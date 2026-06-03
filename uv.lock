@@ -548,7 +548,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.43.21" },
     { name = "drgn", specifier = "==0.2.0" },
     { name = "fastmcp", specifier = "==3.4.0" },
-    { name = "libvirt-python", specifier = "==12.0.0" },
+    { name = "libvirt-python", specifier = "==12.3.0" },
     { name = "psycopg", extras = ["binary"], specifier = "==3.3.4" },
     { name = "pydantic", specifier = "==2.13.4" },
 ]
@@ -579,9 +579,9 @@ wheels = [
 
 [[package]]
 name = "libvirt-python"
-version = "12.0.0"
+version = "12.3.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/5e/cd/a8fdd1c691f2a6a6dc8b0711b42473a7342e4d1a7a1e9ef90677a236eb73/libvirt_python-12.0.0.tar.gz", hash = "sha256:7b4de7d2dde2bc380cf4e108d1eeb8aad50beb3ae351ab9265a7fedc587742bc", size = 243300, upload-time = "2026-01-15T09:14:43.074Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/32/aa296ebea6ea95700af46033607ab168e75369ac3fa947996f9605fa24d2/libvirt_python-12.3.0.tar.gz", hash = "sha256:cc472e54c05a86db26e21358e1e8554bc85fea3cac6fe2b90e60e6a06e496a8d", size = 244723, upload-time = "2026-05-01T22:08:23.908Z" }
 
 [[package]]
 name = "markdown-it-py"
