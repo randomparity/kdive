@@ -32,6 +32,10 @@ jobs:
         working-directory: .github/scripts/mermaid-check
         run: npm ci --ignore-scripts
 
+      - name: Test the checker
+        working-directory: .github/scripts/mermaid-check
+        run: npm test
+
       - name: Parse-check mermaid blocks in all Markdown
         shell: bash
         run: |

@@ -85,22 +85,25 @@ export async function validateDiagram(code) {
  * Check every ```mermaid block in the given Markdown files.
  *
  * @param {string[]} files Paths to Markdown files.
- * @returns {Promise<{file: string, line: number, error: string}[]>} One entry per
- *   failing block; empty when all blocks parse.
+ * @returns {Promise<{failures: {file: string, line: number, error: string}[], checked: number}>}
+ *   `failures` has one entry per failing block; `checked` is the total number of
+ *   blocks parsed across all files.
  */
 export async function checkFiles(files) {
   const failures = [];
+  let checked = 0;
   for (const file of files) {
     const markdown = await readFile(file, "utf8");
     const blocks = extractMermaidBlocks(markdown);
     for (const block of blocks) {
+      checked += 1;
       const result = await validateDiagram(block.code);
       if (!result.valid) {
         failures.push({ file, line: block.startLine, error: result.error ?? "unknown error" });
       }
     }
   }
-  return failures;
+  return { failures, checked };
 }
 
 async function main(files) {
@@ -109,12 +112,7 @@ async function main(files) {
     process.exitCode = 2;
     return;
   }
-  const failures = await checkFiles(files);
-  let checked = 0;
-  for (const file of files) {
-    const markdown = await readFile(file, "utf8");
-    checked += extractMermaidBlocks(markdown).length;
-  }
+  const { failures, checked } = await checkFiles(files);
   if (failures.length > 0) {
     for (const failure of failures) {
       process.stderr.write(`${failure.file}:${failure.line}: invalid mermaid: ${failure.error}\n`);
