@@ -26,8 +26,9 @@ runs.install(run_id)                   → job (kernel onto the System)
 runs.boot(run_id)                      → job (boot the installed kernel)
 debug.start_session(run_id, gdbstub)   → debug_session_id (attach → live)
 debug.set_breakpoint / .read_memory    → fast, synchronous
-control.force_crash(system_id)         → destructive (gated)
-vmcore.fetch(system_id)                → job → vmcore artifact ref
+control.force_crash(system_id)         → destructive (gated); ends the boot:
+                                         DebugSession live → detached, System → crashed
+vmcore.fetch(system_id)                → job (waits for kdump capture) → vmcore ref
 artifacts.get(ref)                     → redacted artifact
 allocations.release(allocation_id)     → released (System torn down)
 ```
@@ -42,8 +43,9 @@ M0 is a skeleton, not a product. Explicitly out of scope:
 
 - **No remote/cloud/bare-metal providers** — one provider only (M2+).
 - **No real reservation, chargeback, or cost model** — allocation is "always-yes,"
-  capacity-admitted against a concurrent-System cap; the cost model
-  ([0007](../adr/0007-metering-budgets-admission.md)) is M1.
+  capacity-admitted against a per-host concurrent-Allocation cap (configured per
+  host; in M0 one Allocation → one System, so it bounds Systems too); the cost
+  model ([0007](../adr/0007-metering-budgets-admission.md)) is M1.
 - **No budget/quota enforcement** — admission checks capacity, not spend (M1).
 - **No fault injection** — the M1.5 mock provider stresses the seams M0 leaves
   slack (lease expiry mid-job, worker death, transport drop, forced secret
@@ -60,11 +62,11 @@ M0, with reduced state machines. `→` is a transition; terminal states are bold
 | Object | M0 state machine | M0 admission / notes |
 |--------|------------------|----------------------|
 | Resource | `available` / `degraded` / `offline` | one row: the local libvirt host, registered at startup |
-| Allocation | `requested → granted → active → releasing → `**`released`** (+ **`failed`**) | always-yes, capacity-checked (concurrent-System cap); no budget |
-| System | `defined → provisioning → `**`ready`** ` / `**`failed`** ` → `**`torn_down`** | one System per Allocation in M0 (no reprovision) |
+| Allocation | `requested → granted → active → releasing → `**`released`** (+ **`failed`**) | always-yes, capacity-checked against a per-host concurrent-Allocation cap; no budget |
+| System | `defined → provisioning → `**`ready`** ` → `crashed` ` → `**`torn_down`** (+ **`failed`**) | one System per Allocation in M0 (no reprovision); `force_crash` drives `ready → crashed`; vmcore is captured from `crashed` |
 | Investigation | `open → active → `**`closed`** (+ **`abandoned`** by reconciler) | becomes `active` on first Run |
-| Run | `created → running → `**`succeeded`** ` / `**`failed`** ` / `**`canceled`** | one build per Run; idempotent steps keyed `(run_id, step)` |
-| DebugSession | `attach ↔ live ↔ detached` (**ends at reboot**) | one boot = one session; durable row, heartbeated |
+| Run | `created → running → `**`succeeded`** ` / `**`failed`** ` / `**`canceled`** | one build per Run; idempotent steps keyed `(run_id, step)`; a failed step is terminal for the Run — recovery is a **new** Run on the same System (see "Failure & retry") |
+| DebugSession | `attach ↔ live ↔ detached` (**ends at reboot/crash**) | one boot = one session; durable row, heartbeated; `force_crash` (or panic) drives `live → detached` |
 
 `run.system → allocation` is the binding invariant: a Run's Allocation is fixed by
 its System ([0003](../adr/0003-six-durable-objects.md)). The Investigation
@@ -92,7 +94,8 @@ debug_sessions(id, run_id→runs, state, transport, transport_handle,
                worker_heartbeat_at)
 jobs(id, kind, payload jsonb, state, attempt, max_attempts, worker_id,
      lease_expires_at, heartbeat_at, result_ref, error_category,
-     authorizing jsonb)                             -- (principal, agent_session, project, scope)
+     authorizing jsonb,                             -- (principal, agent_session, project, scope)
+     dedup_key, UNIQUE(dedup_key))                  -- admission idempotency, e.g. (run_id, step, kind)
 artifacts(id, owner_kind, owner_id, object_key, etag, sensitivity,
           retention_class)
 audit_log(id, ts, principal, agent_session, project, tool, object_kind,
@@ -118,6 +121,11 @@ queue; workers dequeue with `SELECT … FOR UPDATE SKIP LOCKED`.
   `max_attempts` (or a non-idempotent op that crashed mid-effect) dead-letters to
   `failed` and runs the op's compensation
   ([0009](../adr/0009-capability-provider-dispatch.md)).
+- **Admission idempotency:** a long-running tool is idempotent at admission — it
+  computes a `dedup_key` (run-scoped jobs use `(run_id, step, kind)`); re-issuing
+  the tool returns the **existing** job handle instead of enqueuing a duplicate.
+  The `(run_id, step)` ledger then guards step *execution* beneath it, so neither
+  a client retry nor a worker retry double-applies an effect.
 - **Pools:** scoped per resource class. M0 has one pool (local-libvirt); the
   per-pool, per-tenant fairness rule is wired but trivially satisfied with one
   tenant.
@@ -125,6 +133,22 @@ queue; workers dequeue with `SELECT … FOR UPDATE SKIP LOCKED`.
   `(principal, agent_session, project, scope)` at admission; the worker runs under
   a service-scoped internal grant ([0002](../adr/0002-multi-user-mcp-http.md)),
   performing no fresh authorization.
+
+## Failure & retry
+
+A step failure is terminal for its Run ([0003](../adr/0003-six-durable-objects.md):
+one build per Run). The Run moves to `failed` carrying the step's `error_category`;
+the agent recovers by creating a **new** Run on the **same** System — allocation
+and provisioning are not repeated. Three failure shapes are distinguished so audit
+and SLO tracking can tell them apart:
+
+- **Step `failed`** — build/install/boot returned a deterministic error; the new
+  Run is the retry unit.
+- **Job abandoned** — `lease_expired` or worker death; the job's bounded retries
+  ([0008](../adr/0008-async-worker-tier-job-queue.md)) apply first, and only past
+  `max_attempts` does the Run go `failed` (`lease_expired`).
+- **`jobs.cancel`** — an explicit agent abort; the Run is `canceled` and the op's
+  cleanup contract ([0009](../adr/0009-capability-provider-dispatch.md)) runs.
 
 ## Object-store layout
 
@@ -239,13 +263,20 @@ How each plane is realized against libvirt/QEMU:
 | Plane | M0 implementation |
 |-------|-------------------|
 | Discovery | enumerate the local libvirt host; advertise arch/cpu/memory + `gdbstub` transport |
-| Provisioning | render libvirt domain XML from the profile ([0011](../adr/0011-provisioning-profile-schema.md)) + a rootfs image; define + start the domain |
+| Provisioning | create the `systems` row (`provisioning`) first, then render libvirt domain XML from the profile ([0011](../adr/0011-provisioning-profile-schema.md)) + a rootfs image and define/start the domain **tagged with its `system_id`** (libvirt metadata) |
 | Build | local `make` from the kernel source ref in the build profile |
-| Install | direct-kernel boot — stage the built kernel/initrd for the domain's next boot |
-| Connect | QEMU `gdbstub` transport |
+| Install | direct-kernel boot — stage the built kernel/initrd for the domain's next boot, **with a `crashkernel=` reservation** so kdump can capture (see kdump prerequisite below) |
+| Connect | QEMU `gdbstub` transport (single-attach — a second attach is `transport_conflict`) |
 | Debug | gdb-MI tier (ported) over the gdbstub; drgn for introspection |
 | Control | `virsh` destroy/reset; `force_crash` via `sysrq-c` (or QEMU monitor) |
 | Retrieve | vmcore via the kdump path; fetch into the object store |
+
+**kdump prerequisite.** The crash→vmcore endpoint only produces a core if the guest
+boots with a `crashkernel=` memory reservation and a kdump capture service/initramfs
+present. The M0 provisioning profile ([0011](../adr/0011-provisioning-profile-schema.md))
+and the booted kernel config must guarantee both. If `force_crash` yields no core
+within the capture window, `vmcore.fetch` returns a typed `readiness_failure` (not an
+empty artifact).
 
 ## Auth, RBAC & attribution (M0)
 
@@ -287,8 +318,12 @@ A periodic core loop repairs drift between Postgres and libvirt. M0 handles:
   `max_attempts`, dead-lettered to `failed` with compensation run.
 - **Dead DebugSession** — a `live` session whose transport/heartbeat is unreachable
   is moved to `detached`.
-- **Leaked libvirt domain** — via the provider `list_owned` surface: a domain with
-  no owning System row is flagged.
+- **Leaked libvirt domain** — via the provider `list_owned` surface; domains carry
+  their `system_id` as libvirt metadata. A domain is reaped only when its tagged
+  `system_id` has no row (or a `torn_down` row) **and** no provision/teardown job
+  for it is in-flight, and never within the provision grace window — so a domain
+  mid-create is not mistaken for a leak (the write-ordering counterpart to the
+  object-store GC rule above).
 
 **Lease-expiry policy:** on `lease_expiry`, in-flight jobs drain within a grace
 window then are force-killed; the owning Run becomes `failed` (`lease_expired`),
