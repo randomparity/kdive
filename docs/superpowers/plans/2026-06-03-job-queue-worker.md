@@ -383,18 +383,35 @@ git commit -m "feat(jobs): enqueue with admission idempotency on dedup_key"
 
 Append to `tests/jobs/test_queue.py`:
 
+Add `from psycopg.rows import dict_row` to the imports at the top of
+`tests/jobs/test_queue.py` (matching the codebase convention), then append:
+
 ```python
-async def _insert_job(conn: psycopg.AsyncConnection, dedup_key: str, **over: object) -> Job:
-    job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, dedup_key)
-    if over:
-        sets = ", ".join(f"{k} = %s" for k in over)
-        cur = await conn.cursor(row_factory=psycopg.rows.dict_row).execute(
-            f"UPDATE jobs SET {sets} WHERE id = %s RETURNING *",  # noqa: S608 - keys are test literals
-            (*over.values(), job.id),
+async def _insert_running_job(
+    conn: psycopg.AsyncConnection,
+    dedup_key: str,
+    *,
+    worker_id: str = "dead",
+    lease_seconds: int,
+    attempt: int = 0,
+    max_attempts: int = 3,
+) -> Job:
+    """Insert a job already in ``running`` with a lease ``lease_seconds`` from now.
+
+    Negative ``lease_seconds`` makes the lease already lapsed. The timestamp is
+    computed in SQL (``now() + make_interval(...)``) — a relative interval cannot be
+    passed as a bound parameter to a ``timestamptz`` column.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, worker_id, "
+            "    lease_expires_at, authorizing, dedup_key) "
+            "VALUES ('build', '{}', 'running', %s, %s, %s, now() + make_interval(secs => %s), "
+            "    '{}', %s) RETURNING *",
+            (attempt, max_attempts, worker_id, lease_seconds, dedup_key),
         )
         row = await cur.fetchone()
-        return Job.model_validate(row)
-    return job
+    return Job.model_validate(row)
 
 
 def test_dequeue_claims_oldest_and_charges_attempt(migrated_url: str) -> None:
@@ -438,16 +455,10 @@ def test_dequeue_concurrent_claims_distinct_jobs(migrated_url: str) -> None:
 def test_dequeue_skips_future_lease_reclaims_past_lease(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
-            await _insert_job(
-                conn, "dk-future", state="running", worker_id="dead",
-                lease_expires_at="now() + interval '5 min'",
-            )
+            await _insert_running_job(conn, "dk-future", lease_seconds=300)
             assert await queue.dequeue(conn, "w1") is None  # live lease: not reclaimed
 
-            await _insert_job(
-                conn, "dk-past", state="running", worker_id="dead",
-                lease_expires_at="now() - interval '1 min'",
-            )
+            await _insert_running_job(conn, "dk-past", lease_seconds=-60)
             reclaimed = await queue.dequeue(conn, "w1")
             assert reclaimed is not None
             assert reclaimed.dedup_key == "dk-past"
@@ -460,73 +471,11 @@ def test_dequeue_skips_future_lease_reclaims_past_lease(migrated_url: str) -> No
 def test_dequeue_skips_exhausted_attempts(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
-            await _insert_job(
-                conn, "dk-done", state="running", worker_id="dead", attempt=3,
-                max_attempts=3, lease_expires_at="now() - interval '1 min'",
-            )
-            assert await queue.dequeue(conn, "w1") is None  # attempt == max: left for reconciler
-
-    asyncio.run(_run())
-```
-
-Note: `_insert_job`'s `lease_expires_at` values are SQL expressions passed as text won't evaluate. Replace the helper's SQL-expression handling per Step 1a below.
-
-- [ ] **Step 1a: Fix the helper to set lease relative to `now()` in SQL**
-
-The `_insert_job` helper above cannot pass `"now() + interval …"` as a bound parameter (it would be inserted as a literal string). Replace the helper with one that takes an explicit `lease_seconds` offset and computes the timestamp in SQL:
-
-```python
-async def _insert_running_job(
-    conn: psycopg.AsyncConnection,
-    dedup_key: str,
-    *,
-    worker_id: str = "dead",
-    lease_seconds: int,
-    attempt: int = 0,
-    max_attempts: int = 3,
-) -> Job:
-    """Insert a job already in ``running`` with a lease ``lease_seconds`` from now
-    (negative = already lapsed)."""
-    cur = await conn.cursor(row_factory=psycopg.rows.dict_row).execute(
-        "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, worker_id, "
-        "    lease_expires_at, authorizing, dedup_key) "
-        "VALUES ('build', '{}', 'running', %s, %s, %s, now() + make_interval(secs => %s), "
-        "    '{}', %s) RETURNING *",
-        (attempt, max_attempts, worker_id, lease_seconds, dedup_key),
-    )
-    row = await cur.fetchone()
-    return Job.model_validate(row)
-```
-
-Then rewrite the two reclaim tests to use it:
-
-```python
-def test_dequeue_skips_future_lease_reclaims_past_lease(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with await _connect(migrated_url) as conn:
-            await _insert_running_job(conn, "dk-future", lease_seconds=300)
-            assert await queue.dequeue(conn, "w1") is None  # live lease: not reclaimed
-
-            await _insert_running_job(conn, "dk-past", lease_seconds=-60)
-            reclaimed = await queue.dequeue(conn, "w1")
-            assert reclaimed is not None
-            assert reclaimed.dedup_key == "dk-past"
-            assert reclaimed.worker_id == "w1"
-            assert reclaimed.attempt == 1
-
-    asyncio.run(_run())
-
-
-def test_dequeue_skips_exhausted_attempts(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with await _connect(migrated_url) as conn:
             await _insert_running_job(conn, "dk-done", lease_seconds=-60, attempt=3, max_attempts=3)
             assert await queue.dequeue(conn, "w1") is None  # attempt == max: left for reconciler
 
     asyncio.run(_run())
 ```
-
-Delete the earlier `_insert_job` helper and the first drafts of these two tests so only the `_insert_running_job` versions remain.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -663,9 +612,9 @@ def test_fail_requeues_below_max(migrated_url: str) -> None:
 def test_fail_dead_letters_at_max(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
-            await _insert_running_job(conn, "dk-f2", worker_id="w1", lease_seconds=300, attempt=3, max_attempts=3)
-            cur = await conn.execute("SELECT * FROM jobs WHERE dedup_key = %s", ("dk-f2",))
-            claimed = Job.model_validate(await cur.fetchone())
+            claimed = await _insert_running_job(
+                conn, "dk-f2", worker_id="w1", lease_seconds=300, attempt=3, max_attempts=3
+            )
             out = await queue.fail(conn, claimed, ErrorCategory.BUILD_FAILURE)
             assert out.state is JobState.FAILED
             assert out.error_category is ErrorCategory.BUILD_FAILURE
@@ -816,6 +765,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -830,7 +780,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.worker import Worker
 
 
-async def _final_state(url: str, job_id: object) -> Job:
+async def _final_state(url: str, job_id: UUID) -> Job:
     async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
         job = await JOBS.get(conn, job_id)
     assert job is not None
@@ -855,8 +805,7 @@ def test_init_accepts_interval_at_third_of_lease() -> None:
 
 def test_run_once_happy_path(migrated_url: str) -> None:
     async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10, open=False) as pool:
-            await pool.open()
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             calls: list[Job] = []
 
             async def handler(conn: psycopg.AsyncConnection, job: Job) -> str:
@@ -883,8 +832,7 @@ def test_run_once_happy_path(migrated_url: str) -> None:
 
 def test_run_once_unknown_kind_dead_letters(migrated_url: str) -> None:
     async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10, open=False) as pool:
-            await pool.open()
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             worker = Worker(pool, HandlerRegistry(), worker_id="w1")  # no handlers
             async with pool.connection() as conn:
                 job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-unk")
@@ -931,7 +879,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job
 from kdive.jobs import queue
-from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.models import HandlerRegistry, JobHandler
 
 _log = logging.getLogger(__name__)
 
@@ -991,12 +939,12 @@ class Worker:
             if job is None:
                 await asyncio.sleep(poll)
 
-    async def _dispatch(self, job: Job, handler: object) -> None:
+    async def _dispatch(self, job: Job, handler: JobHandler) -> None:
         heartbeat = asyncio.create_task(self._heartbeat_loop(job.id))
         try:
             try:
                 async with self._pool.connection() as conn:
-                    result_ref = await handler(conn, job)  # type: ignore[operator]
+                    result_ref = await handler(conn, job)
             except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
                 category = (
                     exc.category
@@ -1025,29 +973,20 @@ class Worker:
                     return
 ```
 
-Note: the `# type: ignore[operator]` on the handler call is because `handler` is typed `object` in the signature to keep `_dispatch` simple; if `ty` rejects the ignore or the call, change the parameter type to `from kdive.jobs.models import JobHandler` and annotate `handler: JobHandler`, then drop the ignore. Verify in Step 4 and prefer the typed parameter if it satisfies `ty`.
-
-- [ ] **Step 3a: Prefer the typed handler parameter**
-
-Replace `handler: object` with the proper type and drop the ignore, then confirm `ty` is happy:
-
-```python
-from kdive.jobs.models import HandlerRegistry, JobHandler
-```
-
-```python
-    async def _dispatch(self, job: Job, handler: JobHandler) -> None:
-        ...
-                    result_ref = await handler(conn, job)
-```
+The `JobHandler` alias (Task 1) types `handler` precisely, so `await handler(conn,
+job)` type-checks with no ignore. The broad `except Exception` is the worker's job —
+it turns any handler failure into a dead-letter/requeue — so it is annotated
+`# noqa: BLE001` with that justification; `BaseException` (e.g. `CancelledError` on
+shutdown) is deliberately not caught and propagates.
 
 - [ ] **Step 4: Run the tests and the type checker**
 
 Run: `KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/jobs/test_worker.py -q`
 Expected: PASS (4 passed: two `__init__` guard tests, happy path, unknown kind).
 
-Run: `uv run ty check src`
-Expected: clean. If `ty` flagged the handler call, the Step 3a typed parameter resolves it.
+Run: `uv run ty check` (whole project — matches the pre-commit hook, which checks
+`tests/` too).
+Expected: clean.
 
 - [ ] **Step 5: Lint, format, commit**
 
@@ -1071,8 +1010,7 @@ Append to `tests/jobs/test_worker.py`:
 ```python
 def test_run_once_dedup_runs_handler_once(migrated_url: str) -> None:
     async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10, open=False) as pool:
-            await pool.open()
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             calls = 0
 
             async def handler(conn: psycopg.AsyncConnection, job: Job) -> str:
@@ -1097,8 +1035,7 @@ def test_run_once_dedup_runs_handler_once(migrated_url: str) -> None:
 
 def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
     async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10, open=False) as pool:
-            await pool.open()
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             calls = 0
 
             async def always_raises(conn: psycopg.AsyncConnection, job: Job) -> str:
@@ -1125,8 +1062,7 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
 
 def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
     async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10, open=False) as pool:
-            await pool.open()
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             calls = 0
 
             async def handler(conn: psycopg.AsyncConnection, job: Job) -> str:
@@ -1157,8 +1093,7 @@ def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
 
 def test_heartbeat_renews_live_lease(migrated_url: str) -> None:
     async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, min_size=3, max_size=10, open=False) as pool:
-            await pool.open()
+        async with AsyncConnectionPool(migrated_url, min_size=3, max_size=10) as pool:
             started = asyncio.Event()
 
             async def slow(conn: psycopg.AsyncConnection, job: Job) -> str:
@@ -1212,13 +1147,13 @@ Expected: PASS (registry + queue + worker).
 
 ```bash
 uv run ruff check . && uv run ruff format --check .
-uv run ty check src
+uv run ty check          # whole project (src + tests), matching the pre-commit hook
 KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest -m "not live_vm" -q
 git add tests/jobs/test_worker.py
 git commit -m "test(jobs): worker acceptance — dedup, dead-letter, reclaim, live heartbeat"
 ```
 
-Expected: ruff clean, `ty` clean, full suite green (the gdbstub/libvirt/drgn integration tests stay gated/skipped).
+Expected: ruff clean, `ty` clean over src and tests, full suite green (the gdbstub/libvirt/drgn integration tests stay gated/skipped). CI itself runs `ty check src`, but checking tests locally catches type errors in the suite before they reach the commit hook.
 
 ---
 
