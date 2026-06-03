@@ -141,10 +141,15 @@ jobs:
           version: "0.11.18"
           enable-cache: true
 
+      - name: Install libvirt build headers
+        # pip-audit resolves the pinned set with pip, which builds libvirt-python
+        # (sdist only) to read its metadata; that build needs the libvirt headers.
+        # Without them, --strict fails rather than silently skipping the package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvirt-dev
+
       - name: Audit runtime dependencies
-        # The export is the full pinned closure, so --no-deps audits every package
-        # without building wheels — avoiding the libvirt-python source build (and
-        # its libvirt-dev requirement) this job intentionally does not provide.
         run: |
           uv export --no-emit-project --no-dev --no-default-groups \
             --format requirements-txt > runtime-reqs.txt
@@ -164,6 +169,13 @@ jobs:
         with:
           version: "0.11.18"
           enable-cache: true
+
+      - name: Install libvirt build headers
+        # Same reason as the runtime job: pip-audit builds libvirt-python to read
+        # its metadata, so without the headers it would silently skip the package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvirt-dev
 
       - name: Audit all dependencies (including dev)
         # Dev advisories do not ship to users, so this never fails the build — but
