@@ -57,6 +57,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 
 - **Unit + service tests** run anywhere: a disposable Postgres + MinIO + a mock OIDC issuer (the compose file from #24) — used by #4–#11, #13, #15, #20, #23.
 - **`live_vm` tests** (#14, #17, #18, #19, #21, #22 acceptance) require a **KVM/nested-virt-capable host** with libvirt and a **kdump-enabled guest image** (`crashkernel=` reservation + kdump service). They run on a self-hosted KVM runner or as a manual pre-merge gate — **not** on stock GitHub-hosted runners. #1 documents the runner prerequisites; CI marks `live_vm` as a separate, manually-triggered job.
+- **Kernel builds** (#16, and #24's build step) need a kernel **toolchain** (gcc/clang, make, bc, flex, bison, libelf-dev) and a **warm kernel source tree** in the build workspace. M0 builds **incrementally** from the warm tree (minutes), not from scratch (tens of minutes); #1's runner docs name the source location and ccache/workspace path.
 
 ---
 
@@ -107,7 +108,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Goal:** The M0 schema applied by a minimal forward-only migration runner.
 - **Files:** Create `src/kdive/db/schema/0001_init.sql`, `db/migrate.py`, `db/pool.py`; `tests/db/test_migrate.py`.
 - **Scope:**
-  - `0001_init.sql`: the tables from the spec (resources, allocations, systems, investigations[+`external_refs jsonb`], runs, run_steps[`UNIQUE(run_id,step)`], debug_sessions, jobs[`dedup_key UNIQUE`], artifacts, audit_log) with the attribution columns and FKs.
+  - `0001_init.sql`: the tables from the spec (resources, allocations, systems, investigations[+`external_refs jsonb`], runs[+`kernel_ref`, `debuginfo_ref`], run_steps[`UNIQUE(run_id,step)`], debug_sessions, jobs[`dedup_key UNIQUE`], artifacts, audit_log) with the attribution columns and FKs.
   - `migrate.py`: applies `schema/NNNN_*.sql` in order, tracked in a `schema_migrations` table; idempotent re-run.
   - `pool.py`: async `psycopg_pool.AsyncConnectionPool` from env (`KDIVE_DATABASE_URL`).
 - **Acceptance:** against a disposable Postgres (testcontainers or a CI service), `migrate.py` creates all tables; re-running is a no-op; `\d` shows the unique constraints.
@@ -153,7 +154,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Files:** Create `src/kdive/mcp/app.py`, `mcp/auth.py`, `mcp/tools/jobs.py`, `src/kdive/__main__.py`; `tests/mcp/`.
 - **Scope:**
   - `auth.py`: FastMCP `JWTVerifier` against `KDIVE_OIDC_JWKS_URI`, enforcing `iss` + `aud` (ADR-0002/0010); derive `principal` (sub), `agent_session` (claim, optional in M0), and validate `project` against the request param.
-  - `app.py`: `FastMCP(name=..., auth=...)`, `transport="http"`; a request-context accessor returning `(principal, agent_session, project)`.
+  - `app.py`: `FastMCP(name=..., auth=...)`, `transport="http"`; a request-context accessor returning `(principal, agent_session, project)`. **`app.py` aggregates the tool surface**: each `tools/<plane>.py` exposes a `register(app)` function and `app.py` calls every module's `register` at startup, so a plane issue surfaces its tools via that hook without editing the others.
   - `tools/jobs.py`: `jobs.get/.wait/.cancel/.list` returning the spec's job-handle shape.
   - `__main__.py`: `server` subcommand runs the app.
 - **Acceptance:** a request with no/invalid token is rejected; a valid token resolves the principal context; `jobs.get` on a known job returns its status; structured JSON shape matches the spec (object id, status, suggested_next_actions, refs).
@@ -256,9 +257,10 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Goal:** Build a kernel from source as an idempotent job.
 - **Files:** Create `src/kdive/providers/local_libvirt/build.py`, `src/kdive/profiles/build.py`, `mcp/tools/runs.py` (add `runs.build`); register `build` handler; tests.
 - **Scope:**
-  - `BuildProfile` (kernel source ref, config, patch ref); `build()` runs `make` in a workspace, ensuring `CONFIG_CRASH_DUMP`/`crashkernel` support for the kdump prerequisite; stores the kernel artifact (object store) and `kernel_ref` on the Run.
+  - `BuildProfile` (kernel source ref, config, patch ref); `build()` runs `make` in a workspace, ensuring `CONFIG_CRASH_DUMP`/`crashkernel` + `CONFIG_DEBUG_INFO(_DWARF)`/BTF for the kdump and symbolization prerequisites; stores **two** artifacts on the Run — the bootable kernel image (`kernel_ref`) **and a build-id-keyed `vmlinux`/debuginfo artifact (`debuginfo_ref`)** that #20/#22 load to symbolize the vmcore (port v1 `symbols/`).
+  - To bound wall-clock, M0 builds **incrementally from a warm source tree** (base tree + the profile's patch), not a cold from-scratch build; the warm tree is part of the build-workspace setup.
   - Step keyed `(run_id, "build")` via the idempotency ledger.
-- **Acceptance:** a build job produces a kernel artifact and sets `kernel_ref`; a re-issued `runs.build` returns the same job (dedup) and does not rebuild; a failing build sets the Run `failed` with `build_failure`.
+- **Acceptance:** a build job produces a kernel image **and** a debuginfo artifact whose build-id matches the booted kernel, and sets `kernel_ref`/`debuginfo_ref`; a re-issued `runs.build` returns the same job (dedup) and does not rebuild; a failing build sets the Run `failed` with `build_failure`.
 
 ### Issue 17 — Install + boot plane
 - **Labels:** `area:build-install` · `provider:local-libvirt`
@@ -288,7 +290,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Scope:**
   - Port gdb-MI behind the `DebugPlane` Protocol; expose `debug.set_breakpoint/.clear/.list`, `.read_memory` (enforce the **4096-byte cap**, ported invariant), `.read_registers`, `.continue`, `.interrupt`.
   - All transcript output passes through the redactor (#23) before persistence/response.
-- **Acceptance (live_vm):** set a breakpoint at a symbol, continue, hit it, read registers and ≤4096 bytes of memory; a >4096 read is rejected; a known secret in gdb output is masked in the response.
+- **Acceptance (live_vm):** set a breakpoint at a symbol, continue, hit it, read registers and ≤4096 bytes of memory; a >4096 read is rejected; a known secret in the gdb-MI **textual transcript** is masked in the response (this is transcript redaction — raw `read_memory` bytes are returned verbatim under the 4096-byte cap, not redacted).
 
 ### Issue 20 — Debug plane: drgn introspection from vmcore (offline)
 - **Labels:** `area:debug`
@@ -296,7 +298,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Goal:** Offline drgn introspection of a captured vmcore on the host — no live guest, no SSH.
 - **Files:** Create `src/kdive/providers/local_libvirt/introspect_drgn.py` (port the M0 subset of the vmcore path in `~/src/kdive-v1/src/kdive/introspect/*` + `prereqs/drgn_probe.py`); add `introspect.from_vmcore`; tests.
 - **Scope:**
-  - drgn opens the fetched vmcore on the host (`drgn.program_from_core`-style) and runs a minimal helper set (tasks, modules, sysinfo).
+  - drgn opens the fetched vmcore on the host (`drgn.program_from_core`-style), **loading the Run's `debuginfo_ref` (`vmlinux`) from #16 for symbols/types**, and runs a minimal helper set (tasks, modules, sysinfo).
   - **Live drgn (`introspect.run`) is deferred to M1.** v1 implements it as drgn-over-SSH (`local-drgn-introspect`, `transports=["ssh"]`), which needs a guest SSH transport + credentials (secret backend) that the M0 walking-skeleton path does not otherwise require; introducing it here is scope creep and `introspect.run` is not in the M0 tool subset.
   - Output redacted before persistence.
 - **Acceptance:** `introspect.from_vmcore` returns task/module/sysinfo data from a captured vmcore; output is redacted. Runs offline against the artifact from #22 — no `live_vm` host needed.
@@ -318,7 +320,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Files:** Create `src/kdive/providers/local_libvirt/retrieve.py` (port subset of `~/src/kdive-v1/.../postmortem/*`), `mcp/tools/vmcore.py`, `mcp/tools/artifacts.py`; register `capture_vmcore` handler; tests.
 - **Scope:**
   - `capture_vmcore` waits for kdump to finish, writes the **raw** vmcore (`sensitive`) and a **redacted** derivative to the object store (object before row, #6), returns an artifact ref; if no core within the capture window → `readiness_failure`.
-  - `vmcore.list/.fetch` (→ job), `artifacts.list/.get` (returns the redacted derivative only); crash postmortem port for `postmortem.crash`/`.triage`.
+  - `vmcore.list/.fetch` (→ job), `artifacts.list/.get` (returns the redacted derivative only); crash postmortem port for `postmortem.crash`/`.triage`, loading the Run's `debuginfo_ref` (from #16) to symbolize the core.
 - **Acceptance (live_vm):** after force_crash, `vmcore.fetch` produces a fetchable vmcore artifact; `artifacts.get` returns the redacted derivative; a no-core scenario returns `readiness_failure`.
 
 ---

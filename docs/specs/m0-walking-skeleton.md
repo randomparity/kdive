@@ -201,7 +201,8 @@ systems(id, allocation_id→allocations, state, provisioning_profile jsonb,
 investigations(id, project, title, external_refs jsonb, state, last_run_at)
                                                         -- external_refs: mutable [{tracker, id, url}] (bugzilla/jira)
 runs(id, investigation_id→investigations, system_id→systems, state,
-     build_profile jsonb, kernel_ref, failure_category)
+     build_profile jsonb, kernel_ref, debuginfo_ref, failure_category)
+                                       -- debuginfo_ref: vmlinux/DWARF artifact for vmcore symbolization
 run_steps(run_id→runs, step, state, result jsonb,
           UNIQUE(run_id, step))                     -- idempotency ledger
 debug_sessions(id, run_id→runs, state, transport, transport_handle,
