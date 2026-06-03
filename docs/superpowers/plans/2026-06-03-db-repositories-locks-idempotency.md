@@ -52,20 +52,41 @@ def migrated_url(pg_conn: psycopg.Connection, postgres_url: str) -> str:
     return postgres_url
 ```
 
-- [ ] **Step 2: Verify nothing regressed**
+- [ ] **Step 2: Exercise the fixture before anything depends on it**
+
+Append to `tests/db/test_harness.py` a test that uses `migrated_url` directly, so a
+fixture bug surfaces here in isolation rather than two tasks later inside new
+repository code:
+
+```python
+import asyncio
+
+
+def test_migrated_url_has_schema(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            cur = await conn.execute("SELECT to_regclass('public.runs')")
+            row = await cur.fetchone()
+            assert row is not None and row[0] is not None
+
+    asyncio.run(_run())
+```
+
+- [ ] **Step 3: Verify it passes (and nothing regressed)**
 
 Run: `KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/db/test_harness.py tests/db/test_migrate.py -q`
-Expected: PASS (the new import must not break collection).
+Expected: PASS, including the new `test_migrated_url_has_schema`. A failure here means
+the `pg_conn`→migrate→`postgres_url` wiring is wrong — fix it before proceeding.
 
-- [ ] **Step 3: Guardrails**
+- [ ] **Step 4: Guardrails**
 
-Run: `uv run ruff check tests/db/conftest.py && uv run ruff format --check tests/db/conftest.py`
+Run: `uv run ruff check tests/db/conftest.py tests/db/test_harness.py && uv run ruff format --check tests/db/conftest.py tests/db/test_harness.py`
 Expected: clean.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add tests/db/conftest.py
+git add tests/db/conftest.py tests/db/test_harness.py
 git commit -m "test(db): add migrated_url fixture for async repository tests"
 ```
 
@@ -492,7 +513,7 @@ def test_update_state_legal_bumps_updated_at(migrated_url: str) -> None:
             alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
             updated = await ALLOCATIONS.update_state(conn, alloc.id, AllocationState.GRANTED)
             assert updated.state is AllocationState.GRANTED
-            assert updated.updated_at >= alloc.updated_at
+            assert updated.updated_at > alloc.updated_at  # trigger bumped it
 
     asyncio.run(_run_test())
 
