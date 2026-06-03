@@ -82,7 +82,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Goal:** CI runs lint/type/test on PRs; mermaid docs are parse-checked; Dependabot configured.
 - **Files:** Create `.github/workflows/ci.yml`, `.github/workflows/docs-mermaid.yml`, `.github/dependabot.yml`.
 - **Scope:**
-  - `ci.yml`: matrix-free job on `ubuntu-latest`, `uv sync`, ruff/ty/pytest; actions pinned to SHA with version comments; `persist-credentials: false`.
+  - `ci.yml`: matrix-free job on `ubuntu-latest`, `uv sync`, ruff/ty/`pytest -m "not live_vm"`; the `live_vm` suite is a separate, manually-triggered job on the self-hosted KVM runner; actions pinned to SHA with version comments; `persist-credentials: false`.
   - `docs-mermaid.yml`: extract ` ```mermaid ` blocks and `mermaid.parse()` them via jsdom (the browserless check proven in this repo) so diagram errors fail CI.
   - `dependabot.yml`: `uv` + `github-actions` ecosystems, 7-day cooldown, grouped.
 - **Acceptance:** a test PR shows all three checks; an intentionally broken mermaid block fails `docs-mermaid`; `actionlint`/`zizmor` clean.
@@ -145,6 +145,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
   - `queue.dequeue()` — `SELECT ... FOR UPDATE SKIP LOCKED`, set `worker_id`/`lease_expires_at`.
   - `worker.run(handlers)` — claim, heartbeat, dispatch by `kind`, on success store `result_ref`; on exception increment `attempt`, requeue or dead-letter to `failed` past `max_attempts`.
   - A `JobHandler` registry keyed by kind (handlers registered by the plane issues).
+  - **Every long-running tool computes a `dedup_key`** so retries never double-enqueue: run-scoped jobs use `(run_id, step, kind)`; System-scoped jobs use a scope-appropriate key — `(allocation_id, "provision")`, `(system_id, "teardown")`, `(system_id, "capture_vmcore")`, `(system_id, "force_crash")`, `(system_id, "power", action)`. `dedup_key` is `NOT NULL`.
 - **Acceptance:** enqueue+dequeue+complete happy path; a re-enqueue with the same `dedup_key` returns the same `job_id` (no duplicate); a handler that always raises dead-letters at `max_attempts`; a lapsed lease (simulated) returns the job to the queue.
 
 ### Issue 8 — FastMCP/HTTP skeleton + OIDC auth + jobs.* tools
@@ -156,7 +157,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
   - `auth.py`: FastMCP `JWTVerifier` against `KDIVE_OIDC_JWKS_URI`, enforcing `iss` + `aud` (ADR-0002/0010); derive `principal` (sub), `agent_session` (claim, optional in M0), and validate `project` against the request param.
   - `app.py`: `FastMCP(name=..., auth=...)`, `transport="http"`; a request-context accessor returning `(principal, agent_session, project)`. **`app.py` aggregates the tool surface**: each `tools/<plane>.py` exposes a `register(app)` function and `app.py` calls every module's `register` at startup, so a plane issue surfaces its tools via that hook without editing the others.
   - `tools/jobs.py`: `jobs.get/.wait/.cancel/.list` returning the spec's job-handle shape.
-  - `__main__.py`: `server` subcommand runs the app.
+  - `__main__.py`: `server` and `worker` subcommands — `server` runs the app; `worker` runs the `worker.run` loop from #7 (the process that executes jobs).
 - **Acceptance:** a request with no/invalid token is rejected; a valid token resolves the principal context; `jobs.get` on a known job returns its status; structured JSON shape matches the spec (object id, status, suggested_next_actions, refs).
 
 ### Issue 9 — RBAC, audit log, destructive-op gate
@@ -237,7 +238,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Scope:**
   - Create the `systems` row (`provisioning`) **first**, then render domain XML from the profile + rootfs and `defineXML`/`create`, tagging the domain with `system_id` metadata (ADR-0009/reconciler ordering).
   - `teardown`: `destroy`+`undefine`; idempotent.
-  - tools: `systems.provision` (→ job), `systems.get`, `systems.teardown` (→ job).
+  - tools: `systems.provision` (→ job, `dedup_key=(allocation_id, "provision")`), `systems.get`, `systems.teardown` (→ job, `dedup_key=(system_id, "teardown")`).
 - **Acceptance (live_vm):** `systems.provision` drives `defined → provisioning → ready` and a libvirt domain exists tagged with the `system_id`; `teardown` removes it; the System never outlives its Allocation (reconciler test from #10 still holds).
 
 ### Issue 15 — Investigation + Run lifecycle & tools
@@ -310,7 +311,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Files:** Create `src/kdive/providers/local_libvirt/control.py`, `mcp/tools/control.py`; register `force_crash`/power job handlers; tests.
 - **Scope:**
   - `power(on|off|cycle|reset)` via `virsh`/libvirt API; `force_crash` via `sysrq-c` (or QEMU monitor `nmi`), driving System `ready → crashed` and the DebugSession `live → detached`.
-  - Every op passes `gate.assert_destructive_allowed` (#9).
+  - Every op passes `gate.assert_destructive_allowed` (#9); jobs use `dedup_key=(system_id, op[, action])`.
 - **Acceptance:** `force_crash` is refused without admin/scope/opt-in (gate test); (live_vm) force_crash panics the guest and transitions System+DebugSession correctly.
 
 ### Issue 22 — Retrieve plane: vmcore capture/fetch + crash postmortem
@@ -319,7 +320,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Goal:** Capture the kdump vmcore, store it (raw + redacted), and port crash postmortem.
 - **Files:** Create `src/kdive/providers/local_libvirt/retrieve.py` (port subset of `~/src/kdive-v1/.../postmortem/*`), `mcp/tools/vmcore.py`, `mcp/tools/artifacts.py`; register `capture_vmcore` handler; tests.
 - **Scope:**
-  - `capture_vmcore` waits for kdump to finish, writes the **raw** vmcore (`sensitive`) and a **redacted** derivative to the object store (object before row, #6), returns an artifact ref; if no core within the capture window → `readiness_failure`.
+  - `capture_vmcore` waits for kdump to finish, writes the **raw** vmcore (`sensitive`) and a **redacted** derivative to the object store (object before row, #6), returns an artifact ref; if no core within the capture window → `readiness_failure`. The job is enqueued with `dedup_key=(system_id, "capture_vmcore")`.
   - `vmcore.list/.fetch` (→ job), `artifacts.list/.get` (returns the redacted derivative only); crash postmortem port for `postmortem.crash`/`.triage`, loading the Run's `debuginfo_ref` (from #16) to symbolize the core.
 - **Acceptance (live_vm):** after force_crash, `vmcore.fetch` produces a fetchable vmcore artifact; `artifacts.get` returns the redacted derivative; a no-core scenario returns `readiness_failure`.
 
