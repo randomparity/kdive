@@ -35,12 +35,18 @@ read and written*; it does not own *when* (that is the handlers' policy).
 
 ### `repositories.py` — typed async CRUD
 
-A single generic `Repository[M]` parameterized per object, instantiated once per
-table at module scope. One class because the CRUD body is otherwise written eight
-times (the CLAUDE.md "rule of three" is met and exceeded).
+Two generic classes, instantiated once per table at module scope. The CRUD body is
+otherwise written eight times (the CLAUDE.md "rule of three" is met and exceeded).
+A base `Repository[M]` provides `insert` / `get`; a `StatefulRepository[M, S]`
+subclass adds `update_state` and binds the object's state enum `S`. Write-once
+`Artifact` uses the base class, so `ARTIFACTS.update_state` is a *compile* error (the
+method does not exist) rather than an unspecified runtime path, and each stateful
+repo's `update_state` accepts only its own enum — a wrong-enum call cannot be
+written.
 
 ```python
 M = TypeVar("M", bound=DomainModel)
+S = TypeVar("S", bound=StrEnum)
 
 class Repository(Generic[M]):
     def __init__(
@@ -48,30 +54,40 @@ class Repository(Generic[M]):
         model: type[M],
         table: str,
         *,
-        state_column: str | None = "state",
-        state_enum: type[StrEnum] | None = None,
         json_columns: frozenset[str] = frozenset(),
     ) -> None: ...
 
     async def insert(self, conn: AsyncConnection, obj: M) -> M: ...
     async def get(self, conn: AsyncConnection, obj_id: UUID) -> M | None: ...
+
+class StatefulRepository(Repository[M], Generic[M, S]):
+    def __init__(
+        self,
+        model: type[M],
+        table: str,
+        state_enum: type[S],
+        *,
+        state_column: str = "state",
+        json_columns: frozenset[str] = frozenset(),
+    ) -> None: ...
+
     async def update_state(
-        self, conn: AsyncConnection, obj_id: UUID, new_state: StrEnum
+        self, conn: AsyncConnection, obj_id: UUID, new_state: S
     ) -> M: ...
 ```
 
 Module-level instances (the eight durable objects):
 
-| instance | model | table | state column | update_state? |
-|----------|-------|-------|--------------|---------------|
-| `RESOURCES` | `Resource` | `resources` | `status` (`ResourceStatus`) | yes |
-| `ALLOCATIONS` | `Allocation` | `allocations` | `state` (`AllocationState`) | yes |
-| `SYSTEMS` | `System` | `systems` | `state` (`SystemState`) | yes |
-| `INVESTIGATIONS` | `Investigation` | `investigations` | `state` (`InvestigationState`) | yes |
-| `RUNS` | `Run` | `runs` | `state` (`RunState`) | yes |
-| `DEBUG_SESSIONS` | `DebugSession` | `debug_sessions` | `state` (`DebugSessionState`) | yes |
-| `JOBS` | `Job` | `jobs` | `state` (`JobState`) | yes |
-| `ARTIFACTS` | `Artifact` | `artifacts` | `None` | no (write-once) |
+| instance | class | model | table | state column |
+|----------|-------|-------|-------|--------------|
+| `RESOURCES` | `StatefulRepository` | `Resource` | `resources` | `status` (`ResourceStatus`) |
+| `ALLOCATIONS` | `StatefulRepository` | `Allocation` | `allocations` | `state` (`AllocationState`) |
+| `SYSTEMS` | `StatefulRepository` | `System` | `systems` | `state` (`SystemState`) |
+| `INVESTIGATIONS` | `StatefulRepository` | `Investigation` | `investigations` | `state` (`InvestigationState`) |
+| `RUNS` | `StatefulRepository` | `Run` | `runs` | `state` (`RunState`) |
+| `DEBUG_SESSIONS` | `StatefulRepository` | `DebugSession` | `debug_sessions` | `state` (`DebugSessionState`) |
+| `JOBS` | `StatefulRepository` | `Job` | `jobs` | `state` (`JobState`) |
+| `ARTIFACTS` | `Repository` | `Artifact` | `artifacts` | — (write-once) |
 
 **Column mapping.** Column names are `tuple(model.model_fields)`; they already
 match the SQL columns one-for-one (verified against `0001_init.sql`). Rows are read
@@ -88,7 +104,9 @@ on caller-supplied timestamps. jsonb columns (`json_columns`) are wrapped in
 psycopg's `Jsonb` adapter; all other values adapt natively (`UUID`→uuid,
 `datetime`→timestamptz, `StrEnum`→text since `StrEnum` is a `str`).
 
-**`update_state`.** Atomic read-check-write inside the method's own transaction:
+**`update_state`** (on `StatefulRepository`, so `new_state` is typed to the repo's
+own enum `S` — a wrong-enum call is a compile error). Atomic read-check-write inside
+the method's own transaction:
 
 ```
 async with conn.transaction():
@@ -123,15 +141,24 @@ class LockScope(StrEnum):
 async def advisory_xact_lock(
     conn: AsyncConnection, scope: LockScope, key: UUID
 ) -> AsyncIterator[None]:
-    if conn.autocommit:
-        raise RuntimeError(
-            "advisory_xact_lock requires a non-autocommit connection; a "
-            "transaction-scoped lock on an autocommit connection releases "
-            "immediately (ADR-0005)"
-        )
     await conn.execute("SELECT pg_advisory_xact_lock(%s)", (_lock_key(scope, key),))
+    if conn.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError(
+            "advisory_xact_lock must run inside an open transaction; the lock "
+            "auto-released because no transaction is in progress (ADR-0005). "
+            "Wrap the call in `async with conn.transaction()` or use a "
+            "non-autocommit connection."
+        )
     yield
 ```
+
+The guard checks `transaction_status`, not `conn.autocommit`: after the lock
+`SELECT`, the connection is `INTRANS` exactly when a transaction is open to hold the
+lock — true for a non-autocommit connection *and* for an autocommit connection
+inside `conn.transaction()` (which issues a real `BEGIN`), and false only when the
+lock just auto-released (autocommit, no transaction). `conn.autocommit` is the wrong
+signal: psycopg leaves it `True` while `conn.transaction()` holds an open
+transaction, so checking it would reject a valid acquire.
 
 **Lock key.** `_lock_key(scope, key)` derives a deterministic signed 64-bit integer:
 `blake2b(digest_size=8)` over `scope` bytes, a `0x00` separator, and `str(key)`
@@ -145,8 +172,9 @@ keys to over-serialize (safe — never under-serialize). The `0x00` separator re
 
 **Release.** `pg_advisory_xact_lock` has no manual unlock; it releases at
 transaction end (COMMIT/ROLLBACK). The context manager therefore only acquires —
-the surrounding transaction's end is the release. The `autocommit` guard ensures
-such a transaction exists; otherwise the lock would be a silent no-op.
+the surrounding transaction's end is the release. The `transaction_status` guard
+turns the silent-no-op case (lock acquired then immediately auto-released) into a
+loud error.
 
 ### `idempotency.py` — step ledger
 
@@ -169,8 +197,15 @@ Logic:
 2. Else `result = await fn()`.
 3. `INSERT INTO run_steps (run_id, step, state, result) VALUES (%s, %s, 'succeeded',
    %s) ON CONFLICT (run_id, step) DO NOTHING RETURNING result`. If a row came back,
-   return our `result`.
+   return **the `RETURNING result`** — the stored, JSON-round-tripped value.
 4. Otherwise a concurrent caller inserted first; re-`SELECT` and return theirs.
+
+**Return consistency.** Every path returns the value as read back from jsonb (steps
+1, 3, 4), never the raw in-memory `fn()` result. So the first call and every replay
+return *equal* values even when `fn` returns a non-canonical JSON value (a `dict`
+with non-`str` keys, a tuple, etc.) that the jsonb round-trip would normalize —
+which is the whole point of a replay ledger. A test asserts this with a
+non-canonical result.
 
 **Failure semantics.** If `fn` raises, nothing is inserted, so the step is not
 recorded and a later call retries — a failed step never poisons the ledger.
@@ -182,9 +217,20 @@ criterion). A true concurrent *first* call may run `fn` on both racers, but the
 unique `(run_id, step)` key makes the first commit win and both callers return that
 stored result; the second `fn`'s result is discarded. Single-execution under
 concurrency is provided one layer up by the operation's `advisory_xact_lock` and
-the job `dedup_key` at admission (per the m0 spec's layered guarantee). `run_steps.state`
-is free `text` (no CHECK in the schema) — a ledger-bookkeeping field, set to
-`'succeeded'` here.
+the job `dedup_key` at admission (per the m0 spec's layered guarantee).
+
+**Isolation level.** Step 4's "re-`SELECT` and return theirs" assumes the caller's
+transaction runs at **READ COMMITTED** (psycopg's default, the server default): the
+winner's row was committed by another transaction and a fresh `SELECT` must see it.
+Under REPEATABLE READ / SERIALIZABLE the loser's snapshot predates that commit, so
+the `INSERT` would instead raise a serialization failure — `run_step` is not
+designed for those isolation levels in M0, where the per-operation
+`advisory_xact_lock` is the actual concurrent-execution guard and the
+concurrent-first-call race is a degenerate fallback. This precondition is documented
+on the function.
+
+`run_steps.state` is free `text` (no CHECK in the schema) — a ledger-bookkeeping
+field, set to `'succeeded'` here.
 
 ## Data flow (illustrative, a future handler)
 
@@ -204,7 +250,7 @@ handler (later issue), inside one pooled connection + transaction:
 | `KDIVE_DATABASE_URL` unset (existing) | `CategorizedError(CONFIGURATION_ERROR)` | operational |
 | `update_state` on missing row / lost CAS | `ObjectNotFound(RuntimeError)` | consistency |
 | disallowed transition | `IllegalTransition(ValueError)` | programming |
-| `advisory_xact_lock` on autocommit conn | `RuntimeError` | programming |
+| `advisory_xact_lock` with no open transaction | `RuntimeError` | programming |
 | `fn` raises in `run_step` | propagates; nothing recorded | caller's |
 
 ## Testing strategy
@@ -219,17 +265,27 @@ the conninfo for async connections.
   included); `get` miss returns `None`; legal `update_state` returns the new state
   with a DB-bumped `updated_at`; illegal transition raises `IllegalTransition`;
   `update_state` on a missing id raises `ObjectNotFound`; concurrent CAS on the same
-  row — one wins, the loser raises; timestamps come from the DB, not the input.
+  row — one wins, the loser raises; timestamps come from the DB, not the input
+  (insert a model with a deliberately wrong `created_at` and assert the returned
+  value is the DB's). A drift guard introspects `information_schema.columns` for
+  `data_type = 'jsonb'` per table and asserts each repo's `json_columns` matches —
+  tying model / SQL / `json_columns` together the way the existing enum↔CHECK test
+  does.
 - **locks** (the headline acceptance) — two real connections: A holds the lock in a
-  transaction; B blocks (proven: B's acquisition task is not `done()` after a wait);
+  transaction; B's acquisition is started as a task. The test proves B is genuinely
+  *waiting on the lock* (polls `pg_locks` for a `locktype = 'advisory'`,
+  `granted = false` row for B's backend) before asserting the task is not `done()`;
   A commits; B proceeds (`asyncio.wait_for` resolves). Plus: different key does not
-  block; different scope does not block; autocommit connection raises;
-  `_lock_key` is deterministic and scope-sensitive.
+  block; different scope does not block; a lock acquired on an autocommit connection
+  with no `conn.transaction()` raises (no open transaction); `_lock_key` is
+  deterministic and scope-sensitive.
 - **idempotency** (the headline acceptance) — `run_step` runs `fn` once across two
   calls (`call count == 1`), both return the same result; `None`/`list`/`dict`
-  results round-trip; distinct steps are independent; `fn` raising leaves no row and
-  the next call re-executes; concurrent first-call race resolves to one stored
-  result.
+  results round-trip; a **non-canonical** result (e.g. a `dict` with integer keys or
+  a tuple) returns *equal* values on first call and replay (proving every path
+  returns the round-tripped form); distinct steps are independent; `fn` raising
+  leaves no row and the next call re-executes; concurrent first-call race resolves to
+  one stored result.
 
 The env-gated libvirt/gdb/drgn integration tests are untouched and stay gated.
 

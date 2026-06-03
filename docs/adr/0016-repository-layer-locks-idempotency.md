@@ -19,9 +19,11 @@ they shape what those issues build on. Four decisions had viable alternatives.
 
 ## Decision
 
-**1. One generic `Repository[M]`, instantiated per table.** A single
-`Repository(Generic[M])` provides async `insert` / `get` / `update_state`; eight
-module-level instances bind it to the durable objects. Column names derive from
+**1. Generic repositories, instantiated per table.** A base `Repository[M]` provides
+async `insert` / `get`; a `StatefulRepository[M, S]` subclass adds `update_state` and
+binds the object's state enum `S`. Eight module-level instances bind these to the
+durable objects (write-once `Artifact` uses the base, so it has no `update_state` and
+a wrong-enum transition cannot be written). Column names derive from
 `model.model_fields` (they match the SQL columns), rows are read via `dict_row` and
 re-validated with `model_validate`.
 
@@ -38,7 +40,9 @@ transaction.
 **4. Lock scope is a closed `LockScope` enum.** `advisory_xact_lock(conn, scope,
 key)` takes `LockScope.{ALLOCATION,SYSTEM}`, hashes `(scope, key)` to a signed
 64-bit int, and calls the single-bigint `pg_advisory_xact_lock` — disjoint from the
-two-int migration lock. It raises on an autocommit connection.
+two-int migration lock. After acquiring, it raises unless the connection is
+`INTRANS` (a transaction is open to hold the lock), catching the silent
+auto-release that an autocommit-with-no-transaction connection would cause.
 
 ## Consequences
 
@@ -52,8 +56,10 @@ two-int migration lock. It raises on an autocommit connection.
   consistency bugs loud and separate from operational `CategorizedError`s.
 - A `LockScope` typo is impossible; the trade-off is that a new lock scope requires
   an enum edit (intended — it forces the scope into the documented set).
-- `advisory_xact_lock` is correct only inside a transaction; the autocommit guard
-  converts a silent locking no-op into an immediate error.
+- `advisory_xact_lock` is correct only inside a transaction; the post-acquire
+  `transaction_status` guard converts a silent locking no-op into an immediate error
+  (and, unlike a `conn.autocommit` check, still permits the valid autocommit +
+  `conn.transaction()` pattern, since psycopg leaves `autocommit` true there).
 - Lock-key hashing can collide, over-serializing two unrelated keys; it never
   under-serializes, so correctness holds and only concurrency is (rarely) reduced.
 
