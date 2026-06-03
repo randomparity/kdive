@@ -539,7 +539,9 @@ from botocore.exceptions import ClientError
 
 from kdive.store.objectstore import ObjectStore
 
-_MINIO_IMAGE = "minio/minio:RELEASE.2025-10-15T17-29-55Z"
+# MinIO's official images are archived; this is the last tag actually pushed to
+# Docker Hub (the source-only 2025-10-15 patch was never published as an image).
+_MINIO_IMAGE = "minio/minio:RELEASE.2025-09-07T16-13-09Z"
 _MINIO_PORT = 9000
 _ROOT_USER = "kdive-test"
 _ROOT_PASSWORD = "kdive-test-secret"  # disposable local test container credential

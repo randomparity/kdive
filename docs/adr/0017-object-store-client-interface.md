@@ -126,7 +126,8 @@ forecloses key injection; tenant isolation itself remains an access-control conc
   becomes a real risk.
 - **Add the `minio` client / `testcontainers[minio]` for the test fixture.**
   Rejected: a generic `DockerContainer` plus a boto3 readiness poll reuses the
-  `boto3` we already ship; MinIO's official image is archived (final tag
-  `RELEASE.2025-10-15T17-29-55Z`), so the fixture pins that tag for the disposable
-  test container and notes localstack / a Chainguard rebuild as the fallback if the
-  tag stops resolving.
+  `boto3` we already ship; MinIO's official images are archived, so the fixture pins
+  the last tag actually published to Docker Hub (`RELEASE.2025-09-07T16-13-09Z` — the
+  source-only 2025-10-15 patch was never pushed as an image) for the disposable test
+  container and notes localstack / a Chainguard rebuild as the fallback if the tag
+  stops resolving.

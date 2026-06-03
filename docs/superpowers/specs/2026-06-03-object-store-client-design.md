@@ -222,7 +222,9 @@ package (not a dependency) and we already ship `boto3`, a new
 `tests/store/conftest.py` starts a generic `DockerContainer` and polls boto3
 `list_buckets` for readiness:
 
-- `minio_store` (session-scoped): start `minio/minio:RELEASE.2025-10-15T17-29-55Z`
+- `minio_store` (session-scoped): start `minio/minio:RELEASE.2025-09-07T16-13-09Z`
+  (the last MinIO tag actually published to Docker Hub; the source-only 2025-10-15
+  patch was never pushed as an image)
   with `command="server /data"` and root user/password env, expose 9000, poll
   `list_buckets` until ready (bounded retries with a timeout, hard-skip rules
   matching `conftest.py`: skip when Docker is unreachable unless
