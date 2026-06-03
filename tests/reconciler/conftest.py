@@ -61,10 +61,15 @@ class _FakeDomain:
 
 
 class FakeReaper:
-    """Records ``destroy`` calls and returns scripted owned domains."""
+    """Records ``destroy`` calls and returns scripted owned domains.
 
-    def __init__(self, *domains: OwnedDomain) -> None:
+    ``fail_on`` names raise from ``destroy`` (after being recorded as attempted), so a
+    test can prove one domain's failure does not strand the others.
+    """
+
+    def __init__(self, *domains: OwnedDomain, fail_on: frozenset[str] = frozenset()) -> None:
         self._domains: tuple[OwnedDomain, ...] = domains
+        self._fail_on = fail_on
         self.destroyed: list[str] = []
 
     async def list_owned(self) -> list[OwnedDomain]:
@@ -72,6 +77,8 @@ class FakeReaper:
 
     async def destroy(self, name: str) -> None:
         self.destroyed.append(name)
+        if name in self._fail_on:
+            raise RuntimeError(f"libvirt destroy of {name} failed")
 
 
 async def connect(url: str) -> psycopg.AsyncConnection:

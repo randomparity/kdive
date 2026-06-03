@@ -244,6 +244,12 @@ async def reconcile_once(
 
     A repair that raises is logged, its name recorded in ``failures``, and the pass
     continues — one repair never starves the others. Returns the partial counts.
+
+    Counts are **best-effort**: a repair that commits some work and then raises (e.g. a
+    transient DB error in a later iteration) reports ``0`` for its category and appears
+    in ``failures`` — the committed work stands but is not reflected in the count. The
+    per-domain ``destroy`` in :func:`_repair_leaked_domains` is caught individually, so
+    the irreversible case (a domain destroyed, then a later failure) keeps its count.
     """
     counts: dict[str, int] = {
         "orphaned_systems": 0,

@@ -362,6 +362,22 @@ def test_torn_down_row_with_inflight_teardown_not_reaped(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_leaked_domain_destroy_failure_does_not_strand_others(migrated_url: str) -> None:
+    async def _run() -> None:
+        reaper = FakeReaper(
+            _FakeDomain(name="vm-bad", system_id=uuid4()),
+            _FakeDomain(name="vm-good", system_id=uuid4()),
+            fail_on=frozenset({"vm-bad"}),
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        # vm-bad's destroy raised but did not abort the pass; vm-good was still reaped.
+        assert reaper.destroyed == ["vm-bad", "vm-good"]
+        assert count == 1  # only the successful destroy is counted
+
+    asyncio.run(_run())
+
+
 def test_mid_provision_domain_not_reaped(migrated_url: str) -> None:
     async def _run() -> None:
         # Headline acceptance: a provisioning row protects the domain (guard a),

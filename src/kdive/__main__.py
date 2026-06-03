@@ -21,7 +21,7 @@ _DEFAULT_PORT = 8000
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level argument parser with the `server`/`worker` subcommands."""
+    """Build the top-level argument parser with the `server`/`worker`/`reconciler` subcommands."""
     parser = argparse.ArgumentParser(prog="kdive")
     parser.add_argument(
         "--log-level",
