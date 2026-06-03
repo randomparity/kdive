@@ -129,10 +129,21 @@ autocommit setting. `update_state` composes beneath an `advisory_xact_lock` (whi
 serializes the broader operation) but does not require one.
 
 **Errors.** `get` returns `None` on a miss (a lookup may legitimately miss).
-`update_state` raises `ObjectNotFound` (a `RuntimeError` subclass) on a missing
-row and `IllegalTransition` (already in `domain.state`) on a disallowed edge — both
-programming/consistency errors, distinct from `CategorizedError` (reserved for
-operational failures a handler turns into a client response).
+`update_state` raises `ObjectNotFound` (a `RuntimeError` subclass) only when the id
+is absent (the `FOR UPDATE` `SELECT` returns no row), and `IllegalTransition`
+(already in `domain.state`) on a disallowed edge — both programming/consistency
+errors, distinct from `CategorizedError` (reserved for operational failures a
+handler turns into a client response).
+
+**Concurrent updaters.** Because the mechanism is `FOR UPDATE` serialization (not a
+compare-and-swap), a second updater of the same row blocks until the first commits,
+then reads the *new* committed state and re-checks against it. So two callers racing
+to the **same** target produce one winner and a loser that raises
+`IllegalTransition` (a self-transition on the now-current state is never legal); two
+callers with **different** targets where the second is still legal from the new
+state both succeed, applying the transitions in series (the correct serialized
+outcome). There is no zero-row "lost CAS" path — `ObjectNotFound` is reachable only
+via an unknown id.
 
 ### `locks.py` — advisory transaction locks
 
@@ -255,7 +266,7 @@ handler (later issue), inside one pooled connection + transaction:
 | Condition | Raised | Kind |
 |-----------|--------|------|
 | `KDIVE_DATABASE_URL` unset (existing) | `CategorizedError(CONFIGURATION_ERROR)` | operational |
-| `update_state` on missing row / lost CAS | `ObjectNotFound(RuntimeError)` | consistency |
+| `update_state` on unknown id | `ObjectNotFound(RuntimeError)` | consistency |
 | disallowed transition | `IllegalTransition(ValueError)` | programming |
 | `advisory_xact_lock` with no open transaction | `RuntimeError` | programming |
 | `fn` raises in `run_step` | propagates; nothing recorded | caller's |
@@ -271,8 +282,10 @@ the conninfo for async connections.
 - **repositories** — round-trip insert→get for every object (jsonb columns
   included); `get` miss returns `None`; legal `update_state` returns the new state
   with a DB-bumped `updated_at`; illegal transition raises `IllegalTransition`;
-  `update_state` on a missing id raises `ObjectNotFound`; concurrent CAS on the same
-  row — one wins, the loser raises; timestamps come from the DB, not the input
+  `update_state` on an unknown id raises `ObjectNotFound`; two updaters racing to the
+  same target on one row — one wins and the loser raises `IllegalTransition` (the
+  serialized loser sees the new state and a self-transition is illegal); timestamps
+  come from the DB, not the input
   (insert a model with a deliberately wrong `created_at` and assert the returned
   value is the DB's). A drift guard introspects `information_schema.columns` for
   `data_type = 'jsonb'` per table and asserts each repo's `json_columns` matches —

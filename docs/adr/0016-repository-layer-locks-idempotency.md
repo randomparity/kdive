@@ -32,10 +32,12 @@ re-validated with `model_validate`.
 `id` is caller-minted. The model's timestamp fields are advisory on insert.
 
 **3. Lookups return `None`; mutations fail fast.** `get` returns `M | None`.
-`update_state` raises `ObjectNotFound` (a `RuntimeError`) on a missing row or a lost
-compare-and-swap, and `IllegalTransition` on a disallowed edge, after an atomic
-`SELECT … FOR UPDATE` → `can_transition` → `UPDATE … RETURNING` inside its own
-transaction.
+`update_state` raises `ObjectNotFound` (a `RuntimeError`) on an unknown id and
+`IllegalTransition` on a disallowed edge, after an atomic `SELECT … FOR UPDATE` →
+`can_transition` → `UPDATE … RETURNING` inside its own transaction. `FOR UPDATE`
+serializes concurrent updaters: a same-target race makes the loser raise
+`IllegalTransition` (self-transition on the now-current state); there is no zero-row
+compare-and-swap path.
 
 **4. Lock scope is a closed `LockScope` enum.** `advisory_xact_lock(conn, scope,
 key)` takes `LockScope.{ALLOCATION,SYSTEM}`, hashes `(scope, key)` to a signed
