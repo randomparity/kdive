@@ -77,6 +77,19 @@ acquires short-lived connections per claim/dispatch/heartbeat, and exposes a
 single-iteration `run_once` beneath the continuous `run` loop so the loop body is
 testable without sleeping.
 
+**7. No transaction spans the handler.** A handler runs 30+ minutes, so the worker
+holds no transaction across it: each `run_step` (#7) commits in its own short
+transaction, and `dequeue`/`complete`/`fail` are each their own. This keeps the xmin
+horizon from being pinned for the life of a long job and makes partial progress
+durable, so a retry skips already-committed steps. A handler whose job never reaches
+`complete` (worker death, or a fenced-out `complete` after a lapsed lease) leaves its
+committed steps standing for the reclaiming worker and any object-store write as an
+orphan the reconciler GCs. The worker does **not** cancel a running handler when its
+lease lapses; sequential-retry safety is `run_step` and concurrent-overlap safety is
+the handler's `advisory_xact_lock(SYSTEM, …)` (#7) — neither is the worker's job. The
+`heartbeat_interval <= lease / 3` constructor guard keeps a sane configuration from
+lapsing the lease mid-run in the first place.
+
 ## Consequences
 
 - At-least-once delivery is bounded under both deterministic failure and worker
@@ -108,10 +121,20 @@ testable without sleeping.
 - **`DO NOTHING RETURNING` for enqueue.** Rejected (and called out in the issue):
   returns no row on conflict, so a re-issue would get nothing instead of the existing
   job handle.
-- **Single connection for dispatch + heartbeat.** Rejected: a handler holds its
-  connection in a transaction for the duration of its work, so a heartbeat `UPDATE`
+- **Single connection for dispatch + heartbeat.** Rejected: the handler's
+  connection is busy running its own short step transactions, so a heartbeat `UPDATE`
   on the same connection cannot run concurrently. A separate pooled connection is the
   minimal correct mechanism.
+- **One transaction spanning the whole handler (handler + `complete` commit
+  together).** Rejected (decision 7): a 30+ minute open transaction pins the xmin
+  horizon and blocks vacuum, and it defers every `run_step` commit to job end, so a
+  crash near the end loses all partial progress and the retry redoes everything —
+  defeating the ledger. Short per-step transactions make progress durable.
+- **Worker cancels the in-flight handler when the lease lapses.** Rejected for M0:
+  the lease only lapses under a real fault (DB unreachable past the lease) given the
+  `heartbeat_interval <= lease / 3` guard, and concurrent-overlap safety already
+  belongs to the handler's `advisory_xact_lock` (#7). Cancellation machinery the
+  acceptance criteria do not need is deferred (YAGNI).
 - **No heartbeat at M0 (a long fixed lease).** Rejected: it would make the
   lease/heartbeat that [0008](0008-async-worker-tier-job-queue.md) rests on a
   documented-but-absent feature, and any op exceeding the fixed lease would be falsely

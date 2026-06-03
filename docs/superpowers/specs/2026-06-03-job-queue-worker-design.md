@@ -41,6 +41,23 @@ owns *how a job is admitted, claimed, kept alive, and finalized*; it does not ow
 - **No per-pool / per-tenant scheduling.** One pool, one tenant at M0;
   `ORDER BY created_at` FIFO satisfies the ADR-0008 fairness rule trivially. A
   `kinds` filter and fair scheduler arrive with M1's second pool.
+- **No retry backoff.** A requeued job returns to `queued` and is eligible for the
+  very next `dequeue` with no delay — `poll_interval` gates only the empty-queue
+  case. So `max_attempts` failures fire back-to-back in milliseconds. This adds no
+  resilience to a *transient* dependency outage (still down 3 ms later), but it is
+  acceptable for M0's failure set, which is dominated by deterministic failures
+  (`configuration_error`, `build_failure`, `missing_dependency`); bounded retry
+  still covers the occasional `infrastructure_failure`. A `not_before`/`available_at`
+  backoff gate is a schema change deferred to a later milestone.
+- **No in-flight cancellation on lease loss.** If a handler's lease lapses mid-run
+  (heartbeat fails repeatedly, i.e. the DB is unreachable past the lease), the worker
+  does **not** cancel the running handler; its `complete`/`fail` simply fence out and
+  another worker may reclaim and re-run the job. Safety then rests on two existing
+  layers, not on the worker: the handler's `run_step` ledger (#7) makes a *sequential*
+  re-run skip already-committed steps, and the handler's own
+  `advisory_xact_lock(SYSTEM, …)` (#7/ADR-0016) serializes a *concurrent* reclaiming
+  handler so two provider ops cannot overlap. The worker provides neither guarantee
+  and does not need to at M0.
 - **No schema change.** The `jobs` table (`dedup_key NOT NULL UNIQUE`, `attempt`,
   `max_attempts`, `worker_id`, `lease_expires_at`, `heartbeat_at`, `result_ref`,
   `error_category`) and the `JobState` `running → queued` requeue edge already exist
@@ -144,8 +161,9 @@ RETURNING id;
 ```
 
 Returns `True` when a row matched, `False` when the job is no longer this worker's
-running job (reclaimed, completed, failed, or canceled) — the signal a cooperative
-handler uses to abort.
+running job (reclaimed, completed, failed, or canceled). The worker's heartbeat task
+stops beating on `False` (the job is gone); it does **not** cancel the running
+handler (see "No in-flight cancellation" in Non-goals).
 
 **`complete` — fenced success.**
 `UPDATE … SET state = 'succeeded', result_ref = %s WHERE id = %s AND worker_id = %s
@@ -179,27 +197,45 @@ class Worker:
         lease=DEFAULT_LEASE,
         heartbeat_interval=timedelta(seconds=30),
         poll_interval=timedelta(seconds=1),
-    ) -> None: ...
+    ) -> None: ...  # raises ValueError unless heartbeat_interval <= lease / 3
 
     async def run_once(self) -> Job | None: ...      # claim+dispatch one job; None if queue empty
     async def run(self, stop: asyncio.Event) -> None: ...  # loop run_once; sleep poll_interval when idle; exit on stop
 ```
 
+`__init__` rejects `heartbeat_interval > lease / 3`: the `/ 3` margin lets two
+heartbeats be missed (a transient DB blip) before the lease lapses, so a sane
+configuration cannot silently cause mid-job reclaim and double-run. `lease`,
+`heartbeat_interval`, and `poll_interval` are otherwise injectable so tests can drive
+the loop with sub-second values.
+
+**Transaction granularity.** The worker holds **no** transaction spanning the
+handler — a handler runs 30+ minutes (provision/build, ADR-0008), and a transaction
+open that long would pin Postgres's xmin horizon and block vacuum. Instead the
+handler owns its own short transaction boundaries: each `run_step` (#7) commits in
+its own transaction, so partial progress is durable and a retry skips already-done
+steps. `dequeue`, `complete`, and `fail` are each their own short transaction. The
+handler's object-store writes happen out-of-band (the object precedes its `artifacts`
+row, ADR-0013); a write whose job never reaches `complete` is an orphan the
+reconciler GCs.
+
 `run_once`:
 
-1. Acquire a pooled connection, `job = await dequeue(conn, worker_id, lease=…)`,
-   commit/release. Return `None` if no job.
+1. Acquire a pooled connection, `job = await dequeue(conn, worker_id, lease=…)` (its
+   own transaction), release. Return `None` if no job.
 2. `handler = registry.get(job.kind)`. If `None`: `await fail(conn, job,
-   NOT_IMPLEMENTED)` on a fresh connection and return the job.
-3. Start a background heartbeat task (its own pooled connection) that loops
+   NOT_IMPLEMENTED)` and return the job.
+3. Start a background heartbeat task on its **own** pooled connection that loops
    `await heartbeat(...)` every `heartbeat_interval`, stopping when `heartbeat`
    returns `False` or it is cancelled.
-4. Acquire a dispatch connection inside a transaction; `result_ref = await
-   handler(conn, job)`; `await complete(conn, job.id, worker_id, result_ref)`. The
-   handler's effects and its `complete` commit together.
+4. Acquire a dispatch connection; `result_ref = await handler(conn, job)` (the
+   handler commits its own steps as it goes); then `await complete(conn, job.id,
+   worker_id, result_ref)` in its own short transaction. If `complete` fences out
+   (the job was reclaimed), the handler's already-committed steps and any object
+   writes still stand — they benefit the reclaiming worker via `run_step` — and the
+   worker logs and drops the result.
 5. On a handler exception: map to `error_category` (decision 5), `await fail(conn,
-   job, category)` (rolling back the handler's aborted transaction first), log the
-   category + ids (never the exception text).
+   job, category)`, log the category + ids (never the exception text).
 6. Cancel and await the heartbeat task in a `finally`; return the job.
 
 `run` is `while not stop.is_set(): job = await run_once(); if job is None: await
@@ -221,9 +257,13 @@ the authorizing tuple on the job already admitted.
   another worker (new `worker_id`), the original worker's `heartbeat`/`complete`/
   `fail` match zero rows. No double-finalize, no zombie completion.
 - **Effect-idempotency beneath admission-idempotency** — `enqueue`'s `dedup_key`
-  stops a *duplicate job*; the handler's own `run_step` (#7) stops a *duplicate
-  effect* when the same job is retried. The two layers are independent and both
-  required (a retried job re-runs the handler).
+  stops a *duplicate job*; the handler's own `run_step` (#7), committing each step in
+  its own short transaction, stops a *duplicate effect* when the same job is retried
+  *sequentially*; the handler's `advisory_xact_lock(SYSTEM, …)` (#7) stops a
+  *concurrent* double-run when a lapsed lease lets a reclaiming worker overlap the
+  original. The worker tier supplies neither — it is responsible only for admission,
+  claim, lease, and finalize. A retried job always re-runs the handler; durability of
+  partial progress across the retry is exactly what the per-step commits buy.
 - **Isolation level** — `enqueue`'s `INSERT`-then-`SELECT` and `dequeue`'s reclaim
   read committed state, so they assume READ COMMITTED (psycopg's default), consistent
   with `idempotency.run_step`.
@@ -236,7 +276,7 @@ the authorizing tuple on the job already admitted.
 | Handler raises `CategorizedError` | `fail` with `error.category`; requeue if attempts remain, else dead-letter |
 | Handler raises any other exception | `fail` with `INFRASTRUCTURE_FAILURE` |
 | No handler registered for `job.kind` | `fail` with `NOT_IMPLEMENTED` |
-| Handler succeeds but job was reclaimed | `complete` fence misses → `None`; worker logs and drops |
+| Handler succeeds but job was reclaimed | `complete` fence misses → `None`; the handler's committed steps stand and aid the reclaiming worker via `run_step`; this worker logs and drops |
 | `heartbeat` on a reclaimed/finished job | returns `False` (handler may abort) |
 | Job abandoned, `attempt < max_attempts` | next `dequeue` reclaims it |
 | Job abandoned, `attempt >= max_attempts` | left for the reconciler (#12); never re-dequeued |
@@ -247,8 +287,11 @@ Disposable Postgres via the existing `tests/db/conftest.py` fixtures, reused fro
 new `tests/jobs/conftest.py` (import the `migrated_url` / `postgres_url` fixtures);
 async code driven with `asyncio.run(...)` (the established pattern — no
 `pytest-asyncio`). Handlers are tested as plain callables with injected fakes
-(CLAUDE.md: handlers are the unit of testing). Env-gated libvirt/gdb/drgn integration
-tests are untouched and stay gated.
+(CLAUDE.md: handlers are the unit of testing). The `Worker` is constructed over a
+**real** `AsyncConnectionPool` (`min_size >= 2`, opened on `migrated_url`) so the
+dispatch and heartbeat connections are genuinely distinct — a single-connection pool
+would serialize them and hide the concurrency the heartbeat depends on. Env-gated
+libvirt/gdb/drgn integration tests are untouched and stay gated.
 
 - **`queue.enqueue`** — first call inserts and returns a `queued` job; a second call
   with the **same** `dedup_key` returns the **same** `job_id` with no second row
@@ -272,7 +315,16 @@ tests are untouched and stay gated.
   job / `None`.
 - **`HandlerRegistry`** — `get` returns a registered handler and `None` for an
   unregistered kind; a second `register` for a kind raises `DuplicateHandler`.
-- **`Worker.run_once` (the headline acceptance)** — with a fake pool over
+- **`Worker.__init__`** — rejects `heartbeat_interval > lease / 3` with `ValueError`;
+  accepts the boundary (`heartbeat_interval == lease / 3`).
+- **Heartbeat keeps a live lease** — construct a worker with a short `lease`
+  (e.g. 1 s) and shorter `heartbeat_interval` (e.g. 0.25 s); a handler that sleeps
+  past the original lease (e.g. 2 s) completes `succeeded`, the job's
+  `lease_expires_at` is observed to advance during the run (the heartbeat renewed
+  it), and a concurrent `dequeue` by a second `worker_id` does **not** reclaim it
+  mid-run. This is the one test that fails if the heartbeat task is never started or
+  its SQL is wrong.
+- **`Worker.run_once` (the headline acceptance)** — over the real pool on
   `migrated_url`:
   - *happy path*: enqueue → `run_once` dispatches the handler, stores its
     `result_ref`, job ends `succeeded`; a second `run_once` returns `None`.
