@@ -118,9 +118,14 @@ ON CONFLICT (dedup_key) DO NOTHING;
 SELECT * FROM jobs WHERE dedup_key = %s;
 ```
 
-The `SELECT` returns the pre-existing row on conflict and the freshly inserted row
-otherwise, so a re-issued tool gets the **same** `job_id` and never enqueues a
-duplicate. `DO NOTHING RETURNING` is deliberately avoided (it returns no row on
+`enqueue` rejects `max_attempts < 1` with `ValueError` (a boundary guard): a job
+with `max_attempts = 0` can never satisfy `dequeue`'s `attempt < max_attempts`
+predicate, so it would sit `queued` forever — a silent stuck job. The `SELECT`
+returns the pre-existing row on conflict and the freshly inserted row otherwise, so a
+re-issued tool gets the **same** `job_id` and never enqueues a duplicate (in whatever
+state that job has since reached — `enqueue` never resurrects a finished job; recovery
+from a failed run-scoped job is a *new* run with a fresh `dedup_key`, per the parent
+spec's "Failure & retry"). `DO NOTHING RETURNING` is deliberately avoided (it returns no row on
 conflict). `enqueue` wraps the two statements in its own `conn.transaction()` only
 when the connection is not already in one, so it is atomic standalone yet composes
 beneath a caller's transaction. (The `INSERT`+`SELECT` must be one transaction so a
@@ -310,7 +315,7 @@ libvirt/gdb/drgn integration tests are untouched and stay gated.
 - **`queue.enqueue`** — first call inserts and returns a `queued` job; a second call
   with the **same** `dedup_key` returns the **same** `job_id` with no second row
   (assert one row in `jobs`); a different `dedup_key` makes a distinct job; `payload`
-  and `authorizing` round-trip through `jsonb`.
+  and `authorizing` round-trip through `jsonb`; `max_attempts < 1` raises `ValueError`.
 - **`queue.dequeue`** — claims the oldest `queued` job, setting `running`,
   `worker_id`, `attempt = 1`, a future `lease_expires_at`; returns `None` on an empty
   queue; two concurrent dequeues on two connections claim **different** jobs (SKIP
