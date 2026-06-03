@@ -84,3 +84,113 @@ jobs:
 
       - name: Test (live_vm)
         run: uv run python -m pytest -m live_vm -q
+
+  pre-commit:
+    name: pre-commit hooks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Run hooks
+        # The ty hook shells out to `uv run ty check`, which would sync the whole
+        # project (and need libvirt-dev) just to type-check; the lint-type-test
+        # job already covers ty, so skip it here and keep this job venv-free.
+        env:
+          SKIP: ty
+        run: uvx prek@0.4.3 run --all-files --show-diff-on-failure
+
+  workflow-hygiene:
+    name: workflow security scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Scan workflows with zizmor
+        run: uvx zizmor@1.25.2 .github/workflows
+
+  supply-chain-runtime:
+    name: supply chain (runtime)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Install libvirt build headers
+        # pip-audit resolves the pinned set with pip, which builds libvirt-python
+        # (sdist only) to read its metadata; that build needs the libvirt headers.
+        # Without them, --strict fails rather than silently skipping the package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvirt-dev
+
+      - name: Audit runtime dependencies
+        run: |
+          uv export --no-emit-project --no-dev --no-default-groups \
+            --format requirements-txt > runtime-reqs.txt
+          uvx pip-audit@2.10.0 --no-deps --strict -r runtime-reqs.txt
+
+  supply-chain-dev:
+    name: supply chain (dev)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Install libvirt build headers
+        # Same reason as the runtime job: pip-audit builds libvirt-python to read
+        # its metadata, so without the headers it would silently skip the package.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvirt-dev
+
+      - name: Audit all dependencies (including dev)
+        # Dev advisories do not ship to users, so this never fails the build — but
+        # it surfaces findings in the job summary and as a warning annotation
+        # rather than hiding them behind a green check.
+        run: |
+          uv export --no-emit-project --format requirements-txt > dev-reqs.txt
+          if uvx pip-audit@2.10.0 --no-deps -r dev-reqs.txt > dev-audit.txt 2>&1; then
+            echo "No known advisories in dev dependencies." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### pip-audit: dev-dependency advisories (informational)"
+              echo '```'
+              cat dev-audit.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::pip-audit found dev-dependency advisories (see job summary)"
+          fi
