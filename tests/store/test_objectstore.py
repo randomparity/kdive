@@ -7,11 +7,18 @@ exactly as the db tests do; the pure tests (key validation, etag normalization,
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.store.objectstore import ObjectStore, _normalize_etag
+from kdive.store.objectstore import (
+    ObjectStore,
+    StoredArtifact,
+    _normalize_etag,
+    register_artifact_row,
+)
 
 
 def test_normalize_etag_strips_surrounding_quotes() -> None:
@@ -43,3 +50,19 @@ def test_put_artifact_rejects_invalid_key_component(
             retention_class="vmcore",
         )
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_register_artifact_row_maps_stored_and_owner() -> None:
+    stored = StoredArtifact("t/vmcore/oid/core", "etag123", Sensitivity.REDACTED, "vmcore")
+    owner_id = uuid4()
+
+    row = register_artifact_row(stored, owner_kind="system", owner_id=owner_id)
+
+    assert row.object_key == "t/vmcore/oid/core"
+    assert row.etag == "etag123"
+    assert row.sensitivity is Sensitivity.REDACTED
+    assert row.retention_class == "vmcore"
+    assert row.owner_kind == "system"
+    assert row.owner_id == owner_id
+    # id is minted; created_at/updated_at are populated (advisory pre-insert).
+    assert row.id is not None
