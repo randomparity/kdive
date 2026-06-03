@@ -28,24 +28,24 @@
 
 Guardrails after every task: `uv run ruff check && uv run ruff format && uv run ty check src && uv run python -m pytest -q`.
 
+**Commit boundaries are self-contained and green.** Task 1 lands `rbac.py` **and** the `RequestContext.roles` field together, because the rbac tests construct a `RequestContext(roles=…)` — splitting them would leave a red commit. Each of Tasks 1–3 is one green, bisectable commit.
+
 ---
 
-## Task 1: Test package + fixture re-export
+## Task 1: `rbac.py` + `RequestContext.roles` (one green commit)
 
 **Files:**
-- Create: `tests/security/__init__.py`
-- Create: `tests/security/conftest.py`
+- Create: `tests/security/__init__.py`, `tests/security/conftest.py`
+- Create: `src/kdive/security/rbac.py`
+- Modify: `src/kdive/mcp/auth.py`
+- Test: `tests/security/test_rbac.py`, and new cases appended to `tests/mcp/test_auth.py`
 
-- [ ] **Step 1: Create the package marker**
+- [ ] **Step 1: Create the test package + fixture re-export**
 
-`tests/security/__init__.py`:
+`tests/security/__init__.py` — empty file (mirrors `tests/db/__init__.py`):
 
 ```python
 ```
-
-(empty file — mirrors `tests/db/__init__.py`)
-
-- [ ] **Step 2: Re-export the Postgres fixtures (existing idiom)**
 
 `tests/security/conftest.py` — identical pattern to `tests/jobs/conftest.py`:
 
@@ -63,27 +63,7 @@ from tests.db.conftest import migrated_url, pg_conn, postgres_url
 __all__ = ["migrated_url", "pg_conn", "postgres_url"]
 ```
 
-- [ ] **Step 3: Verify collection succeeds**
-
-Run: `uv run python -m pytest tests/security -q`
-Expected: `no tests ran` (collection succeeds, zero tests yet — not an error).
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tests/security/__init__.py tests/security/conftest.py
-git commit -m "test(security): add tests/security package + fixture re-export"
-```
-
----
-
-## Task 2: `rbac.py` — roles, claim parsing, enforcement
-
-**Files:**
-- Create: `src/kdive/security/rbac.py`
-- Test: `tests/security/test_rbac.py`
-
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 2: Write the failing rbac tests**
 
 `tests/security/test_rbac.py`:
 
@@ -98,12 +78,11 @@ from kdive.mcp.auth import AuthError, RequestContext
 from kdive.security.rbac import AuthorizationError, Role, require_role, roles_from_claims
 
 
-def _ctx(*, projects: tuple[str, ...] = ("proj",), roles: dict[str, Role] | None = None) -> RequestContext:
+def _ctx(
+    *, projects: tuple[str, ...] = ("proj",), roles: dict[str, Role] | None = None
+) -> RequestContext:
     return RequestContext(
-        principal="alice",
-        agent_session=None,
-        projects=projects,
-        roles=roles or {},
+        principal="alice", agent_session=None, projects=projects, roles=roles or {}
     )
 
 
@@ -159,16 +138,33 @@ def test_require_role_member_without_role_denied_not_keyerror() -> None:
 
 def test_request_context_with_roles_is_hashable() -> None:
     ctx = _ctx(roles={"proj": Role.ADMIN})
-    assert hash(ctx) == hash(ctx)  # does not raise
+    assert hash(ctx) == hash(ctx)  # does not raise despite the dict field
     assert ctx.roles["proj"] is Role.ADMIN
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 3: Append the failing auth-context cases**
 
-Run: `uv run python -m pytest tests/security/test_rbac.py -q`
-Expected: FAIL — `ModuleNotFoundError: No module named 'kdive.security.rbac'` (and `RequestContext` has no `roles` field yet; that field is added in Task 3, so `_ctx` will also fail — acceptable, both go green together once Tasks 2+3 land. If you prefer a fully-green Task 2, run Task 3's `auth.py` edit first; the order is interchangeable but commit them separately).
+Append to `tests/mcp/test_auth.py` (its imports already include `context_from_claims` and `pytest`):
 
-- [ ] **Step 3: Write `rbac.py`**
+```python
+def test_context_from_claims_parses_roles() -> None:
+    from kdive.security.rbac import Role
+
+    ctx = context_from_claims({"sub": "alice", "projects": ["a"], "roles": {"a": "admin"}})
+    assert ctx.roles == {"a": Role.ADMIN}
+
+
+def test_context_from_claims_absent_roles_is_empty() -> None:
+    ctx = context_from_claims({"sub": "alice", "projects": ["a"]})
+    assert ctx.roles == {}
+```
+
+- [ ] **Step 4: Run the tests to verify they fail**
+
+Run: `uv run python -m pytest tests/security/test_rbac.py tests/mcp/test_auth.py -q`
+Expected: FAIL — `ModuleNotFoundError: No module named 'kdive.security.rbac'`.
+
+- [ ] **Step 5: Write `rbac.py`**
 
 `src/kdive/security/rbac.py`:
 
@@ -266,70 +262,21 @@ def require_role(ctx: RequestContext, project: str, role: Role) -> None:
         )
 ```
 
-- [ ] **Step 4: Run tests to verify they pass (after Task 3's `auth.py` edit is also in place)**
+- [ ] **Step 6: Add the `roles` field to `RequestContext`**
 
-Run: `uv run python -m pytest tests/security/test_rbac.py -q`
-Expected: PASS (10 tests). If `RequestContext` has no `roles` field yet, do Task 3 Step 3 first.
-
-- [ ] **Step 5: Guardrails + commit**
-
-```bash
-uv run ruff check && uv run ruff format && uv run ty check src && uv run python -m pytest tests/security/test_rbac.py -q
-git add src/kdive/security/rbac.py tests/security/test_rbac.py
-git commit -m "feat(security): project-scoped roles, claim parsing, require_role"
-```
-
----
-
-## Task 3: Thread `roles` through `RequestContext`
-
-**Files:**
-- Modify: `src/kdive/mcp/auth.py`
-- Test: `tests/mcp/test_auth.py` (add cases)
-
-- [ ] **Step 1: Write the failing tests**
-
-Append to `tests/mcp/test_auth.py`:
-
-```python
-def test_context_from_claims_parses_roles() -> None:
-    from kdive.security.rbac import Role
-
-    ctx = context_from_claims(
-        {"sub": "alice", "projects": ["a"], "roles": {"a": "admin"}}
-    )
-    assert ctx.roles == {"a": Role.ADMIN}
-
-
-def test_context_from_claims_absent_roles_is_empty() -> None:
-    ctx = context_from_claims({"sub": "alice", "projects": ["a"]})
-    assert ctx.roles == {}
-```
-
-(Check the existing imports at the top of `tests/mcp/test_auth.py` already include `context_from_claims`; it is exercised by existing tests, so no new import is needed.)
-
-- [ ] **Step 2: Run to verify failure**
-
-Run: `uv run python -m pytest tests/mcp/test_auth.py -k roles -q`
-Expected: FAIL — `AttributeError: 'RequestContext' object has no attribute 'roles'`.
-
-- [ ] **Step 3: Edit `RequestContext` and `context_from_claims`**
-
-In `src/kdive/mcp/auth.py`:
-
-Change the imports block — add `field` and the rbac runtime import:
+In `src/kdive/mcp/auth.py`, change the `dataclasses` import to add `field`:
 
 ```python
 from dataclasses import dataclass, field
 ```
 
-and after the existing imports add:
+Add the rbac runtime import alongside the other absolute imports:
 
 ```python
 from kdive.security.rbac import Role, roles_from_claims
 ```
 
-Add the `roles` field (note `compare=False` keeps the frozen dataclass hashable despite the `dict`):
+Add the `roles` field (`compare=False` keeps the frozen dataclass hashable despite the `dict`; the `Mapping[str, Role]` annotation is a string at runtime via `from __future__ import annotations`, so `Role` is needed only for typing):
 
 ```python
 @dataclass(frozen=True)
@@ -353,22 +300,22 @@ In `context_from_claims`, populate `roles` on the returned context:
     )
 ```
 
-- [ ] **Step 4: Run to verify pass (auth + rbac suites)**
+- [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `uv run python -m pytest tests/mcp/test_auth.py tests/security/test_rbac.py -q`
-Expected: PASS. (`compare=False` means existing equality assertions on `RequestContext` are unaffected by roles.)
+Run: `uv run python -m pytest tests/security/test_rbac.py tests/mcp -q`
+Expected: PASS. (`compare=False` means existing `RequestContext` equality assertions are unaffected by `roles`.)
 
-- [ ] **Step 5: Guardrails + commit**
+- [ ] **Step 8: Guardrails + commit (one self-contained green commit)**
 
 ```bash
-uv run ruff check && uv run ruff format && uv run ty check src && uv run python -m pytest tests/mcp tests/security/test_rbac.py -q
-git add src/kdive/mcp/auth.py tests/mcp/test_auth.py
-git commit -m "feat(security): carry per-project roles on RequestContext"
+uv run ruff check && uv run ruff format && uv run ty check src && uv run python -m pytest tests/security/test_rbac.py tests/mcp -q
+git add src/kdive/security/rbac.py src/kdive/mcp/auth.py tests/security/__init__.py tests/security/conftest.py tests/security/test_rbac.py tests/mcp/test_auth.py
+git commit -m "feat(security): project-scoped roles on RequestContext + require_role"
 ```
 
 ---
 
-## Task 4: `audit.py` — `args_digest` + `record`
+## Task 2: `audit.py` — `args_digest` + `record`
 
 **Files:**
 - Create: `src/kdive/security/audit.py`
@@ -384,6 +331,7 @@ git commit -m "feat(security): carry per-project roles on RequestContext"
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -452,9 +400,17 @@ def test_args_digest_does_not_contain_secret() -> None:
     assert secret not in args_digest({"password": secret})
 
 
-def test_args_digest_handles_uuid_and_datetime() -> None:
-    args = {"id": uuid4(), "when": _DT}
-    assert args_digest(args) == args_digest(dict(args))  # deterministic over scalars
+def test_args_digest_uuid_datetime_pins_canonical_encoding() -> None:
+    # `default=str` renders these scalars deterministically; pin the exact canonical
+    # form so a change to the encoding (and thus the digest) is caught.
+    u = UUID("12345678-1234-5678-1234-567812345678")
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    canonical = (
+        '{"id":"12345678-1234-5678-1234-567812345678",'
+        '"when":"2026-01-01 00:00:00+00:00"}'
+    )
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    assert args_digest({"id": u, "when": when}) == expected
 
 
 def test_record_writes_one_row(migrated_url: str) -> None:
@@ -637,7 +593,7 @@ async def record(
 - [ ] **Step 4: Run to verify pass**
 
 Run: `uv run python -m pytest tests/security/test_audit.py -q`
-Expected: PASS (8 tests). If Docker/testcontainers is unavailable locally the DB-backed tests skip — run with `KDIVE_REQUIRE_DOCKER=1` to force them in CI.
+Expected: PASS (8 tests). If Docker/testcontainers is unavailable locally the DB-backed tests skip — CI sets `KDIVE_REQUIRE_DOCKER=1` to force them.
 
 - [ ] **Step 5: Guardrails + commit**
 
@@ -649,7 +605,7 @@ git commit -m "feat(security): append-only audit record with hashed args_digest"
 
 ---
 
-## Task 5: `gate.py` — the three-check destructive gate
+## Task 3: `gate.py` — the three-check destructive gate
 
 **Files:**
 - Create: `src/kdive/security/gate.py`
@@ -854,19 +810,17 @@ git commit -m "feat(security): three-check destructive-op gate"
 ## Self-Review
 
 **Spec coverage:**
-- `Role` enum + rank, `roles_from_claims`, `require_role` → Task 2. ✓
-- `RequestContext.roles` + `context_from_claims` population, `compare=False` hashability → Task 3. ✓
-- `args_digest` (canonical JSON, one-way), `record` (one row, caller's transaction, `project in ctx.projects` guard) → Task 4. ✓
-- Transition+audit atomicity and rollback-leaves-zero → Task 4 (`test_record_in_transition_transaction_is_atomic`, `test_record_rolls_back_with_failed_transition`). ✓
-- `DestructiveOp`, `DestructiveOpDenied`, three-check gate with the three single-factor denials → Task 5. ✓
-- `require_role` member-without-role → `AuthorizationError` not `KeyError` → Task 2 (`test_require_role_member_without_role_denied_not_keyerror`). ✓
-- `args_digest` does not contain secret; `default=str` scalar domain → Task 4. ✓
-- Denial-audit shape: `DestructiveOpDenied.missing` is ordered and asserted → Task 5 (`test_all_three_absent_lists_all`); the handler wiring is a later-issue contract (out of scope, per spec Non-goals). ✓
-- Import-cycle break (function-level `AuthError` import in `roles_from_claims`) → Task 2 code + comment. ✓
+- `Role` enum + rank, `roles_from_claims`, `require_role`, `RequestContext.roles` + `context_from_claims` population, `compare=False` hashability → Task 1. ✓
+- `args_digest` (canonical JSON, one-way, pinned scalar encoding), `record` (one row, caller's transaction, `project in ctx.projects` guard), transition+audit atomicity and rollback-leaves-zero → Task 2. ✓
+- `DestructiveOp`, `DestructiveOpDenied`, three-check gate with the three single-factor denials + fail-closed scope → Task 3. ✓
+- `require_role` member-without-role → `AuthorizationError` not `KeyError` → Task 1 (`test_require_role_member_without_role_denied_not_keyerror`). ✓
+- `args_digest` does not contain secret; `default=str` scalar domain pinned → Task 2. ✓
+- Denial-audit shape: `DestructiveOpDenied.missing` ordered and asserted → Task 3 (`test_all_three_absent_lists_all`); the handler wiring is a later-issue contract (out of scope, per spec Non-goals). ✓
+- Import-cycle break (function-level `AuthError` import in `roles_from_claims`) → Task 1 code + comment. ✓
 - Append-only: `audit.py` exposes only `record`/`args_digest` (no update/delete) → structural, satisfied by the module surface. ✓
 
 **Placeholder scan:** none — every step carries complete code or an exact command.
 
 **Type consistency:** `Role`, `RequestContext`, `roles_from_claims`, `require_role`, `record`, `args_digest`, `DestructiveOp(kind, profile_opt_in)`, `DestructiveOpDenied(missing)`, `assert_destructive_allowed(ctx, allocation, op)` are spelled identically across tasks and tests. `record`'s keyword-only signature `(conn, ctx, *, tool, object_kind, object_id, transition, args, project)` matches every call site in the tests.
 
-**Edge note for the executor:** Tasks 2 and 3 are mutually dependent (the rbac tests construct a `RequestContext` with `roles`, which Task 3 adds). Land them as two commits but expect the rbac suite to go green only once both are applied; run `uv run python -m pytest tests/security/test_rbac.py tests/mcp/test_auth.py -q` after Task 3 to confirm both.
+**Commit hygiene:** each of Tasks 1–3 is a single commit that is green on its own — Task 1 deliberately bundles the `rbac.py` module with the `RequestContext.roles` field (and the test scaffolding that first uses fixtures) because the rbac tests depend on the field; there is no intermediate red commit.
