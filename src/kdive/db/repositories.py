@@ -81,7 +81,8 @@ class Repository[M: DomainModel]:
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(query, self._insert_params(obj))
             row = await cur.fetchone()
-        assert row is not None  # INSERT ... RETURNING always yields one row.
+        if row is None:  # Invariant: INSERT ... RETURNING always yields one row.
+            raise RuntimeError(f"INSERT into {self._table} returned no row")
         return self._model.model_validate(row)
 
     async def get(self, conn: AsyncConnection, obj_id: UUID) -> M | None:
@@ -136,7 +137,8 @@ class StatefulRepository[M: DomainModel, S: StrEnum](Repository[M]):
             ensure_transition(self._state_enum(row[col]), new_state)
             await cur.execute(update_q, (new_state, obj_id))
             updated = await cur.fetchone()
-        assert updated is not None  # The row existed under FOR UPDATE.
+        if updated is None:  # Invariant: the row was held under FOR UPDATE.
+            raise RuntimeError(f"UPDATE of {self._table} id {obj_id} returned no row")
         return self._model.model_validate(updated)
 
 

@@ -59,5 +59,6 @@ async def run_step(
             "SELECT result FROM run_steps WHERE run_id = %s AND step = %s", (run_id, step)
         )
         winner = await cur.fetchone()
-    assert winner is not None  # ON CONFLICT fired, so a committed row exists.
+    if winner is None:  # Invariant: ON CONFLICT fired, so a committed row exists.
+        raise RuntimeError(f"run_step ({run_id}, {step}) conflicted but found no row")
     return winner["result"]
