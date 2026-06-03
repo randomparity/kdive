@@ -51,6 +51,9 @@ Create `tests/store/__init__.py` with no content (an empty file), mirroring
 
 Create `tests/store/test_objectstore.py`:
 
+Import only what each task uses, so every commit passes `ruff` F401 (CI runs
+`ruff check .` over `tests/` too). Later tasks add their imports as noted.
+
 ```python
 """Behavior and edge tests for the object-store client (ADR-0017).
 
@@ -61,19 +64,11 @@ exactly as the db tests do; the pure tests (key validation, etag normalization,
 
 from __future__ import annotations
 
-from uuid import uuid4
-
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.store.objectstore import (
-    ObjectStore,
-    StoredArtifact,
-    _normalize_etag,
-    object_store_from_env,
-    register_artifact_row,
-)
+from kdive.store.objectstore import ObjectStore, _normalize_etag
 
 
 def test_normalize_etag_strips_surrounding_quotes() -> None:
@@ -378,9 +373,28 @@ git commit -m "feat(store): object-store client skeleton with key validation"
 - Modify: `tests/store/test_objectstore.py` (append)
 - (implementation already written in Task 1 — this task tests it)
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Extend the imports, then write the failing test**
 
-Append to `tests/store/test_objectstore.py`:
+First add the names this task needs. Change the top imports so they read:
+
+```python
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
+from kdive.store.objectstore import (
+    ObjectStore,
+    StoredArtifact,
+    _normalize_etag,
+    register_artifact_row,
+)
+```
+
+Then append to `tests/store/test_objectstore.py`:
 
 ```python
 def test_register_artifact_row_maps_stored_and_owner() -> None:
@@ -422,9 +436,21 @@ git commit -m "test(store): cover register_artifact_row mapping"
 **Files:**
 - Modify: `tests/store/test_objectstore.py` (append)
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Extend the imports, then write the failing tests**
 
-Append to `tests/store/test_objectstore.py`:
+Add `object_store_from_env` to the `kdive.store.objectstore` import so it reads:
+
+```python
+from kdive.store.objectstore import (
+    ObjectStore,
+    StoredArtifact,
+    _normalize_etag,
+    object_store_from_env,
+    register_artifact_row,
+)
+```
+
+Then append to `tests/store/test_objectstore.py`:
 
 ```python
 def test_object_store_from_env_requires_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -516,7 +542,7 @@ from kdive.store.objectstore import ObjectStore
 _MINIO_IMAGE = "minio/minio:RELEASE.2025-10-15T17-29-55Z"
 _MINIO_PORT = 9000
 _ROOT_USER = "kdive-test"
-_ROOT_PASSWORD = "kdive-test-secret"  # noqa: S105 - disposable local test container
+_ROOT_PASSWORD = "kdive-test-secret"  # disposable local test container credential
 _BUCKET = "kdive-test"
 _REGION = "us-east-1"
 _READY_TIMEOUT_S = 60.0
@@ -720,6 +746,18 @@ Run: `git status --short`
 Expected: only `src/kdive/store/objectstore.py`, `tests/store/__init__.py`,
 `tests/store/conftest.py`, `tests/store/test_objectstore.py` were added (the docs
 landed in earlier commits).
+
+- [ ] **Step 3: Verify the MinIO image is required-test-safe in CI**
+
+CI (`/.github/workflows/ci.yml`) runs `pytest -m "not live_vm"` with
+`KDIVE_REQUIRE_DOCKER=1`, so the six `minio_store` tests are **required** — they
+hard-fail (not skip) if the pinned image cannot be pulled on the GitHub-hosted
+runner. The pinned tag is from MinIO's now-archived repo; archived tags remain
+pullable, but the PR's CI run is the verification of record. When watching CI: if the
+store tests error on `container.start()` / image pull, switch `_MINIO_IMAGE` to a
+maintained equivalent (a Chainguard MinIO image or a localstack S3 fixture per
+ADR-0017) and re-push — do not weaken `KDIVE_REQUIRE_DOCKER` or mark the tests
+skippable.
 
 ---
 
