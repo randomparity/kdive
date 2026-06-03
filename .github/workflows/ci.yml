@@ -151,9 +151,6 @@ jobs:
   supply-chain-dev:
     name: supply chain (dev)
     runs-on: ubuntu-latest
-    # Dev-only advisories are informational: they do not ship to users, so a
-    # finding here annotates the run without failing it.
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -167,6 +164,19 @@ jobs:
           enable-cache: true
 
       - name: Audit all dependencies (including dev)
+        # Dev advisories do not ship to users, so this never fails the build — but
+        # it surfaces findings in the job summary and as a warning annotation
+        # rather than hiding them behind a green check.
         run: |
           uv export --no-emit-project --format requirements-txt > dev-reqs.txt
-          uvx pip-audit@2.10.0 -r dev-reqs.txt
+          if uvx pip-audit@2.10.0 -r dev-reqs.txt > dev-audit.txt 2>&1; then
+            echo "No known advisories in dev dependencies." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### pip-audit: dev-dependency advisories (informational)"
+              echo '```'
+              cat dev-audit.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::pip-audit found dev-dependency advisories (see job summary)"
+          fi

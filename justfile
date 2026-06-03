@@ -54,13 +54,13 @@ lint-workflows:
     uv run --with 'actionlint-py==1.7.12.24' actionlint
 
 # Browserless syntax check of every mermaid block in tracked Markdown.
+# -z/-0 keeps paths with spaces intact; -r skips the run when nothing matches.
 check-mermaid:
-    node .github/scripts/mermaid-check/mermaid-check.mjs $(git ls-files '*.md')
+    git ls-files -z '*.md' | xargs -0 -r node .github/scripts/mermaid-check/mermaid-check.mjs
 
 # Audit runtime dependencies for known vulnerabilities.
 audit:
-    uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > /tmp/runtime-reqs.txt
-    uv run --with 'pip-audit==2.10.0' pip-audit --strict -r /tmp/runtime-reqs.txt
+    reqs="$(mktemp)" && trap 'rm -f "$reqs"' EXIT && uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > "$reqs" && uv run --with 'pip-audit==2.10.0' pip-audit --strict -r "$reqs"
 
 # Run the full gate that PR CI runs, reproducible locally.
 ci: lint type lint-shell lint-workflows check-mermaid test
