@@ -130,12 +130,19 @@ def args_digest(args: Mapping[str, object]) -> str: ...   # sha256 hex
 
 - **`args_digest(args)`** — `hashlib.sha256` of a canonical JSON encoding:
   `json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)`, UTF-8
-  encoded, hex digest. Canonicalization makes the digest stable across key order;
-  `default=str` keeps non-JSON-native values (UUID, datetime) encodable. The digest is
-  one-way, so no plaintext from `args` is stored — satisfying "args_digest never
-  contains secret material" literally. See "Threat model & guarantees" for what this
-  does and does **not** protect (it is tamper-evidence/correlation, not confidentiality
-  of low-entropy values).
+  encoded, hex digest. **Input contract:** `args` are JSON-native (they originate from
+  an MCP/JSON tool call — objects, arrays, strings, numbers, booleans, null), plus the
+  two scalar non-native types the codebase routinely carries, `UUID` and `datetime`,
+  which `default=str` renders deterministically. `default=str` is a scalar safety net
+  **only**: an *unordered or identity-dependent* container (a `set`, or an object whose
+  `__str__` is not stable) has no canonical `str` and would make the digest
+  non-deterministic, breaking the "same args → same digest" correlation property. Such
+  a value is a caller bug, not a supported input; the determinism claim holds for the
+  declared JSON-native-plus-`UUID`/`datetime` domain. `sort_keys=True` canonicalizes
+  object key order (top-level and nested). The digest is one-way, so no plaintext from
+  `args` is stored — satisfying "args_digest never contains secret material" literally.
+  See "Threat model & guarantees" for what this does and does **not** protect (it is
+  tamper-evidence/correlation, not confidentiality of low-entropy values).
 - **`record(...)`** issues exactly one
   `INSERT INTO audit_log (principal, agent_session, project, tool, object_kind,
   object_id, transition, args_digest) VALUES (…) RETURNING id`. `id`/`ts` are
@@ -205,6 +212,23 @@ audit/log line shows the full reason, not just the first failure):
   audits `args` that include the opt-in's source key, so a hardcoded bypass is visible
   in the audit trail after the fact. The gate's job is to compose three inputs
   fail-closed; proving factor (c)'s input is real is the handler's job and its test's.
+
+**Denied attempts are audited, not just refused.** A refused destructive op is a
+security event — an attacker probing the gate, or a misconfigured agent, must leave a
+trail in the append-only log, not vanish. `record` audits *transitions*, but the audit
+schema (`object_kind`, `transition`, `args_digest`) is general enough to record an
+*attempt* that produced no transition, so the contract is: **the handler that catches
+`DestructiveOpDenied` calls `record` before re-raising/returning the denial**, with
+`object_kind` = the target object's kind, `transition = f"{op.kind}:denied"`, and `args`
+including the refusal reason (`{"missing_checks": exc.missing, …}`). `DestructiveOpDenied`
+carries `missing` precisely so the handler has the reason to audit without
+re-deriving it. This is a handler obligation (the destructive handlers are later
+issues, so #11 owns no caller) recorded here so denial-auditing is a tracked decision,
+not an accidental blind spot; a granted op audits its real `transition` after the
+transition commits, a denied op audits `f"{op.kind}:denied"` with no transition. The
+gate primitive itself does **not** call `record` — it has no `conn`, and coupling a
+pure policy check to a DB write would make every gate call a transaction; auditing is
+the handler's composition, same as for granted transitions.
 
 ### `auth.py` — context plumbing (minimal change)
 
@@ -297,9 +321,11 @@ What each primitive does and does **not** promise, so callers do not over-trust 
   `frozen`+`dict` hazard).
 
 **audit**
-- `args_digest`: deterministic across key reorder; differs for differing args; a known
-  secret string in `args` does **not** appear in the digest (hex, secret not a
-  substring); UUID/datetime values encode without error.
+- `args_digest`: deterministic across key reorder (incl. a nested object); differs for
+  differing args; a known secret string in `args` does **not** appear in the digest
+  (hex, secret not a substring); `UUID`/`datetime` scalar values encode without error
+  and reproduce the same digest twice (locks the `default=str` scalar safety-net domain
+  from finding 2).
 - `record`: one call → exactly one `audit_log` row with the expected
   principal/agent_session/project/tool/object_kind/object_id/transition and a digest
   matching `args_digest(args)`; `agent_session=None` persists as SQL `NULL`; returns
@@ -318,6 +344,10 @@ What each primitive does and does **not** promise, so callers do not over-trust 
 - not admin (operator role) → `DestructiveOpDenied(["admin_role"])`.
 - opt-in false (default) → `DestructiveOpDenied(["profile_opt_in"])`.
 - multiple absent → `missing` lists all of them.
+- denial-audit shape (finding 1): `DestructiveOpDenied.missing` is populated and ordered
+  so a catching handler can audit `transition=f"{op.kind}:denied"`,
+  `args={"missing_checks": missing}` — asserted on the exception, since #11 owns no
+  handler caller (the wiring is a later-issue contract).
 - `capability_scope` missing the key / not a dict → scope check fails closed.
 
 ## Testing strategy

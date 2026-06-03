@@ -91,6 +91,12 @@ We will ship the three primitives with these shapes:
   **provisional contracts** pinned here. The allocation issue that owns
   `capability_scope`'s typed interior, and #13/IdP integration that owns the real
   claim set, must honor these keys or update this ADR.
+- The gate stays a pure policy check with no `conn` and never writes audit rows;
+  **denied** destructive attempts are audited by the handler that catches
+  `DestructiveOpDenied` (`transition=f"{op.kind}:denied"`, `args` carrying
+  `missing`), the same composition as a granted transition. `DestructiveOpDenied.missing`
+  exists to feed that record. Recorded so a refused destructive op leaves an audit
+  trail rather than vanishing; the wiring is a later-handler-issue obligation.
 - A denial has no wire `ErrorCategory` yet. The first handler that must return a
   denial as a `ToolResponse.failure` will force a taxonomy decision (a new
   `authorization_denied` category is the likely outcome) — recorded here as a known
