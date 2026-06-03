@@ -60,7 +60,7 @@ check-mermaid:
 
 # Audit runtime dependencies for known vulnerabilities.
 audit:
-    reqs="$(mktemp)" && trap 'rm -f "$reqs"' EXIT && uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > "$reqs" && uv run --with 'pip-audit==2.10.0' pip-audit --strict -r "$reqs"
+    reqs="$(mktemp)" && trap 'rm -f "$reqs"' EXIT && uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > "$reqs" && uv run --with 'pip-audit==2.10.0' pip-audit --no-deps --strict -r "$reqs"
 
 # Run the full gate that PR CI runs, reproducible locally.
 ci: lint type lint-shell lint-workflows check-mermaid test

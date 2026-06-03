@@ -142,11 +142,13 @@ jobs:
           enable-cache: true
 
       - name: Audit runtime dependencies
-        # Reads the lockfile only (no build), so libvirt-dev is not needed.
+        # The export is the full pinned closure, so --no-deps audits every package
+        # without building wheels — avoiding the libvirt-python source build (and
+        # its libvirt-dev requirement) this job intentionally does not provide.
         run: |
           uv export --no-emit-project --no-dev --no-default-groups \
             --format requirements-txt > runtime-reqs.txt
-          uvx pip-audit@2.10.0 --strict -r runtime-reqs.txt
+          uvx pip-audit@2.10.0 --no-deps --strict -r runtime-reqs.txt
 
   supply-chain-dev:
     name: supply chain (dev)
@@ -169,7 +171,7 @@ jobs:
         # rather than hiding them behind a green check.
         run: |
           uv export --no-emit-project --format requirements-txt > dev-reqs.txt
-          if uvx pip-audit@2.10.0 -r dev-reqs.txt > dev-audit.txt 2>&1; then
+          if uvx pip-audit@2.10.0 --no-deps -r dev-reqs.txt > dev-audit.txt 2>&1; then
             echo "No known advisories in dev dependencies." >> "$GITHUB_STEP_SUMMARY"
           else
             {
