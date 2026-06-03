@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
+from psycopg.pq import TransactionStatus
 
 SCHEMA_DIR = Path(__file__).parent / "schema"
 
@@ -51,10 +52,13 @@ def discover_migrations(schema_dir: Path | None = None) -> list[Migration]:
         Migrations sorted ascending by version.
 
     Raises:
-        MigrationError: A filename does not match ``NNNN_*.sql`` or two files share
-            a version.
+        MigrationError: The directory does not exist (a mispackaged build or wrong
+            path — fail loud rather than silently migrating nothing), a filename
+            does not match ``NNNN_*.sql``, or two files share a version.
     """
     directory = schema_dir if schema_dir is not None else SCHEMA_DIR
+    if not directory.is_dir():
+        raise MigrationError(f"schema directory {directory} does not exist")
     migrations: list[Migration] = []
     seen: dict[str, str] = {}
     for path in sorted(directory.glob("*.sql")):
@@ -90,9 +94,15 @@ def apply_migrations(conn: psycopg.Connection) -> list[str]:
         date).
 
     Raises:
-        MigrationError: An applied migration's file is missing or its checksum no
-            longer matches the recorded value.
+        MigrationError: The connection already has an open transaction, an applied
+            migration's file is missing, or its checksum no longer matches the
+            recorded value.
     """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise MigrationError(
+            "apply_migrations requires a connection with no open transaction; "
+            "the runner manages its own transaction (ADR-0015)"
+        )
     migrations = discover_migrations()
     by_version = {m.version: m for m in migrations}
     applied_now: list[str] = []

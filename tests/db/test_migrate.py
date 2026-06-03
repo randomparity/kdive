@@ -142,6 +142,19 @@ def test_duplicate_version_rejected(tmp_path: Path) -> None:
         migrate.discover_migrations(tmp_path)
 
 
+def test_missing_schema_dir_raises(tmp_path: Path) -> None:
+    with pytest.raises(migrate.MigrationError, match="does not exist"):
+        migrate.discover_migrations(tmp_path / "nope")
+
+
+def test_apply_requires_idle_connection(postgres_url: str) -> None:
+    with psycopg.connect(postgres_url) as conn:  # autocommit=False
+        conn.execute("SELECT 1")  # opens a server-side transaction
+        with pytest.raises(migrate.MigrationError, match="open transaction"):
+            migrate.apply_migrations(conn)
+        conn.rollback()
+
+
 def test_applied_file_missing_raises(pg_conn: psycopg.Connection, monkeypatch) -> None:
     migrate.apply_migrations(pg_conn)  # records 0001 from the real dir
     monkeypatch.setattr(migrate, "discover_migrations", lambda: [])
