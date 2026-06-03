@@ -159,8 +159,12 @@ so the implementer treats the conditional-GET contract as verified, not assumed.
   (`PreconditionFailed`) → `CategorizedError(STALE_HANDLE)` — the object is gone or
   the etag no longer matches ([ADR-0005](../../adr/0005-postgres-object-store-state.md),
   [ADR-0013](../../adr/0013-object-store-layout-retention.md)).
-- Any other `ClientError` → `CategorizedError(INFRASTRUCTURE_FAILURE)`, carrying the
-  S3 error code in `details`.
+- Any other `ClientError`, or any `BotoCoreError` (connection refused, DNS failure,
+  connect/read timeout — a sibling hierarchy, not a `ClientError`), →
+  `CategorizedError(INFRASTRUCTURE_FAILURE)`, carrying the S3 error code (or the
+  exception class name for a transport error) in `details`. Both `put_artifact` and
+  `get_artifact` catch `(BotoCoreError, ClientError)` so a degraded object store
+  never leaks an untyped boto exception.
 
 The status is read from `err.response["ResponseMetadata"]["HTTPStatusCode"]` (the
 status code is consistent across S3 implementations; MinIO and AWS return 412 for
@@ -208,7 +212,7 @@ worker capture_vmcore step (later issue), one pooled connection:
 | `get` on a missing object (404) | `CategorizedError(STALE_HANDLE)` | operational |
 | `get` with a non-matching etag (412) | `CategorizedError(STALE_HANDLE)` | operational |
 | `get` on an object with absent/invalid sensitivity metadata | `CategorizedError(INFRASTRUCTURE_FAILURE)` | operational |
-| any other S3 `ClientError` | `CategorizedError(INFRASTRUCTURE_FAILURE)` | operational |
+| any other `ClientError` or any `BotoCoreError` (connect/timeout) | `CategorizedError(INFRASTRUCTURE_FAILURE)` | operational |
 
 The storage layer raises only `CategorizedError` — every failure here is
 operational (a handler turns it into a client response). There is no consistency

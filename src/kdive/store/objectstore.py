@@ -16,7 +16,7 @@ from typing import Any, NamedTuple
 from uuid import UUID, uuid4
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Artifact, Sensitivity
@@ -88,9 +88,17 @@ def _artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
     )
 
 
-def _infrastructure_error(op: str, key: str, err: ClientError) -> CategorizedError:
-    """Map an unexpected S3 ``ClientError`` to a typed infrastructure failure."""
-    code = err.response.get("Error", {}).get("Code", "unknown")
+def _infrastructure_error(op: str, key: str, err: BotoCoreError | ClientError) -> CategorizedError:
+    """Map an S3 client or transport error to a typed infrastructure failure.
+
+    ``ClientError`` carries an S3 error code in its ``response``; a ``BotoCoreError``
+    (connection refused, DNS failure, connect/read timeout) has no response, so its
+    exception class name stands in for the code.
+    """
+    if isinstance(err, ClientError):
+        code = err.response.get("Error", {}).get("Code", "unknown")
+    else:
+        code = type(err).__name__
     return CategorizedError(
         f"object-store {op} for {key!r} failed: {code}",
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -137,7 +145,7 @@ class ObjectStore:
                     "retention-class": retention_class,
                 },
             )
-        except ClientError as err:
+        except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("put_object", key, err) from err
         return StoredArtifact(key, _normalize_etag(resp["ETag"]), sensitivity, retention_class)
 
@@ -164,6 +172,8 @@ class ObjectStore:
                     category=ErrorCategory.STALE_HANDLE,
                     details={"key": key, "http_status": status},
                 ) from err
+            raise _infrastructure_error("get_object", key, err) from err
+        except BotoCoreError as err:
             raise _infrastructure_error("get_object", key, err) from err
         metadata = resp["Metadata"]
         try:

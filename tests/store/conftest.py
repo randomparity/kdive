@@ -21,7 +21,7 @@ from uuid import uuid4
 import boto3
 import pytest
 from botocore.client import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from kdive.store.objectstore import ObjectStore
 
@@ -46,7 +46,7 @@ def _await_ready(client: Any) -> None:
         try:
             client.list_buckets()
             return
-        except (ClientError, OSError) as exc:
+        except (BotoCoreError, ClientError, OSError) as exc:
             last_exc = exc
             time.sleep(0.5)
     raise RuntimeError(f"MinIO not ready within {_READY_TIMEOUT_S}s: {last_exc}")

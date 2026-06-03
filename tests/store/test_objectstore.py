@@ -10,6 +10,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from botocore.exceptions import EndpointConnectionError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
@@ -51,6 +52,38 @@ def test_put_artifact_rejects_invalid_key_component(
             retention_class="vmcore",
         )
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+class _UnreachableClient:
+    """A stub S3 client whose calls raise a transport-level ``BotoCoreError``."""
+
+    def put_object(self, **_kwargs: object) -> object:
+        raise EndpointConnectionError(endpoint_url="http://unreachable")
+
+    def get_object(self, **_kwargs: object) -> object:
+        raise EndpointConnectionError(endpoint_url="http://unreachable")
+
+
+def test_put_artifact_maps_transport_error_to_infrastructure_failure() -> None:
+    store = ObjectStore(_UnreachableClient(), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.put_artifact(
+            "t",
+            "vmcore",
+            "oid",
+            "core",
+            data=b"x",
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="vmcore",
+        )
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_get_artifact_maps_transport_error_to_infrastructure_failure() -> None:
+    store = ObjectStore(_UnreachableClient(), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.get_artifact("t/vmcore/oid/core", "etag")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_register_artifact_row_maps_stored_and_owner() -> None:

@@ -44,10 +44,12 @@ what may reach a response.
 (`IfMatch=etag`). A missing object (404) and an etag mismatch (412) both raise
 `CategorizedError(STALE_HANDLE)` — the single failure
 [0005](0005-postgres-object-store-state.md)/[0013](0013-object-store-layout-retention.md)
-name for "the row's object is gone or rotated". Other S3 errors — and an object the
-layer cannot interpret (absent or out-of-enum `sensitivity` metadata) — raise
-`CategorizedError(INFRASTRUCTURE_FAILURE)`; no bare `ClientError`/`KeyError`/
-`ValueError` escapes, so the layer's only failure type is `CategorizedError`.
+name for "the row's object is gone or rotated". Other S3 errors — any other
+`ClientError`, any `BotoCoreError` (connection/timeout, a sibling of `ClientError`,
+not a subclass), and an object the layer cannot interpret (absent or out-of-enum
+`sensitivity` metadata) — raise `CategorizedError(INFRASTRUCTURE_FAILURE)`; no bare
+`BotoCoreError`/`ClientError`/`KeyError`/`ValueError` escapes, so the layer's only
+failure type is `CategorizedError`.
 
 **4. Sensitivity and retention are stored as S3 user metadata.** `put_artifact`
 writes `sensitivity` and `retention_class` as object user metadata
