@@ -20,7 +20,7 @@ kernel-tooling ecosystem (drgn, libvirt bindings, crash, the MCP SDK).
 |---|---|---|
 | Tenancy | single-user, local | multi-user hosted service |
 | Transport | stdio | MCP over streamable HTTP |
-| Central abstraction | run-centric (a run bundles build+boot+debug) | five durable objects with independent lifecycles |
+| Central abstraction | run-centric (a run bundles build+boot+debug) | six durable objects with independent lifecycles |
 | State | per-run JSON + flock | Postgres (system-of-record) + S3-compatible object store |
 | Identity | implicit local user | OIDC/SSO + RBAC, with on-behalf-of agent attribution |
 | Accounting | none | metering ledger + enforced budgets/quotas (admission control) |
@@ -30,12 +30,12 @@ kernel-tooling ecosystem (drgn, libvirt bindings, crash, the MCP SDK).
 ## Core decisions
 
 These were decided during brainstorming and are load-bearing for everything
-below. Each should become an ADR before implementation.
+below. Each should become an [ADR](../adr/) before implementation.
 
 1. **Greenfield rewrite**, Python.
 2. **Multi-user service**; MCP over streamable HTTP.
-3. **Five durable objects** (Resource / Allocation / System / Investigation / Run),
-   replacing the run-centric model.
+3. **Six durable objects** (Resource / Allocation / System / Investigation / Run /
+   DebugSession), replacing the run-centric model.
 4. **First slice targets local libvirt/QEMU** — proven infra, on the new
    architecture, before remote/cloud/bare-metal.
 5. **Postgres + object store** for state; Postgres advisory locks replace flock.
@@ -71,7 +71,7 @@ below. Each should become an ADR before implementation.
         │  scoped per resource class│    │  vmcores, build outputs,     │
         └───────────┬──────────────┘    │  console/gdb transcripts     │
                     ▼                    └──────────────────────────────┘
-   providers: local-libvirt │ remote-libvirt │ cloud │ baremetal-bmc │ powervm …
+   providers: local-libvirt │ fault-inject │ remote-libvirt │ cloud │ baremetal-bmc │ powervm …
 ```
 
 - **MCP over streamable HTTP** — the service is remote and multi-user; agents
@@ -86,13 +86,20 @@ below. Each should become an ADR before implementation.
 
 ## Domain model
 
-Five durable objects. Lower layers outlive higher ones. Each is a Postgres row
-with an explicit state machine.
+Six durable objects. Within the Resource → Allocation → System → Run chain, lower
+layers outlive higher ones; **Investigation is a cross-cutting grouping** whose
+lifetime is independent of any single Allocation (see below). Each is a Postgres
+row with an explicit state machine.
 
 ```
-Resource ──< Allocation ──< System ──< Run ──< DebugSession
-                  └──────< Investigation ──< Run
+(principal / project) ──< Investigation ──┐
+                                          ├──< Run ──< DebugSession
+   Resource ──< Allocation ──< System ────┘
 ```
+
+A Run is the join point: it belongs to exactly one System (which fixes its
+Allocation) and exactly one Investigation (which may group Runs across many
+Allocations).
 
 ### Resource
 
@@ -113,7 +120,10 @@ accounting live here.
 - States: `requested → granted → active → releasing → released`, plus `denied`,
   `expired`, `failed`.
 - `requested → granted` passes through **admission control**: capability match,
-  RBAC, quota/budget check. Local-libvirt is "always-yes"; cloud/lab is a real
+  RBAC, quota/budget check, **and a capacity check against host headroom**.
+  Local-libvirt is "always-yes" only for *chargeback/reservation* — it is still
+  capacity-admitted (a concurrent-System cap or resource accounting) so M0/M1 fail
+  closed instead of thrashing the single host. Cloud/lab adds a real
   reservation/lease with a chargeback estimate.
 - Carries `lease_expiry`, `(principal, agent_session)`; emits accounting events
   on every transition.
@@ -134,10 +144,12 @@ an Allocation.
 
 A bug-chasing campaign that groups the Runs iterating toward a fix.
 
-- Scoped to an Allocation. Groups the sequence of Runs; carries narrative/notes
-  and rolled-up cost attribution across iterations.
-- **May span a System reprovision**: if the agent reinstalls the OS mid-chase,
-  the Investigation continues; each Run records which System it used.
+- Scoped to a `(principal / project)`, **not** to a single Allocation. Groups the
+  sequence of Runs; carries narrative/notes and rolled-up cost attribution.
+- **May span System reprovisions, Allocations, and resource kinds**: if the chase
+  moves from a local VM to bare metal — a new Allocation on a different Resource —
+  the Investigation continues. Each Run records which System it used, and cost
+  attribution **rolls up across allocations and `cost_class` boundaries**.
 
 ### Run
 
@@ -156,6 +168,9 @@ it.
 A sub-object of a Run, bounded by a single boot of a single kernel.
 
 - States: `attach → live → detached`.
+- **A durable row**, not just worker-side state: persists `(state, transport
+  handle, worker heartbeat)` so the reconciler can detect a `live` session whose
+  transport has died and move it to `detached` (see Reconciliation & teardown).
 - Within one boot it can cycle attach ↔ detach (and interrupt/continue) any
   number of times.
 - A **reboot ends it**: the transport drops and, for a patched kernel, symbols
@@ -168,6 +183,9 @@ A sub-object of a Run, bounded by a single boot of a single kernel.
    defined it).
 2. **Idempotent, lock-guarded step execution** — Postgres row / advisory locks
    replace flock; serialization is per-Allocation and per-System.
+3. **A Run's Allocation is determined by its System** (`run.system → allocation`).
+   The Investigation grouping a Run imposes no allocation constraint — it may
+   group Runs across different Allocations and resource kinds.
 
 ## Provider / capability model
 
@@ -182,15 +200,17 @@ Two rules:
   provider names. Adding ppc64le/PowerVM is a new provider package with zero core
   change.
 - **Each plane operation declares its contract** — idempotent? destructive?
-  cancelable? long-running (job) vs synchronous? This drives job-queue routing
-  and the destructive-op policy gate.
+  cancelable? long-running (job) vs synchronous? **and its cancel/abandon cleanup
+  guarantee** (clean-rollback / best-effort / orphan-flagged). This drives
+  job-queue routing, the destructive-op policy gate, and the reconciler (see
+  Reconciliation & teardown).
 
 ## Lifecycle planes
 
 | Plane | Responsibility | Local-libvirt (slice 1) | Later providers |
 |---|---|---|---|
 | Discovery | register resources, advertise capabilities, report health | enumerate local libvirt host | cloud regions, lab inventory, HMC frames |
-| Allocation | claim/lease/release; feeds admission control + accounting | always-yes lease | cloud reserve API, lab reservation, LPAR activate |
+| Allocation | claim/lease/release; feeds admission control + accounting | always-yes lease (capacity-checked) | cloud reserve API, lab reservation, LPAR activate |
 | Provisioning | apply a provisioning profile → a ready System | libvirt XML + rootfs image | ISO+kickstart, golden/QCOW2 images, ansible, NIM/PXE |
 | Build | produce a kernel from source + profile | local `make` | remote build host, GitHub Actions workflow |
 | Install | deploy a built kernel onto a System | copy + direct-kernel boot | SSH push, image bake, netboot |
@@ -230,7 +250,7 @@ Provisioning
   systems.list / .get / .reprovision / .teardown
 
 Investigation + Run
-  investigations.open(allocation_id, title)   → investigation_id
+  investigations.open(project, title)         → investigation_id
   runs.create(investigation_id, system_id, build_profile, …)
   runs.build(run_id)    → job        runs.install(run_id) → job
   runs.boot(run_id)     → job        runs.get(run_id)
@@ -268,7 +288,12 @@ Applied across every plane.
 - **Secrets by reference** — cloud creds, BMC/IPMI passwords, SSH keys, sudo,
   HMC tokens never appear in requests, state rows, or responses. The service
   resolves references from a pluggable secret backend at the worker boundary;
-  only `(present, source-ref)` is persisted.
+  only `(present, source-ref)` is persisted. When a worker resolves a reference,
+  it **registers the resolved value into the redaction registry** (the ported
+  `PROCESS_SECRET_REGISTRY.register`) for the op's lifetime, so any transcript or
+  console output capturing the value is masked by **exact-value replacement**, not
+  merely by the redactor's secret-name patterns. Output captured before
+  registration completes is quarantined (object-store, sensitive) until redacted.
 - **Mandatory redaction** — all guest output, gdb/SoL transcripts, and console
   logs pass through the redactor before persistence and before any response
   snippet. Raw artifacts stay in the object store, marked sensitive, fetched only
@@ -278,24 +303,59 @@ Applied across every plane.
   args-digest)`.
 - **Accounting ledger** — allocation transitions emit usage events; admission
   control checks budget/quota on `allocations.request` and denies or requires
-  approval over budget.
+  approval over budget. The budget/quota **check and the resulting ledger debit
+  are atomic** under a per-project lock (see Concurrency) — otherwise two
+  concurrent requests can both pass the check and overspend.
 - **Destructive-op policy gate** — `control.power(off/cycle/reset)`,
   `force_crash`, `teardown`, disk delete, and PCI passthrough are gated by three
   independent, all-required checks: (a) the allocation's granted capability
   scope, (b) RBAC role, (c) an explicit profile/flag opt-in.
 - **Concurrency** — serialize per-Allocation and per-System via Postgres advisory
-  locks; idempotent steps keyed by `run_id` + step.
+  locks; idempotent steps keyed by `run_id` + step. Admission control serializes
+  on a **per-project (budget-scope) lock** — an advisory lock or `SELECT … FOR
+  UPDATE` on the budget row — so the check-then-debit on `allocations.request`
+  cannot race.
+
+### Reconciliation & teardown
+
+State in Postgres can drift from real infrastructure whenever a worker dies, a
+lease expires mid-operation, or a `jobs.cancel` lands on a half-applied op. A
+periodic **reconciler loop** in the core detects and repairs that drift:
+
+- **Orphaned Systems** — a System whose Allocation is `released` / `expired` /
+  `failed` is torn down (a System never outlives its Allocation).
+- **Abandoned jobs** — each job carries a **worker heartbeat/lease**; when it
+  lapses the job is marked abandoned and the op's declared compensation runs.
+  (Advisory locks release on connection close and the PoC's `O_CREAT|O_EXCL` lock
+  releases on unlink — but neither cleans up *infrastructure*, only the lock.)
+- **Dead DebugSessions** — a session row in `live` whose transport is unreachable
+  is moved to `detached`.
+- **Leaked provider infra** — the reconciler reconciles against a provider
+  `list-owned` / `reconcile` capability (Discovery plane) to find, e.g., a libvirt
+  domain with no owning System row.
+
+**Lease-expiry policy.** On `lease_expiry`, in-flight jobs are drained within a
+grace window, then force-killed; the accounting ledger attributes the partial
+spend to the Allocation regardless of completion. **Cancel/abandon cleanup** is
+part of every plane op's declared contract (see Provider / capability model):
+each op declares whether cancel yields clean-rollback, best-effort, or
+orphan-flagged state — `jobs.cancel` on a half-done `provision` / `install` is
+never undefined.
 
 ## Error taxonomy
 
 Keep the PoC's stable, agent-facing `ErrorCategory` taxonomy and extend it for
 the new planes: `configuration_error`, `missing_dependency`, `build_failure`,
 `boot_timeout`, `readiness_failure`, `test_failure`, `debug_attach_failure`,
-`infrastructure_failure`, plus new categories —
-`allocation_denied` (admission/quota), `quota_exceeded`, `lease_expired`,
-`provisioning_failure`, `install_failure`, `transport_failure`,
-`control_failure`, `not_implemented`. Pick the most specific value; do not invent
-strings.
+`infrastructure_failure`, `stale_handle`, `transport_conflict`, `not_implemented`,
+plus new categories — `allocation_denied` (admission/quota), `quota_exceeded`,
+`lease_expired`, `provisioning_failure`, `install_failure`, `transport_failure`,
+`control_failure`. Pick the most specific value; do not invent strings.
+
+`stale_handle` and `transport_conflict` carry over from the PoC and matter *more*
+in the distributed model: stale handles surface after a reprovision or reboot
+invalidates a System/DebugSession reference; transport conflicts surface when two
+attaches contend for one debug transport.
 
 ## Decomposition into sub-projects
 
@@ -325,6 +385,12 @@ Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
 - **M1 — Allocation/accounting depth.** Real reservation/lease semantics,
   admission control, ledger, quotas/budgets, OIDC/RBAC hardening. Still
   local-libvirt, but the allocation plane becomes real.
+- **M1.5 — Fault-injection provider.** A mock provider behind the real plane
+  interfaces that forces secret resolution and injects latency and failures
+  (provision timeout, lease expiry mid-job, worker death, transport drop). It
+  exercises reconciliation/teardown, the secret-registration contract, and
+  admission-control races **before** any real remote provider — validating the
+  seams while they are still cheap to change.
 - **M2 — Remote libvirt.** Second provider behind the same interfaces — proves
   remote allocation/provision/install/transport with no core change.
 - **M3 — Cloud.** Cloud provider + QCOW2/cloud-image provisioning + chargeback
@@ -333,9 +399,14 @@ Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
   hardware power/crash.
 - **M5 — PowerVM/ppc64le.** LPAR activation + HMC; second architecture.
 
-Each milestone after M0 is "add a provider package + its provisioning profiles,"
-with the core and tool surface unchanged — the payoff of the plane/capability
-design.
+Each milestone after M0 is intended to be "add a provider package + its
+provisioning profiles," with the core and tool surface unchanged — the payoff of
+the plane/capability design. **This is a falsifiable hypothesis, not a
+guarantee**: the test is that adding the M2 remote provider touches zero lines in
+`core/*` and the MCP tool-surface modules, measured by diff scope. M0 proves the
+happy-path wiring end-to-end; it does **not** prove the seams hold under real
+leasing, secret resolution, chargeback, or hardware failure — which is exactly
+what the M1.5 fault-injection provider exists to stress first.
 
 ## Open follow-up decisions
 
