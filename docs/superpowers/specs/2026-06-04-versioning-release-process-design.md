@@ -19,7 +19,7 @@ Deliverables:
   milestone→minor mapping, the release process summary). Status **Proposed**; added
   to the ADR index table.
 - `docs/RELEASING.md` — the operational runbook (milestone-start bump, cut-a-release,
-  CI behavior, future PyPI/artifact-baking toggles, rollback).
+  **the post-release "begin next-dev" bump**, CI behavior, future PyPI toggle, rollback).
 - `CHANGELOG.md` — Keep a Changelog format, generated from conventional commits by
   git-cliff; seeded with the `v0.1.0` section + an `[Unreleased]` section.
 - `cliff.toml` — git-cliff config mapping commit types → changelog sections.
@@ -81,11 +81,20 @@ Deliverables:
   does **not** automatically force a minor — an additive one is patch-eligible; a
   breaking one forces a minor. Pre-1.0, none of this is a major bump; `1.0.0` is the
   first release where a breaking contract change would require a major.
-- **In-tree version leads the tag.** `[project].version` is bumped to a Milestone's
-  target minor **when that Milestone's work begins**; the matching annotated
-  `vX.Y.Z` tag is cut **when the Milestone completes**. Consequence: throughout a
-  Milestone every build reports `X.Y.Z-dev+g<sha>`; only the tagged release commit
-  reports `X.Y.Z`.
+- **In-tree version always points at the next *unreleased* version** (so `-dev` is
+  unambiguously "ahead of the last tag," never reused across a release boundary — the
+  setuptools-scm convention, kept with plain `X.Y.Z` strings and no `.devN` counter).
+  Two bump moments move it forward:
+  - **Milestone start** — `set-version` jumps to the Milestone's target minor
+    (`0.1.0 → 0.2.0` as M1 begins). The `vX.Y.0` tag is cut when the Milestone completes.
+  - **Immediately after *any* release tag** — the release procedure bumps in-tree to the
+    next patch dev version (`0.2.0 → 0.2.1` right after `v0.2.0`), so a commit *after* the
+    release reports `0.2.1-dev`, not `0.2.0-dev`. A later Milestone-start bump overrides
+    this (e.g. `0.2.1 → 0.3.0`, skipping unused `0.2.x`).
+  Consequence: in-tree is always strictly greater than the last tag; every non-tag build
+  reports `X.Y.Z-dev+g<sha>` where `X.Y.Z` is the *next* version, and only the tagged
+  release commit itself reports a bare `X.Y.Z`. `0.2.0-dev` therefore only ever means
+  "before the `v0.2.0` release," never "after it."
 - **Tags are annotated**, named `vX.Y.Z` (matches the existing `v0.1.0`).
 - **Single source of version truth:** `[project].version` in `pyproject.toml`. `uv.lock`
   carries a *synchronized copy* of the project version (`uv.lock` pins
@@ -218,10 +227,15 @@ generated artifact, not hand-maintained line-by-line.
   `release`) to write `src/kdive/_buildinfo.py`, `uv build` (wheel + sdist), then **remove
   `_buildinfo.py`** (even on failure) so it never lingers in the editable checkout. The
   artifact carries the baked module; the working tree is left clean.
-- `release VERSION` — the Milestone-completion recipe. Guards, in order:
-  on `main`, clean tree, up to date with `origin/main`, and `[project].version ==
-  VERSION`. On pass: create annotated tag `vVERSION` (message names the Milestone)
-  and `git push origin vVERSION` — **the tag only, never a commit to `main`.**
+- `release VERSION` — the release recipe. Guards, in order: on `main`, clean tree, up to
+  date with `origin/main`, and `[project].version == VERSION`. On pass: create annotated
+  tag `vVERSION` (message names the Milestone) and `git push origin vVERSION` — **the tag
+  only, never a commit to `main`.** It then **prints the required follow-up**: open a
+  `chore(release): begin <next>-dev` PR that `set-version`s in-tree to the next patch dev
+  version (it cannot commit that itself — no direct `main` writes). The post-release bump
+  is a PR, not a recipe side effect, so branch protection holds; `RELEASING.md` makes it a
+  checklist step so it is never skipped (skipping it is what would resurrect the ambiguous
+  `X.Y.Z-dev`).
 
 ### `.github/workflows/release.yml`
 
@@ -245,8 +259,13 @@ generated artifact, not hand-maintained line-by-line.
      `uv_build`, so no `libvirt-dev` needed), then removes `_buildinfo.py`. The published
      artifacts self-report `vX.Y.Z+g<sha>`.
   5. generate release notes via `uvx ${{ env.GIT_CLIFF }} --latest --strip header`
-     (the pinned version) and **assert the notes file is non-empty** (fail otherwise —
-     an empty changelog means the history/tags were not fetched).
+     (the pinned version). **Guard on the *fetch*, not the notes:** assert
+     `git rev-list --count <prev-tag>..HEAD` > 0 and that the previous tag is visible —
+     that is what proves `fetch-depth: 0` worked. Empty notes are *allowed* (a thin
+     patch whose only commits are skipped `chore`/merge types is a legitimate release);
+     fall back to a placeholder body (e.g. "Maintenance release — see commit history")
+     rather than hard-failing, so a real release is never blocked by having no
+     changelog-worthy commits.
   6. create-or-update the Release idempotently: `gh release create "$TAG"
      --notes-file … dist/*`, falling back to `gh release edit "$TAG" --notes-file …`
      plus `gh release upload "$TAG" dist/* --clobber` if the Release already exists
@@ -263,6 +282,8 @@ milestone done:   PR-merge to main, then  just release 0.2.0
                     → release.yml: tag==pyproject check → uv build → git-cliff notes
                       → gh release create (internal, artifacts attached)
                     → on the v0.2.0 commit, full_version() = "0.2.0+g<sha>"  (is_release)
+post-release:     PR  chore(release): begin 0.2.1-dev  → set-version 0.2.1
+                    → commits after v0.2.0 report "0.2.1-dev+g<sha>"  (never "0.2.0-dev")
 ```
 
 `CHANGELOG.md` is refreshed via `just changelog` in normal feature PRs; the GitHub
