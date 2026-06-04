@@ -29,6 +29,14 @@ def test_build_app_registers_jobs_tools() -> None:
         names = {t.name for t in tools}
         assert {"jobs.get", "jobs.wait", "jobs.cancel", "jobs.list"} <= names
         assert {"systems.provision", "systems.get", "systems.teardown"} <= names
+        assert {
+            "investigations.open",
+            "investigations.get",
+            "investigations.close",
+            "investigations.link",
+            "investigations.unlink",
+        } <= names
+        assert {"runs.create", "runs.get"} <= names
 
     asyncio.run(_run())
 
