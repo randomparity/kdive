@@ -231,8 +231,8 @@ worker → force_crash handler
 | System not found / cross-project | `configuration_error` (not-found-shaped) |
 | `power` on a System with no started domain | `configuration_error` (`current_status`) |
 | `force_crash` on a non-`ready` System | `configuration_error` (`current_status`) |
-| `force_crash` missing any gate check | `authorization_denied` + audited `force_crash:denied` |
-| `power`/`force_crash` without `operator`/`admin` role | raises (RBAC), per the gate split |
+| `force_crash` missing any gate check (incl. the `admin`-role check) | caught → `authorization_denied` + audited `force_crash:denied` |
+| `power` without `operator` role | raises `AuthorizationError` (RBAC, uncaught — the worker/transport maps it) |
 | provider libvirt error (incl. absent domain) | handler dead-letters `control_failure` (before any state change) |
 | handler target System gone | `infrastructure_failure` |
 | `force_crash` handler finds System terminal (teardown won the race) | no NMI, no transition; returns (reconciler backstops sessions) |
