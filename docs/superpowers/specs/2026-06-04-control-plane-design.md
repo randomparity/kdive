@@ -74,7 +74,20 @@ class Controller(Protocol):
     def force_crash(self, domain_name: str) -> None: ...
 ```
 
-`PowerAction` is a `StrEnum` (`on`/`off`/`cycle`/`reset`). `LocalLibvirtControl` builds
+**Relation to the existing `ControlPlane` placeholder.** `providers/interfaces.py`
+already declares a capability-dispatch `ControlPlane` Protocol keyed on a `SystemHandle`
+(`power(system, action)` / `force_crash(system)`) and `type PowerAction = str`. As with
+`Provisioner` vs `ProvisioningPlane` (ADR-0025 / ADR-0027 §1), the realized M0 port keys on
+the already-minted libvirt **domain name** (row-first ordering: the System and its
+`domain_name` exist before any control op), not the `SystemHandle` the registry dispatch
+placeholder uses; control is not dispatched through the capability registry in M0.
+`LocalLibvirtControl` satisfies `Controller` structurally. The control plane defines a
+`PowerAction` **StrEnum** (`on`/`off`/`cycle`/`reset`) in `control.py` — a typed
+refinement of the `interfaces.py` `type PowerAction = str` alias, which `power`'s `str`
+value still satisfies; reconciling the placeholder Protocol to the realized port is the
+capability-dispatch integration's job (deferred, like provisioning).
+
+`LocalLibvirtControl` builds
 over the injected `Connect` factory (`from_env` reads `KDIVE_LIBVIRT_URI`, lazy — no
 connection at construction). It looks the domain up by name, then:
 
@@ -112,6 +125,16 @@ helpers are re-derived locally; no cross-tool import).
 call `controller.power`, and audit `transition=f"power:{action}"`. No System state change
 (ADR-0027 §3).
 
+**`power off` leaves a `ready` System with a stopped domain.** `power off → destroy` stops
+the domain but does **not** undefine it (unlike teardown's destroy+undefine), so the System
+stays `ready` and a later `power on → create` restarts the still-defined domain. This is an
+intended, recoverable inconsistency, not drift: the reconciler's leaked-domain reaper only
+acts on a domain whose tagged System is **gone** (ADR-0021), and a powered-off System is
+present and `ready` — so no reconciler rule sweeps it. M0 has no health probe that would
+flag a `ready` System's stopped domain; if a later milestone adds one it must exempt the
+operator-power-off case. A `power off` is audited (`transition="power:off"`) so the stopped
+state is attributable.
+
 **`control.force_crash(system_id)`** (synchronous admission, async execution):
 1. Parse `system_id` (malformed → `configuration_error`).
 2. Load the System + its Allocation (for the gate's capability scope and project).
@@ -121,21 +144,45 @@ call `controller.power`, and audit `transition=f"power:{action}"`. No System sta
 4. `assert_destructive_allowed(ctx, allocation, DestructiveOp("force_crash", opt_in))`. On
    `DestructiveOpDenied`: audit `transition="force_crash:denied"` (`args` carrying
    `missing`) and return `ToolResponse.failure(system_id, AUTHORIZATION_DENIED)`.
+   **Ordering invariant:** the in-project check (step 2) precedes the gate, so the audited
+   System's `project` is guaranteed to be in `ctx.projects` — `audit.record`'s
+   `project in ctx.projects` guard therefore cannot itself raise `AuthError` on the denial
+   path. The denial is recorded under the live `ctx` (the principal who attempted it), not a
+   reconstructed job context, because the denial happens synchronously before any job is
+   enqueued. Reordering the gate ahead of the in-project check would break this and is
+   forbidden.
 5. Refuse unless the System is `ready` (only a ready System can crash; `current_status`
    in `data` otherwise → `configuration_error`).
 6. Enqueue a `FORCE_CRASH` job, `dedup_key=f"{system_id}:force_crash"`, payload
    `{system_id}`. Return the job-handle envelope.
 
-**`control.force_crash` handler** (`force_crash` job): under the per-System lock —
-1. Load the System (missing → `infrastructure_failure`).
-2. If already `crashed`/terminal: idempotent — re-attempt the NMI where the System is
-   still `crashed` (the domain may still be up), make no illegal transition, and still
-   detach sessions; a terminal System returns without crashing.
-3. Call `controller.force_crash(domain_name)`.
-4. In one transaction under the lock: drive System `ready → crashed`, audit
+**`control.force_crash` handler** (`force_crash` job): all System reads and writes happen
+under the per-System advisory lock, and the handler **re-reads the System state under that
+lock** (`SELECT … FOR UPDATE`, the systems.py provision-handler precedent) before any
+transition — the synchronous tool's `ready` check is advisory only; a concurrent
+lock-serialized `teardown` may have driven the System `ready → torn_down` between admission
+and dispatch. Under the lock:
+1. Load the System `FOR UPDATE` (missing → `infrastructure_failure`).
+2. Branch on the re-read state:
+   - **terminal (`torn_down`/`failed`)**: a teardown/failure won the race — return without
+     calling the NMI and without any transition (the domain is gone or going). No detach is
+     needed: teardown does not strand `live` sessions in M0 (no tool creates them yet), and
+     the reconciler's stale-session sweep is the backstop.
+   - **already `crashed`**: idempotent re-run — re-attempt the NMI (the domain may still be
+     up), make no transition, and re-run the (idempotent) session detach.
+   - **`ready`**: the normal path — steps 3–4.
+3. Call `controller.force_crash(domain_name)` (a `CONTROL_FAILURE` here dead-letters the
+   job *before* any state change, so a retry re-enters cleanly).
+4. In the same lock-holding transaction: drive System `ready → crashed`
+   (`ensure_transition` guards it — if the state moved to terminal between the `FOR UPDATE`
+   read and here it cannot, but the `FOR UPDATE` lock makes that impossible), audit
    `transition="ready->crashed"`, then `UPDATE debug_sessions SET state='detached' WHERE
    state IN ('attach','live') AND run_id IN (SELECT id FROM runs WHERE system_id=…)` and
-   audit one `live->detached` (or `*->detached`) row per detached session.
+   audit one `*->detached` row per detached session.
+
+Ordering the NMI **before** the transition (not after) means a provider failure leaves the
+System untouched and the job retryable; the state move and the detach commit atomically
+only once the guest has actually been panicked.
 
 The gate is **only** on `force_crash`; `power` is `operator`-authorized and ungated
 (ADR-0027 §3).
@@ -172,8 +219,9 @@ worker → force_crash handler
 | `force_crash` on a non-`ready` System | `configuration_error` (`current_status`) |
 | `force_crash` missing any gate check | `authorization_denied` + audited `force_crash:denied` |
 | `power`/`force_crash` without `operator`/`admin` role | raises (RBAC), per the gate split |
-| provider libvirt error (incl. absent domain) | handler dead-letters `control_failure` |
+| provider libvirt error (incl. absent domain) | handler dead-letters `control_failure` (before any state change) |
 | handler target System gone | `infrastructure_failure` |
+| `force_crash` handler finds System terminal (teardown won the race) | no NMI, no transition; returns (reconciler backstops sessions) |
 
 ## Redaction
 
