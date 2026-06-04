@@ -21,3 +21,7 @@ node_modules/
 dist/
 build/
 *.egg-info/
+
+# Agents and orchestration
+.claude-flow/
+.swarm/
