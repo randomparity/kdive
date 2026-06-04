@@ -38,11 +38,17 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
         AllocationState.GRANTED: {
             AllocationState.ACTIVE,
             AllocationState.RELEASING,
+            AllocationState.EXPIRED,
             AllocationState.FAILED,
         },
-        AllocationState.ACTIVE: {AllocationState.RELEASING, AllocationState.FAILED},
+        AllocationState.ACTIVE: {
+            AllocationState.RELEASING,
+            AllocationState.EXPIRED,
+            AllocationState.FAILED,
+        },
         AllocationState.RELEASING: {AllocationState.RELEASED, AllocationState.FAILED},
         AllocationState.RELEASED: set(),
+        AllocationState.EXPIRED: set(),
         AllocationState.FAILED: set(),
     },
     SystemState: {
@@ -52,7 +58,13 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
             SystemState.FAILED,
             SystemState.TORN_DOWN,
         },
-        SystemState.READY: {SystemState.CRASHED, SystemState.TORN_DOWN, SystemState.FAILED},
+        SystemState.READY: {
+            SystemState.CRASHED,
+            SystemState.TORN_DOWN,
+            SystemState.REPROVISIONING,
+            SystemState.FAILED,
+        },
+        SystemState.REPROVISIONING: {SystemState.READY, SystemState.FAILED},
         SystemState.CRASHED: {SystemState.TORN_DOWN, SystemState.FAILED},
         SystemState.TORN_DOWN: set(),
         SystemState.FAILED: set(),
@@ -148,6 +160,25 @@ def test_representative_illegal_transition_raises_with_context() -> None:
 def test_mixing_two_object_enums_is_a_programming_error() -> None:
     with pytest.raises(TypeError):
         can_transition(SystemState.READY, RunState.RUNNING)
+
+
+def test_allocation_expiry_edges_are_legal_from_granted_and_active() -> None:
+    # M1 reconciler →expired sweep reaches `expired` from a granted-but-unprovisioned
+    # allocation and from an active one; `expired` is terminal.
+    assert can_transition(AllocationState.GRANTED, AllocationState.EXPIRED) is True
+    assert can_transition(AllocationState.ACTIVE, AllocationState.EXPIRED) is True
+    assert can_transition(AllocationState.RELEASING, AllocationState.EXPIRED) is False
+    with pytest.raises(IllegalTransition, match="expired"):
+        ensure_transition(AllocationState.EXPIRED, AllocationState.RELEASED)
+
+
+def test_system_reprovision_cycle_edges_are_legal() -> None:
+    # M1 reprovision-in-place: ready ↔ reprovisioning, reprovisioning → failed.
+    assert can_transition(SystemState.READY, SystemState.REPROVISIONING) is True
+    assert can_transition(SystemState.REPROVISIONING, SystemState.READY) is True
+    assert can_transition(SystemState.REPROVISIONING, SystemState.FAILED) is True
+    # Reprovisioning cannot jump straight to teardown without returning to ready.
+    assert can_transition(SystemState.REPROVISIONING, SystemState.TORN_DOWN) is False
 
 
 def test_force_crash_edge_is_legal_teardown_skip_is_not() -> None:

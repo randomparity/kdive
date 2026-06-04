@@ -37,10 +37,13 @@ class ResourceStatus(StrEnum):
 
 
 class AllocationState(StrEnum):
-    """Always-yes, capacity-checked allocation lifecycle.
+    """Capacity- and budget-checked allocation lifecycle (M1 adds ``expired``).
 
     ``granted → releasing`` lets an admitted-but-unprovisioned allocation be released
     without first reaching ``active`` (which provisioning produces); see ADR-0023.
+    ``granted/active → expired`` is the M1 reconciler ``→expired`` sweep reclaiming a
+    lease past its window (ADR-0036, ADR-0040); ``expired`` is terminal and distinct
+    from ``failed`` (a reclaimed lease is not an operation failure).
     """
 
     REQUESTED = "requested"
@@ -48,15 +51,22 @@ class AllocationState(StrEnum):
     ACTIVE = "active"
     RELEASING = "releasing"
     RELEASED = "released"
+    EXPIRED = "expired"
     FAILED = "failed"
 
 
 class SystemState(StrEnum):
-    """One System per Allocation in M0 (no reprovision)."""
+    """A provisioned target's lifecycle (M1 adds ``reprovisioning``).
+
+    M1 reprovision-in-place (ADR-0038) cycles a ready System through
+    ``ready → reprovisioning → ready`` on the same row; an interrupted reprovision
+    fails to ``reprovisioning → failed``.
+    """
 
     DEFINED = "defined"
     PROVISIONING = "provisioning"
     READY = "ready"
+    REPROVISIONING = "reprovisioning"
     CRASHED = "crashed"
     TORN_DOWN = "torn_down"
     FAILED = "failed"
@@ -121,11 +131,19 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
     AllocationState: {
         AllocationState.REQUESTED: frozenset({AllocationState.GRANTED, AllocationState.FAILED}),
         AllocationState.GRANTED: frozenset(
-            {AllocationState.ACTIVE, AllocationState.RELEASING, AllocationState.FAILED}
+            {
+                AllocationState.ACTIVE,
+                AllocationState.RELEASING,
+                AllocationState.EXPIRED,
+                AllocationState.FAILED,
+            }
         ),
-        AllocationState.ACTIVE: frozenset({AllocationState.RELEASING, AllocationState.FAILED}),
+        AllocationState.ACTIVE: frozenset(
+            {AllocationState.RELEASING, AllocationState.EXPIRED, AllocationState.FAILED}
+        ),
         AllocationState.RELEASING: frozenset({AllocationState.RELEASED, AllocationState.FAILED}),
         AllocationState.RELEASED: frozenset(),
+        AllocationState.EXPIRED: frozenset(),
         AllocationState.FAILED: frozenset(),
     },
     SystemState: {
@@ -134,8 +152,14 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
             {SystemState.READY, SystemState.FAILED, SystemState.TORN_DOWN}
         ),
         SystemState.READY: frozenset(
-            {SystemState.CRASHED, SystemState.TORN_DOWN, SystemState.FAILED}
+            {
+                SystemState.CRASHED,
+                SystemState.TORN_DOWN,
+                SystemState.REPROVISIONING,
+                SystemState.FAILED,
+            }
         ),
+        SystemState.REPROVISIONING: frozenset({SystemState.READY, SystemState.FAILED}),
         SystemState.CRASHED: frozenset({SystemState.TORN_DOWN, SystemState.FAILED}),
         SystemState.TORN_DOWN: frozenset(),
         SystemState.FAILED: frozenset(),
