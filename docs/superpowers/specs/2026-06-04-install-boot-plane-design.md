@@ -149,11 +149,16 @@ the command line:
    nothing. Staging-file cleanup is the System's teardown / the reconciler's leaked-domain
    sweep (a per-Run path under the System is removed when the System is torn down); M0
    does not GC mid-Run staging files, and this is stated, not left implicit.
-3. **kdump prerequisite.** The handler verifies the kdump capture service/initramfs is
-   present (the `crashkernel=` reservation alone is inert without the capture path).
-   In M0 this is the same readiness-preflight machinery boot uses, run against the
-   staged config; a missing capture path is a `configuration_error` (a config defect
-   the operator fixes), distinct from a libvirt redefine failure (`install_failure`).
+3. **kdump prerequisite (inside `install()`, before the redefine).** `install()` verifies
+   the kdump capture service/initramfs is present (the `crashkernel=` reservation alone is
+   inert without the capture path) **before** it `defineXML`s, so a missing capture path
+   stages nothing. In M0 this is the ported preflight machinery (an injected `kdump_check`
+   seam, sibling to boot's `readiness` seam), run against the staged config; a missing
+   capture path is a `configuration_error` (a config defect the operator fixes), distinct
+   from a libvirt redefine failure (`install_failure`). The handler (which runs `install()`
+   under `run_step`) owns no separate check — `install()` is the single owner of staging +
+   kdump verification + redefine, so the fake `Installer` is the unit-test seam for all
+   three.
 
 A libvirt error staging/redefining the domain is `install_failure`.
 
