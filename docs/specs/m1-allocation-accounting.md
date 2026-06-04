@@ -97,9 +97,22 @@ Append-only, signed deltas; **reserve-at-grant, reconcile-at-release**:
   reaches `ready`); `active_ended_at` on `active → releasing` / `active → expired`.
   `active_hours = active_ended_at − active_started_at`, computed from these columns —
   **never** reconstructed from `updated_at`, which every transition overwrites.
-- **`budget_remaining = limit_kcu − Σ kcu_delta`** over the project's ledger rows;
-  `reserved` + `reconciled` net to `actual`, so the running sum is committed-plus-actual
-  exposure and the budget cannot be overcommitted.
+- **`budget_remaining = limit_kcu − spent_kcu`**, where `spent_kcu` is a **running total
+  maintained on the `budgets` row**, adjusted by every `kcu_delta` in the **same
+  transaction** that writes its ledger row (always under the project lock — see lock
+  hierarchy). Admission and renew read it `O(1)`; they never `Σ` the full append-only
+  ledger on the locked hot path (which would grow without bound as history accumulates).
+  The ledger stays the audit trail and the source for `accounting.usage`'s
+  `by_cost_class` breakdown. `reserved` + `reconciled` net to `actual`, so `spent_kcu` is
+  committed-plus-actual exposure and the budget cannot be overcommitted.
+- **Investigation rollup attributes per Allocation and never double-counts.** Cost is
+  metered per Allocation. `accounting.usage(investigation_id)` sums the ledger of
+  allocations whose Runs belong **solely** to that investigation; an Allocation reused
+  across investigations — possible once reprovision-in-place lets one Allocation back
+  sequential Systems whose Runs differ — is attributed to none individually and surfaces
+  only in the project rollup as `shared_kcu`. Per-investigation sums therefore never
+  double-count and never exceed the project total; in M1's expected
+  one-allocation-per-investigation pattern the rollup is exact.
 
 ## Admission control (M1)
 
@@ -109,21 +122,31 @@ admission, under a fixed **project-before-resource** lock order to stay deadlock
 
 ```
 validate selector (vcpus≥1, memory_gb≥0, ≤ resource caps) + window>0  → configuration_error
+resolve idempotency_key → if already seen, return the stored result (no re-grant, no re-debit)
 acquire LockScope.PROJECT(project)              # M1, new
   check max_concurrent_allocations (non-terminal count)   → quota_exceeded
   estimate = rate(selector) × window_hours       # always ≥ 0 (validated above)
-  check budget_remaining ≥ estimate                       → allocation_denied
+  check (limit_kcu − spent_kcu) ≥ estimate                → allocation_denied
   acquire LockScope.RESOURCE(resource_id)        # M0, unchanged (ADR-0023)
     check per-host concurrent_allocation_cap             → allocation_denied (at_capacity)
   one transaction:
     insert Allocation (granted, lease_expiry, requested size)
-    insert ledger row (reserved, +estimate)
+    insert ledger row (reserved, +estimate); budgets.spent_kcu += estimate
+    record idempotency_key → allocation_id
     insert audit row (->granted)
 ```
 
 Any failing check returns a typed failure with **no** allocation/ledger/audit row
 (ADR-0023's denial rule). `quota_exceeded` = over-count; `allocation_denied` =
 over-budget or over-host-cap.
+
+**Request idempotency.** `allocations.request` and `allocations.renew` carry a client
+`idempotency_key`. Admission resolves it against an idempotency-key store (migration
+`0002`) **before** granting: a replayed key returns the original result — the same
+allocation, no second grant, no second `reserved` debit. Without this, a client retry
+after a lost response would create a duplicate allocation and double-charge the budget
+(reserve-at-grant makes that immediate). It is the synchronous analogue of the M0 job
+`dedup_key`, which only covers async tools.
 
 **Lock hierarchy.** Every path that takes more than one advisory lock acquires them in
 the fixed total order `PROJECT < RESOURCE < ALLOCATION < SYSTEM`, so no two paths can
@@ -170,10 +193,12 @@ Per [0036](../adr/0036-reservation-lease-semantics.md):
   KDIVE_LEASE_MAX)`, defaulting to `KDIVE_LEASE_DEFAULT` when omitted (proposed 4h
   default / 24h max); `lease_expiry = now() + window`. `renew`'s `extend` is validated
   the same way (`> 0`).
-- **`allocations.renew(allocation_id, extend)`** — extends `lease_expiry` under the
-  per-project lock, re-checks budget for the **added** window only, writes an
-  incremental `reserved` delta; over budget → `allocation_denied`, window unchanged.
-  `operator` role; non-terminal only (else `stale_handle`).
+- **`allocations.renew(allocation_id, extend, idempotency_key)`** — extends
+  `lease_expiry` under the per-project lock, re-checks budget for the **added** window
+  only, writes an incremental `reserved` delta (and increments `spent_kcu`); over budget
+  → `allocation_denied`, window unchanged. Idempotent on `idempotency_key` (a replay
+  neither re-extends nor re-charges). `operator` role; non-terminal only (else
+  `stale_handle`).
 - **New terminal state `expired`** — reached from `granted`/`active` by the reconciler
   when `lease_expiry < now()`. Distinct from `released` (explicit) and `failed`
   (operation failure). The owning Run still becomes `failed(lease_expired)` via the
@@ -231,13 +256,15 @@ Forward-only ([0015](../adr/0015-sql-migration-runner.md)).
 -- new tables
 cost_class_coefficients(cost_class PK, coeff numeric NOT NULL, updated_at)
                                                   -- seed: ('local', 1.0)
-budgets(project PK, limit_kcu numeric NOT NULL, updated_at)
+budgets(project PK, limit_kcu numeric NOT NULL,
+        spent_kcu numeric NOT NULL DEFAULT 0, updated_at)  -- O(1) running total; budget_remaining = limit−spent
 quotas(project PK, max_concurrent_allocations int NOT NULL,
        max_concurrent_systems int NOT NULL, updated_at)
 ledger(id, ts, project, allocation_id→allocations, resource_id→resources,
        cost_class, event_type CHECK IN ('reserved','reconciled'),
-       kcu_delta numeric NOT NULL, note)          -- append-only, signed
+       kcu_delta numeric NOT NULL, note)          -- append-only, signed (audit + by_cost_class source)
        INDEX (project), INDEX (allocation_id)
+idempotency_keys(key PK, project, kind, result jsonb, created_at)  -- request/renew retry-dedup
 
 -- altered columns
 allocations  ADD requested_vcpus int, ADD requested_memory_gb int
@@ -247,19 +274,22 @@ allocations  state CHECK += 'expired'             -- + state.py edges granted/ac
 systems      state CHECK += 'reprovisioning'      -- + state.py edges ready ↔ reprovisioning, → failed
 ```
 
-`lease_expiry` and `capability_scope` (already present, dormant in M0) become live.
-No object-store layout change. New advisory-lock scope `LockScope.PROJECT`.
+`lease_expiry` (already present, dormant in M0) becomes live. **`capability_scope` is
+unchanged from M0** — the destructive-op gate's capability factor behaves exactly as in
+M0 (ADR-0020); defining a richer per-allocation capability scope is **deferred** (not
+made "live" in M1), so the gate's strength is not silently altered. No object-store
+layout change. New advisory-lock scope `LockScope.PROJECT`.
 
 ## MCP tool surface (M1 delta)
 
 New and changed tools (M0 tools unchanged unless noted):
 
 ```
-Allocation  allocations.request({selector:{vcpus,memory_gb,…}, project, window?})
-              → {allocation_id, status:"granted"|"denied", reason?, estimate_kcu}
-            allocations.renew(allocation_id, extend) → {allocation_id, lease_expiry}      # new, operator
+Allocation  allocations.request({selector:{vcpus,memory_gb,…}, project, window?, idempotency_key})
+              → {allocation_id, status:"granted"|"denied", reason?, estimate_kcu}        # idempotency_key: retry-dedup
+            allocations.renew(allocation_id, extend, idempotency_key) → {allocation_id, lease_expiry}      # new, operator
 Accounting  accounting.estimate({selector, window}) → {estimate_kcu, rate_kcu_per_hr, breakdown}   # new, viewer
-            accounting.usage(project | investigation_id) → {spent_kcu, budget_remaining, by_cost_class}   # new, viewer (scoped to target project; investigation_id resolves to its project)
+            accounting.usage(project | investigation_id) → {spent_kcu, budget_remaining, by_cost_class, shared_kcu?}   # new, viewer (scoped to target project; investigation_id resolves to its project; shared_kcu = cost of allocations spanning investigations, project form only)
             accounting.set_budget(project, limit_kcu) → {project, limit_kcu}              # new, admin
             accounting.set_quota(project, max_allocations, max_systems) → {…}             # new, admin
 Provision   systems.provision(...)        # + max_concurrent_systems quota check (quota_exceeded)
@@ -304,12 +334,13 @@ are unchanged.
 M1 is done when, on the local-libvirt stack, each is demonstrably true (the
 falsifiable signal, as M0's six were):
 
-1. **Budget denial + input validation** — a request whose `estimate` exceeds
-   `budget_remaining` returns `allocation_denied` with **no** allocation, ledger, or
-   audit row; a request within budget grants and writes exactly one `reserved` row; and a
+1. **Budget denial + input validation + idempotency** — a request whose `estimate`
+   exceeds `budget_remaining` returns `allocation_denied` with **no** allocation, ledger,
+   or audit row; a request within budget grants and writes exactly one `reserved` row; a
    **malformed** request (`vcpus < 1`, `memory_gb < 0`, selector over the host's caps, or
-   `window ≤ 0`) is rejected `configuration_error` with no row — proving negative inputs
-   cannot mint budget.
+   `window ≤ 0`) is rejected `configuration_error` with no row; and a **replayed**
+   request (same `idempotency_key`) returns the original allocation with **no** second
+   grant or `reserved` debit — proving neither negative inputs nor retries mint budget.
 2. **Quota denial** — at `max_concurrent_allocations`, `allocations.request` returns
    `quota_exceeded`; at `max_concurrent_systems`, `systems.provision` returns
    `quota_exceeded`; both write no durable object.
@@ -319,6 +350,9 @@ falsifiable signal, as M0's six were):
    from `active_started_at`/`active_ended_at`, not the estimate), and `accounting.usage`
    reports exactly that sum as `spent_kcu`. Estimate (reservation) and actual (usage)
    are asserted **separately** — they coincide only when a lease runs its full window.
+   An Investigation whose Runs span two Allocations sums both; an Allocation shared by two
+   Investigations is counted in **neither** per-investigation rollup (only the project's
+   `shared_kcu`), so no kcu is double-counted.
 4. **Lease expiry (idle)** — an allocation past its window **with no in-flight job** is
    moved to `expired` by the reconciler, its System torn down, its Run
    `failed(lease_expired)`, and the unused reservation credited back — distinct from an

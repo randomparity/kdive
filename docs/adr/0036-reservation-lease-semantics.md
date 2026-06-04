@@ -61,10 +61,13 @@ tests (additive, bisectable — the M0 pattern).
 
 ### 3. `allocations.renew` extends the window, re-charged and re-checked
 
-`allocations.renew(allocation_id, extend)` extends `lease_expiry` by `extend`
-(which must be `> 0`, else `configuration_error` — the same guard as the initial
-window), clamped so total remaining never exceeds `KDIVE_LEASE_MAX` from now. It runs
-under the per-project lock (ADR-0007) and **re-checks budget for the added window only**,
+`allocations.renew(allocation_id, extend, idempotency_key)` extends `lease_expiry` by
+`extend` (which must be `> 0`, else `configuration_error` — the same guard as the initial
+window), clamped so total remaining never exceeds `KDIVE_LEASE_MAX` from now. It is
+**idempotent on `idempotency_key`** (ADR-0007's `idempotency_keys` store): a replayed
+renew neither re-extends the lease nor re-charges the budget — a retry after a lost
+response is safe. It runs under the per-project lock (ADR-0007) and **re-checks budget
+for the added window only**,
 writing an incremental `reserved` ledger delta (`rate × extend_hours`). Renewal over
 budget is denied (`allocation_denied`) and does **not** extend — fail-closed, the
 window stands. Renewal is `operator` (it is lifecycle, not administration). Only a

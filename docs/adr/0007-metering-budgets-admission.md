@@ -105,14 +105,31 @@ event_type, kcu_delta, note)` — append-only, signed deltas.
   `active → expired`); `active_hours = active_ended_at − active_started_at`. It is
   **never** reconstructed from `updated_at`, which every transition overwrites and so
   cannot carry the billing interval.
-- **`budget_remaining = limit_kcu − Σ kcu_delta`** over the project's ledger rows.
-  Because reserved and reconciled deltas net to `actual`, the running sum is the
-  project's committed-plus-actual exposure; the budget can never be overcommitted.
+- **`budget_remaining = limit_kcu − spent_kcu`**, where `spent_kcu` is a **running
+  total maintained on the `budgets` row**, adjusted by every `kcu_delta` in the same
+  transaction that writes its ledger row (always under the project lock). Admission and
+  renew read it `O(1)`; they never `Σ` the full append-only ledger on the locked hot path
+  — that would make the critical section cost grow with project history. The ledger
+  remains the audit trail and the `by_cost_class` source for `accounting.usage`. Because
+  reserved and reconciled deltas net to `actual`, `spent_kcu` is committed-plus-actual
+  exposure; the budget can never be overcommitted.
 
-`accounting.usage(project)` rolls up `Σ kcu_delta` and `budget_remaining`;
+`accounting.usage(project)` reports `spent_kcu`, `budget_remaining`, and the
+`by_cost_class` breakdown (the latter `Σ`-d from the ledger off the hot path);
 `accounting.usage(investigation_id)` rolls up the deltas of the allocations its Runs
 touched — the cross-allocation, cross-cost_class Investigation sum the top-level
 design calls for, in one unit.
+
+**Attribution is per Allocation and must not double-count.** Cost is metered per
+Allocation, but reprovision-in-place ([ADR-0038](0038-system-reprovision-in-place.md))
+lets one Allocation back sequential Systems whose Runs may belong to **different**
+Investigations. So `usage(investigation_id)` sums only allocations whose Runs are
+**solely** in that investigation; an Allocation shared across investigations is
+attributed to none individually and appears only in the project rollup as `shared_kcu`.
+Per-investigation sums therefore never double-count and never exceed the project total;
+in the expected one-allocation-per-investigation pattern the rollup is exact. (Metering
+at a finer Run grain to apportion a shared allocation is deferred — it is not needed
+while the common case is one allocation per investigation.)
 
 ### 4. Quotas are **two per-project concurrency caps**, enforced at the right plane
 
@@ -145,7 +162,13 @@ runs:
 1. **Validate inputs** (before any lock): reject `vcpus < 1`, `memory_gb < 0`, a
    selector over the host's caps, or `window ≤ 0` (`configuration_error`), so `rate` and
    `estimate` are `≥ 0` and cannot mint budget (decision 2).
-2. Acquire `LockScope.PROJECT(project)` — **then** `LockScope.RESOURCE(resource_id)`.
+2. **Resolve the client `idempotency_key`** against `idempotency_keys` (migration
+   `0002`): a replay returns the stored `allocation_id` with no second grant or
+   `reserved` debit. `allocations.request` is synchronous, so — unlike the M0 async tools
+   guarded by the job `dedup_key` — it would otherwise double-allocate and double-charge
+   on an ordinary client retry after a lost response; the key closes that. `renew` is
+   idempotent the same way.
+3. Acquire `LockScope.PROJECT(project)` — **then** `LockScope.RESOURCE(resource_id)`.
    This is one instance of a **global total lock order** `PROJECT < RESOURCE <
    ALLOCATION < SYSTEM` that **every** multi-lock path obeys, so the design is
    deadlock-free across all paths that now take `PROJECT` — not just this pair:
@@ -153,13 +176,14 @@ runs:
    `systems.provision` takes PROJECT→SYSTEM (system-quota check then the M0 per-System
    section); the reconciler `→expired` sweep takes PROJECT→ALLOCATION→SYSTEM. A single
    pairwise rule would not suffice once these paths share the `PROJECT` scope.
-3. Under the project lock: check `max_concurrent_allocations`; compute `estimate`;
-   check `budget_remaining ≥ estimate`.
-4. Under the resource lock (the M0 critical section, unchanged): check the per-host
+4. Under the project lock: check `max_concurrent_allocations`; compute `estimate`;
+   check `(limit_kcu − spent_kcu) ≥ estimate`.
+5. Under the resource lock (the M0 critical section, unchanged): check the per-host
    `concurrent_allocation_cap`.
-5. If all pass, in one transaction: insert the `granted` Allocation (with
+6. If all pass, in one transaction: insert the `granted` Allocation (with
    `lease_expiry` per ADR-0036, `requested_vcpus`/`requested_memory_gb`), write the
-   `reserved` ledger row, write the audit row.
+   `reserved` ledger row, increment `budgets.spent_kcu` by `estimate`, record the
+   `idempotency_key → allocation_id`, write the audit row.
 
 Any failing check returns a typed failure (`quota_exceeded` /
 `allocation_denied`) with **no** allocation, ledger, or audit row — admission is the
@@ -195,10 +219,16 @@ boundary, enforced and negatively tested ([ADR-0037](0037-rbac-hardening-role-se
 - The per-project lock serializes a project's admissions; cross-project admissions
   on one host still serialize on the resource lock (ADR-0023). Fixed lock ordering
   keeps the two-lock section deadlock-free.
-- Migration `0002` adds `ledger`, `budgets`, `quotas`, `cost_class_coefficients`, and
-  the `allocations` columns `requested_vcpus`/`requested_memory_gb` (rate inputs) and
-  `active_started_at`/`active_ended_at` (the `active_hours` billing interval); all
-  additive.
+- Migration `0002` adds `ledger`, `budgets` (with the `spent_kcu` running total),
+  `quotas`, `cost_class_coefficients`, an `idempotency_keys` store (request/renew
+  retry-dedup), and the `allocations` columns `requested_vcpus`/`requested_memory_gb`
+  (rate inputs) and `active_started_at`/`active_ended_at` (the `active_hours` billing
+  interval); all additive.
+- Admission reads `budget_remaining` in `O(1)` from `budgets.spent_kcu` rather than
+  aggregating the append-only ledger under the lock, so the critical section does not
+  grow with project history — the `Σ` is reserved for the off-hot-path `usage` report.
+- `allocations.request`/`renew` are retry-safe: a replayed `idempotency_key` cannot
+  double-allocate or double-charge, the synchronous counterpart to the M0 job dedup.
 - `accounting.usage` gives the Investigation cost rollup the top-level design
   promised, in kcu, across allocations and cost_classes.
 
