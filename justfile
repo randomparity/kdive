@@ -43,6 +43,14 @@ test:
 test-live:
     uv run python -m pytest -m live_vm -q
 
+# Start the operator backing services (Postgres + MinIO + mock OIDC) for a live run.
+compose-up:
+    docker compose up -d
+
+# Stop the operator backing services and remove their volumes.
+compose-down:
+    docker compose down -v
+
 # Lint and format-check the shell scripts (recursively, including scripts/live-vm).
 lint-shell:
     shfmt -f scripts | xargs shellcheck
