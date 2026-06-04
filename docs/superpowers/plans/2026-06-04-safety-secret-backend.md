@@ -123,7 +123,7 @@ Every task creates new files only; no existing file is edited and no migration o
 |---|---|
 | 1 Exact-value masking | Task 4 acceptance test (Redactor masks resolved value) |
 | 2 Allowlist confinement | Task 3 symlink/escape tests + Task 4 escape-rejected test |
-| 3 Register-before-return | Task 4 no-skip double + positive post-resolve Redactor |
+| 3 Register-before-return | Task 4 no-skip post-condition (`V in snapshot()`) + positive post-resolve Redactor |
 | 4 Empty-value drop | Task 1 no-op register + Task 4 empty-file test |
 | 5 Refcount eviction | Task 1 release tests + Task 4 scope-plumbing test |
 | 6 URL credential strip | Task 2 `redact_url_credentials` tests |
