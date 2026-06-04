@@ -16,14 +16,19 @@ from uuid import UUID
 from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import BaseModel
 
 from kdive.domain.models import (
     Allocation,
     Artifact,
+    Budget,
+    CostClassCoefficient,
     DebugSession,
     DomainModel,
     Investigation,
     Job,
+    LedgerEntry,
+    Quota,
     Resource,
     Run,
     System,
@@ -47,8 +52,13 @@ class ObjectNotFound(RuntimeError):
     """An `update_state` target id does not exist — a consistency error."""
 
 
-class Repository[M: DomainModel]:
-    """Async `insert` / `get` for one durable-object table."""
+class Repository[M: BaseModel]:
+    """Async `insert` / `get` for one table.
+
+    Columns in ``server_generated`` are omitted from inserts so the DB default/trigger
+    fills them; ``key_column`` is the lookup column ``get`` filters on (``id`` for the
+    durable objects, the natural key for the accounting tables).
+    """
 
     def __init__(
         self,
@@ -56,12 +66,15 @@ class Repository[M: DomainModel]:
         table: str,
         *,
         json_columns: frozenset[str] = frozenset(),
+        server_generated: tuple[str, ...] = _SERVER_GENERATED,
+        key_column: str = "id",
     ) -> None:
         self._model = model
         self._table = table
         self._json_columns = json_columns
+        self._key_column = key_column
         self._insert_columns = tuple(
-            name for name in model.model_fields if name not in _SERVER_GENERATED
+            name for name in model.model_fields if name not in server_generated
         )
 
     def _insert_params(self, obj: M) -> dict[str, Any]:
@@ -85,11 +98,13 @@ class Repository[M: DomainModel]:
             raise RuntimeError(f"INSERT into {self._table} returned no row")
         return self._model.model_validate(row)
 
-    async def get(self, conn: AsyncConnection, obj_id: UUID) -> M | None:
-        """Return the object with ``obj_id``, or ``None`` if absent."""
-        query = sql.SQL("SELECT * FROM {} WHERE id = %s").format(sql.Identifier(self._table))
+    async def get(self, conn: AsyncConnection, key: UUID | str) -> M | None:
+        """Return the row whose ``key_column`` equals ``key``, or ``None`` if absent."""
+        query = sql.SQL("SELECT * FROM {table} WHERE {col} = %s").format(
+            table=sql.Identifier(self._table), col=sql.Identifier(self._key_column)
+        )
         async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(query, (obj_id,))
+            await cur.execute(query, (key,))
             row = await cur.fetchone()
         return None if row is None else self._model.model_validate(row)
 
@@ -142,6 +157,59 @@ class StatefulRepository[M: DomainModel, S: StrEnum](Repository[M]):
         return self._model.model_validate(updated)
 
 
+class KeyedRepository[M: BaseModel](Repository[M]):
+    """A `Repository` for a natural-key table that supports `upsert`.
+
+    The M1 accounting tables (`budgets`, `quotas`, `cost_class_coefficients`) are keyed
+    by `project` / `cost_class`, not a generated `id`, and admin re-sets overwrite an
+    existing row. `upsert` writes the row or, on a primary-key conflict, updates only
+    ``update_columns`` — letting `budgets` re-set `limit_kcu` without clobbering the
+    DB-maintained `spent_kcu` running total.
+    """
+
+    def __init__(
+        self,
+        model: type[M],
+        table: str,
+        *,
+        update_columns: frozenset[str] | None = None,
+        json_columns: frozenset[str] = frozenset(),
+    ) -> None:
+        key = next(iter(model.model_fields))  # the natural key is the first declared field
+        super().__init__(
+            model,
+            table,
+            json_columns=json_columns,
+            server_generated=("updated_at",),
+            key_column=key,
+        )
+        candidates = update_columns or (frozenset(self._insert_columns) - {key})
+        self._update_columns = tuple(c for c in self._insert_columns if c in candidates)
+
+    async def upsert(self, conn: AsyncConnection, obj: M) -> M:
+        """Insert ``obj``; on a primary-key conflict update only ``update_columns``."""
+        assignments = sql.SQL(", ").join(
+            sql.SQL("{col} = EXCLUDED.{col}").format(col=sql.Identifier(c))
+            for c in self._update_columns
+        )
+        query = sql.SQL(
+            "INSERT INTO {table} ({cols}) VALUES ({vals}) "
+            "ON CONFLICT ({key}) DO UPDATE SET {assignments} RETURNING *"
+        ).format(
+            table=sql.Identifier(self._table),
+            cols=sql.SQL(", ").join(sql.Identifier(c) for c in self._insert_columns),
+            vals=sql.SQL(", ").join(sql.Placeholder(c) for c in self._insert_columns),
+            key=sql.Identifier(self._key_column),
+            assignments=assignments,
+        )
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(query, self._insert_params(obj))
+            row = await cur.fetchone()
+        if row is None:  # Invariant: INSERT ... RETURNING always yields one row.
+            raise RuntimeError(f"UPSERT into {self._table} returned no row")
+        return self._model.model_validate(row)
+
+
 RESOURCES = StatefulRepository(
     Resource,
     "resources",
@@ -162,3 +230,11 @@ RUNS = StatefulRepository(Run, "runs", RunState, json_columns=frozenset({"build_
 DEBUG_SESSIONS = StatefulRepository(DebugSession, "debug_sessions", DebugSessionState)
 JOBS = StatefulRepository(Job, "jobs", JobState, json_columns=frozenset({"payload", "authorizing"}))
 ARTIFACTS = Repository(Artifact, "artifacts")
+
+# M1 accounting tables. COST_CLASS_COEFFICIENTS/QUOTAS upsert every non-key column;
+# BUDGETS upserts only `limit_kcu` so a re-set_budget never clobbers `spent_kcu` (the
+# DB-maintained running total). LEDGER is append-only with a DB-authoritative `ts`.
+COST_CLASS_COEFFICIENTS = KeyedRepository(CostClassCoefficient, "cost_class_coefficients")
+BUDGETS = KeyedRepository(Budget, "budgets", update_columns=frozenset({"limit_kcu"}))
+QUOTAS = KeyedRepository(Quota, "quotas")
+LEDGER = Repository(LedgerEntry, "ledger", server_generated=("ts",))

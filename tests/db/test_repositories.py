@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import psycopg
@@ -12,9 +13,13 @@ import pytest
 from kdive.db.repositories import (
     ALLOCATIONS,
     ARTIFACTS,
+    BUDGETS,
+    COST_CLASS_COEFFICIENTS,
     DEBUG_SESSIONS,
     INVESTIGATIONS,
     JOBS,
+    LEDGER,
+    QUOTAS,
     RESOURCES,
     RUNS,
     SYSTEMS,
@@ -23,11 +28,15 @@ from kdive.db.repositories import (
 from kdive.domain.models import (
     Allocation,
     Artifact,
+    Budget,
     DebugSession,
     ExternalRef,
     Investigation,
     Job,
     JobKind,
+    LedgerEntry,
+    LedgerEventType,
+    Quota,
     Resource,
     ResourceKind,
     Run,
@@ -277,6 +286,107 @@ def test_update_state_concurrent_same_target(migrated_url: str) -> None:
         failures = [r for r in results if isinstance(r, IllegalTransition)]
         assert len(successes) == 1
         assert len(failures) == 1
+
+    asyncio.run(_run_test())
+
+
+def test_seed_coefficient_is_readable(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            local = await COST_CLASS_COEFFICIENTS.get(conn, "local")
+            assert local is not None
+            assert local.coeff == Decimal("1.0")
+            assert await COST_CLASS_COEFFICIENTS.get(conn, "missing") is None
+
+    asyncio.run(_run_test())
+
+
+def test_budget_upsert_inserts_then_updates(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            created = await BUDGETS.upsert(
+                conn, Budget(project="p", limit_kcu=Decimal("100"), updated_at=_DT)
+            )
+            assert created.limit_kcu == Decimal("100")
+            assert created.spent_kcu == Decimal("0")  # DB default
+            # Upserting the same PK overwrites limit_kcu (admin re-set_budget).
+            updated = await BUDGETS.upsert(
+                conn, Budget(project="p", limit_kcu=Decimal("250"), updated_at=_DT)
+            )
+            assert updated.limit_kcu == Decimal("250")
+            fetched = await BUDGETS.get(conn, "p")
+            assert fetched is not None and fetched.limit_kcu == Decimal("250")
+
+    asyncio.run(_run_test())
+
+
+def test_quota_upsert_and_get(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            await QUOTAS.upsert(
+                conn,
+                Quota(
+                    project="p",
+                    max_concurrent_allocations=3,
+                    max_concurrent_systems=5,
+                    updated_at=_DT,
+                ),
+            )
+            fetched = await QUOTAS.get(conn, "p")
+            assert fetched is not None
+            assert fetched.max_concurrent_allocations == 3
+            assert fetched.max_concurrent_systems == 5
+            assert await QUOTAS.get(conn, "absent") is None
+
+    asyncio.run(_run_test())
+
+
+def test_ledger_insert_and_get_signed_delta(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            res = await RESOURCES.insert(conn, _resource())
+            alloc = await ALLOCATIONS.insert(
+                conn, _allocation(res.id, state=AllocationState.GRANTED)
+            )
+            entry = LedgerEntry(
+                id=uuid4(),
+                ts=_DT,
+                project="proj",
+                allocation_id=alloc.id,
+                resource_id=res.id,
+                cost_class="local",
+                event_type=LedgerEventType.RECONCILED,
+                kcu_delta=Decimal("-3.5"),
+                note=None,
+            )
+            inserted = await LEDGER.insert(conn, entry)
+            assert inserted.kcu_delta == Decimal("-3.5")
+            assert inserted.ts != _DT  # DB-authoritative `ts`
+            fetched = await LEDGER.get(conn, inserted.id)
+            assert fetched is not None and fetched.event_type is LedgerEventType.RECONCILED
+
+    asyncio.run(_run_test())
+
+
+def test_ledger_allows_null_resource_id(migrated_url: str) -> None:
+    # A credit reconciling an allocation released before any System was provisioned.
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            res = await RESOURCES.insert(conn, _resource())
+            alloc = await ALLOCATIONS.insert(
+                conn, _allocation(res.id, state=AllocationState.GRANTED)
+            )
+            entry = LedgerEntry(
+                id=uuid4(),
+                ts=_DT,
+                project="proj",
+                allocation_id=alloc.id,
+                cost_class="local",
+                event_type=LedgerEventType.RESERVED,
+                kcu_delta=Decimal("4"),
+            )
+            inserted = await LEDGER.insert(conn, entry)
+            assert inserted.resource_id is None
 
     asyncio.run(_run_test())
 
