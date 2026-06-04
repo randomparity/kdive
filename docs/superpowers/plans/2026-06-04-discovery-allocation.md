@@ -910,6 +910,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.db.repositories import RESOURCES
 from kdive.domain.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Resource, ResourceKind
@@ -1100,7 +1101,7 @@ async def register_local_libvirt_resource(
     )
 ```
 
-The `RESOURCES` import is in the import block above (`from kdive.db.repositories import RESOURCES`). `RESOURCES.insert` wraps `capabilities` in `Jsonb` itself; the in-place `UPDATE` branch wraps it explicitly.
+`RESOURCES.insert` (imported at the top of the block via `from kdive.db.repositories import RESOURCES`) wraps `capabilities` in `Jsonb` itself; the in-place `UPDATE` branch wraps it explicitly.
 
 - [ ] **Step 5: Run to verify it passes**
 
