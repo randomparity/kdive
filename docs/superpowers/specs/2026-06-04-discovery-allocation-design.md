@@ -152,8 +152,12 @@ async def register_local_libvirt_resource(
   - calls `discovery.list_resources()` (one record), then within one
     `conn.transaction()`: `SELECT id FROM resources WHERE kind=%s AND host_uri=%s FOR
     UPDATE`; if a row exists, `UPDATE` its `capabilities`/`status`/`pool`/`cost_class`;
-    else `INSERT` a new `resources` row (uuid + timestamps DB-generated). Returns the
-    persisted `Resource`.
+    else insert via **`RESOURCES.insert`** (it already wraps `capabilities` in
+    `psycopg.types.json.Jsonb`, per `repositories.py`). The `UPDATE` branch is raw SQL
+    and **must** wrap `capabilities` in `Jsonb(...)` too — psycopg3 does not adapt a bare
+    `dict` to `jsonb` and would raise "cannot adapt type dict". Returns the persisted
+    `Resource`. The registration test asserts the round-tripped `capabilities` dict
+    (incl. the cap), not just the row count.
   - **M0 single-registrar assumption.** Without a `UNIQUE(kind, host_uri)` constraint,
     two *first-time* concurrent registrations could both insert. M0 registers from one
     startup/operator path, so this is not reachable; the constraint is the M1 hardening
@@ -260,11 +264,23 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None: ...
      "cap": str(outcome.cap), "in_use": str(outcome.in_use)})`. `object_id` is the
      resource id (no allocation was created). The denial is also `log.info`-ed.
   6. `CategorizedError` from `admit` (e.g. cap misconfig) → `failure` with its category.
-- **`allocations.get(allocation_id)`** — `require_project` against the **allocation's
-  own** project (read the row, then verify `alloc.project in ctx.projects`; a row in a
-  project the caller was not granted → `failure(..., CONFIGURATION_ERROR)`, identical to
-  "not found" so the tool does not leak the existence of other projects' allocations).
-  Returns `success(str(alloc.id), alloc.state.value, …)`.
+- **`_envelope_for_allocation(alloc)` (shared by `get` and `list`).** An Allocation's
+  state maps to the envelope through one helper, because the state value `"failed"`
+  collides with the response envelope's failure-status set
+  (`responses.py`: `_FAILURE_STATUSES = {"failed", "error"}`). Building
+  `success(id, "failed")` would trip the "category iff failure" validator and raise.
+  So: a `failed` allocation → `failure(str(alloc.id), ErrorCategory.INFRASTRUCTURE_FAILURE,
+  data={"current_status": "failed"})` (allocations carry **no** `error_category` column,
+  so `INFRASTRUCTURE_FAILURE` is the documented default category for the terminal
+  `failed` state; the `data` field preserves the literal state). Every **other** state
+  (`requested`/`granted`/`active`/`releasing`/`released` — none are failure statuses) →
+  `success(str(alloc.id), alloc.state.value, …)`. This is the only Allocation state that
+  needs the failure branch.
+- **`allocations.get(allocation_id)`** — parse the uuid (malformed → `failure(...,
+  CONFIGURATION_ERROR)`), read the row, then verify `alloc.project in ctx.projects`; a
+  row in a project the caller was not granted → `failure(..., CONFIGURATION_ERROR)`,
+  identical to "not found" so the tool does not leak the existence of other projects'
+  allocations. Returns `_envelope_for_allocation(alloc)`.
 - **`allocations.release(allocation_id)`** — parse the uuid, `RESOURCES`-style
   `ALLOCATIONS.get` to read `alloc.project`, then `require_role(ctx, alloc.project,
   Role.OPERATOR)`. The state read for the *release decision* must happen **under a
@@ -288,8 +304,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None: ...
     `IllegalTransition` reaches the transport.
   - returns `success(str(alloc.id), "released", suggested_next_actions=[])`.
 - **`allocations.list(project, limit=50)`** — `require_project(ctx, project)`; return the
-  newest allocations for `project` (capped, `MAX_LIST_LIMIT=200`), each as a
-  `success`/`failure` envelope, isolating a bad row per `jobs.list`.
+  newest allocations for `project` (capped, `MAX_LIST_LIMIT=200`), each via
+  `_envelope_for_allocation` (so a legitimately-`failed` allocation renders as a typed
+  `failure` row, **not** as the per-row isolation's catch-all); the `jobs.list`-style
+  isolation still wraps any *envelope-invariant* violation so one corrupt row cannot
+  blank the list.
 
 Every handler wraps its body in `bind_context(principal=ctx.principal, …)` (ADR-0014) so
 records emitted while serving are attributed, and takes its dependencies (`pool`, `ctx`)
@@ -358,14 +377,20 @@ as arguments so it is tested directly, never through MCP transport.
 - a `released`/`requested`/`active`/`releasing` mix is counted exactly per `_NON_TERMINAL`.
 - cap missing from `resource.capabilities` / non-int / negative → `CategorizedError`
   (`CONFIGURATION_ERROR`), no row.
-- serialization (**mandatory** — this is the test that falsifies ADR-0023 §1's whole
-  reason to exist): two `admit` coroutines racing on one host with `cap=1`, on **two
-  separate async connections** via `asyncio.gather`, yield exactly one grant and one
-  denial. `advisory_xact_lock(RESOURCE, id)` blocks the second `admit` until the first
-  commits its `granted` insert, so the second's count observes it and denies. This is
-  deterministically reproducible (the lock is a hard block, not a timing window); there
-  is **no** sequential stand-in — a sequential test would not exercise the lock and the
-  concurrency guarantee would ship unverified.
+- serialization (**mandatory** — falsifies ADR-0023 §1's whole reason to exist). A bare
+  `asyncio.gather` of two admits is **insufficient**: if the first commits before the
+  second issues its lock, the second never blocks yet still counts-after-commit and
+  denies — so the assertion passes even against a no-op lock. The test must therefore
+  force the lock-contended interleaving deterministically, in **two** parts:
+  1. **Lock-blocking proof.** On connection A, open a transaction and pre-acquire
+     `advisory_xact_lock(RESOURCE, resource.id)` (hold it). On connection B, start
+     `admit(...)` and assert it does **not** complete within a short window (the task is
+     still pending / `pg_locks` shows B waiting) — proving `admit` acquires the *same*
+     RESOURCE lock. Release A (commit); B's `admit` then completes. If `admit` failed to
+     take the lock, B would complete immediately and this assertion fails.
+  2. **Outcome.** With `cap=1`, the two serialized admits yield exactly one grant and one
+     denial, and exactly one `granted` allocation row exists.
+  There is **no** sequential stand-in.
 
 **resources tools** (real Postgres; registered host)
 - `resources.list` returns the host with the flat capability projection
@@ -389,6 +414,10 @@ as arguments so it is tested directly, never through MCP transport.
 - `get` of own-project allocation → `success` with its state; of another project's id →
   `failure(CONFIGURATION_ERROR)` (indistinguishable from not-found); malformed uuid →
   same.
+- `get`/`list` of a **`failed`** allocation → `failure(INFRASTRUCTURE_FAILURE,
+  data.current_status="failed")`, **not** a `success("…","failed")` that would trip the
+  envelope's category-iff-failure validator and raise; `get`/`list` of a `released`
+  allocation → `success(..., "released")` (released is not a failure status).
 - `release` of a `granted` allocation → `success` `status="released"`; exactly **two**
   audit rows (`granted->releasing`, `releasing->released`); the row ends `released`.
 - `release` of an `active` allocation → same `released` result via `active->releasing->released`.
