@@ -10,19 +10,23 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import sql
 
-from kdive.db.repositories import ALLOCATIONS, RESOURCES
+from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY
-from kdive.domain.models import Allocation, Resource, ResourceKind
+from kdive.domain.cost import Selector
+from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
+# A 1-vcpu/0-GB selector → rate 1.0 kcu/hr; small so a generous budget never denies.
+SMALL_SELECTOR = Selector(vcpus=1, memory_gb=0, cost_class="local")
 
 
 async def one(cur: psycopg.AsyncCursor[Any]) -> tuple[Any, ...]:
@@ -60,7 +64,11 @@ async def open_conns(url: str, n: int) -> AsyncIterator[list[psycopg.AsyncConnec
 
 
 async def seed_resource(conn: psycopg.AsyncConnection, *, cap: object) -> Resource:
-    """Insert a local-libvirt resource carrying ``cap`` as its concurrent-alloc cap."""
+    """Insert a local-libvirt resource carrying ``cap`` as its concurrent-alloc cap.
+
+    Advertises generous ``vcpus``/``memory_mb`` caps so the admission ≤-resource-caps
+    check (ADR-0007 §2) passes for the small selectors the suite uses.
+    """
     return await RESOURCES.insert(
         conn,
         Resource(
@@ -68,11 +76,44 @@ async def seed_resource(conn: psycopg.AsyncConnection, *, cap: object) -> Resour
             created_at=_DT,
             updated_at=_DT,
             kind=ResourceKind.LOCAL_LIBVIRT,
-            capabilities={CONCURRENT_ALLOCATION_CAP_KEY: cap},
+            capabilities={
+                CONCURRENT_ALLOCATION_CAP_KEY: cap,
+                "vcpus": 64,
+                "memory_mb": 65536,
+            },
             pool="local-libvirt",
             cost_class="local",
             status=ResourceStatus.AVAILABLE,
             host_uri="qemu:///system",
+        ),
+    )
+
+
+async def seed_budget(
+    conn: psycopg.AsyncConnection, *, project: str = "proj", limit: str = "1000000"
+) -> None:
+    """Seed a project budget with a generous limit (so spend is never the binding cap)."""
+    await BUDGETS.upsert(
+        conn,
+        Budget(project=project, limit_kcu=Decimal(limit), spent_kcu=Decimal(0), updated_at=_DT),
+    )
+
+
+async def seed_quota(
+    conn: psycopg.AsyncConnection,
+    *,
+    project: str = "proj",
+    allocs: int = 1_000_000,
+    systems: int = 1_000_000,
+) -> None:
+    """Seed a project quota with generous caps (so concurrency is never the binding cap)."""
+    await QUOTAS.upsert(
+        conn,
+        Quota(
+            project=project,
+            max_concurrent_allocations=allocs,
+            max_concurrent_systems=systems,
+            updated_at=_DT,
         ),
     )
 

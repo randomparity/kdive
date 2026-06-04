@@ -1,29 +1,54 @@
-"""Always-yes, capacity-checked allocation admission (ADR-0023).
+"""Budget/quota + host-cap allocation admission (ADR-0007 §4-6, ADR-0040).
 
-``admit`` books a host's :class:`~kdive.domain.models.Allocation` only if the host's
-non-terminal allocation count is under the per-host cap. The count and the insert run
-inside one transaction holding a per-**resource** advisory lock
-(:data:`~kdive.db.locks.LockScope.RESOURCE`), so concurrent requests for the same host
-serialize and the cap cannot be overshot. The cap lives on the resource's
-``capabilities`` jsonb under :data:`CONCURRENT_ALLOCATION_CAP_KEY`; a missing/invalid
-cap fails closed (``configuration_error``), never "unlimited".
+``admit`` is the M1 fail-closed admission gate. It composes M0's per-**host** capacity
+cap (ADR-0023) with the M1 per-**project** invariant — a concurrency quota and a spend
+budget — and reserves the lease estimate against budget in the same transaction it grants:
 
-This is core (not a provider plane) — the M0 ``AllocationPlane`` is the always-yes path
-implemented here; a provider-supplied lease arrives at M1.
+1. **Validate first** (no lock, no write): the selector size, the lease window, and the
+   selector ≤ the chosen Resource's advertised caps. Any failure is a
+   ``configuration_error`` so a negative/oversized request can never reach the ledger
+   (ADR-0007 §2 — the budget-minting guard).
+2. **Resolve idempotency** under the project lock: a replayed ``(principal,
+   idempotency_key)`` returns the originally granted allocation with no second grant,
+   reserve, or ``spent_kcu`` change (ADR-0040 §3).
+3. **Check then debit** under ``PROJECT`` → ``RESOURCE`` (the global lock order, ADR-0040
+   §1): ``max_concurrent_allocations`` (→ ``quota_exceeded``), then ``(limit_kcu −
+   spent_kcu) ≥ estimate`` read O(1) from the budget row (→ ``allocation_denied``), then
+   the M0 host cap (→ ``allocation_denied``). On success, **in one transaction**: insert
+   the ``granted`` Allocation (``lease_expiry``, ``requested_vcpus``/``requested_memory_gb``,
+   ``active_started_at`` null), write the ``reserved`` ledger row and bump ``spent_kcu``
+   (``accounting.reserve``), record the idempotency key, and write the audit row.
+
+Any failing check returns a denial with **no** durable write (ADR-0023's all-or-nothing
+rule). The ``cost_class`` is resolved admission-side from the chosen Resource (unlike
+``accounting.estimate``, which prices a hypothetical class with no host).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
+from kdive.domain import accounting
+from kdive.domain.cost import (
+    Selector,
+    cost,
+    quantize_kcu,
+    rate,
+    resolve_coeff,
+    validate_against_resource,
+    validate_size,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lease import resolve_window_hours
 from kdive.domain.models import Allocation, Resource
 from kdive.domain.state import AllocationState
 from kdive.security import audit
@@ -32,11 +57,17 @@ if TYPE_CHECKING:
     # Annotation-only (PEP 563): keep this domain module free of a runtime mcp import.
     from kdive.mcp.auth import RequestContext
 
+_SECONDS_PER_HOUR = 3600
+
 # The resource-capabilities key carrying the per-host concurrent-Allocation cap. Owned
 # here (the consumer); the discovery provider imports it to advertise the cap.
 CONCURRENT_ALLOCATION_CAP_KEY = "concurrent_allocation_cap"
 
-# States that occupy a capacity slot (terminal released/failed do not).
+# The idempotency-store ``kind`` discriminator for a request grant (ADR-0040 §3); the
+# renewal path (#67) reuses the store under its own kind.
+_REQUEST_KIND = "allocations.request"
+
+# States that occupy a capacity slot (terminal released/expired/failed do not).
 _NON_TERMINAL = (
     AllocationState.REQUESTED,
     AllocationState.GRANTED,
@@ -47,13 +78,188 @@ _NON_TERMINAL = (
 
 @dataclass(frozen=True)
 class AdmissionOutcome:
-    """The result of an admission attempt."""
+    """The result of an admission attempt.
+
+    On a grant, ``allocation`` is the inserted (or replayed) row and ``category`` is
+    ``None``. On a denial, ``allocation`` is ``None`` and ``category`` is the most
+    specific failure the handler maps to a typed response: ``configuration_error``
+    (validation), ``quota_exceeded`` (over the concurrency cap / no quota row), or
+    ``allocation_denied`` (over budget / no budget row / over the host cap). ``cap`` /
+    ``in_use`` carry the host-cap counters for the denial diagnostic.
+    """
 
     granted: bool
     allocation: Allocation | None
-    reason: str | None
-    cap: int
-    in_use: int
+    category: ErrorCategory | None = None
+    reason: str | None = None
+    cap: int | None = None
+    in_use: int | None = None
+
+
+async def admit(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    *,
+    resource: Resource,
+    project: str,
+    selector: Selector,
+    window: object | None = None,
+    idempotency_key: str | None = None,
+) -> AdmissionOutcome:
+    """Admit an allocation against the project budget/quota and the host cap.
+
+    Validates inputs, resolves idempotency, runs the check-then-debit under
+    ``PROJECT`` → ``RESOURCE``, and on success grants + reserves atomically. See the
+    module docstring for the full ordering and the denial categories.
+
+    Args:
+        conn: An async connection (the transaction is opened here).
+        ctx: The authenticated request context (attribution + idempotency principal).
+        resource: The chosen host Resource (its ``cost_class`` and caps are read here).
+        project: The owning project (the budget/quota key and the lock key).
+        selector: The requested size (``vcpus``/``memory_gb``); priced and persisted.
+        window: The requested lease window in hours (a number or decimal string), or
+            ``None`` for the configured default; validated ``> 0`` and clamped.
+        idempotency_key: An optional client retry key, scoped to ``ctx.principal``.
+
+    Returns:
+        An :class:`AdmissionOutcome`: a grant, or a typed denial with no durable write.
+    """
+    try:
+        window_hours = resolve_window_hours(window)
+        validate_size(selector)
+        validate_against_resource(selector, resource)
+        coeff = await resolve_coeff(conn, resource.cost_class)
+    except CategorizedError as exc:
+        return AdmissionOutcome(granted=False, allocation=None, category=exc.category)
+    estimate = quantize_kcu(
+        cost(rate(coeff, vcpus=selector.vcpus, memory_gb=selector.memory_gb), window_hours)
+    )
+    try:
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
+            return await _admit_under_project_lock(
+                conn,
+                ctx,
+                resource=resource,
+                project=project,
+                selector=selector,
+                window_hours=window_hours,
+                estimate=estimate,
+                idempotency_key=idempotency_key,
+            )
+    except CategorizedError as exc:
+        # The M0 host-cap resolve (decision 5) fails closed on an invalid cap; the
+        # transaction rolled back, so no durable write survived.
+        return AdmissionOutcome(granted=False, allocation=None, category=exc.category)
+
+
+async def _admit_under_project_lock(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    *,
+    resource: Resource,
+    project: str,
+    selector: Selector,
+    window_hours: Decimal,
+    estimate: Decimal,
+    idempotency_key: str | None,
+) -> AdmissionOutcome:
+    """Run idempotency + the check-then-debit holding the PROJECT lock (RESOURCE nested)."""
+    if idempotency_key is not None:
+        replay = await _resolve_replay(conn, ctx.principal, idempotency_key)
+        if replay is not None:
+            return AdmissionOutcome(granted=True, allocation=replay)
+    quota_ok = await _within_alloc_quota(conn, project)
+    if not quota_ok:
+        return AdmissionOutcome(
+            granted=False, allocation=None, category=ErrorCategory.QUOTA_EXCEEDED
+        )
+    budget_ok = await _within_budget(conn, project, estimate)
+    if not budget_ok:
+        return AdmissionOutcome(
+            granted=False, allocation=None, category=ErrorCategory.ALLOCATION_DENIED
+        )
+    async with advisory_xact_lock(conn, LockScope.RESOURCE, resource.id):
+        host = await _host_cap_check(conn, resource)
+        if host is not None:
+            return host
+        return await _grant(
+            conn,
+            ctx,
+            resource=resource,
+            project=project,
+            selector=selector,
+            window_hours=window_hours,
+            estimate=estimate,
+            idempotency_key=idempotency_key,
+        )
+
+
+async def _grant(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    *,
+    resource: Resource,
+    project: str,
+    selector: Selector,
+    window_hours: Decimal,
+    estimate: Decimal,
+    idempotency_key: str | None,
+) -> AdmissionOutcome:
+    """Insert the granted Allocation, reserve, record the key, and audit (one txn)."""
+    now = datetime.now(UTC)  # the DB sets created_at/updated_at; lease_expiry is explicit
+    lease_expiry = now + timedelta(seconds=int(window_hours * _SECONDS_PER_HOUR))
+    allocation = await ALLOCATIONS.insert(
+        conn,
+        Allocation(
+            id=uuid4(),
+            created_at=now,
+            updated_at=now,
+            principal=ctx.principal,
+            agent_session=ctx.agent_session,
+            project=project,
+            resource_id=resource.id,
+            state=AllocationState.GRANTED,
+            lease_expiry=lease_expiry,
+            requested_vcpus=selector.vcpus,
+            requested_memory_gb=selector.memory_gb,
+            capability_scope={},
+        ),
+    )
+    await accounting.reserve(conn, allocation, estimate)
+    if idempotency_key is not None:
+        await _record_key(conn, ctx.principal, idempotency_key, project, allocation.id)
+    await audit.record(
+        conn,
+        ctx,
+        tool="allocations.request",
+        object_kind="allocations",
+        object_id=allocation.id,
+        transition="->granted",
+        args={"resource_id": str(resource.id), "project": project},
+        project=project,
+    )
+    return AdmissionOutcome(granted=True, allocation=allocation)
+
+
+async def _host_cap_check(conn: AsyncConnection, resource: Resource) -> AdmissionOutcome | None:
+    """The M0 per-host capacity check; return a denial outcome, or ``None`` if under cap.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if the resource has no valid cap.
+    """
+    cap = _resolve_cap(resource)
+    in_use = await _count_non_terminal(conn, resource.id)
+    if in_use >= cap:
+        return AdmissionOutcome(
+            granted=False,
+            allocation=None,
+            category=ErrorCategory.ALLOCATION_DENIED,
+            reason="at_capacity",
+            cap=cap,
+            in_use=in_use,
+        )
+    return None
 
 
 def _resolve_cap(resource: Resource) -> int:
@@ -82,54 +288,77 @@ async def _count_non_terminal(conn: AsyncConnection, resource_id: object) -> int
     return int(row[0])
 
 
-async def admit(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    *,
-    resource: Resource,
-    project: str,
-) -> AdmissionOutcome:
-    """Admit an allocation against ``resource``'s per-host cap.
+async def _within_alloc_quota(conn: AsyncConnection, project: str) -> bool:
+    """Report whether the project is under ``max_concurrent_allocations``.
 
-    Counts non-terminal allocations and, under cap, inserts a ``granted`` Allocation and
-    one audit row — atomically, under a per-resource advisory lock. At cap, returns a
-    denial with no row written.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if the resource has no valid cap.
+    Fail-closed: a project with **no quota row** is over quota (ADR-0007 §4 — no silent
+    default). Counts the project's non-terminal allocations under the held PROJECT lock.
     """
-    cap = _resolve_cap(resource)
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RESOURCE, resource.id):
-        in_use = await _count_non_terminal(conn, resource.id)
-        if in_use >= cap:
-            return AdmissionOutcome(
-                granted=False, allocation=None, reason="at_capacity", cap=cap, in_use=in_use
-            )
-        now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
-        allocation = await ALLOCATIONS.insert(
-            conn,
-            Allocation(
-                id=uuid4(),
-                created_at=now,
-                updated_at=now,
-                principal=ctx.principal,
-                agent_session=ctx.agent_session,
-                project=project,
-                resource_id=resource.id,
-                state=AllocationState.GRANTED,
-                capability_scope={},
-            ),
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT max_concurrent_allocations FROM quotas WHERE project = %s", (project,)
         )
-        await audit.record(
-            conn,
-            ctx,
-            tool="allocations.request",
-            object_kind="allocations",
-            object_id=allocation.id,
-            transition="->granted",
-            args={"resource_id": str(resource.id), "project": project},
-            project=project,
+        row = await cur.fetchone()
+    if row is None:
+        return False
+    cap = int(row[0])
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT count(*) FROM allocations WHERE project = %s AND state = ANY(%s)",
+            (project, [s.value for s in _NON_TERMINAL]),
         )
-        return AdmissionOutcome(
-            granted=True, allocation=allocation, reason=None, cap=cap, in_use=in_use
+        count_row = await cur.fetchone()
+    if count_row is None:  # Invariant: count(*) always yields a row.
+        raise RuntimeError("count(*) returned no row")
+    return int(count_row[0]) < cap
+
+
+async def _within_budget(conn: AsyncConnection, project: str, estimate: Decimal) -> bool:
+    """Report whether ``(limit_kcu − spent_kcu) ≥ estimate``, read O(1) from the budget row.
+
+    Fail-closed: a project with **no budget row** is over budget (read as
+    ``limit_kcu = 0``, ADR-0007 §4). The O(1) ``spent_kcu`` running total is read under
+    the held PROJECT lock, never reconstructed from the append-only ledger.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", (project,))
+        row = await cur.fetchone()
+    if row is None:
+        return False
+    remaining = Decimal(row[0]) - Decimal(row[1])
+    return remaining >= estimate
+
+
+async def _resolve_replay(conn: AsyncConnection, principal: str, key: str) -> Allocation | None:
+    """Return the allocation a prior ``(principal, key)`` grant stored, or ``None``.
+
+    A stored key whose allocation row is somehow gone is a consistency violation
+    surfaced loudly rather than silently re-granting under a key already consumed.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT result FROM idempotency_keys WHERE principal = %s AND key = %s",
+            (principal, key),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    allocation_id = UUID(row[0]["allocation_id"])
+    allocation = await ALLOCATIONS.get(conn, allocation_id)
+    if allocation is None:
+        raise RuntimeError(
+            f"idempotency key ({principal}, {key}) references missing allocation {allocation_id}"
+        )
+    return allocation
+
+
+async def _record_key(
+    conn: AsyncConnection, principal: str, key: str, project: str, allocation_id: UUID
+) -> None:
+    """Record the ``(principal, key) → allocation_id`` idempotency row in the grant txn."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (key, principal, project, _REQUEST_KIND, Jsonb({"allocation_id": str(allocation_id)})),
         )
