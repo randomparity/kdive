@@ -648,3 +648,46 @@ class GdbMiSessionRegistry:
     def reap(self, session_id: str) -> GdbMiAttachment | None:
         with self._lock:
             return self._sessions.pop(session_id, None)
+
+
+@runtime_checkable
+class AttachSeam(Protocol):
+    """The lazy-attach port the Debug-plane handlers inject (ADR-0034 §4c).
+
+    Opens a gdb/MI engine over the session's RSP endpoint, loads the Run's debuginfo symbols,
+    and returns the live :class:`GdbMiAttachment`. The real default is ``live_vm``-gated (the
+    debuginfo resolver raises ``MISSING_DEPENDENCY`` outside the gate); tests inject a fake that
+    returns an attachment over a scripted :class:`MiController`.
+    """
+
+    def __call__(
+        self, *, host: str, port: int, run_id: str, transcript_path: Path
+    ) -> GdbMiAttachment: ...
+
+
+def _resolve_debuginfo_ref(run_id: str) -> str:  # pragma: no cover - live_vm
+    """Resolve the Run's debuginfo (vmlinux) object key, mirroring the Retrieve plane's lookup.
+
+    Raises ``MISSING_DEPENDENCY`` in M0 (no live host); the handler re-tags it
+    ``DEBUG_ATTACH_FAILURE`` so a Debug-plane op without a reachable host fails as an attach
+    failure rather than leaking the gate seam.
+    """
+    raise CategorizedError(
+        "resolving a Run's debuginfo object runs only under the live_vm gate",
+        category=ErrorCategory.MISSING_DEPENDENCY,
+        details={"run_id": run_id},
+    )
+
+
+def default_attach_seam(
+    *, host: str, port: int, run_id: str, transcript_path: Path
+) -> GdbMiAttachment:  # pragma: no cover - live_vm
+    """The real ``live_vm`` attach: resolve+materialize debuginfo, spawn gdb, connect RSP."""
+    import tempfile
+
+    debuginfo_ref = _resolve_debuginfo_ref(run_id)
+    del debuginfo_ref  # the live path fetches it to a temp file before attach
+    vmlinux_path = Path(tempfile.gettempdir()) / f"kdive-debuginfo-{run_id}"
+    return GdbMiEngine().attach(
+        host=host, port=port, vmlinux_path=vmlinux_path, transcript_path=transcript_path
+    )

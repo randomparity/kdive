@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt import debug_gdbmi
 from kdive.providers.local_libvirt.debug_gdbmi import (
     MAX_MEMORY_READ_BYTES,
     GdbMiAttachment,
@@ -415,3 +416,14 @@ def test_registry_require_raises_no_live_session() -> None:
         GdbMiSessionRegistry().require("missing")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["code"] == "no_live_session"
+
+
+# --- attach seam (live_vm default) ---------------------------------------------------------
+
+
+def test_debuginfo_resolver_default_raises_missing_dependency() -> None:
+    # The M0 default (no live host) raises MISSING_DEPENDENCY; the handler re-tags it
+    # DEBUG_ATTACH_FAILURE (asserted at the handler level).
+    with pytest.raises(CategorizedError) as exc:
+        debug_gdbmi._resolve_debuginfo_ref("run-1")
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
