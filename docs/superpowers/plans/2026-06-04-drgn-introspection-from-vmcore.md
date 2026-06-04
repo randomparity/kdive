@@ -92,7 +92,7 @@ The repo's gated-integration-test idiom is **not** a `live_vm`/`skipif` marker (
 
 **Files:** all of the above
 
-- [ ] **Step 1:** Full `uv run ruff check` · `uv run ruff format --check` · `uv run ty check src` · `uv run python -m pytest -q` (whole suite, not just new files) — confirm zero warnings and the `live_vm` test is `skipped`, not errored.
+- [ ] **Step 1:** Full `uv run ruff check` · `uv run ruff format --check` · `uv run ty check src` · `uv run python -m pytest -q` (whole suite, not just new files) — confirm zero warnings and that the `@pytest.mark.n` real-drgn test is **deselected** (filtered out of the default run, never collected/errored), no unknown-marker warning.
 - [ ] **Step 2:** Run the enforced `/challenge main..HEAD` loop (spec §6 of work-issue); address every defensible finding via `superpowers:receiving-code-review`; commit after each pass until `approve` or 5 iterations.
 - [ ] **Step 3:** Push `git push -u origin HEAD`; open the PR (`Closes #22`); watch `gh pr checks --watch` AND poll `gh pr view --json mergeable,mergeStateStatus` until green AND CLEAN/MERGEABLE.
 
@@ -112,7 +112,7 @@ The repo's gated-integration-test idiom is **not** a `live_vm`/`skipif` marker (
 | null `debuginfo_ref` / no build step / no core / bad uuid | tool | `configuration_error` |
 | cross-project `run_id` | tool | `configuration_error` (not-found-shaped) |
 | `register` adds the tool | tool/app | `introspect.from_vmcore` in `list_tools()` |
-| real drgn path | gated test | skipped in CI |
+| real drgn path | `@pytest.mark.n` test | deselected in CI (not collected) |
 
 ## Rollback / cleanup
 
