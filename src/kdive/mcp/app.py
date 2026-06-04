@@ -18,10 +18,14 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
-from kdive.mcp.tools import jobs
+from kdive.mcp.tools import allocations, jobs, resources
 
 # Tool seam: each plane exposes register(app, pool); build_app calls them all.
-_PLANE_REGISTRARS: tuple[Callable[[FastMCP, AsyncConnectionPool], None], ...] = (jobs.register,)
+_PLANE_REGISTRARS: tuple[Callable[[FastMCP, AsyncConnectionPool], None], ...] = (
+    jobs.register,
+    resources.register,
+    allocations.register,
+)
 
 # Handler seam: each plane exposes register_handlers(registry); the worker calls them
 # all. jobs.* register no JobHandler, so M0 has no entries — the seam exists for the

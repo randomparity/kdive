@@ -20,10 +20,11 @@ from psycopg.pq import TransactionStatus
 
 
 class LockScope(StrEnum):
-    """The advisory-lock scopes M0 serializes on (ADR-0016)."""
+    """The advisory-lock scopes M0 serializes on (ADR-0016, ADR-0023)."""
 
     ALLOCATION = "allocation"
     SYSTEM = "system"
+    RESOURCE = "resource"
 
 
 def _lock_key(scope: LockScope, key: UUID) -> int:
