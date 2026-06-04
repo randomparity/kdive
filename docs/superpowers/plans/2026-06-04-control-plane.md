@@ -79,20 +79,16 @@ git log -1 --oneline
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/profiles/test_provisioning.py` (reuse the module's existing valid-profile helper; if none, build the dict inline matching `_PROFILE` from `tests/mcp/test_systems_tools.py`):
+Append to `tests/profiles/test_provisioning.py`. The module already defines a `_valid()` helper (`return copy.deepcopy(_VALID)`) and imports `pytest` and `ProvisioningProfile` — reuse them; do **not** define a new helper:
 
 ```python
 def test_destructive_ops_defaults_empty() -> None:
-    from kdive.profiles.provisioning import ProvisioningProfile
-
-    profile = ProvisioningProfile.parse(_valid_profile())
+    profile = ProvisioningProfile.parse(_valid())
     assert profile.provider.local_libvirt.destructive_ops == []
 
 
 def test_destructive_ops_accepts_force_crash() -> None:
-    from kdive.profiles.provisioning import ProvisioningProfile
-
-    data = _valid_profile()
+    data = _valid()
     data["provider"]["local-libvirt"]["destructive_ops"] = ["force_crash"]
     profile = ProvisioningProfile.parse(data)
     assert profile.provider.local_libvirt.destructive_ops == ["force_crash"]
@@ -100,15 +96,12 @@ def test_destructive_ops_accepts_force_crash() -> None:
 
 def test_destructive_ops_rejects_blank_entry() -> None:
     from kdive.domain.errors import CategorizedError
-    from kdive.profiles.provisioning import ProvisioningProfile
 
-    data = _valid_profile()
+    data = _valid()
     data["provider"]["local-libvirt"]["destructive_ops"] = [" "]
     with pytest.raises(CategorizedError):
         ProvisioningProfile.parse(data)
 ```
-
-If `_valid_profile()` and `pytest` are not already imported/defined in the test module, add a module-level `_valid_profile()` returning a deepcopy of a known-good profile dict and `import pytest`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1054,14 +1047,18 @@ git log -1 --oneline
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/mcp/test_control_tools.py` (helpers seed a Run + DebugSession so the join detaches it):
+Append to `tests/mcp/test_control_tools.py` (helpers seed a Run + DebugSession so the join detaches it). **First** move these imports up into the module's existing top-of-file import block (ruff `E402` forbids imports after code), merging into the existing `from kdive.domain.models import …` / `from kdive.domain.state import …` / `from kdive.db.repositories import …` lines rather than adding mid-file:
 
 ```python
-from kdive.domain.models import DebugSession, Investigation, Run
-from kdive.domain.state import DebugSessionState, InvestigationState, RunState
-from kdive.db.repositories import DEBUG_SESSIONS, INVESTIGATIONS, RUNS
+# (merge into the existing top-of-file imports)
+from kdive.db.repositories import DEBUG_SESSIONS, INVESTIGATIONS, RUNS  # + ALLOCATIONS, SYSTEMS
+from kdive.domain.models import DebugSession, Investigation, Run  # + Allocation, Job, JobKind, System
+from kdive.domain.state import DebugSessionState, InvestigationState, RunState  # + AllocationState, SystemState
+```
 
+Then append the helpers and tests:
 
+```python
 async def _seed_live_session(pool: AsyncConnectionPool, sys_id: str) -> str:
     async with pool.connection() as conn:
         inv = await INVESTIGATIONS.insert(
@@ -1279,7 +1276,11 @@ def test_register_handlers_binds_power_and_force_crash() -> None:
     assert registry.get(JobKind.FORCE_CRASH) is not None
 ```
 
-In `tests/mcp/test_app.py`, find the test asserting registered tool names (mirror its existing pattern) and add `"control.power"` and `"control.force_crash"` to the expected set. If the test enumerates `await app.list_tools()`, add both names to its expected list.
+In `tests/mcp/test_app.py`, the `test_build_app_registers_jobs_tools` test enumerates `names = {t.name for t in await app.list_tools()}` and makes subset assertions like `assert {"systems.provision", …} <= names`. Add one more assertion line in that test (do **not** edit an existing set):
+
+```python
+        assert {"control.power", "control.force_crash"} <= names
+```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
