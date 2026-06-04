@@ -229,12 +229,12 @@ handler's `data["report"]`.
 | captured core build-id ≠ the Run's recorded build-id (provenance) | `configuration_error` |
 | drgn cannot **open** the core or **load** the vmlinux (the attach boundary) | `debug_attach_failure` |
 | the drgn seams are not configured on the introspector (default real seams) | `missing_dependency` |
+| caller lacks project membership | authz raises (no category, ADR-0020) |
 
 A helper raising mid-decode (including `modules`' all-failed case) is **not** a whole-call
 failure — it degrades to a per-helper error marker / `all_failed` flag and the call still
 succeeds (a partial report is more useful than a hard failure, and an all-failed module
 decode is version skew, not an attach failure).
-| caller lacks project membership | authz raises (no category, ADR-0020) |
 
 ## Testing
 
