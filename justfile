@@ -45,6 +45,16 @@ test:
 test-live:
     uv run python -m pytest -m live_vm -q
 
+# Build wheel + sdist with build info baked in, then remove the stamp so it never lingers
+# in the editable checkout (a leftover would shadow live-git version reporting). Pass
+# release=true only when building from a release tag.
+build release="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'rm -f src/kdive/_buildinfo.py' EXIT
+    ./scripts/stamp-buildinfo.sh "{{release}}"
+    uv build
+
 # Start the operator backing services (Postgres + MinIO + mock OIDC) for a live run.
 compose-up:
     docker compose up -d
