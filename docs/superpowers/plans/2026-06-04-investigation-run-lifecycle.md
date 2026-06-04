@@ -6,7 +6,7 @@
 
 **Architecture:** Two new tool modules of thin `@app.tool` wrappers over plain async handlers (pool + ctx injected, tested directly), mirroring `allocations.py` / `systems.py`. State changes run under transaction-scoped advisory locks (a new `LockScope.INVESTIGATION`) with `audit.record` in the same transaction. The durable models, state machines, repositories, and Postgres tables already exist (shipped by #7); this issue adds only the tool layer plus one `LockScope` member and the app wiring.
 
-**Tech Stack:** Python 3.13, FastMCP, psycopg3 (async) + `psycopg_pool`, Pydantic v2, pytest against a disposable Postgres (`migrated_url` fixture, `asyncio.run(_run())` idiom). Guardrails: `uv run ruff check` / `ruff format`, `uv run ty check src`, `uv run python -m pytest -q`.
+**Tech Stack:** Python 3.13, FastMCP, psycopg3 (async) + `psycopg_pool`, Pydantic v2, pytest against a disposable Postgres (`migrated_url` fixture, `asyncio.run(_run())` idiom). Guardrails: `uv run ruff check` / `ruff format`, `uv run ty check`, `uv run python -m pytest -q`.
 
 **Design source:** [`docs/superpowers/specs/2026-06-04-investigation-run-lifecycle-design.md`](../specs/2026-06-04-investigation-run-lifecycle-design.md) · [`docs/adr/0026-investigation-run-lifecycle.md`](../../adr/0026-investigation-run-lifecycle.md)
 
@@ -416,14 +416,42 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
 > them with their first use. Prefer the latter: import `IllegalTransition`/`dict_row`/`Jsonb`/
 > `AsyncConnection` in Task 3's first step.
 
-To keep this commit's guardrails green, **remove** the four not-yet-used imports for now:
-delete `from psycopg import AsyncConnection`, `from psycopg.rows import dict_row`,
-`from psycopg.types.json import Jsonb`, and `IllegalTransition` from the `state` import
-(leave `InvestigationState`). They return in Task 3.
+To keep this commit's guardrails green, **remove every import not yet used by `open`+`get`**
+(`ruff` selects `F`, so any unused import fails the commit). For the Task 2 commit, delete:
+- `from psycopg import AsyncConnection`
+- `from psycopg.rows import dict_row`
+- `from psycopg.types.json import Jsonb`
+- `from kdive.db.locks import LockScope, advisory_xact_lock` (the **whole** line — neither
+  is used until Task 3's `_close_locked`)
+- `IllegalTransition` from the `kdive.domain.state` import (leave `InvestigationState`)
+
+All of these return in Tasks 3-4. The exact import block that compiles clean for the Task 2
+commit is therefore:
+
+```python
+import logging
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+from fastmcp import FastMCP
+from psycopg_pool import AsyncConnectionPool
+from pydantic import ValidationError
+
+from kdive.db.repositories import INVESTIGATIONS
+from kdive.domain.errors import ErrorCategory
+from kdive.domain.models import ExternalRef, Investigation
+from kdive.domain.state import InvestigationState
+from kdive.log import bind_context
+from kdive.mcp.auth import RequestContext, current_context, require_project
+from kdive.mcp.responses import ToolResponse
+from kdive.security import audit
+from kdive.security.rbac import Role, require_role
+```
 
 - [ ] **Step 4: Run tests + guardrails to verify pass**
 
-Run: `uv run python -m pytest tests/mcp/test_investigations_tools.py -q && uv run ruff check src/kdive/mcp/tools/investigations.py && uv run ty check src`
+Run: `uv run python -m pytest tests/mcp/test_investigations_tools.py -q && uv run ruff check src/kdive/mcp/tools/investigations.py && uv run ty check`
 Expected: PASS; zero ruff/ty findings.
 
 - [ ] **Step 5: Commit**
@@ -655,7 +683,7 @@ Add the tool binding inside `register`:
 
 - [ ] **Step 4: Run tests + guardrails**
 
-Run: `uv run python -m pytest tests/mcp/test_investigations_tools.py -q && uv run ruff check src/kdive/mcp/tools/investigations.py && uv run ty check src`
+Run: `uv run python -m pytest tests/mcp/test_investigations_tools.py -q && uv run ruff check src/kdive/mcp/tools/investigations.py && uv run ty check`
 Expected: PASS; zero findings.
 
 - [ ] **Step 5: Commit**
@@ -937,7 +965,7 @@ Add the two tool bindings inside `register`:
 
 - [ ] **Step 4: Run tests + guardrails**
 
-Run: `uv run python -m pytest tests/mcp/test_investigations_tools.py -q && uv run ruff check src/kdive/mcp/tools/investigations.py && uv run ty check src`
+Run: `uv run python -m pytest tests/mcp/test_investigations_tools.py -q && uv run ruff check src/kdive/mcp/tools/investigations.py && uv run ty check`
 Expected: PASS; zero findings.
 
 - [ ] **Step 5: Commit**
@@ -1295,21 +1323,44 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await get_run(pool, current_context(), run_id)
 ```
 
-> Note: `create_run` (Task 6) uses `AsyncConnection`, `dict_row`, `advisory_xact_lock`,
-> `INVESTIGATIONS`, `ALLOCATIONS`, `SYSTEMS`, `Investigation`, `datetime`, `uuid4`, the
-> three frozensets, `_stale_handle`, and `require_role`/`audit`. To keep guardrails green at
-> **this** commit, omit the imports/symbols not yet used by `get_run` and add them in Task 6.
-> Specifically, for this commit reduce the imports to what `get_run`/`_envelope_for_run` use:
-> drop `AsyncConnection`, `dict_row`, `advisory_xact_lock`, `LockScope`, `datetime`, `uuid4`,
-> `ALLOCATIONS`, `INVESTIGATIONS`, `SYSTEMS`, `Investigation`, `audit`, `require_role`, `Role`,
-> `_stale_handle`, and the three `_*_HOSTABLE`/`_SYSTEM_GONE`/`_INVESTIGATION_*` frozensets —
-> they all return in Task 6. Keep `RUNS`, `RunState`, `ErrorCategory`, `Run`, `bind_context`,
-> `current_context`, `RequestContext`, `ToolResponse`, `FastMCP`, `AsyncConnectionPool`, `UUID`,
-> `logging`, `Any` (Any is unused here too — drop it until Task 6).
+> **Keep-vs-defer for the Task 5 commit (`ruff` selects `F`, so any unused *import* fails;
+> module-level constants/helpers defined ahead of use are NOT flagged).** Keep the four
+> frozensets (`_RUN_HOSTABLE`, `_SYSTEM_GONE`, `_ALLOC_HOSTABLE`, `_INVESTIGATION_OPEN_FOR_RUN`)
+> and `_stale_handle` defined as written — they are harmless ahead of use and, crucially, they
+> keep the `SystemState`/`AllocationState`/`InvestigationState`/`ErrorCategory` imports *used*,
+> so those imports stay. **Drop** only the imports nothing references until `create_run`
+> (Task 6): `from psycopg import AsyncConnection`, `from psycopg.rows import dict_row`,
+> `from kdive.db.locks import LockScope, advisory_xact_lock`, `datetime, UTC` (the
+> `datetime` import line), `uuid4` (leave `UUID`), `from kdive.db.repositories import` — narrow
+> to **`RUNS`** only (drop `ALLOCATIONS, INVESTIGATIONS, SYSTEMS`), `Investigation` from the
+> models import (leave `Run`), `audit`, `require_role` + `Role`, and `Any` from `typing`
+> (unused until `create_run`'s `dict[str, Any]`). They all return in Task 6 Step 3. The exact
+> import block that compiles clean for the Task 5 commit is:
+>
+> ```python
+> import logging
+> from uuid import UUID
+>
+> from fastmcp import FastMCP
+> from psycopg_pool import AsyncConnectionPool
+>
+> from kdive.db.repositories import RUNS
+> from kdive.domain.errors import ErrorCategory
+> from kdive.domain.models import Run
+> from kdive.domain.state import (
+>     AllocationState,
+>     InvestigationState,
+>     RunState,
+>     SystemState,
+> )
+> from kdive.log import bind_context
+> from kdive.mcp.auth import RequestContext, current_context
+> from kdive.mcp.responses import ToolResponse
+> ```
 
 - [ ] **Step 4: Run tests + guardrails**
 
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q && uv run ruff check src/kdive/mcp/tools/runs.py && uv run ty check src`
+Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q && uv run ruff check src/kdive/mcp/tools/runs.py && uv run ty check`
 Expected: PASS; zero findings.
 
 - [ ] **Step 5: Commit**
@@ -1468,8 +1519,13 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool)
             sys_id = await _seed_system(pool)
+            # Bind the deliberately-wrong value to an Any-typed local so `ty` (whose
+            # whole-tree check covers tests) does not flag the str->dict argument. Do NOT
+            # use a mypy-style `# type: ignore[arg-type]` — ty's directive is
+            # `# ty: ignore[invalid-argument-type]`, and avoiding the error entirely is cleaner.
+            bad: Any = "nope"
             resp = await runs_tools.create_run(
-                pool, _ctx(), investigation_id=inv_id, system_id=sys_id, build_profile="nope"  # type: ignore[arg-type]
+                pool, _ctx(), investigation_id=inv_id, system_id=sys_id, build_profile=bad
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -1556,10 +1612,14 @@ Expected: FAIL with `AttributeError: create_run`.
 
 - [ ] **Step 3: Implement `create_run` (restore the Task-5-deferred imports)**
 
-In `src/kdive/mcp/tools/runs.py`, restore the imports/symbols deferred in Task 5
-(`AsyncConnection`, `dict_row`, `advisory_xact_lock`, `LockScope`, `datetime`/`UTC`, `uuid4`,
-`Any`, `ALLOCATIONS`, `INVESTIGATIONS`, `SYSTEMS`, `Investigation`, `audit`, `require_role`,
-`Role`, and the four module-level frozensets/`_stale_handle`). Add after `get_run`:
+In `src/kdive/mcp/tools/runs.py`, restore **only the imports** deferred in Task 5 — add back
+`from psycopg import AsyncConnection`, `from psycopg.rows import dict_row`,
+`from kdive.db.locks import LockScope, advisory_xact_lock`, `from datetime import UTC, datetime`,
+`uuid4` (alongside `UUID`), `Any` (in `from typing import Any`), `ALLOCATIONS, INVESTIGATIONS,
+SYSTEMS` (widen the `kdive.db.repositories` import), `Investigation` (alongside `Run`),
+`from kdive.security import audit`, and `require_role`/`Role` (`from kdive.security.rbac import
+Role, require_role`). The four frozensets and `_stale_handle` already exist from Task 5 — do
+**not** redefine them. Add after `get_run`:
 
 ```python
 async def _investigation_for_update(conn: AsyncConnection, uid: UUID) -> Investigation | None:
@@ -1703,7 +1763,7 @@ Add the `runs.create` binding inside `register`:
 
 - [ ] **Step 4: Run tests + guardrails**
 
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q && uv run ruff check src/kdive/mcp/tools/runs.py && uv run ty check src`
+Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q && uv run ruff check src/kdive/mcp/tools/runs.py && uv run ty check`
 Expected: PASS (all runs tests incl. the parametrized + concurrency cases); zero findings.
 
 - [ ] **Step 5: Commit**
@@ -1762,7 +1822,7 @@ _PLANE_REGISTRARS: tuple[Callable[[FastMCP, AsyncConnectionPool], None], ...] = 
 
 - [ ] **Step 4: Run test + guardrails**
 
-Run: `uv run python -m pytest tests/mcp/test_app.py -q && uv run ruff check src && uv run ty check src`
+Run: `uv run python -m pytest tests/mcp/test_app.py -q && uv run ruff check src && uv run ty check`
 Expected: PASS; zero findings.
 
 - [ ] **Step 5: Commit**
@@ -1778,7 +1838,7 @@ Run:
 ```bash
 uv run ruff format --check src tests
 uv run ruff check src tests
-uv run ty check src
+uv run ty check
 uv run python -m pytest -q
 ```
 Expected: all green, zero warnings. If `ruff format --check` reports a diff, run `uv run ruff format src tests`, re-run the suite, and amend the relevant commit. The env-gated libvirt/gdb/drgn integration tests remain skipped (expected).
