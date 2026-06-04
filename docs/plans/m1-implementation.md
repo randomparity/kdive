@@ -88,7 +88,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Goal:** The M1 data layer: new tables, widened state machines, the project lock — no behavior.
 - **Files:** Create `src/kdive/db/schema/0002_*.sql`; extend `db/locks.py`, `db/repositories.py`, `domain/models.py`, `domain/state.py`; tests under `tests/db/`, `tests/domain/`.
 - **Scope:**
-  - `0002_*.sql`: `cost_class_coefficients` (seed `('local', 1.0)`), `budgets`, `quotas`, `ledger` (signed `kcu_delta`, `event_type CHECK IN ('reserved','reconciled')`, indexes on `project`/`allocation_id`); `ALTER allocations ADD requested_vcpus int, requested_memory_gb int`; widen `allocations` CHECK with `expired` and `systems` CHECK with `reprovisioning`.
+  - `0002_*.sql`: `cost_class_coefficients` (seed `('local', 1.0)`), `budgets`, `quotas`, `ledger` (signed `kcu_delta`, `event_type CHECK IN ('reserved','reconciled')`, indexes on `project`/`allocation_id`); `ALTER allocations ADD requested_vcpus int, requested_memory_gb int, active_started_at timestamptz, active_ended_at timestamptz` (the `active_hours` billing interval — not `updated_at`); widen `allocations` CHECK with `expired` and `systems` CHECK with `reprovisioning`.
   - `domain/models.py`: `LedgerEntry`, `Budget`, `Quota`, `CostClassCoefficient` Pydantic models.
   - `domain/state.py`: edges `AllocationState.GRANTED/ACTIVE → EXPIRED`; `SystemState.READY → REPROVISIONING`, `REPROVISIONING → READY`, `REPROVISIONING → FAILED`; matching guard-table tests.
   - `db/locks.py`: `LockScope.PROJECT`; `db/repositories.py`: typed repos for the four new tables.
@@ -110,8 +110,8 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Goal:** Append-only ledger writers, the release-time reconciliation, and the usage rollup.
 - **Files:** Create `src/kdive/domain/accounting.py`; extend `mcp/tools/accounting.py` (usage), `mcp/tools/allocations.py` (wire reconcile into `release`); tests.
 - **Scope:**
-  - `accounting.py`: `reserve(conn, allocation, estimate)` writes a `reserved` row; `reconcile(conn, allocation)` computes `actual = rate × active_hours` and writes `kcu_delta = actual − Σ reserved`; `usage(conn, project)` / `usage_for_investigation(conn, id)` return `{spent_kcu, budget_remaining, by_cost_class}` where `budget_remaining = limit_kcu − Σ kcu_delta`.
-  - Wire `reconcile` into `allocations.release` (the `releasing → released` path) so an explicit release credits the unused reservation.
+  - `accounting.py`: `reserve(conn, allocation, estimate)` writes a `reserved` row; `reconcile(conn, allocation)` computes `actual = rate × active_hours` (`active_hours = active_ended_at − active_started_at`, read from the allocation row, never from `updated_at`) and writes `kcu_delta = actual − Σ reserved`; `usage(conn, project)` / `usage_for_investigation(conn, id)` return `{spent_kcu, budget_remaining, by_cost_class}` where `budget_remaining = limit_kcu − Σ kcu_delta`.
+  - Wire `reconcile` into `allocations.release`: stamp `active_ended_at` on the `active → releasing` transition, then reconcile so an explicit release credits the unused reservation (release from `granted` leaves `active_started_at` null → `active_hours = 0` → full credit).
   - `accounting.usage(project | investigation_id)` tool; `viewer` role.
 - **Acceptance:** a `reserve` then `reconcile` for a known active duration net to `rate × active_hours`; `usage` rolls up signed deltas and computes `budget_remaining`; release from `granted` (never active) reconciles to a full credit; investigation rollup sums across two allocations.
 
@@ -121,9 +121,10 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Goal:** Fail-closed admission: per-project quota + budget check-then-debit, composed with M0's host cap, plus the admin set tools and the lease window at grant.
 - **Files:** Extend `src/kdive/domain/allocation_admission.py`, `mcp/tools/allocations.py` (request selector/window), `mcp/tools/systems.py` (system-quota check), `mcp/tools/accounting.py` (set_budget/set_quota); tests.
 - **Scope:**
-  - Extend `admit()`: acquire `LockScope.PROJECT(project)` **then** `LockScope.RESOURCE` (fixed order); under the project lock check `max_concurrent_allocations` (→ `quota_exceeded`) and `budget_remaining ≥ estimate` (→ `allocation_denied`); under the resource lock the unchanged M0 host-cap check; in one transaction insert `granted` Allocation (with `lease_expiry = now()+window`, `requested_vcpus/memory_gb`), the `reserved` ledger row (call ③'s `reserve`), and the audit row.
+  - Extend `admit()`: acquire `LockScope.PROJECT(project)` **then** `LockScope.RESOURCE` (the global order `PROJECT < RESOURCE < ALLOCATION < SYSTEM`); under the project lock check `max_concurrent_allocations` (→ `quota_exceeded`) and `budget_remaining ≥ estimate` (→ `allocation_denied`); under the resource lock the unchanged M0 host-cap check; in one transaction insert `granted` Allocation (with `lease_expiry = now()+window`, `requested_vcpus/memory_gb`; `active_started_at` null until provisioned), the `reserved` ledger row (call ③'s `reserve`), and the audit row.
+  - Stamp `active_started_at` on the `granted → active` transition (the System reaches `ready` in `systems.provision`) so the billing interval opens when work actually starts.
   - `systems.provision`: under `LockScope.PROJECT`, check `max_concurrent_systems` (non-terminal System count) → `quota_exceeded`.
-  - `accounting.set_budget(project, limit_kcu)` / `set_quota(project, max_allocations, max_systems)` — `admin` role; missing project row falls back to a conservative configured default at read time.
+  - `accounting.set_budget(project, limit_kcu)` / `set_quota(project, max_allocations, max_systems)` — `admin` role. **No silent default:** a project with no budget row is denied (`allocation_denied`, `limit_kcu = 0`) and no quota row is denied (`quota_exceeded`) — allocation requires both rows to exist. A deployment seeds them explicitly.
 - **Acceptance:** over-budget request → `allocation_denied`, **no** allocation/ledger/audit row; at alloc cap → `quota_exceeded`; at system cap `systems.provision` → `quota_exceeded`; a granted request writes exactly one `reserved` row and one audit row atomically; two concurrent same-project requests serialize and cannot overshoot budget or quota (two-connection test); `set_budget`/`set_quota` refused for `operator`.
 
 ### Issue ⑤ — Lease window, renew, reconciler →expired sweep
@@ -133,8 +134,8 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Files:** Extend `mcp/tools/allocations.py` (renew), `reconciler/loop.py` (expiry sweep); `__main__.py` unchanged; tests.
 - **Scope:**
   - `allocations.renew(allocation_id, extend)`: under `LockScope.PROJECT`, clamp to `KDIVE_LEASE_MAX` from now, re-check budget for the **added** window, write an incremental `reserved` delta, extend `lease_expiry`; over budget → `allocation_denied` (window unchanged); terminal allocation → `stale_handle`; `operator` role.
-  - Reconciler `→expired` pass: select non-terminal allocations with `lease_expiry < now()`; transition `→ expired` (audited); hand the System to the **existing** orphaned-System teardown; on teardown, call ③'s `reconcile` for the ledger credit. Idempotent; one structured-log line per reclaim.
-- **Acceptance:** `renew` extends the window and writes an incremental `reserved`; renew over budget denies and leaves the window unchanged; renew on a terminal allocation → `stale_handle`; a seeded expired allocation is moved to `expired` on one reconciler pass, its System torn down, its Run `failed(lease_expired)`, and a `reconciled` credit written; the sweep is a no-op on a second pass.
+  - Reconciler `→expired` pass: select non-terminal allocations with `lease_expiry < now()`; transition `→ expired` (audited), stamping `active_ended_at`; hand the System to the **existing** orphaned-System teardown, which honors the M0 in-flight-job grace window (drain → force-kill) so the `→expired` flip never bypasses the drain; on teardown, call ③'s `reconcile` for the ledger credit. Idempotent; one structured-log line per reclaim. **Scope:** M1 gates the *idle* expiry path (no in-flight job) + grace-window drain of a cleanly completing job; the expiry-mid-job race is M1.5.
+- **Acceptance:** `renew` extends the window and writes an incremental `reserved`; renew over budget denies and leaves the window unchanged; renew on a terminal allocation → `stale_handle`; a seeded **idle** expired allocation is moved to `expired` on one reconciler pass, its System torn down, its Run `failed(lease_expired)`, `active_ended_at` stamped, and a `reconciled` credit written; the sweep is a no-op on a second pass.
 
 ## Phase B — RBAC hardening (forks off ④)
 
@@ -179,7 +180,8 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Depends on:** ①–⑧
 - **Goal:** Prove the eight M1 exit criteria end-to-end.
 - **Files:** Create `tests/integration/test_m1_allocation_accounting.py` (marker `live_vm` for the reprovision/SSH/expiry-on-real-host portions; the budget/quota/role assertions run on the service harness without a host); extend the `live_vm` preflight with SSH reachability.
-- **Scope:** Drive: budget denial + within-budget grant with `reserved` row; alloc-quota and system-quota denials; grant→active→release with ledger reconciliation vs estimate; lease expiry → `expired` → teardown → Run `failed(lease_expired)` → credit; renew (success + over-budget denial); role separation (operator refused admin ops, reprovision allowed for operator); reprovision-in-place cycle; live `introspect.run` over SSH with redaction.
+- **Setup:** seed the test project's `budgets` + `quotas` rows (mandatory now that `0002` enforces explicit limits — no silent default); this also patches the M0 walking-skeleton harness, whose project previously needed no budget.
+- **Scope:** Drive: budget denial + within-budget grant with `reserved` row; alloc-quota and system-quota denials; grant→active→release with ledger reconciliation (assert `reserved`+`reconciled` sum to `rate × active_hours` = the **actual**, and that estimate=`rate × window` is asserted separately); idle lease expiry → `expired` → teardown → Run `failed(lease_expired)` → credit; renew (success + over-budget denial); role separation (operator refused admin ops, reprovision allowed for operator); reprovision-in-place cycle; live `introspect.run` over SSH with redaction.
 - **Acceptance:** the spec's eight exit criteria each have an assertion.
 
 ---

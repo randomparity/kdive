@@ -72,12 +72,15 @@ non-terminal (`granted`/`active`) allocation can renew; renewing a terminal one 
 A new reconciler pass selects non-terminal allocations with `lease_expiry < now()`
 and, per allocation:
 
-1. transitions the allocation `→ expired` (audited);
+1. transitions the allocation `→ expired` (audited), stamping `active_ended_at`
+   (ADR-0007) so the ledger reconciliation has its billing interval;
 2. hands its System (if any) to the **existing** M0 orphaned-System teardown — a
    System never outlives its Allocation (ADR-0021), and an `expired` Allocation is now
    one of the "not active" states that orphans a System;
-3. the existing lease-expiry compensation drains/force-kills the System's in-flight
-   job and marks the owning Run `failed(lease_expired)`;
+3. the existing lease-expiry compensation drains the System's in-flight job **within
+   the same M0 grace window** and force-kills only after — so transitioning the
+   allocation to `expired` first does **not** bypass the drain; the owning Run becomes
+   `failed(lease_expired)`;
 4. the release reconciliation writes the `reconciled` ledger delta (ADR-0007) for the
    allocation's actual active time, crediting back the unused reservation.
 
@@ -85,6 +88,14 @@ The sweep is idempotent (a second pass sees an `expired` allocation and skips it
 emits a structured-log line per reclaimed allocation. The grace window and force-kill
 are unchanged from M0 — M1 only adds the trigger and the `expired` transition, reusing
 the teardown machinery already proven by M0 exit criterion 5.
+
+**M1 vs M1.5 scope.** M1 makes the *idle* expiry path a falsifiable gate (an allocation
+past its window with **no** in-flight job, plus the grace-window drain of a cleanly
+completing job). The adversarial lease-expiry-**mid-job** failures — worker death
+*during* the drain, a `provision` that half-applies as the lease lapses — are
+deliberately the M1.5 fault-injection target, not an M1 gate: M1 wires the trigger and
+the clean path, M1.5 attacks the race. This keeps M1's exit criterion honest about what
+it proves.
 
 ## Consequences
 

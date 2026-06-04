@@ -75,14 +75,24 @@ Append-only, signed deltas; **reserve-at-grant, reconcile-at-release**:
 
 - **`reserved`** at grant: `kcu_delta = +estimate = rate × lease_window_hours`,
   written **inside the admission transaction** so the reservation counts against
-  budget immediately (fail-closed under concurrency).
-- **`reconciled`** at release/expiry: `kcu_delta = actual − estimate`, where
-  `actual = rate × active_hours` (`active_hours` = time spent `active`; 0 if released
-  from `granted` → full `−estimate` credit). A `renew` writes an incremental
-  `reserved` delta for the added window.
-- **`budget_remaining = limit_kcu − Σ kcu_delta`**; reserved+reconciled net to actual,
-  so the running sum is committed-plus-actual exposure and the budget cannot be
-  overcommitted.
+  budget immediately (fail-closed under concurrency). A `renew` writes an **additional**
+  `reserved` delta for the added window, so one allocation may carry several `reserved`
+  rows.
+- **`reconciled`** at release/expiry: `kcu_delta = actual − Σ reserved`, summed over
+  **all** of the allocation's `reserved` rows (initial grant + every renewal), where
+  `actual = rate × active_hours`. Reconciling against `Σ reserved` — not the initial
+  estimate — is what keeps the books balanced once an allocation has been renewed
+  (`actual − estimate` would leave each renewal's reservation permanently debited).
+  `active_hours = 0` if released from `granted` without ever going `active` → a full
+  `−Σ reserved` credit.
+- **Active-interval source:** the billing interval is recorded explicitly on the
+  allocation. `active_started_at` is stamped on `granted → active` (the first System
+  reaches `ready`); `active_ended_at` on `active → releasing` / `active → expired`.
+  `active_hours = active_ended_at − active_started_at`, computed from these columns —
+  **never** reconstructed from `updated_at`, which every transition overwrites.
+- **`budget_remaining = limit_kcu − Σ kcu_delta`** over the project's ledger rows;
+  `reserved` + `reconciled` net to `actual`, so the running sum is committed-plus-actual
+  exposure and the budget cannot be overcommitted.
 
 ## Admission control (M1)
 
@@ -107,15 +117,31 @@ Any failing check returns a typed failure with **no** allocation/ledger/audit ro
 (ADR-0023's denial rule). `quota_exceeded` = over-count; `allocation_denied` =
 over-budget or over-host-cap.
 
+**Lock hierarchy.** Every path that takes more than one advisory lock acquires them in
+the fixed total order `PROJECT < RESOURCE < ALLOCATION < SYSTEM`, so no two paths can
+deadlock — a single pairwise rule is not enough once `renew`, `provision`, and the
+reconciler also take `PROJECT`. `allocations.request` takes PROJECT→RESOURCE;
+`allocations.renew` takes PROJECT only; `systems.provision` takes PROJECT (system-quota
+check) →SYSTEM; the `→expired` sweep takes PROJECT→SYSTEM. The M0 per-Allocation /
+per-System critical sections keep their place at the tail of this order.
+
 **`systems.provision`** gains the second quota check under the same per-project lock:
 `max_concurrent_systems` (non-terminal System count) → `quota_exceeded`. Systems are
 created in the provisioning plane, so the system-concurrency cap is enforced there,
 not at request time.
 
 `quotas(project, max_concurrent_allocations, max_concurrent_systems)` and
-`budgets(project, limit_kcu)` are seeded by `0002`; a project with no row fails closed
-to a conservative configured default. Both are set **admin-only** via
-`accounting.set_quota` / `accounting.set_budget` ([0037](../adr/0037-rbac-hardening-role-separation.md)).
+`budgets(project, limit_kcu)` are **explicit, admin-set** rows
+(`accounting.set_quota` / `accounting.set_budget`, admin-only —
+[0037](../adr/0037-rbac-hardening-role-separation.md)). Fail-closed is **literal**: a
+project with **no budget row is denied** (`allocation_denied`, read as `limit_kcu = 0`)
+and a project with **no quota row is denied** (`quota_exceeded`) — a project cannot
+allocate until an admin has set both. There is **no silent permissive default**. A
+deployment that wants a project to allocate seeds its budget/quota rows explicitly
+(the test harnesses and any walking-skeleton run do this in setup), so a grant is
+always traceable to a deliberate limit, never to an inherited default. (Consequence:
+the M0 e2e harness, which had no budgets, must seed a budget + quota for its project
+once `0002` lands — folded into issue ⑨.)
 
 ## Reservation / lease (M1)
 
@@ -132,11 +158,20 @@ Per [0036](../adr/0036-reservation-lease-semantics.md):
   when `lease_expiry < now()`. Distinct from `released` (explicit) and `failed`
   (operation failure). The owning Run still becomes `failed(lease_expired)` via the
   existing compensation — allocation `expired` ≠ Run `failed`.
-- **Reconciler `→expired` sweep** — selects expired non-terminal allocations,
-  transitions them `→expired` (audited), hands the System to the **existing** M0
-  orphaned-System teardown (drain → force-kill → Run `failed(lease_expired)`), and the
-  release reconciliation writes the `reconciled` ledger credit. Idempotent; one
-  structured-log line per reclaim.
+- **Reconciler `→expired` sweep** — selects expired non-terminal allocations and, per
+  allocation, transitions it `→expired` (audited, stamping `active_ended_at`), then
+  hands its System to the **existing** M0 orphaned-System teardown. The teardown
+  **honors the same in-flight-job grace window M0 already uses**: an in-flight
+  provision/job is drained within the grace window and force-killed only after, so
+  flipping the allocation to `expired` never bypasses the drain. The Run becomes
+  `failed(lease_expired)` and the release reconciliation writes the `reconciled` ledger
+  credit. Idempotent; one structured-log line per reclaim.
+  - **M1 vs M1.5 scope:** M1 covers the *idle* expiry path end-to-end (an allocation
+    past its window with **no** in-flight job) and the grace-window drain of a cleanly
+    completing job. The adversarial lease-expiry-**mid-job** failures — worker death
+    *during* the drain, a `provision` that half-applies as the lease lapses — remain the
+    M1.5 fault-injection target. M1 wires the trigger and the clean path; M1.5 attacks
+    the race.
 
 ## Auth, RBAC & attribution (M1)
 
@@ -179,6 +214,8 @@ ledger(id, ts, project, allocation_id→allocations, resource_id→resources,
 
 -- altered columns
 allocations  ADD requested_vcpus int, ADD requested_memory_gb int
+allocations  ADD active_started_at timestamptz, ADD active_ended_at timestamptz
+                                                  -- billing interval = active_hours source (NOT updated_at)
 allocations  state CHECK += 'expired'             -- + state.py edges granted/active → expired
 systems      state CHECK += 'reprovisioning'      -- + state.py edges ready ↔ reprovisioning, → failed
 ```
@@ -246,12 +283,16 @@ falsifiable signal, as M0's six were):
 2. **Quota denial** — at `max_concurrent_allocations`, `allocations.request` returns
    `quota_exceeded`; at `max_concurrent_systems`, `systems.provision` returns
    `quota_exceeded`; both write no durable object.
-3. **Ledger reconciliation** — after grant→active→release, the ledger holds a
-   `reserved` and a `reconciled` row whose sum equals `rate × active_hours`, and
-   `accounting.usage` reflects it within tolerance of `accounting.estimate`.
-4. **Lease expiry** — an allocation past its window is moved to `expired` by the
-   reconciler, its System is torn down, its Run is `failed(lease_expired)`, and the
-   reservation is credited back — distinct from an explicit `release`.
+3. **Ledger reconciliation** — at grant, `accounting.estimate` equals the `reserved`
+   row (`rate × window`); after grant→active→release, the allocation's `reserved` +
+   `reconciled` rows sum to `rate × active_hours` (the reconciled **actual**, computed
+   from `active_started_at`/`active_ended_at`, not the estimate), and `accounting.usage`
+   reports exactly that sum as `spent_kcu`. Estimate (reservation) and actual (usage)
+   are asserted **separately** — they coincide only when a lease runs its full window.
+4. **Lease expiry (idle)** — an allocation past its window **with no in-flight job** is
+   moved to `expired` by the reconciler, its System torn down, its Run
+   `failed(lease_expired)`, and the unused reservation credited back — distinct from an
+   explicit `release`. (The expiry-**mid-job** race is an M1.5 target, not an M1 gate.)
 5. **Renewal** — `allocations.renew` extends the window and writes an incremental
    `reserved` delta; a renewal over budget is denied and leaves the window unchanged.
 6. **Role separation** — an `operator` is refused `accounting.set_budget`/`.set_quota`

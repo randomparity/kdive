@@ -80,12 +80,21 @@ event_type, kcu_delta, note)` — append-only, signed deltas.
   reservation counts against budget **immediately**, so two concurrent grants cannot
   both pass a budget check before either debits — the property debit-at-release
   cannot give.
-- **At release or expiry**, write a `reconciled` row with `kcu_delta = actual −
-  estimate`, where `actual = rate(selector) × active_hours` and `active_hours` is the
-  time the allocation spent `active` (0 if it was released from `granted` without
-  ever provisioning → a full `−estimate` credit). A renewal that extends the window
-  ([ADR-0036](0036-reservation-lease-semantics.md)) writes an incremental `reserved`
-  delta for the added window under the same per-project lock and budget check.
+- **At release or expiry**, write a `reconciled` row with `kcu_delta = actual − Σ
+  reserved`, summed over **all** of the allocation's `reserved` rows (initial grant +
+  every renewal), where `actual = rate(selector) × active_hours`. Reconciling against
+  `Σ reserved` rather than the single initial estimate is required for correctness: a
+  renewal ([ADR-0036](0036-reservation-lease-semantics.md)) writes an **additional**
+  `reserved` delta for the added window (under the same per-project lock and budget
+  check), so `actual − estimate` would leave every renewal permanently over-debited.
+  `active_hours = 0` if the allocation was released from `granted` without ever going
+  `active` → a full `−Σ reserved` credit.
+- **`active_hours` has an explicit source**, not a derived one. Migration `0002` adds
+  `allocations.active_started_at` (stamped on `granted → active`, when the first System
+  reaches `ready`) and `allocations.active_ended_at` (stamped on `active → releasing` /
+  `active → expired`); `active_hours = active_ended_at − active_started_at`. It is
+  **never** reconstructed from `updated_at`, which every transition overwrites and so
+  cannot carry the billing interval.
 - **`budget_remaining = limit_kcu − Σ kcu_delta`** over the project's ledger rows.
   Because reserved and reconciled deltas net to `actual`, the running sum is the
   project's committed-plus-actual exposure; the budget can never be overcommitted.
@@ -98,8 +107,13 @@ design calls for, in one unit.
 ### 4. Quotas are **two per-project concurrency caps**, enforced at the right plane
 
 Distinct from the spend budget, two count caps bound a project's footprint
-(`quotas(project, max_concurrent_allocations, max_concurrent_systems)`, seeded by
-`0002`; a project with no row fails closed to a configured conservative default):
+(`quotas(project, max_concurrent_allocations, max_concurrent_systems)`). Fail-closed
+is **literal**, not a permissive fallback: a project with **no quota row is denied**
+(`quota_exceeded`) and a project with **no budget row is denied** (`allocation_denied`,
+read as `limit_kcu = 0`) — a project cannot allocate until an admin has set both
+(decision 6). There is no silent configured default; a deployment that wants a project
+to allocate seeds its budget/quota rows explicitly, so every grant traces to a
+deliberate limit. The two caps:
 
 - **`max_concurrent_allocations`** is checked at `allocations.request` — the
   per-*project* analogue of M0's per-*host* cap (ADR-0023), counting the project's
@@ -119,8 +133,13 @@ M1 adds `LockScope.PROJECT` (keyed by `project`). `allocations.request` admissio
 runs:
 
 1. Acquire `LockScope.PROJECT(project)` — **then** `LockScope.RESOURCE(resource_id)`.
-   The order is **always project-before-resource** to prevent deadlock between two
-   requests touching the same project and host in opposite orders.
+   This is one instance of a **global total lock order** `PROJECT < RESOURCE <
+   ALLOCATION < SYSTEM` that **every** multi-lock path obeys, so the design is
+   deadlock-free across all paths that now take `PROJECT` — not just this pair:
+   `allocations.renew` takes PROJECT only; `systems.provision` takes PROJECT→SYSTEM
+   (system-quota check then the M0 per-System section); the reconciler `→expired` sweep
+   takes PROJECT→SYSTEM. A single pairwise rule would not suffice once three paths
+   share the `PROJECT` scope.
 2. Under the project lock: check `max_concurrent_allocations`; compute `estimate`;
    check `budget_remaining ≥ estimate`.
 3. Under the resource lock (the M0 critical section, unchanged): check the per-host
@@ -155,8 +174,10 @@ from the `operator` lifecycle role M0 collapsed.
 - The per-project lock serializes a project's admissions; cross-project admissions
   on one host still serialize on the resource lock (ADR-0023). Fixed lock ordering
   keeps the two-lock section deadlock-free.
-- Migration `0002` adds `ledger`, `budgets`, `quotas`, `cost_class_coefficients`,
-  and the `allocations.requested_vcpus`/`requested_memory_gb` columns; all additive.
+- Migration `0002` adds `ledger`, `budgets`, `quotas`, `cost_class_coefficients`, and
+  the `allocations` columns `requested_vcpus`/`requested_memory_gb` (rate inputs) and
+  `active_started_at`/`active_ended_at` (the `active_hours` billing interval); all
+  additive.
 - `accounting.usage` gives the Investigation cost rollup the top-level design
   promised, in kcu, across allocations and cost_classes.
 
