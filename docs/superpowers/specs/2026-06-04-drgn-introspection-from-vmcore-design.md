@@ -117,9 +117,10 @@ already-redacted text.
 3. stage `vmcore_bytes` and `fetch_object(debuginfo_ref)` to temp files.
 4. `program = open_program(core_file, vmlinux_file)`; an open failure raises
    `CategorizedError(DEBUG_ATTACH_FAILURE)`.
-5. run the three helpers (each capped, see §"Output bounds"); **redact the assembled
-   report inside the port** (see §Redaction); assemble `IntrospectOutput(tasks, modules,
-   sysinfo, truncated)`.
+5. run the three helpers; **redact the assembled report inside the port** (see §Redaction)
+   **then** byte-cap the redacted report (see §"Output bounds") — redact-before-cap so the
+   cap bounds the returned (redacted) payload exactly; assemble `IntrospectOutput(tasks,
+   modules, sysinfo, truncated)`.
 
 The provenance **comparison logic** (the build-id equality check), the temp staging, the
 helper dispatch, and the redaction are host-free and **unit-tested with the seams
@@ -167,9 +168,10 @@ parameters:
   default); a per-frame stack is bounded by drgn's own stack depth. Hitting `limit` sets
   the helper's `truncated`.
 - `modules`/`sysinfo`: naturally bounded by the loaded-module count / fixed uts fields.
-- The **assembled report** is JSON-serialized and bounded by a fixed total byte cap
-  (`_REPORT_BYTE_CAP`); if serialization exceeds it, the `tasks` list is the first thing
-  trimmed and `IntrospectOutput.truncated` is set. The cap prevents an unbounded
+- The **assembled, already-redacted report** is JSON-serialized and bounded by a fixed
+  total byte cap (`_REPORT_BYTE_CAP`); if serialization exceeds it, the `tasks` list is the
+  first thing trimmed and `IntrospectOutput.truncated` is set. The cap runs **after**
+  redaction so it bounds the returned (redacted) payload exactly, preventing an unbounded
   multi-megabyte `data["report"]` string from a core with deep/many stacks.
 
 `truncated` surfaces in `data` so an agent knows the report is partial and can narrow.

@@ -182,8 +182,12 @@ class LocalLibvirtVmcoreIntrospect:
 
     Stages the raw core + ``vmlinux`` from the object store, verifies the core's build-id
     against the Run's recorded build-id (provenance), opens drgn against the staged core
-    (``live_vm`` seam), runs the three helpers, byte-caps the assembled report, and redacts
-    it before returning — the port is the single redaction boundary.
+    (``live_vm`` seam), runs the three helpers, redacts and byte-caps the assembled report,
+    and returns it — the port is the single redaction boundary.
+
+    The drgn seams (``open_program``/``run_helper``) are ``None`` off-gate; ``from_vmcore``
+    then raises ``MISSING_DEPENDENCY`` before touching the store, mirroring
+    ``LocalLibvirtRetrieve.run``'s seam guard. The ``live_vm`` runner injects real seams.
     """
 
     def __init__(
@@ -191,8 +195,8 @@ class LocalLibvirtVmcoreIntrospect:
         *,
         fetch_object: _FetchObject,
         read_vmcore_build_id: _ReadBuildId,
-        open_program: _OpenProgram,
-        run_helper: _RunHelper,
+        open_program: _OpenProgram | None = None,
+        run_helper: _RunHelper | None = None,
     ) -> None:
         self._fetch_object = fetch_object
         self._read_vmcore_build_id = read_vmcore_build_id
@@ -204,15 +208,13 @@ class LocalLibvirtVmcoreIntrospect:
     def from_env(cls) -> LocalLibvirtVmcoreIntrospect:
         """Build from env; does not import drgn or open the store (lazy ``live_vm`` seams).
 
-        Every seam is ``live_vm``-gated: the offline drgn path (store fetch, build-id read,
-        drgn open, helper run) runs only under the gate, so ``from_vmcore`` raises
-        ``MISSING_DEPENDENCY`` off-gate rather than touching the store or importing drgn.
+        The drgn seams are left ``None``, so ``from_vmcore`` raises ``MISSING_DEPENDENCY``
+        up front off-gate — it never reads the store or imports drgn. The ``live_vm`` runner
+        constructs the port with the real seams injected.
         """
         return cls(
-            fetch_object=_gated_fetch_object,
+            fetch_object=_real_fetch_object,
             read_vmcore_build_id=_real_read_vmcore_build_id,
-            open_program=_real_open_program,
-            run_helper=_real_run_helper,
         )
 
     def from_vmcore(
@@ -221,10 +223,15 @@ class LocalLibvirtVmcoreIntrospect:
         """Open the core, run the helpers, and return a redacted, size-bounded report.
 
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` on a build-id provenance mismatch;
-                ``DEBUG_ATTACH_FAILURE`` if drgn cannot open the core or load the vmlinux;
-                ``MISSING_DEPENDENCY`` if the drgn seams were not configured.
+            CategorizedError: ``MISSING_DEPENDENCY`` if the drgn seams were not configured
+                (off-gate); ``CONFIGURATION_ERROR`` on a build-id provenance mismatch;
+                ``DEBUG_ATTACH_FAILURE`` if drgn cannot open the core or load the vmlinux.
         """
+        if self._open_program is None or self._run_helper is None:
+            raise CategorizedError(
+                "offline drgn introspection runs only under the live_vm gate",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+            )
         vmcore_bytes = self._fetch_object(vmcore_ref)
         self._verify_provenance(vmcore_bytes, expected_build_id, vmcore_ref)
         vmlinux_bytes = self._fetch_object(debuginfo_ref)
@@ -236,7 +243,7 @@ class LocalLibvirtVmcoreIntrospect:
             core_file.flush()
             vmlinux_file.write(vmlinux_bytes)
             vmlinux_file.flush()
-            program = self._open(Path(core_file.name), Path(vmlinux_file.name))
+            program = self._open(self._open_program, Path(core_file.name), Path(vmlinux_file.name))
             tasks = self._run_helper(program, "tasks")
             modules = self._run_helper(program, "modules")
             sysinfo = self._run_helper(program, "sysinfo")
@@ -251,9 +258,10 @@ class LocalLibvirtVmcoreIntrospect:
                 details={"vmcore_ref": vmcore_ref},
             )
 
-    def _open(self, core: Path, vmlinux: Path) -> _Program:
+    @staticmethod
+    def _open(open_program: _OpenProgram, core: Path, vmlinux: Path) -> _Program:
         try:
-            return self._open_program(core, vmlinux)
+            return open_program(core, vmlinux)
         except CategorizedError:
             raise
         except Exception as exc:  # noqa: BLE001 - any drgn open fault becomes a typed attach failure
@@ -268,14 +276,22 @@ class LocalLibvirtVmcoreIntrospect:
         modules: dict[str, object],
         sysinfo: dict[str, object],
     ) -> IntrospectOutput:
-        truncated = bool(tasks.get("truncated"))
-        tasks, byte_trimmed = self._byte_cap(tasks, modules, sysinfo)
+        """Redact first (the single redaction boundary), then byte-cap the redacted report.
+
+        Redaction precedes the byte-cap so the cap bounds the *returned* (redacted) payload
+        exactly (ADR-0033 §"Output bounds"), not a pre-redaction size that never ships.
+        """
+        helper_truncated = bool(tasks.get("truncated"))
         redactor = Redactor()
+        tasks = redactor.redact_value(tasks)
+        modules = redactor.redact_value(modules)
+        sysinfo = redactor.redact_value(sysinfo)
+        tasks, byte_trimmed = self._byte_cap(tasks, modules, sysinfo)
         return IntrospectOutput(
-            tasks=redactor.redact_value(tasks),
-            modules=redactor.redact_value(modules),
-            sysinfo=redactor.redact_value(sysinfo),
-            truncated=truncated or byte_trimmed,
+            tasks=tasks,
+            modules=modules,
+            sysinfo=sysinfo,
+            truncated=helper_truncated or byte_trimmed,
         )
 
     def _byte_cap(
@@ -299,17 +315,10 @@ class LocalLibvirtVmcoreIntrospect:
         return len(json.dumps(payload).encode("utf-8"))
 
 
-def _gated_fetch_object(ref: str) -> bytes:
-    """The off-gate fetch stub: the offline drgn path runs only under the ``live_vm`` gate.
+def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
+    from kdive.store.objectstore import object_store_from_env
 
-    ``from_env`` wires this so ``from_vmcore`` raises ``MISSING_DEPENDENCY`` at the first
-    seam off-gate, never touching the store or importing drgn. The real store fetch lives
-    in ``_real_fetch_object`` (used only by the gated runner).
-    """
-    raise CategorizedError(
-        "offline drgn introspection runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-    )
+    return object_store_from_env().get_artifact(ref, "").data
 
 
 def _real_read_vmcore_build_id(data: bytes) -> str:  # pragma: no cover - live_vm
@@ -317,19 +326,6 @@ def _real_read_vmcore_build_id(data: bytes) -> str:  # pragma: no cover - live_v
         "vmcore build-id extraction runs only under the live_vm gate",
         category=ErrorCategory.MISSING_DEPENDENCY,
     )
-
-
-def _real_open_program(vmcore: Path, vmlinux: Path) -> _Program:  # pragma: no cover - live_vm
-    raise CategorizedError(
-        "the drgn program open runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-    )
-
-
-def _real_run_helper(  # pragma: no cover - live_vm
-    program: _Program, name: str
-) -> dict[str, object]:
-    return _HELPERS[name](program)
 
 
 __all__ = [
