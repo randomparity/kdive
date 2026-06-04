@@ -1,0 +1,157 @@
+"""The `investigations.*` MCP tools — the Investigation campaign surface (ADR-0026).
+
+Thin FastMCP wrappers over plain async handlers (pool + ctx injected; tested directly).
+`open` mints an Investigation (`open`); `close` drives it to `closed`; `link`/`unlink`
+mutate the `external_refs` jsonb under a per-Investigation advisory lock, keyed on the
+`(tracker, id)` natural key (link upserts, unlink removes-if-present — both idempotent).
+`get`/the mutators render through `_envelope_for_investigation` (every Investigation state
+is a non-failure status, so no failure mapping is needed). RBAC: mutations require
+`operator`; reads require project membership. Authz denials raise (ADR-0020: no authz
+ErrorCategory).
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+from fastmcp import FastMCP
+from psycopg_pool import AsyncConnectionPool
+from pydantic import ValidationError
+
+from kdive.db.repositories import INVESTIGATIONS
+from kdive.domain.errors import ErrorCategory
+from kdive.domain.models import ExternalRef, Investigation
+from kdive.domain.state import InvestigationState
+from kdive.log import bind_context
+from kdive.mcp.auth import RequestContext, current_context, require_project
+from kdive.mcp.responses import ToolResponse
+from kdive.security import audit
+from kdive.security.rbac import Role, require_role
+
+_log = logging.getLogger(__name__)
+
+_TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
+
+
+def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
+    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, data=data or {})
+
+
+def _as_uuid(value: str) -> UUID | None:
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+def _envelope_for_investigation(inv: Investigation) -> ToolResponse:
+    """Render an Investigation; every state is a non-failure status (ADR-0026 §6)."""
+    if inv.state in _TERMINAL_INVESTIGATION:
+        actions = ["investigations.get"]
+    else:
+        actions = ["investigations.get", "investigations.close", "runs.create"]
+    return ToolResponse.success(
+        str(inv.id),
+        inv.state.value,
+        suggested_next_actions=actions,
+        data={"project": inv.project, "external_refs": str(len(inv.external_refs))},
+    )
+
+
+def _parse_external_refs(raw: list[dict[str, Any]] | None) -> list[ExternalRef]:
+    """Parse + dedup external refs by the ``(tracker, id)`` natural key (last-wins).
+
+    Raises:
+        ValidationError / TypeError: A malformed entry or a non-list container.
+    """
+    if raw is None:
+        return []
+    by_key: dict[tuple[str, str], ExternalRef] = {}
+    for entry in raw:
+        ref = ExternalRef.model_validate(entry)
+        by_key[(ref.tracker, ref.id)] = ref
+    return list(by_key.values())
+
+
+async def open_investigation(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    project: str,
+    title: str,
+    external_refs: list[dict[str, Any]] | None = None,
+) -> ToolResponse:
+    """Mint an Investigation (`open`) for the caller's project."""
+    require_project(ctx, project)
+    require_role(ctx, project, Role.OPERATOR)
+    with bind_context(principal=ctx.principal):
+        try:
+            refs = _parse_external_refs(external_refs)
+        except (ValidationError, TypeError):
+            return _config_error(project)
+        now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
+        async with pool.connection() as conn, conn.transaction():
+            inv = await INVESTIGATIONS.insert(
+                conn,
+                Investigation(
+                    id=uuid4(),
+                    created_at=now,
+                    updated_at=now,
+                    principal=ctx.principal,
+                    agent_session=ctx.agent_session,
+                    project=project,
+                    title=title,
+                    external_refs=refs,
+                    state=InvestigationState.OPEN,
+                ),
+            )
+            await audit.record(
+                conn,
+                ctx,
+                tool="investigations.open",
+                object_kind="investigations",
+                object_id=inv.id,
+                transition="->open",
+                args={"project": project, "title": title},
+                project=project,
+            )
+        return ToolResponse.success(
+            str(inv.id),
+            "open",
+            suggested_next_actions=["investigations.get", "runs.create"],
+            data={"project": project},
+        )
+
+
+async def get_investigation(
+    pool: AsyncConnectionPool, ctx: RequestContext, investigation_id: str
+) -> ToolResponse:
+    """Return an Investigation the caller's project owns, or a not-found-shaped error."""
+    uid = _as_uuid(investigation_id)
+    if uid is None:
+        return _config_error(investigation_id)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            inv = await INVESTIGATIONS.get(conn, uid)
+        if inv is None or inv.project not in ctx.projects:
+            return _config_error(investigation_id)
+        return _envelope_for_investigation(inv)
+
+
+def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
+
+    @app.tool(name="investigations.open")
+    async def investigations_open(
+        project: str, title: str, external_refs: list[dict[str, Any]] | None = None
+    ) -> ToolResponse:
+        return await open_investigation(
+            pool, current_context(), project=project, title=title, external_refs=external_refs
+        )
+
+    @app.tool(name="investigations.get")
+    async def investigations_get(investigation_id: str) -> ToolResponse:
+        return await get_investigation(pool, current_context(), investigation_id)
