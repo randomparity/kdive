@@ -29,7 +29,12 @@ M0_DISTRIBUTED = {
     "control_failure",
     "authorization_denied",
 }
-M0_ALL = M0_PORTED | M0_DISTRIBUTED
+# M1 first-use categories (ADR-0007 §4): the per-project concurrency-cap denial,
+# distinct from the over-budget `allocation_denied` so audit/SLO tell count from spend.
+M1_ADDED = {
+    "quota_exceeded",
+}
+M0_ALL = M0_PORTED | M0_DISTRIBUTED | M1_ADDED
 
 
 def test_taxonomy_is_exactly_the_m0_set() -> None:

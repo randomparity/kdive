@@ -35,6 +35,7 @@ class ErrorCategory(StrEnum):
 
     # New distributed categories for the async worker / provider seams.
     ALLOCATION_DENIED = "allocation_denied"
+    QUOTA_EXCEEDED = "quota_exceeded"
     LEASE_EXPIRED = "lease_expired"
     PROVISIONING_FAILURE = "provisioning_failure"
     INSTALL_FAILURE = "install_failure"
