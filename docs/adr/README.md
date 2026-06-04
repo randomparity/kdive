@@ -63,3 +63,4 @@ and keep prose plain and factual (no "critical", "robust", "comprehensive").
 | [0031](0031-retrieve-plane-vmcore-postmortem.md) | Retrieve plane: vmcore capture/fetch + crash postmortem (M0) | Proposed |
 | [0032](0032-connect-plane-gdbstub-debugsession.md) | Connect plane (gdbstub) + DebugSession lifecycle (M0) | Proposed |
 | [0033](0033-drgn-introspection-from-vmcore.md) | Debug plane: drgn introspection from vmcore (offline) (M0) | Proposed |
+| [0034](0034-debug-plane-gdbmi-tier.md) | Debug plane: gdb-MI tier (breakpoints, read_memory cap, read_registers, continue/interrupt) (M0) | Proposed |
