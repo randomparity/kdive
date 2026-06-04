@@ -51,16 +51,38 @@ different failure modes:
    returns the **same** job row in whatever state it has reached — no second job, no
    second build.
 
-2. **Step ledger (`run_steps`, `run_step()`)** — makes the *handler body* run at most
-   once per `(run_id, "build")`. A worker re-dispatch of the **same** build job
-   (lease lapse → double-run, or a requeue after a transient finalize failure) must
-   not re-run `make`. `run_step(conn, run_id, "build", fn)` returns the stored result
-   on replay; `fn` (the `make` + artifact store) runs only on the first call.
+2. **Step ledger (`run_steps`)** — records that `(run_id, "build")` already produced a
+   result, so a worker re-dispatch of the **same** build job (lease lapse → double-run,
+   or a requeue after a transient finalize failure) does not re-run `make`.
 
-The job dedup_key bounds *admission*; the step ledger bounds *execution*. Acceptance
+   **The ledger is consulted and recorded around `make`, never across it.** `make` and
+   the artifact store are slow (30+ min) and `make` runs **with no DB connection or
+   transaction held** — the worker's explicit contract (the handler "holds no
+   transaction across the handler … and commits its own steps",
+   `jobs/worker.py`). So the handler does **not** call `kdive.db.idempotency.run_step`
+   (which runs `fn()` *between* its `SELECT` and `INSERT` on one held connection, with
+   no internal `conn.transaction()`, leaving the slow body inside an open implicit
+   transaction). Instead it uses the ledger row directly in three short, separately
+   bounded steps (§6b): (a) a short read for an existing `(run_id, "build")` result;
+   (b) if absent, run `make` + store artifacts **connectionless**; (c) a short
+   `conn.transaction()` that records the ledger row **and** finalizes the Run together.
+
+The job dedup_key bounds *admission*; the ledger bounds *execution*. Acceptance
 "a re-issued `runs.build` returns the same job and does not rebuild" needs the
 former; exit-criterion 4 ("replaying a completed step returns the prior result
 without re-executing") needs the latter.
+
+**Crash window (store-then-record).** Steps (b) and (c) are not one atomic unit across
+an object store + Postgres: a worker crash/lease-lapse after the artifacts are stored
+but before the ledger row commits leaves the artifacts written and no ledger row, so a
+re-dispatch re-runs `make`. To make that re-run *recover* rather than *orphan*, the two
+artifact object keys are **deterministic** — `{tenant}/runs/{run_id}/{kernel,vmlinux}`
+(the existing `{tenant}/{kind}/{object_id}/{name}` scheme) — so a re-run **overwrites**
+the same keys (object-store `put` is last-writer-wins on a key) rather than leaking a
+second pair. "Does not rebuild" is therefore guaranteed **once the ledger row is
+committed**; before that commit a crash costs at most one wasted (idempotent,
+self-overwriting) rebuild — a transient, recoverable state, not an artifact leak. This
+window is the build-plane analogue of the reconciler-covered races in ADR-0026.
 
 ## 4. `BuildProfile` schema (`profiles/build.py`)
 
@@ -122,7 +144,10 @@ class Builder(Protocol):
    match debuginfo to the booted kernel.
 5. **Store two artifacts** — put the bootable image and the `vmlinux`/debuginfo into
    the object store as `sensitive` artifacts (build outputs may embed local paths and
-   config), keyed under the Run; return their object keys and the build-id.
+   config), under **deterministic, Run-keyed** object keys (`name` segments `kernel`
+   and `vmlinux`, giving `{tenant}/runs/{run_id}/{kernel,vmlinux}`), so a re-run after
+   a crash overwrites the same keys rather than orphaning a second pair (§3 crash
+   window). Return the two object keys and the build-id.
 
 The real `make`-driven, object-store-touching path runs only against a toolchain +
 warm tree, so it is exercised under the **`live_vm`** gate (the existing kernel-build
@@ -159,26 +184,45 @@ and re-enqueues into the same dedup_key row).
 
 ### 6b. `build_handler` (the worker)
 
-`build_handler(conn, job, builder, store)`:
+`build_handler(conn, job, builder, store)`. The handler **never holds a DB transaction
+across `make`** (the worker contract). It runs in four bounded steps:
 
-1. `system_id`/`run_id` come from `job.payload`. Reconstruct the audit context from
-   `job.authorizing` (the `_ctx_from_job` pattern).
-2. Wrap the build body in `run_step(conn, run_id, "build", fn)`. `fn`:
-   - calls `builder.build(run_id, profile)` (the slow `make`),
-   - stores the two artifacts (offloaded via `asyncio.to_thread`, the store is sync),
-   - returns a JSON dict `{kernel_ref, debuginfo_ref, build_id}` — the ledger result.
-   On replay the ledger returns this dict without re-running `make`.
-3. After `run_step` returns (first run or replay), drive the Run finalize under the
-   `RUN` lock: set `kernel_ref`/`debuginfo_ref` and transition `running → succeeded`,
-   **only if** the Run is still `running` (a concurrent cancel/terminal wins). Audit
-   the transition. The finalize is idempotent: a re-dispatch that finds the Run
-   already `succeeded` (its refs set) is a no-op success.
-4. On a `CategorizedError` from the build, drive `running → failed` with the error's
-   category (the builder raises `BUILD_FAILURE` for a `make` failure,
-   `CONFIGURATION_ERROR` for a config-preflight failure), audit, and re-raise so the
-   worker dead-letters the job with the correct category. Tolerate `IllegalTransition`
-   on the failed-write (a concurrent cancel already drove the Run terminal), matching
-   the provision handler.
+1. **Resolve.** `run_id` comes from `job.payload` (just the id — the Run is the source
+   of truth for everything else; no `system_id` is copied into the payload, so there is
+   no second copy to drift from `run.system_id`). Read the Run; parse
+   `run.build_profile`. Reconstruct the audit context from `job.authorizing` (the
+   `_ctx_from_job` pattern).
+2. **Ledger read (short).** In a short `conn.transaction()`, look up the
+   `(run_id, "build")` `run_steps` row. If it exists, the build already produced its
+   result `{kernel_ref, debuginfo_ref, build_id}` — **skip to step 4** with that stored
+   result (no rebuild). The connection is released after this read; nothing is held
+   across step 3.
+3. **Build (connectionless).** With **no DB connection held**, call
+   `builder.build(run_id, profile)` (the slow `make` + the two artifact puts, the
+   builder offloads the sync store via `asyncio.to_thread`). The builder stores under
+   deterministic Run-keyed object keys (§5), so a crash-and-retry overwrites rather than
+   orphans. On a `CategorizedError` here, go to the failure path below.
+4. **Record + finalize (short, under the `RUN` lock).** In **one** short
+   `conn.transaction()` holding `advisory_xact_lock(RUN, run_id)`: (a) record the
+   `(run_id, "build")` ledger row (`ON CONFLICT … DO NOTHING` — a concurrent double-run
+   already recorded it); (b) re-read the Run state `FOR UPDATE`; (c) **only if** it is
+   still `running`, `UPDATE runs SET kernel_ref=…, debuginfo_ref=…, state='succeeded'`
+   and audit `running → succeeded`. If the Run is already `succeeded` (a same-job
+   double-run finalized first) it is a no-op success; if a concurrent cancel drove it
+   `canceled`, leave it (the built artifacts are inert, reachable for a re-run's
+   overwrite). The lock is held only for this short write — **never across `make`**,
+   mirroring how the provision handler takes the SYSTEM lock only for the post-`provision`
+   state write, not across the libvirt call.
+
+**Failure path.** On a `CategorizedError` from step 3, open a short `conn.transaction()`
+under the `RUN` lock, drive `running → failed` with the error's category (the builder
+raises `BUILD_FAILURE` for a `make` failure, `CONFIGURATION_ERROR` for a config-preflight
+failure — set as the Run's `failure_category`), audit, and re-raise so the worker
+dead-letters the job with the correct category. Tolerate `IllegalTransition` on the
+failed-write (a concurrent cancel already drove the Run terminal), matching the provision
+handler. A build failure is **not** recorded in the ledger (the step did not succeed), so
+a retry of the job re-attempts `make` until `max_attempts` — at which point the job
+dead-letters and the Run is `failed`.
 
 `register_handlers(registry, *, builder=None, store=None)` builds the builder/store
 lazily from env (no toolchain/S3 connection at registration), mirroring
@@ -186,12 +230,11 @@ lazily from env (no toolchain/S3 connection at registration), mirroring
 
 ### 6c. Persisting the refs
 
-`RUNS.update_state` only writes `state`. The handler sets `kernel_ref`/`debuginfo_ref`
+`RUNS.update_state` only writes `state`, so step 4 sets `kernel_ref`/`debuginfo_ref`
 with a direct `UPDATE runs SET kernel_ref=%s, debuginfo_ref=%s, state='succeeded'
-WHERE id=%s AND state='running'` inside the lock+transaction (one write, fenced on
-`running`), then audits — the same "write the columns and the transition together
-under the lock" shape the provision handler uses for `domain_name` + `ready`. No new
-repository method is added (the fenced inline `UPDATE` is local to the handler).
+WHERE id=%s AND state='running'` — one write, fenced on `running`, inside the §6b step-4
+transaction. No new repository method is added (the fenced inline `UPDATE` is local to
+the handler), mirroring the provision handler's `domain_name` + `ready` write.
 
 ## 7. Error categories
 
@@ -227,15 +270,22 @@ profile referencing secret material cannot leak it.
 | acceptance clause | how it is met | test |
 |-------------------|---------------|------|
 | build job produces a kernel image **and** a debuginfo artifact, sets `kernel_ref`/`debuginfo_ref` | handler stores both, writes both columns under the lock | handler test (fake builder/store): both columns set, Run `succeeded` |
-| debuginfo build-id matches the booted kernel | builder extracts the GNU build-id from the produced `vmlinux`; the same id the booted kernel reports | `live_vm` build test asserts build-id extraction; unit test pins the fake's build-id flows to the result |
+| debuginfo build-id is the `vmlinux`'s GNU build-id (the symbolization key) | builder extracts the GNU build-id from the produced `vmlinux`; it keys `debuginfo_ref` and flows to the result | `live_vm` build test asserts the extracted id equals `readelf -n vmlinux` (extraction tested against a real ELF); unit test pins the fake's build-id through the handler to `debuginfo_ref` |
 | re-issued `runs.build` returns the same job (dedup), does not rebuild | dedup_key `f"{run_id}:build"`; step ledger guards the handler body | tool test: two `runs.build` → same `object_id`; handler test: second dispatch does not call `builder.build` |
 | failing build sets the Run `failed` with `build_failure` | builder raises `BUILD_FAILURE`; handler drives `running → failed` | handler test (builder raises): Run `failed`, `failure_category = build_failure`, job dead-lettered |
 
+The issue's acceptance phrases the build-id clause as "build-id matches the **booted**
+kernel," but #18 does not install or boot a kernel (out of scope, #19/#20). #18 is
+falsifiable only up to "the `debuginfo_ref` is keyed by the produced `vmlinux`'s GNU
+build-id"; the booted-kernel **match** (comparing that id to `/sys/kernel/notes` on the
+running guest) is verified by the `live_vm` install/boot path (#19/#20) and consumed by
+symbolization (#22/#24). Recorded so the deferred half is a decision, not a gap.
+
 ## 10. Risks / open questions
 
-- **`runs.build` payload** carries `run_id` (and `system_id`, for parity). The handler
-  re-reads the Run for the profile, so the payload stays minimal (ids only) — no
-  profile copied into the job payload (it already lives on the Run row).
+- **`runs.build` payload** carries **only `run_id`**. The handler re-reads the Run for
+  the profile and the `system_id`, so the Run stays the single source of truth (no
+  `system_id` or profile copied into the payload to drift from the Run row).
 - **Shared file `runs.py`** is also touched by siblings; the build additions are
   localized (a new tool, a new handler, a `register_handlers`) and called out in
   NOTES.
