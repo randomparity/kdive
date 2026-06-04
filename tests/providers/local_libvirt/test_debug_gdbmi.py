@@ -246,6 +246,14 @@ def test_read_memory_rejects_zero_byte_count(tmp_path: Path) -> None:
     assert exc.value.details["code"] == "bad_read_range"
 
 
+def test_read_memory_rejects_non_hex_contents(tmp_path: Path) -> None:
+    controller = _memory_controller(0x6000, 4, "nothex!!")
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_memory(_attachment(controller, tmp_path), address=0x6000, byte_count=4)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["code"] == "bad_memory_contents"
+
+
 def test_read_memory_rejects_out_of_range_address(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _engine().read_memory(

@@ -511,9 +511,20 @@ class GdbMiEngine:
         payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
         memory = payload.get("memory")
         segments = memory if isinstance(memory, list) else []
-        blob = b"".join(
-            bytes.fromhex(str(seg.get("contents", ""))) for seg in segments if isinstance(seg, dict)
-        )
+        try:
+            blob = b"".join(
+                bytes.fromhex(str(seg.get("contents", "")))
+                for seg in segments
+                if isinstance(seg, dict)
+            )
+        except ValueError as exc:
+            # A non-hex / odd-length `contents` is a malformed stub reply, not a verbatim dump;
+            # surface it as an attach-level failure rather than letting ValueError escape uncaught.
+            raise CategorizedError(
+                "gdb/MI returned non-hex memory contents",
+                category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+                details={"code": "bad_memory_contents"},
+            ) from exc
         return blob[:byte_count]
 
     # --- interactive execution ------------------------------------------------------------
