@@ -37,7 +37,9 @@ repos:
     hooks:
       - id: ty
         name: ty check
-        entry: uv run ty check
+        # Delegates to the justfile recipe so the type-check command has one definition
+        # shared with CI (`just type` → whole-tree `uv run ty check`).
+        entry: just type
         language: system
         types: [python]
         pass_filenames: false

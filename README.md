@@ -38,7 +38,7 @@ itself. Run `just` (or `just --list`) to see every task:
 |------|--------------|
 | `just lint`    | `ruff check` + `ruff format --check` |
 | `just format`  | `ruff check --fix` + `ruff format` |
-| `just type`    | `ty check src` |
+| `just type`    | `ty check` (whole tree: src + tests) |
 | `just test`    | the suite, excluding the gated `live_vm` tests |
 | `just ci`      | the full gate PR CI runs (lint, type, shell, workflows, mermaid, test) |
 
@@ -47,7 +47,7 @@ The underlying commands still work directly if you prefer not to use `just`:
 ```bash
 uv sync                      # create the venv and install pinned dependencies
 uv run ruff check .          # lint
-uv run ty check src          # type-check
+uv run ty check              # type-check (whole tree)
 uv run python -m pytest -q   # run the test suite
 prek install && prek run -a  # install and run the git hooks
 ```

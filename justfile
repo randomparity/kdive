@@ -31,9 +31,11 @@ format:
     uv run ruff check --fix .
     uv run ruff format .
 
-# Type-check the package.
+# Type-check the whole tree (src + tests). Whole-tree, not `src`: this is the single
+# definition CI and the pre-commit ty hook both invoke, and the only place tests/ is
+# type-checked (scoping to src once let a test-tree type error merge green).
 type:
-    uv run ty check src
+    uv run ty check
 
 # Run the test suite, excluding the gated live_vm suite.
 test:
