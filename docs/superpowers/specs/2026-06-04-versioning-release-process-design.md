@@ -29,11 +29,14 @@ Deliverables:
   git subprocess; commit is resolved lazily via `version_info()`).
 - `src/kdive/__main__.py` — a `--version` action and a startup log line in each of
   `server`/`worker`/`reconciler`.
-- `scripts/stamp-buildinfo.sh` (+ `just stamp`/`just build`) — writes the generated
-  `src/kdive/_buildinfo.py` from live git *before* `uv build`, so every built artifact
-  carries its commit SHA + release flag (see Surface → build-info baking).
+- `scripts/stamp-buildinfo.sh` — writes the generated `src/kdive/_buildinfo.py` from
+  live git (commit + release flag); driven only by the `build` recipe, which removes
+  the file again after `uv build` (see Surface → build-info baking).
 - `.gitignore` — ignore the generated `src/kdive/_buildinfo.py`.
-- `justfile` — `set-version`, `changelog`, `stamp`, `build`, `release` recipes.
+- `justfile` — `set-version`, `changelog`, `build`, `release` recipes. There is no bare
+  `stamp` recipe: stamping persistently into `src/kdive/` would shadow live-git
+  reporting in the editable checkout (see build-info baking), so stamping only ever
+  happens inside `build`, bracketed by cleanup.
 - `.github/workflows/release.yml` — tag-triggered stamp + build + internal GitHub Release.
 - `pyproject.toml` + `uv.lock` — `[project].version` bumped `0.1.0` → `0.2.0` via
   `uv version` (which rewrites **both** atomically; see Surface → `set-version`).
@@ -131,16 +134,30 @@ The version-info resolver. Pure, lazy, cached — no subprocess at import time.
 
 A dirty tree on the exact tag resolves to **dev** (it is not a clean release build).
 
-### Build-info baking (`scripts/stamp-buildinfo.sh`, `just stamp` / `just build`)
+### Build-info baking (`scripts/stamp-buildinfo.sh`, `just build`)
 
-`uv_build` packages everything under `src/kdive/`, so a generated
-`src/kdive/_buildinfo.py` present at build time is included in the wheel/sdist. The
-stamp script computes `COMMIT` (short HEAD SHA) and `RELEASE` (the same clean-exact-tag
-test as the live-git layer) and writes the module; `just build` runs `stamp` then
-`uv build`, and `release.yml` does the same. The file is gitignored, so a dev checkout
-never has it and falls through to the live-git layer — only *built* artifacts carry it.
-This keeps both requirements true everywhere: a release wheel reports `X.Y.Z+g<sha>`, a
-dev-built wheel reports `X.Y.Z-dev+g<sha>`, and a live checkout reports via git.
+`uv_build` packages every file under `src/kdive/` regardless of git-ignore status —
+**verified empirically**: a gitignored `src/kdive/_buildinfo.py` present at build time
+appears in the wheel (`unzip -l dist/*.whl` lists `kdive/_buildinfo.py`). So baking is a
+generate-then-build step, no build-backend plugin needed.
+
+`scripts/stamp-buildinfo.sh` computes `COMMIT` (short HEAD SHA) and `RELEASE` and writes
+`src/kdive/_buildinfo.py`. `RELEASE` is taken from an **explicit signal when the caller
+knows** (`--release`/env, which `release.yml` passes — the tag-triggered workflow is
+authoritative that this is a release), falling back to the live-git clean-exact-tag test
+for a local `just build`. This avoids a real release artifact silently reporting `-dev`
+because a `git describe` probe hiccupped on the runner.
+
+**The file must not persist in the working tree.** `src/kdive/` *is* the editable-install
+location (`uv sync` maps `kdive` there), so a leftover `_buildinfo.py` would make
+resolution layer 1 win for the developer's own `kdive --version`/startup logs — freezing
+them at the moment of the build, and (because the file is gitignored and so invisible to
+`git status --porcelain`) doing it silently and indefinitely. Therefore `just build`
+**brackets the build with cleanup**: write `_buildinfo.py` → `uv build` → remove it again,
+via a `trap` so it is removed even if `uv build` fails. A dev checkout that never runs
+`build`, or runs it to completion, has no `_buildinfo.py` and reports via live git; only
+the *artifact* carries the baked module. Net result, true everywhere: a release wheel
+reports `X.Y.Z+g<sha>`, a dev-built wheel `X.Y.Z-dev+g<sha>`, a live checkout via git.
 
 ### `src/kdive/__init__.py`
 
@@ -197,9 +214,10 @@ generated artifact, not hand-maintained line-by-line.
 - `changelog` — regenerate `CHANGELOG.md` from git history via
   `uvx {{GIT_CLIFF}}` (a single pinned `git-cliff@<pinned>` justfile variable — see
   below).
-- `stamp` — run `scripts/stamp-buildinfo.sh` to write `src/kdive/_buildinfo.py`.
-- `build` — `stamp` then `uv build` (wheel + sdist), so every locally built artifact
-  carries its build info.
+- `build [release=false]` — `trap`-bracketed: run `scripts/stamp-buildinfo.sh` (passing
+  `release`) to write `src/kdive/_buildinfo.py`, `uv build` (wheel + sdist), then **remove
+  `_buildinfo.py`** (even on failure) so it never lingers in the editable checkout. The
+  artifact carries the baked module; the working tree is left clean.
 - `release VERSION` — the Milestone-completion recipe. Guards, in order:
   on `main`, clean tree, up to date with `origin/main`, and `[project].version ==
   VERSION`. On pass: create annotated tag `vVERSION` (message names the Milestone)
@@ -221,9 +239,11 @@ generated artifact, not hand-maintained line-by-line.
   2. set up uv (pinned, as in `ci.yml`).
   3. **verify** the tag name equals `v{[project].version}` (fail the release on
      mismatch).
-  4. `just build` — stamp `_buildinfo.py` (the tagged, clean commit → `RELEASE=True`)
-     then `uv build` (wheel + sdist; kdive is pure-Python under `uv_build`, so no
-     `libvirt-dev` needed), so the published artifacts self-report `vX.Y.Z+g<sha>`.
+  4. `just build release=true` — bakes `_buildinfo.py` with `RELEASE=True` **passed
+     explicitly** (the tag-triggered workflow is authoritative; it does not re-infer via
+     `git describe`), `uv build`s the wheel + sdist (kdive is pure-Python under
+     `uv_build`, so no `libvirt-dev` needed), then removes `_buildinfo.py`. The published
+     artifacts self-report `vX.Y.Z+g<sha>`.
   5. generate release notes via `uvx ${{ env.GIT_CLIFF }} --latest --strip header`
      (the pinned version) and **assert the notes file is non-empty** (fail otherwise —
      an empty changelog means the history/tags were not fetched).
@@ -283,6 +303,13 @@ notes never depend on a committed changelog being current.
   uv just established and pass even when the *committed* lock is stale. `uv lock
   --check` (and the existing `uv sync --locked` in CI) run before that auto-relock and
   fail on a stale committed lock — the real protection.
+- **Baking-inclusion guard** — a test (or a CI step) that runs `just build`, unzips the
+  resulting wheel, and asserts `kdive/_buildinfo.py` is present and importable from it.
+  This pins the empirically-verified `uv_build` behavior the baking layer depends on, so
+  a future `uv_build` change that started excluding the generated module fails loudly
+  instead of silently reverting artifacts to `-dev`/no-SHA. The test also asserts the
+  working tree has no leftover `src/kdive/_buildinfo.py` after `build` (the cleanup
+  `trap` worked).
 - `cliff.toml` smoke: a test (or the `changelog` recipe in CI dry-run) that the pinned
   `uvx {{GIT_CLIFF}}` parses the config and emits non-empty output for the current
   history.
