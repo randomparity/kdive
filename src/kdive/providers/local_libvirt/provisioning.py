@@ -15,6 +15,7 @@ ignores `<os><cmdline>` without a `<kernel>` element, and the test kernel plus i
 
 from __future__ import annotations
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -27,10 +28,16 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.discovery import _KDIVE_METADATA_NS
 
+_log = logging.getLogger(__name__)
+
 _URI_ENV = "KDIVE_LIBVIRT_URI"
 _DEFAULT_URI = "qemu:///system"
 _DEFAULT_MACHINE = "q35"
 SUPPORTED_DOMAIN_XML_PARAMS = frozenset({"machine"})
+
+# Register the kdive metadata prefix once at import (global ElementTree state) so the
+# rendered tag serializes as `kdive:system` rather than an auto-generated `ns0:` prefix.
+ET.register_namespace("kdive", _KDIVE_METADATA_NS)
 
 
 class _LibvirtDomain(Protocol):
@@ -42,9 +49,18 @@ class _LibvirtDomain(Protocol):
 class _LibvirtConn(Protocol):
     def defineXML(self, xml: str) -> _LibvirtDomain: ...
     def lookupByName(self, name: str) -> _LibvirtDomain: ...
+    def close(self) -> int: ...
 
 
 type Connect = Callable[[], _LibvirtConn]
+
+
+def _close(conn: _LibvirtConn) -> None:
+    """Close a libvirt connection, swallowing a close-time error (best-effort cleanup)."""
+    try:
+        conn.close()
+    except libvirt.libvirtError:
+        _log.warning("libvirt connection close failed; continuing", exc_info=True)
 
 
 class Provisioner(Protocol):
@@ -112,7 +128,6 @@ def render_domain_xml(system_id: UUID, profile: ProvisioningProfile) -> str:
     metadata = ET.SubElement(domain, "metadata")
     ET.SubElement(metadata, f"{{{_KDIVE_METADATA_NS}}}system").text = str(system_id)
 
-    ET.register_namespace("kdive", _KDIVE_METADATA_NS)
     return ET.tostring(domain, encoding="unicode")
 
 
@@ -138,8 +153,12 @@ class LocalLibvirtProvisioning:
         """
         xml = render_domain_xml(system_id, profile)
         try:
-            domain = self._connect().defineXML(xml)
-            domain.create()
+            conn = self._connect()
+            try:
+                domain = conn.defineXML(xml)
+                domain.create()
+            finally:
+                _close(conn)
         except libvirt.libvirtError as exc:
             raise CategorizedError(
                 "libvirt failed to define/start the domain",
@@ -157,23 +176,29 @@ class LocalLibvirtProvisioning:
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any other libvirt error.
         """
-        conn = self._connect()
         try:
-            domain = conn.lookupByName(domain_name)
+            conn = self._connect()
         except libvirt.libvirtError as exc:
-            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
-                return
-            raise self._infra("looking up", domain_name) from exc
+            raise self._infra("connecting to libvirt to tear down", domain_name) from exc
         try:
-            domain.destroy()
-        except libvirt.libvirtError as exc:
-            if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID:
-                raise self._infra("destroying", domain_name) from exc
-        try:
-            domain.undefine()
-        except libvirt.libvirtError as exc:
-            if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
-                raise self._infra("undefining", domain_name) from exc
+            try:
+                domain = conn.lookupByName(domain_name)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                    return  # already gone
+                raise self._infra("looking up", domain_name) from exc
+            try:
+                domain.destroy()
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID:
+                    raise self._infra("destroying", domain_name) from exc
+            try:
+                domain.undefine()
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
+                    raise self._infra("undefining", domain_name) from exc
+        finally:
+            _close(conn)
 
     @staticmethod
     def _infra(verb: str, domain_name: str) -> CategorizedError:

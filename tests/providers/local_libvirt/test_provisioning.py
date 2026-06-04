@@ -133,6 +133,7 @@ class _ProvConn:
     defined: dict[str, _ProvDomain] = field(default_factory=dict)
     define_error: int | None = None
     lookup_error: int | None = None  # raised by lookupByName (e.g. NO_DOMAIN)
+    closed: int = 0
 
     def defineXML(self, xml: str) -> _ProvDomain:
         if self.define_error is not None:
@@ -148,6 +149,10 @@ class _ProvConn:
             raise libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
         return self.defined[name]
 
+    def close(self) -> int:
+        self.closed += 1
+        return 0
+
 
 def _prov(conn: _ProvConn) -> LocalLibvirtProvisioning:
     return LocalLibvirtProvisioning(connect=lambda: conn)
@@ -158,6 +163,7 @@ def test_provision_defines_and_starts_returns_name() -> None:
     name = _prov(conn).provision(_SYS, _profile())
     assert name == "kdive-11111111-1111-1111-1111-111111111111"
     assert conn.defined[name].created is True
+    assert conn.closed == 1  # the connection is closed after use (no leak)
 
 
 def test_provision_define_error_is_provisioning_failure() -> None:
@@ -181,6 +187,20 @@ def test_teardown_destroys_and_undefines() -> None:
     conn = _ProvConn(defined={name: dom})
     _prov(conn).teardown(name)
     assert dom.destroyed is True and dom.undefined is True
+    assert conn.closed == 1  # the connection is closed after use (no leak)
+
+
+def test_provision_failure_still_closes_connection() -> None:
+    conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError):
+        _prov(conn).provision(_SYS, _profile())
+    assert conn.closed == 1  # closed even on a libvirt failure
+
+
+def test_teardown_absent_domain_closes_connection() -> None:
+    conn = _ProvConn()
+    _prov(conn).teardown(domain_name_for(_SYS))  # NO_DOMAIN -> early return
+    assert conn.closed == 1  # the finally still closes
 
 
 def test_teardown_absent_domain_is_noop() -> None:
