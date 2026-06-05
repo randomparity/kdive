@@ -132,19 +132,19 @@ PR — the host-first/real-JWKS shape of ADR-0042 §3 would not change, only A's
 The smoke test ships in **three tiers** — a finer split than ADR-0042's CI-able-vs-live, so the
 claim-shape gate gets an automated signal that does not require the full host stack:
 
-- a **CI-able in-memory tier** (default suite, `pull_request`) — an in-memory `fastmcp.Client`
-  against `build_app(pool, verifier=...)` with an **injected local-keypair verifier** and the
-  in-process `mint` helper (the ADR-0035 §3 token path). It proves the `LiveStackClient`
-  envelope-parsing seam and the per-role read-only probe (`viewer`/`operator`/`admin` + a
-  `platform_auditor` call) over the in-memory transport, plus — purely in-process, no
-  network — the **claim *shape*** (`_build_claims` produces the nested `roles` object and the
-  array `platform_roles`; the in-process token decodes to exactly those). It does **not**
-  exercise the real issuer or JWKS. Because the probe is `resources.list`, which executes
-  `SELECT * FROM resources` through the pool (`mcp/tools/resources.py`), this tier **needs a
-  migrated Postgres** — it uses the repo's disposable-Postgres fixture (`migrated_url`) and
-  **skips cleanly when Docker is absent**, exactly as the existing DB-backed MCP tests do
-  (`KDIVE_REQUIRE_DOCKER=1` turns the skip into a failure in CI). It is "CI-able" in the same
-  sense every DB test in this repo is, **not** Docker-free.
+- a **CI-able in-memory tier** (default suite, `pull_request`, **no marker**) — an in-memory
+  `fastmcp.Client` over a small probe `FastMCP` app. **Constraint (verified by probe):** the
+  in-memory `FastMCPTransport` rejects `auth=` and carries **no** access token, so
+  `get_access_token()` returns `None` in-process and any tool that calls `current_context()`
+  (every kdive plane tool, including `resources.list`) cannot be driven through the in-memory
+  client. This tier therefore proves only what the in-memory transport *can* prove: the
+  `LiveStackClient` **envelope-parsing seam** (a scalar tool → one `ToolResponse`; a
+  `list[ToolResponse]` tool → a list; the `.data` shape pin) and `list_tools()`, against probe
+  tools that do not read auth, plus — purely in-process, no network — the **claim *shape*** via
+  `_build_claims` and the in-process `mint` (the nested `roles` object and the array
+  `platform_roles` decode exactly). It needs **no Postgres and no Docker** (the probe tools read
+  no DB), so it always runs on `pull_request`. The **per-role read-only probe is not run here** —
+  it requires real auth, which the in-memory transport lacks; it lives in the `live_stack` tier.
 - an **issuer-only tier** (`oidc_issuer` marker) — stands up **only** the `oidc` container
   (`docker compose up -d oidc`, no kdive server, no Postgres, no VM), has `mint_token` obtain
   each token from the **real issuer**, and verifies it through a real `JWTVerifier` built from
@@ -152,28 +152,29 @@ claim-shape gate gets an automated signal that does not require the full host st
   asserts the nested `roles` object + array `platform_roles` are in the verified access token,
   `roles_from_claims` parses the object, and a wrong-audience verifier rejects. It `pytest.skip`s
   when `KDIVE_OIDC_ISSUER`/the issuer is unreachable, so it runs wherever Docker + the issuer
-  are up (a CI job *can* opt in) and skips otherwise. This tier is what makes the gate a
-  standing regression rather than a one-time manual probe — the limitation finding against the
-  in-memory tier (it cannot reach the issuer) is answered here, at a far lower bar than the full
-  stack.
+  are up (a CI job *can* opt in) and skips otherwise. This tier makes the gate a standing
+  regression rather than a one-time manual probe, at a far lower bar than the full stack.
 - a **`live_stack` tier** (marker `live_stack`, operator-run, skipped on `pull_request`) —
   `fastmcp.Client` **over HTTP** against a host-run `server` + Postgres + the real issuer:
   the only tier that puts the real transport, server startup, **and** the JWKS/`JWTVerifier`
-  path on one wire. It `pytest.skip`s with an actionable reason when `KDIVE_STACK_BASE_URL` /
-  the issuer env are absent (the ADR-0035 §4 idiom), so it is CI-safe.
+  path on one wire — and therefore the **only** tier where the per-role read-only probe
+  (`viewer`/`operator`/`admin` + a `platform_auditor` call to `resources.list`) actually
+  exercises authenticated tool dispatch end to end. It `pytest.skip`s with an actionable reason
+  when `KDIVE_STACK_BASE_URL` / the issuer env are absent (the ADR-0035 §4 idiom), so it is
+  CI-safe.
 
-The per-role read-only probe is `resources.list` — Discovery-plane reads require only an
-authenticated context (no RBAC scoping, no project rows), so it returns a well-formed envelope
-for every role against an empty (but migrated) database, isolating the auth/transport path from
-domain state.
+The per-role read-only probe (in the `live_stack` tier) is `resources.list` — Discovery-plane
+reads require only an authenticated context (no RBAC scoping, no project rows), so it returns a
+well-formed envelope for every role against an empty database, isolating the auth/transport path
+from domain state.
 
 ### 4. Two new pytest markers, distinct from `live_vm`
 
 Registered in `pyproject.toml`. `live_vm` means "a KVM/libvirt host"; the new `oidc_issuer`
 means "the mock issuer container is up" (no server, no VM); `live_stack` means "a running
 server + issuer + Postgres." The issuer-only tier carries `oidc_issuer`, the wire tier carries
-`live_stack`, and the in-memory tier carries no marker (it rides the default suite's
-disposable-Postgres gating).
+`live_stack`, and the in-memory tier carries no marker — it reads no DB and needs no Docker, so
+it runs unconditionally in the default suite.
 
 ## Consequences
 
@@ -185,12 +186,12 @@ disposable-Postgres gating).
   default for the pinned image) and on the login form posting `username` + `claims` back to the
   authorize URL. If a future image bump changes either, the login-form post breaks loudly in
   the issuer-only tier — caught by the gate, not silently.
-- The CI surface grows by: one **always-run** in-memory smoke test that rides the repo's
-  existing disposable-Postgres gating (skips when Docker is absent, like every DB test here —
-  it is *not* Docker-free); one **`oidc_issuer`-gated** test that runs only when the issuer
-  container is up (a CI job can opt in with `docker compose up -d oidc`); and one
-  **`live_stack`-gated** test skipped on `pull_request` exactly as `live_vm` is. Default
-  `pull_request` CI gains no new mandatory infra.
+- The CI surface grows by: one **always-run, Docker-free** in-memory smoke test (probe app,
+  no DB, no auth — it covers the envelope-parsing seam + claim shape only, because the
+  in-memory transport carries no token); one **`oidc_issuer`-gated** test that runs only when
+  the issuer container is up (a CI job can opt in with `docker compose up -d oidc`); and one
+  **`live_stack`-gated** test skipped on `pull_request` exactly as `live_vm` is — the only tier
+  that drives authenticated tool calls. Default `pull_request` CI gains no new mandatory infra.
 - The `platform_roles` claim is proven **mintable and verifiable** but not yet **parseable**
   here; platform-RBAC P1 lands the parser and the live-stack driver (D/E) routes it through
   `require_platform_role`. A's gate is the necessary precondition, scoped honestly.
@@ -207,4 +208,9 @@ disposable-Postgres gating).
   A confirms the claim shape independently and unblocks D's scheduling.
 - **Probe a domain read (`accounting.usage`) instead of `resources.list`.** Needs seeded
   ledger/project rows and RBAC scoping, coupling the auth smoke to domain state. Rejected for
-  a read that is well-formed on an empty DB for every role.
+  a read that is well-formed on an empty DB for every role (in the `live_stack` tier).
+- **Drive a kdive plane tool through the in-memory client (no real server).** Rejected because
+  the in-memory `FastMCPTransport` carries no access token (verified: it rejects `auth=` and
+  `get_access_token()` returns `None`), so any tool calling `current_context()` cannot run that
+  way. The in-memory tier covers only the auth-free envelope seam; authenticated dispatch is the
+  `live_stack` tier's job.

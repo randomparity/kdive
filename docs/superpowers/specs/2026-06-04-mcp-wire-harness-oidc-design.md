@@ -124,31 +124,31 @@ gives the bare list; `.data` is used to avoid that asymmetry.) A pinning test as
 concrete shape (`resources.list` → `.data` is a list; a scalar tool → `.data` is a model) so a
 future fastmcp change fails loudly, and D imports a defined contract, not an inferred one. The
 constructor takes an already-built `fastmcp.Client` so the in-memory tier injects a client over
-`build_app(...)` and the live tier uses `over_http`.
+a probe `FastMCP` app and the live tier uses `over_http`.
 
 ## Smoke test — three tiers
 
-All tiers, where they run: connect → `list_tools` (assert the M0/M1 tool surface is present) →
-one read-only `resources.list` call **per role** (`viewer`/`operator`/`admin`) plus one under
-a `platform_auditor` token. `resources.list` needs only an authenticated context (no RBAC
-scoping, no seeded rows), so it returns a well-formed envelope for every role against an empty
-**but migrated** DB (ADR-0044 §3). No VM, no domain state.
+The **per-role read-only probe** (connect → `list_tools` → a `resources.list` call as
+`viewer`/`operator`/`admin` + a `platform_auditor` token) runs only in the **`live_stack`
+tier**. `resources.list` calls `current_context()` → `get_access_token()`, which the
+**in-memory transport cannot populate** (verified: `FastMCPTransport` rejects `auth=` and
+carries no token), so the per-role probe needs real HTTP auth. The lower tiers cover what they
+can without that: the in-memory tier the envelope-parsing seam + claim shape; the issuer-only
+tier the mint+verify gate.
 
-### In-memory tier (no marker; default suite, `pull_request`)
+### In-memory tier (no marker; default suite, `pull_request`) — Docker-free
 
-- In-memory `fastmcp.Client` over `build_app(pool, verifier=<local-keypair JWTVerifier>)`.
-  `resources.list` executes `SELECT * FROM resources` through the pool, so the tier **requires
-  a migrated Postgres**: it uses the repo's disposable-Postgres fixture (`migrated_url`,
-  re-exported in `tests.mcp.conftest`) and **skips cleanly when Docker is absent**, exactly as
-  the other DB-backed MCP tests do (`KDIVE_REQUIRE_DOCKER=1` turns the skip into a failure in
-  CI). It is "CI-able" in the same sense those are — *not* Docker-free.
-- Tokens come from the in-process `mint` helper signing the same claim shapes; the injected
-  verifier validates them (the ADR-0035 §3 path). Exercises the `LiveStackClient`/envelope
-  seam and the per-role probe **without** the real JWKS, issuer, or HTTP transport.
+- In-memory `fastmcp.Client` over a small **probe** `FastMCP` app with two tools that do **not**
+  read auth: a scalar `ToolResponse` tool and a `list[ToolResponse]` tool. This proves the
+  `LiveStackClient` envelope-parsing seam (scalar → one `ToolResponse`, list → `list`, the
+  `.data` shape pin) and `list_tools()`. It reads no DB and needs no Docker, so it runs
+  unconditionally on `pull_request`.
 - **Claim-shape unit assertions run here** (no network): `_build_claims` produces the
-  nested-object `roles` and array `platform_roles`, and the in-process-minted token decodes to
-  exactly those shapes. A `pull_request`-CI regression guard on the claim *shape* (the *issuer*
-  gate lives in the next tier).
+  nested-object `roles` and array `platform_roles`, and an in-process `mint`ed token decodes to
+  exactly those shapes — a `pull_request`-CI regression guard on the claim *shape* (the *issuer*
+  gate is the next tier).
+- It does **not** drive any kdive plane tool through the client (those call `current_context()`,
+  which the in-memory transport leaves unset) and does **not** exercise the real issuer or JWKS.
 
 ### Issuer-only tier (marker `oidc_issuer`) — **the executable claim-shape gate**
 
@@ -173,7 +173,9 @@ scoping, no seeded rows), so it returns a well-formed envelope for every role ag
 - `mint_token` obtains each token from the real issuer; the **host-run server** (behind
   `KDIVE_STACK_BASE_URL`) validates them through its configured `JWTVerifier` against the live
   JWKS as each `call_tool` runs **over HTTP**. The only tier with the real transport + server
-  startup + JWKS path on one wire — the shape D drives.
+  startup + JWKS path on one wire — the shape D drives — and **the only tier that runs the
+  per-role `resources.list` probe** (`viewer`/`operator`/`admin` + `platform_auditor`), since
+  authenticated tool dispatch needs the real HTTP middleware the in-memory transport lacks.
 
 ## Edges covered (TDD)
 
@@ -192,8 +194,8 @@ scoping, no seeded rows), so it returns a well-formed envelope for every role ag
 
 ## Acceptance (issue #98)
 
-- In-memory tier passes on `pull_request` (no server process, no issuer; rides the repo's
-  disposable-Postgres gating — skips when Docker absent, fails when `KDIVE_REQUIRE_DOCKER=1`).
+- In-memory tier passes on `pull_request` (no server, no issuer, no Docker — a probe app +
+  the envelope-parsing seam + the claim-shape unit checks).
 - `oidc_issuer` tier (the gate): with just the issuer container up, the issuer mints the
   nested-object `roles` claim and the `platform_roles` array claim **into the access token**;
   all tokens validate through a real `JWTVerifier` against the live JWKS, `roles_from_claims`
@@ -217,6 +219,6 @@ scoping, no seeded rows), so it returns a well-formed envelope for every role ag
 - New `live_stack` + `oidc_issuer` markers distinct from `live_vm` → `pyproject.toml`;
   ADR-0044 §4. ✓
 - Importable by D → package layout under `tests/integration/live_stack/`. ✓
-- In-memory tier needs migrated Postgres (not Docker-free) — false "no Docker" claim removed →
-  In-memory tier; ADR-0044 §3. ✓
+- Per-role probe runs only in `live_stack` (in-memory transport carries no auth token,
+  verified) → Smoke test §3; ADR-0044 §3. ✓
 - No product code / no spine driver / no `platform_roles` parser → Non-goals. ✓
