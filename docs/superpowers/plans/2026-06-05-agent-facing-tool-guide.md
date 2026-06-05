@@ -201,6 +201,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import textwrap
 from collections import Counter
 from pathlib import Path
 
@@ -226,8 +227,13 @@ def _build_tools() -> list:
 
 
 def _callees(fn: object) -> set[str]:
-    """The set of called symbol names in a wrapper body (Name + Attribute calls)."""
-    tree = ast.parse(inspect.getsource(fn))
+    """The set of called symbol names in a wrapper body (Name + Attribute calls).
+
+    The wrappers are closures nested inside ``register()``, so ``inspect.getsource``
+    returns them at their nesting indent (decorator included); ``textwrap.dedent`` is
+    required or ``ast.parse`` raises ``IndentationError``.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
