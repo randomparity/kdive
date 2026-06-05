@@ -14,6 +14,7 @@ class _HeadClient:
         self._response = response
 
     def head_object(self, **_kwargs: object) -> dict[str, object]:
+        assert _kwargs.get("ChecksumMode") == "ENABLED"
         if isinstance(self._response, Exception):
             raise self._response
         return self._response
@@ -22,6 +23,13 @@ class _HeadClient:
 def _not_found() -> ClientError:
     return ClientError(
         {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject"
+    )
+
+
+def _forbidden() -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+        "HeadObject",
     )
 
 
@@ -53,6 +61,13 @@ def test_head_without_checksum_metadata_yields_none_checksum() -> None:
 
 def test_head_maps_transport_error_to_infrastructure_failure() -> None:
     store = ObjectStore(_HeadClient(EndpointConnectionError(endpoint_url="http://x")), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.head("t/runs/r1/kernel")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_head_non_404_client_error_raises_infrastructure_failure() -> None:
+    store = ObjectStore(_HeadClient(_forbidden()), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
         store.head("t/runs/r1/kernel")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
