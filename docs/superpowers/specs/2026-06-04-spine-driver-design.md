@@ -1,0 +1,180 @@
+# Phase-structured spine driver — sub-issue D design (M1.2, #100)
+
+**Parent (umbrella) spec:** [`2026-06-04-live-stack-e2e-design.md`](2026-06-04-live-stack-e2e-design.md)
+(sub-issue D) · **Decisions:** [ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) §1/§4/§5
+(the cross-cutting decisions this driver realizes) + [ADR-0045](../../adr/0045-spine-driver-capability-grant-phase-naming.md)
+(the two driver-local decisions: out-of-band capability grant and the phase-failure naming
+contract) · **Depends on:** A ([#98](https://github.com/randomparity/kdive/issues/98), merged —
+`tests/integration/live_stack/harness.py`), C ([#99](https://github.com/randomparity/kdive/issues/99),
+merged — `just stack-up`/`just test-live-stack`, the `live_stack` marker, the runbook) ·
+**Status:** Proposed · **Date:** 2026-06-04
+
+## Goal
+
+Build `tests/integration/test_live_stack.py`: a single phase-structured test that drives the
+full kdive spine **over the live MCP HTTP transport** via A's `LiveStackClient`/`mint_token`,
+each phase a tool call under a specific OIDC role token, the async job kinds drained by the
+real host `worker` + `reconciler`. It asserts the protocol/#1/#2/#3/#5/RBAC exit criteria and,
+on any failure, **names the phase that failed**. It replaces (deletes) the unimplemented
+`test_walking_skeleton_full_path` stub. It carries the `live_stack` marker and a preflight that
+skips cleanly when the stack/fixtures are absent, so it is safe in CI and on any host.
+
+This is a **test-only** change: no `src/` product code moves. The driver exercises shipped
+handlers unchanged.
+
+## Non-goals
+
+- **No `report` phase accounting assertions.** The umbrella spec splits the `report` phase's
+  `accounting.report` ledger assertions + report artifact into sub-issue E
+  ([#101](https://github.com/randomparity/kdive/issues/101)) for bisectability. This driver
+  proves only the **RBAC reachability boundary** the issue lists: `accounting.report`'s
+  all-projects form is reachable over the wire under a `platform_auditor` token and **denied**
+  to a project-only token. The ledger-variance assertions and the emitted report artifact are E.
+- **No CI execution.** Operator-run on a KVM host with the stack up (ADR-0042 Consequences).
+  The marked suite skips cleanly everywhere else.
+- **No new product code, no new fixtures.** Reuses the ADR-0035 `scripts/live-vm/*` fixtures
+  and the existing handlers/tools.
+
+## The spine and its phases
+
+The driver advances through the phases below in order, each phase one or more tool calls over
+HTTP under the named caller role; each phase records pass/fail and threads its output id into
+the phases that follow. The async job-kind phases (`provision`/`build`/`install`/`boot`/
+`capture`) are **enqueued** by the caller's tool call (which returns a *job handle* envelope,
+status `queued`) and **executed by the real host worker**; the driver polls `jobs.wait` (then
+the read tool `runs.get`/`systems.get`) until the step commits before the next dependent phase
+— the queue-drive contract (ADR-0042 §1).
+
+| # | Phase | Caller (role) | Tool(s) over the wire | Output → / asserts |
+|---|---|---|---|---|
+| 1 | allocate | operator | `allocations.request` | → `allocation_id`; envelope `status=granted` |
+| — | *(grant capability scope)* | *(platform setup)* | *out-of-band DB update* | `allocations.capability_scope.destructive_ops=["force_crash"]` (ADR-0045 §1) |
+| 2 | provision | operator | `systems.provision(allocation_id, profile)` — profile **opts `force_crash` in** via `provider.local-libvirt.destructive_ops` → worker; poll `systems.get` to `ready` | → `system_id` |
+| 3 | open-investigation | operator | `investigations.open(project, title)` | → `investigation_id` |
+| 4 | create-run | operator | `runs.create(investigation_id, system_id, build_profile)` | → `run_id` |
+| 5 | build | operator → worker | `runs.build(run_id)` (enqueue); poll `jobs.wait` to `succeeded` | `run` reaches `succeeded`; `build_id` recorded |
+| 6 | install | operator → worker | `runs.install(run_id)` (enqueue); poll `jobs.wait` | kernel installed |
+| 7 | boot | operator → worker | `runs.boot(run_id)` (enqueue); poll `jobs.wait` | guest boots |
+| 8 | attach | operator | `debug.start_session(run_id, "gdbstub")` then `debug.read_registers` probe | → `session_id`; the gdb-MI probe returns a non-error envelope |
+| 9 | crash | admin | `control.force_crash(system_id)` (enqueue); poll `systems.get` to `crashed` | 3-check gate passes (admin role ∧ capability scope ∧ profile opt-in) |
+| 10 | capture | operator → worker | `vmcore.fetch(system_id)` (enqueue); poll `jobs.wait` | **redacted** vmcore artifact in MinIO (#1) |
+| 11 | introspect | operator | `introspect.from_vmcore(run_id)` | redacted report returned in `data.report` |
+| 12 | release | operator | `allocations.release(allocation_id)` | ledger `reconciled`; teardown enqueued |
+| — | *(await teardown)* | operator → worker | poll `systems.get` to `torn_down` | System `torn_down`; `Discovery.list_owned()` empty for `system_id` (#5) |
+| 13 | report (RBAC boundary only) | platform_auditor + viewer | `accounting.report(scope="all-projects")` under a `platform_auditor` token (reachable) **and** under a project-only token (denied); `accounting.usage(investigation_id=…)` under viewer | the platform-vs-project authorization boundary holds over the wire (E owns the ledger assertions) |
+
+The `attach` probe uses `debug.read_registers` (a gdb-MI command) rather than the umbrella
+spec's placeholder `debug.gdb_mi_command`; the registered MI tools are
+`debug.read_registers`/`debug.read_memory`/`debug.continue`/`debug.interrupt`/breakpoints.
+
+### Setup prerequisite for `crash` (the capability scope) — ADR-0045 §1
+
+`control.force_crash` is behind the three-check destructive gate
+(`kdive.security.gate.assert_destructive_allowed`): admin role **and** the controlling
+allocation's `capability_scope.destructive_ops` granting `force_crash` **and** the provisioning
+profile opting `force_crash` in. The wire `allocations.request` tool always grants an **empty**
+capability scope (`allocation_admission._grant` hardcodes `capability_scope={}`), and no shipped
+tool sets it — granting a destructive capability is a privileged platform action outside the
+per-project operator surface. So the driver establishes the scope **up front, out of band**: a
+single privileged DB `UPDATE allocations SET capability_scope = … WHERE id = <allocation_id>`
+against the same Postgres the stack uses (`KDIVE_DATABASE_URL`), mirroring exactly what
+`seed_granted_allocation(capability_scope=…)` does in the in-process gate tests. This is setup
+the driver performs deterministically before `crash`, not something the crash phase discovers
+(ADR-0045 §1 records the rationale and the rejected alternatives).
+
+The profile opt-in (the third gate factor) is carried in the provision phase's `profile` dict:
+`provider.local-libvirt.destructive_ops = ["force_crash"]`, validated by `LibvirtProfile`.
+
+## Phase-failure naming contract (ADR-0042 §4, mechanism in ADR-0045 §2)
+
+Each phase runs inside a `phase(name)` context manager that, on any exception, re-raises a
+`SpinePhaseError(phase=name)` chaining the original (`raise … from exc`). The test body is a
+linear sequence of `async with phase("provision"): …` blocks, so a failure's message and the
+chained traceback both name the failing phase — `provision`, not "something in the VM path"
+(ADR-0042 §4). A tool envelope returned with `status in {"error","failed"}` inside a phase is
+converted to a raised `SpinePhaseError` carrying the envelope's `error_category`, so an
+authorization/infrastructure denial is reported under its phase too, not silently passed over.
+
+## Async drain (worker + reconciler)
+
+The real host `worker` drains `provision`/`build`/`install`/`boot`/`capture_vmcore`/
+`force_crash` jobs; the `reconciler` repairs drift and reaps released infra. The driver never
+runs a job inline — it polls:
+
+- For job-handle phases (`build`/`install`/`boot`/`capture`/`crash`/`provision`): poll
+  `jobs.wait(job_id, timeout_s)` until the job envelope reports `succeeded`, then assert the
+  read tool reflects the new state (`runs.get` `succeeded`, `systems.get` `ready`/`crashed`/
+  `torn_down`). `jobs.wait` long-polls server-side; the driver wraps it in a bounded retry loop
+  with an overall per-phase deadline so a stalled worker fails the phase by *name* with a
+  timeout, not a hang.
+- A single module-level `_DRAIN_DEADLINE_S` bounds each async phase; exceeding it raises the
+  phase's `SpinePhaseError` with a timeout reason.
+
+## Acceptance assertions
+
+All assertions run over the wire / against the stack's Postgres + MinIO:
+
+- **Protocol.** Every phase's tool call returns a well-formed `ToolResponse` envelope parsed by
+  `LiveStackClient.call_tool` (the structured-content path). Tokens are minted by `mint_token`
+  from the real issuer and validated through the server's `JWTVerifier`/JWKS — proven by the
+  calls succeeding under role tokens (an invalid token is rejected at the transport, never
+  reaching a handler).
+- **#1 redacted vmcore in MinIO.** After `capture`, `vmcore.list(system_id)` /
+  `artifacts.list(system_id)` over the wire return a fetchable **redacted** artifact, and
+  `artifacts.get` on it succeeds; the raw `sensitive` key is never returned (the artifact-
+  sensitivity guard, mirrors the in-process `test_raw_vmcore_is_sensitive_and_unreachable`).
+- **#2 audit per transition + force_crash.** The stack Postgres `audit_log` carries a row for
+  every transition the spine drove — `->granted`, provision/run transitions, `ready->crashed`
+  (the `force_crash`), release — each under the request's `(principal, agent_session, project)`
+  tuple. Asserted by querying `audit_log` for the `force_crash` row and the release rows under
+  the driver's principal/session/project.
+- **#3 redaction.** The introspect report (`introspect.from_vmcore`) and any returned crash
+  transcript do not leak a planted secret over the wire; `[REDACTED]` appears where the secret
+  was. The fixture guest plants the secret (operator fixture concern); the driver asserts the
+  wire path does not surface it.
+- **#5 torn_down + no OwnedInfra.** After `release` and teardown drain, `systems.get(system_id)`
+  reports `torn_down` **and** a `LocalLibvirtDiscovery(host_uri="qemu:///system", …).list_owned()`
+  returns no `OwnedInfra` for the released `system_id` (the ADR-0035 §2 mechanism).
+- **RBAC negatives over the wire.** A `viewer` token is denied operator ops
+  (`allocations.request`, `systems.provision`) and admin ops; `control.force_crash` under a
+  non-admin (operator) token is denied (`authorization_denied`) — asserted as raised/`error`
+  envelopes over HTTP, *not* in-process. These negatives run against the standing stack and do
+  **not** require a KVM host beyond the spine itself.
+- **report RBAC boundary.** `accounting.report(scope="all-projects")` is reachable under a
+  `platform_auditor` token and denied under a project-only `viewer`/`operator`/`admin` token
+  (sub-issue E owns the ledger-variance + artifact assertions).
+
+## Preflight / skip semantics
+
+A module-level `_spine_preflight()` (the ADR-0035 §4 idiom, extended) skips with an actionable
+reason unless **all** of: `KDIVE_GUEST_IMAGE` + `KDIVE_KERNEL_SRC` present (the VM fixtures);
+`KDIVE_STACK_BASE_URL` set + the server reachable; the OIDC issuer reachable
+(`require_issuer()`); and `KDIVE_DATABASE_URL` set (the out-of-band capability grant + the
+audit/teardown assertions read it). Each missing prerequisite produces a distinct
+`pytest.skip` naming the exact fix (the script to run / the env to set / `just stack-up`). The
+suite carries the `live_stack` marker, so `just test` (`-m "not live_vm and not live_stack"`)
+never collects it and `just test-live-stack` runs it (skipping cleanly when the preflight
+fails).
+
+## Files
+
+- **Create** `tests/integration/test_live_stack.py` — the phase-structured driver + `phase`
+  context manager + `SpinePhaseError` + `_spine_preflight` + the assertions above. Marked
+  `live_stack`.
+- **Modify** `tests/integration/test_walking_skeleton.py` — **delete**
+  `test_walking_skeleton_full_path` and its now-unused `live_vm` preflight branch
+  (`_live_vm_preflight` is retained only if still used by a remaining test; the non-gated
+  exit-criterion tests stay untouched). The `live_vm` marker on the per-plane smoke tests is
+  untouched (`live_stack` is additive, ADR-0042 §5).
+- **Create** `docs/adr/0045-spine-driver-capability-grant-phase-naming.md` + add it to
+  `docs/adr/README.md`.
+
+## Risks
+
+- **libvirt path/permission seams** surface here first (the reason for host-first staging,
+  ADR-0042 §2); a provision/boot/teardown failure names its phase.
+- **Async-job timing** — bounded per-phase deadlines make a worker stall a named-phase timeout,
+  not a hang.
+- **Capability-scope coupling** — the out-of-band grant is a test-side privileged action; if a
+  future release adds a real `allocations.grant_capability` tool, the driver should switch to it
+  (ADR-0045 §1 Consequences).
