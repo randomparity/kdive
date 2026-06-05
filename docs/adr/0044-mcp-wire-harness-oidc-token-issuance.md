@@ -28,7 +28,7 @@ injected, local-keypair `JWTVerifier`; the in-process `tests.mcp.conftest.mint` 
 those claims directly. Nothing obtains a token **from the issuer** or exercises the real
 JWKS/`JWTVerifier` path end to end. Sub-issue A builds the reusable seam that does.
 
-Two facts bound the decision:
+Three facts bound the decision:
 
 - **`JWTVerifier` validates signature, `iss`, and `aud` only.** It does not inspect or reject
   custom claims; `roles`/`platform_roles`/`projects` are parsed *downstream* by
@@ -41,19 +41,34 @@ Two facts bound the decision:
   **verifier accepts** it. The nested `roles` object, by contrast, **can** be routed through
   the real `roles_from_claims` parser, which already ships — so A asserts the stronger
   property there.
+- **The claim-shape gate is settled empirically, not assumed.** Before writing the harness, the
+  pinned issuer image was stood up alone (`docker compose up -d oidc`) and driven through the
+  login-form flow below; the returned **access_token** carried the nested `roles` object
+  `{"proj-a": "admin"}` and the `platform_roles` array `["platform_auditor"]` with the right
+  `iss`/`aud`, the real `JWTVerifier` reading the live JWKS **accepted** it, `roles_from_claims`
+  parsed the verified object to `{"proj-a": Role.ADMIN}`, and a wrong-audience verifier
+  **rejected** it. ADR-0042 §3's open assumption is therefore **confirmed** — the issuer's
+  login-form `claims` flow into the access token, not only the id_token. The `JSON_CONFIG`/
+  token-exchange fallback is **not needed** and is recorded only as the contingency had the
+  probe failed. (During the probe the compose `oidc` tag was found to point at a nonexistent
+  image — `3.1.4` is unpublished; latest 3.x is `3.0.3` — and was corrected in the same branch.)
 
 ## Decision
 
 ### 1. Token acquisition uses the issuer's login flow with literal `claims`, not a static `JSON_CONFIG`
 
-`mint_token(role, project, platform_roles=...)` drives the mock-oauth2-server's
-**interactive-login authorization-code flow** and posts the desired claims as a literal JSON
-object in the login form's `claims` field, then exchanges the returned `code` at the issuer's
-`/{issuerId}/token` endpoint for a signed JWT. This is the navikt server's documented path
-for **request-time arbitrary claims** (including nested objects) and needs **no** server-side
-`tokenCallbacks`/`requestMappings` config file — so the compose `oidc` service stays unchanged
-(ADR-0042's "reused unchanged" constraint holds) and the harness mints a different per-project
-`roles` map and `platform_roles` set per call without restarting the issuer.
+`mint_token(...)` drives the mock-oauth2-server's **interactive-login authorization-code
+flow**: GET `/{issuerId}/authorize?response_type=code&...` returns the login page whose form
+posts back to that same authorize URL (no `action`, oauth params on the query string) with
+two fields — `username` and a literal `claims` JSON object; the server 302-redirects to the
+`redirect_uri` with a `code`, which is exchanged at `/{issuerId}/token`
+(`grant_type=authorization_code`) for the signed access token. The empirical probe (Context)
+confirms the posted `claims` — including the **nested `roles` object** and the array
+`platform_roles` — land in the **access token** the verifier checks. This needs **no**
+server-side `tokenCallbacks`/`requestMappings` config file, so the compose `oidc` service
+stays unchanged (ADR-0042's "reused unchanged" constraint holds) and the harness mints a
+different per-project `roles` map and `platform_roles` set per call without restarting the
+issuer.
 
 Rejected alternative — a static `JSON_CONFIG` with `requestMappings` mapping a request param
 to a fixed claim set — cannot carry a *dynamic* nested role map (a different `{project: role}`
@@ -81,57 +96,96 @@ The **acceptance gate** (the smoke test) asserts:
   is **out of scope for A** — that parser is platform-RBAC P1; A's gate is mint-and-verify,
   which is exactly what ADR-0042 §3 asked to confirm.
 
-If the issuer cannot mint either shape, A redesigns acquisition (a claim-mapping config or a
-token-exchange shim) before D is scheduled, and records it in the PR — the host-first/real-JWKS
-shape of ADR-0042 §3 does not change, only A's mechanism.
+All three assertions were run by hand against the standalone issuer (Context) and held, so the
+gate is met before the harness is built; the live tier (§3) is the standing regression of that
+proof. The escape hatch is therefore unused: **had** the issuer been unable to mint either
+shape into the access token, A would have switched acquisition to a `JSON_CONFIG`
+`tokenCallbacks` mapping or a token-exchange shim before D was scheduled and recorded it in the
+PR — the host-first/real-JWKS shape of ADR-0042 §3 would not change, only A's mechanism.
 
-### 3. The harness is a two-class, two-tier seam under `tests/integration/live_stack/`
+### 3. The harness is a two-class seam under `tests/integration/live_stack/`, exercised in three tiers
 
 `harness.py` exposes:
 
-- `LiveStackClient` — a thin wrapper over `fastmcp.Client` (streamable HTTP) against
-  `KDIVE_STACK_BASE_URL`, exposing `list_tools()` and `call_tool(name, **args)` that returns
-  the **parsed `ToolResponse` envelope** (not the raw transport result). It is the single
-  client seam sub-issue D imports to drive the spine.
-- `mint_token(...)` and an `OidcIssuer` config (issuer base URL, `issuerId`, audience, the
-  client id) read from the same `KDIVE_OIDC_*`/`KDIVE_STACK_*` env the server uses.
+- `LiveStackClient` — a thin wrapper over `fastmcp.Client`, exposing `list_tools()` (tool
+  names) and `call_tool(name, **args)` that returns the **parsed `ToolResponse` envelope** (not
+  the raw transport result). A `LiveStackClient.over_http(base_url, token)` classmethod builds
+  the streamable-HTTP + bearer client for the live tier; the constructor also accepts an
+  already-built in-memory client so the lower tiers reuse the same envelope-parsing seam D
+  imports. **Envelope parsing (fastmcp 3.4.0):** `Client.call_tool` returns a
+  `CallToolResult`; the parser reads its **`.data`** field (the deserialized structured
+  output, populated from the tool's output schema), validating it into `ToolResponse`
+  (`mcp/responses.py`). A tool whose return annotation is `list[ToolResponse]` (only
+  `resources.list` here) yields a list under `.data`, so `call_tool` returns
+  `list[ToolResponse]`; a single-object tool yields a dict, returning one `ToolResponse`. The
+  single-vs-list discrimination is **by the parsed payload's JSON type** (list → list, object →
+  scalar), pinned by a test asserting both shapes — not by a per-tool table the harness would
+  have to maintain.
+- `mint_token(...)` and an `OidcIssuer` config (issuer base URL, audience, client id) read
+  from the same `KDIVE_OIDC_*`/`KDIVE_STACK_*` env the server uses.
 
-The smoke test ships in **two tiers**, matching ADR-0042's CI-able-vs-live split:
+The smoke test ships in **three tiers** — a finer split than ADR-0042's CI-able-vs-live, so the
+claim-shape gate gets an automated signal that does not require the full host stack:
 
-- a **CI-able in-memory tier** (`pull_request`) — an in-memory `fastmcp.Client` against
-  `build_app(pool, verifier=...)` with an **injected local-keypair verifier** and the
-  in-process `mint` helper (the ADR-0035 §3 token path). It exercises tool registration,
-  schemas, and envelope serialization end to end **without** a server process, the real JWKS,
-  or the issuer. It proves the `LiveStackClient` envelope-parsing seam and the per-role
-  read-only call (`viewer`/`operator`/`admin` + a `platform_auditor` call) on the wire-shaped
-  client. It does **not** prove the claim-shape gate.
-- a **`live_stack` tier** (operator-run, skipped on `pull_request`) — `fastmcp.Client` over
-  HTTP against a host-run `server` + Postgres + the **real issuer**, the tier that exercises
-  the real JWKS/`JWTVerifier` path and **is** the claim-shape gate. It `pytest.skip`s with an
-  actionable reason when `KDIVE_STACK_BASE_URL` / the issuer env are absent (the ADR-0035 §4
-  idiom), so it is CI-safe.
+- a **CI-able in-memory tier** (default suite, `pull_request`) — an in-memory `fastmcp.Client`
+  against `build_app(pool, verifier=...)` with an **injected local-keypair verifier** and the
+  in-process `mint` helper (the ADR-0035 §3 token path). It proves the `LiveStackClient`
+  envelope-parsing seam and the per-role read-only probe (`viewer`/`operator`/`admin` + a
+  `platform_auditor` call) over the in-memory transport, plus — purely in-process, no
+  network — the **claim *shape*** (`_build_claims` produces the nested `roles` object and the
+  array `platform_roles`; the in-process token decodes to exactly those). It does **not**
+  exercise the real issuer or JWKS. Because the probe is `resources.list`, which executes
+  `SELECT * FROM resources` through the pool (`mcp/tools/resources.py`), this tier **needs a
+  migrated Postgres** — it uses the repo's disposable-Postgres fixture (`migrated_url`) and
+  **skips cleanly when Docker is absent**, exactly as the existing DB-backed MCP tests do
+  (`KDIVE_REQUIRE_DOCKER=1` turns the skip into a failure in CI). It is "CI-able" in the same
+  sense every DB test in this repo is, **not** Docker-free.
+- an **issuer-only tier** (`oidc_issuer` marker) — stands up **only** the `oidc` container
+  (`docker compose up -d oidc`, no kdive server, no Postgres, no VM), has `mint_token` obtain
+  each token from the **real issuer**, and verifies it through a real `JWTVerifier` built from
+  the issuer env against the **live JWKS**. **This is the executable claim-shape gate**: it
+  asserts the nested `roles` object + array `platform_roles` are in the verified access token,
+  `roles_from_claims` parses the object, and a wrong-audience verifier rejects. It `pytest.skip`s
+  when `KDIVE_OIDC_ISSUER`/the issuer is unreachable, so it runs wherever Docker + the issuer
+  are up (a CI job *can* opt in) and skips otherwise. This tier is what makes the gate a
+  standing regression rather than a one-time manual probe — the limitation finding against the
+  in-memory tier (it cannot reach the issuer) is answered here, at a far lower bar than the full
+  stack.
+- a **`live_stack` tier** (marker `live_stack`, operator-run, skipped on `pull_request`) —
+  `fastmcp.Client` **over HTTP** against a host-run `server` + Postgres + the real issuer:
+  the only tier that puts the real transport, server startup, **and** the JWKS/`JWTVerifier`
+  path on one wire. It `pytest.skip`s with an actionable reason when `KDIVE_STACK_BASE_URL` /
+  the issuer env are absent (the ADR-0035 §4 idiom), so it is CI-safe.
 
 The per-role read-only probe is `resources.list` — Discovery-plane reads require only an
 authenticated context (no RBAC scoping, no project rows), so it returns a well-formed envelope
-for every role against an empty database, isolating the auth/transport path from domain state.
+for every role against an empty (but migrated) database, isolating the auth/transport path from
+domain state.
 
-### 4. A new `live_stack` pytest marker, distinct from `live_vm`
+### 4. Two new pytest markers, distinct from `live_vm`
 
-Registered in `pyproject.toml`. `live_vm` means "a KVM/libvirt host"; `live_stack` means "a
-running server + issuer + Postgres." The smoke test's live tier carries `live_stack`; the
-CI-able tier carries no marker and runs in the default suite.
+Registered in `pyproject.toml`. `live_vm` means "a KVM/libvirt host"; the new `oidc_issuer`
+means "the mock issuer container is up" (no server, no VM); `live_stack` means "a running
+server + issuer + Postgres." The issuer-only tier carries `oidc_issuer`, the wire tier carries
+`live_stack`, and the in-memory tier carries no marker (it rides the default suite's
+disposable-Postgres gating).
 
 ## Consequences
 
-- The open assumption in ADR-0042 §3 is closed by an executable gate, not a memo: the live
-  tier mints both claim shapes and verifies them through the real path. Sub-issue D imports
-  `harness.py` unchanged.
+- The open assumption in ADR-0042 §3 is closed by an executable gate, not a memo, and is
+  proven **before** the harness is built (Context). The issuer-only tier keeps it a standing
+  regression at a low infra bar (just the `oidc` container); the live tier additionally proves
+  the same claims over the real HTTP transport. Sub-issue D imports `harness.py` unchanged.
 - `mint_token` depends on the issuer's interactive-login flow being enabled (the standalone
-  default for the pinned image). If a future bump disables it, the login-form post breaks
-  loudly in the live tier — caught by the gate, not silently.
-- The CI surface grows by one always-run in-memory smoke test (no server, no Docker, no
-  issuer) and one `live_stack`-gated test that skips on `pull_request` exactly as `live_vm`
-  does. CI stays green with no new infra.
+  default for the pinned image) and on the login form posting `username` + `claims` back to the
+  authorize URL. If a future image bump changes either, the login-form post breaks loudly in
+  the issuer-only tier — caught by the gate, not silently.
+- The CI surface grows by: one **always-run** in-memory smoke test that rides the repo's
+  existing disposable-Postgres gating (skips when Docker is absent, like every DB test here —
+  it is *not* Docker-free); one **`oidc_issuer`-gated** test that runs only when the issuer
+  container is up (a CI job can opt in with `docker compose up -d oidc`); and one
+  **`live_stack`-gated** test skipped on `pull_request` exactly as `live_vm` is. Default
+  `pull_request` CI gains no new mandatory infra.
 - The `platform_roles` claim is proven **mintable and verifiable** but not yet **parseable**
   here; platform-RBAC P1 lands the parser and the live-stack driver (D/E) routes it through
   `require_platform_role`. A's gate is the necessary precondition, scoped honestly.

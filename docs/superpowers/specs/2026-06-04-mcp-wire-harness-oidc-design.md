@@ -16,18 +16,27 @@ to **close ADR-0042 §3's open assumption**: prove the mock-oauth2-server can mi
 nested-object `roles` claim and the `platform_roles` array claim, and that both validate
 through the server's real `JWTVerifier` against the issuer's JWKS.
 
+**Gate already cleared empirically** (recorded in [ADR-0044](../../adr/0044-mcp-wire-harness-oidc-token-issuance.md)
+Context): the pinned issuer, driven through the login-form flow, puts the nested `roles`
+object and the `platform_roles` array into the **access token**; the real `JWTVerifier`
+accepts it and `roles_from_claims` parses it. This spec builds the harness on that proof and
+turns the probe into a standing `oidc_issuer`-gated regression.
+
 ## Non-goals
 
-- **No product code.** No `src/` change; this is a test-side harness + smoke test + one
-  pytest marker.
+- **No product code.** No `src/` change; this is a test-side harness + smoke test + two
+  pytest markers. (The compose `oidc` image-tag fix — `3.1.4`→`3.0.3`, a nonexistent tag — is
+  an ops fix in the same branch, not product code.)
 - **No spine driver.** The phase-structured driver, the `accounting.report` call, and the VM
   path are sub-issues D/E — A only ships the harness they import and the gate that unblocks
   them.
 - **No `platform_roles` *parser*.** `platform_roles_from_claims` / `PlatformRole` are
   platform-RBAC P1 (ADR-0043), not merged. A proves the claim is **minted and verified**, not
   parsed into a `RequestContext`.
-- **No CI infra growth.** The CI-able tier needs no server, Docker, or issuer; the live tier
-  skips on `pull_request`.
+- **No new *mandatory* CI infra.** The in-memory tier rides the repo's existing
+  disposable-Postgres gating (skips when Docker is absent — it is *not* Docker-free, because
+  its probe reads the DB); the `oidc_issuer` and `live_stack` tiers skip unless their backing
+  service is up.
 
 ## Package layout
 
@@ -37,8 +46,8 @@ tests/integration/
   live_stack/
     __init__.py                # NEW
     harness.py                 # NEW — LiveStackClient + mint_token + OidcIssuer config
-  test_wire_harness.py         # NEW — two-tier smoke test (in-memory + live_stack)
-pyproject.toml                 # + `live_stack` pytest marker
+  test_wire_harness.py         # NEW — three-tier smoke (in-memory / oidc_issuer / live_stack)
+pyproject.toml                 # + `live_stack` and `oidc_issuer` pytest markers
 ```
 
 ## `harness.py` surface
@@ -72,17 +81,23 @@ def mint_token(
 ) -> str: ...
 ```
 
-Drives the issuer's **interactive-login authorization-code flow** (ADR-0044 §1): GET the
-`authorize` endpoint to start the flow, POST the login form with a literal `claims` JSON
-object carrying `sub`/`projects`/`roles`/`platform_roles`/`agent_session`, follow the
-redirect to capture the `code`, then POST `grant_type=authorization_code` + `code` to the
-token endpoint and return the `access_token`. The `claims` JSON is built by a small pure
-`_build_claims(...)` helper (unit-testable without a network) so the nested-object `roles`
-and array `platform_roles` shapes are asserted directly.
+Drives the issuer's **interactive-login authorization-code flow** (ADR-0044 §1, mechanism
+proven by the Context probe):
 
-`platform_roles=None` omits the claim entirely (a per-project-only token); `platform_roles=[]`
-mints an empty array (a token that carries the claim but grants no platform role) — both are
-exercised so the omit-vs-empty distinction is pinned.
+1. POST to `{authorize_endpoint}?response_type=code&client_id=…&redirect_uri=…&scope=openid&state=…`
+   — the login form has **no `action`**, so it posts back to the authorize URL with the oauth
+   params on the **query string** and a body of just `username` + `claims` (a literal JSON
+   object built by `_build_claims(...)`). The redirect MUST NOT be followed (the helper uses a
+   no-redirect opener) so the `code` is read from the 302 `Location`.
+2. POST `grant_type=authorization_code` + `code` + `redirect_uri` + `client_id` to
+   `token_endpoint`; return `access_token` from the JSON response.
+
+`_build_claims(...)` is a pure, network-free helper carrying `sub`/`aud`/`projects`/`roles`/
+`platform_roles`/`agent_session`, so the nested-object `roles` and array `platform_roles`
+shapes are unit-asserted directly. `platform_roles=None` omits the claim (a per-project-only
+token); `platform_roles=[]` mints an empty array (carries the claim, grants nothing) — both
+exercised so the omit-vs-empty distinction is pinned. The `aud` in `claims` is set to the
+issuer's audience so the minted token targets the verifier.
 
 ### `LiveStackClient`
 
@@ -95,52 +110,64 @@ class LiveStackClient:
     async def call_tool(self, name: str, **args) -> ToolResponse | list[ToolResponse]: ...
 ```
 
-`call_tool` parses the FastMCP transport result back into the project's `ToolResponse`
-envelope (`mcp/responses.py`) — single-object tools return a `ToolResponse`, list tools
-(`resources.list`) return `list[ToolResponse]` — so D asserts against the same envelope the
-in-process tests use, not raw transport JSON. The constructor takes an already-built
-`fastmcp.Client` so the in-memory tier can inject a client over `build_app(...)` and the live
-tier uses `over_http`.
+**Envelope-parsing contract (fastmcp 3.4.0).** `Client.call_tool` returns a `CallToolResult`;
+`call_tool` reads its **`.data`** attribute — the deserialized structured output FastMCP
+builds from the tool's declared output schema — and validates it into the project's
+`ToolResponse` (`mcp/responses.py`). Discrimination is **by the parsed JSON type of `.data`**:
+a JSON **array** → `list[ToolResponse]` (only `resources.list` returns a list here); a JSON
+**object** → a single `ToolResponse`. No per-tool table is maintained. A test pins both shapes
+(`resources.list` → list, a scalar tool → one envelope) so D imports a defined contract, not an
+inferred one. The constructor takes an already-built `fastmcp.Client` so the in-memory tier
+injects a client over `build_app(...)` and the live tier uses `over_http`.
 
-## Smoke test — two tiers
+## Smoke test — three tiers
 
-Both tiers: connect → `list_tools` (assert the M0/M1 tool surface is present) → one read-only
-`resources.list` call **per role** (`viewer`/`operator`/`admin`) plus one under a
-`platform_auditor` token. `resources.list` is chosen because Discovery reads need only an
-authenticated context (no RBAC scoping, no seeded rows) — well-formed on an empty DB for every
-role (ADR-0044 §3). No VM, no domain state.
+All tiers, where they run: connect → `list_tools` (assert the M0/M1 tool surface is present) →
+one read-only `resources.list` call **per role** (`viewer`/`operator`/`admin`) plus one under
+a `platform_auditor` token. `resources.list` needs only an authenticated context (no RBAC
+scoping, no seeded rows), so it returns a well-formed envelope for every role against an empty
+**but migrated** DB (ADR-0044 §3). No VM, no domain state.
 
-### CI-able in-memory tier (no marker; runs on `pull_request`)
+### In-memory tier (no marker; default suite, `pull_request`)
 
-- Build `build_app(pool, verifier=<local-keypair JWTVerifier>)`; the pool need not be open —
-  `resources.list` is the only call and it reads no rows in this tier's assertion path, so the
-  tier asserts **registration + envelope shape over the in-memory client**, not DB reads. (If
-  `resources.list` requires a live connection, the tier seeds a disposable-Postgres fixture
-  via the existing `migrated_url` conftest re-export and skips cleanly when Docker is absent,
-  matching the repo's db-test idiom — decided at TDD time against the real handler.)
+- In-memory `fastmcp.Client` over `build_app(pool, verifier=<local-keypair JWTVerifier>)`.
+  `resources.list` executes `SELECT * FROM resources` through the pool, so the tier **requires
+  a migrated Postgres**: it uses the repo's disposable-Postgres fixture (`migrated_url`,
+  re-exported in `tests.mcp.conftest`) and **skips cleanly when Docker is absent**, exactly as
+  the other DB-backed MCP tests do (`KDIVE_REQUIRE_DOCKER=1` turns the skip into a failure in
+  CI). It is "CI-able" in the same sense those are — *not* Docker-free.
 - Tokens come from the in-process `mint` helper signing the same claim shapes; the injected
-  verifier validates them. This is the ADR-0035 §3 path — it exercises the
-  `LiveStackClient`/envelope seam and the per-role probe **without** the real JWKS, issuer, or
-  transport.
-- **Claim-shape unit assertions run here too** (no network): `_build_claims` produces the
-  nested-object `roles` and array `platform_roles`, and the in-process-minted tokens carry
-  exactly those shapes (decoded from the signed JWT). This gives `pull_request` CI a
-  regression guard on the claim *shape* even though the *issuer* gate is live-only.
+  verifier validates them (the ADR-0035 §3 path). Exercises the `LiveStackClient`/envelope
+  seam and the per-role probe **without** the real JWKS, issuer, or HTTP transport.
+- **Claim-shape unit assertions run here** (no network): `_build_claims` produces the
+  nested-object `roles` and array `platform_roles`, and the in-process-minted token decodes to
+  exactly those shapes. A `pull_request`-CI regression guard on the claim *shape* (the *issuer*
+  gate lives in the next tier).
+
+### Issuer-only tier (marker `oidc_issuer`) — **the executable claim-shape gate**
+
+- Needs only the `oidc` container up (`docker compose up -d oidc`): no kdive server, no
+  Postgres, no VM. Preflight `pytest.skip`s with an actionable reason unless the issuer
+  (`KDIVE_OIDC_ISSUER` / the discovery + JWKS endpoints) is reachable.
+- `mint_token` obtains each token **from the real issuer**; the test verifies it through a real
+  `JWTVerifier` built from the issuer env against the **live JWKS**, asserting:
+  - the token verifies (signature + `iss` + `aud`) → an `AccessToken`;
+  - the verified `roles` claim is the expected nested object **and** `roles_from_claims` parses
+    it to the expected `{project: Role}` map (the real parser, which ships);
+  - the verified `platform_roles` claim is the expected flat array (minted + verified; parser
+    is P1, out of scope per ADR-0044 §2);
+  - a `JWTVerifier` built for the **wrong audience** rejects the token (the verifier enforces).
+- This turns the manual Context probe into a standing regression at a low infra bar; a CI job
+  may opt in by standing up the one container.
 
 ### `live_stack` tier (marker `live_stack`; skipped on `pull_request`)
 
-- Preflight `pytest.skip`s with an actionable reason unless `KDIVE_STACK_BASE_URL` and the
-  `KDIVE_OIDC_*` issuer env are present and the issuer's JWKS is reachable.
-- `mint_token` obtains each token **from the real issuer**; the server (host-run, behind
+- Preflight `pytest.skip`s unless `KDIVE_STACK_BASE_URL` and the `KDIVE_OIDC_*` issuer env are
+  present and the issuer's JWKS is reachable.
+- `mint_token` obtains each token from the real issuer; the **host-run server** (behind
   `KDIVE_STACK_BASE_URL`) validates them through its configured `JWTVerifier` against the live
-  JWKS as each `call_tool` runs over HTTP.
-- **This is the gate.** It asserts, additionally to the per-role probe:
-  - each token verifies through a `JWTVerifier` built from the issuer env (signature + `iss` +
-    `aud`) — proving the issuer signs with the JWKS key the server trusts;
-  - the verified `roles` claim is the expected nested object **and** `roles_from_claims`
-    parses it to the expected `{project: Role}` map (the real parser, which ships);
-  - the verified `platform_roles` claim is the expected flat array (minted + verified; the
-    parser is P1, out of scope per ADR-0044 §2).
+  JWKS as each `call_tool` runs **over HTTP**. The only tier with the real transport + server
+  startup + JWKS path on one wire — the shape D drives.
 
 ## Edges covered (TDD)
 
@@ -152,29 +179,37 @@ role (ADR-0044 §3). No VM, no domain state.
 - `roles_from_claims` on the verified nested object → the expected map; a malformed `roles`
   value (non-string) → `AuthError` (the existing fail-closed path, asserted on issuer-minted
   claims).
-- `LiveStackClient.call_tool` parses single-object and list envelopes; `list_tools` returns
-  the expected M0/M1 names.
-- Live preflight skips cleanly (no stack) and does not error.
+- `LiveStackClient.call_tool` parses single-object (`.data` is an object) and list (`.data` is
+  an array) envelopes; `list_tools` returns the expected M0/M1 names.
+- Each tier's preflight skips cleanly (no stack / no issuer / no Docker) and does not error.
 
 ## Acceptance (issue #98)
 
-- CI-able tier passes on `pull_request` (no server process, no issuer).
-- `live_stack` tier: the issuer mints the nested-object `roles` claim and the `platform_roles`
-  array claim; all tokens validate through the server's **real** verifier over HTTP — the gate
-  confirming ADR-0042 §3's open assumption. Passes against a locally-run stack.
+- In-memory tier passes on `pull_request` (no server process, no issuer; rides the repo's
+  disposable-Postgres gating — skips when Docker absent, fails when `KDIVE_REQUIRE_DOCKER=1`).
+- `oidc_issuer` tier (the gate): with just the issuer container up, the issuer mints the
+  nested-object `roles` claim and the `platform_roles` array claim **into the access token**;
+  all tokens validate through a real `JWTVerifier` against the live JWKS, `roles_from_claims`
+  parses the nested object, and a wrong-audience verifier rejects. Confirms ADR-0042 §3's open
+  assumption — **already cleared empirically** (Goal / ADR-0044 Context), now a standing test.
+- `live_stack` tier: the same claims validate through the **host-run server's** verifier over
+  HTTP. Passes against a locally-run stack.
 - `harness.py` is importable by sub-issue D.
-- **If the issuer cannot mint that claim shape**, redesign token acquisition before D is
-  scheduled, documented in the PR.
+- The escape hatch (redesign acquisition if the claim shape cannot be minted) was **not**
+  needed — the login-form `claims` flow works; recorded in the PR.
 
 ## Self-review (coverage)
 
-- Wire client wrapper returning parsed envelopes → `LiveStackClient`; ADR-0044 §3. ✓
+- Wire client wrapper returning parsed envelopes, `.data` contract pinned → `LiveStackClient`;
+  ADR-0044 §3. ✓
 - Nested-object `roles` + array `platform_roles` mint → `mint_token`/`_build_claims`;
   ADR-0042 §3, ADR-0044 §2. ✓
-- Validate through the **real** `JWTVerifier`/JWKS → live tier gate; ADR-0044 §2. ✓
-- CI-able in-memory tier (no server/issuer) + live `live_stack` tier → two-tier smoke;
-  ADR-0044 §3. ✓
-- New `live_stack` marker distinct from `live_vm` → `pyproject.toml`; ADR-0044 §4. ✓
+- Validate through the **real** `JWTVerifier`/JWKS — proven empirically, standing as the
+  `oidc_issuer` tier → ADR-0044 §2/§3, Context. ✓
+- In-memory + `oidc_issuer` + `live_stack` three-tier smoke → ADR-0044 §3. ✓
+- New `live_stack` + `oidc_issuer` markers distinct from `live_vm` → `pyproject.toml`;
+  ADR-0044 §4. ✓
 - Importable by D → package layout under `tests/integration/live_stack/`. ✓
-- Redesign-if-cannot-mint escape hatch → Acceptance; ADR-0044 §2. ✓
+- In-memory tier needs migrated Postgres (not Docker-free) — false "no Docker" claim removed →
+  In-memory tier; ADR-0044 §3. ✓
 - No product code / no spine driver / no `platform_roles` parser → Non-goals. ✓
