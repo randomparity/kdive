@@ -19,6 +19,13 @@ body = """
 {% else -%}
     ## [Unreleased]
 {% endif -%}
+{% set breaking = commits | filter(attribute="breaking", value=true) -%}
+{% if breaking | length > 0 %}
+    ### ⚠ Breaking Changes
+    {% for commit in breaking %}
+        - {{ commit.message | split(pat="\n") | first | upper_first | trim }}\
+    {% endfor %}
+{% endif -%}
 {% for group, commits in commits | group_by(attribute="group") %}
     ### {{ group | upper_first }}
     {% for commit in commits %}
@@ -55,7 +62,7 @@ trim = true
 # See https://www.conventionalcommits.org
 conventional_commits = true
 # Exclude commits that do not match the conventional commits specification.
-filter_unconventional = false
+filter_unconventional = true
 # An array of regex based parsers for extracting data from the commit message.
 # Assigns commits to groups.
 # Optionally sets the commit's scope and can decide to exclude commits from further processing.
@@ -72,10 +79,14 @@ commit_parsers = [
   { message = "^test", skip = true },
   { message = "^ci", skip = true },
 ]
-# Prevent commits that are breaking from being excluded by commit parsers.
+# Keep commits that match no commit parser in the output (e.g. legacy non-standard types).
 filter_commits = false
 # Order releases topologically instead of chronologically.
 topo_order = false
 # Order of commits in each group/release within the changelog.
 # Allowed values: newest, oldest
 sort_commits = "oldest"
+
+[remote.github]
+owner = "randomparity"
+repo = "kdive"
