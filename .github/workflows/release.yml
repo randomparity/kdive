@@ -43,7 +43,7 @@ jobs:
           fi
 
       - name: Build artifacts (SHA baked, release flag set)
-        run: just build release=true
+        run: just build true
 
       - name: Generate release notes
         run: |

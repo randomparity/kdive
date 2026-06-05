@@ -50,7 +50,9 @@ jobs:
 
       - name: Build-info baking guard
         run: |
-          just build
+          # Exercise the release-path invocation (`just build true`) that release.yml
+          # uses, so a regression in argument passing fails here, not at release time.
+          just build true
           unzip -l dist/*.whl | grep -q 'kdive/_buildinfo.py' \
             || { echo "::error::_buildinfo.py not packaged in the wheel"; exit 1; }
           test ! -f src/kdive/_buildinfo.py \
