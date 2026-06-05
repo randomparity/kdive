@@ -2049,7 +2049,8 @@ from uuid import uuid4
 import pytest
 
 from kdive.db import upload_manifest
-from kdive.reconciler.loop import _repair_abandoned_uploads
+from kdive.db.locks import LockScope
+from kdive.reconciler.loop import _reap_one_owner, _repair_abandoned_uploads
 
 
 class _FakeStore:
@@ -2113,6 +2114,21 @@ async def test_skips_finalized_owner(pg_conn) -> None:
     )
     store = _FakeStore({prefix: [f"{prefix}kernel"]})
     assert await _repair_abandoned_uploads(pg_conn, store) == 0
+
+
+async def test_reap_one_owner_declines_renewed_manifest(pg_conn) -> None:
+    """The locked re-read fences a deadline renewed (a create_upload re-mint) after select."""
+    run_id = await _seed_created_run(pg_conn)
+    prefix = f"local/runs/{run_id}/"
+    await upload_manifest.replace_manifest(
+        pg_conn, owner_kind="runs", owner_id=run_id, prefix=prefix,
+        entries=[upload_manifest.ManifestEntry("kernel", "a", 1)], ttl=timedelta(hours=1),  # future
+    )
+    store = _FakeStore({prefix: [f"{prefix}kernel"]})
+    # A stale candidate select could pick this owner; the locked re-read (future deadline)
+    # declines to reap, so a concurrently re-minted manifest's objects are never deleted.
+    assert await _reap_one_owner(pg_conn, store, "runs", run_id, LockScope.RUN) is False
+    assert store.deleted == []
 ```
 
 *Implementer: add the small `_seed_*`/`_insert_artifact_row` helpers per the existing `tests/reconciler` style.*
@@ -2140,44 +2156,82 @@ class UploadStore(Protocol):
 Add the repair:
 
 ```python
+_UPLOAD_PRE_FINALIZE = {"runs": "created", "systems": "defined"}
+
+
 async def _repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) -> int:
     """Prefix-reap uncommitted objects of pre-finalize owners past their upload deadline.
 
-    For each ``upload_manifests`` row with ``deadline < now()`` whose owner is still in
-    its pre-finalize state (a ``created`` Run or a ``defined`` System), lists the owner's
-    key-prefix and deletes only objects with **no committed ``artifacts`` row** — so an
-    object an operator is slow to consume (a referenced rootfs) is never destroyed. Then
-    deletes the manifest row. Returns the number of owners reaped (ADR-0048 §6).
+    Candidate-selects ``upload_manifests`` rows with ``deadline < now()`` whose owner is
+    still pre-finalize (a ``created`` Run or a ``defined`` System), then reaps each under
+    its per-owner advisory lock. Returns the number of owners reaped (ADR-0048 §6).
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT m.owner_kind, m.owner_id, m.prefix FROM upload_manifests m "
+            "SELECT m.owner_kind, m.owner_id FROM upload_manifests m "
             "WHERE m.deadline < now() AND ("
             "  (m.owner_kind = 'runs' AND EXISTS ("
             "     SELECT 1 FROM runs r WHERE r.id = m.owner_id AND r.state = 'created')) "
             "  OR (m.owner_kind = 'systems' AND EXISTS ("
             "     SELECT 1 FROM systems s WHERE s.id = m.owner_id AND s.state = 'defined')))"
         )
-        owners = await cur.fetchall()
+        candidates = await cur.fetchall()
     reaped = 0
-    for owner in owners:
-        prefix: str = owner["prefix"]
-        for key in store.list_prefix(prefix):
+    for cand in candidates:
+        scope = LockScope.RUN if cand["owner_kind"] == "runs" else LockScope.SYSTEM
+        if await _reap_one_owner(conn, store, cand["owner_kind"], cand["owner_id"], scope):
+            reaped += 1
+    return reaped
+
+
+async def _reap_one_owner(
+    conn: AsyncConnection, store: UploadStore, owner_kind: str, owner_id: UUID, scope: LockScope
+) -> bool:
+    """Re-validate under the per-owner lock, then prefix-reap + delete the manifest.
+
+    The lock serializes against a concurrent ``create_upload`` re-mint, ``complete_build``,
+    or provision-consume on the **same** owner (which all take this lock), so a renewed
+    deadline or a finalized owner is observed *before* any delete — mirroring
+    :func:`_expire_one`'s locked re-read fence. Unlike :func:`_repair_leaked_domains`
+    (whose ``destroy`` runs unlocked because libvirt can hang), the bounded S3 deletes run
+    under the narrow per-owner lock so a re-mint cannot interleave between the re-check and
+    the manifest delete. Deletes only objects with **no committed ``artifacts`` row**, so a
+    referenced/consumed object (a slow-but-real rootfs) is never destroyed.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, scope, owner_id):
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT prefix FROM upload_manifests "
+                "WHERE owner_kind = %s AND owner_id = %s AND deadline < now()",
+                (owner_kind, owner_id),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return False  # renewed (deadline pushed out) or already reaped since the select
+        if not await _owner_pre_finalize(conn, owner_kind, owner_id):
+            return False  # owner finalized between the candidate select and this lock
+        for key in store.list_prefix(row["prefix"]):
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT 1 FROM artifacts WHERE object_key = %s", (key,))
-                committed = await cur.fetchone() is not None
-            if not committed:
-                store.delete(key)
-        async with conn.transaction():
-            await conn.execute(
-                "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
-                (owner["owner_kind"], owner["owner_id"]),
-            )
-        reaped += 1
-        _log.info(
-            "reconciler: abandoned upload owner %s/%s reaped", owner["owner_kind"], owner["owner_id"]
+                if await cur.fetchone() is None:
+                    store.delete(key)
+        await conn.execute(
+            "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
+            (owner_kind, owner_id),
         )
-    return reaped
+    _log.info("reconciler: abandoned upload owner %s/%s reaped", owner_kind, owner_id)
+    return True
+
+
+async def _owner_pre_finalize(conn: AsyncConnection, owner_kind: str, owner_id: UUID) -> bool:
+    """Report whether the owner is still in its pre-finalize state (locked re-read)."""
+    table = "runs" if owner_kind == "runs" else "systems"
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            f"SELECT 1 FROM {table} WHERE id = %s AND state = %s",  # noqa: S608 - 2-value whitelist
+            (owner_id, _UPLOAD_PRE_FINALIZE[owner_kind]),
+        )
+        return await cur.fetchone() is not None
 ```
 
 Thread an `UploadStore` through `reconcile_once`/`Reconciler` and `ReconcileReport`:
@@ -2897,4 +2951,4 @@ Merge with `--rebase` or `--merge` (never `--squash` — preserves bisectable hi
 
 **Type consistency** — `sha256` is base64 everywhere; `ManifestEntry`/`UploadManifest`/`HeadResult`/`PresignedUpload`/`BuildOutput`/`ValidatedUpload` names are used identically across tasks; the validator returns `ValidatedUpload(output, heads)` so `complete_build` writes artifact rows from `heads` and never calls the object store directly (fully injectable); `owner_kind` wire values are `"run"`/`"system"` at the tool boundary and `"runs"`/`"systems"` as object-store kinds (the tool maps between them in T6/T8/T10) — this is the one deliberate dual-vocabulary; keep the mapping at the tool boundary only.
 
-**Known sharp edges flagged inline for the implementer** — (1) the `created → succeeded` collapse uses guarded raw `UPDATE`s (not `update_state`), so no `state.py` edit (T8); (2) the T8 finalize writes one write-once `artifacts` row per uploaded object keyed by its **own** object key (`keys[name]`) — `BuildOutput` carries only `kernel_ref`/`debuginfo_ref`, so `initrd` is recorded from `keys`/`heads`, not from `BuildOutput` (T8); (3) `_read_section` takes the object `key` (T7); (4) presigned-PUT length enforcement is asserted by the live test, with the pre-mint cap as the guaranteed backstop, and the `head`-vs-manifest recheck fails closed when a checksum is absent (T12); (5) re-read `__main__.py` and `provision_handler` for exact wiring sites before editing (T10/T11); (6) update existing `rootfs_image_ref` test fixtures to the new `rootfs` shape (T10); (7) `create_upload` takes the per-owner advisory lock and re-checks owner state in-lock before minting/persisting, so a concurrent finalize cannot strand a reaper-invisible manifest (T6).
+**Known sharp edges flagged inline for the implementer** — (1) the `created → succeeded` collapse uses guarded raw `UPDATE`s (not `update_state`), so no `state.py` edit (T8); (2) the T8 finalize writes one write-once `artifacts` row per uploaded object keyed by its **own** object key (`keys[name]`) — `BuildOutput` carries only `kernel_ref`/`debuginfo_ref`, so `initrd` is recorded from `keys`/`heads`, not from `BuildOutput` (T8); (3) `_read_section` takes the object `key` (T7); (4) presigned-PUT length enforcement is asserted by the live test, with the pre-mint cap as the guaranteed backstop, and the `head`-vs-manifest recheck fails closed when a checksum is absent (T12); (5) re-read `__main__.py` and `provision_handler` for exact wiring sites before editing (T10/T11); (6) update existing `rootfs_image_ref` test fixtures to the new `rootfs` shape (T10); (7) `create_upload` takes the per-owner advisory lock and re-checks owner state in-lock before minting/persisting, so a concurrent finalize cannot strand a reaper-invisible manifest (T6); (8) the reaper reaps each owner under the **same** per-owner lock with a locked re-read of the deadline + pre-finalize state (`_reap_one_owner`), so a concurrent `create_upload` re-mint or finalize is observed before any delete — mirroring `_expire_one`, and deliberately holding the lock across the bounded S3 deletes (unlike `_repair_leaked_domains`, whose libvirt `destroy` can hang) (T11).
