@@ -106,11 +106,17 @@ async def delete_manifest(conn, owner_kind: str, owner_id: UUID) -> None: ...
 **Validator (Task 7), in `src/kdive/providers/local_libvirt/build.py`:** reuses `BuildOutput`.
 
 ```python
+class ValidatedUpload(NamedTuple):
+    output: BuildOutput
+    heads: dict[str, HeadResult]   # name -> head, returned so finalize needs no second HEAD
+
 def validate_external_artifacts(store, *, manifest: Sequence[ManifestEntry],
                                 keys: Mapping[str, str],          # name -> object key
-                                declared_build_id: str | None) -> BuildOutput: ...
+                                declared_build_id: str | None) -> ValidatedUpload: ...
 def extract_build_id_ranged(store, key: str) -> str: ...          # ELF64-LE ranged build-id read
 ```
+
+Returning `heads` from the single validation pass keeps `runs.complete_build` fully injectable — the tool writes the write-once `artifacts` rows from `ValidatedUpload.heads`, never calling the object store directly (so a unit test that injects a fake validator does no S3 IO).
 
 **Shared constants (Task 6), in `src/kdive/mcp/tools/artifacts.py`:**
 
@@ -1473,7 +1479,8 @@ def test_happy_path_kernel_only_returns_build_output() -> None:
         store, manifest=[ManifestEntry("kernel", "csum", len(_BZIMAGE_HEAD))],
         keys={"kernel": "k"}, declared_build_id=None,
     )
-    assert out.kernel_ref == "k" and out.debuginfo_ref == "" and out.build_id == ""
+    assert out.output.kernel_ref == "k" and out.output.debuginfo_ref == "" and out.output.build_id == ""
+    assert set(out.heads) == {"kernel"}
 
 
 def test_build_id_mismatch_is_build_failure() -> None:
@@ -1524,8 +1531,8 @@ def test_matching_build_id_passes_and_pairs_vmlinux() -> None:
         keys={"kernel": "k", "vmlinux": "v"},
         declared_build_id="DEADBEEF",  # case-insensitive vs the lowercase-hex note
     )
-    assert out.kernel_ref == "k" and out.debuginfo_ref == "v"
-    assert out.build_id == "deadbeef"  # normalized to the value parse_gnu_build_id returns
+    assert out.output.kernel_ref == "k" and out.output.debuginfo_ref == "v"
+    assert out.output.build_id == "deadbeef"  # normalized to the value parse_gnu_build_id returns
 
 
 def test_initrd_is_validated_and_returned_in_keys() -> None:
@@ -1540,7 +1547,8 @@ def test_initrd_is_validated_and_returned_in_keys() -> None:
         keys={"kernel": "k", "initrd": "i"},
         declared_build_id=None,
     )
-    assert out.kernel_ref == "k"  # initrd validated without error; finalize keys it by its own key
+    assert out.output.kernel_ref == "k"  # initrd validated without error
+    assert set(out.heads) == {"kernel", "initrd"}  # both heads returned for the finalize rows
 ```
 
 *Implementer note: finish `_elf_with_build_id` so it round-trips through `extract_build_id_ranged` (Step 3). Use `struct` to write a valid ELF64-LE header (`e_shoff`, `e_shentsize=64`, `e_shnum`), a `.shstrtab` section, and a `SHT_NOTE` section named `.note.gnu.build-id` whose payload is `namesz=4, descsz=len(id), type=3, "GNU\\0", <id>`.*
@@ -1566,6 +1574,18 @@ class _ValidatorStore(Protocol):
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
 
 
+class ValidatedUpload(NamedTuple):
+    """Validation result: the recorded ``BuildOutput`` plus the per-name ``HeadResult``s.
+
+    The heads (etag/size/checksum per uploaded object) are returned so the finalize step
+    writes the write-once ``artifacts`` rows from this one validation pass — no second
+    HEAD, and no second object-store handle — which keeps ``complete_build`` injectable.
+    """
+
+    output: BuildOutput
+    heads: dict[str, HeadResult]
+
+
 def _build_failure(message: str, **details: object) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.BUILD_FAILURE, details=details)
 
@@ -1576,8 +1596,8 @@ def validate_external_artifacts(
     manifest: Sequence[ManifestEntry],
     keys: Mapping[str, str],
     declared_build_id: str | None,
-) -> BuildOutput:
-    """Validate uploaded build artifacts and return the recorded ``BuildOutput``.
+) -> ValidatedUpload:
+    """Validate uploaded build artifacts; return the ``BuildOutput`` plus per-name heads.
 
     Order (ADR-0048 §5): require ``kernel``; then per declared artifact HEAD existence +
     size, checksum vs the manifest, and leading-byte magic; then, if a ``vmlinux`` is
@@ -1598,6 +1618,7 @@ def validate_external_artifacts(
             "external build is missing the required kernel artifact",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
+    heads: dict[str, HeadResult] = {}
     for name, entry in by_name.items():
         key = keys[name]
         head = store.head(key)
@@ -1610,6 +1631,7 @@ def validate_external_artifacts(
         if head.size_bytes != entry.size_bytes or head.checksum_sha256 != entry.sha256:
             raise _build_failure("uploaded artifact disagrees with its manifest", name=name)
         _check_magic(store, name, key)
+        heads[name] = head
 
     build_id = ""
     if "vmlinux" in by_name:
@@ -1623,11 +1645,12 @@ def validate_external_artifacts(
             raise _build_failure("declared build_id does not match the uploaded vmlinux")
         build_id = actual  # record the normalized lowercase-hex value, not the raw input
 
-    return BuildOutput(
+    output = BuildOutput(
         kernel_ref=keys["kernel"],
         debuginfo_ref=keys.get("vmlinux", ""),
         build_id=build_id,
     )
+    return ValidatedUpload(output=output, heads=heads)
 
 
 def _check_magic(store: _ValidatorStore, name: str, key: str) -> None:
@@ -1692,7 +1715,7 @@ def _read_section(store: _ValidatorStore, key: str, sht: bytes, e_shentsize: int
     return store.get_range(key, start=sh_offset, length=sh_size)
 ```
 
-and call it as `_read_section(store, key, sht, e_shentsize, e_shstrndx)` / `(store, key, sht, e_shentsize, i)`. Add `validate_external_artifacts`, `extract_build_id_ranged` to `__all__`.
+and call it as `_read_section(store, key, sht, e_shentsize, e_shstrndx)` / `(store, key, sht, e_shentsize, i)`. Add `validate_external_artifacts`, `extract_build_id_ranged`, `ValidatedUpload` to `__all__`.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -1731,19 +1754,23 @@ from __future__ import annotations
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.state import RunState
 from kdive.mcp.tools import runs as runs_tools
-from kdive.providers.local_libvirt.build import BuildOutput
+from kdive.providers.local_libvirt.build import BuildOutput, ValidatedUpload
+from kdive.store.objectstore import HeadResult
 
 
 class _FakeValidator:
+    """Injected validator: returns a ValidatedUpload (output + a head per declared key)."""
+
     def __init__(self, output: BuildOutput | Exception) -> None:
         self._output = output
         self.calls = 0
 
-    def validate(self, run_id, manifest, keys, declared_build_id) -> BuildOutput:
+    def validate(self, run_id, manifest, keys, declared_build_id) -> ValidatedUpload:
         self.calls += 1
         if isinstance(self._output, Exception):
             raise self._output
-        return self._output
+        heads = {name: HeadResult(size_bytes=1, checksum_sha256="c", etag="e") for name in keys}
+        return ValidatedUpload(output=self._output, heads=heads)
 
 
 async def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
@@ -1818,19 +1845,19 @@ In `src/kdive/mcp/tools/runs.py`, `build_run`, after the existing `BuildProfile.
 
 - [ ] **Step 4: Implement `complete_build`**
 
-Add to `runs.py`. Imports: `from kdive.db import upload_manifest`, `from kdive.db.repositories import ARTIFACTS`, `from kdive.domain.models import Sensitivity`, `from kdive.providers.local_libvirt.build import BuildOutput, validate_external_artifacts`, `from kdive.store.objectstore import HeadResult, StoredArtifact, object_store_from_env, register_artifact_row`, `from kdive.profiles.build import ExternalBuildProfile`, `from typing import Protocol`.
+Add to `runs.py`. Imports: `from kdive.db import upload_manifest`, `from kdive.db.repositories import ARTIFACTS`, `from kdive.domain.models import Sensitivity`, `from kdive.providers.local_libvirt.build import BuildOutput, ValidatedUpload, validate_external_artifacts`, `from kdive.store.objectstore import HeadResult, StoredArtifact, object_store_from_env, register_artifact_row`, `from kdive.profiles.build import ExternalBuildProfile`, `from typing import Protocol`. (`HeadResult` is used only in `_finalize_external_build`'s signature; the validator returns the heads, so there is no second HEAD in the tool — the path is fully injectable via `validator`.)
 
 Define the injected validator port + the default, then the core function:
 
 ```python
 class _CompleteBuildValidator(Protocol):
-    def validate(self, run_id, manifest, keys, declared_build_id) -> BuildOutput: ...
+    def validate(self, run_id, manifest, keys, declared_build_id) -> ValidatedUpload: ...
 
 
 class _StoreBackedValidator:
     """Default validator: builds an ObjectStore from env and runs the provider validator."""
 
-    def validate(self, run_id, manifest, keys, declared_build_id) -> BuildOutput:
+    def validate(self, run_id, manifest, keys, declared_build_id) -> ValidatedUpload:
         store = object_store_from_env()
         return validate_external_artifacts(
             store, manifest=manifest, keys=keys, declared_build_id=declared_build_id
@@ -1879,24 +1906,15 @@ async def complete_build(
             keys = {e.name: f"{manifest_row.prefix}{e.name}" for e in manifest_row.entries}
 
             try:
-                output = await asyncio.to_thread(
+                validated = await asyncio.to_thread(
                     validator.validate, uid, list(manifest_row.entries), keys, build_id
                 )
-                heads = await asyncio.to_thread(_head_all, keys)
             except CategorizedError as exc:
                 return ToolResponse.failure(run_id, exc.category)
 
-            return await _finalize_external_build(conn, ctx, run, output, cmdline, keys, heads)
-
-
-def _head_all(keys: dict[str, str]) -> dict[str, HeadResult]:
-    store = object_store_from_env()
-    out: dict[str, HeadResult] = {}
-    for name, key in keys.items():
-        head = store.head(key)
-        if head is not None:
-            out[name] = head
-    return out
+            return await _finalize_external_build(
+                conn, ctx, run, validated.output, cmdline, keys, validated.heads
+            )
 
 
 def _complete_envelope(run_id: UUID, result: dict[str, Any]) -> ToolResponse:
@@ -2877,6 +2895,6 @@ Merge with `--rebase` or `--merge` (never `--squash` — preserves bisectable hi
 
 **Spec coverage** — every §2 scope item maps to a task: object-store methods (T1–3); BuildProfile discrimination (T4); create_upload (T6); complete_build (T8); provisioning rootfs source kind + commit row (T10); validate_external_artifacts + ranged build-id (T7); upload-manifest migration/storage (T5); reconciler prefix-reaper (T11); ported catalog (T9). §5 validation order (required-set → existence/size → integrity → magic → build_id) is T7. §6 error taxonomy uses only real `ErrorCategory` values. §7 unit/adversarial/live_stack tests are T7/T12/T13. §8 success criterion (validated, well-formed; not bootable) is the Milestone A deliverable.
 
-**Type consistency** — `sha256` is base64 everywhere; `ManifestEntry`/`UploadManifest`/`HeadResult`/`PresignedUpload`/`BuildOutput` names are used identically across tasks; `owner_kind` wire values are `"run"`/`"system"` at the tool boundary and `"runs"`/`"systems"` as object-store kinds (the tool maps between them in T6/T8/T10) — this is the one deliberate dual-vocabulary; keep the mapping at the tool boundary only.
+**Type consistency** — `sha256` is base64 everywhere; `ManifestEntry`/`UploadManifest`/`HeadResult`/`PresignedUpload`/`BuildOutput`/`ValidatedUpload` names are used identically across tasks; the validator returns `ValidatedUpload(output, heads)` so `complete_build` writes artifact rows from `heads` and never calls the object store directly (fully injectable); `owner_kind` wire values are `"run"`/`"system"` at the tool boundary and `"runs"`/`"systems"` as object-store kinds (the tool maps between them in T6/T8/T10) — this is the one deliberate dual-vocabulary; keep the mapping at the tool boundary only.
 
 **Known sharp edges flagged inline for the implementer** — (1) the `created → succeeded` collapse uses guarded raw `UPDATE`s (not `update_state`), so no `state.py` edit (T8); (2) the T8 finalize writes one write-once `artifacts` row per uploaded object keyed by its **own** object key (`keys[name]`) — `BuildOutput` carries only `kernel_ref`/`debuginfo_ref`, so `initrd` is recorded from `keys`/`heads`, not from `BuildOutput` (T8); (3) `_read_section` takes the object `key` (T7); (4) presigned-PUT length enforcement is asserted by the live test, with the pre-mint cap as the guaranteed backstop, and the `head`-vs-manifest recheck fails closed when a checksum is absent (T12); (5) re-read `__main__.py` and `provision_handler` for exact wiring sites before editing (T10/T11); (6) update existing `rootfs_image_ref` test fixtures to the new `rootfs` shape (T10); (7) `create_upload` takes the per-owner advisory lock and re-checks owner state in-lock before minting/persisting, so a concurrent finalize cannot strand a reaper-invisible manifest (T6).
