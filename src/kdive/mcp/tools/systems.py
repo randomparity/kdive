@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastmcp import FastMCP
@@ -21,6 +21,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import Field
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
@@ -32,6 +33,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.provisioning import (
     LocalLibvirtProvisioning,
@@ -673,8 +675,15 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             pool, current_context(), allocation_id=allocation_id, profile=profile
         )
 
-    @app.tool(name="systems.get")
-    async def systems_get(system_id: str) -> ToolResponse:
+    @app.tool(
+        name="systems.get",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def systems_get(
+        system_id: Annotated[str, Field(description="The System to render.")],
+    ) -> ToolResponse:
+        """Render a System; failed maps to a failure envelope. Requires project membership."""
         return await get_system(pool, current_context(), system_id)
 
     @app.tool(name="systems.teardown")

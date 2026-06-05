@@ -13,12 +13,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
+from pydantic import Field
 
 from kdive.db.repositories import BUDGETS, QUOTAS
 from kdive.domain import accounting as accounting_domain
@@ -39,6 +40,7 @@ from kdive.domain.models import Budget, Quota
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context, require_project
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 from kdive.security import audit
 from kdive.security.rbac import (
     AuthorizationError,
@@ -659,17 +661,24 @@ async def _audit_set(
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `accounting.*` tools on ``app``, bound to ``pool``."""
 
-    @app.tool(name="accounting.estimate")
+    @app.tool(
+        name="accounting.estimate",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
     async def accounting_estimate(
-        project: str,
-        vcpus: int,
-        memory_gb: int,
-        window: float | str,
-        cost_class: str = _DEFAULT_COST_CLASS,
+        project: Annotated[str, Field(description="Project to price the estimate for.")],
+        vcpus: Annotated[int, Field(description="Number of vCPUs in the hypothetical selector.")],
+        memory_gb: Annotated[int, Field(description="Memory in GiB in the hypothetical selector.")],
+        window: Annotated[
+            float | str,
+            Field(description="Lease duration in hours (number or decimal string)."),
+        ],
+        cost_class: Annotated[
+            str, Field(description="Cost class identifier (default: local).")
+        ] = _DEFAULT_COST_CLASS,
     ) -> ToolResponse:
-        # `window` accepts a number or a decimal string so a precise caller can pass an
-        # exact window; `parse_window_hours` does one `Decimal(str(window))` conversion
-        # shared with admission, and a non-numeric value fails closed (configuration_error).
+        """Price a hypothetical selector over a window without writing anything. Requires viewer."""
         return await estimate(
             pool,
             current_context(),
@@ -680,12 +689,28 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             cost_class=cost_class,
         )
 
-    @app.tool(name="accounting.usage")
+    @app.tool(
+        name="accounting.usage",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
     async def accounting_usage(
-        project: str | None = None, investigation_id: str | None = None
+        project: Annotated[
+            str | None,
+            Field(
+                description="Project to report spend for (mutually exclusive with "
+                "investigation_id)."
+            ),
+        ] = None,
+        investigation_id: Annotated[
+            str | None,
+            Field(
+                description="Investigation UUID to report spend for (mutually exclusive with "
+                "project)."
+            ),
+        ] = None,
     ) -> ToolResponse:
-        # Exactly one of project / investigation_id; the investigation form resolves the
-        # owning project and authorizes on it (no cross-project read bypass, ADR-0007 §6).
+        """Return spend rollup for a project or investigation. Requires viewer."""
         return await usage(
             pool,
             current_context(),
@@ -693,16 +718,33 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             investigation_id=investigation_id,
         )
 
-    @app.tool(name="accounting.report")
+    @app.tool(
+        name="accounting.report",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
     async def accounting_report(
-        scope: str,
-        projects: list[str] | None = None,
-        group_by: str | None = None,
-        window: list[str | None] | None = None,
+        scope: Annotated[
+            str,
+            Field(
+                description="Report scope: 'granted-set' (member projects) or "
+                "'all-projects' (platform_auditor only)."
+            ),
+        ],
+        projects: Annotated[
+            list[str] | None,
+            Field(description="Named project subset for granted-set scope; omit for all members."),
+        ] = None,
+        group_by: Annotated[
+            str | None,
+            Field(description="Group rows by 'principal', or omit for per-project grouping."),
+        ] = None,
+        window: Annotated[
+            list[str | None] | None,
+            Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
+        ] = None,
     ) -> ToolResponse:
-        # Two scope forms (ADR-0043 §3): `granted-set` rides per-project require_role(viewer)
-        # over the caller's members; `all-projects` is gated platform_auditor. Read-audited
-        # to platform_audit_log by read-shape (granted-set) or always (all-projects).
+        """Multi-project usage rollup. granted-set: viewer role; all-projects: platform_auditor."""
         return await report(
             pool,
             current_context(),
@@ -712,16 +754,36 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             window=window,
         )
 
-    @app.tool(name="accounting.set_budget")
-    async def accounting_set_budget(project: str, limit_kcu: float | str) -> ToolResponse:
-        # admin-only; `limit_kcu` accepts a number or a decimal string (precise limit).
+    @app.tool(
+        name="accounting.set_budget",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def accounting_set_budget(
+        project: Annotated[str, Field(description="Project to set the spend budget for.")],
+        limit_kcu: Annotated[
+            float | str,
+            Field(description="Budget ceiling in KCU (number or decimal string, >= 0)."),
+        ],
+    ) -> ToolResponse:
+        """Set a project's spend budget limit_kcu; preserves spent_kcu. Requires admin."""
         return await set_budget(pool, current_context(), project=project, limit_kcu=limit_kcu)
 
-    @app.tool(name="accounting.set_quota")
+    @app.tool(
+        name="accounting.set_quota",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
     async def accounting_set_quota(
-        project: str, max_concurrent_allocations: int, max_concurrent_systems: int
+        project: Annotated[str, Field(description="Project to set concurrency caps for.")],
+        max_concurrent_allocations: Annotated[
+            int, Field(description="Maximum concurrent allocations allowed (>= 0).")
+        ],
+        max_concurrent_systems: Annotated[
+            int, Field(description="Maximum concurrent Systems allowed (>= 0).")
+        ],
     ) -> ToolResponse:
-        # admin-only; both caps must be >= 0 (a negative cap is a configuration_error).
+        """Set a project's concurrency caps for allocations and systems. Requires admin."""
         return await set_quota(
             pool,
             current_context(),
