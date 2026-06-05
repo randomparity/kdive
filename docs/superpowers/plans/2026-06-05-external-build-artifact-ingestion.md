@@ -1179,6 +1179,7 @@ from datetime import timedelta
 from typing import Any
 
 from kdive.db import upload_manifest
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.models import Sensitivity
 from kdive.mcp.tools import _docmeta
@@ -1263,8 +1264,6 @@ async def create_upload(
             if project is None or project not in ctx.projects:
                 return [_config_error(owner_id)]
             require_role(ctx, project, Role.OPERATOR)
-            if not await _owner_accepts_upload(conn, owner_kind, uid):
-                return [_config_error(owner_id, data={"reason": "owner_not_accepting_upload"})]
 
             allowed = _allowed_names(owner_kind)
             cap = _max_upload_bytes()
@@ -1280,29 +1279,36 @@ async def create_upload(
                 return [_config_error(owner_id, data={"reason": "no_artifacts_declared"})]
 
             prefix = owner_prefix(_TENANT, kind, str(uid))
+            lock_scope = LockScope.RUN if owner_kind == "run" else LockScope.SYSTEM
+            # Take the per-owner lock and re-check state INSIDE it before minting + persisting,
+            # so a concurrent complete_build/provision that finalizes the owner cannot interleave
+            # between the check and the manifest write — which would otherwise strand a manifest
+            # (and its objects) the reaper, scoped to pre-finalize owners, never sweeps.
             try:
-                uploads = [
-                    (
-                        e,
-                        artifact_key(_TENANT, kind, str(uid), e.name),
-                        store.presign_put(
+                async with conn.transaction(), advisory_xact_lock(conn, lock_scope, uid):
+                    if not await _owner_accepts_upload(conn, owner_kind, uid):
+                        return [_config_error(owner_id, data={"reason": "owner_not_accepting_upload"})]
+                    uploads = [
+                        (
+                            e,
                             artifact_key(_TENANT, kind, str(uid), e.name),
-                            sha256=e.sha256,
-                            size_bytes=e.size_bytes,
-                            sensitivity=Sensitivity.SENSITIVE,
-                            retention_class=_RETENTION_CLASS,
-                            expires_in=_presign_ttl_seconds(),
-                        ),
+                            store.presign_put(
+                                artifact_key(_TENANT, kind, str(uid), e.name),
+                                sha256=e.sha256,
+                                size_bytes=e.size_bytes,
+                                sensitivity=Sensitivity.SENSITIVE,
+                                retention_class=_RETENTION_CLASS,
+                                expires_in=_presign_ttl_seconds(),
+                            ),
+                        )
+                        for e in entries
+                    ]
+                    await upload_manifest.replace_manifest(
+                        conn, owner_kind=kind, owner_id=uid, prefix=prefix,
+                        entries=entries, ttl=_upload_ttl(),
                     )
-                    for e in entries
-                ]
-            except CategorizedError as exc:
+            except CategorizedError as exc:  # presign failure rolls back the manifest write
                 return [ToolResponse.failure(owner_id, exc.category)]
-            async with conn.transaction():
-                await upload_manifest.replace_manifest(
-                    conn, owner_kind=kind, owner_id=uid, prefix=prefix,
-                    entries=entries, ttl=_upload_ttl(),
-                )
 
     return [
         ToolResponse.success(
@@ -1500,6 +1506,41 @@ def test_vmlinux_without_declared_build_id_is_configuration_error() -> None:
             declared_build_id=None,
         )
     assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_matching_build_id_passes_and_pairs_vmlinux() -> None:
+    """The anti-mispairing guard's success path: a correct build_id is accepted."""
+    blob = _elf_with_build_id(bytes.fromhex("deadbeef"))
+    store = _FakeStore(
+        {"k": _BZIMAGE_HEAD, "v": blob},
+        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
+    )
+    out = validate_external_artifacts(
+        store,
+        manifest=[
+            ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+            ManifestEntry("vmlinux", "cv", len(blob)),
+        ],
+        keys={"kernel": "k", "vmlinux": "v"},
+        declared_build_id="DEADBEEF",  # case-insensitive vs the lowercase-hex note
+    )
+    assert out.kernel_ref == "k" and out.debuginfo_ref == "v"
+    assert out.build_id == "deadbeef"  # normalized to the value parse_gnu_build_id returns
+
+
+def test_initrd_is_validated_and_returned_in_keys() -> None:
+    """An uploaded initrd is HEAD/checksum-validated (magic-exempt) and survives validation."""
+    store = _FakeStore(
+        {"k": _BZIMAGE_HEAD, "i": b"\x1f\x8b" + b"\x00" * 40},  # initrd: no magic check
+        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "i": HeadResult(42, "ci", "e")},
+    )
+    out = validate_external_artifacts(
+        store,
+        manifest=[ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)), ManifestEntry("initrd", "ci", 42)],
+        keys={"kernel": "k", "initrd": "i"},
+        declared_build_id=None,
+    )
+    assert out.kernel_ref == "k"  # initrd validated without error; finalize keys it by its own key
 ```
 
 *Implementer note: finish `_elf_with_build_id` so it round-trips through `extract_build_id_ranged` (Step 3). Use `struct` to write a valid ELF64-LE header (`e_shoff`, `e_shentsize=64`, `e_shnum`), a `.shstrtab` section, and a `SHT_NOTE` section named `.note.gnu.build-id` whose payload is `namesz=4, descsz=len(id), type=3, "GNU\\0", <id>`.*
@@ -1542,6 +1583,10 @@ def validate_external_artifacts(
     size, checksum vs the manifest, and leading-byte magic; then, if a ``vmlinux`` is
     present, verify the declared ``build_id`` against its ranged ``.note.gnu.build-id``.
 
+    ``declared_build_id`` is the GNU build-id as hex (the value ``parse_gnu_build_id``
+    yields); the comparison is case-insensitive and the returned ``BuildOutput.build_id``
+    is the normalized lowercase-hex value extracted from the file, not the raw input.
+
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` (a missing/skipped upload, or a vmlinux
             with no declared build_id); ``BUILD_FAILURE`` (checksum/size/magic/build_id
@@ -1573,10 +1618,10 @@ def validate_external_artifacts(
                 "a vmlinux upload requires a declared build_id",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        actual = extract_build_id_ranged(store, keys["vmlinux"])
-        if actual != declared_build_id:
+        actual = extract_build_id_ranged(store, keys["vmlinux"])  # lowercase hex
+        if actual != declared_build_id.lower():
             raise _build_failure("declared build_id does not match the uploaded vmlinux")
-        build_id = declared_build_id
+        build_id = actual  # record the normalized lowercase-hex value, not the raw input
 
     return BuildOutput(
         kernel_ref=keys["kernel"],
@@ -1841,7 +1886,7 @@ async def complete_build(
             except CategorizedError as exc:
                 return ToolResponse.failure(run_id, exc.category)
 
-            return await _finalize_external_build(conn, ctx, run, output, cmdline, heads)
+            return await _finalize_external_build(conn, ctx, run, output, cmdline, keys, heads)
 
 
 def _head_all(keys: dict[str, str]) -> dict[str, HeadResult]:
@@ -1855,9 +1900,12 @@ def _head_all(keys: dict[str, str]) -> dict[str, HeadResult]:
 
 
 def _complete_envelope(run_id: UUID, result: dict[str, Any]) -> ToolResponse:
+    """Build the success envelope from a ledger ``result`` (used live and on replay)."""
     refs = {"kernel": result["kernel_ref"]}
     if result.get("debuginfo_ref"):
         refs["vmlinux"] = result["debuginfo_ref"]
+    if result.get("initrd_ref"):
+        refs["initrd"] = result["initrd_ref"]
     return ToolResponse.success(
         str(run_id), "succeeded", suggested_next_actions=["runs.get"], refs=refs
     )
@@ -1869,12 +1917,22 @@ async def _finalize_external_build(
     run: Run,
     output: BuildOutput,
     cmdline: str,
+    keys: dict[str, str],
     heads: dict[str, HeadResult],
 ) -> ToolResponse:
-    """Write artifact rows + ledger + drive created→running→succeeded under the per-Run lock."""
+    """Write artifact rows + ledger + drive created→succeeded under the per-Run lock.
+
+    The external lane collapses ``created → succeeded`` in one locked transaction via
+    guarded raw ``UPDATE``s (``WHERE state='created'``), bypassing ``can_transition`` the
+    same way the server lane's ``_finalize_build`` does for ``running → succeeded`` — so no
+    ``state.py`` edge change is needed. One write-once ``artifacts`` row is written per
+    uploaded object, keyed by its **own** object key (``keys[name]``) — so an ``initrd`` is
+    recorded against its real key, never the kernel's or vmlinux's.
+    """
     result = {
         "kernel_ref": output.kernel_ref,
         "debuginfo_ref": output.debuginfo_ref,
+        "initrd_ref": keys.get("initrd", ""),
         "build_id": output.build_id,
         "cmdline": cmdline,
     }
@@ -1890,19 +1948,13 @@ async def _finalize_external_build(
             return _complete_envelope(run.id, recorded or result)
         if state is not RunState.CREATED:
             return _config_error(str(run.id), data={"current_status": state.value})
-        # Write the write-once artifact rows (sensitivity/retention from the store-set metadata).
+        # One write-once artifacts row per uploaded object, keyed by its own object key
+        # (sensitivity/retention are the SENSITIVE/build class the presign set on the object).
         for name, head in heads.items():
-            stored = StoredArtifact(
-                f"{run.kernel_ref or ''}",  # placeholder; replaced below
-                head.etag,
-                Sensitivity.SENSITIVE,
-                "build",
+            stored = StoredArtifact(keys[name], head.etag, Sensitivity.SENSITIVE, "build")
+            await ARTIFACTS.insert(
+                conn, register_artifact_row(stored, owner_kind="runs", owner_id=run.id)
             )
-        # Build rows from the resolved keys, not run.kernel_ref:
-        for name, head in heads.items():
-            key = output.kernel_ref if name == "kernel" else output.debuginfo_ref
-            stored = StoredArtifact(key, head.etag, Sensitivity.SENSITIVE, "build")
-            await ARTIFACTS.insert(conn, register_artifact_row(stored, owner_kind="runs", owner_id=run.id))
         await conn.execute(
             "INSERT INTO run_steps (run_id, step, state, result) "
             "VALUES (%s, 'build', 'succeeded', %s) ON CONFLICT (run_id, step) DO NOTHING",
@@ -1921,11 +1973,9 @@ async def _finalize_external_build(
     return _complete_envelope(run.id, result)
 ```
 
-**Clean up the duplicated artifact-row loop** (the first `for` block above is a leftover — delete it; keep only the second loop that builds rows from `output.kernel_ref`/`output.debuginfo_ref`). Note `runs.created → succeeded` is **not** a legal direct edge in `state.py` (`CREATED → RUNNING → SUCCEEDED`). Two options — pick one and keep the test green:
+`heads` is keyed by artifact name and contains every uploaded object (kernel + optional initrd/vmlinux); `keys[name]` is each object's real key from the manifest, so the row loop records all of them — including `initrd`, which `BuildOutput` does not carry. Note `runs.created → succeeded` is **not** a legal direct edge in `state.py` (`CREATED → RUNNING → SUCCEEDED`). It does not need to be:
 
-- **(Chosen)** Update `_TRANSITIONS[RunState]` is *not* required because `complete_build` writes the state with a raw `UPDATE ... SET state='succeeded' WHERE state='created'` (bypassing `can_transition`, exactly as `_build_locked`/`_finalize_build` use raw guarded UPDATEs). The state machine guard only applies to `StatefulRepository.update_state`, which this path does not call. Confirm by re-reading `_finalize_build` (raw UPDATE) — same pattern. So **no `state.py` change** is needed. Document this in the function docstring: the external lane collapses `created → succeeded` in one locked transaction via guarded raw UPDATEs, mirroring the server lane's `running → succeeded`.
-
-Add the audit transition string `created->succeeded` (allowed — audit records the actual transition).
+No `_TRANSITIONS[RunState]` change is required: `complete_build` writes the state with a raw `UPDATE ... SET state='succeeded' WHERE state='created'`, which bypasses `can_transition` exactly as `_build_locked`/`_finalize_build` use raw guarded UPDATEs. The state-machine guard only applies to `StatefulRepository.update_state`, which this path does not call. Confirm by re-reading `_finalize_build` (raw UPDATE) — same pattern. The audit transition string `created->succeeded` is allowed (audit records the actual transition).
 
 - [ ] **Step 5: Register the tool**
 
@@ -1940,7 +1990,7 @@ In `runs.py` `register(app, pool)`:
     async def runs_complete_build(
         run_id: Annotated[str, Field(description="The external-build Run to finalize.")],
         cmdline: Annotated[str, Field(description="Kernel command line, e.g. 'console=ttyS0 dhash_entries=1'.")],
-        build_id: Annotated[str | None, Field(description="GNU build-id; required iff a vmlinux was uploaded.")] = None,
+        build_id: Annotated[str | None, Field(description="GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive.")] = None,
     ) -> ToolResponse:
         """Validate an external Run's uploads and finalize it to succeeded. Operator only."""
         return await complete_build(pool, current_context(), run_id, build_id=build_id, cmdline=cmdline)
@@ -2780,4 +2830,4 @@ Merge with `--rebase` or `--merge` (never `--squash` — preserves bisectable hi
 
 **Type consistency** — `sha256` is base64 everywhere; `ManifestEntry`/`UploadManifest`/`HeadResult`/`PresignedUpload`/`BuildOutput` names are used identically across tasks; `owner_kind` wire values are `"run"`/`"system"` at the tool boundary and `"runs"`/`"systems"` as object-store kinds (the tool maps between them in T6/T8/T10) — this is the one deliberate dual-vocabulary; keep the mapping at the tool boundary only.
 
-**Known sharp edges flagged inline for the implementer** — (1) the `created → succeeded` collapse uses guarded raw `UPDATE`s (not `update_state`), so no `state.py` edit (T8); (2) the duplicated artifact-row loop in the T8 draft must be deleted; (3) `_read_section` takes the object `key` (T7); (4) presigned-PUT length enforcement is asserted by the live test, with the pre-mint cap as the guaranteed backstop (T12); (5) re-read `__main__.py` and `provision_handler` for exact wiring sites before editing (T10/T11); (6) update existing `rootfs_image_ref` test fixtures to the new `rootfs` shape (T10).
+**Known sharp edges flagged inline for the implementer** — (1) the `created → succeeded` collapse uses guarded raw `UPDATE`s (not `update_state`), so no `state.py` edit (T8); (2) the T8 finalize writes one write-once `artifacts` row per uploaded object keyed by its **own** object key (`keys[name]`) — `BuildOutput` carries only `kernel_ref`/`debuginfo_ref`, so `initrd` is recorded from `keys`/`heads`, not from `BuildOutput` (T8); (3) `_read_section` takes the object `key` (T7); (4) presigned-PUT length enforcement is asserted by the live test, with the pre-mint cap as the guaranteed backstop, and the `head`-vs-manifest recheck fails closed when a checksum is absent (T12); (5) re-read `__main__.py` and `provision_handler` for exact wiring sites before editing (T10/T11); (6) update existing `rootfs_image_ref` test fixtures to the new `rootfs` shape (T10); (7) `create_upload` takes the per-owner advisory lock and re-checks owner state in-lock before minting/persisting, so a concurrent finalize cannot strand a reaper-invisible manifest (T6).
