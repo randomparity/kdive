@@ -6,7 +6,14 @@ import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.store.objectstore import HeadResult, ObjectStore
+from kdive.domain.models import Sensitivity
+from kdive.store.objectstore import (
+    HeadResult,
+    ObjectStore,
+    PresignedUpload,
+    artifact_key,
+    owner_prefix,
+)
 
 
 class _HeadClient:
@@ -71,3 +78,60 @@ def test_head_non_404_client_error_raises_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         store.head("t/runs/r1/kernel")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_artifact_key_and_owner_prefix_match_layout() -> None:
+    assert artifact_key("local", "runs", "r1", "kernel") == "local/runs/r1/kernel"
+    assert owner_prefix("local", "runs", "r1") == "local/runs/r1/"
+
+
+class _RangeClient:
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        assert kwargs["Range"] == "bytes=0-3"
+
+        class _Body:
+            def read(self) -> bytes:
+                return b"\x7fELF"
+
+        return {"Body": _Body()}
+
+
+def test_get_range_requests_byte_range() -> None:
+    store = ObjectStore(_RangeClient(), "bucket")
+    assert store.get_range("t/runs/r1/vmlinux", start=0, length=4) == b"\x7fELF"
+
+
+class _PresignClient:
+    def __init__(self) -> None:
+        self.params: dict[str, object] | None = None
+
+    def generate_presigned_url(
+        self, op: str, *, Params: dict[str, object], ExpiresIn: int, HttpMethod: str
+    ) -> str:
+        assert op == "put_object" and HttpMethod == "PUT"
+        self.params = Params
+        return f"https://store/put?exp={ExpiresIn}"
+
+
+def test_presign_put_signs_checksum_and_metadata() -> None:
+    client = _PresignClient()
+    store = ObjectStore(client, "bucket")
+    out = store.presign_put(
+        "local/runs/r1/kernel",
+        sha256="Zm9vYmFy",
+        size_bytes=10,
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="build",
+        expires_in=900,
+    )
+    assert isinstance(out, PresignedUpload)
+    assert out.url == "https://store/put?exp=900"
+    assert client.params is not None
+    assert client.params["ChecksumSHA256"] == "Zm9vYmFy"
+    assert client.params["Metadata"] == {
+        "sensitivity": "sensitive",
+        "retention-class": "build",
+    }
+    assert out.required_headers["x-amz-checksum-sha256"] == "Zm9vYmFy"
+    assert out.required_headers["x-amz-meta-sensitivity"] == "sensitive"
+    assert out.required_headers["x-amz-meta-retention-class"] == "build"

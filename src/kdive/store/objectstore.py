@@ -59,6 +59,13 @@ class HeadResult(NamedTuple):
     etag: str
 
 
+class PresignedUpload(NamedTuple):
+    """A presigned PUT URL plus the headers the client must send for it to validate."""
+
+    url: str
+    required_headers: dict[str, str]
+
+
 def _normalize_etag(raw: str) -> str:
     """Strip S3's surrounding double quotes from an ETag, leaving the bare value."""
     return raw.strip('"')
@@ -94,6 +101,23 @@ def _artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
             _validate_component("name", name),
         )
     )
+
+
+def artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
+    """Public, validated ``{tenant}/{kind}/{object_id}/{name}`` key (ingestion + reaper)."""
+    return _artifact_key(tenant, kind, object_id, name)
+
+
+def owner_prefix(tenant: str, kind: str, object_id: str) -> str:
+    """The validated ``{tenant}/{kind}/{object_id}/`` key prefix for an owner's objects."""
+    base = "/".join(
+        (
+            _validate_component("tenant", tenant),
+            _validate_component("kind", kind),
+            _validate_component("object_id", object_id),
+        )
+    )
+    return base + "/"
 
 
 def _infrastructure_error(op: str, key: str, err: BotoCoreError | ClientError) -> CategorizedError:
@@ -224,6 +248,67 @@ class ObjectStore:
             checksum_sha256=resp.get("ChecksumSHA256"),
             etag=_normalize_etag(resp["ETag"]),
         )
+
+    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        """Return ``length`` bytes of ``key`` starting at ``start`` (an HTTP ranged GET).
+
+        Raises:
+            CategorizedError: the ranged read fails
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+        """
+        end = start + length - 1
+        try:
+            resp = self._client.get_object(
+                Bucket=self._bucket, Key=key, Range=f"bytes={start}-{end}"
+            )
+            return resp["Body"].read()
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("get_range", key, err) from err
+
+    def presign_put(
+        self,
+        key: str,
+        *,
+        sha256: str,
+        size_bytes: int,
+        sensitivity: Sensitivity,
+        retention_class: str,
+        expires_in: int,
+    ) -> PresignedUpload:
+        """Mint a presigned PUT that signs the checksum + object metadata into the URL.
+
+        The agent must send the returned ``required_headers`` (the signed
+        ``x-amz-checksum-sha256`` and ``x-amz-meta-*`` metadata); S3 rejects a PUT whose
+        checksum disagrees with the signed value, and the metadata lands on the object so
+        the later install fetch (`get_artifact`) reads its sensitivity. ``size_bytes`` is
+        recorded by the caller's manifest and capped before this is called; presigned-PUT
+        length enforcement is asserted by the `live_stack` test (ADR-0048 §2).
+
+        Raises:
+            CategorizedError: presigning fails
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+        """
+        metadata = {"sensitivity": sensitivity.value, "retention-class": retention_class}
+        try:
+            url = self._client.generate_presigned_url(
+                "put_object",
+                Params={
+                    "Bucket": self._bucket,
+                    "Key": key,
+                    "ChecksumSHA256": sha256,
+                    "Metadata": metadata,
+                },
+                ExpiresIn=expires_in,
+                HttpMethod="PUT",
+            )
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("presign_put", key, err) from err
+        headers = {
+            "x-amz-checksum-sha256": sha256,
+            "x-amz-meta-sensitivity": sensitivity.value,
+            "x-amz-meta-retention-class": retention_class,
+        }
+        return PresignedUpload(url=url, required_headers=headers)
 
 
 def register_artifact_row(stored: StoredArtifact, *, owner_kind: str, owner_id: UUID) -> Artifact:
