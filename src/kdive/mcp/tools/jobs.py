@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
+from pydantic import Field
 
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.errors import ErrorCategory
@@ -30,6 +32,7 @@ from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 
 _log = logging.getLogger(__name__)
 
@@ -169,18 +172,51 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     verified token reached the tool) and delegates; the handler owns its log context.
     """
 
-    @app.tool(name="jobs.get")
-    async def jobs_get(job_id: str) -> ToolResponse:
+    @app.tool(
+        name="jobs.get",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def jobs_get(
+        job_id: Annotated[str, Field(description="The Job to render.")],
+    ) -> ToolResponse:
+        """Render a Job by ID. Requires project membership."""
         return await get_job(pool, current_context(), job_id)
 
-    @app.tool(name="jobs.wait")
-    async def jobs_wait(job_id: str, timeout_s: float = 30.0) -> ToolResponse:
+    @app.tool(
+        name="jobs.wait",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def jobs_wait(
+        job_id: Annotated[str, Field(description="The Job to poll until terminal.")],
+        timeout_s: Annotated[
+            float, Field(description="Maximum seconds to wait (capped at 300).")
+        ] = 30.0,
+    ) -> ToolResponse:
+        """Poll a Job until terminal or the timeout elapses. Requires project membership."""
         return await wait_job(pool, current_context(), job_id, timeout_s)
 
-    @app.tool(name="jobs.cancel")
-    async def jobs_cancel(job_id: str) -> ToolResponse:
+    @app.tool(
+        name="jobs.cancel",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def jobs_cancel(
+        job_id: Annotated[str, Field(description="The Job to cancel.")],
+    ) -> ToolResponse:
+        """Cancel a Job cooperatively; error envelope if already terminal. Requires membership."""
         return await cancel_job(pool, current_context(), job_id)
 
-    @app.tool(name="jobs.list")
-    async def jobs_list(limit: int = DEFAULT_LIST_LIMIT) -> list[ToolResponse]:
+    @app.tool(
+        name="jobs.list",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def jobs_list(
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = DEFAULT_LIST_LIMIT,
+    ) -> list[ToolResponse]:
+        """List the newest Jobs visible to the caller's projects. Requires project membership."""
         return await list_jobs(pool, current_context(), limit=limit)

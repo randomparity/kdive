@@ -13,7 +13,7 @@ ErrorCategory).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastmcp import FastMCP
@@ -21,7 +21,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
@@ -31,6 +31,7 @@ from kdive.domain.state import IllegalTransition, InvestigationState
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context, require_project
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 from kdive.security import audit
 from kdive.security.rbac import Role, require_role
 
@@ -326,26 +327,76 @@ async def unlink_external_ref(
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
 
-    @app.tool(name="investigations.open")
+    @app.tool(
+        name="investigations.open",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
     async def investigations_open(
-        project: str, title: str, external_refs: list[dict[str, Any]] | None = None
+        project: Annotated[str, Field(description="Project to create the Investigation under.")],
+        title: Annotated[str, Field(description="Human-readable title for the Investigation.")],
+        external_refs: Annotated[
+            list[dict[str, Any]] | None,
+            Field(description="Optional external tracker refs (each with tracker, id, url)."),
+        ] = None,
     ) -> ToolResponse:
+        """Mint an Investigation in the open state for the caller's project. Requires operator."""
         return await open_investigation(
             pool, current_context(), project=project, title=title, external_refs=external_refs
         )
 
-    @app.tool(name="investigations.get")
-    async def investigations_get(investigation_id: str) -> ToolResponse:
+    @app.tool(
+        name="investigations.get",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_get(
+        investigation_id: Annotated[str, Field(description="The Investigation to render.")],
+    ) -> ToolResponse:
+        """Render an Investigation by ID. Requires project membership."""
         return await get_investigation(pool, current_context(), investigation_id)
 
-    @app.tool(name="investigations.close")
-    async def investigations_close(investigation_id: str) -> ToolResponse:
+    @app.tool(
+        name="investigations.close",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_close(
+        investigation_id: Annotated[
+            str, Field(description="The Investigation to drive to closed.")
+        ],
+    ) -> ToolResponse:
+        """Close an Investigation (idempotent on closed; errors on abandoned). Requires operator."""
         return await close_investigation(pool, current_context(), investigation_id)
 
-    @app.tool(name="investigations.link")
-    async def investigations_link(investigation_id: str, ref: dict[str, Any]) -> ToolResponse:
+    @app.tool(
+        name="investigations.link",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_link(
+        investigation_id: Annotated[str, Field(description="The Investigation to add the ref to.")],
+        ref: Annotated[
+            dict[str, Any],
+            Field(description="External ref to upsert, with tracker, id, and optional url."),
+        ],
+    ) -> ToolResponse:
+        """Upsert an external ref onto an Investigation by (tracker, id) key. Requires operator."""
         return await link_external_ref(pool, current_context(), investigation_id, ref)
 
-    @app.tool(name="investigations.unlink")
-    async def investigations_unlink(investigation_id: str, ref: dict[str, Any]) -> ToolResponse:
+    @app.tool(
+        name="investigations.unlink",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_unlink(
+        investigation_id: Annotated[
+            str, Field(description="The Investigation to remove the ref from.")
+        ],
+        ref: Annotated[
+            dict[str, Any],
+            Field(description="Ref to remove; only tracker and id are used as the key."),
+        ],
+    ) -> ToolResponse:
+        """Remove an external ref from an Investigation by (tracker, id) key. Requires operator."""
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)

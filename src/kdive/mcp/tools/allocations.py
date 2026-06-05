@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from pydantic import Field
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
@@ -32,6 +34,7 @@ from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context, require_project
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 from kdive.security import audit
 from kdive.security.rbac import Role, require_role
 
@@ -350,19 +353,35 @@ async def list_allocations(
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `allocations.*` tools on ``app``, bound to ``pool``."""
 
-    @app.tool(name="allocations.request")
+    @app.tool(
+        name="allocations.request",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
     async def allocations_request(
-        project: str,
-        vcpus: int,
-        memory_gb: int,
-        window: float | str | None = None,
-        resource_id: str | None = None,
-        kind: str | None = None,
-        idempotency_key: str | None = None,
+        project: Annotated[str, Field(description="Project to admit the allocation for.")],
+        vcpus: Annotated[int, Field(description="Number of vCPUs requested.")],
+        memory_gb: Annotated[int, Field(description="Memory in GiB requested.")],
+        window: Annotated[
+            float | str | None,
+            Field(
+                description="Lease duration in hours (number or decimal string); "
+                "omit for the configured default."
+            ),
+        ] = None,
+        resource_id: Annotated[
+            str | None, Field(description="Resource UUID to target; omit to pick by kind.")
+        ] = None,
+        kind: Annotated[
+            str | None,
+            Field(description="Resource kind filter when resource_id is omitted."),
+        ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior grant."),
+        ] = None,
     ) -> ToolResponse:
-        # `window` accepts a number or a decimal string (precise window), or is omitted
-        # for the configured lease default; `idempotency_key` makes the synchronous grant
-        # retry-safe, scoped to the caller's principal (ADR-0040 §3).
+        """Admit an allocation against project budget, quota, and host cap. Requires operator."""
         return await request_allocation(
             pool,
             current_context(),
@@ -375,23 +394,45 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             idempotency_key=idempotency_key,
         )
 
-    @app.tool(name="allocations.get")
-    async def allocations_get(allocation_id: str) -> ToolResponse:
+    @app.tool(
+        name="allocations.get",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def allocations_get(
+        allocation_id: Annotated[str, Field(description="The Allocation to render.")],
+    ) -> ToolResponse:
+        """Render an Allocation; failed maps to a failure envelope. Requires project membership."""
         return await get_allocation(pool, current_context(), allocation_id)
 
-    @app.tool(name="allocations.release")
-    async def allocations_release(allocation_id: str) -> ToolResponse:
+    @app.tool(
+        name="allocations.release",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def allocations_release(
+        allocation_id: Annotated[str, Field(description="The Allocation to release.")],
+    ) -> ToolResponse:
+        """Drive an Allocation to released and reconcile its spend. Requires operator."""
         return await release_allocation(pool, current_context(), allocation_id)
 
-    @app.tool(name="allocations.renew")
+    @app.tool(
+        name="allocations.renew",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
     async def allocations_renew(
-        allocation_id: str,
-        extend: float | str,
-        idempotency_key: str | None = None,
+        allocation_id: Annotated[str, Field(description="The Allocation to renew.")],
+        extend: Annotated[
+            float | str,
+            Field(description="Additional hours to add (number or decimal string, > 0)."),
+        ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior renewal."),
+        ] = None,
     ) -> ToolResponse:
-        # `extend` is the added window in hours (a number or decimal string), validated
-        # > 0 and clamped against the remaining KDIVE_LEASE_MAX window; `idempotency_key`
-        # makes the synchronous re-charge retry-safe, scoped to the principal (ADR-0040 §3).
+        """Extend an Allocation's lease window, re-charged and re-checked. Requires operator."""
         return await renew_allocation(
             pool,
             current_context(),
@@ -400,6 +441,16 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             idempotency_key=idempotency_key,
         )
 
-    @app.tool(name="allocations.list")
-    async def allocations_list(project: str, limit: int = DEFAULT_LIST_LIMIT) -> list[ToolResponse]:
+    @app.tool(
+        name="allocations.list",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def allocations_list(
+        project: Annotated[str, Field(description="Project whose allocations to list.")],
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = DEFAULT_LIST_LIMIT,
+    ) -> list[ToolResponse]:
+        """List the newest Allocations for a project. Requires project membership."""
         return await list_allocations(pool, current_context(), project=project, limit=limit)

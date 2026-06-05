@@ -10,12 +10,14 @@ envelope (ADR-0019 `data` is `dict[str, str]`).
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
 from kdive.domain.errors import ErrorCategory
@@ -23,6 +25,7 @@ from kdive.domain.models import Resource
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools import _docmeta
 
 _log = logging.getLogger(__name__)
 
@@ -114,10 +117,27 @@ async def describe_resource(
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `resources.*` tools on ``app``, bound to ``pool``."""
 
-    @app.tool(name="resources.list")
-    async def resources_list(kind: str | None = None) -> list[ToolResponse]:
+    @app.tool(
+        name="resources.list",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def resources_list(
+        kind: Annotated[
+            str | None,
+            Field(description="Filter by resource kind (e.g. 'local-libvirt'); omit for all."),
+        ] = None,
+    ) -> list[ToolResponse]:
+        """List Resources, optional kind. Requires a valid token; no project membership needed."""
         return await list_resources_tool(pool, current_context(), kind=kind)
 
-    @app.tool(name="resources.describe")
-    async def resources_describe(resource_id: str) -> ToolResponse:
+    @app.tool(
+        name="resources.describe",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def resources_describe(
+        resource_id: Annotated[str, Field(description="The Resource UUID to describe.")],
+    ) -> ToolResponse:
+        """Describe a Resource. Requires a valid token; no project membership needed."""
         return await describe_resource(pool, current_context(), resource_id)
