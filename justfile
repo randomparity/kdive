@@ -161,5 +161,21 @@ release VERSION:
     echo "Pushed tag v{{VERSION}}. NEXT: open a 'chore(release): begin <next>-dev' PR"
     echo "(just set-version <next>; just changelog) — see docs/RELEASING.md."
 
+# Regenerate the agent-facing tool reference from the live registry (mutating).
+docs:
+    uv run python scripts/gen_tool_reference.py
+
+# Verify the committed tool reference matches a fresh generation (CI gate).
+docs-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    uv run python -c "from scripts.gen_tool_reference import write_reference; from pathlib import Path; write_reference(Path('$tmp'))"
+    if ! diff -ru docs/guide/reference "$tmp"; then
+        echo "tool reference is stale — run 'just docs' and commit" >&2
+        exit 1
+    fi
+
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check test
