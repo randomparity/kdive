@@ -135,3 +135,39 @@ def test_presign_put_signs_checksum_and_metadata() -> None:
     assert out.required_headers["x-amz-checksum-sha256"] == "Zm9vYmFy"
     assert out.required_headers["x-amz-meta-sensitivity"] == "sensitive"
     assert out.required_headers["x-amz-meta-retention-class"] == "build"
+
+
+class _FailingGetClient:
+    def get_object(self, **_kwargs: object) -> dict[str, object]:
+        raise EndpointConnectionError(endpoint_url="http://x")
+
+
+def test_get_range_maps_transport_error_to_infrastructure_failure() -> None:
+    store = ObjectStore(_FailingGetClient(), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.get_range("t/runs/r1/vmlinux", start=0, length=4)
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+class _FailingPresignClient:
+    def generate_presigned_url(self, *_a: object, **_k: object) -> str:
+        raise EndpointConnectionError(endpoint_url="http://x")
+
+
+def test_presign_put_maps_error_to_infrastructure_failure() -> None:
+    store = ObjectStore(_FailingPresignClient(), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.presign_put(
+            "local/runs/r1/kernel",
+            sha256="Zm9v",
+            size_bytes=10,
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="build",
+            expires_in=900,
+        )
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_owner_prefix_rejects_invalid_component() -> None:
+    with pytest.raises(CategorizedError):
+        owner_prefix("local", "runs", "bad/id")
