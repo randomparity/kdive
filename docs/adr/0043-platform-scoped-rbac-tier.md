@@ -147,8 +147,12 @@ member multi-project read; `scope` still records the project set). Keeping it a 
 preserves the per-project `audit_log`'s `NOT NULL` invariants and per-tenant query shape, and
 avoids a recursion wrinkle when `audit.query` later lands (M1.3): its cross-project form reads
 `audit_log` while its own read-access record lands in `platform_audit_log`, so platform reads
-never pollute the per-project trail they inspect. `require_platform_role` denials are written
-the same way.
+never pollute the per-project trail they inspect. A `require_platform_role` denial is written
+the same way **when the denied principal holds ≥1 `platform_role`** (an over-reach within the
+platform tier — e.g. a `platform_operator` attempting the auditor read — which is the
+accountability target). A denial of a principal carrying **no** `platform_roles` is *not*
+recorded: on an openly-registered read tool that is the routine "no platform grant" case, and
+auditing it would let any authenticated token amplify writes into `platform_audit_log`.
 (The broader retrofit that audits all bare `require_role` denials in the per-project
 `audit_log` remains a separate deferred hardening.)
 
