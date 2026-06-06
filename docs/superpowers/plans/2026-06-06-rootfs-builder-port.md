@@ -602,19 +602,18 @@ VMLINUX_PATH="${KDIVE_ROOTFS_VMLINUX:-}"
 KERNEL_RELEASE="${KDIVE_ROOTFS_KERNEL_RELEASE:-}"
 MARKER="kdive-ready"
 
-# Repo root (scripts/live-vm/ -> repo root), so the managed-key helper is importable regardless
-# of the caller's cwd. The helper is the single source of truth for the managed key path and its
-# generation (ADR-0052), shared with the future connect-time `ssh -i` identity.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
 # The first positional argument overrides KDIVE_ROOTFS.
 if [[ $# -ge 1 ]]; then
   ROOTFS_PATH="$1"
 fi
 
-# Idempotency guard (presence-only): runs first so a second invocation against an existing image
-# is a no-op even with an empty PATH. It does not validate the file or consult build inputs. The
+# ORDERING INVARIANT: nothing above the idempotency guard may run an EXTERNAL command. Only
+# parameter expansion and bash builtins (`[[ ]]`, echo, exit) are allowed, so a second invocation
+# on an existing image is a no-op even with an empty PATH (the fixtures-test idempotency contract).
+# SCRIPT_DIR/REPO_ROOT are therefore computed lower down (they shell out to `dirname`), and the
+# Stage-0 preflight (realpath/mkdir) sits after the guard too.
+
+# Idempotency guard (presence-only): it does not validate the file or consult build inputs. The
 # `-f` test follows symlinks, so a symlink pointing at a regular file short-circuits here before
 # the Stage-0 symlink refusal below — safe, because this branch performs no write.
 if [[ -f "${ROOTFS_PATH}" ]]; then
@@ -714,6 +713,13 @@ require() {
     exit 1
   }
 }
+
+# Repo root (scripts/live-vm/ -> repo root), so the managed-key helper is importable regardless of
+# the caller's cwd. Computed here (not at the top) because it shells out to `dirname` — see the
+# ordering invariant above the idempotency guard. The helper is the single source of truth for the
+# managed key path + generation (ADR-0052), shared with the future connect-time `ssh -i` identity.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 authorized_key="$(resolve_authorized_key)"
 if [[ -z "${authorized_key}" || ! -f "${authorized_key}" ]]; then
@@ -894,11 +900,18 @@ changing any build input (`KDIVE_ROOTFS_DEBUG`, `KDIVE_ROOTFS_VMLINUX`,
 `KDIVE_ROOTFS_SSH_USER`, `KDIVE_ROOTFS_SIZE`, or a rotated managed SSH key).
 ```
 
-- [ ] **Step 2: Verify the docs guardrails pass**
+- [ ] **Step 2: Verify the doc edit and unrelated doc gates**
+
+The runbook edit is prose-only and has no dedicated automated gate (this repo has no
+markdown link checker). Verify it visually — the §3 comment now reads "builds the
+bootable kdive-ready rootfs qcow2" and the labeling note renders. Then confirm the
+edit broke no *generated* doc gate:
 
 Run: `just docs-check && just check-mermaid`
-Expected: PASS (no broken links / markdown issues introduced). If `docs-check`
-reports a dead relative link, fix the link target and re-run.
+Expected: PASS. `docs-check` regenerates and diffs the tool reference
+(`docs/guide/reference`) — unrelated to this runbook, so it stays clean; `check-mermaid`
+finds no mermaid blocks in the edit. If either fails, the failure is pre-existing or in
+another file — investigate before committing.
 
 - [ ] **Step 3: Commit**
 
