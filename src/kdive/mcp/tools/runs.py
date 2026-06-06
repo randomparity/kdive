@@ -889,10 +889,16 @@ async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str |
                 # first registration; on a re-boot refresh the existing row's etag so it tracks
                 # the rewritten object — otherwise the row keeps the first boot's etag while the
                 # object holds the latest content, and a later conditional `If-Match` read of
-                # the row's etag hits STALE_HANDLE (#117). No advisory lock (unlike vmcore.py's
-                # capture): the (run_id, "boot") job dedup key serializes a single Run's
-                # re-dispatch, and a replay re-puts identical bytes (same etag), so the etag
-                # compare makes the refresh a no-op — registration stays idempotent.
+                # the row's etag hits STALE_HANDLE (#117).
+                #
+                # Idempotency rests on the etag compare, not a lock: the (run_id, "boot") dedup
+                # key serializes a single Run's re-dispatch, and a replay re-puts identical bytes
+                # (same etag), so the refresh is a no-op. Two *different* Runs booting one System
+                # concurrently is NOT serialized here — put_artifact ran before this transaction
+                # and the key is shared, so a FOR UPDATE on the row would not order the put vs the
+                # update; making that race consistent needs an advisory lock spanning the put
+                # (vmcore.py's capture pattern). M0 boots a System's Runs sequentially, so that
+                # race is out of scope for this latent fix.
                 async with conn.transaction():
                     existing = await _existing_console_row(conn, run.system_id)
                     if existing is None:

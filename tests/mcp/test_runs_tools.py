@@ -1511,6 +1511,9 @@ def test_boot_handler_reboot_refreshes_console_etag(
     whenever a `%/console` row already existed, leaving the row pinned to the FIRST boot's
     etag while the object held the second boot's content — a consumer's conditional `If-Match`
     GET then hit STALE_HANDLE. The row's etag must instead track the stored object.
+
+    The two boots run sequentially, matching M0 (a System's Runs boot one at a time). Two Runs
+    booting one System *concurrently* is not serialized by boot_handler and is out of scope.
     """
     monkeypatch.setattr(runs_tools, "object_store_from_env", lambda: minio_store)
     monkeypatch.setattr(runs_tools, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
