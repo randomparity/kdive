@@ -363,6 +363,42 @@ def _apply_patch(patch_ref: str, workspace: Path) -> None:
         )
 
 
+def _sync_tree(kernel_src: str, workspace: Path) -> None:
+    """Mirror the warm ``kernel_src`` tree into ``workspace`` with ``rsync -a --delete``.
+
+    Creates ``workspace`` (and missing parents) first, since ``build()`` does not and rsync
+    does not create missing parent directories.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if ``kernel_src`` is empty or not a
+            directory; ``MISSING_DEPENDENCY`` if ``rsync`` is absent;
+            ``INFRASTRUCTURE_FAILURE`` on a non-zero rsync exit (redacted stderr in details).
+    """
+    if not kernel_src or not Path(kernel_src).is_dir():
+        raise CategorizedError(
+            "KDIVE_KERNEL_SRC is not set to an existing kernel source tree",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    if shutil.which("rsync") is None:
+        raise CategorizedError(
+            "rsync is required to materialize the warm kernel tree",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+        )
+    workspace.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        ["rsync", "-a", "--delete", f"{kernel_src.rstrip('/')}/", f"{workspace}/"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CategorizedError(
+            "rsync failed to materialize the workspace tree",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"stderr": _redacted_tail(result.stderr)},
+        )
+
+
 class _ValidatorStore(Protocol):
     def head(self, key: str) -> HeadResult | None: ...
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...

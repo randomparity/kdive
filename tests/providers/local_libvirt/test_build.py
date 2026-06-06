@@ -21,6 +21,7 @@ from kdive.providers.local_libvirt.build import (
     _apply_patch,
     _resolve_local_ref,
     _stage_config,
+    _sync_tree,
     parse_gnu_build_id,
 )
 from kdive.store.objectstore import StoredArtifact
@@ -414,3 +415,74 @@ def test_apply_patch_missing_git_is_missing_dependency(
     with pytest.raises(CategorizedError) as caught:
         _apply_patch(str(patch), workspace)
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+# --- _sync_tree ---------------------------------------------------------------------
+
+
+def _ok_run(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+
+def test_sync_tree_missing_kernel_src_is_configuration_error(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _sync_tree("", tmp_path / "ws")
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_sync_tree_nonexistent_kernel_src_is_configuration_error(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _sync_tree(str(tmp_path / "absent"), tmp_path / "ws")
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_sync_tree_missing_rsync_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "linux"
+    src.mkdir()
+    monkeypatch.setattr(build_module.shutil, "which", lambda _name: None)
+    with pytest.raises(CategorizedError) as caught:
+        _sync_tree(str(src), tmp_path / "ws")
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_sync_tree_creates_workspace_and_invokes_rsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "linux"
+    src.mkdir()
+    workspace = tmp_path / "runs" / "abc" / "ws"  # parents do not exist yet
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return _ok_run()
+
+    monkeypatch.setattr(build_module.shutil, "which", lambda _name: "/usr/bin/rsync")
+    monkeypatch.setattr(build_module.subprocess, "run", _record)
+
+    _sync_tree(str(src), workspace)
+
+    assert workspace.is_dir()  # mkdir(parents=True) ran before rsync
+    assert calls == [["rsync", "-a", "--delete", f"{src}/", f"{workspace}/"]]
+
+
+def test_sync_tree_rsync_nonzero_is_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "linux"
+    src.mkdir()
+
+    def _fail(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=23, stdout="", stderr="rsync: disk full"
+        )
+
+    monkeypatch.setattr(build_module.shutil, "which", lambda _name: "/usr/bin/rsync")
+    monkeypatch.setattr(build_module.subprocess, "run", _fail)
+
+    with pytest.raises(CategorizedError) as caught:
+        _sync_tree(str(src), tmp_path / "ws")
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "stderr" in caught.value.details
