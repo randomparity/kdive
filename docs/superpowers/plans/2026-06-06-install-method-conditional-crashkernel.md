@@ -10,31 +10,37 @@
 
 ---
 
+## Guardrail discipline (read before starting)
+
+`_cmdline_for` has **two existing callers** today — `install_run` (`runs.py:668`) and `install_handler` (`runs.py:770`) — both calling it with one positional arg. Task 2 changes its signature to require `method`. **The signature change and both caller rewrites MUST land in the same commit** (Task 2), or the full suite goes red mid-plan. Every task's final verify step runs the **full** suite (`just test`), not a narrow `-k` subset, and you must not commit on red — this is the project's "guardrails green at every commit" rule. The `-k` runs shown are for fast iteration *within* a step; the pre-commit gate is always the full `just lint && just type && just test`.
+
 ## Background the engineer needs
 
 - `runs.install` → `install_run(pool, ctx, run_id)` (`src/kdive/mcp/tools/runs.py:655`) is the **tool gate**: it validates the Run is `succeeded`, currently rejects any cmdline lacking `crashkernel=` (line 668), then enqueues the install job. It does **not** run the install — the worker does.
 - `install_handler(conn, job, installer)` (`runs.py:752`) is the **worker**: it reads the Run, computes the cmdline, and calls `installer.install(...)`. The real installer is `LocalLibvirtInstall` (`src/kdive/providers/local_libvirt/install.py`); tests inject `_FakeInstaller`.
-- `installer.install(system_id, run_id, kernel_ref, *, cmdline, method=CaptureMethod.HOST_DUMP, initrd_ref=None)` (`install.py:154`) already runs `_kdump_check` **only** for `method == CaptureMethod.KDUMP` and emits an `<initrd>` only when `initrd_ref` is not `None`. The tool layer just never passes `method`/`initrd_ref`.
+- `installer.install(system_id, run_id, kernel_ref, *, cmdline, method=CaptureMethod.HOST_DUMP, initrd_ref=None)` (`install.py:154`) already runs `_kdump_check` **only** for `method == CaptureMethod.KDUMP` and emits an `<initrd>` only when `initrd_ref` is not `None`. The tool layer just never passes `method`/`initrd_ref`. Leave this provider signature unchanged.
 - `CaptureMethod` is `kdive.domain.capture.CaptureMethod` (`CONSOLE`, `HOST_DUMP`, `GDBSTUB`, `KDUMP`).
 - A System's `provisioning_profile` (`System.provisioning_profile: dict[str, Any]`) is a `ProvisioningProfile.model_dump(by_alias=True)` in production (`mcp/tools/systems.py:335/476/743`). **The provider section lives under the alias key `"local-libvirt"`** (`ResourceKind.LOCAL_LIBVIRT.value`), **not** `"local_libvirt"`. The kdump prerequisite is `provider["local-libvirt"]["crashkernel"]` (a non-empty string or absent); the debug flags are `provider["local-libvirt"]["debug"]["preserve_on_crash"]` and `["gdbstub"]` (booleans).
 - The build ledger row `(run_id, "build")` is read by `_existing_build_result(conn, run_id)` (`runs.py:336`). The external-build lane records `initrd_ref` there (`runs.py:513`, the uploaded initrd's object key or `""`); the server-build lane records no `initrd_ref` key (`runs.py:625-629`).
-- `SYSTEMS` repository (`kdive.db.repositories.SYSTEMS`) is already imported in `runs.py:31`; `SYSTEMS.get(conn, uuid)` returns a `System | None`.
-- `Mapping` and `Run` are already imported (`runs.py:16`, `:34`). You will add `CaptureMethod` and `ResourceKind` imports.
+- `SYSTEMS` repository (`kdive.db.repositories.SYSTEMS`) is already imported in `runs.py:31`; `SYSTEMS.get(conn, uuid)` returns a `System | None`. **`runs.system_id` is `NOT NULL REFERENCES systems(id)`** (`db/schema/0001_init.sql:83`, default RESTRICT), so a persisted Run always resolves a live System — the `system is None` guards added below are defensive type-narrowing (`SYSTEMS.get` is typed `System | None`), not a reachable runtime path, and are therefore not given dedicated tests.
+- `Mapping` and `Run` are already imported (`runs.py:16`, `:34`). You will add `CaptureMethod`, `ResourceKind`, and `System` imports.
+- In the **test** file (`tests/mcp/test_runs_tools.py`): `System`, `Run`, `ResourceKind` (line 20-27), `SystemState`/`RunState`/`AllocationState` (line 28-33), and `_VALID_BUILD` (line 480) already exist. `Jsonb` is **not** imported there yet — add `from psycopg.types.json import Jsonb` near the psycopg imports (line 15-16) when Task 3 needs it.
 
 Run a single test with: `uv run python -m pytest tests/mcp/test_runs_tools.py::<name> -q`.
-The whole-tree type check is `just type`; lint is `just lint`; the suite is `just test`.
 
 ---
 
-## Task 1: Method resolver + method-aware cmdline default (pure helpers)
+## Task 1: Add the method resolver (purely additive — no signature changes)
+
+This task adds **new** symbols only; it does not touch `_cmdline_for` or any call site, so the full suite stays green.
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/runs.py` (imports near line 33-34; constants/helpers near 636-652)
+- Modify: `src/kdive/mcp/tools/runs.py` (imports near 33-34; new helpers near 642, after the existing `_CRASHKERNEL_TOKEN`/`_cmdline_for` block)
 - Test: `tests/mcp/test_runs_tools.py`
 
-- [ ] **Step 1: Write the failing unit tests for the resolver and cmdline split**
+- [ ] **Step 1: Write the failing unit tests for the resolver**
 
-Add near the other install tests in `tests/mcp/test_runs_tools.py` (the `CaptureMethod` import already exists at line 869; add a `System`/`Run` builder using the existing `_DT`). Append:
+Append to `tests/mcp/test_runs_tools.py` (the `CaptureMethod` import already exists at line 869):
 
 ```python
 def _system_with_profile(profile: dict[str, Any]) -> System:
@@ -101,67 +107,28 @@ def test_install_method_reads_alias_not_attribute_spelling() -> None:
     # the resolver reads the persisted alias 'local-libvirt' (ADR-0051 Decision 1).
     system = _system_with_profile({"provider": {"local_libvirt": {"crashkernel": "256M"}}})
     assert runs_tools._install_method_for(system) is CaptureMethod.CONSOLE
-
-
-def test_cmdline_default_is_kdump_reserving_for_kdump() -> None:
-    run = _run_with_build_profile({"schema_version": 1})
-    assert "crashkernel=" in runs_tools._cmdline_for(run, CaptureMethod.KDUMP)
-
-
-def test_cmdline_default_omits_crashkernel_for_non_kdump() -> None:
-    run = _run_with_build_profile({"schema_version": 1})
-    assert "crashkernel=" not in runs_tools._cmdline_for(run, CaptureMethod.CONSOLE)
-
-
-def test_cmdline_explicit_overrides_default_for_any_method() -> None:
-    run = _run_with_build_profile({"cmdline": "console=ttyS0 dhash_entries=1"})
-    assert runs_tools._cmdline_for(run, CaptureMethod.KDUMP) == "console=ttyS0 dhash_entries=1"
-
-
-def _run_with_build_profile(build_profile: dict[str, Any]) -> Run:
-    return Run(
-        id=uuid4(),
-        created_at=_DT,
-        updated_at=_DT,
-        principal="user-1",
-        project="proj",
-        investigation_id=uuid4(),
-        system_id=uuid4(),
-        state=RunState.SUCCEEDED,
-        build_profile=build_profile,
-    )
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_method or cmdline_default or cmdline_explicit"`
-Expected: FAIL — `AttributeError: module ... has no attribute '_install_method_for'` and `_cmdline_for` taking one positional arg (TypeError on the 2-arg calls).
+Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_method"`
+Expected: FAIL — `AttributeError: module 'kdive.mcp.tools.runs' has no attribute '_install_method_for'`.
 
 - [ ] **Step 3: Add the imports**
 
-In `src/kdive/mcp/tools/runs.py`, extend the domain imports. Change line 34 region to add `ResourceKind` and add the `CaptureMethod` import after it:
+In `src/kdive/mcp/tools/runs.py`, add the `CaptureMethod` import (sorts before `kdive.domain.errors` at line 33) and add `ResourceKind` + `System` to the `kdive.domain.models` import (line 34), keeping alphabetical order:
 
 ```python
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import Investigation, Job, JobKind, ResourceKind, Run, Sensitivity
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Investigation, Job, JobKind, ResourceKind, Run, Sensitivity, System
 ```
 
-(Keep the import block alphabetically grouped as ruff's `I` rule expects; `from kdive.domain.capture import CaptureMethod` sorts before `from kdive.domain.errors import ...` at line 33.)
+- [ ] **Step 4: Add the resolver helpers**
 
-- [ ] **Step 4: Replace the cmdline constants and helper, add the resolver**
-
-Replace lines 636-652 (`_DEFAULT_CMDLINE` through the end of `_cmdline_for`) with:
+Insert directly **after** the existing `_cmdline_for` function (after `runs.py:652`), leaving `_DEFAULT_CMDLINE`/`_CRASHKERNEL_TOKEN`/`_cmdline_for` untouched for now:
 
 ```python
-# Default kernel command lines for direct-kernel boot, split by capture method. The kdump
-# default carries a `crashkernel=` reservation (the kdump prerequisite); the non-kdump default
-# does not — the non-kdump tiers (console/host_dump/gdbstub) boot without it (ADR-0049 §5,
-# ADR-0051 §3). An operator override (the Run's `cmdline`) replaces the default entirely.
-_KDUMP_DEFAULT_CMDLINE = "console=ttyS0 crashkernel=256M"
-_NONKDUMP_DEFAULT_CMDLINE = "console=ttyS0"
-_CRASHKERNEL_TOKEN = "crashkernel="
-
-
 def _local_libvirt_section(profile: Mapping[str, Any]) -> Mapping[str, Any]:
     """The `provider['local-libvirt']` section of a stored profile, or `{}` (loose read).
 
@@ -195,28 +162,14 @@ def _install_method_for(system: System) -> CaptureMethod:
     if debug.get("preserve_on_crash") is True:
         return CaptureMethod.HOST_DUMP
     return CaptureMethod.CONSOLE
-
-
-def _cmdline_for(run: Run, method: CaptureMethod) -> str:
-    """Resolve the kernel command line from the Run's opaque `build_profile`.
-
-    The cmdline is read from the raw `build_profile` dict (not via `BuildProfile.parse`, whose
-    `extra="forbid"` would reject the `cmdline` key); an absent/blank value falls back to the
-    method-appropriate default — the kdump default reserves `crashkernel=`, the non-kdump
-    default does not (ADR-0051 §3).
-    """
-    value = run.build_profile.get("cmdline")
-    if isinstance(value, str) and value.strip():
-        return value
-    return _KDUMP_DEFAULT_CMDLINE if method is CaptureMethod.KDUMP else _NONKDUMP_DEFAULT_CMDLINE
 ```
 
-You will also need `System` in scope. It is imported from `kdive.domain.models`? Check the import line — if `System` is not already imported there, add it. (As of writing, `runs.py:34` imports `Investigation, Job, JobKind, Run, Sensitivity` — **add `System`** to that list as well, keeping alphabetical order: `Investigation, Job, JobKind, ResourceKind, Run, Sensitivity, System`.)
+- [ ] **Step 5: Run the resolver tests, then the full suite**
 
-- [ ] **Step 5: Run the tests to verify they pass**
-
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_method or cmdline_default or cmdline_explicit"`
-Expected: PASS (9 tests).
+Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_method"`
+Expected: PASS (6 tests).
+Then run the full gate before committing: `just lint && just type && just test`
+Expected: all PASS (this task is additive — no existing behavior changed).
 
 - [ ] **Step 6: Commit**
 
@@ -229,17 +182,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 2: Make the `runs.install` gate method-conditional
+## Task 2: Method-aware cmdline + rewire BOTH callers (atomic — one commit)
+
+This is the rewire commit: it changes `_cmdline_for`'s signature **and** updates both call sites (`install_run`, `install_handler`) in the same change, so the suite never goes red. It also adds `_installed_initrd_ref` and threads `method`/`initrd_ref` through the handler.
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/runs.py:655-670` (`install_run`)
+- Modify: `src/kdive/mcp/tools/runs.py` — constants/`_cmdline_for` (636-652), `install_run` (655-670), `install_handler` (752-794), new `_installed_initrd_ref` (after 346)
 - Test: `tests/mcp/test_runs_tools.py`
 
-- [ ] **Step 1: Allow seeding a System's provisioning profile, then write the gate tests**
+- [ ] **Step 1: Extend seed helpers + `_FakeInstaller`, then write the gate + handler tests**
 
-First extend the seed helpers so a test can choose the System's profile. In `tests/mcp/test_runs_tools.py`:
+In `tests/mcp/test_runs_tools.py`:
 
-Change `_seed_system` (line 64) to accept a profile and use it instead of the hard-coded `{"schema_version": 1}`:
+(a) Add `from psycopg.types.json import Jsonb` near line 15-16.
+
+(b) Let `_seed_system` (line 64) accept a profile — add the kwarg and use it:
 
 ```python
 async def _seed_system(
@@ -252,7 +209,7 @@ async def _seed_system(
 ) -> str:
 ```
 
-and inside, replace the `provisioning_profile={"schema_version": 1}` argument to `System(...)` with:
+and replace the `provisioning_profile={"schema_version": 1}` argument inside the `System(...)` insert with:
 
 ```python
                 provisioning_profile=provisioning_profile
@@ -260,11 +217,67 @@ and inside, replace the `provisioning_profile={"schema_version": 1}` argument to
                 else {"schema_version": 1},
 ```
 
-Thread it through `_seed_run` (line 136) — add `provisioning_profile: dict[str, Any] | None = None` to its signature and pass it to `_seed_system(pool, project=project, provisioning_profile=provisioning_profile)`. Thread it through `_seed_succeeded_run` (line 916) the same way — add the kwarg and forward it to `_seed_run`.
+(c) Thread `provisioning_profile: dict[str, Any] | None = None` through `_seed_run` (line 136) → pass to `_seed_system(pool, project=project, provisioning_profile=provisioning_profile)`; and through `_seed_succeeded_run` (line 916) → forward to `_seed_run`.
 
-Now rewrite the obsolete test and add the kdump/non-kdump pair. Delete `test_install_cmdline_without_crashkernel_is_config_error_no_job` (lines 1016-1027 — it asserts the OLD unconditional behavior #116 reverses) and add:
+(d) Extend `_FakeInstaller` (line 881) to record `method`/`initrd_ref`:
 
 ```python
+class _FakeInstaller:
+    """Records install() calls (incl. method/initrd_ref); returns or raises a canned category."""
+
+    def __init__(self, *, error: ErrorCategory | None = None) -> None:
+        self.calls: list[tuple[UUID, UUID, str, str, CaptureMethod, str | None]] = []
+        self._error = error
+
+    def install(
+        self,
+        system_id: UUID,
+        run_id: UUID,
+        kernel_ref: str,
+        *,
+        cmdline: str,
+        method: CaptureMethod = CaptureMethod.HOST_DUMP,
+        initrd_ref: str | None = None,
+    ) -> None:
+        self.calls.append((system_id, run_id, kernel_ref, cmdline, method, initrd_ref))
+        if self._error is not None:
+            raise CategorizedError("boom", category=self._error)
+```
+
+(e) **Delete** `test_install_cmdline_without_crashkernel_is_config_error_no_job` (lines 1016-1027 — it asserts the OLD unconditional behavior #116 reverses).
+
+(f) Add the cmdline-default unit tests, the gate tests, the ledger helper, and the handler-forwarding tests:
+
+```python
+def test_cmdline_default_is_kdump_reserving_for_kdump() -> None:
+    run = _run_with_build_profile({"schema_version": 1})
+    assert "crashkernel=" in runs_tools._cmdline_for(run, CaptureMethod.KDUMP)
+
+
+def test_cmdline_default_omits_crashkernel_for_non_kdump() -> None:
+    run = _run_with_build_profile({"schema_version": 1})
+    assert "crashkernel=" not in runs_tools._cmdline_for(run, CaptureMethod.CONSOLE)
+
+
+def test_cmdline_explicit_overrides_default_for_any_method() -> None:
+    run = _run_with_build_profile({"cmdline": "console=ttyS0 dhash_entries=1"})
+    assert runs_tools._cmdline_for(run, CaptureMethod.KDUMP) == "console=ttyS0 dhash_entries=1"
+
+
+def _run_with_build_profile(build_profile: dict[str, Any]) -> Run:
+    return Run(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        investigation_id=uuid4(),
+        system_id=uuid4(),
+        state=RunState.SUCCEEDED,
+        build_profile=build_profile,
+    )
+
+
 def test_install_nonkdump_system_admits_cmdline_without_crashkernel(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -308,99 +321,8 @@ def test_install_kdump_system_with_crashkernel_enqueues(migrated_url: str) -> No
         assert resp.status == "queued"
 
     asyncio.run(_run())
-```
 
-(`_profile_dump` was added in Task 1; `_VALID_BUILD` already exists in the file.)
 
-- [ ] **Step 2: Run to verify the new gate tests fail**
-
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_kdump_system or install_nonkdump_system"`
-Expected: FAIL — the kdump-without-crashkernel case still enqueues (today's gate is unconditional and the seed cmdline `console=ttyS0` *would* be rejected for *every* System, so `test_install_nonkdump_system_admits...` fails: status is `error`, not `queued`).
-
-- [ ] **Step 3: Rewrite `install_run` to gate on the resolved method**
-
-Replace `install_run` (lines 655-670) with:
-
-```python
-async def install_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> ToolResponse:
-    """Admit an idempotent install for a built Run; require `crashkernel=` only for kdump.
-
-    The capture method is resolved from the System's provisioning profile (ADR-0051 §1): a
-    kdump-provisioned System (a `crashkernel` reservation) must carry a `crashkernel=` cmdline
-    token; the non-kdump tiers are admitted without it.
-    """
-    uid = _as_uuid(run_id)
-    if uid is None:
-        return _config_error(run_id)
-    with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
-            run = await RUNS.get(conn, uid)
-            if run is None or run.project not in ctx.projects:
-                return _config_error(run_id)
-            require_role(ctx, run.project, Role.OPERATOR)
-            if run.state is not RunState.SUCCEEDED:
-                return _config_error(run_id, data={"current_status": run.state.value})
-            system = await SYSTEMS.get(conn, run.system_id)
-            if system is None:
-                return _config_error(run_id, data={"reason": "system_gone"})
-            method = _install_method_for(system)
-            if method is CaptureMethod.KDUMP and _CRASHKERNEL_TOKEN not in _cmdline_for(run, method):
-                return _config_error(run_id, data={"reason": "cmdline_missing_crashkernel"})
-            return await _enqueue_step(conn, ctx, run, JobKind.INSTALL, "install", "runs.install")
-```
-
-- [ ] **Step 4: Run the gate tests to verify they pass**
-
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_kdump_system or install_nonkdump_system or install_succeeded or install_on_unbuilt or install_on_terminal or install_cross_project or install_malformed or install_without_operator"`
-Expected: PASS (all existing install-gate tests plus the three new ones; the previously-removed test is gone).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/kdive/mcp/tools/runs.py tests/mcp/test_runs_tools.py
-git commit -m "feat(runs): gate crashkernel cmdline token on kdump method
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
-```
-
----
-
-## Task 3: Thread `method`/`initrd_ref` from `install_handler` to the provider
-
-**Files:**
-- Modify: `src/kdive/mcp/tools/runs.py:752-794` (`install_handler`) + add `_installed_initrd_ref`
-- Test: `tests/mcp/test_runs_tools.py` (extend `_FakeInstaller`)
-
-- [ ] **Step 1: Extend `_FakeInstaller` to record method/initrd_ref, write forwarding tests**
-
-In `tests/mcp/test_runs_tools.py`, change `_FakeInstaller` (line 881) to capture the new params:
-
-```python
-class _FakeInstaller:
-    """Records install() calls (incl. method/initrd_ref); returns or raises a canned category."""
-
-    def __init__(self, *, error: ErrorCategory | None = None) -> None:
-        self.calls: list[tuple[UUID, UUID, str, str, CaptureMethod, str | None]] = []
-        self._error = error
-
-    def install(
-        self,
-        system_id: UUID,
-        run_id: UUID,
-        kernel_ref: str,
-        *,
-        cmdline: str,
-        method: CaptureMethod = CaptureMethod.HOST_DUMP,
-        initrd_ref: str | None = None,
-    ) -> None:
-        self.calls.append((system_id, run_id, kernel_ref, cmdline, method, initrd_ref))
-        if self._error is not None:
-            raise CategorizedError("boom", category=self._error)
-```
-
-Add a helper to record a build ledger row with an `initrd_ref`, and the forwarding tests:
-
-```python
 async def _record_build_ledger(
     pool: AsyncConnectionPool, run_id: str, result: dict[str, Any]
 ) -> None:
@@ -469,45 +391,52 @@ def test_install_handler_no_initrd_when_ledger_initrd_blank(migrated_url: str) -
         assert installer.calls[0][5] is None
 
     asyncio.run(_run())
-
-
-def test_install_handler_missing_system_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _seed_succeeded_run(pool)
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE runs SET system_id=%s WHERE id=%s", (str(uuid4()), run_id)
-                )
-            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
-            installer = _FakeInstaller()
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError) as caught:
-                    await runs_tools.install_handler(conn, job, installer)
-            assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
-            assert installer.calls == []
-
-    asyncio.run(_run())
 ```
 
-`Jsonb` is already imported (`runs.py` uses it; in the test it comes from `psycopg.types.json`). If `Jsonb` is not yet imported in the **test** file, add `from psycopg.types.json import Jsonb` near the other psycopg imports.
+- [ ] **Step 2: Run the new tests to verify they fail**
 
-- [ ] **Step 2: Run to verify the forwarding tests fail**
+Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "cmdline_default or cmdline_explicit or install_kdump_system or install_nonkdump_system or install_handler_forwards or install_handler_no_initrd"`
+Expected: FAIL — `_cmdline_for` takes 1 positional arg (TypeError on the 2-arg unit-test calls); the kdump gate is still unconditional; the handler still passes the default `HOST_DUMP` and reads no ledger `initrd_ref`.
 
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_handler_forwards or install_handler_no_initrd or install_handler_missing_system"`
-Expected: FAIL — `install_handler` does not fetch the System, always passes the default `HOST_DUMP` (so the `console`/`host_dump` asserts and the missing-system raise fail), and never reads the ledger for `initrd_ref`.
+- [ ] **Step 3: Split the cmdline default and make `_cmdline_for` method-aware**
 
-- [ ] **Step 3: Add `_installed_initrd_ref` and rewrite `install_handler`'s resolution**
+Replace lines 636-652 (`_DEFAULT_CMDLINE` through the end of `_cmdline_for`) with:
 
-In `src/kdive/mcp/tools/runs.py`, add a ledger reader next to `_existing_build_result` (after line 346):
+```python
+# Default kernel command lines for direct-kernel boot, split by capture method. The kdump
+# default carries a `crashkernel=` reservation (the kdump prerequisite); the non-kdump default
+# does not — the non-kdump tiers (console/host_dump/gdbstub) boot without it (ADR-0049 §5,
+# ADR-0051 §3). An operator override (the Run's `cmdline`) replaces the default entirely.
+_KDUMP_DEFAULT_CMDLINE = "console=ttyS0 crashkernel=256M"
+_NONKDUMP_DEFAULT_CMDLINE = "console=ttyS0"
+_CRASHKERNEL_TOKEN = "crashkernel="
+
+
+def _cmdline_for(run: Run, method: CaptureMethod) -> str:
+    """Resolve the kernel command line from the Run's opaque `build_profile`.
+
+    The cmdline is read from the raw `build_profile` dict (not via `BuildProfile.parse`, whose
+    `extra="forbid"` would reject the `cmdline` key); an absent/blank value falls back to the
+    method-appropriate default — the kdump default reserves `crashkernel=`, the non-kdump
+    default does not (ADR-0051 §3).
+    """
+    value = run.build_profile.get("cmdline")
+    if isinstance(value, str) and value.strip():
+        return value
+    return _KDUMP_DEFAULT_CMDLINE if method is CaptureMethod.KDUMP else _NONKDUMP_DEFAULT_CMDLINE
+```
+
+(The `_install_method_for`/`_local_libvirt_section` helpers from Task 1 sit just below this block — leave them.)
+
+- [ ] **Step 4: Add `_installed_initrd_ref` (after `_existing_build_result`, ~line 346)**
 
 ```python
 async def _installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | None:
     """The build ledger's recorded `initrd_ref`, or `None` (server builds record none).
 
     The external-build lane records the uploaded initrd's object key in the `(run_id, "build")`
-    ledger result (`_finalize_external_build`); a blank/absent value means no external initrd
-    is staged (a bzImage with an embedded initramfs), so the install emits no `<initrd>`.
+    ledger result (`_finalize_external_build`); a blank/absent value means no external initrd is
+    staged (a bzImage with an embedded initramfs), so the install emits no `<initrd>`.
     """
     result = await _existing_build_result(conn, run_id)
     if result is None:
@@ -516,7 +445,41 @@ async def _installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | No
     return ref if isinstance(ref, str) and ref else None
 ```
 
-Then in `install_handler` (lines 761-780), replace the block from `run = await RUNS.get(conn, run_id)` through the `_do` body's `installer.install(...)` call with:
+- [ ] **Step 5: Rewire `install_run` (caller #1) to gate on the resolved method**
+
+Replace `install_run` (lines 655-670) with:
+
+```python
+async def install_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> ToolResponse:
+    """Admit an idempotent install for a built Run; require `crashkernel=` only for kdump.
+
+    The capture method is resolved from the System's provisioning profile (ADR-0051 §1): a
+    kdump-provisioned System (a `crashkernel` reservation) must carry a `crashkernel=` cmdline
+    token; the non-kdump tiers are admitted without it.
+    """
+    uid = _as_uuid(run_id)
+    if uid is None:
+        return _config_error(run_id)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            run = await RUNS.get(conn, uid)
+            if run is None or run.project not in ctx.projects:
+                return _config_error(run_id)
+            require_role(ctx, run.project, Role.OPERATOR)
+            if run.state is not RunState.SUCCEEDED:
+                return _config_error(run_id, data={"current_status": run.state.value})
+            system = await SYSTEMS.get(conn, run.system_id)
+            if system is None:  # defensive: runs.system_id is NOT NULL REFERENCES systems(id)
+                return _config_error(run_id, data={"reason": "system_gone"})
+            method = _install_method_for(system)
+            if method is CaptureMethod.KDUMP and _CRASHKERNEL_TOKEN not in _cmdline_for(run, method):
+                return _config_error(run_id, data={"reason": "cmdline_missing_crashkernel"})
+            return await _enqueue_step(conn, ctx, run, JobKind.INSTALL, "install", "runs.install")
+```
+
+- [ ] **Step 6: Rewire `install_handler` (caller #2) to resolve + thread method/initrd_ref**
+
+In `install_handler` (lines 761-780), replace the block from `run_id = UUID(...)` through the `installer.install(...)` call with:
 
 ```python
     run_id = UUID(job.payload["run_id"])
@@ -528,7 +491,7 @@ Then in `install_handler` (lines 761-780), replace the block from `run = await R
             details={"run_id": str(run_id)},
         )
     system = await SYSTEMS.get(conn, run.system_id)
-    if system is None:
+    if system is None:  # defensive: runs.system_id is NOT NULL REFERENCES systems(id)
         raise CategorizedError(
             "install target system is gone",
             category=ErrorCategory.CONFIGURATION_ERROR,
@@ -552,25 +515,27 @@ Then in `install_handler` (lines 761-780), replace the block from `run = await R
         )
 ```
 
-Delete the obsolete `# `method`/`initrd_ref` are left at their defaults ...` comment block (the old `runs.py:774-777`) — it is now wrong and the behavior it described is replaced.
+Delete the now-wrong comment block at the old `runs.py:774-777` (the `# `method`/`initrd_ref` are left at their defaults …` paragraph) — the behavior it described is replaced.
 
-- [ ] **Step 4: Run the forwarding tests and the full install-handler set to verify they pass**
+- [ ] **Step 7: Run the new tests, then the FULL suite**
 
-Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "install_handler"`
-Expected: PASS — the existing handler tests (records-step, replay, concurrent, failure, missing-kernel) plus the new forwarding/missing-system tests.
+Run: `uv run python -m pytest tests/mcp/test_runs_tools.py -q -k "cmdline or install"`
+Expected: PASS — the new gate/handler/cmdline tests plus every pre-existing `install`/`boot` test (which now exercise the method-aware path through the bare seed profile = console).
+Then the pre-commit gate: `just lint && just type && just test`
+Expected: all PASS, zero warnings. (`just type` is whole-tree.) **Do not commit on red.**
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/kdive/mcp/tools/runs.py tests/mcp/test_runs_tools.py
-git commit -m "feat(runs): thread capture method and initrd_ref into install
+git commit -m "feat(runs): method-conditional crashkernel gate; thread method/initrd_ref
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 4: Tier-0 demo cmdlines pass the boundary (acceptance)
+## Task 3: Tier-0 demo cmdlines pass the boundary (acceptance — additive)
 
 **Files:**
 - Test: `tests/mcp/test_runs_tools.py`
@@ -614,20 +579,20 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 5: Full guardrails green + dead-comment sweep
+## Task 4: Final guardrails + dead-reference sweep
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/runs.py` (only if the guardrails flag something)
+- Modify: `src/kdive/mcp/tools/runs.py` (only if a guardrail flags something)
 
 - [ ] **Step 1: Confirm no stale references to the removed `_DEFAULT_CMDLINE`**
 
 Run: `rg -n "_DEFAULT_CMDLINE\b" src tests`
-Expected: no matches (the constant was renamed to `_KDUMP_DEFAULT_CMDLINE`/`_NONKDUMP_DEFAULT_CMDLINE` in Task 1). If a stray `complete_build` comment at `runs.py:508` mentions `_cmdline_for`, leave it (still accurate) — but verify it does not reference the old single-default name.
+Expected: no matches (renamed to `_KDUMP_DEFAULT_CMDLINE`/`_NONKDUMP_DEFAULT_CMDLINE`). The `complete_build` comment at `runs.py:508` mentions `_cmdline_for` generically — verify it does not name the old single-default constant; leave it otherwise.
 
 - [ ] **Step 2: Run the full local gate**
 
 Run: `just lint && just type && just test`
-Expected: all PASS, zero warnings. `just type` is whole-tree (src + tests). If `ty` flags the new `_FakeInstaller.calls` tuple or the `System` import, fix it before continuing.
+Expected: all PASS, zero warnings.
 
 - [ ] **Step 3: Commit any guardrail fixes**
 
@@ -645,10 +610,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ## Self-review against the spec / ADR-0051
 
 - **Acceptance 1 — admit non-kdump w/o crashkernel; reject kdump w/o it:** Task 2 (`test_install_nonkdump_system_admits...`, `test_install_kdump_system_without_crashkernel...`, `test_install_kdump_system_with_crashkernel_enqueues`). ✅
-- **Acceptance 2 — `install_handler` forwards `method`/`initrd_ref`:** Task 3 (`test_install_handler_forwards_console_method...`, `..._host_dump...`, `..._initrd_ref_from_build_ledger`, `..._no_initrd_when_ledger_initrd_blank`). ✅
-- **Acceptance 3 — Tier-0 demo cmdlines pass:** Task 4. ✅
+- **Acceptance 2 — `install_handler` forwards `method`/`initrd_ref`:** Task 2 (`test_install_handler_forwards_console_method...`, `..._host_dump...`, `..._initrd_ref_from_build_ledger`, `..._no_initrd_when_ledger_initrd_blank`). ✅
+- **Acceptance 3 — Tier-0 demo cmdlines pass:** Task 3. ✅
 - **ADR-0051 Decision 1 (resolve from profile, alias-keyed, loose read):** Task 1 (`test_install_method_*`, incl. the alias-vs-attribute and partial-profile tests). ✅
-- **ADR-0051 Decision 3 (`_DEFAULT_CMDLINE` split):** Task 1 (`test_cmdline_default_*`). ✅
-- **ADR-0051 Decision 4 (initrd_ref from the ledger; `_FakeInstaller` asserts forwarding):** Task 3. ✅
-- **ADR-0051 fail-fast on a gone System:** Task 2 (`system_gone` branch) + Task 3 (`test_install_handler_missing_system_is_config_error`). ✅
+- **ADR-0051 Decision 3 (`_DEFAULT_CMDLINE` split):** Task 2 (`test_cmdline_default_*`). ✅
+- **ADR-0051 Decision 4 (initrd_ref from the ledger; `_FakeInstaller` asserts forwarding):** Task 2. ✅
+- **`system is None` guards:** defensive type-narrowing only — `runs.system_id` is `NOT NULL REFERENCES systems(id)` (RESTRICT), so the branch is unreachable for a persisted Run and is intentionally not given a DB test (would error in setup on the FK).
 - **Out of scope (deferred, not in this plan):** flag-derived panic-escalation/`nokaslr` cmdline tokens (spec §8, Tier-1/2 plans); install-gate unsupported-method reject (ADR-0051 Decision 5).
