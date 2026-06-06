@@ -533,9 +533,8 @@ async def _finalize_external_build(
     never the kernel's or vmlinux's (``BuildOutput`` carries no initrd field).
     """
     # ``cmdline`` is recorded in the LEDGER result, not in build_profile (an immutable
-    # request input; ExternalBuildProfile is extra="forbid"). The install path's
-    # _cmdline_for still reads build_profile, so this is inert until install is wired to
-    # read it from the ledger (next spec) — intentional for this spec's scope.
+    # request input; ExternalBuildProfile is extra="forbid"). ``_cmdline_for`` reads this
+    # ledger result and applies it at boot, so the external lane's cmdline is live (ADR-0056).
     result = {
         "kernel_ref": output.kernel_ref,
         "debuginfo_ref": output.debuginfo_ref,
