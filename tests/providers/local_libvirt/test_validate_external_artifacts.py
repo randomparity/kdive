@@ -8,7 +8,10 @@ import pytest
 
 from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.build import validate_external_artifacts
+from kdive.providers.local_libvirt.build import (
+    extract_build_id_ranged,
+    validate_external_artifacts,
+)
 from kdive.store.objectstore import HeadResult
 
 _BZIMAGE_HEAD = b"\x00" * 0x202 + b"HdrS"  # bzImage magic at offset 0x202
@@ -207,3 +210,69 @@ def test_initrd_is_validated_and_returned_in_keys() -> None:
     )
     assert out.output.kernel_ref == "k"
     assert set(out.heads) == {"kernel", "initrd"}
+
+
+def test_vmlinux_without_upload_key_is_configuration_error() -> None:
+    store = _FakeStore({"k": _BZIMAGE_HEAD}, {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e")})
+    with pytest.raises(CategorizedError) as e:
+        validate_external_artifacts(
+            store,
+            manifest=[
+                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("vmlinux", "cv", 64),
+            ],
+            keys={"kernel": "k"},  # vmlinux declared but no upload key
+            declared_build_id="deadbeef",
+        )
+    assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def _validate_vmlinux_blob(blob: bytes) -> None:
+    """Wire a vmlinux blob through validate_external_artifacts to reach the extractor."""
+    store = _FakeStore(
+        {"k": _BZIMAGE_HEAD, "v": blob},
+        {"k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"), "v": HeadResult(len(blob), "cv", "e")},
+    )
+    validate_external_artifacts(
+        store,
+        manifest=[
+            ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+            ManifestEntry("vmlinux", "cv", len(blob)),
+        ],
+        keys={"kernel": "k", "vmlinux": "v"},
+        declared_build_id="deadbeef",
+    )
+
+
+def test_truncated_elf_header_is_build_failure() -> None:
+    blob = b"\x7fELF\x02\x01" + b"\x00" * 2  # passes magic/class/endian, header < 64 bytes
+    with pytest.raises(CategorizedError) as e:
+        _validate_vmlinux_blob(blob)
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_shstrndx_past_shnum_is_build_failure() -> None:
+    blob = bytearray(_elf_with_build_id(bytes.fromhex("deadbeef")))
+    e_shnum = struct.unpack_from("<H", blob, 0x3C)[0]
+    struct.pack_into("<H", blob, 0x3E, e_shnum + 5)  # e_shstrndx points past the SHT
+    with pytest.raises(CategorizedError) as e:
+        _validate_vmlinux_blob(bytes(blob))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_note_sh_name_past_shstrtab_is_build_failure() -> None:
+    blob = bytearray(_elf_with_build_id(bytes.fromhex("deadbeef")))
+    e_shoff = struct.unpack_from("<Q", blob, 0x28)[0]
+    e_shentsize = struct.unpack_from("<H", blob, 0x3A)[0]
+    note_sh_name_off = e_shoff + 1 * e_shentsize  # section index 1 is the SHT_NOTE entry
+    struct.pack_into("<I", blob, note_sh_name_off, 0xFFFF)  # sh_name far past the shstrtab
+    with pytest.raises(CategorizedError) as e:
+        _validate_vmlinux_blob(bytes(blob))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_extract_build_id_ranged_truncated_header_is_build_failure() -> None:
+    store = _FakeStore({"v": b"\x7fELF\x02\x01"}, {})
+    with pytest.raises(CategorizedError) as e:
+        extract_build_id_ranged(store, "v")
+    assert e.value.category is ErrorCategory.BUILD_FAILURE

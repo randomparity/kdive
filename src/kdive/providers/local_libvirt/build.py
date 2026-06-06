@@ -318,9 +318,10 @@ def validate_external_artifacts(
     is the normalized lowercase-hex value extracted from the file, not the raw input.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` (a missing/skipped upload, or a vmlinux
-            with no declared build_id); ``BUILD_FAILURE`` (checksum/size/magic/build_id
-            defect); ``INFRASTRUCTURE_FAILURE`` propagated from the store.
+        CategorizedError: ``CONFIGURATION_ERROR`` (a missing/skipped upload, an artifact
+            with no upload key, or a vmlinux with no declared build_id); ``BUILD_FAILURE``
+            (checksum/size/magic/build_id defect). Store exceptions propagate as raised
+            (the production ObjectStore wraps them as ``INFRASTRUCTURE_FAILURE``).
     """
     by_name = {e.name: e for e in manifest}
     if "kernel" not in by_name or "kernel" not in keys:
@@ -330,18 +331,14 @@ def validate_external_artifacts(
         )
     heads: dict[str, HeadResult] = {}
     for name, entry in by_name.items():
-        key = keys[name]
-        head = store.head(key)
-        if head is None:
+        key = keys.get(name)
+        if key is None:
             raise CategorizedError(
-                f"declared artifact {name!r} was never uploaded",
+                f"declared artifact {name!r} has no upload key",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"name": name},
             )
-        if head.size_bytes != entry.size_bytes or head.checksum_sha256 != entry.sha256:
-            raise _build_failure("uploaded artifact disagrees with its manifest", name=name)
-        _check_magic(store, name, key)
-        heads[name] = head
+        heads[name] = _validate_one_artifact(store, name, entry, key)
 
     build_id = ""
     if "vmlinux" in by_name:
@@ -361,6 +358,23 @@ def validate_external_artifacts(
         build_id=build_id,
     )
     return ValidatedUpload(output=output, heads=heads)
+
+
+def _validate_one_artifact(
+    store: _ValidatorStore, name: str, entry: ManifestEntry, key: str
+) -> HeadResult:
+    """HEAD existence + size/checksum vs the manifest + leading-byte magic; return the head."""
+    head = store.head(key)
+    if head is None:
+        raise CategorizedError(
+            f"declared artifact {name!r} was never uploaded",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"name": name},
+        )
+    if head.size_bytes != entry.size_bytes or head.checksum_sha256 != entry.sha256:
+        raise _build_failure("uploaded artifact disagrees with its manifest", name=name)
+    _check_magic(store, name, key)
+    return head
 
 
 def _check_magic(store: _ValidatorStore, name: str, key: str) -> None:
@@ -385,16 +399,33 @@ def extract_build_id_ranged(store: _ValidatorStore, key: str) -> str:
         CategorizedError: ``BUILD_FAILURE`` if the ELF is malformed or carries no build-id.
     """
     header = store.get_range(key, start=0, length=64)
+    if len(header) < 64:
+        raise _build_failure("vmlinux ELF header is truncated")
     if header[:4] != _ELF_MAGIC or header[4] != 2 or header[5] != 1:  # ELFCLASS64, ELFDATA2LSB
         raise _build_failure("vmlinux is not a 64-bit little-endian ELF")
-    e_shoff = struct.unpack_from("<Q", header, 0x28)[0]
-    e_shentsize = struct.unpack_from("<H", header, 0x3A)[0]
-    e_shnum = struct.unpack_from("<H", header, 0x3C)[0]
-    e_shstrndx = struct.unpack_from("<H", header, 0x3E)[0]
-    if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
-        raise _build_failure("vmlinux has no usable section header table")
-    sht = store.get_range(key, start=e_shoff, length=e_shentsize * e_shnum)
-    shstr = _read_section(store, key, sht, e_shentsize, e_shstrndx)
+    try:
+        e_shoff = struct.unpack_from("<Q", header, 0x28)[0]
+        e_shentsize = struct.unpack_from("<H", header, 0x3A)[0]
+        e_shnum = struct.unpack_from("<H", header, 0x3C)[0]
+        e_shstrndx = struct.unpack_from("<H", header, 0x3E)[0]
+        if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
+            raise _build_failure("vmlinux has no usable section header table")
+        sht = store.get_range(key, start=e_shoff, length=e_shentsize * e_shnum)
+        shstr = _read_section(store, key, sht, e_shentsize, e_shstrndx)
+        return _find_build_id_note(store, key, sht, shstr, e_shentsize, e_shnum)
+    except (struct.error, ValueError, IndexError) as exc:
+        raise _build_failure("vmlinux ELF is structurally malformed") from exc
+
+
+def _find_build_id_note(
+    store: _ValidatorStore,
+    key: str,
+    sht: bytes,
+    shstr: bytes,
+    e_shentsize: int,
+    e_shnum: int,
+) -> str:
+    """Walk the SHT for the ``.note.gnu.build-id`` SHT_NOTE section and parse its build-id."""
     for i in range(e_shnum):
         off = i * e_shentsize
         sh_name = struct.unpack_from("<I", sht, off)[0]
