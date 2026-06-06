@@ -9,6 +9,7 @@ real clone/build (no network, no qemu), so they stay in the non-gated suite.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -65,3 +66,26 @@ def test_build_is_idempotent_on_existing_image(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "idempotent" in result.stderr
+
+
+def test_build_fails_fast_on_missing_authorized_key(tmp_path: Path) -> None:
+    """A set-but-missing KDIVE_ROOTFS_AUTHORIZED_KEY fails fast before libguestfs.
+
+    Proves key resolution is wired and the failure is deterministic without qemu/network:
+    the build exits non-zero naming the key knob, not by stack-tracing on a missing tool.
+    The inherited PATH is kept (the Stage-0 preflight needs realpath/mkdir); the key knob
+    points at a non-existent file so resolution deterministically fails.
+    """
+    assert _BASH is not None, "bash is required"
+    dest = tmp_path / "out" / "guest.qcow2"  # parent writable so the Stage-0 preflight passes
+    dest.parent.mkdir()
+    env = {**os.environ, "KDIVE_ROOTFS_AUTHORIZED_KEY": str(tmp_path / "missing.pub")}
+    result = subprocess.run(
+        [_BASH, str(_BUILD), str(dest)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "KDIVE_ROOTFS_AUTHORIZED_KEY" in result.stderr
