@@ -111,10 +111,16 @@ it through the host `python3`, which may predate the project's venv.
    fixtures test require: a pre-existing destination → log a message containing `idempotent` and
    exit 0 before requiring any tool. The guard runs first (after arg parsing), so a second run on
    an existing image is a no-op even with an empty `PATH`.
-   The guard is **presence-only**: any existing file at the destination is treated as a finished
-   image — it does *not* validate the qcow2. A build killed mid-Stage-2 can leave a truncated or
-   zero-byte file; the documented recovery is **delete the destination and re-run** (a partial
-   image is never auto-repaired). The `[[ -f "$dest" ]]` test follows symlinks, so a symlinked
+   The guard is **presence-only**: it keys solely on path existence and consults no build input,
+   so it neither validates the qcow2 nor rebuilds when inputs change. Two consequences follow, and
+   both share one recovery — **delete the destination and re-run**: (a) a build killed mid-Stage-2
+   can leave a truncated or zero-byte file, which is never auto-repaired; (b) re-running with a
+   changed input (`KDIVE_ROOTFS_DEBUG`, `KDIVE_ROOTFS_VMLINUX`, `KDIVE_ROOTFS_SSH_USER`,
+   `KDIVE_ROOTFS_SIZE`, or after the managed keypair is rotated so the baked-in public key is
+   stale) keeps the **old** image and exits 0 — a *valid* but stale image that can silently pass
+   §6.1 acceptance. The idempotency log line therefore states explicitly that no rebuild occurred
+   and inputs were not consulted, so the no-op is unambiguous in logs. The `[[ -f "$dest" ]]` test
+   follows symlinks, so a symlinked
    destination pointing at a regular file short-circuits to the `idempotent` exit before the
    Stage-0 symlink refusal (change 2) is reached; this is safe because the guard performs no write,
    but it means the symlink refusal only governs the *build* path, not the no-op path.
@@ -176,7 +182,8 @@ the marker (the demo's failure signal is the separate G4 console-crash path, not
 marker). Procedure:
 
 1. Build: `KDIVE_ROOTFS=/var/lib/kdive/rootfs/minimal.qcow2 scripts/live-vm/build-guest-image.sh`.
-2. Direct-kernel boot under `qemu:///system` with a known-good Linux 7.0 `bzImage`, no initrd,
+2. Direct-kernel boot under `qemu:///system` with a known-good Linux 7.0 `bzImage` (built from the
+   tree `scripts/live-vm/fetch-kernel-tree.sh` checks out, via `make` — gap G1), no initrd,
    `root=/dev/vda console=ttyS0`, the console teed to a file (the same layout ADR-0030 boots).
 3. **Pass signal:** the literal line `kdive-ready` appears on the `ttyS0` console log within the
    boot-timeout window. **Fail signals:** a `login:` prompt with no preceding `kdive-ready`
