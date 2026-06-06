@@ -261,16 +261,54 @@ def test_from_env_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.live_vm
 def test_live_vm_real_make_build_id_matches_readelf() -> None:  # pragma: no cover - live_vm
+    """Drive the real seams end-to-end and assert the build-id equals ``readelf -n``.
+
+    Runs only on a real build host. Inputs come from the operator/live_vm runner:
+    ``KDIVE_KERNEL_SRC`` is the warm tree and ``KDIVE_TEST_BUILD_CONFIG`` is a ``.config``
+    (path or ``file://`` URL) that satisfies the kdump/debuginfo preflight. Absent either —
+    or ``readelf``/``rsync`` — the test skips, the established gated-suite convention.
+    """
     import os
-    import shutil
+    import re
+    import subprocess as sp
+    import tempfile
 
     src = os.environ.get("KDIVE_KERNEL_SRC")
-    if not src or not shutil.which("readelf"):
-        pytest.skip("KDIVE_KERNEL_SRC or readelf unavailable")
-    # The real build runs against the operator-provided warm tree; the assertion that the
-    # extracted build-id equals `readelf -n vmlinux` lives here so extraction is tested
-    # against a real ELF. Implemented as part of the live_vm gated suite (#18).
-    raise NotImplementedError("live_vm real-make harness wired by the live_vm runner")
+    config_ref = os.environ.get("KDIVE_TEST_BUILD_CONFIG")
+    if not src or not config_ref or not shutil.which("readelf") or not shutil.which("rsync"):
+        pytest.skip("KDIVE_KERNEL_SRC / KDIVE_TEST_BUILD_CONFIG / readelf / rsync unavailable")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _FakeStore()
+        builder = LocalLibvirtBuild(
+            tenant=_TENANT,
+            workspace_root=Path(tmp),
+            store_factory=lambda: store,
+            checkout=lambda _run, profile, ws: build_module._real_checkout(src, profile, ws),
+            read_config=build_module._real_read_config,
+            run_make=build_module._real_run_make,
+            read_kernel_image=lambda ws: (ws / "arch/x86/boot/bzImage").read_bytes(),
+            read_vmlinux=lambda ws: (ws / "vmlinux").read_bytes(),
+            read_build_id=build_module._real_read_build_id,
+        )
+        profile = BuildProfile.parse(
+            {
+                "schema_version": 1,
+                "kernel_source_ref": f"file://{src}",
+                "config_ref": config_ref,
+                "patch_ref": None,
+            }
+        )
+        assert isinstance(profile, ServerBuildProfile)
+        out = builder.build(_RUN, profile)
+
+        vmlinux = Path(tmp) / str(_RUN) / "vmlinux"
+        notes = sp.run(
+            ["readelf", "-n", str(vmlinux)], capture_output=True, text=True, check=True
+        ).stdout
+        match = re.search(r"Build ID:\s*([0-9a-f]+)", notes)
+        assert match is not None, "readelf reported no GNU build-id"
+        assert out.build_id == match.group(1)
 
 
 # --- _resolve_local_ref -------------------------------------------------------------
