@@ -836,10 +836,15 @@ def test_provision_handler_absent_uploaded_rootfs_fails_config_error(
                 pool, alloc_id, SystemState.PROVISIONING, _upload_profile()
             )
             job = await _enqueue_provision(pool, sys_id, alloc_id)
+            prov = _FakeProvisioning()
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await systems_tools.provision_handler(conn, job, _FakeProvisioning())
+                    await systems_tools.provision_handler(conn, job, prov)
             assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+            # The System rolls back to provisioning (not terminal), so the terminal-teardown
+            # compensation deliberately does NOT fire — the started domain is left in place for
+            # an idempotent retry.
+            assert prov.torn_down == []
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
                 sys_row = await cur.fetchone()

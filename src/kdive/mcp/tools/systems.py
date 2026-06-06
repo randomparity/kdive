@@ -362,6 +362,27 @@ async def _commit_uploaded_rootfs(
     await upload_manifest.delete_manifest(conn, "systems", system.id)
 
 
+async def _finalize_provision_ready(
+    conn: AsyncConnection, job: Job, system: System, profile: ProvisioningProfile
+) -> None:
+    """Run the provisioning->ready follow-on (caller holds the System lock + transaction).
+
+    Must be called from within the caller's open ``conn.transaction()`` under the held
+    ``LockScope.SYSTEM`` advisory lock — it opens neither, so the artifacts commit, billing
+    open, and audit land atomically with the UPDATE-to-READY in the same locked transaction.
+    """
+    await _commit_uploaded_rootfs(conn, system, profile)
+    await _open_billing_interval(conn, system.allocation_id)
+    await _audit_transition(
+        conn,
+        job,
+        project=system.project,
+        object_id=system.id,
+        transition="provisioning->ready",
+        tool="systems.provision",
+    )
+
+
 async def provision_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
@@ -416,22 +437,14 @@ async def provision_handler(
             await cur.execute("SELECT state FROM systems WHERE id = %s FOR UPDATE", (system_id,))
             row = await cur.fetchone()
             current = SystemState(row["state"]) if row is not None else None
-            if current is SystemState.PROVISIONING:
-                await cur.execute(
-                    "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
-                    (SystemState.READY.value, domain_name, system_id),
-                )
+        # The FOR UPDATE row lock and the advisory lock are held until this transaction
+        # commits, so the UPDATE + finalize run after the cursor closes but still under both.
         if current is SystemState.PROVISIONING:
-            await _commit_uploaded_rootfs(conn, system, profile)
-            await _open_billing_interval(conn, system.allocation_id)
-            await _audit_transition(
-                conn,
-                job,
-                project=system.project,
-                object_id=system_id,
-                transition="provisioning->ready",
-                tool="systems.provision",
+            await conn.execute(
+                "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
+                (SystemState.READY.value, domain_name, system_id),
             )
+            await _finalize_provision_ready(conn, job, system, profile)
     # Outside the lock. If a concurrent *teardown* drove the System terminal while we were
     # mid-provision, clean up the domain we just created. A non-terminal, non-provisioning
     # state (``ready``/``crashed``) means a concurrent *same-job* provision (lease lapse →
