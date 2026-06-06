@@ -77,11 +77,28 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
+def _provisioning_profile(rootfs_kind: str) -> dict[str, Any]:
+    rootfs: dict[str, Any] = {"kind": rootfs_kind}
+    if rootfs_kind == "path":
+        rootfs["path"] = "/img/x.qcow2"
+    return {
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 1,
+        "memory_mb": 1024,
+        "disk_gb": 10,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": "git+https://example/linux.git#v6.9",
+        "provider": {"local-libvirt": {"rootfs": rootfs, "crashkernel": "256M"}},
+    }
+
+
 async def _seed_system(
     pool: AsyncConnectionPool,
     *,
     project: str = "proj",
     state: SystemState = SystemState.READY,
+    rootfs_kind: str = "upload",
 ) -> str:
     async with pool.connection() as conn:
         res = await RESOURCES.insert(
@@ -119,7 +136,7 @@ async def _seed_system(
                 project=project,
                 allocation_id=alloc.id,
                 state=state,
-                provisioning_profile={"schema_version": 1},
+                provisioning_profile=_provisioning_profile(rootfs_kind),
             ),
         )
     return str(system.id)
@@ -337,6 +354,29 @@ def test_create_upload_for_defined_system_mints_rootfs_and_persists(migrated_url
                 manifest = await upload_manifest.get_manifest(conn, "systems", UUID(sys_id))
             assert manifest is not None
             assert {e.name for e in manifest.entries} == {"rootfs"}
+
+    asyncio.run(_run())
+
+
+def test_create_upload_rejects_non_upload_kind_defined_system(migrated_url: str) -> None:
+    # A DEFINED System whose stored profile is path-kind cannot open an upload window —
+    # else the object would be minted, never committed, and orphaned past the reaper (#111).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _seed_system(pool, state=SystemState.DEFINED, rootfs_kind="path")
+            store = _FakeStore()
+            responses = await artifacts_tools.create_upload(
+                pool,
+                _ctx(),
+                owner_kind="system",
+                owner_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                store=store,
+            )
+        assert len(responses) == 1
+        assert responses[0].error_category == "configuration_error"
+        assert responses[0].data["reason"] == "owner_not_accepting_upload"
+        assert store.calls == []  # no PUT minted
 
     asyncio.run(_run())
 
