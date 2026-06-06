@@ -1776,3 +1776,23 @@ def test_install_handler_no_initrd_when_ledger_initrd_blank(migrated_url: str) -
         assert installer.calls[0][5] is None
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "cmdline",
+    ["console=ttyS0 dhash_entries=1 panic_on_oops=1", "console=ttyS0"],
+)
+def test_install_tier0_demo_cmdlines_pass_boundary(migrated_url: str, cmdline: str) -> None:
+    # Acceptance (#116): the Tier-0 demo cmdlines carry no crashkernel=; a bare (console)
+    # System admits them through runs.install.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool, build_profile={**_VALID_BUILD, "cmdline": cmdline}
+            )
+            resp = await _install(pool, _ctx(), run_id)
+            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
+        assert resp.status == "queued"
+        assert njobs == 1
+
+    asyncio.run(_run())
