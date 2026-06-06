@@ -308,6 +308,10 @@ def test_oversized_section_header_table_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as e:
         extract_build_id_ranged(store, "v", max_size=64 * 1024 * 1024)
     assert e.value.category is ErrorCategory.BUILD_FAILURE
+    # Tie the assertion to the SHT cap specifically: only that guard sets ``sht_bytes``.
+    # Without it the empty fake-store SHT read would still raise BUILD_FAILURE via a
+    # struct.error, so a bare category check would pass even with the guard removed.
+    assert e.value.details.get("sht_bytes") == 512 * 0xFFFF
 
 
 def test_oversized_section_size_is_build_failure() -> None:
