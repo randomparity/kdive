@@ -32,7 +32,17 @@ re-dispatch, single core per System) is preserved; tests move to the new key sha
 - Modify: `src/kdive/providers/local_libvirt/retrieve.py:180-184`
 - Modify: `src/kdive/mcp/tools/vmcore.py:88-91` (`_RAW_KEY_SQL`), `:181-186` (`_existing_raw_key`), `:248-253` (`list_vmcores`), `:295-300` (`_resolve_postmortem` cursor)
 - Modify: `src/kdive/mcp/tools/introspect.py:46-48` (`_RAW_KEY_SQL`), `:96-97` (cursor)
-- Test: `tests/mcp/test_vmcore_tools.py`, `tests/mcp/test_introspect_tools.py`, `tests/integration/test_walking_skeleton.py`
+- Test: `tests/mcp/test_vmcore_tools.py`, `tests/mcp/test_introspect_tools.py`, `tests/providers/local_libvirt/test_retrieve.py`, `tests/integration/test_walking_skeleton.py`, `tests/integration/test_live_stack.py`
+
+> **Exhaustiveness (verified by `rg -n '/vmcore"' tests/ src/`):** the raw-key literal `…/vmcore`
+> appears in `retrieve.py` (producer), `vmcore.py`/`introspect.py` (readers, this task), and these
+> test files: `test_vmcore_tools.py` (×4: `_capture_output`, ref asserts, idempotency insert,
+> redaction guard), `test_introspect_tools.py` (×2: seed insert, `endswith` assert),
+> `test_retrieve.py` (×5: producer-unit asserts + `_FakeStore(fail_on=...)`),
+> `test_walking_skeleton.py` (×2: fake keys, line-295 guard), `test_live_stack.py` (×1: line-525
+> guard, gated). `test_artifacts_tools.py` also inserts `vmcore`/`vmcore-redacted` rows but asserts
+> on **sensitivity**, not key shape — unaffected. All of these are edited below; re-run the `rg`
+> sweep before committing to confirm nothing new crept in.
 
 - [ ] **Step 1: Update the producer to method-suffixed keys**
 
@@ -188,6 +198,31 @@ Update the surface-wide redaction guard `test_no_raw_vmcore_key_in_any_read_resp
         assert str(port.kwargs["vmcore_ref"]).endswith("/vmcore-host_dump")
 ```
 
+`tests/providers/local_libvirt/test_retrieve.py` — the producer's own unit test (this test
+captures with `CaptureMethod.KDUMP`, so the suffix is `kdump`). Update
+`test_capture_stores_two_artifacts_and_returns_build_id` (lines 92-99):
+
+```python
+    assert out.raw.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump"
+    assert out.redacted.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump-redacted"
+    assert out.vmcore_build_id == "deadbeef"
+    names = {(name, sens) for _, name, sens, _ in store.puts}
+    assert ("vmcore-kdump", Sensitivity.SENSITIVE) in names
+    assert ("vmcore-kdump-redacted", Sensitivity.REDACTED) in names
+    redacted_data = next(d for _, name, _, d in store.puts if name == "vmcore-kdump-redacted")
+    assert b"hunter2" not in redacted_data and b"[REDACTED]" in redacted_data
+```
+
+And `test_capture_store_failure_is_infrastructure_failure` (line 109) — `_FakeStore.fail_on`
+matches the object **name** exactly (`self.fail_on == name`), so it must name the suffixed object:
+
+```python
+        _retriever(_FakeStore(fail_on="vmcore-kdump"), core=b"X").capture(_SYS, CaptureMethod.KDUMP)
+```
+
+(`test_run_returns_redacted_crash_output` at line 130 passes `vmcore_ref="k/systems/s/vmcore"` as an
+input ref to `run()`, not a stored key — `run()` fetches by the ref verbatim, so it needs no change.)
+
 `tests/integration/test_walking_skeleton.py` — the fake capture keys (lines 86-94):
 
 ```python
@@ -202,12 +237,38 @@ Update the surface-wide redaction guard `test_no_raw_vmcore_key_in_any_read_resp
         )
 ```
 
-If the walking-skeleton test asserts the raw ref ends in `/vmcore` elsewhere, update it to `/vmcore-host_dump` (grep the file for `/vmcore"` before committing).
+And the same vacuous-after-rename raw-key guard exists here at line 295 — replace it with the
+non-vacuous form (identical to `test_vmcore_tools.py:471`):
 
-- [ ] **Step 6: Run the affected tests**
+```python
+        assert all(not ("/vmcore-" in key and not key.endswith("-redacted")) for key in refs)
+```
 
-Run: `uv run python -m pytest tests/mcp/test_vmcore_tools.py tests/mcp/test_introspect_tools.py tests/mcp/test_artifacts_tools.py -q`
-Expected: PASS (artifacts tests filter by sensitivity, unaffected). If Docker is unavailable they SKIP cleanly — set `KDIVE_REQUIRE_DOCKER=1` locally to force them.
+`tests/integration/test_live_stack.py` (gated `live_stack`, not run by `just test`, but the guard
+must not silently go vacuous) — line 525:
+
+```python
+                assert all(
+                    not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs
+                ), "raw vmcore leaked (#1)"
+```
+
+- [ ] **Step 6: Sweep for missed sites, then run the FULL suite**
+
+First confirm the edits are exhaustive (no stray raw-key literal remains un-updated):
+
+Run: `rg -n '"%/vmcore"|/vmcore"' tests/ src/`
+Expected: every hit is a string you intentionally changed to the `vmcore-{method}` shape or the
+`%/vmcore-%`/`%-redacted` patterns; **no** bare `…/vmcore"` or `"%/vmcore"` literal survives in
+`retrieve.py`, `vmcore.py`, `introspect.py`, `test_vmcore_tools.py`, `test_introspect_tools.py`,
+`test_retrieve.py`, `test_walking_skeleton.py`, or `test_live_stack.py`.
+
+Then run the whole suite (not a subset — the key rename is global; `test_retrieve.py` is a
+Docker-free producer unit test that would otherwise commit red unnoticed):
+
+Run: `KDIVE_REQUIRE_DOCKER=1 just test`
+Expected: PASS. A *skipped* DB test does **not** satisfy this step — `KDIVE_REQUIRE_DOCKER=1` turns
+an absent Docker daemon into an error so a missing backend can't masquerade as green.
 
 - [ ] **Step 7: Guardrails + commit**
 
@@ -215,7 +276,7 @@ Run: `just lint && just type`
 Expected: clean.
 
 ```bash
-git add src/kdive/providers/local_libvirt/retrieve.py src/kdive/mcp/tools/vmcore.py src/kdive/mcp/tools/introspect.py tests/mcp/test_vmcore_tools.py tests/mcp/test_introspect_tools.py tests/integration/test_walking_skeleton.py
+git add src/kdive/providers/local_libvirt/retrieve.py src/kdive/mcp/tools/vmcore.py src/kdive/mcp/tools/introspect.py tests/mcp/test_vmcore_tools.py tests/mcp/test_introspect_tools.py tests/providers/local_libvirt/test_retrieve.py tests/integration/test_walking_skeleton.py tests/integration/test_live_stack.py
 git commit -m "refactor(vmcore): encode capture method in the raw object key
 
 Store the raw core as vmcore-{method} (redacted: vmcore-{method}-redacted) and
@@ -271,8 +332,8 @@ idempotency with the suffixed key; no new same-method test is needed.
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run python -m pytest tests/mcp/test_vmcore_tools.py::test_capture_handler_rejects_different_method tests/mcp/test_vmcore_tools.py::test_captured_method_rejects_bare_key -q`
-Expected: FAIL — the reject test currently no-ops (precheck returns the host_dump key, no raise); `_captured_method` does not exist yet.
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/mcp/test_vmcore_tools.py::test_capture_handler_rejects_different_method tests/mcp/test_vmcore_tools.py::test_captured_method_rejects_bare_key -q`
+Expected: FAIL — the reject test currently no-ops (precheck returns the host_dump key, no raise); `_captured_method` does not exist yet. (`KDIVE_REQUIRE_DOCKER=1` so the DB-backed reject test errors rather than *skips* on a host without Docker — a skip is not a "fail" and would make this TDD gate vacuous.)
 
 - [ ] **Step 3: Add the helpers in `vmcore.py`**
 
@@ -379,13 +440,13 @@ async def _finalize_capture(
 
 - [ ] **Step 5: Run the new + existing handler tests**
 
-Run: `uv run python -m pytest tests/mcp/test_vmcore_tools.py -q`
-Expected: PASS (new reject + bare-key tests pass; idempotency, store, no-core, missing-system, list, postmortem all still pass).
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest tests/mcp/test_vmcore_tools.py -q`
+Expected: PASS (new reject + bare-key tests pass; idempotency, store, no-core, missing-system, list, postmortem all still pass). A skip ≠ a pass — `KDIVE_REQUIRE_DOCKER=1` enforces that.
 
 - [ ] **Step 6: Full guardrails**
 
-Run: `just lint && just type && just test`
-Expected: clean / all pass (gated `live_vm`/`live_stack` excluded by the recipe).
+Run: `just lint && just type && KDIVE_REQUIRE_DOCKER=1 just test`
+Expected: clean / all pass (gated `live_vm`/`live_stack` excluded by the recipe; `KDIVE_REQUIRE_DOCKER=1` keeps the DB tests from skipping into a false green).
 
 - [ ] **Step 7: Commit**
 
@@ -409,8 +470,11 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - **Spec coverage:** producer rename (Task 1 S1), 3-reader SQL (T1 S2/S4), list filter (T1 S3),
   `_captured_method` fail-fast (T2 S3), precheck+finalize reject (T2 S4), non-vacuous redaction
-  guard (T1 S5), producer-side fakes (T1 S5), different-method/bare-key/same-method tests (T2 S1,
-  T1 idempotency). All spec sections map to a step.
+  guard at all three guard sites — `test_vmcore_tools.py:471`, `test_walking_skeleton.py:295`,
+  gated `test_live_stack.py:525` (T1 S5), producer-unit test `test_retrieve.py` incl. the
+  name-keyed `_FakeStore(fail_on=...)` (T1 S5), producer-side fakes (T1 S5),
+  different-method/bare-key/same-method tests (T2 S1, T1 idempotency). All spec sections map to a
+  step; the `rg` sweep + full `KDIVE_REQUIRE_DOCKER=1 just test` (T1 S6) backstops a missed site.
 - **No admission-layer change** (ADR-0050 Decision 4) — `fetch_vmcore` untouched; M0 keeps
   rejecting `kdump` at the supported-set boundary.
 - **Type consistency:** `_ensure_method_match(existing_key, method, system_id)` and
