@@ -48,14 +48,10 @@ class _Fetch:
 
 @dataclass
 class _Readiness:
-    """Canned readiness/kdump seam. answered=False → never-answered; ok=False → answered-fail."""
+    """Canned readiness seam. answered=False → never-answered; ok=False → answered-fail."""
 
     answered: bool = True
     ok: bool = True
-    kdump_present: bool = True
-
-    def kdump_check(self, system_id: UUID) -> bool:
-        return self.kdump_present
 
     def readiness(self, system_id: UUID) -> ReadinessResult:
         return ReadinessResult(answered=self.answered, ok=self.ok)
@@ -84,7 +80,6 @@ def _install(
         connect=lambda: conn,
         fetch_kernel=fetch,
         fetch_initrd=fetch,
-        kdump_check=seam.kdump_check,
         readiness=seam.readiness,
         staging_root=staging_root,
         boot_window_polls=3,
@@ -142,21 +137,21 @@ def test_install_does_not_inject_xml_from_cmdline(tmp_path: Path) -> None:
 # --- install: kdump prerequisite -----------------------------------------------------
 
 
-def test_install_kdump_absent_is_config_error_before_redefine(tmp_path: Path) -> None:
+def test_install_kdump_without_initrd_is_config_error_before_redefine(tmp_path: Path) -> None:
+    # method=KDUMP with no initrd_ref: the capture initramfs is absent → CONFIGURATION_ERROR,
+    # nothing redefined (the crashkernel reservation is inert without a capture initrd).
     conn = _conn_with_existing()
-    seam = _Readiness(kdump_present=False)
-    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+    inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
         inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE, method=CaptureMethod.KDUMP)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert conn.defined_xml == []  # nothing redefined on a missing capture path
 
 
-def test_install_kdump_present_proceeds(tmp_path: Path) -> None:
-    # method=KDUMP with the capture path present: install proceeds and redefines the domain.
+def test_install_kdump_with_initrd_proceeds(tmp_path: Path) -> None:
+    # method=KDUMP with a staged initrd present: install proceeds and redefines once.
     conn = _conn_with_existing()
-    seam = _Readiness(kdump_present=True)
-    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+    inst = _install(conn=conn, staging_root=tmp_path)
     inst.install(
         _SYS,
         _RUN,
@@ -287,11 +282,8 @@ def test_read_console_log_missing_is_empty(tmp_path: Path) -> None:
 # --- method-conditional kdump + optional initrd --------------------------------------
 
 
-def test_install_skips_kdump_check_and_omits_initrd(tmp_path: Path) -> None:
-    """CONSOLE method: kdump_check never called; no initrd fetched; no <initrd> in XML."""
-
-    def _kdump_must_not_run(_sid: UUID) -> bool:
-        raise AssertionError("kdump_check called for a non-kdump method")
+def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
+    """CONSOLE method, no initrd_ref: no initrd fetched; no <initrd> in XML."""
 
     def _initrd_must_not_run(_ref: str, _dest: Path) -> None:
         raise AssertionError("initrd fetched when no initrd_ref given")
@@ -301,11 +293,10 @@ def test_install_skips_kdump_check_and_omits_initrd(tmp_path: Path) -> None:
         connect=lambda: conn,
         fetch_kernel=lambda _ref, _dest: None,
         fetch_initrd=_initrd_must_not_run,
-        kdump_check=_kdump_must_not_run,
         readiness=lambda _sid: ReadinessResult(answered=True, ok=True),
         staging_root=tmp_path,
     )
-    # CONSOLE + no initrd_ref: kdump_check skipped, no initrd fetched, no <initrd> rendered.
+    # CONSOLE + no initrd_ref: no initrd fetched, no <initrd> rendered.
     installer.install(
         _SYS, _RUN, _KERNEL_REF, cmdline="console=ttyS0", method=CaptureMethod.CONSOLE
     )

@@ -104,7 +104,6 @@ def _installer(conn: FakeLibvirtConn, staging_root: Path) -> LocalLibvirtInstall
         connect=lambda: conn,
         fetch_kernel=lambda ref, dest: dest.write_bytes(b"k"),
         fetch_initrd=lambda ref, dest: dest.write_bytes(b"i"),
-        kdump_check=lambda system_id: True,
         readiness=lambda system_id: ReadinessResult(answered=True, ok=True),
         staging_root=staging_root,
         boot_window_polls=3,
