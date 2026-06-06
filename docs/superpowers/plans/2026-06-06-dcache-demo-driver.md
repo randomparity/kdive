@@ -217,12 +217,12 @@ def test_build_run_records_cmdline_in_the_build_ledger(migrated_url: str) -> Non
         async with _pool(migrated_url) as pool:
             sys_id = await _seed_system(pool)
             run_id = await _seed_running_built_run(pool, sys_id)  # created-state server run
-            ctx = request_context(Role.OPERATOR)
+            ctx = _ctx(Role.OPERATOR)
             env = await runs_tools.build_run(pool, ctx, run_id, cmdline="console=ttyS0 dhash_entries=1")
             assert env.status != "error"  # a job-handle envelope, not a failure
             async with pool.connection() as conn:
                 job = await _build_job_for(conn, run_id)  # the enqueued build job
-                await runs_tools.build_handler(conn, job, _RecordingBuilder())
+                await runs_tools.build_handler(conn, job, _FakeBuilder())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT result FROM run_steps WHERE run_id=%s AND step='build'", (run_id,)
@@ -238,11 +238,11 @@ def test_build_run_without_cmdline_records_none(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await _seed_system(pool)
             run_id = await _seed_running_built_run(pool, sys_id)
-            ctx = request_context(Role.OPERATOR)
+            ctx = _ctx(Role.OPERATOR)
             await runs_tools.build_run(pool, ctx, run_id)
             async with pool.connection() as conn:
                 job = await _build_job_for(conn, run_id)
-                await runs_tools.build_handler(conn, job, _RecordingBuilder())
+                await runs_tools.build_handler(conn, job, _FakeBuilder())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT result FROM run_steps WHERE run_id=%s AND step='build'", (run_id,)
