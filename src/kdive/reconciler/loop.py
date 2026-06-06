@@ -422,7 +422,10 @@ async def _reap_one_owner(
     (whose ``destroy`` runs unlocked because libvirt can hang), the bounded S3 deletes run
     under the narrow per-owner lock so a re-mint cannot interleave between the re-check and
     the manifest delete. Deletes only objects with **no committed ``artifacts`` row**, so a
-    referenced/consumed object (a slow-but-real rootfs) is never destroyed.
+    referenced/consumed object (a slow-but-real rootfs) is never destroyed. The synchronous
+    boto3-backed ``list_prefix``/``delete`` are offloaded via ``asyncio.to_thread`` so they
+    do not block the event loop; the ``await`` only yields the loop — nothing else touches
+    ``conn`` meanwhile, so the lock + transaction stay held across the deletes (the fence).
     """
     async with conn.transaction(), advisory_xact_lock(conn, scope, owner_id):
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -436,11 +439,11 @@ async def _reap_one_owner(
             return False  # renewed (deadline pushed out) or already reaped since the select
         if not await _owner_pre_finalize(conn, owner_kind, owner_id):
             return False  # owner finalized between the candidate select and this lock
-        for key in store.list_prefix(row["prefix"]):
+        for key in await asyncio.to_thread(store.list_prefix, row["prefix"]):
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT 1 FROM artifacts WHERE object_key = %s", (key,))
                 if await cur.fetchone() is None:
-                    store.delete(key)
+                    await asyncio.to_thread(store.delete, key)
         await conn.execute(
             "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
             (owner_kind, owner_id),
