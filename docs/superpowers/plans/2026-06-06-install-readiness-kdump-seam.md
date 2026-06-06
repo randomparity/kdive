@@ -28,16 +28,23 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/providers/local_libvirt/test_install.py` (top-level, after the existing imports add `classify_console` to the install import block):
+First add `classify_console` to the **existing** install import block in
+`tests/providers/local_libvirt/test_install.py` (lines 17-21) — it already imports
+`LocalLibvirtInstall, ReadinessResult, _stage_object`, and the file already has `import pytest`
+(line 12) and `import os` (line 5), so do **not** add either again:
 
 ```python
-# add `classify_console` to the existing
-# `from kdive.providers.local_libvirt.install import (...)` block.
+from kdive.providers.local_libvirt.install import (
+    LocalLibvirtInstall,
+    ReadinessResult,
+    _stage_object,
+    classify_console,
+)
+```
 
-import pytest
+Then add these classifier tests (top-level; `_MARKER` is a new module constant):
 
-from kdive.providers.local_libvirt.install import classify_console
-
+```python
 _MARKER = "kdive-ready"
 
 
@@ -348,7 +355,16 @@ In `tests/adversarial/test_provider_xml.py`, drop the `kdump_check=lambda system
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `uv run python -m pytest tests/providers/local_libvirt/test_install.py tests/adversarial/test_provider_xml.py -q`
-Expected: FAIL — `TypeError: __init__() got an unexpected keyword argument` is *not* yet raised (the param still exists), but the two rewritten kdump tests fail: `test_install_kdump_without_initrd_is_config_error_before_redefine` currently raises `MISSING_DEPENDENCY` (the stub), not `CONFIGURATION_ERROR`. Confirm those two fail for the right reason.
+
+Expected: FAIL. **This is a coupled refactor, not a clean feature red** — Steps 1-2 dropped the
+`kdump_check=` argument from the `_install`/`_installer` call sites, but the constructor still
+*requires* the `kdump_check` parameter (it is not removed until Step 4). So **every** test built
+through `_install(...)` / `_installer(...)` errors at construction with
+`TypeError: LocalLibvirtInstall.__init__() missing 1 required keyword-only argument: 'kdump_check'`.
+That broad TypeError *is* the expected red here — it confirms the call sites no longer pass the
+seam. The clean category check (`CONFIGURATION_ERROR` for kdump-without-initrd) only becomes
+observable after Step 4 removes the parameter and adds the gate; do not expect a
+`MISSING_DEPENDENCY`-vs-`CONFIGURATION_ERROR` signal at this step (construction fails first).
 
 - [ ] **Step 4: Implement the gate in install.py**
 
@@ -520,33 +536,23 @@ This pins the §3/§8 precondition: pre-marker scoping is sound only because the
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/adversarial/test_provider_xml.py` (it already imports `render_domain_xml`, `ET`, `ProvisioningProfile`, `_SYS`):
+Add to `tests/adversarial/test_provider_xml.py`. The file already imports `render_domain_xml`,
+`ET`, `_SYS`, and has a working `_profile(...)` helper (lines 50-70) that builds a valid
+`ProvisioningProfile` via `ProvisioningProfile.parse({...})` — reuse it exactly as the existing
+`test_render_domain_xml_…` does (line 89). Do **not** invent a `_MINIMAL_PROFILE` dict or call
+`model_validate` (neither exists; the model is built with `.parse`):
 
 ```python
 def test_console_log_element_does_not_enable_append() -> None:
     # Readiness pre-marker scoping (ADR-0055 §3/§8) relies on the console log being
     # truncated per create(). QEMU/libvirt default logappend=off; the rendered <log> must
     # not set append='on', or a stale prior-boot marker could survive into the next boot.
-    profile = ProvisioningProfile.model_validate(_MINIMAL_PROFILE)
-    domain = ET.fromstring(render_domain_xml(_SYS, profile))  # noqa: S314 - self-rendered
+    domain = ET.fromstring(render_domain_xml(_SYS, _profile()))  # noqa: S314 - self-rendered
     logs = domain.findall("./devices/serial/log")
     assert logs, "the always-on serial console <log> tee must be present (ADR-0049 §4)"
     for log in logs:
         assert log.get("append") != "on"
 ```
-
-If the file has no `_MINIMAL_PROFILE`, add one next to the existing fixtures, mirroring the shape `render_domain_xml` validates (reuse the profile literal already used by the provisioning tests):
-
-```python
-_MINIMAL_PROFILE = {
-    "memory_mb": 2048,
-    "vcpu": 2,
-    "arch": "x86_64",
-    "provider": {"local_libvirt": {"rootfs": {"kind": "path", "path": "/var/lib/kdive/rootfs/minimal.qcow2"}}},
-}
-```
-
-(Confirm the exact required keys against `tests/providers/local_libvirt/test_provisioning.py`'s profile fixture and reuse it if one is exported; do not invent fields the model rejects.)
 
 - [ ] **Step 2: Run the test to verify it passes (guard is already satisfied)**
 
