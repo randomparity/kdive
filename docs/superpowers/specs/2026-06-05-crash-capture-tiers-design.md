@@ -161,17 +161,31 @@ no-injection property the module documents):
 
 1. **Always-on console** — a `<serial type="file">` (or `<serial type="pty">` + `<console>`)
    with `<log file="{console_log_path}"/>`, where `console_log_path` is a deterministic
-   per-System host path. This is the Tier 0 artifact source and the boot-readiness signal (the
-   POC `stream_console` pattern tails this file for the readiness marker).
+   per-System host path. This is the Tier 0 artifact source and the boot-readiness signal: the
+   install plane's `_real_readiness` seam (`install.py:233`, `_await_ready`) is **realized** by
+   tailing this log for the readiness marker (the POC `stream_console` pattern) — readiness is the
+   console tail, not a separate poll, so the two are one mechanism. That same `_await_ready`
+   loop owns the boot window and registers the console artifact in a `finally` around the loop —
+   so the crashed/timeout paths, which `_await_ready` reaches by *raising*, still register the
+   console when the window closes for any reason (ready, crashed, timeout — §4, §11).
 2. **`preserve_on_crash` flag** → a `<panic model="pvpanic"/>` device and
    `<on_crash>preserve</on_crash>`, so a guest panic freezes the domain (state observable as
-   crashed) instead of rebooting away. Paired with `panic=0` in the cmdline (§8).
+   crashed) instead of rebooting away. pvpanic fires only on an actual `panic()`, so this is
+   paired with the panic-escalation cmdline (§8) — without it an oops/KASAN fault logs and the
+   domain never freezes, and host_dump has nothing to capture.
 3. **`gdbstub` flag** → the QEMU passthrough namespace
    (`xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0"` on `<domain>`) and
    `<qemu:commandline><qemu:arg value="-gdb"/><qemu:arg value="tcp:127.0.0.1:{port},server=on,wait=off"/></qemu:commandline>`.
-   The port is deterministic per System (e.g. a base offset + a stable hash of `system_id`),
-   so the Connect resolver (§9) can recompute it without extra state. Paired with `nokaslr`
-   in the cmdline (§8).
+   The port is **allocated from a tracked range and persisted on the System**, not derived from a
+   hash of `system_id`: a hash over a finite port range collides, and because the Connect resolver
+   (§9) keys purely on the System, a collision would let one System's debug session attach to
+   *another's* gdbstub on the shared loopback — a cross-System isolation break. To avoid simply
+   re-introducing that collision via an allocation race, the port is allocated **atomically under
+   the existing provisioning transaction / per-System advisory lock**, persisted on the System row,
+   and **released on teardown** (so the range does not leak). The resolver reads the stored value.
+   (A per-System `-gdb unix:/…/{system_id}.sock` would sidestep port allocation entirely and is
+   filesystem-isolated — viable if the Connect probe is later generalized off TCP; out of scope
+   here, where the probe is TCP-only.) Paired with `nokaslr` in the cmdline (§8).
 
 ## 7. Capture seam (Tier 1 `host_dump`)
 
@@ -184,7 +198,9 @@ the byte-source seam differs by method:
   magic (`\x7fELF`), read the bytes, unlink the temp file. Ported from POC
   `local_libvirt_qemu.py` (`virsh dump --memory-only`, ELF-magic validation, partial-file
   cleanup on failure). No transaction held during the dump (mirrors `capture_handler`'s slow
-  phase).
+  phase). **Note the state difference from the POC:** the POC dumped a *running* domain, but here
+  the domain is `<on_crash>preserve>`-frozen (`VIR_DOMAIN_CRASHED`) at capture — that `virsh dump
+  --memory-only` accepts a crashed-state domain is a dependency to verify (§13).
 - **`kdump`** — the existing `_real_wait_for_vmcore`, deferred (#115).
 
 `capture(system_id, method)` selects the seam; the rest of the method
@@ -202,21 +218,39 @@ non-kdump boot. Changes:
 
 - The install/boot handler learns the Run's capture method (from the Run/build profile). The
   kdump preflight runs **only** for `method="kdump"`; the three non-kdump methods skip it.
-- The effective cmdline is composed from the Run cmdline plus flag-derived tokens: append
-  `panic=0` when `preserve_on_crash`, `nokaslr` when `gdbstub`. `console=ttyS0` is part of the
-  Run cmdline (always present for the console artifact). The bug parameter (`dhash_entries=1`)
-  rides through unchanged — `_render_direct_kernel_xml` already renders `<cmdline>` verbatim
-  (`install.py:222`).
+- **Crash-during-boot is success for a `preserve_on_crash` Run, not a boot failure.** The dcache
+  bug panics during early boot (path lookups in init), *before* any readiness marker, so
+  `_await_ready` would otherwise raise `boot_timeout`/`readiness_failure` and mark the Run failed —
+  inverting the intended outcome. For a `preserve_on_crash` Run, `_await_ready` polls domain state
+  (restoring the POC's domstate check that console-tail readiness alone drops) and reports a
+  **fourth, terminal-success** outcome when the domain enters the crashed state within the boot
+  window. The install plane stays DB-free: `_await_ready` *reports* the crashed outcome (a new
+  `ReadinessResult` variant) and the boot **handler** records the System as `CRASHED`, then the Run
+  proceeds to `host_dump`. This transition is already legal — a System is `READY` when a Run boots
+  a kernel on it, and `READY → CRASHED` is an allowed edge (`domain/state.py`, `_TRANSITIONS`), so
+  no state-machine change is needed. This is the crash-**during**-boot path; the crash-**after**-ready path
+  (boot to readiness, then trigger via a path lookup) reaches `CRASHED` through reconcile instead
+  (§10, §13.1). Only a genuine no-crash timeout is `boot_timeout`; for non-`preserve_on_crash`
+  Runs, a crashed domain during boot stays a failure.
+- The effective cmdline is composed from the Run cmdline plus flag-derived tokens. For
+  `preserve_on_crash`, append the **panic-escalation** set, because pvpanic only fires on an
+  actual `panic()` and the target faults do not panic by default: `panic_on_oops=1` (a recoverable
+  oops alone does not panic), `kasan.fault=panic` when the kernel is KASAN-instrumented (a KASAN
+  report otherwise logs and continues), and `panic=0` so the kernel halts at panic for the
+  `<on_crash>preserve>` capture instead of rebooting away. For `gdbstub`, append `nokaslr`.
+  `console=ttyS0` is always in the Run cmdline (the console artifact). The bug parameter
+  (`dhash_entries=1`) rides through unchanged — `_render_direct_kernel_xml` already renders
+  `<cmdline>` verbatim (`install.py:222`).
 
 ## 9. Connect-plane change (Tier 2 endpoint)
 
 The Connect plane (`connect.py`) is complete except for one stub. `_open_gdbstub` (orchestration),
 the loopback-only SSRF control, and the RSP reachability probe (`rsp_reachable`,
 `_real_probe`) are implemented. Only `_real_resolve_endpoint` (`connect.py:286`) raises. This
-spec implements it: resolve the System's gdbstub endpoint to `("127.0.0.1", port)`, where `port`
-is the same deterministic per-System port rendered into the domain XML (§6.3). No new state — the
-port is a pure function of `system_id`. Loopback-only is preserved (the value is `127.0.0.1`),
-satisfying the existing `_is_loopback_literal` gate.
+spec implements it: resolve the System's gdbstub endpoint to `("127.0.0.1", port)`, reading the
+`port` **allocated and persisted at provision time** (§6.3) — not recomputing a hash, so two
+concurrent Systems can never resolve to the same listener. Loopback-only is preserved (the value
+is `127.0.0.1`), satisfying the existing `_is_loopback_literal` gate.
 
 ## 10. Error handling, state, security
 
@@ -226,9 +260,11 @@ satisfying the existing `_is_loopback_literal` gate.
   existing `readiness_failure`/`infrastructure_failure` contract of `capture`.
 - **State gating** — only the core-producing methods go through `vmcore.fetch`, which already
   requires `SystemState.CRASHED` (`vmcore.py:140`). For `host_dump` the System reaches `CRASHED`
-  via pvpanic → `<on_crash>preserve</on_crash>` → reconcile. **This mapping is an assumption to
-  verify** (see §13), not built here. `console` (an `artifacts.*` read) and `gdbstub` (a Connect
-  transport) are **not** `vmcore.fetch` and **not** `CRASHED`-gated.
+  by one of two paths (§8): crash-**during**-boot via the boot handler (from `_await_ready`'s
+  crashed outcome), or crash-**after**-ready via pvpanic → `<on_crash>preserve</on_crash>` →
+  reconcile. **The reconcile mapping is an assumption to verify** (see §13), not built here.
+  `console` (an `artifacts.*` read) and `gdbstub` (a Connect transport) are **not** `vmcore.fetch`
+  and **not** `CRASHED`-gated.
 - **Security** — all domain-XML additions are constructed with `ElementTree` (no interpolation);
   the gdbstub endpoint is loopback-only (the ported "F2" SSRF control); the console/dmesg
   artifacts pass through the existing `Redactor`; the crash-command allowlist (`postmortem.*`)
@@ -246,12 +282,17 @@ Mirroring the plane's existing fakes-over-seams approach (orchestration tested w
 - **capture()** — seam selection by method; `host_dump` seam fake returns bytes → raw+redacted
   rows; ELF-magic rejection path; build-id/redact seams exercised independently of source.
 - **render_domain_xml** — console+`<log>` always present; `preserve_on_crash` ⇒ pvpanic +
-  `<on_crash>preserve`; `gdbstub` ⇒ qemu `-gdb` arg with the deterministic port; neither flag ⇒
-  neither element (golden-XML assertions).
+  `<on_crash>preserve`; `gdbstub` ⇒ qemu `-gdb` arg with the System's persisted allocated port,
+  and two Systems get **distinct** ports; neither flag ⇒ neither element (golden-XML assertions).
 - **install** — `_kdump_check` skipped for non-kdump methods, enforced for kdump; cmdline
-  composition appends `panic=0`/`nokaslr` per flag; bug param preserved.
-- **connect** — `_real_resolve_endpoint` returns the same port rendered into the XML; loopback
-  gate holds.
+  composition appends the panic-escalation set (`panic_on_oops=1`/`kasan.fault=panic`/`panic=0`)
+  for `preserve_on_crash` and `nokaslr` for `gdbstub`; bug param preserved.
+- **boot outcome** — a `preserve_on_crash` Run whose domain enters the crashed state mid-window
+  yields `_await_ready`'s crashed outcome (not `boot_timeout`/`readiness_failure`), the boot
+  handler transitions the System to `CRASHED`, and the console artifact is still registered; a
+  non-`preserve_on_crash` Run that crashes mid-boot still fails.
+- **connect** — `_real_resolve_endpoint` returns the System's persisted allocated port (matching
+  the rendered XML); loopback gate holds.
 - **profile** — `crashkernel` optional; `method="kdump"` against a no-`crashkernel` profile
   rejected; typed `debug` block round-trips and rejects unknown keys (`extra="forbid"`).
 - **live_vm (gated)** — one end-to-end on the real host: boot v7.0.0 with `dhash_entries=1`,
@@ -272,14 +313,15 @@ On the local host, for a System booted with `dhash_entries=1`:
 
 ## 13. Open dependencies / assumptions to verify (not built here)
 
-1. **CRASHED-state mapping.** `vmcore.fetch` admits only on `SystemState.CRASHED`. A guest panic
-   via pvpanic + `<on_crash>preserve>` must land the System in `CRASHED` through the
-   discovery/reconcile path. If reconcile does not map a pvpanic-preserved (libvirt "crashed")
-   domain to `SystemState.CRASHED`, that is an added dependency — flagged here, to be confirmed
-   before implementation, not silently assumed.
-2. **Console-as-capture artifact shape.** Registering a console log under the `vmcore.*`
-   artifact owner/key conventions (which assume a core) needs a small naming decision so
-   `vmcore.list`'s `…/vmcore-redacted` filter and the console artifact coexist cleanly.
+1. **Reaching CRASHED at all.** host_dump needs the System in `SystemState.CRASHED`, which is two
+   linked assumptions: (a) the guest actually **panics** — a bare oops or KASAN report does not, so
+   the §8 panic-escalation cmdline (`panic_on_oops=1`/`kasan.fault=panic`) is what makes pvpanic
+   fire; and (b) the reconcile/discovery path maps a pvpanic-preserved (libvirt "crashed") domain
+   to `SystemState.CRASHED`. Both are to be confirmed before implementation, not assumed.
+2. **Console artifact owner/key.** The console log is a generic `artifacts.*` object (not a
+   vmcore — §4 dispatches it off `vmcore.fetch`), produced by the boot plane. It needs an
+   owner/key/kind convention that keeps it discoverable without colliding with `vmcore.list`'s
+   `…/vmcore-redacted` filter.
 3. **host_dump build-id provenance.** A `virsh dump --memory-only` image carries the build-id in a
    `VMCOREINFO` `PT_NOTE` only if the guest exposes `vmcoreinfo` (the `fw_cfg etc/vmcoreinfo`
    path); the non-kdump boot does not guarantee it. If absent, `_read_vmcore_build_id` cannot
@@ -287,5 +329,9 @@ On the local host, for a System booted with `dhash_entries=1`:
    `observed != expected_build_id` → `configuration_error`) rejects the core. Confirm the note is
    present (enable the vmcoreinfo fw_cfg in the boot path) or define a host_dump-specific fallback
    before claiming Tier-1 → drgn/`crash` parity (ADR-0049 Decision 7).
-4. The Run→method plumbing (how the install/boot handler learns the capture method) reuses the
+4. **`virsh dump` on a frozen domain.** §7 captures with `virsh dump --memory-only` against the
+   `<on_crash>preserve>`-frozen (`VIR_DOMAIN_CRASHED`) domain, whereas the POC dumped a *running*
+   domain. Confirm `virsh dump --memory-only` accepts a crashed-state domain; if not, switch the
+   freeze to a dump-friendly state (pause-on-panic) or capture via a libvirt crash event instead.
+5. The Run→method plumbing (how the install/boot handler learns the capture method) reuses the
    build-profile carrier; the exact field is settled in the implementation plan.
