@@ -53,6 +53,11 @@ def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> N
             assert all(r.status == "succeeded" for r in results), (
                 f"Expected both results to succeed, got: {[r.status for r in results]}"
             )
+            assert validator.calls in (1, 2), (
+                "validator must run at least once and at most once per racer: "
+                f"both may validate before the lock, or the second may hit the "
+                f"idempotent short-read, but got {validator.calls} calls"
+            )
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
                     "SELECT count(*) FROM run_steps WHERE run_id = %s AND step = 'build'",
