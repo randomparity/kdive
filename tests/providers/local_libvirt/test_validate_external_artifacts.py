@@ -293,6 +293,23 @@ def _tamper_note_sh_size(blob: bytes, sh_size: int) -> bytes:
     return bytes(mutable)
 
 
+def test_oversized_section_header_table_is_build_failure() -> None:
+    # e_shentsize*e_shnum past the 16 MiB cap, but the header is within a large max_size so
+    # the per-object guard passes — the absolute SHT cap must catch it before the get_range.
+    header = bytearray(64)
+    header[0:4] = b"\x7fELF"
+    header[4] = 2  # ELFCLASS64
+    header[5] = 1  # ELFDATA2LSB
+    struct.pack_into("<Q", header, 0x28, 64)  # e_shoff
+    struct.pack_into("<H", header, 0x3A, 512)  # e_shentsize
+    struct.pack_into("<H", header, 0x3C, 0xFFFF)  # e_shnum -> 512*65535 == 32 MiB > 16 MiB
+    struct.pack_into("<H", header, 0x3E, 0)  # e_shstrndx
+    store = _FakeStore({"v": bytes(header)}, {})
+    with pytest.raises(CategorizedError) as e:
+        extract_build_id_ranged(store, "v", max_size=64 * 1024 * 1024)
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
 def test_oversized_section_size_is_build_failure() -> None:
     base = _elf_with_build_id(bytes.fromhex("deadbeef"))
     # Past the object size (max_size == len(blob)) but under the per-section cap.

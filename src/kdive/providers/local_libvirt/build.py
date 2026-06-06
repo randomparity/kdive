@@ -423,6 +423,14 @@ def extract_build_id_ranged(store: _ValidatorStore, key: str, *, max_size: int) 
         e_shstrndx = struct.unpack_from("<H", header, 0x3E)[0]
         if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
             raise _build_failure("vmlinux has no usable section header table")
+        # Cap the SHT read itself: e_shentsize*e_shnum is u16*u16 (~4 GiB worst case), so
+        # without an absolute bound a crafted ~object-sized vmlinux could force a multi-GB
+        # read here even though the per-object guard below passes. 16 MiB ~= 262k entries.
+        if e_shentsize * e_shnum > _MAX_SECTION_BYTES:
+            raise _build_failure(
+                "vmlinux section header table exceeds the readable cap",
+                sht_bytes=e_shentsize * e_shnum,
+            )
         if e_shoff + e_shentsize * e_shnum > max_size:
             raise _build_failure("vmlinux section header table extends past the object size")
         sht = store.get_range(key, start=e_shoff, length=e_shentsize * e_shnum)
