@@ -677,7 +677,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def systems_get(
         system_id: Annotated[str, Field(description="The System to render.")],
     ) -> ToolResponse:
-        """Render a System; failed maps to a failure envelope. Requires project membership."""
+        """Render a System; failed maps to a failure envelope. Requires viewer."""
         return await get_system(pool, current_context(), system_id)
 
     @app.tool(

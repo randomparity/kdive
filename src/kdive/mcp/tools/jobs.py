@@ -6,11 +6,11 @@ directly without MCP transport. A handler that raises a domain error becomes an
 error :class:`~kdive.mcp.responses.ToolResponse` (with the most specific
 ``ErrorCategory``), never an unhandled 500.
 
-Every read/cancel is **project-scoped** (#11): a job is visible only to a member of
-the project that owns it (``authorizing->>'project'``). A by-id read or cancel of a job
-in an ungranted project returns the same not-found-shaped error as a missing job, so
-existence is not leaked (matching ``systems``/``runs``/``allocations`` getters); ``list``
-returns only the caller's jobs.
+Every read/cancel is **project-scoped** (#11): a job is visible only to a caller with
+``viewer`` on the owning project (``authorizing->>'project'``), while cancellation requires
+``operator``. A by-id read or cancel of a job in an ungranted project returns the same
+not-found-shaped error as a missing job, so existence is not leaked (matching
+``systems``/``runs``/``allocations`` getters); ``list`` returns only readable jobs.
 """
 
 from __future__ import annotations
@@ -194,7 +194,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_get(
         job_id: Annotated[str, Field(description="The Job to render.")],
     ) -> ToolResponse:
-        """Render a Job by ID. Requires project membership."""
+        """Render a Job by ID. Requires viewer."""
         return await get_job(pool, current_context(), job_id)
 
     @app.tool(
@@ -208,7 +208,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             float, Field(description="Maximum seconds to wait (capped at 300).")
         ] = 30.0,
     ) -> ToolResponse:
-        """Poll a Job until terminal or the timeout elapses. Requires project membership."""
+        """Poll a Job until terminal or the timeout elapses. Requires viewer."""
         return await wait_job(pool, current_context(), job_id, timeout_s)
 
     @app.tool(
@@ -219,7 +219,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_cancel(
         job_id: Annotated[str, Field(description="The Job to cancel.")],
     ) -> ToolResponse:
-        """Cancel a Job cooperatively; error envelope if already terminal. Requires membership."""
+        """Cancel a Job cooperatively; error envelope if already terminal. Requires operator."""
         return await cancel_job(pool, current_context(), job_id)
 
     @app.tool(
@@ -232,5 +232,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
     ) -> list[ToolResponse]:
-        """List the newest Jobs visible to the caller's projects. Requires project membership."""
+        """List the newest Jobs visible to the caller's readable projects. Requires viewer."""
         return await list_jobs(pool, current_context(), limit=limit)

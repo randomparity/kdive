@@ -6,7 +6,7 @@ allocation to `released` under a per-allocation advisory lock with an `IllegalTr
 backstop; `get`/`list` render an allocation through `_envelope_for_allocation`, which maps
 the terminal `failed` state to a `failure` envelope (its value collides with the response
 envelope's failure-status set). RBAC: `request`/`release` require `operator`; reads require
-project membership. Authz denials raise (ADR-0020: no authz `ErrorCategory`).
+`viewer` on the owning project. Authz denials raise (ADR-0020: no authz `ErrorCategory`).
 """
 
 from __future__ import annotations
@@ -423,7 +423,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_get(
         allocation_id: Annotated[str, Field(description="The Allocation to render.")],
     ) -> ToolResponse:
-        """Render an Allocation; failed maps to a failure envelope. Requires project membership."""
+        """Render an Allocation; failed maps to a failure envelope. Requires viewer."""
         return await get_allocation(pool, current_context(), allocation_id)
 
     @app.tool(
@@ -473,5 +473,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
     ) -> list[ToolResponse]:
-        """List the newest Allocations for a project. Requires project membership."""
+        """List the newest Allocations for a project. Requires viewer."""
         return await list_allocations(pool, current_context(), project=project, limit=limit)

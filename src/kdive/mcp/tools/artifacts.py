@@ -2,8 +2,8 @@
 
 `artifacts.list(system_id)` and `artifacts.get(artifact_id)` surface **only** `redacted`
 rows; a `sensitive` artifact id is shaped as not-found, so the raw vmcore is never
-fetchable through the agent surface even by id. Project membership is enforced through the
-owning System.
+fetchable through the agent surface even by id. Project scope is resolved through the owning
+System; reads require ``viewer`` on that System's project.
 """
 
 from __future__ import annotations
@@ -368,7 +368,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="The System whose redacted artifacts to list.")
         ],
     ) -> list[ToolResponse]:
-        """List the redacted artifacts for a System. Requires project membership."""
+        """List the redacted artifacts for a System. Requires viewer."""
         return await artifacts_list(pool, current_context(), system_id=system_id)
 
     @app.tool(
@@ -382,7 +382,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="The redacted artifact to fetch (sensitive ids are not-found)."),
         ],
     ) -> ToolResponse:
-        """Fetch one redacted artifact by id; sensitive ids are not-found (no raw vmcore leak)."""
+        """Fetch one redacted artifact by id. Requires viewer; sensitive ids are not-found."""
         return await artifacts_get(pool, current_context(), artifact_id=artifact_id)
 
     @app.tool(

@@ -6,7 +6,7 @@ mutate the `external_refs` jsonb under a per-Investigation advisory lock, keyed 
 `(tracker, id)` natural key (link upserts, unlink removes-if-present — both idempotent).
 `get`/the mutators render through `_envelope_for_investigation` (every Investigation state
 is a non-failure status, so no failure mapping is needed). RBAC: mutations require
-`operator`; reads require project membership. Authz denials raise (ADR-0020: no authz
+`operator`; reads require `viewer` on the owning project. Authz denials raise (ADR-0020: no authz
 ErrorCategory).
 """
 
@@ -352,7 +352,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def investigations_get(
         investigation_id: Annotated[str, Field(description="The Investigation to render.")],
     ) -> ToolResponse:
-        """Render an Investigation by ID. Requires project membership."""
+        """Render an Investigation by ID. Requires viewer."""
         return await get_investigation(pool, current_context(), investigation_id)
 
     @app.tool(

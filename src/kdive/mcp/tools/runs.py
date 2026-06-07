@@ -6,7 +6,8 @@ Investigation `open -> active` on its first Run — all in one transaction holdi
 per-System then per-Investigation advisory lock (the global ALLOCATION→SYSTEM→
 INVESTIGATION→RUN order). `runs.get` renders a Run; a `failed` Run maps to a failure
 envelope carrying the Run's own `failure_category`. RBAC: `create` requires `operator`;
-`get` requires project membership. Authz denials raise (ADR-0020: no authz ErrorCategory).
+`get` requires `viewer` on the owning project. Authz denials raise (ADR-0020: no authz
+ErrorCategory).
 """
 
 from __future__ import annotations
@@ -642,7 +643,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def runs_get(
         run_id: Annotated[str, Field(description="The Run to render.")],
     ) -> ToolResponse:
-        """Render a Run; a failed Run maps to a failure envelope. Requires project membership."""
+        """Render a Run; a failed Run maps to a failure envelope. Requires viewer."""
         return await get_run(pool, current_context(), run_id)
 
     @app.tool(

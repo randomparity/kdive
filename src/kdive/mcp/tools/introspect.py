@@ -139,7 +139,7 @@ async def _live_ssh_session(
 ) -> tuple[str, str] | ToolResponse:
     """Resolve a `live` ssh DebugSession, returning its (project, transport_handle), or a failure.
 
-    Gates on UUID shape, project membership, ``operator`` role, ``live`` state, and an ``ssh``
+    Gates on UUID shape, project scope, ``operator`` role, ``live`` state, and an ``ssh``
     transport (a live `introspect.run` requires the ssh transport, not gdbstub; ADR-0039 §4).
     """
     uid = _as_uuid(session_id)

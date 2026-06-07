@@ -300,7 +300,7 @@ def register(
             Field(description="The System whose redacted vmcore artifacts to list."),
         ],
     ) -> list[ToolResponse]:
-        """List the redacted vmcore artifacts for a System. Requires project membership."""
+        """List the redacted vmcore artifacts for a System. Requires viewer."""
         return await list_vmcores(pool, current_context(), system_id=system_id)
 
     @app.tool(
