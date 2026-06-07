@@ -34,18 +34,12 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.job_context import authorizing as job_authorizing
+from kdive.mcp.job_context import context_from_job as job_context_from_job
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools import artifacts as artifacts_tools
-from kdive.mcp.tools._jobs import (
-    authorizing as job_authorizing,
-)
-from kdive.mcp.tools._jobs import (
-    context_from_job as job_context_from_job,
-)
-from kdive.mcp.tools._jobs import (
-    job_envelope,
-)
+from kdive.mcp.tools._jobs import job_envelope
 from kdive.providers.composition import (
     crash_command_rejection_reason,
     crash_postmortem_from_env,
