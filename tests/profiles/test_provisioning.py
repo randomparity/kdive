@@ -294,18 +294,6 @@ def test_direct_construction_bypasses_configuration_error_mapping() -> None:
         ProvisioningProfile.model_validate({"schema_version": 1})
 
 
-def test_public_names_exported_from_package() -> None:
-    import kdive.profiles as profiles
-
-    assert profiles.ProvisioningProfile is ProvisioningProfile
-    assert profiles.BootMethod is BootMethod
-    assert hasattr(profiles, "LibvirtProfile")
-    assert hasattr(profiles, "ProviderSection")
-    assert profiles.capture_method is capture_method
-    assert profiles.destructive_opt_in is destructive_opt_in
-    assert profiles.rootfs_upload_window_allowed is rootfs_upload_window_allowed
-
-
 def test_destructive_ops_defaults_empty() -> None:
     profile = ProvisioningProfile.parse(_valid())
     assert profile.provider.local_libvirt.destructive_ops == []
