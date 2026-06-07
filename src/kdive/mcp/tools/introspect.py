@@ -31,11 +31,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.providers.composition import (
-    ProviderRuntime,
-    live_introspector_from_env,
-    vmcore_introspector_from_env,
-)
+from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
 from kdive.providers.ports import LiveIntrospector, VmcoreIntrospector
 from kdive.security.context import RequestContext
 from kdive.security.rbac import Role, require_role
@@ -205,14 +201,9 @@ def register(
     app: FastMCP, pool: AsyncConnectionPool, *, provider_runtime: ProviderRuntime | None = None
 ) -> None:
     """Register the `introspect.from_vmcore` and `introspect.run` tools on ``app``."""
-    introspector = (
-        provider_runtime.vmcore_introspector()
-        if provider_runtime
-        else vmcore_introspector_from_env()
-    )
-    live_introspector = (
-        provider_runtime.live_introspector() if provider_runtime else live_introspector_from_env()
-    )
+    runtime = provider_runtime or build_default_provider_runtime()
+    introspector = runtime.vmcore_introspector()
+    live_introspector = runtime.live_introspector()
 
     @app.tool(
         name="introspect.from_vmcore",

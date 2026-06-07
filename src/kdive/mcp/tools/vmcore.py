@@ -47,11 +47,8 @@ from kdive.mcp.tools._common import (
 from kdive.planes.vmcore import RAW_KEY_LIKE as _RAW_KEY_LIKE
 from kdive.planes.vmcore import RAW_KEY_SQL as _RAW_KEY_SQL
 from kdive.planes.vmcore import REDACTED_LIKE as _REDACTED_LIKE
-from kdive.providers.composition import (
-    ProviderRuntime,
-    crash_command_rejection_reason,
-    crash_postmortem_from_env,
-)
+from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
+from kdive.providers.local_libvirt.retrieve import crash_command_rejection_reason
 from kdive.providers.ports import CrashPostmortem
 from kdive.security.context import RequestContext
 from kdive.security.rbac import Role, require_role
@@ -273,7 +270,8 @@ def register(
     app: FastMCP, pool: AsyncConnectionPool, *, provider_runtime: ProviderRuntime | None = None
 ) -> None:
     """Register the `vmcore.*` / `postmortem.*` tools on ``app``, bound to ``pool``."""
-    crash = provider_runtime.crash_postmortem() if provider_runtime else crash_postmortem_from_env()
+    runtime = provider_runtime or build_default_provider_runtime()
+    crash = runtime.crash_postmortem()
 
     @app.tool(
         name="vmcore.fetch",

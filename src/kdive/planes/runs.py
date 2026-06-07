@@ -30,11 +30,7 @@ from kdive.planes.runs_shared import (
     read_console_log,
 )
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.providers.composition import (
-    ProviderRuntime,
-    builder_from_env,
-    install_boot_from_env,
-)
+from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
 from kdive.providers.ports import Booter, Builder, BuildOutput, Installer
 from kdive.security import audit
 from kdive.security.redaction import Redactor
@@ -276,11 +272,10 @@ def register_handlers(
     provider_runtime: ProviderRuntime | None = None,
 ) -> None:
     """Bind the `build`/`install`/`boot` job handlers."""
-    build = builder or (provider_runtime.builder() if provider_runtime else builder_from_env())
+    runtime = provider_runtime or build_default_provider_runtime()
+    build = builder or runtime.builder()
     if installer is None or booter is None:
-        default_installer, default_booter = (
-            provider_runtime.install_boot() if provider_runtime else install_boot_from_env()
-        )
+        default_installer, default_booter = runtime.install_boot()
         install: Installer = installer or default_installer
         boot: Booter = booter or default_booter
     else:

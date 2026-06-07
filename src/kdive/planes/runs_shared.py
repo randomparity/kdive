@@ -16,10 +16,10 @@ from kdive.domain.models import Job, Run, System
 from kdive.domain.state import RunState
 from kdive.mcp.job_context import context_from_job as job_context_from_job
 from kdive.profiles.provisioning import capture_method
-from kdive.providers.composition import (
+from kdive.providers.local_libvirt.install import (
     console_log_path as _console_log_path,
 )
-from kdive.providers.composition import (
+from kdive.providers.local_libvirt.install import (
     read_console_log as _read_console_log,
 )
 from kdive.security import audit

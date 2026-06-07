@@ -40,12 +40,7 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.debug_ops import DebugEngineRuntime, register_debug_ops
-from kdive.providers.composition import (
-    ProviderRuntime,
-    attach_seam_from_env,
-    connector_from_env,
-    debug_engine_from_env,
-)
+from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
 from kdive.providers.interfaces import SystemHandle, TransportHandle
 from kdive.providers.ports import Connector
 from kdive.security import audit
@@ -392,12 +387,11 @@ def register(
     locks + the `live_vm`-gated attach seam); its seven tools register here too, so `app.py` is
     untouched. `end_session` reaps the lazy engine via the shared runtime.
     """
-    connector: Connector = (
-        provider_runtime.connector() if provider_runtime else connector_from_env()
-    )
+    provider = provider_runtime or build_default_provider_runtime()
+    connector: Connector = provider.connector()
     secret_backend: SecretBackend = secret_backend_from_env()
-    attach = provider_runtime.attach_seam() if provider_runtime else attach_seam_from_env()
-    engine = provider_runtime.debug_engine() if provider_runtime else debug_engine_from_env()
+    attach = provider.attach_seam()
+    engine = provider.debug_engine()
     runtime = DebugEngineRuntime(engine=engine, attach=attach)
 
     @app.tool(

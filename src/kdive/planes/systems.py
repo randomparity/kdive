@@ -23,7 +23,8 @@ from kdive.profiles.provisioning import (
     profile_digest,
     rootfs_upload_window_allowed,
 )
-from kdive.providers.composition import ProviderRuntime, domain_name_for, provisioner_from_env
+from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
+from kdive.providers.local_libvirt.provisioning import domain_name_for
 from kdive.providers.ports import Provisioner
 from kdive.security import audit
 from kdive.store import objectstore as _objectstore
@@ -245,9 +246,8 @@ def register_handlers(
     provider_runtime: ProviderRuntime | None = None,
 ) -> None:
     """Bind the `provision`/`teardown`/`reprovision` job handlers."""
-    prov = provisioning or (
-        provider_runtime.provisioner() if provider_runtime else provisioner_from_env()
-    )
+    runtime = provider_runtime or build_default_provider_runtime()
+    prov = provisioning or runtime.provisioner()
 
     async def _provision(conn: AsyncConnection, job: Job) -> str | None:
         return await provision_handler(conn, job, prov)

@@ -14,7 +14,8 @@ from kdive.domain.state import SystemState
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
 from kdive.mcp.job_context import context_from_job as job_context_from_job
-from kdive.providers.composition import ProviderRuntime, controller_from_env, domain_name_for
+from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
+from kdive.providers.local_libvirt.provisioning import domain_name_for
 from kdive.providers.ports import Controller
 from kdive.security import audit
 
@@ -124,7 +125,8 @@ def register_handlers(
     provider_runtime: ProviderRuntime | None = None,
 ) -> None:
     """Bind the `power`/`force_crash` job handlers; build the provider lazily from env."""
-    ctrl = control or (provider_runtime.controller() if provider_runtime else controller_from_env())
+    runtime = provider_runtime or build_default_provider_runtime()
+    ctrl = control or runtime.controller()
 
     async def _power(conn: AsyncConnection, job: Job) -> str | None:
         return await power_handler(conn, job, ctrl)

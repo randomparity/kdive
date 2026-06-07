@@ -52,9 +52,7 @@ from kdive.profiles.provisioning import (
     profile_digest,
     reject_rootfs_upload_without_window,
 )
-from kdive.providers.composition import (
-    validate_profile,
-)
+from kdive.providers.local_libvirt.provisioning import validate_profile
 from kdive.security import audit
 from kdive.security.context import RequestContext
 from kdive.security.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
