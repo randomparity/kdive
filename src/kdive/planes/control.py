@@ -15,7 +15,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
 from kdive.mcp.job_context import context_from_job as job_context_from_job
 from kdive.providers.composition import ProviderRuntime, controller_from_env, domain_name_for
-from kdive.providers.ports import Controller, PowerAction
+from kdive.providers.ports import Controller
 from kdive.security import audit
 
 TERMINAL_SYSTEM = frozenset({SystemState.TORN_DOWN, SystemState.FAILED})
@@ -29,7 +29,7 @@ async def power_handler(conn: AsyncConnection, job: Job, control: Controller) ->
     """Drive the domain's power; audit `power:{action}`; move no System state."""
     payload = load_payload(job, PowerPayload)
     system_id = UUID(payload.system_id)
-    action = PowerAction(payload.action)
+    action = payload.action
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:

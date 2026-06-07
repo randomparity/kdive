@@ -12,7 +12,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import Job, JobAuthorizing, JobKind
+from kdive.providers.ports import PowerAction
 
 
 class PayloadValidationError(ValueError):
@@ -70,11 +72,11 @@ class BuildPayload(RunPayload):
 
 
 class PowerPayload(SystemPayload):
-    action: str
+    action: PowerAction
 
 
 class CaptureVmcorePayload(SystemPayload):
-    method: str
+    method: CaptureMethod
 
 
 _PayloadModel = (

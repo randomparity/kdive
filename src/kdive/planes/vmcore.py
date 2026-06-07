@@ -119,7 +119,7 @@ async def capture_handler(conn: AsyncConnection, job: Job, retriever: Retriever)
     """Capture the System's vmcore and store the raw + redacted rows."""
     payload = load_payload(job, CaptureVmcorePayload)
     system_id = UUID(payload.system_id)
-    method = CaptureMethod(payload.method)
+    method = payload.method
     precheck = await precheck_system(conn, system_id, method)
     if isinstance(precheck, str):
         return precheck

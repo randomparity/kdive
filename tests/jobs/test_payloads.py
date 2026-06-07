@@ -7,16 +7,20 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import Job, JobKind
 from kdive.domain.state import JobState
 from kdive.jobs.payloads import (
     BuildPayload,
+    CaptureVmcorePayload,
     PayloadValidationError,
+    PowerPayload,
     ReprovisionPayload,
     dump_authorizing,
     dump_payload,
     load_payload,
 )
+from kdive.providers.ports import PowerAction
 
 
 def test_build_payload_round_trips_with_optional_cmdline() -> None:
@@ -58,6 +62,55 @@ def test_reprovision_payload_includes_profile_digest() -> None:
 
     assert decoded.system_id == str(system_id)
     assert decoded.profile_digest == "abc123"
+
+
+def test_capture_payload_dumps_json_and_loads_enum() -> None:
+    system_id = uuid4()
+    now = datetime.now(UTC)
+
+    payload = dump_payload(
+        JobKind.CAPTURE_VMCORE,
+        {"system_id": str(system_id), "method": "host_dump"},
+    )
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.CAPTURE_VMCORE,
+        payload=payload,
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key="capture",
+    )
+
+    decoded = load_payload(job, CaptureVmcorePayload)
+
+    assert payload == {"system_id": str(system_id), "method": "host_dump"}
+    assert decoded.method is CaptureMethod.HOST_DUMP
+
+
+def test_power_payload_dumps_json_and_loads_enum() -> None:
+    system_id = uuid4()
+    now = datetime.now(UTC)
+
+    payload = dump_payload(JobKind.POWER, {"system_id": str(system_id), "action": "reset"})
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.POWER,
+        payload=payload,
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key="power",
+    )
+
+    decoded = load_payload(job, PowerPayload)
+
+    assert payload == {"system_id": str(system_id), "action": "reset"}
+    assert decoded.action is PowerAction.RESET
 
 
 def test_authorizing_requires_project_at_enqueue_boundary() -> None:
