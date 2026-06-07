@@ -1174,6 +1174,16 @@ async def _record_install_step(pool: AsyncConnectionPool, run_id: str) -> None:
         )
 
 
+async def _set_expected_boot_failure(
+    pool: AsyncConnectionPool, run_id: str, pattern: str = "__d_lookup|Oops"
+) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE runs SET expected_boot_failure=%s WHERE id=%s",
+            (Jsonb({"kind": "console_crash", "pattern": pattern}), run_id),
+        )
+
+
 async def _seed_build_ledger(
     pool: AsyncConnectionPool, run_id: str, *, cmdline: str | None
 ) -> None:
@@ -1743,6 +1753,79 @@ def test_boot_handler_registers_console_even_on_failure(
                 ("%/console",),
             )
         assert n == 1
+
+    asyncio.run(_run())
+
+
+def test_boot_handler_records_expected_crash_observed(
+    migrated_url: str,
+    minio_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
+    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _set_expected_boot_failure(pool, run_id)
+            await _record_install_step(pool, run_id)
+            sid = await _system_id_of(pool, run_id)
+            (tmp_path / f"{sid}.log").write_bytes(b"Kernel panic\nRIP: __d_lookup+0x1\n")
+            job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
+            booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
+            async with pool.connection() as conn:
+                result = await runs_handlers.boot_handler(conn, job, booter)
+            assert result == run_id
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state, result FROM run_steps WHERE run_id=%s AND step='boot'",
+                    (run_id,),
+                )
+                step = await cur.fetchone()
+                await cur.execute("SELECT state FROM systems WHERE id=%s", (sid,))
+                system = await cur.fetchone()
+        assert step is not None
+        assert step["state"] == "succeeded"
+        assert step["result"]["boot_outcome"] == "expected_crash_observed"
+        assert step["result"]["expectation_matched"] is True
+        assert step["result"]["evidence_kind"] == "console"
+        assert step["result"]["evidence_artifact_id"]
+        assert system is not None
+        assert system["state"] == "crashed"
+
+    asyncio.run(_run())
+
+
+def test_boot_handler_expected_crash_requires_matching_console(
+    migrated_url: str,
+    minio_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
+    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _set_expected_boot_failure(pool, run_id, pattern="__d_lookup")
+            await _record_install_step(pool, run_id)
+            sid = await _system_id_of(pool, run_id)
+            (tmp_path / f"{sid}.log").write_bytes(b"Kernel panic\nRIP: other_symbol\n")
+            job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
+            booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as caught:
+                    await runs_handlers.boot_handler(conn, job, booter)
+            nsteps = await _count(
+                pool,
+                "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='boot'",
+                (run_id,),
+            )
+        assert caught.value.category is ErrorCategory.READINESS_FAILURE
+        assert nsteps == 0
 
     asyncio.run(_run())
 

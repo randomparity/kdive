@@ -406,6 +406,28 @@ def test_start_session_non_ready_system_is_config_error(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_start_session_rejects_expected_crash_system(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.CRASHED)
+            run_id = await _seed_run(pool, sys_id)
+            resp = await debug_tools.start_session(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                transport="gdbstub",
+                connector=_FakeConnector(),
+            )
+            count = await _session_count(pool)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "crashed"
+        assert count == 0
+
+    asyncio.run(_run())
+
+
 def test_start_session_bad_transport_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
