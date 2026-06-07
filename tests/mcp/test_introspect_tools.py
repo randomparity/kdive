@@ -23,8 +23,11 @@ from kdive.security.rbac import AuthorizationError, Role
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 
 
-def _ctx(*, projects: tuple[str, ...] = ("proj",)) -> RequestContext:
-    return RequestContext(principal="u", agent_session="s", projects=projects, roles={})
+def _ctx(
+    role: Role | None = Role.VIEWER, *, projects: tuple[str, ...] = ("proj",)
+) -> RequestContext:
+    roles = {"proj": role} if role is not None else {}
+    return RequestContext(principal="u", agent_session="s", projects=projects, roles=roles)
 
 
 @asynccontextmanager
@@ -201,6 +204,18 @@ def test_from_vmcore_cross_project_is_config_error(migrated_url: str) -> None:
                 pool, _ctx(projects=("other",)), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_from_vmcore_without_viewer_raises(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _built_run_with_core(pool)
+            with pytest.raises(AuthorizationError):
+                await introspect_tools.introspect_from_vmcore(
+                    pool, _ctx(None), run_id=run_id, introspector=_FakeIntrospector()
+                )
 
     asyncio.run(_run())
 

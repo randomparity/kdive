@@ -1,12 +1,12 @@
 """The `introspect.from_vmcore` MCP tool: offline drgn introspection of a captured vmcore.
 
-`introspect.from_vmcore(run_id)` is a synchronous, ungated offline read (ADR-0033). It
-resolves the Run's `debuginfo_ref` (the build-plane `vmlinux`), the build plane's recorded
-`build_id` (provenance), and the Run's System's captured raw `vmcore` key — the same
-resolution shape `vmcore.py`'s postmortem path uses, replicated here so this plane stays off
-`vmcore.py`. It then runs the `VmcoreIntrospector` port over the captured core and returns
-the **already-redacted** report (the port is the single redaction boundary, ADR-0033 §6) as
-a JSON string in `data["report"]`.
+`introspect.from_vmcore(run_id)` is a synchronous offline viewer read (ADR-0033). It resolves
+the Run's `debuginfo_ref` (the build-plane `vmlinux`), the build plane's recorded `build_id`
+(provenance), and the Run's System's captured raw `vmcore` key — the same resolution shape
+`vmcore.py`'s postmortem path uses, replicated here so this plane stays off `vmcore.py`. It
+then runs the `VmcoreIntrospector` port over the captured core and returns the
+**already-redacted** report (the port is the single redaction boundary, ADR-0033 §6) as a JSON
+string in `data["report"]`.
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ async def _resolve(
     run = await RUNS.get(conn, uid)
     if run is None or run.project not in ctx.projects:
         return _config_error(run_id)
+    require_role(ctx, run.project, Role.VIEWER)
     if run.debuginfo_ref is None:
         return _config_error(run_id)
     build_id = await _build_id_for_run(conn, uid)
@@ -104,9 +105,9 @@ async def introspect_from_vmcore(
 ) -> ToolResponse:
     """Run offline drgn introspection over the Run's captured core; return the redacted report.
 
-    Ungated. A Run with a null `debuginfo_ref`, no recorded `build` step, or a System with no
-    captured core is a `configuration_error`; a provenance mismatch or a drgn open/decode fault
-    surfaces as the port's typed `CategorizedError` category, never a 500.
+    Requires the viewer role. A Run with a null `debuginfo_ref`, no recorded `build` step, or a
+    System with no captured core is a `configuration_error`; a provenance mismatch or a drgn
+    open/decode fault surfaces as the port's typed `CategorizedError` category, never a 500.
     """
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
