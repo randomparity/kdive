@@ -135,3 +135,25 @@ def test_ensure_local_host_registered_bootstraps_one_idempotent_row(migrated_url
         assert rows == [("local-libvirt", "qemu:///system")]
 
     asyncio.run(_run())
+
+
+def test_ensure_local_host_registered_does_not_overwrite_an_existing_row(migrated_url: str) -> None:
+    # First-run bootstrap only: a later reconciler restart must not resurrect/retune an existing
+    # host row (resetting an operator-raised cap back to the env default).
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await ensure_local_host_registered(pool, discovery=_discovery(FakeLibvirtConn(), cap=2))
+            async with pool.connection() as conn:  # operator raises the cap out of band
+                await conn.execute(
+                    "UPDATE resources SET capabilities = "
+                    "jsonb_set(capabilities, '{concurrent_allocation_cap}', '9'::jsonb)"
+                )
+                await conn.commit()
+            # A restart whose env cap is the default 1 must NOT clobber the operator's 9.
+            await ensure_local_host_registered(pool, discovery=_discovery(FakeLibvirtConn(), cap=1))
+        async with _pg(migrated_url) as check, check.cursor() as cur:
+            await cur.execute("SELECT capabilities->>'concurrent_allocation_cap' FROM resources")
+            row = await cur.fetchone()
+        assert row is not None and row[0] == "9"
+
+    asyncio.run(_run())

@@ -24,13 +24,17 @@ An unregistered host is exactly the kind of Postgres/infra drift the reconciler 
 repair, and the reconciler is the process that owns host-facing reconciliation, so it is the
 natural bootstrap site — no new operator step, no `server`-startup coupling.
 
-### 2. It is best-effort and idempotent
+### 2. It is best-effort and **insert-if-absent**
 
-`ensure_local_host_registered` delegates to `register_local_libvirt_resource`, which upserts by
-`(kind, host_uri)`, so every startup re-asserts the row (and refreshes the advertised
-capabilities) without creating duplicates. A registration failure (libvirt unreachable, bad
-`KDIVE_LIBVIRT_ALLOCATION_CAP`) is logged and swallowed: it must not crash the reconciler, the
-other repairs still run, and the next startup retries.
+`ensure_local_host_registered` registers only when no row exists for the host. It runs on every
+startup but does **not** re-assert an existing row, so a restart never overwrites operator-tuned
+state — it cannot resurrect a drained host to `available` or reset a hand-raised
+`concurrent_allocation_cap` back to the env default. (Refreshing a host's real capacity after a
+hardware change is a separate, explicit operation, not a side effect of a restart.) A
+registration failure (libvirt unreachable, bad `KDIVE_LIBVIRT_ALLOCATION_CAP`) is logged and
+swallowed: it must not crash the reconciler, the other repairs still run, and the next startup
+retries. M0 assumes a single registrar; the `UNIQUE(kind, host_uri)` constraint is the M1
+hardening for a concurrent check-then-insert race (ADR-0023).
 
 ### 3. Scope: local-libvirt only
 

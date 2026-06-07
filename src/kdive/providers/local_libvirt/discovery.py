@@ -220,18 +220,26 @@ _LOCAL_COST_CLASS = "local"
 async def ensure_local_host_registered(
     pool: AsyncConnectionPool, *, discovery: LocalLibvirtDiscovery | None = None
 ) -> None:
-    """Register the local-libvirt host as a Resource row at startup (first-run bootstrap).
+    """Register the local-libvirt host as a Resource row **iff absent** (first-run bootstrap).
 
-    Idempotent by ``host_uri`` — delegates to :func:`register_local_libvirt_resource`, which
-    upserts — so the reconciler calls it on every startup. Without a registered host,
-    ``allocations.request`` has nothing to admit against and fails ``configuration_error``
-    until a row is seeded out of band (ADR-0059). ``discovery`` defaults to
-    :meth:`LocalLibvirtDiscovery.from_env`, which reads host capacity from libvirt; tests inject
-    a fake. Resource limits beyond the concurrent-allocation cap (max VMs, vCPUs per VM) will
-    extend the advertised ``capabilities`` here later.
+    Insert-only: the reconciler calls this on every startup, but it registers only when no row
+    exists for the host, so a restart never overwrites operator-tuned state — it cannot resurrect
+    a drained host to ``available`` or reset a hand-raised ``concurrent_allocation_cap`` to the
+    env default (ADR-0059). Without a registered host, ``allocations.request`` has nothing to
+    admit against and fails ``configuration_error`` until a row exists. ``discovery`` defaults to
+    :meth:`LocalLibvirtDiscovery.from_env`, which reads host capacity from libvirt; tests inject a
+    fake. (Single-registrar M0; the ``UNIQUE(kind, host_uri)`` constraint is the M1 hardening for
+    a concurrent-registrar race — ADR-0023.)
     """
     disc = discovery if discovery is not None else LocalLibvirtDiscovery.from_env()
     async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM resources WHERE kind = %s AND host_uri = %s",
+                (ResourceKind.LOCAL_LIBVIRT.value, disc.host_uri),
+            )
+            if await cur.fetchone() is not None:
+                return  # already registered; leave the operator's status/cap/capabilities intact
         await register_local_libvirt_resource(
             conn, disc, pool=_LOCAL_POOL, cost_class=_LOCAL_COST_CLASS
         )
