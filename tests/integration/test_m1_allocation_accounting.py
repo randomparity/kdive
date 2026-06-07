@@ -473,7 +473,7 @@ def test_c3_reconciliation_nets_to_actual_and_usage_matches(migrated_url: str) -
             assert net == actual  # billed the active interval, not credited back in full
             assert actual != estimate  # the lease did not run the full 3h window
             assert net != Decimal(0)  # the bug would have netted 0 (active_hours = 0)
-            usage = await acct_tools.usage(pool, _viewer_ctx(), project="proj")
+            usage = await acct_tools.usage_project(pool, _viewer_ctx(), project="proj")
             assert Decimal(usage.data["spent_kcu"]) == net
 
     asyncio.run(_run())
@@ -920,7 +920,7 @@ def test_c6_viewer_refused_cross_project_usage_by_investigation(migrated_url: st
             # and authorizes on it; a proj-a-only viewer is not a member, so the resolve
             # raises before any spend is read (the tenant-isolation boundary, ADR-0007 §6).
             with pytest.raises((AuthError, AuthorizationError)):
-                await acct_tools.usage(pool, viewer_a, investigation_id=str(inv_b))
+                await acct_tools.usage_investigation(pool, viewer_a, investigation_id=str(inv_b))
 
     asyncio.run(_run())
 

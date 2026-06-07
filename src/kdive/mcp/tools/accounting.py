@@ -55,7 +55,8 @@ _USAGE_OBJECT_ID = "usage"
 _BUDGET_OBJECT_ID = "budget"
 _QUOTA_OBJECT_ID = "quota"
 _REPORT_OBJECT_ID = "report"
-_REPORT_TOOL = "accounting.report"
+_REPORT_GRANTED_SET_TOOL = "accounting.report_granted_set"
+_REPORT_ALL_PROJECTS_TOOL = "accounting.report_all_projects"
 _SCOPE_GRANTED_SET = "granted-set"
 _SCOPE_ALL_PROJECTS = "all-projects"
 _GROUP_BY_PRINCIPAL = "principal"
@@ -143,78 +144,62 @@ def _estimate_response(
     )
 
 
-async def usage(
+async def usage_project(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    project: str | None = None,
-    investigation_id: str | None = None,
+    project: str,
 ) -> ToolResponse:
-    """Report a project's spend rollup; ``viewer`` of the **target** project (ADR-0007 §6).
-
-    Exactly one of ``project`` / ``investigation_id`` must be set. The ``project`` form
-    checks ``require_project`` + ``require_role(viewer)`` on it. The ``investigation_id``
-    form first resolves the investigation's owning project, then applies the identical
-    check on that project — so a viewer cannot read another project's spend through a
-    foreign ``investigation_id`` (the tenant-isolation boundary). The investigation form
-    additionally returns that investigation's exclusively-owned rollup.
-    """
+    """Report a project's spend rollup; ``viewer`` of the target project (ADR-0007 §6)."""
     with bind_context(principal=ctx.principal):
         try:
-            return await _usage_inner(pool, ctx, project=project, investigation_id=investigation_id)
+            require_project(ctx, project)
+            require_role(ctx, project, Role.VIEWER)
+            async with pool.connection() as conn:
+                rollup = await accounting_domain.usage(conn, project)
+            return _usage_response(project, rollup)
         except CategorizedError as exc:
             return ToolResponse.failure(
                 _USAGE_OBJECT_ID,
                 exc.category,
-                suggested_next_actions=["accounting.usage"],
+                suggested_next_actions=["accounting.usage_project"],
             )
 
 
-async def _usage_inner(
+async def usage_investigation(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    project: str | None,
-    investigation_id: str | None,
+    investigation_id: str,
 ) -> ToolResponse:
-    if (project is None) == (investigation_id is None):
-        raise CategorizedError(
-            "exactly one of project / investigation_id is required",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    if investigation_id is not None:
-        return await _usage_for_investigation(pool, ctx, investigation_id)
-    assert project is not None  # narrowed by the xor check above
-    require_project(ctx, project)
-    require_role(ctx, project, Role.VIEWER)
-    async with pool.connection() as conn:
-        rollup = await accounting_domain.usage(conn, project)
-    return _usage_response(project, rollup)
-
-
-async def _usage_for_investigation(
-    pool: AsyncConnectionPool, ctx: RequestContext, investigation_id: str
-) -> ToolResponse:
-    try:
-        inv_uuid = UUID(investigation_id)
-    except ValueError:
-        raise CategorizedError(
-            f"investigation_id {investigation_id!r} is not a uuid",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        ) from None
-    async with pool.connection() as conn:
-        owning_project = await _resolve_investigation_project(conn, inv_uuid)
-        if owning_project is None:
-            raise CategorizedError(
-                f"investigation {investigation_id} does not exist",
-                category=ErrorCategory.CONFIGURATION_ERROR,
+    """Report spend for one investigation plus its owning project rollup."""
+    with bind_context(principal=ctx.principal):
+        try:
+            try:
+                inv_uuid = UUID(investigation_id)
+            except ValueError:
+                raise CategorizedError(
+                    f"investigation_id {investigation_id!r} is not a uuid",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                ) from None
+            async with pool.connection() as conn:
+                owning_project = await _resolve_investigation_project(conn, inv_uuid)
+                if owning_project is None:
+                    raise CategorizedError(
+                        f"investigation {investigation_id} does not exist",
+                        category=ErrorCategory.CONFIGURATION_ERROR,
+                    )
+                # Authorize on the owning project before reading spend.
+                require_project(ctx, owning_project)
+                require_role(ctx, owning_project, Role.VIEWER)
+                rollup = await accounting_domain.usage(conn, owning_project)
+                investigation_kcu = await accounting_domain.usage_for_investigation(conn, inv_uuid)
+        except CategorizedError as exc:
+            return ToolResponse.failure(
+                _USAGE_OBJECT_ID,
+                exc.category,
+                suggested_next_actions=["accounting.usage_investigation"],
             )
-        # Authorize on the OWNING project — resolved before any spend is read, so a
-        # foreign investigation_id cannot leak another tenant's usage.
-        require_project(ctx, owning_project)
-        require_role(ctx, owning_project, Role.VIEWER)
-        rollup = await accounting_domain.usage(conn, owning_project)
-        investigation_kcu = await accounting_domain.usage_for_investigation(conn, inv_uuid)
     response = _usage_response(owning_project, rollup)
     response.data["investigation_id"] = investigation_id
     response.data["investigation_kcu"] = str(investigation_kcu)
@@ -244,51 +229,47 @@ def _usage_response(project: str, rollup: accounting_domain.ProjectUsage) -> Too
     )
 
 
-async def report(
+async def report_granted_set(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    scope: str,
     projects: list[str] | None = None,
     group_by: str | None = None,
     window: object = None,
 ) -> ToolResponse:
-    """Multi-project usage/variance rollup in two scope forms (ADR-0043 §3).
-
-    ``scope="granted-set"`` rolls up the caller's **own** member projects, authorized per
-    project by ``require_role(viewer)`` — no platform role. The default set is the projects
-    in ``ctx.projects`` carrying a role; a **named** ``projects`` arg authorizes each
-    (a non-member or role-less name *raises* ``AuthorizationError``, so a typo surfaces).
-    It is read-audited to ``platform_audit_log`` (``platform_role`` null) **iff** the
-    authorized set spans >1 project **or** ``group_by="principal"``.
-
-    ``scope="all-projects"`` rolls up every project (``DISTINCT project FROM budgets``),
-    gated ``platform_auditor`` (satisfied by ``platform_admin``) and **always**
-    read-audited. A denial by a principal holding ≥1 platform role is audited (the held
-    role recorded) then mapped to ``authorization_denied``; a denial by a project-only
-    token is not audited (the routine non-grant case).
-
-    Both forms return per-project (or per-principal) ``reserved/reconciled/variance`` plus a
-    cross-project total. Requires ``viewer`` membership (granted-set) or the platform role
-    (all-projects); a malformed ``scope`` / ``group_by`` / ``window`` fails closed.
-    """
+    """Roll up caller-authorized member projects (ADR-0043 §3)."""
     with bind_context(principal=ctx.principal):
         try:
             parsed_group_by = _parse_group_by(group_by)
             parsed_window = _parse_window(window)
         except CategorizedError as exc:
             return ToolResponse.failure(
-                _REPORT_OBJECT_ID, exc.category, suggested_next_actions=[_REPORT_TOOL]
+                _REPORT_OBJECT_ID,
+                exc.category,
+                suggested_next_actions=[_REPORT_GRANTED_SET_TOOL],
             )
-        if scope == _SCOPE_GRANTED_SET:
-            return await _report_granted_set(pool, ctx, projects, parsed_group_by, parsed_window)
-        if scope == _SCOPE_ALL_PROJECTS:
-            return await _report_all_projects(pool, ctx, parsed_group_by, parsed_window)
-        return ToolResponse.failure(
-            _REPORT_OBJECT_ID,
-            ErrorCategory.CONFIGURATION_ERROR,
-            suggested_next_actions=[_REPORT_TOOL],
-        )
+        return await _report_granted_set(pool, ctx, projects, parsed_group_by, parsed_window)
+
+
+async def report_all_projects(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    group_by: str | None = None,
+    window: object = None,
+) -> ToolResponse:
+    """Roll up all projects under the platform-auditor role (ADR-0043 §3)."""
+    with bind_context(principal=ctx.principal):
+        try:
+            parsed_group_by = _parse_group_by(group_by)
+            parsed_window = _parse_window(window)
+        except CategorizedError as exc:
+            return ToolResponse.failure(
+                _REPORT_OBJECT_ID,
+                exc.category,
+                suggested_next_actions=[_REPORT_ALL_PROJECTS_TOOL],
+            )
+        return await _report_all_projects(pool, ctx, parsed_group_by, parsed_window)
 
 
 async def _report_granted_set(
@@ -312,7 +293,7 @@ async def _report_granted_set(
                     principal=ctx.principal,
                     agent_session=ctx.agent_session,
                     event=audit.PlatformAuditEvent(
-                        tool=_REPORT_TOOL,
+                        tool=_REPORT_GRANTED_SET_TOOL,
                         scope=scope_value,
                         args=_report_args(_SCOPE_GRANTED_SET, named, group_by, window),
                         platform_role=None,
@@ -355,7 +336,7 @@ async def _report_all_projects(
         return ToolResponse.failure(
             _REPORT_OBJECT_ID,
             ErrorCategory.AUTHORIZATION_DENIED,
-            suggested_next_actions=[_REPORT_TOOL],
+            suggested_next_actions=[_REPORT_ALL_PROJECTS_TOOL],
         )
     async with pool.connection() as conn:
         targets = await _all_projects(conn)
@@ -368,7 +349,7 @@ async def _report_all_projects(
                 principal=ctx.principal,
                 agent_session=ctx.agent_session,
                 event=audit.PlatformAuditEvent(
-                    tool=_REPORT_TOOL,
+                    tool=_REPORT_ALL_PROJECTS_TOOL,
                     scope=_SCOPE_ALL_PROJECTS,
                     args=_report_args(_SCOPE_ALL_PROJECTS, None, group_by, window),
                     platform_role=_held_platform_roles(ctx),
@@ -399,7 +380,7 @@ async def _audit_all_projects_denial(
             principal=ctx.principal,
             agent_session=ctx.agent_session,
             event=audit.PlatformAuditEvent(
-                tool=_REPORT_TOOL,
+                tool=_REPORT_ALL_PROJECTS_TOOL,
                 scope=_SCOPE_ALL_PROJECTS,
                 args=_report_args(_SCOPE_ALL_PROJECTS, None, group_by, window),
                 platform_role=held,
@@ -522,7 +503,7 @@ def _report_response(
     return ToolResponse.success(
         _REPORT_OBJECT_ID,
         "ok",
-        suggested_next_actions=["accounting.usage"],
+        suggested_next_actions=["accounting.usage_project"],
         data={
             "scope": scope,
             "group_by": group_by or "",
@@ -559,12 +540,12 @@ async def set_budget(
                 Budget(project=project, limit_kcu=limit, spent_kcu=Decimal(0), updated_at=now),
             )
             await _audit_set(conn, ctx, project, "set_budget", {"limit_kcu": str(limit)})
-        return ToolResponse.success(
-            _BUDGET_OBJECT_ID,
-            "ok",
-            suggested_next_actions=["accounting.usage", "allocations.request"],
-            data={"project": project, "limit_kcu": str(limit)},
-        )
+            return ToolResponse.success(
+                _BUDGET_OBJECT_ID,
+                "ok",
+                suggested_next_actions=["accounting.usage_project", "allocations.request"],
+                data={"project": project, "limit_kcu": str(limit)},
+            )
 
 
 async def set_quota(
@@ -611,16 +592,16 @@ async def set_quota(
                     "max_concurrent_systems": str(max_concurrent_systems),
                 },
             )
-        return ToolResponse.success(
-            _QUOTA_OBJECT_ID,
-            "ok",
-            suggested_next_actions=["accounting.usage", "allocations.request"],
-            data={
-                "project": project,
-                "max_concurrent_allocations": str(max_concurrent_allocations),
-                "max_concurrent_systems": str(max_concurrent_systems),
-            },
-        )
+            return ToolResponse.success(
+                _QUOTA_OBJECT_ID,
+                "ok",
+                suggested_next_actions=["accounting.usage_project", "allocations.request"],
+                data={
+                    "project": project,
+                    "max_concurrent_allocations": str(max_concurrent_allocations),
+                    "max_concurrent_systems": str(max_concurrent_systems),
+                },
+            )
 
 
 def _parse_non_negative_kcu(value: object) -> Decimal:
@@ -698,47 +679,35 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         )
 
     @app.tool(
-        name="accounting.usage",
+        name="accounting.usage_project",
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
-    async def accounting_usage(
-        project: Annotated[
-            str | None,
-            Field(
-                description="Project to report spend for (mutually exclusive with "
-                "investigation_id)."
-            ),
-        ] = None,
-        investigation_id: Annotated[
-            str | None,
-            Field(
-                description="Investigation UUID to report spend for (mutually exclusive with "
-                "project)."
-            ),
-        ] = None,
+    async def accounting_usage_project(
+        project: Annotated[str, Field(description="Project to report spend for.")],
     ) -> ToolResponse:
-        """Return spend rollup for a project or investigation. Requires viewer."""
-        return await usage(
-            pool,
-            current_context(),
-            project=project,
-            investigation_id=investigation_id,
-        )
+        """Return spend rollup for one project. Requires viewer."""
+        return await usage_project(pool, current_context(), project=project)
 
     @app.tool(
-        name="accounting.report",
+        name="accounting.usage_investigation",
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
-    async def accounting_report(
-        scope: Annotated[
-            str,
-            Field(
-                description="Report scope: 'granted-set' (member projects) or "
-                "'all-projects' (platform_auditor only)."
-            ),
+    async def accounting_usage_investigation(
+        investigation_id: Annotated[
+            str, Field(description="Investigation UUID to report spend for.")
         ],
+    ) -> ToolResponse:
+        """Return spend rollup for one investigation and its owning project. Requires viewer."""
+        return await usage_investigation(pool, current_context(), investigation_id=investigation_id)
+
+    @app.tool(
+        name="accounting.report_granted_set",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def accounting_report_granted_set(
         projects: Annotated[
             list[str] | None,
             Field(description="Named project subset for granted-set scope; omit for all members."),
@@ -752,15 +721,28 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
         ] = None,
     ) -> ToolResponse:
-        """Multi-project usage rollup. granted-set: viewer role; all-projects: platform_auditor."""
-        return await report(
-            pool,
-            current_context(),
-            scope=scope,
-            projects=projects,
-            group_by=group_by,
-            window=window,
+        """Multi-project usage rollup over caller-authorized projects. Requires viewer."""
+        return await report_granted_set(
+            pool, current_context(), projects=projects, group_by=group_by, window=window
         )
+
+    @app.tool(
+        name="accounting.report_all_projects",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def accounting_report_all_projects(
+        group_by: Annotated[
+            str | None,
+            Field(description="Group rows by 'principal', or omit for per-project grouping."),
+        ] = None,
+        window: Annotated[
+            list[str | None] | None,
+            Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
+        ] = None,
+    ) -> ToolResponse:
+        """Multi-project usage rollup over every project. Requires platform auditor."""
+        return await report_all_projects(pool, current_context(), group_by=group_by, window=window)
 
     @app.tool(
         name="accounting.set_budget",

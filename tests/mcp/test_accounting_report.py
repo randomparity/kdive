@@ -1,4 +1,4 @@
-"""accounting.report tool tests — two scope forms + read-shape audit (ADR-0043 §3/§4).
+"""Accounting report tool tests — two explicit report forms + read-shape audit.
 
 The handler is called directly with an injected pool + RequestContext (the repo's unit
 contract). Coverage maps to the #97 acceptance bullets:
@@ -179,7 +179,7 @@ def test_all_projects_auditor_rollup_and_audit_row(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-            resp = await acct_tools.report(pool, ctx, scope="all-projects")
+            resp = await acct_tools.report_all_projects(pool, ctx)
         assert resp.status == "ok"
         assert resp.error_category is None
         by_project = {r["project"]: r for r in _rows(resp)}
@@ -191,7 +191,9 @@ def test_all_projects_auditor_rollup_and_audit_row(migrated_url: str) -> None:
         assert total["variance"] == "-28.0000"
         # Exactly one platform_audit_log row (role recorded), zero per-project audit_log.
         rows = await _platform_audit_rows(migrated_url)
-        assert rows == [("user-1", "platform_auditor", "accounting.report", "all-projects")]
+        assert rows == [
+            ("user-1", "platform_auditor", "accounting.report_all_projects", "all-projects")
+        ]
         assert await _count_audit_log(migrated_url) == 0
 
     asyncio.run(_run())
@@ -202,7 +204,7 @@ def test_all_projects_admin_satisfies_auditor_gate(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}))
-            resp = await acct_tools.report(pool, ctx, scope="all-projects")
+            resp = await acct_tools.report_all_projects(pool, ctx)
         assert resp.status == "ok"
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
@@ -218,7 +220,7 @@ def test_all_projects_project_only_token_denied_unaudited(migrated_url: str) -> 
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
-            resp = await acct_tools.report(pool, ctx, scope="all-projects")
+            resp = await acct_tools.report_all_projects(pool, ctx)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
         assert await _count_platform_audit(migrated_url) == 0
@@ -233,7 +235,7 @@ def test_all_projects_operator_denied_but_audited(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_OPERATOR}))
-            resp = await acct_tools.report(pool, ctx, scope="all-projects")
+            resp = await acct_tools.report_all_projects(pool, ctx)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
         rows = await _platform_audit_rows(migrated_url)
@@ -257,7 +259,7 @@ def test_granted_set_default_resolves_member_projects_with_role(migrated_url: st
                 roles={"proj-a": Role.VIEWER, "proj-b": Role.VIEWER},
                 projects=("proj-a", "proj-b", "proj-c"),
             )
-            resp = await acct_tools.report(pool, ctx, scope="granted-set")
+            resp = await acct_tools.report_granted_set(pool, ctx)
         assert resp.status == "ok"
         assert {r["project"] for r in _rows(resp)} == {"proj-a", "proj-b"}
         rows = await _platform_audit_rows(migrated_url)
@@ -284,7 +286,7 @@ def test_granted_set_audits_two_projects_even_when_only_one_has_spend(migrated_u
                 roles={"proj-a": Role.VIEWER, "proj-b": Role.VIEWER},
                 projects=("proj-a", "proj-b"),
             )
-            resp = await acct_tools.report(pool, ctx, scope="granted-set")
+            resp = await acct_tools.report_granted_set(pool, ctx)
         assert resp.status == "ok"
         assert {r["project"] for r in _rows(resp)} == {"proj-a"}
         assert await _count_platform_audit(migrated_url) == 1
@@ -297,7 +299,7 @@ def test_granted_set_all_roleless_memberships_empty_rollup(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(roles={}, projects=("proj-a", "proj-b"))
-            resp = await acct_tools.report(pool, ctx, scope="granted-set")
+            resp = await acct_tools.report_granted_set(pool, ctx)
         assert resp.status == "ok"
         assert _rows(resp) == []
         assert _total(resp)["reserved"] == "0.0000"
@@ -312,9 +314,7 @@ def test_granted_set_named_non_member_rejected(migrated_url: str) -> None:
             await _seed_two_projects(pool)
             ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
             try:
-                await acct_tools.report(
-                    pool, ctx, scope="granted-set", projects=["proj-a", "proj-z"]
-                )
+                await acct_tools.report_granted_set(pool, ctx, projects=["proj-a", "proj-z"])
                 raise AssertionError("expected AuthorizationError for a named non-member")
             except AuthorizationError:
                 pass
@@ -330,7 +330,7 @@ def test_granted_set_named_roleless_project_rejected(migrated_url: str) -> None:
             # proj-c is a bare membership (no role): naming it explicitly must raise.
             ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a", "proj-c"))
             try:
-                await acct_tools.report(pool, ctx, scope="granted-set", projects=["proj-c"])
+                await acct_tools.report_granted_set(pool, ctx, projects=["proj-c"])
                 raise AssertionError("expected AuthorizationError for a named role-less project")
             except AuthorizationError:
                 pass
@@ -343,7 +343,7 @@ def test_granted_set_single_project_ungrouped_unaudited(migrated_url: str) -> No
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
-            resp = await acct_tools.report(pool, ctx, scope="granted-set")
+            resp = await acct_tools.report_granted_set(pool, ctx)
         assert resp.status == "ok"
         assert {r["project"] for r in _rows(resp)} == {"proj-a"}
         assert await _count_platform_audit(migrated_url) == 0
@@ -357,7 +357,7 @@ def test_granted_set_single_project_group_by_principal_audited(migrated_url: str
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
-            resp = await acct_tools.report(pool, ctx, scope="granted-set", group_by="principal")
+            resp = await acct_tools.report_granted_set(pool, ctx, group_by="principal")
         assert resp.status == "ok"
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
@@ -371,7 +371,7 @@ def test_granted_set_zero_resolution_empty_rollup(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(roles={}, projects=())
-            resp = await acct_tools.report(pool, ctx, scope="granted-set")
+            resp = await acct_tools.report_granted_set(pool, ctx)
         assert resp.status == "ok"
         assert _rows(resp) == []
         assert await _count_platform_audit(migrated_url) == 0
@@ -397,8 +397,8 @@ def test_group_by_principal_window_totals_granted_set(migrated_url: str) -> None
                 await _ledger(conn, "proj-a", alice, "reserved", "100", outside)
             ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
             window = ["2026-01-10T00:00:00+00:00", "2026-02-01T00:00:00+00:00"]
-            resp = await acct_tools.report(
-                pool, ctx, scope="granted-set", group_by="principal", window=window
+            resp = await acct_tools.report_granted_set(
+                pool, ctx, group_by="principal", window=window
             )
         assert resp.status == "ok"
         by_principal = {r["principal"]: r for r in _rows(resp)}
@@ -413,7 +413,7 @@ def test_group_by_principal_all_projects(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-            resp = await acct_tools.report(pool, ctx, scope="all-projects", group_by="principal")
+            resp = await acct_tools.report_all_projects(pool, ctx, group_by="principal")
         assert resp.status == "ok"
         keyed = {(r["project"], r["principal"]): r for r in _rows(resp)}
         assert keyed[("proj-a", "alice")]["reserved"] == "10.0000"
@@ -425,20 +425,10 @@ def test_group_by_principal_all_projects(migrated_url: str) -> None:
 # ---- input validation -------------------------------------------------------------
 
 
-def test_invalid_scope_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await acct_tools.report(pool, _ctx(), scope="everything")
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
 def test_invalid_group_by_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await acct_tools.report(pool, _ctx(), scope="granted-set", group_by="project")
+            resp = await acct_tools.report_granted_set(pool, _ctx(), group_by="project")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
 
@@ -448,9 +438,7 @@ def test_invalid_group_by_is_config_error(migrated_url: str) -> None:
 def test_invalid_window_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await acct_tools.report(
-                pool, _ctx(), scope="granted-set", window=["not-a-date", None]
-            )
+            resp = await acct_tools.report_granted_set(pool, _ctx(), window=["not-a-date", None])
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
 
@@ -462,8 +450,8 @@ def test_naive_window_bound_is_config_error(migrated_url: str) -> None:
     # unintended zone.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await acct_tools.report(
-                pool, _ctx(), scope="granted-set", window=["2026-01-01T00:00:00", None]
+            resp = await acct_tools.report_granted_set(
+                pool, _ctx(), window=["2026-01-01T00:00:00", None]
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -475,10 +463,9 @@ def test_inverted_window_is_config_error(migrated_url: str) -> None:
     # start >= end must error rather than return a silently-empty rollup.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await acct_tools.report(
+            resp = await acct_tools.report_granted_set(
                 pool,
                 _ctx(),
-                scope="granted-set",
                 window=["2026-02-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"],
             )
         assert resp.status == "error"
@@ -494,7 +481,7 @@ def test_granted_set_explicit_empty_list_is_empty_rollup_unaudited(migrated_url:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
-            resp = await acct_tools.report(pool, ctx, scope="granted-set", projects=[])
+            resp = await acct_tools.report_granted_set(pool, ctx, projects=[])
         assert resp.status == "ok"
         assert _rows(resp) == []
         assert await _count_platform_audit(migrated_url) == 0
@@ -513,7 +500,7 @@ def test_all_projects_universe_includes_ledger_without_budget(migrated_url: str)
                 x = await _alloc(conn, res, "proj-x", "xavier")
                 await _ledger(conn, "proj-x", x, "reserved", "42")
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-            resp = await acct_tools.report(pool, ctx, scope="all-projects")
+            resp = await acct_tools.report_all_projects(pool, ctx)
         assert resp.status == "ok"
         by_project = {r["project"]: r for r in _rows(resp)}
         assert by_project["proj-x"]["reserved"] == "42.0000"
