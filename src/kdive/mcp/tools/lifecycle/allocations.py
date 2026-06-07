@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
@@ -40,6 +40,7 @@ from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByKind
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
@@ -51,33 +52,8 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
-_DEFAULT_KIND = "local-libvirt"
 _RELEASABLE = (AllocationState.GRANTED, AllocationState.ACTIVE)
 _TERMINAL = (AllocationState.RELEASED, AllocationState.EXPIRED, AllocationState.FAILED)
-
-
-class _AllocationPayloadBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class ResourceById(_AllocationPayloadBase):
-    mode: Literal["id"]
-    resource_id: str
-
-
-class ResourceByKind(_AllocationPayloadBase):
-    mode: Literal["kind"] = "kind"
-    kind: str = _DEFAULT_KIND
-
-
-type ResourceSelector = ResourceById | ResourceByKind
-
-
-class AllocationRequestPayload(_AllocationPayloadBase):
-    vcpus: int
-    memory_gb: int
-    window: object | None = None
-    resource: ResourceSelector = Field(default_factory=ResourceByKind, discriminator="mode")
 
 
 def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:
@@ -137,7 +113,7 @@ async def request_allocation(
         except ValueError:
             return _config_error(project)
         resolved_id: UUID | None = None
-        kind = _DEFAULT_KIND
+        kind = ResourceByKind().kind
         if isinstance(payload.resource, ResourceById):
             resolved_id = _as_uuid(payload.resource.resource_id)
             if resolved_id is None:

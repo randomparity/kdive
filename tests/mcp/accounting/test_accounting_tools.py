@@ -25,6 +25,12 @@ def _ctx(
     return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
 
 
+def _request(
+    *, vcpus: int = 1, memory_gb: int = 1, window: object = 1, cost_class: str = "local"
+) -> dict[str, object]:
+    return {"vcpus": vcpus, "memory_gb": memory_gb, "window": window, "cost_class": cost_class}
+
+
 @asynccontextmanager
 async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=3, open=False)
@@ -39,7 +45,7 @@ def test_estimate_returns_rate_window_product_and_breakdown(migrated_url: str) -
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=2, memory_gb=4, window=3
+                pool, _ctx(), project="proj", request=_request(vcpus=2, memory_gb=4, window=3)
             )
         # coeff(local)=1.0; rate = 1.0*(1.0*2 + 0.25*4) = 3.0; estimate = 3.0*3 = 9.0000.
         assert resp.status == "ok"
@@ -56,7 +62,7 @@ def test_estimate_fractional_window(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=0, window="1.5"
+                pool, _ctx(), project="proj", request=_request(memory_gb=0, window="1.5")
             )
         # rate = 1.0; estimate = 1.0 * 1.5 = 1.5.
         assert resp.data["estimate_kcu"] == "1.5000"
@@ -69,7 +75,7 @@ def test_estimate_never_negative_on_zero_memory(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=0, window=1
+                pool, _ctx(), project="proj", request=_request(memory_gb=0)
             )
         assert resp.status == "ok"
         assert resp.data["estimate_kcu"] == "1.0000"
@@ -81,7 +87,7 @@ def test_estimate_unknown_cost_class_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=1, window=1, cost_class="cloud"
+                pool, _ctx(), project="proj", request=_request(cost_class="cloud")
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -93,7 +99,7 @@ def test_estimate_negative_memory_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=-1, window=1
+                pool, _ctx(), project="proj", request=_request(memory_gb=-1)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -105,7 +111,7 @@ def test_estimate_zero_vcpus_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=0, memory_gb=1, window=1
+                pool, _ctx(), project="proj", request=_request(vcpus=0)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -117,7 +123,7 @@ def test_estimate_zero_window_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=1, window=0
+                pool, _ctx(), project="proj", request=_request(window=0)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -129,7 +135,7 @@ def test_estimate_negative_window_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=1, window=-3
+                pool, _ctx(), project="proj", request=_request(window=-3)
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -141,7 +147,7 @@ def test_estimate_unparseable_window_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=1, window="not-a-number"
+                pool, _ctx(), project="proj", request=_request(window="not-a-number")
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -153,7 +159,7 @@ def test_estimate_nan_window_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=1, window="NaN"
+                pool, _ctx(), project="proj", request=_request(window="NaN")
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -168,7 +174,7 @@ def test_estimate_huge_finite_window_fails_closed(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(), project="proj", vcpus=1, memory_gb=0, window="1e30"
+                pool, _ctx(), project="proj", request=_request(memory_gb=0, window="1e30")
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -180,9 +186,7 @@ def test_estimate_requires_viewer_role(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             try:
-                await acct_tools.estimate(
-                    pool, _ctx(role=None), project="proj", vcpus=1, memory_gb=1, window=1
-                )
+                await acct_tools.estimate(pool, _ctx(role=None), project="proj", request=_request())
                 raise AssertionError("expected AuthorizationError")
             except AuthorizationError:
                 pass
@@ -195,9 +199,7 @@ def test_estimate_foreign_project_refused(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             other = _ctx(projects=("elsewhere",), role=Role.VIEWER)
             try:
-                await acct_tools.estimate(
-                    pool, other, project="proj", vcpus=1, memory_gb=1, window=1
-                )
+                await acct_tools.estimate(pool, other, project="proj", request=_request())
                 raise AssertionError("expected AuthError")
             except AuthError:
                 pass
@@ -210,7 +212,7 @@ def test_estimate_operator_may_call(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await acct_tools.estimate(
-                pool, _ctx(role=Role.OPERATOR), project="proj", vcpus=1, memory_gb=1, window=1
+                pool, _ctx(role=Role.OPERATOR), project="proj", request=_request()
             )
         assert resp.status == "ok"
 

@@ -418,7 +418,10 @@ def test_c3_estimate_equals_reserved_row(migrated_url: str) -> None:
             await register_resource(pool)
             await seed_project_limits(pool, limit_kcu=1000)
             est = await acct_tools.estimate(
-                pool, _viewer_ctx(), project="proj", vcpus=2, memory_gb=4, window=3
+                pool,
+                _viewer_ctx(),
+                project="proj",
+                request={"vcpus": 2, "memory_gb": 4, "window": 3},
             )
             assert est.status != "error"
             grant = await _request_allocation(

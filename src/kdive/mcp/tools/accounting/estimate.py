@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -21,16 +21,16 @@ from kdive.domain.cost import (
     validate_size,
     validate_window,
 )
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import EstimateRequestPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security.context import RequestContext, require_project
 from kdive.security.rbac import Role, require_role
 
 _ESTIMATE_OBJECT_ID = "estimate"
-_DEFAULT_COST_CLASS = "local"
 
 
 async def estimate(
@@ -38,23 +38,28 @@ async def estimate(
     ctx: RequestContext,
     *,
     project: str,
-    vcpus: int,
-    memory_gb: int,
-    window: object,
-    cost_class: str = _DEFAULT_COST_CLASS,
+    request: EstimateRequestPayload | dict[str, Any],
 ) -> ToolResponse:
     """Price a hypothetical ``selector`` over ``window`` hours, without writing anything."""
     require_project(ctx, project)
     require_role(ctx, project, Role.VIEWER)
     with bind_context(principal=ctx.principal):
         try:
+            payload = (
+                request
+                if isinstance(request, EstimateRequestPayload)
+                else EstimateRequestPayload.model_validate(request)
+            )
             return await _estimate_inner(
                 pool,
                 project=project,
-                vcpus=vcpus,
-                memory_gb=memory_gb,
-                window=window,
-                cost_class=cost_class,
+                request=payload,
+            )
+        except ValueError:
+            return ToolResponse.failure(
+                _ESTIMATE_OBJECT_ID,
+                ErrorCategory.CONFIGURATION_ERROR,
+                suggested_next_actions=["accounting.estimate"],
             )
         except CategorizedError as exc:
             return ToolResponse.failure(
@@ -68,14 +73,13 @@ async def _estimate_inner(
     pool: AsyncConnectionPool,
     *,
     project: str,
-    vcpus: int,
-    memory_gb: int,
-    window: object,
-    cost_class: str,
+    request: EstimateRequestPayload,
 ) -> ToolResponse:
-    selector = Selector(vcpus=vcpus, memory_gb=memory_gb, cost_class=cost_class)
+    selector = Selector(
+        vcpus=request.vcpus, memory_gb=request.memory_gb, cost_class=request.cost_class
+    )
     validate_size(selector)
-    window_hours = parse_window_hours(window)
+    window_hours = parse_window_hours(request.window)
     validate_window(window_hours)
     async with pool.connection() as conn:
         coeff = await resolve_coeff(conn, selector.cost_class)
@@ -114,23 +118,15 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def accounting_estimate(
         project: Annotated[str, Field(description="Project to price the estimate for.")],
-        vcpus: Annotated[int, Field(description="Number of vCPUs in the hypothetical selector.")],
-        memory_gb: Annotated[int, Field(description="Memory in GiB in the hypothetical selector.")],
-        window: Annotated[
-            float | str,
-            Field(description="Lease duration in hours (number or decimal string)."),
+        request: Annotated[
+            dict[str, Any],
+            Field(description="Estimate request payload: size, lease window, cost class."),
         ],
-        cost_class: Annotated[
-            str, Field(description="Cost class identifier (default: local).")
-        ] = _DEFAULT_COST_CLASS,
     ) -> ToolResponse:
         """Price a hypothetical selector over a window without writing anything. Requires viewer."""
         return await estimate(
             pool,
             current_context(),
             project=project,
-            vcpus=vcpus,
-            memory_gb=memory_gb,
-            window=window,
-            cost_class=cost_class,
+            request=request,
         )
