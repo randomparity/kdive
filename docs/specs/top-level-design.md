@@ -120,7 +120,7 @@ accounting live here.
 
 - States: `requested → granted → active → releasing → released`, plus `denied`,
   `expired`, `failed`.
-- `requested → granted` passes through **admission control**: capability match,
+- `requested → granted` passes through **admission control**: selector/resource fit,
   RBAC, quota/budget check, **and a capacity check against host headroom**.
   Local-libvirt is "always-yes" only for *chargeback/reservation* — it is still
   capacity-admitted (a concurrent-System cap or resource accounting) so M0/M1 fail
@@ -201,7 +201,11 @@ A sub-object of a Run, bounded by a single boot of a single kernel.
 
 ## Provider model
 
-Providers are the extension seam. In M0/M1 the production seam is
+Providers are the extension seam.
+
+### Current status
+
+In M0/M1 the production seam is
 `ProviderRuntime`: startup builds typed ports for the active provider
 (`Provisioner`, `Builder`, `Installer`, `Controller`, `Retriever`, debug and
 introspection ports) and passes those ports to MCP tool registrars and worker
@@ -342,9 +346,9 @@ periodic **reconciler loop** in the core detects and repairs that drift:
   releases on unlink — but neither cleans up *infrastructure*, only the lock.)
 - **Dead DebugSessions** — a session row in `live` whose transport is unreachable
   is moved to `detached`.
-- **Leaked provider infra** — the reconciler reconciles against a provider
-  `list-owned` / `reconcile` capability (Discovery plane) to find, e.g., a libvirt
-  domain with no owning System row.
+- **Leaked provider infra** — the reconciler reconciles against typed provider
+  inventory/reconcile operations to find, e.g., a libvirt domain with no owning
+  System row.
 - **Idle Investigations** — an Investigation in `open` / `active` whose last Run
   was created beyond the retention window is moved to `abandoned`. Closure is
   otherwise explicit, and abandoning never cascades to its Runs.
@@ -382,7 +386,7 @@ Each gets its own spec → plan → implementation cycle.
 1. **Core platform** — domain model, Postgres schema + repository layer, object
    store, job queue + worker tier, MCP/HTTP server skeleton, OIDC/RBAC, audit.
    (Foundation; everything depends on it.)
-2. **Resource + Allocation plane** — discovery, capability model, admission
+2. **Resource + Allocation plane** — discovery, resource capability metadata, admission
    control, accounting ledger, quotas/budgets.
 3. **Provisioning plane** — provisioning-profile model + the libvirt provisioner.
 4. **Build + Install plane** — local build, kernel install onto a System.
@@ -457,13 +461,14 @@ Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
 - **M5 — PowerVM/ppc64le.** LPAR activation + HMC; second architecture.
 
 Each milestone after M0 is intended to be "add a provider package + its
-provisioning profiles," with the core and tool surface unchanged — the payoff of
-the plane/capability design. **This is a falsifiable hypothesis, not a
-guarantee**: the test is that adding the M2 remote provider touches zero lines in
-`core/*` and the MCP tool-surface modules, measured by diff scope. M0 proves the
-happy-path wiring end-to-end; it does **not** prove the seams hold under real
-leasing, secret resolution, chargeback, or hardware failure — which is exactly
-what the M1.5 fault-injection provider exists to stress first.
+provisioning profiles," with the core and tool surface unchanged — first through
+the typed `ProviderRuntime` ports, and later through a separately accepted
+multi-provider dispatch design if M2 needs one. **This is a falsifiable
+hypothesis, not a guarantee**: the test is that adding the M2 remote provider
+touches zero lines in `core/*` and the MCP tool-surface modules, measured by diff
+scope. M0 proves the happy-path wiring end-to-end; it does **not** prove the
+seams hold under real leasing, secret resolution, chargeback, or hardware failure
+— which is exactly what the M1.5 fault-injection provider exists to stress first.
 
 ## Open follow-up decisions
 
