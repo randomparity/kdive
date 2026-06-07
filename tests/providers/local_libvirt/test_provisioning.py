@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -19,6 +20,7 @@ from kdive.providers.local_libvirt.provisioning import (
     LocalLibvirtProvisioning,
     console_log_path,
     domain_name_for,
+    overlay_path,
     render_domain_xml,
     validate_profile,
 )
@@ -79,6 +81,15 @@ def test_render_declares_qcow2_disk_driver() -> None:
     assert driver is not None
     assert driver.get("name") == "qemu"
     assert driver.get("type") == "qcow2"
+
+
+def test_render_uses_disk_path_override_when_given() -> None:
+    # provision() attaches a per-System overlay, not the shared base, by passing disk_path.
+    root = _safe_fromstring(
+        render_domain_xml(_SYS, _profile(), disk_path="/var/lib/kdive/rootfs/ov.qcow2")
+    )
+    source = root.find("devices/disk/source")
+    assert source is not None and source.get("file") == "/var/lib/kdive/rootfs/ov.qcow2"
 
 
 def test_render_has_no_kernel_or_cmdline() -> None:
@@ -148,10 +159,12 @@ class _ProvConn:
     define_error: int | None = None
     lookup_error: int | None = None  # raised by lookupByName (e.g. NO_DOMAIN)
     closed: int = 0
+    recorded_xml: list[str] = field(default_factory=list)  # each defineXML payload, in order
 
     def defineXML(self, xml: str) -> _ProvDomain:
         if self.define_error is not None:
             raise libvirt_error(self.define_error)
+        self.recorded_xml.append(xml)
         name = _safe_fromstring(xml).findtext("name")
         assert name is not None
         return self.defined.setdefault(name, _ProvDomain(name))
@@ -168,8 +181,16 @@ class _ProvConn:
         return 0
 
 
-def _prov(conn: _ProvConn) -> LocalLibvirtProvisioning:
-    return LocalLibvirtProvisioning(connect=lambda: conn)
+def _prov(
+    conn: _ProvConn,
+    *,
+    make_overlay: Callable[[str, str], None] = lambda _base, _overlay: None,
+    remove_overlay: Callable[[str], None] = lambda _overlay: None,
+) -> LocalLibvirtProvisioning:
+    # The overlay seams default to no-ops so the libvirt-only tests never spawn qemu-img.
+    return LocalLibvirtProvisioning(
+        connect=lambda: conn, make_overlay=make_overlay, remove_overlay=remove_overlay
+    )
 
 
 def test_provision_defines_and_starts_returns_name() -> None:
@@ -236,6 +257,46 @@ def test_teardown_destroys_and_undefines() -> None:
     _prov(conn).teardown(name)
     assert dom.destroyed is True and dom.undefined is True
     assert conn.closed == 1  # the connection is closed after use (no leak)
+
+
+def test_provision_creates_overlay_over_base_and_attaches_it() -> None:
+    # The disk attached to the domain is a per-System overlay backed by the resolved base, so two
+    # Systems never contend for the base's qcow2 write lock and guest state does not bleed.
+    made: list[tuple[str, str]] = []
+    conn = _ProvConn()
+    _prov(conn, make_overlay=lambda base, ov: made.append((base, ov))).provision(_SYS, _profile())
+    base, overlay = made[0]
+    assert base == "oci://registry.internal/rootfs/fedora-40@sha256:abc123"  # the _VALID base
+    assert overlay == overlay_path(_SYS)
+    disk = _safe_fromstring(conn.recorded_xml[0]).find("devices/disk/source")
+    assert disk is not None and disk.get("file") == overlay  # the domain boots the overlay
+
+
+def test_teardown_removes_the_overlay() -> None:
+    removed: list[str] = []
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name)})
+    _prov(conn, remove_overlay=removed.append).teardown(name)
+    assert removed == [overlay_path(_SYS)]
+
+
+def test_teardown_removes_overlay_even_when_domain_already_gone() -> None:
+    # The overlay must be reclaimed regardless of whether the domain still exists.
+    removed: list[str] = []
+    conn = _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN)
+    _prov(conn, remove_overlay=removed.append).teardown(domain_name_for(_SYS))
+    assert removed == [overlay_path(_SYS)]
+
+
+def test_provision_create_failure_removes_the_overlay() -> None:
+    # A real start failure must reclaim the overlay it just created, mirroring the domain undefine,
+    # so a failed provision leaks neither a defined domain nor an overlay file.
+    removed: list[str] = []
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_INTERNAL_ERROR)})
+    with pytest.raises(CategorizedError):
+        _prov(conn, remove_overlay=removed.append).provision(_SYS, _profile())
+    assert removed == [overlay_path(_SYS)]
 
 
 def test_provision_failure_still_closes_connection() -> None:

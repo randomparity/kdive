@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess  # noqa: S404 - qemu-img is invoked with a fixed argv, no shell
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
@@ -45,6 +46,16 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 def console_log_path(system_id: UUID) -> Path:
     """The deterministic host path libvirt tees the System's serial console to."""
     return Path(_CONSOLE_DIR) / f"{system_id}.log"
+
+
+def overlay_path(system_id: UUID | str) -> str:
+    """The per-System qcow2 overlay path (a writable layer backed by the shared base image).
+
+    Each System boots its own overlay so two domains never contend for the read-only base's
+    qcow2 write lock and one System's writes never bleed into another (ADR-0060). Accepts the
+    raw id string too, so ``teardown`` can derive it from the domain name without a UUID parse.
+    """
+    return f"{_ROOTFS_DIR}/{system_id}-overlay.qcow2"
 
 
 # Register the kdive metadata prefix once at import (global ElementTree state) so the
@@ -205,13 +216,16 @@ def validate_profile(profile: ProvisioningProfile) -> None:
     validate_rootfs_reference(profile.provider.local_libvirt.rootfs)
 
 
-def render_domain_xml(system_id: UUID, profile: ProvisioningProfile) -> str:
+def render_domain_xml(
+    system_id: UUID, profile: ProvisioningProfile, *, disk_path: str | None = None
+) -> str:
     """Render the tagged libvirt domain XML for a System (ADR-0025 §3).
 
     Renders the domain shell, the rootfs disk, the always-on serial console with a ``<log>``
     tee to ``_CONSOLE_DIR``, and the kdive metadata tag — no ``<kernel>``/``<cmdline>`` (the
     kdump ``crashkernel=`` reservation is the install/boot plane's, #17, and is inert without a
-    ``<kernel>`` element).
+    ``<kernel>`` element). ``disk_path`` overrides the disk source: ``provision`` passes the
+    per-System overlay (ADR-0060); a bare render (tests) defaults to the resolved base image.
     """
     validate_profile(profile)
     section = profile.provider.local_libvirt
@@ -230,7 +244,11 @@ def render_domain_xml(system_id: UUID, profile: ProvisioningProfile) -> str:
     # start of the disk and fail to mount root; declare the format so /dev/vda is the ext4
     # filesystem, not the container metadata.
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")
-    rootfs_path = resolve_rootfs_path(section.rootfs, tenant="local", system_id=system_id)
+    rootfs_path = (
+        disk_path
+        if disk_path is not None
+        else resolve_rootfs_path(section.rootfs, tenant="local", system_id=system_id)
+    )
     ET.SubElement(disk, "source", file=rootfs_path)
     ET.SubElement(disk, "target", dev="vda", bus="virtio")
     serial = ET.SubElement(devices, "serial", type="pty")
@@ -244,11 +262,49 @@ def render_domain_xml(system_id: UUID, profile: ProvisioningProfile) -> str:
     return ET.tostring(domain, encoding="unicode")
 
 
+def _real_make_overlay(base: str, overlay: str) -> None:
+    """Create the per-System qcow2 overlay backed by ``base`` with ``qemu-img`` (ADR-0060).
+
+    ``-F qcow2`` names the backing format (the rootfs images are qcow2), so qemu-img does not
+    format-probe the base. A non-zero exit is a ``PROVISIONING_FAILURE`` with a redacted stderr
+    tail.
+    """
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted paths
+        ["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", base, overlay],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CategorizedError(
+            "qemu-img failed to create the per-System rootfs overlay",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"stderr": result.stderr[-2000:]},
+        )
+
+
+def _real_remove_overlay(overlay: str) -> None:
+    """Remove a System's overlay file; an absent file is the achieved post-state (idempotent)."""
+    Path(overlay).unlink(missing_ok=True)
+
+
+type MakeOverlay = Callable[[str, str], None]
+type RemoveOverlay = Callable[[str], None]
+
+
 class LocalLibvirtProvisioning:
     """The `ProvisioningPlane` for the local libvirt host (define/start, destroy/undefine)."""
 
-    def __init__(self, *, connect: Connect) -> None:
+    def __init__(
+        self,
+        *,
+        connect: Connect,
+        make_overlay: MakeOverlay = _real_make_overlay,
+        remove_overlay: RemoveOverlay = _real_remove_overlay,
+    ) -> None:
         self._connect = connect
+        self._make_overlay = make_overlay
+        self._remove_overlay = remove_overlay
 
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
@@ -269,7 +325,12 @@ class LocalLibvirtProvisioning:
         Raises:
             CategorizedError: ``PROVISIONING_FAILURE`` on any other libvirt error.
         """
-        xml = render_domain_xml(system_id, profile)
+        base = resolve_rootfs_path(
+            profile.provider.local_libvirt.rootfs, tenant="local", system_id=system_id
+        )
+        overlay = overlay_path(system_id)
+        xml = render_domain_xml(system_id, profile, disk_path=overlay)  # validates the profile
+        self._make_overlay(base, overlay)  # the domain boots this overlay, not the shared base
         try:
             conn = self._connect()
             try:
@@ -281,6 +342,8 @@ class LocalLibvirtProvisioning:
                         # Not "already running" — a real start failure. Undefine the domain we
                         # just defined so provision stays transactional (a started domain or
                         # none); swallow an undefine error so it cannot mask the start failure.
+                        # The overlay is reclaimed by the outer handler, which catches this
+                        # re-raise as well as a define failure.
                         try:
                             domain.undefine()
                         except libvirt.libvirtError:
@@ -292,6 +355,7 @@ class LocalLibvirtProvisioning:
             finally:
                 _close(conn)
         except libvirt.libvirtError as exc:
+            self._remove_overlay(overlay)  # no started domain; reclaim the overlay we created
             raise CategorizedError(
                 "libvirt failed to define/start the domain",
                 category=ErrorCategory.PROVISIONING_FAILURE,
@@ -317,6 +381,20 @@ class LocalLibvirtProvisioning:
         return self.provision(system_id, profile)
 
     def teardown(self, domain_name: str) -> None:
+        """Destroy+undefine the domain and reclaim its per-System overlay; idempotent.
+
+        The overlay is removed after the libvirt teardown — including the already-absent-domain
+        path — so a torn-down System leaves no orphaned disk (ADR-0060). An absent overlay is a
+        no-op (``unlink(missing_ok)``).
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any libvirt error other than the
+                achieved post-states.
+        """
+        self._teardown_domain(domain_name)
+        self._remove_overlay(overlay_path(domain_name.removeprefix("kdive-")))
+
+    def _teardown_domain(self, domain_name: str) -> None:
         """Destroy and undefine the domain; idempotent over an already-absent domain.
 
         "No such domain" on lookup/undefine and "not running" on destroy are the achieved
