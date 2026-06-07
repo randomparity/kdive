@@ -35,6 +35,8 @@ from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context, require_project
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import config_error as _config_error
 from kdive.security import audit
 from kdive.security.rbac import Role, require_role
 
@@ -45,17 +47,6 @@ MAX_LIST_LIMIT = 200
 _DEFAULT_KIND = "local-libvirt"
 _RELEASABLE = (AllocationState.GRANTED, AllocationState.ACTIVE)
 _TERMINAL = (AllocationState.RELEASED, AllocationState.EXPIRED, AllocationState.FAILED)
-
-
-def _config_error(object_id: str) -> ToolResponse:
-    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR)
-
-
-def _as_uuid(value: str) -> UUID | None:
-    try:
-        return UUID(value)
-    except ValueError:
-        return None
 
 
 def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:

@@ -24,7 +24,6 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
-from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -38,6 +37,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.providers.ports import (
     AttachSeam,
     GdbMiAttachment,
@@ -58,13 +58,6 @@ _EngineOp = Callable[[GdbMiAttachment], ToolResponse]
 
 def _default_transcript_dir() -> Path:
     return Path(os.environ.get(_TRANSCRIPT_DIR_ENV, _DEFAULT_TRANSCRIPT_DIR))
-
-
-def _as_uuid(value: str) -> UUID | None:
-    try:
-        return UUID(value)
-    except ValueError:
-        return None
 
 
 class DebugEngineRuntime:

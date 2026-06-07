@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Annotated
-from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -33,6 +32,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.security.rbac import AuthorizationError, Role, require_role
 
 _log = logging.getLogger(__name__)
@@ -47,13 +47,6 @@ _TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
     return ToolResponse(object_id=object_id, status="error", error_category=category.value)
-
-
-def _as_uuid(job_id: str) -> UUID | None:
-    try:
-        return UUID(job_id)
-    except ValueError:
-        return None
 
 
 def _in_scope(job: Job, ctx: RequestContext) -> bool:

@@ -37,6 +37,8 @@ from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.debug_ops import DebugEngineRuntime, register_debug_ops
 from kdive.providers.composition import ProviderRuntime, attach_seam_from_env, connector_from_env
 from kdive.providers.interfaces import SystemHandle, TransportHandle
@@ -62,17 +64,6 @@ _OCCUPIED_SQL: LiteralString = (
     "JOIN runs r ON r.id = s.run_id "
     "WHERE r.system_id = %s AND s.transport = %s AND s.state IN ('attach', 'live') LIMIT 1"
 )
-
-
-def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
-    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, data=data or {})
-
-
-def _as_uuid(value: str) -> UUID | None:
-    try:
-        return UUID(value)
-    except ValueError:
-        return None
 
 
 async def _system_for_run(conn: AsyncConnection, run: Run) -> System | None:

@@ -19,8 +19,8 @@ from kdive.domain.models import Job, JobKind, Run, Sensitivity
 from kdive.domain.state import IllegalTransition, RunState
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import BuildPayload, RunPayload, load_payload
-from kdive.mcp.job_context import context_from_job as job_context_from_job
 from kdive.mcp.tools import runs as plane
+from kdive.mcp.tools._common import context_from_job as job_context_from_job
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.composition import (
     ProviderRuntime,

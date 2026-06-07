@@ -32,11 +32,26 @@ from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
-from kdive.mcp.job_context import authorizing as job_authorizing
-from kdive.mcp.job_context import context_from_job as job_context_from_job
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._jobs import job_envelope
+from kdive.mcp.tools._common import (
+    as_uuid as _as_uuid,
+)
+from kdive.mcp.tools._common import (
+    authorizing as job_authorizing,
+)
+from kdive.mcp.tools._common import (
+    config_error as _config_error,
+)
+from kdive.mcp.tools._common import (
+    context_from_job as job_context_from_job,
+)
+from kdive.mcp.tools._common import (
+    job_envelope,
+)
+from kdive.mcp.tools._common import (
+    stale_handle as _stale_handle,
+)
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.composition import (
     ProviderRuntime,
@@ -60,23 +75,6 @@ _REPROVISION = "reprovision"
 
 def object_store_from_env() -> _objectstore.ObjectStore:
     return _objectstore.object_store_from_env()
-
-
-def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
-    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, data=data or {})
-
-
-def _stale_handle(object_id: str, *, current_status: str) -> ToolResponse:
-    return ToolResponse.failure(
-        object_id, ErrorCategory.STALE_HANDLE, data={"current_status": current_status}
-    )
-
-
-def _as_uuid(value: str) -> UUID | None:
-    try:
-        return UUID(value)
-    except ValueError:
-        return None
 
 
 def _envelope_for_system(system: System) -> ToolResponse:

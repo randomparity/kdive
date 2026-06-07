@@ -25,28 +25,18 @@ from pydantic import Field, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
-from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import ExternalRef, Investigation
 from kdive.domain.state import IllegalTransition, InvestigationState
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context, require_project
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import config_error as _config_error
 from kdive.security import audit
 from kdive.security.rbac import Role, require_role
 
 _TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
-
-
-def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
-    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, data=data or {})
-
-
-def _as_uuid(value: str) -> UUID | None:
-    try:
-        return UUID(value)
-    except ValueError:
-        return None
 
 
 def _envelope_for_investigation(inv: Investigation) -> ToolResponse:

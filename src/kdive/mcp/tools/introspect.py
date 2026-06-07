@@ -23,12 +23,14 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import DEBUG_SESSIONS, RUNS
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.domain.state import DebugSessionState
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import config_error as _config_error
 from kdive.providers.composition import (
     ProviderRuntime,
     live_introspector_from_env,
@@ -50,17 +52,6 @@ _RAW_KEY_SQL: LiteralString = (
 _RAW_KEY_LIKE = "%/vmcore-%"
 _REDACTED_LIKE = "%-redacted"
 _BUILD_STEP_SQL: LiteralString = "SELECT result FROM run_steps WHERE run_id = %s AND step = 'build'"
-
-
-def _config_error(object_id: str) -> ToolResponse:
-    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR)
-
-
-def _as_uuid(value: str) -> UUID | None:
-    try:
-        return UUID(value)
-    except ValueError:
-        return None
 
 
 class _Targets(NamedTuple):
