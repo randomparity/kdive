@@ -256,6 +256,49 @@ def test_from_env_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(builder, LocalLibvirtBuild)
 
 
+# --- real seam argv (the wrappers that only run under live_vm, but whose argv is testable) ----
+
+
+def test_real_run_make_runs_parallel_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A kernel build must parallelize across cores; an argv without -j serializes it and the
+    # build takes ~15x longer on a many-core host.
+    captured: list[list[str]] = []
+
+    def _capture(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    assert build_module._real_run_make(Path("/ws")) == 0
+    argv = captured[0]
+    assert argv[:3] == ["make", "-C", "/ws"]
+    assert any(tok.startswith("-j") and tok[2:].isdigit() and int(tok[2:]) >= 1 for tok in argv), (
+        argv
+    )
+
+
+def test_real_read_build_id_reads_merged_notes_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # vmlinux.lds merges every ELF note into one `.notes` section, so the standalone
+    # `.note.gnu.build-id` section objcopy looks for in a userspace binary is empty for a
+    # vmlinux. Dumping the wrong section yields zero bytes and turns a successful make into a
+    # spurious BUILD_FAILURE; objcopy must dump `.notes`.
+    build_id = b"\xaa\xbb\xcc\xdd\x01\x02\x03\x04"
+    note = _gnu_build_id_note(build_id)
+    captured: list[list[str]] = []
+
+    def _fake_objcopy(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        Path(argv[-1]).write_bytes(note)  # objcopy writes the dumped section to the out path
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", _fake_objcopy)
+    assert build_module._real_read_build_id(tmp_path) == build_id.hex()
+    assert "--only-section=.notes" in captured[0]
+    assert "--only-section=.note.gnu.build-id" not in captured[0]
+
+
 # --- live_vm real-make build ---------------------------------------------------------
 
 

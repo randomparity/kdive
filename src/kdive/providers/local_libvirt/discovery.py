@@ -21,6 +21,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import RESOURCES
 from kdive.domain.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY
@@ -210,3 +211,36 @@ async def register_local_libvirt_resource(
             host_uri=discovery.host_uri,
         ),
     )
+
+
+_LOCAL_POOL = "local-libvirt"
+_LOCAL_COST_CLASS = "local"
+
+
+async def ensure_local_host_registered(
+    pool: AsyncConnectionPool, *, discovery: LocalLibvirtDiscovery | None = None
+) -> None:
+    """Register the local-libvirt host as a Resource row **iff absent** (first-run bootstrap).
+
+    Insert-only: the reconciler calls this on every startup, but it registers only when no row
+    exists for the host, so a restart never overwrites operator-tuned state — it cannot resurrect
+    a drained host to ``available`` or reset a hand-raised ``concurrent_allocation_cap`` to the
+    env default (ADR-0059). Without a registered host, ``allocations.request`` has nothing to
+    admit against and fails ``configuration_error`` until a row exists. ``discovery`` defaults to
+    :meth:`LocalLibvirtDiscovery.from_env`, which reads host capacity from libvirt; tests inject a
+    fake. (Single-registrar M0; the ``UNIQUE(kind, host_uri)`` constraint is the M1 hardening for
+    a concurrent-registrar race — ADR-0023.)
+    """
+    disc = discovery if discovery is not None else LocalLibvirtDiscovery.from_env()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM resources WHERE kind = %s AND host_uri = %s",
+                (ResourceKind.LOCAL_LIBVIRT.value, disc.host_uri),
+            )
+            if await cur.fetchone() is not None:
+                return  # already registered; leave the operator's status/cap/capabilities intact
+        await register_local_libvirt_resource(
+            conn, disc, pool=_LOCAL_POOL, cost_class=_LOCAL_COST_CLASS
+        )
+        await conn.commit()
