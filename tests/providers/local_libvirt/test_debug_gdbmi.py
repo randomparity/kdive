@@ -36,6 +36,7 @@ class _FakeMiController:
         self._responses = responses or {}
         self._reads = list(reads or [])
         self.written: list[str] = []
+        self.read_timeouts: list[float] = []
         self.exited = False
 
     def write(self, command: str, *, timeout_sec: float) -> list[dict[str, object]]:
@@ -46,7 +47,7 @@ class _FakeMiController:
         )
 
     def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
-        del timeout_sec
+        self.read_timeouts.append(timeout_sec)
         return self._reads.pop(0) if self._reads else []
 
     def get_gdb_response(
@@ -335,6 +336,26 @@ def test_continue_interrupts_on_timeout(tmp_path: Path) -> None:
     stop = _engine().continue_(_attachment(controller, tmp_path), timeout_sec=1)
     assert stop.timed_out is True
     assert "-exec-interrupt" in controller.written
+
+
+def test_continue_zero_timeout_uses_interactive_wait_cap(tmp_path: Path) -> None:
+    resume_reads = int(debug_gdbmi.MAX_INTERACTIVE_WAIT_SEC / debug_gdbmi._STOP_POLL_SLICE_SEC) + 1
+    controller = _FakeMiController(
+        responses={
+            "-exec-continue": [{"type": "result", "message": "running", "payload": None}],
+            "-exec-interrupt": [{"type": "result", "message": "done", "payload": None}],
+        },
+        reads=[
+            *([] for _ in range(resume_reads)),
+            [{"type": "notify", "message": "stopped", "payload": {"reason": "signal-received"}}],
+        ],
+    )
+
+    stop = _engine().continue_(_attachment(controller, tmp_path), timeout_sec=0.0)
+
+    assert stop.timed_out is True
+    assert controller.written == ["-exec-continue", "-exec-interrupt"]
+    assert len(controller.read_timeouts) == resume_reads + 1
 
 
 def test_continue_raises_transport_stall_on_silent_link(tmp_path: Path) -> None:

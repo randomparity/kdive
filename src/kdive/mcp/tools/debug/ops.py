@@ -408,7 +408,10 @@ def register_debug_ops(
         ],
         timeout_sec: Annotated[
             float,
-            Field(description="Seconds to wait for a stop event; 0.0 waits indefinitely."),
+            Field(
+                description="Seconds to wait for a stop event; 0.0 uses the provider "
+                "interactive wait cap."
+            ),
         ] = 0.0,
     ) -> ToolResponse:
         """Resume execution on a live DebugSession and wait for a stop event. Operator only."""
