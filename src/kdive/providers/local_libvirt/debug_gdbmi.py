@@ -133,6 +133,10 @@ class StopRecord(_MiModel):
     timed_out: bool = False
 
 
+def _mi_int(value: object) -> int | None:
+    return int(value) if isinstance(value, str) and value.lstrip("-").isdigit() else None
+
+
 class BreakpointRef(_MiModel):
     """One breakpoint from ``-break-insert``/``-break-list``; ``number`` is gdb's bp id."""
 
@@ -563,15 +567,12 @@ class GdbMiEngine:
         )
 
     def _frame_from(self, payload: dict[str, Any]) -> Frame:
-        def _int(value: object) -> int | None:
-            return int(value) if isinstance(value, str) and value.lstrip("-").isdigit() else None
-
         return Frame(
-            level=_int(payload.get("level")),
+            level=_mi_int(payload.get("level")),
             func=payload.get("func") if isinstance(payload.get("func"), str) else None,
             addr=payload.get("addr") if isinstance(payload.get("addr"), str) else None,
             file=payload.get("file") if isinstance(payload.get("file"), str) else None,
-            line=_int(payload.get("line")),
+            line=_mi_int(payload.get("line")),
         )
 
     def run(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
