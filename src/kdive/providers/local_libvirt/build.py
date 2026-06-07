@@ -286,7 +286,7 @@ def _real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
                 "objcopy",
                 "-O",
                 "binary",
-                "--only-section=.note.gnu.build-id",
+                "--only-section=.notes",
                 str(workspace / "vmlinux"),
                 note_file.name,
             ],
