@@ -589,9 +589,9 @@ async def _finalize_external_build(
 
 
 async def build_handler(conn: AsyncConnection, job: Job, builder: Builder) -> str | None:
-    from kdive.mcp.tools import runs_handlers
+    from kdive.planes import runs
 
-    return await runs_handlers.build_handler(conn, job, builder)
+    return await runs.build_handler(conn, job, builder)
 
 
 # --- install + boot plane (#19, ADR-0030) --------------------------------------------
@@ -760,15 +760,15 @@ async def _enqueue_step(
 
 
 async def install_handler(conn: AsyncConnection, job: Job, installer: Installer) -> str | None:
-    from kdive.mcp.tools import runs_handlers
+    from kdive.planes import runs
 
-    return await runs_handlers.install_handler(conn, job, installer)
+    return await runs.install_handler(conn, job, installer)
 
 
 async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str | None:
-    from kdive.mcp.tools import runs_handlers
+    from kdive.planes import runs
 
-    return await runs_handlers.boot_handler(conn, job, booter)
+    return await runs.boot_handler(conn, job, booter)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -885,9 +885,9 @@ def register_handlers(
     provider_runtime: ProviderRuntime | None = None,
 ) -> None:
     """Bind the worker handlers while keeping the public app seam unchanged."""
-    from kdive.mcp.tools import runs_handlers
+    from kdive.planes import runs
 
-    runs_handlers.register_handlers(
+    runs.register_handlers(
         registry,
         builder=builder,
         installer=installer,

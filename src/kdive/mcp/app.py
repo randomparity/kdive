@@ -22,16 +22,17 @@ from kdive.mcp.tools import (
     accounting,
     allocations,
     artifacts,
-    control,
     debug,
     introspect,
     investigations,
     jobs,
     resources,
-    runs,
-    systems,
-    vmcore,
 )
+from kdive.mcp.tools import control as control_tools
+from kdive.mcp.tools import runs as runs_tools
+from kdive.mcp.tools import systems as systems_tools
+from kdive.mcp.tools import vmcore as vmcore_tools
+from kdive.planes import control, runs, systems, vmcore
 from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
 
 type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool, ProviderRuntime], None]
@@ -51,12 +52,12 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _plain(resources.register),
     _plain(accounting.register),
     _plain(allocations.register),
-    _plain(systems.register),
+    _plain(systems_tools.register),
     _plain(investigations.register),
-    _plain(runs.register),
-    _plain(control.register),
+    _plain(runs_tools.register),
+    _plain(control_tools.register),
     _plain(artifacts.register),
-    lambda app, pool, runtime: vmcore.register(app, pool, provider_runtime=runtime),
+    lambda app, pool, runtime: vmcore_tools.register(app, pool, provider_runtime=runtime),
     lambda app, pool, runtime: debug.register(app, pool, provider_runtime=runtime),
     lambda app, pool, runtime: introspect.register(app, pool, provider_runtime=runtime),
 )

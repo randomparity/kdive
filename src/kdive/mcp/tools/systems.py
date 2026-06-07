@@ -488,9 +488,9 @@ async def _define_locked(
 async def provision_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
-    from kdive.mcp.tools import systems_handlers
+    from kdive.planes import systems
 
-    return await systems_handlers.provision_handler(conn, job, provisioning)
+    return await systems.provision_handler(conn, job, provisioning)
 
 
 def _reprovision_opt_in(profile: ProvisioningProfile) -> bool:
@@ -627,9 +627,9 @@ async def _admit_reprovision(
 async def reprovision_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
-    from kdive.mcp.tools import systems_handlers
+    from kdive.planes import systems
 
-    return await systems_handlers.reprovision_handler(conn, job, provisioning)
+    return await systems.reprovision_handler(conn, job, provisioning)
 
 
 async def teardown_system(
@@ -672,9 +672,9 @@ async def teardown_system(
 async def teardown_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
-    from kdive.mcp.tools import systems_handlers
+    from kdive.planes import systems
 
-    return await systems_handlers.teardown_handler(conn, job, provisioning)
+    return await systems.teardown_handler(conn, job, provisioning)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -772,8 +772,8 @@ def register_handlers(
     provider_runtime: ProviderRuntime | None = None,
 ) -> None:
     """Bind the worker handlers while keeping the public app seam unchanged."""
-    from kdive.mcp.tools import systems_handlers
+    from kdive.planes import systems
 
-    systems_handlers.register_handlers(
+    systems.register_handlers(
         registry, provisioning=provisioning, provider_runtime=provider_runtime
     )
