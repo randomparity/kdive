@@ -11,7 +11,7 @@ connection, and all assume READ COMMITTED (psycopg's default).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 from uuid import UUID
@@ -147,7 +147,12 @@ async def complete(
 
 
 async def fail(
-    conn: AsyncConnection, job: Job, error_category: ErrorCategory, *, terminal: bool = False
+    conn: AsyncConnection,
+    job: Job,
+    error_category: ErrorCategory,
+    *,
+    terminal: bool = False,
+    failure_context: Mapping[str, str] | None = None,
 ) -> Job:
     """Dead-letter or requeue a claimed ``job``, fenced on its ``worker_id``.
 
@@ -162,14 +167,19 @@ async def fail(
     """
     if terminal or job.attempt >= job.max_attempts:
         query = (
-            "UPDATE jobs SET state = 'failed', error_category = %s "
+            "UPDATE jobs SET state = 'failed', error_category = %s, failure_context = %s "
             "WHERE id = %s AND worker_id = %s AND state = 'running' RETURNING *"
         )
-        params: tuple[object, ...] = (error_category, job.id, job.worker_id)
+        params: tuple[object, ...] = (
+            error_category,
+            Jsonb(dict(failure_context or {})),
+            job.id,
+            job.worker_id,
+        )
     else:
         query = (
             "UPDATE jobs SET state = 'queued', worker_id = NULL, "
-            "    lease_expires_at = NULL, heartbeat_at = NULL "
+            "    lease_expires_at = NULL, heartbeat_at = NULL, failure_context = '{}'::jsonb "
             "WHERE id = %s AND worker_id = %s AND state = 'running' RETURNING *"
         )
         params = (job.id, job.worker_id)

@@ -20,6 +20,7 @@ def _job(
     *,
     result_ref: str | None = None,
     error_category: ErrorCategory | None = None,
+    failure_context: dict[str, str] | None = None,
 ) -> Job:
     return Job(
         id=uuid4(),
@@ -31,6 +32,7 @@ def _job(
         max_attempts=3,
         result_ref=result_ref,
         error_category=error_category,
+        failure_context=failure_context or {},
         authorizing={"principal": "p"},
         dedup_key=str(uuid4()),
     )
@@ -61,6 +63,20 @@ def test_from_job_failed_carries_category() -> None:
     assert resp.status == "failed"
     assert resp.error_category == "build_failure"
     assert resp.suggested_next_actions == ["jobs.get"]
+
+
+def test_from_job_failed_exposes_failure_context() -> None:
+    job = _job(
+        JobState.FAILED,
+        error_category=ErrorCategory.BUILD_FAILURE,
+        failure_context={"failure_message": "make failed", "failure_detail_run_id": "r1"},
+    )
+    resp = ToolResponse.from_job(job)
+    assert resp.data == {
+        "kind": "build",
+        "failure_message": "make failed",
+        "failure_detail_run_id": "r1",
+    }
 
 
 def test_from_job_canceled_has_no_actions() -> None:

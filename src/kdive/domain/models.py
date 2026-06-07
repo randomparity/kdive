@@ -207,6 +207,7 @@ class Job(DomainModel):
     heartbeat_at: datetime | None = None
     result_ref: str | None = None
     error_category: ErrorCategory | None = None
+    failure_context: dict[str, str] = Field(default_factory=dict)
     authorizing: dict[str, Any]
     dedup_key: str
 
