@@ -33,7 +33,12 @@ from kdive.domain.models import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports import Builder, BuildOutput, ValidatedUpload
 from kdive.security.redaction import Redactor
-from kdive.store.objectstore import HeadResult, StoredArtifact, object_store_from_env
+from kdive.store.objectstore import (
+    ArtifactWriteRequest,
+    HeadResult,
+    StoredArtifact,
+    object_store_from_env,
+)
 
 _WORKSPACE_ENV = "KDIVE_BUILD_WORKSPACE"
 _KERNEL_SRC_ENV = "KDIVE_KERNEL_SRC"
@@ -65,17 +70,7 @@ _REQUIRED_CONFIG: tuple[tuple[str, ...], ...] = (
 
 
 class _StorePort(Protocol):
-    def put_artifact(
-        self,
-        tenant: str,
-        kind: str,
-        object_id: str,
-        name: str,
-        *,
-        data: bytes,
-        sensitivity: Sensitivity,
-        retention_class: str,
-    ) -> StoredArtifact: ...
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
 
 
 def parse_gnu_build_id(notes: bytes) -> str:
@@ -215,13 +210,15 @@ class LocalLibvirtBuild:
         if self._store is None:
             self._store = self._store_factory()
         return self._store.put_artifact(
-            self._tenant,
-            "runs",
-            str(run_id),
-            name,
-            data=data,
-            sensitivity=Sensitivity.SENSITIVE,
-            retention_class=_RETENTION_CLASS,
+            ArtifactWriteRequest(
+                tenant=self._tenant,
+                owner_kind="runs",
+                owner_id=str(run_id),
+                name=name,
+                data=data,
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class=_RETENTION_CLASS,
+            )
         )
 
 

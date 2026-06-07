@@ -26,7 +26,7 @@ from kdive.providers.local_libvirt.build import (
     _sync_tree,
     parse_gnu_build_id,
 )
-from kdive.store.objectstore import StoredArtifact
+from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
 _TENANT = "proj"
@@ -76,25 +76,17 @@ class _FakeStore:
     puts: list[tuple[str, str, str, Sensitivity]] = field(default_factory=list)
     fail_on: str | None = None  # raise INFRASTRUCTURE_FAILURE on this name
 
-    def put_artifact(
-        self,
-        tenant: str,
-        kind: str,
-        object_id: str,
-        name: str,
-        *,
-        data: bytes,
-        sensitivity: Sensitivity,
-        retention_class: str,
-    ) -> StoredArtifact:
-        if self.fail_on == name:
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+        if self.fail_on == request.name:
             raise CategorizedError(
                 "synthetic put failure",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
-        key = f"{tenant}/{kind}/{object_id}/{name}"
-        self.puts.append((key, name, kind, sensitivity))
-        return StoredArtifact(key, "etag-" + name, sensitivity, retention_class)
+        key = request.key()
+        self.puts.append((key, request.name, request.owner_kind, request.sensitivity))
+        return StoredArtifact(
+            key, "etag-" + request.name, request.sensitivity, request.retention_class
+        )
 
 
 @dataclass

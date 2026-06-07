@@ -34,7 +34,11 @@ from kdive.providers.composition import ProviderRuntime, build_default_provider_
 from kdive.providers.ports import Booter, Builder, BuildOutput, Installer
 from kdive.security import audit
 from kdive.security.redaction import Redactor
-from kdive.store.objectstore import object_store_from_env, register_artifact_row
+from kdive.store.objectstore import (
+    ArtifactWriteRequest,
+    object_store_from_env,
+    register_artifact_row,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -234,13 +238,15 @@ async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str |
                 redacted = Redactor().redact_text(raw.decode("utf-8", "replace")).encode("utf-8")
                 stored = await asyncio.to_thread(
                     lambda: object_store_from_env().put_artifact(
-                        "local",
-                        "systems",
-                        str(run.system_id),
-                        "console",
-                        data=redacted,
-                        sensitivity=Sensitivity.REDACTED,
-                        retention_class="console",
+                        ArtifactWriteRequest(
+                            tenant="local",
+                            owner_kind="systems",
+                            owner_id=str(run.system_id),
+                            name="console",
+                            data=redacted,
+                            sensitivity=Sensitivity.REDACTED,
+                            retention_class="console",
+                        )
                     )
                 )
                 async with conn.transaction():

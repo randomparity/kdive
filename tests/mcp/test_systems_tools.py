@@ -32,7 +32,7 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools import systems as systems_tools
 from kdive.planes import systems as systems_handlers
 from kdive.security.rbac import AuthorizationError, Role
-from kdive.store.objectstore import ObjectStore, artifact_key
+from kdive.store.objectstore import ArtifactWriteRequest, ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     TEST_DT as _DT,
 )
@@ -682,13 +682,15 @@ def test_provision_handler_commits_uploaded_rootfs_artifact(
             )
             key = artifact_key("local", "systems", sys_id, "rootfs")
             minio_store.put_artifact(
-                "local",
-                "systems",
-                sys_id,
-                "rootfs",
-                data=b"rootfs-image-bytes",
-                sensitivity=Sensitivity.SENSITIVE,
-                retention_class="rootfs",
+                ArtifactWriteRequest(
+                    tenant="local",
+                    owner_kind="systems",
+                    owner_id=sys_id,
+                    name="rootfs",
+                    data=b"rootfs-image-bytes",
+                    sensitivity=Sensitivity.SENSITIVE,
+                    retention_class="rootfs",
+                )
             )
             async with pool.connection() as conn:
                 await upload_manifest.replace_manifest(

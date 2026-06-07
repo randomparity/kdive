@@ -31,7 +31,7 @@ from kdive.providers.ports import (
     Retriever,
 )
 from kdive.security.redaction import Redactor
-from kdive.store.objectstore import StoredArtifact, object_store_from_env
+from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact, object_store_from_env
 
 # Pipe-to-shell, redirection, command substitution, chaining, backgrounding.
 _DENY_CHARS = ("|", ">", "<", "`", "$(", ";", "&")
@@ -64,17 +64,7 @@ def crash_command_rejection_reason(command: str, allowlist: frozenset[str]) -> s
 
 
 class _StorePort(Protocol):
-    def put_artifact(
-        self,
-        tenant: str,
-        kind: str,
-        object_id: str,
-        name: str,
-        *,
-        data: bytes,
-        sensitivity: Sensitivity,
-        retention_class: str,
-    ) -> StoredArtifact: ...
+    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
 
 
 type _WaitForVmcore = Callable[[UUID], bytes | None]
@@ -155,13 +145,15 @@ class LocalLibvirtRetrieve:
         if self._store is None:
             self._store = self._store_factory()
         return self._store.put_artifact(
-            self._tenant,
-            "systems",
-            str(system_id),
-            name,
-            data=data,
-            sensitivity=sens,
-            retention_class=_RETENTION_CLASS,
+            ArtifactWriteRequest(
+                tenant=self._tenant,
+                owner_kind="systems",
+                owner_id=str(system_id),
+                name=name,
+                data=data,
+                sensitivity=sens,
+                retention_class=_RETENTION_CLASS,
+            )
         )
 
     def run_crash_postmortem(

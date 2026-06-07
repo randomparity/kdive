@@ -17,7 +17,7 @@ from kdive.domain.models import Sensitivity
 from kdive.mcp.tools import artifacts as artifacts_tools
 from kdive.mcp.tools import systems as systems_tools
 from kdive.planes import systems as systems_handlers
-from kdive.store.objectstore import ObjectStore, artifact_key
+from kdive.store.objectstore import ArtifactWriteRequest, ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     FakeProvisioning as _FakeProvisioning,
 )
@@ -66,13 +66,15 @@ def test_define_upload_provision_reaches_ready_with_committed_rootfs(
 
             # 3. the agent PUTs the qcow2 (staged directly into the store for the test)
             minio_store.put_artifact(
-                "local",
-                "systems",
-                sys_id,
-                "rootfs",
-                data=b"rootfs-image-bytes",
-                sensitivity=Sensitivity.SENSITIVE,
-                retention_class="rootfs",
+                ArtifactWriteRequest(
+                    tenant="local",
+                    owner_kind="systems",
+                    owner_id=sys_id,
+                    name="rootfs",
+                    data=b"rootfs-image-bytes",
+                    sensitivity=Sensitivity.SENSITIVE,
+                    retention_class="rootfs",
+                )
             )
 
             # 4. provision admits the DEFINED System (no profile re-passed)
