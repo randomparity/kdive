@@ -162,6 +162,7 @@ async def get_allocation(
         # A row in an ungranted project is indistinguishable from not-found (no leak).
         if alloc is None or alloc.project not in ctx.projects:
             return _config_error(allocation_id)
+        require_role(ctx, alloc.project, Role.VIEWER)
         return _envelope_for_allocation(alloc)
 
 
@@ -322,6 +323,7 @@ async def list_allocations(
 ) -> list[ToolResponse]:
     """Return the newest allocations for ``project``, each as an envelope."""
     require_project(ctx, project)
+    require_role(ctx, project, Role.VIEWER)
     capped = max(1, min(limit, MAX_LIST_LIMIT))
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

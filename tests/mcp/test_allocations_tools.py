@@ -174,6 +174,17 @@ def test_get_own_allocation_returns_state(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_get_allocation_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            req = await _request(pool, _ctx())
+            with pytest.raises(AuthorizationError):
+                await alloc_tools.get_allocation(pool, _ctx(role=None), req.object_id)
+
+    asyncio.run(_run())
+
+
 def test_get_other_project_allocation_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -288,5 +299,16 @@ def test_list_returns_project_allocations(migrated_url: str) -> None:
             responses = await alloc_tools.list_allocations(pool, _ctx(), project="proj", limit=50)
         assert len(responses) == 2
         assert all(r.status == "granted" for r in responses)
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=1)
+            await _request(pool, _ctx())
+            with pytest.raises(AuthorizationError):
+                await alloc_tools.list_allocations(pool, _ctx(role=None), project="proj", limit=50)
 
     asyncio.run(_run())

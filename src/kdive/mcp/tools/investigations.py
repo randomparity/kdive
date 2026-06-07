@@ -132,6 +132,7 @@ async def get_investigation(
             inv = await INVESTIGATIONS.get(conn, uid)
         if inv is None or inv.project not in ctx.projects:
             return _config_error(investigation_id)
+        require_role(ctx, inv.project, Role.VIEWER)
         return _envelope_for_investigation(inv)
 
 

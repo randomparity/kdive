@@ -366,6 +366,19 @@ def test_list_vmcores_redacted_only(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_list_vmcores_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            job = await _enqueue_capture(pool, sys_id)
+            async with pool.connection() as conn:
+                await vmcore_tools.capture_handler(conn, job, _FakeRetriever(sys_id))
+            with pytest.raises(AuthorizationError):
+                await vmcore_tools.list_vmcores(pool, _ctx(role=None), system_id=sys_id)
+
+    asyncio.run(_run())
+
+
 # --- postmortem.crash ----------------------------------------------------------------------
 
 
@@ -406,6 +419,18 @@ def test_postmortem_crash_runs_and_redacts(migrated_url: str) -> None:
         assert "hunter2" not in resp.data["transcript"]
         assert "[REDACTED]" in resp.data["transcript"]
         assert crash.kwargs["expected_build_id"] == "deadbeef"
+
+    asyncio.run(_run())
+
+
+def test_postmortem_crash_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _crashed_with_built_run(pool)
+            with pytest.raises(AuthorizationError):
+                await vmcore_tools.postmortem_crash(
+                    pool, _ctx(role=None), run_id=run_id, commands=["log"], crash=_FakeCrash()
+                )
 
     asyncio.run(_run())
 

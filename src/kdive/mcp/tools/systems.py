@@ -111,6 +111,7 @@ async def get_system(
             system = await SYSTEMS.get(conn, uid)
         if system is None or system.project not in ctx.projects:
             return _config_error(system_id)
+        require_role(ctx, system.project, Role.VIEWER)
         return _envelope_for_system(system)
 
 

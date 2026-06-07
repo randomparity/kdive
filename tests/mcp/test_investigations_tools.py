@@ -117,6 +117,16 @@ def test_get_own_investigation_renders_state(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_get_investigation_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            with pytest.raises(AuthorizationError):
+                await inv_tools.get_investigation(pool, _ctx(role=None), opened.object_id)
+
+    asyncio.run(_run())
+
+
 def test_get_cross_project_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

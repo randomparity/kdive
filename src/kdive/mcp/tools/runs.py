@@ -131,6 +131,7 @@ async def get_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -
             run = await RUNS.get(conn, uid)
             if run is None or run.project not in ctx.projects:
                 return _config_error(run_id)
+            require_role(ctx, run.project, Role.VIEWER)
             system = await SYSTEMS.get(conn, run.system_id)
         required = (
             system_required_cmdline(_install_method_for(system)) if system is not None else None

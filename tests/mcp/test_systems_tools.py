@@ -163,6 +163,17 @@ def test_get_own_system_returns_state(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_get_system_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            with pytest.raises(AuthorizationError):
+                await systems_tools.get_system(pool, _ctx(role=None), sys_id)
+
+    asyncio.run(_run())
+
+
 def test_get_failed_system_renders_failure(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

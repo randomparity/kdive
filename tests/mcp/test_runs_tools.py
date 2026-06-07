@@ -181,6 +181,16 @@ def test_get_created_run(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_get_run_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+            with pytest.raises(AuthorizationError):
+                await runs_tools.get_run(pool, _ctx(role=None), run_id)
+
+    asyncio.run(_run())
+
+
 def test_get_failed_run_renders_failure_category(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

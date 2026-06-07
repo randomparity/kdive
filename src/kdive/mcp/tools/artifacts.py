@@ -183,6 +183,7 @@ async def artifacts_list(
             owner = await cur.fetchone()
             if owner is None or owner["project"] not in ctx.projects:
                 return []
+            require_role(ctx, owner["project"], Role.VIEWER)
             await cur.execute(_LIST_SQL, (uid,))
             rows = await cur.fetchall()
     responses: list[ToolResponse] = []
@@ -222,6 +223,7 @@ async def artifacts_get(
             owner = await cur.fetchone()
         if owner is None or owner["project"] not in ctx.projects:
             return _config_error(artifact_id)
+        require_role(ctx, owner["project"], Role.VIEWER)
         return ToolResponse.success(
             artifact_id,
             "available",

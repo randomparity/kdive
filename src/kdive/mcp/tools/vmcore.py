@@ -328,6 +328,7 @@ async def _resolve_postmortem(
     run = await RUNS.get(conn, uid)
     if run is None or run.project not in ctx.projects:
         return _config_error(run_id)
+    require_role(ctx, run.project, Role.VIEWER)
     if run.debuginfo_ref is None:
         return _config_error(run_id)
     build_id = await _build_id_for_run(conn, uid)

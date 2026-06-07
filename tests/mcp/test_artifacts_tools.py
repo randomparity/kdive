@@ -6,19 +6,21 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools import artifacts as artifacts_tools
-from kdive.security.rbac import Role
+from kdive.security.rbac import AuthorizationError, Role
 from tests.mcp._seed import seed_crashed_system
 
 
-def _ctx(projects: tuple[str, ...] = ("proj",)) -> RequestContext:
-    return RequestContext(
-        principal="u", agent_session="s", projects=projects, roles={"proj": Role.OPERATOR}
-    )
+def _ctx(
+    role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
+) -> RequestContext:
+    roles = {"proj": role} if role is not None else {}
+    return RequestContext(principal="u", agent_session="s", projects=projects, roles=roles)
 
 
 @asynccontextmanager
@@ -62,12 +64,32 @@ def test_artifacts_list_returns_redacted_only(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_artifacts_list_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, _, _ = await _seed_system_with_artifacts(pool)
+            with pytest.raises(AuthorizationError):
+                await artifacts_tools.artifacts_list(pool, _ctx(role=None), system_id=sys_id)
+
+    asyncio.run(_run())
+
+
 def test_artifacts_get_redacted_returns_ref(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             resp = await artifacts_tools.artifacts_get(pool, _ctx(), artifact_id=red_id)
         assert resp.status != "error" and resp.refs
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            with pytest.raises(AuthorizationError):
+                await artifacts_tools.artifacts_get(pool, _ctx(role=None), artifact_id=red_id)
 
     asyncio.run(_run())
 
