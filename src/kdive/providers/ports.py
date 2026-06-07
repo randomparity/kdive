@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict
+
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
@@ -68,6 +70,43 @@ class IntrospectOutput(NamedTuple):
     modules: dict[str, object]
     sysinfo: dict[str, object]
     truncated: bool
+
+
+class _ProviderModel(BaseModel):
+    """Frozen wire shape for provider-returned records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GdbFrame(_ProviderModel):
+    """One stack frame from a gdb/MI stop record."""
+
+    level: int | None = None
+    func: str | None = None
+    addr: str | None = None
+    file: str | None = None
+    line: int | None = None
+
+
+class GdbStopRecord(_ProviderModel):
+    """A parsed gdb/MI stop record."""
+
+    reason: str | None = None
+    bkptno: str | None = None
+    stopped_thread: str | None = None
+    frame: GdbFrame | None = None
+    timed_out: bool = False
+
+
+class GdbBreakpointRef(_ProviderModel):
+    """One gdb/MI breakpoint reference."""
+
+    number: str
+    type: str | None = None
+    addr: str | None = None
+    func: str | None = None
+    what: str | None = None
+    enabled: bool | None = None
 
 
 class TransportHandleData(NamedTuple):
@@ -199,13 +238,13 @@ class GdbMiAttachment(Protocol):
 class GdbMiEngine(Protocol):
     """Debug operation engine over a live gdb/MI attachment."""
 
-    def set_breakpoint(self, attachment: Any, location: str) -> Any: ...
+    def set_breakpoint(self, attachment: Any, location: str) -> GdbBreakpointRef: ...
     def clear_breakpoint(self, attachment: Any, number: str) -> None: ...
-    def list_breakpoints(self, attachment: Any) -> list[Any]: ...
+    def list_breakpoints(self, attachment: Any) -> list[GdbBreakpointRef]: ...
     def read_memory(self, attachment: Any, *, address: int, byte_count: int) -> bytes: ...
     def read_registers(self, attachment: Any, register_names: list[str]) -> dict[str, object]: ...
-    def continue_(self, attachment: Any, *, timeout_sec: float) -> Any: ...
-    def interrupt(self, attachment: Any) -> Any: ...
+    def continue_(self, attachment: Any, *, timeout_sec: float) -> GdbStopRecord: ...
+    def interrupt(self, attachment: Any) -> GdbStopRecord | None: ...
 
 
 class GdbMiSessionRegistry:

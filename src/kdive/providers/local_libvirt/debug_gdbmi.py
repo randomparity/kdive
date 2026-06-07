@@ -38,6 +38,7 @@ from pygdbmi.constants import GdbTimeoutError
 from pygdbmi.gdbmiparser import parse_response
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports import GdbBreakpointRef, GdbFrame, GdbStopRecord
 from kdive.security.redaction import Redactor
 
 MAX_MEMORY_READ_BYTES = 4096
@@ -108,44 +109,8 @@ class MiRecord(_MiModel):
         return next((record for record in records if record.type == "result"), None)
 
 
-class Frame(_MiModel):
-    """One stack frame from a gdb/MI ``frame={...}`` payload (optional fields gdb may omit)."""
-
-    level: int | None = None
-    func: str | None = None
-    addr: str | None = None
-    file: str | None = None
-    line: int | None = None
-
-
-class StopRecord(_MiModel):
-    """A parsed ``*stopped`` async record.
-
-    ``reason`` is gdb's stop reason (``breakpoint-hit``, ``end-stepping-range``, ``exited``,
-    ...); ``frame`` is the stop frame. ``timed_out`` is True when the wait expired and the
-    handler had to ``-exec-interrupt``.
-    """
-
-    reason: str | None = None
-    bkptno: str | None = None
-    stopped_thread: str | None = None
-    frame: Frame | None = None
-    timed_out: bool = False
-
-
 def _mi_int(value: object) -> int | None:
     return int(value) if isinstance(value, str) and value.lstrip("-").isdigit() else None
-
-
-class BreakpointRef(_MiModel):
-    """One breakpoint from ``-break-insert``/``-break-list``; ``number`` is gdb's bp id."""
-
-    number: str
-    type: str | None = None
-    addr: str | None = None
-    func: str | None = None
-    what: str | None = None
-    enabled: bool | None = None
 
 
 def parse_mi_records(text: str) -> list[MiRecord]:
@@ -247,7 +212,7 @@ class _ExecutionControl:
 
     def wait_for_stop(
         self, attachment: GdbMiAttachment, *, timeout_sec: float
-    ) -> StopRecord | None:
+    ) -> GdbStopRecord | None:
         slices = max(1, int(timeout_sec / _STOP_POLL_SLICE_SEC) + 1)
         for _ in range(slices):
             records = self._engine.records_from(
@@ -261,7 +226,7 @@ class _ExecutionControl:
                 return self._engine.stop_record_from(stop)
         return None
 
-    def interrupt(self, attachment: GdbMiAttachment) -> StopRecord | None:
+    def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
         raw = attachment.controller.write("-exec-interrupt", timeout_sec=_MI_COMMAND_TIMEOUT_SEC)
         records = self._engine.records_from(raw)
         attachment.records.extend(records)
@@ -269,7 +234,9 @@ class _ExecutionControl:
         stop = self.wait_for_stop(attachment, timeout_sec=_INTERRUPT_STOP_TIMEOUT_SEC)
         return self._redact_stop(stop) if stop is not None else None
 
-    def resume(self, attachment: GdbMiAttachment, verb: str, *, timeout_sec: float) -> StopRecord:
+    def resume(
+        self, attachment: GdbMiAttachment, verb: str, *, timeout_sec: float
+    ) -> GdbStopRecord:
         # Round fractional requests up: a sub-second request still waits its full span (and the
         # floor of 1s below), never truncating toward zero (5.7 -> 6, not 5).
         requested = math.ceil(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC
@@ -291,8 +258,8 @@ class _ExecutionControl:
             )
         return self._redact_stop(interrupted.model_copy(update={"timed_out": True}))
 
-    def _redact_stop(self, stop: StopRecord) -> StopRecord:
-        return StopRecord.model_validate(
+    def _redact_stop(self, stop: GdbStopRecord) -> GdbStopRecord:
+        return GdbStopRecord.model_validate(
             self._engine.redactor.redact_value(stop.model_dump(mode="json"))
         )
 
@@ -390,7 +357,7 @@ class GdbMiEngine:
 
     # --- breakpoints ----------------------------------------------------------------------
 
-    def set_breakpoint(self, attachment: GdbMiAttachment, location: str) -> BreakpointRef:
+    def set_breakpoint(self, attachment: GdbMiAttachment, location: str) -> GdbBreakpointRef:
         if not _BREAK_LOCATION_RE.match(location):
             raise _config_error(
                 f"breakpoint location must be a bare C identifier, got {location!r}",
@@ -412,7 +379,7 @@ class GdbMiEngine:
             )
         self.run(attachment, f"-break-delete {number}")
 
-    def list_breakpoints(self, attachment: GdbMiAttachment) -> list[BreakpointRef]:
+    def list_breakpoints(self, attachment: GdbMiAttachment) -> list[GdbBreakpointRef]:
         records = self.run(attachment, "-break-list")
         result = MiRecord.first_result(records)
         payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
@@ -423,14 +390,14 @@ class GdbMiEngine:
         )
         body = table.get("body") if isinstance(table, dict) else None
         rows = body if isinstance(body, list) else []
-        refs: list[BreakpointRef] = []
+        refs: list[GdbBreakpointRef] = []
         for row in rows:
             entry = row.get("bkpt") if isinstance(row, dict) else None
             if isinstance(entry, dict):
                 refs.append(self._breakpoint_ref_from(entry))
         return refs
 
-    def _breakpoint_ref(self, records: list[MiRecord], *, key: str) -> BreakpointRef:
+    def _breakpoint_ref(self, records: list[MiRecord], *, key: str) -> GdbBreakpointRef:
         result = MiRecord.first_result(records)
         payload = result.payload if result is not None and isinstance(result.payload, dict) else {}
         entry = payload.get(key)
@@ -442,8 +409,8 @@ class GdbMiEngine:
             )
         return self._breakpoint_ref_from(entry)
 
-    def _breakpoint_ref_from(self, entry: dict[str, Any]) -> BreakpointRef:
-        return BreakpointRef.model_validate(
+    def _breakpoint_ref_from(self, entry: dict[str, Any]) -> GdbBreakpointRef:
+        return GdbBreakpointRef.model_validate(
             self.redactor.redact_value(
                 {
                     "number": str(entry.get("number")),
@@ -532,22 +499,22 @@ class GdbMiEngine:
 
     # --- interactive execution ------------------------------------------------------------
 
-    def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> StopRecord:
-        """Resume, wait for the stop, return a redacted StopRecord (interrupt back on timeout)."""
+    def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Resume, wait for the stop, and interrupt back on timeout."""
         return self._execution.resume(attachment, "-exec-continue", timeout_sec=timeout_sec)
 
-    def interrupt(self, attachment: GdbMiAttachment) -> StopRecord | None:
+    def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
         """Idempotent 'ensure HALTED': -exec-interrupt then wait the short fixed bound."""
         return self._execution.interrupt(attachment)
 
     def wait_for_stop(
         self, attachment: GdbMiAttachment, *, timeout_sec: float
-    ) -> StopRecord | None:
+    ) -> GdbStopRecord | None:
         return self._execution.wait_for_stop(attachment, timeout_sec=timeout_sec)
 
     # --- record helpers (public to _ExecutionControl) -------------------------------------
 
-    def stop_record_from(self, record: MiRecord) -> StopRecord:
+    def stop_record_from(self, record: MiRecord) -> GdbStopRecord:
         payload = record.payload if isinstance(record.payload, dict) else {}
         reason = payload.get("reason")
         if isinstance(reason, str) and reason in _TERMINAL_STOP_REASONS:
@@ -559,15 +526,15 @@ class GdbMiEngine:
         frame_payload = payload.get("frame")
         frame = self._frame_from(frame_payload) if isinstance(frame_payload, dict) else None
         thread = payload.get("stopped-threads")
-        return StopRecord(
+        return GdbStopRecord(
             reason=reason if isinstance(reason, str) else None,
             bkptno=payload.get("bkptno") if isinstance(payload.get("bkptno"), str) else None,
             stopped_thread=thread if isinstance(thread, str) else None,
             frame=frame,
         )
 
-    def _frame_from(self, payload: dict[str, Any]) -> Frame:
-        return Frame(
+    def _frame_from(self, payload: dict[str, Any]) -> GdbFrame:
+        return GdbFrame(
             level=_mi_int(payload.get("level")),
             func=payload.get("func") if isinstance(payload.get("func"), str) else None,
             addr=payload.get("addr") if isinstance(payload.get("addr"), str) else None,
