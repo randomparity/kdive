@@ -44,6 +44,11 @@ from kdive.profiles.provisioning import (
     reject_rootfs_upload_without_window,
     validate_profile,
 )
+from kdive.providers.component_validation import (
+    ComponentSourceCapabilities,
+    reject_unsupported_component_source,
+)
+from kdive.providers.composition import build_default_provider_runtime
 from kdive.security import audit
 from kdive.security.context import RequestContext
 from kdive.security.rbac import Role, require_role
@@ -109,6 +114,29 @@ class _CreateLane(Enum):
     DEFINE_ONLY = "define_only"
 
 
+def _component_sources(
+    capabilities: ComponentSourceCapabilities | None,
+) -> ComponentSourceCapabilities:
+    if capabilities is not None:
+        return capabilities
+    return build_default_provider_runtime().component_sources
+
+
+def _validate_profile_for_provider(
+    profile: ProvisioningProfile,
+    capabilities: ComponentSourceCapabilities | None,
+) -> None:
+    validate_profile(profile)
+    rootfs = profile.provider.local_libvirt.rootfs
+    if rootfs.kind == "upload":
+        return
+    reject_unsupported_component_source(
+        _component_sources(capabilities),
+        component_kind="rootfs",
+        ref=rootfs,
+    )
+
+
 async def _within_system_quota(conn: AsyncConnection, project: str) -> bool:
     """Report whether the project is under ``max_concurrent_systems`` (ADR-0007 §4).
 
@@ -151,6 +179,7 @@ async def provision_system(
     *,
     allocation_id: str,
     profile: dict[str, Any],
+    component_sources: ComponentSourceCapabilities | None = None,
 ) -> ToolResponse:
     """Mint a System for a ``granted`` Allocation and enqueue its provision job."""
     uid = _as_uuid(allocation_id)
@@ -158,7 +187,7 @@ async def provision_system(
         return _config_error(allocation_id)
     try:
         parsed = ProvisioningProfile.parse(profile)
-        validate_profile(parsed)
+        _validate_profile_for_provider(parsed, component_sources)
     except CategorizedError as exc:
         return ToolResponse.failure(allocation_id, exc.category)
     with bind_context(principal=ctx.principal):
@@ -271,7 +300,11 @@ async def _admit_defined(
 
 
 async def provision_defined_system(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    component_sources: ComponentSourceCapabilities | None = None,
 ) -> ToolResponse:
     """Admit a ``defined`` System after its upload window is complete."""
     uid = _as_uuid(system_id)
@@ -299,6 +332,11 @@ async def provision_defined_system(
                 return _config_error(str(system.allocation_id))
             if system.state in _TERMINAL_SYSTEM:
                 return _config_error(system_id, data={"current_status": system.state.value})
+            try:
+                parsed = ProvisioningProfile.parse(system.provisioning_profile)
+                _validate_profile_for_provider(parsed, component_sources)
+            except CategorizedError as exc:
+                return ToolResponse.failure(system_id, exc.category)
             if system.state is SystemState.DEFINED:
                 if alloc.state is not AllocationState.ACTIVE:
                     return _config_error(str(alloc.id), data={"current_status": alloc.state.value})
@@ -400,6 +438,7 @@ async def define_system(
     *,
     allocation_id: str,
     profile: dict[str, Any],
+    component_sources: ComponentSourceCapabilities | None = None,
 ) -> ToolResponse:
     """Create a System in ``defined`` for a ``granted`` Allocation (ADR-0025 decision 10).
 
@@ -414,7 +453,7 @@ async def define_system(
         return _config_error(allocation_id)
     try:
         parsed = ProvisioningProfile.parse(profile)
-        validate_profile(parsed)
+        _validate_profile_for_provider(parsed, component_sources)
     except CategorizedError as exc:
         return ToolResponse.failure(allocation_id, exc.category)
     with bind_context(principal=ctx.principal):

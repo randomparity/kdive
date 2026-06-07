@@ -22,11 +22,13 @@ class _FakeStore:
     def __init__(self, blobs: dict[str, bytes], heads: dict[str, HeadResult]) -> None:
         self._blobs = blobs
         self._heads = heads
+        self.range_calls: list[tuple[str, int, int]] = []
 
     def head(self, key: str) -> HeadResult | None:
         return self._heads.get(key)
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        self.range_calls.append((key, start, length))
         return self._blobs[key][start : start + length]
 
 
@@ -250,6 +252,31 @@ def test_effective_config_required_when_profile_requirements_selected() -> None:
         )
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_oversized_effective_config_is_configuration_error_without_read() -> None:
+    store = _FakeStore(
+        {"k": _BZIMAGE_HEAD, "c": b""},
+        {
+            "k": HeadResult(len(_BZIMAGE_HEAD), "ck", "e"),
+            "c": HeadResult(1024 * 1024 + 1, "cc", "ec"),
+        },
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        validate_external_artifacts(
+            store,
+            manifest=[
+                ManifestEntry("kernel", "ck", len(_BZIMAGE_HEAD)),
+                ManifestEntry("effective_config", "cc", 1024 * 1024 + 1),
+            ],
+            keys={"kernel": "k", "effective_config": "c"},
+            declared_build_id=None,
+            profile_requirements=ConfigRequirements(required={"CONFIG_VIRTIO_BLK": "y"}),
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert ("c", 0, 1024 * 1024 + 1) not in store.range_calls
 
 
 def test_effective_config_mismatch_is_configuration_error() -> None:

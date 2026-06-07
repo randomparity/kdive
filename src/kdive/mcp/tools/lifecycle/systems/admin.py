@@ -23,13 +23,14 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
+from kdive.mcp.tools.lifecycle.systems.provision import _validate_profile_for_provider
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     destructive_opt_in,
     profile_digest,
     reject_rootfs_upload_without_window,
-    validate_profile,
 )
+from kdive.providers.component_validation import ComponentSourceCapabilities
 from kdive.security import audit
 from kdive.security.context import RequestContext
 from kdive.security.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
@@ -41,7 +42,12 @@ _TEARDOWN = "teardown"
 
 
 async def reprovision_system(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str, profile: dict[str, Any]
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    profile: dict[str, Any],
+    component_sources: ComponentSourceCapabilities | None = None,
 ) -> ToolResponse:
     """Reprovision a `ready` System in place under the same Allocation."""
     uid = _as_uuid(system_id)
@@ -49,7 +55,7 @@ async def reprovision_system(
         return _config_error(system_id)
     try:
         parsed = ProvisioningProfile.parse(profile)
-        validate_profile(parsed)
+        _validate_profile_for_provider(parsed, component_sources)
         reject_rootfs_upload_without_window(parsed)
     except CategorizedError as exc:
         return ToolResponse.failure(system_id, exc.category)

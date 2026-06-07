@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
@@ -16,6 +17,7 @@ from kdive.db.provider_components import (
     link_local_component,
     list_visible_components,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import HeadResult
 
 
@@ -137,5 +139,117 @@ def test_component_upload_finalization_is_idempotent(migrated_url: str) -> None:
             second = await finalize_component_upload(pool, upload_id, object_store=store)
 
         assert first == second
+
+    asyncio.run(_run())
+
+
+def test_component_upload_finalization_uses_persisted_tenant(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            upload_id, key = await create_component_upload_intent(
+                pool,
+                tenant="local",
+                provider="local-libvirt",
+                component_kind="rootfs",
+                sha256="sha256:" + "3" * 64,
+                size_bytes=42,
+                visibility="project",
+                project="proj-a",
+                principal="alice",
+            )
+            assert key == component_upload_object_key(
+                tenant="local",
+                provider="local-libvirt",
+                component_kind="rootfs",
+                upload_id=upload_id,
+            )
+            wrong_key = component_upload_object_key(
+                tenant="proj-a",
+                provider="local-libvirt",
+                component_kind="rootfs",
+                upload_id=upload_id,
+            )
+            store = _ObjectStore(
+                {key: HeadResult(size_bytes=42, checksum_sha256="sha256:" + "3" * 64, etag="e")}
+            )
+
+            component_id = await finalize_component_upload(pool, upload_id, object_store=store)
+
+        assert component_id != upload_id
+        assert wrong_key not in store.heads
+
+    asyncio.run(_run())
+
+
+def test_component_upload_finalization_accepts_s3_base64_sha256(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            digest = bytes.fromhex("4" * 64)
+            upload_id, key = await create_component_upload_intent(
+                pool,
+                tenant="local",
+                provider="local-libvirt",
+                component_kind="rootfs",
+                sha256="sha256:" + digest.hex(),
+                size_bytes=42,
+                visibility="project",
+                project="proj-a",
+                principal="alice",
+            )
+            store = _ObjectStore(
+                {
+                    key: HeadResult(
+                        size_bytes=42,
+                        checksum_sha256=base64.b64encode(digest).decode("ascii"),
+                        etag="e",
+                    )
+                }
+            )
+
+            component_id = await finalize_component_upload(pool, upload_id, object_store=store)
+            component = await get_visible_component(pool, component_id, project="proj-a")
+
+        assert component is not None
+        assert component.sha256 == "sha256:" + "4" * 64
+
+    asyncio.run(_run())
+
+
+def test_component_upload_finalization_rejects_s3_checksum_mismatch(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            upload_id, key = await create_component_upload_intent(
+                pool,
+                tenant="local",
+                provider="local-libvirt",
+                component_kind="rootfs",
+                sha256="sha256:" + "5" * 64,
+                size_bytes=42,
+                visibility="project",
+                project="proj-a",
+                principal="alice",
+            )
+            wrong_digest = bytes.fromhex("6" * 64)
+            store = _ObjectStore(
+                {
+                    key: HeadResult(
+                        size_bytes=42,
+                        checksum_sha256=base64.b64encode(wrong_digest).decode("ascii"),
+                        etag="e",
+                    )
+                }
+            )
+
+            try:
+                await finalize_component_upload(pool, upload_id, object_store=store)
+            except CategorizedError as exc:
+                assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+            else:
+                raise AssertionError("checksum mismatch should reject finalization")
 
     asyncio.run(_run())

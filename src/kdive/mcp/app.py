@@ -47,7 +47,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _plain(resources.register),
     _plain(accounting_tools.register),
     _plain(allocations.register),
-    _plain(systems_tools.register),
+    lambda app, pool, runtime: systems_tools.register(app, pool, provider_runtime=runtime),
     _plain(investigations.register),
     _plain(runs_tools.register),
     _plain(control_tools.register),

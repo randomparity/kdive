@@ -22,6 +22,7 @@ CREATE INDEX provider_components_project_idx ON provider_components (project);
 
 CREATE TABLE component_uploads (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant text NOT NULL,
     provider text NOT NULL,
     component_kind text NOT NULL,
     artifact_id uuid,

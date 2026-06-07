@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Literal, NamedTuple, Protocol, cast
@@ -143,10 +145,20 @@ async def create_component_upload_intent(
     async with pool.connection() as conn:
         row = await conn.execute(
             "INSERT INTO component_uploads "
-            "(provider, component_kind, sha256, size_bytes, visibility, project, principal, "
-            "state, deadline) VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', now() + %s) "
-            "RETURNING id",
-            (provider, component_kind, sha256, size_bytes, visibility, project, principal, ttl),
+            "(tenant, provider, component_kind, sha256, size_bytes, visibility, project, "
+            "principal, state, deadline) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', now() + %s) RETURNING id",
+            (
+                tenant,
+                provider,
+                component_kind,
+                sha256,
+                size_bytes,
+                visibility,
+                project,
+                principal,
+                ttl,
+            ),
         )
         found = await row.fetchone()
     assert found is not None
@@ -182,16 +194,19 @@ async def finalize_component_upload(
             return existing
 
         key = component_upload_object_key(
-            tenant=upload["project"],
+            tenant=upload["tenant"],
             provider=upload["provider"],
             component_kind=upload["component_kind"],
             upload_id=upload_id,
         )
         head = object_store.head(key)
+        object_sha256 = _s3_checksum_to_component_sha256(
+            None if head is None else head.checksum_sha256
+        )
         if (
             head is None
             or head.size_bytes != upload["size_bytes"]
-            or head.checksum_sha256 != upload["sha256"]
+            or object_sha256 != upload["sha256"]
         ):
             raise CategorizedError(
                 "component upload object does not match its intent",
@@ -235,6 +250,23 @@ def component_upload_object_key(
     upload_id: UUID,
 ) -> str:
     return f"{tenant}/provider-components/{provider}/{component_kind}/{upload_id}"
+
+
+def _s3_checksum_to_component_sha256(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value.startswith("sha256:"):
+        prefix, digest = value.split(":", 1)
+        if len(digest) == 64 and all(char in "0123456789abcdefABCDEF" for char in digest):
+            return f"{prefix}:{digest.lower()}"
+        return None
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(decoded) != 32:
+        return None
+    return f"sha256:{decoded.hex()}"
 
 
 def _component_from_row(row: dict[str, object]) -> ProviderComponent:

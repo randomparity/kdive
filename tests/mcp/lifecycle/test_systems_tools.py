@@ -163,6 +163,15 @@ async def _provision_defined(pool: AsyncConnectionPool, ctx: RequestContext, sys
     return await systems_tools.provision_defined_system(pool, ctx, system_id=system_id)
 
 
+def _artifact_rootfs_profile() -> dict[str, Any]:
+    profile = _profile()
+    profile["provider"]["local-libvirt"]["rootfs"] = {
+        "kind": "artifact",
+        "artifact_id": str(uuid4()),
+    }
+    return profile
+
+
 # --- systems.provision tool ----------------------------------------------------------------
 
 
@@ -332,6 +341,29 @@ def test_provision_unknown_domain_param_is_config_error_no_job(migrated_url: str
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert sys_n is not None and sys_n["n"] == 0  # validated before any write
+
+    asyncio.run(_run())
+
+
+def test_provision_rejects_unsupported_artifact_rootfs_before_system_and_job(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            resp = await _provision(pool, _ctx(), alloc_id, _artifact_rootfs_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs")
+                job_n = await cur.fetchone()
+                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
+                alloc_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert sys_n is not None and sys_n["n"] == 0
+        assert job_n is not None and job_n["n"] == 0
+        assert alloc_row is not None and alloc_row["state"] == "granted"
 
     asyncio.run(_run())
 
@@ -1270,6 +1302,32 @@ def test_reprovision_bad_profile_is_config_error_no_job(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_reprovision_rejects_unsupported_artifact_rootfs_before_mutating_ready_system(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            resp = await _reprovision(pool, _ctx(), sys_id, _artifact_rootfs_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state, provisioning_profile FROM systems WHERE id = %s", (sys_id,)
+                )
+                sys_row = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs")
+                job_n = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert sys_row is not None and sys_row["state"] == "ready"
+        assert sys_row["provisioning_profile"]["provider"]["local-libvirt"]["rootfs"]["kind"] == (
+            "local"
+        )
+        assert job_n is not None and job_n["n"] == 0
+
+    asyncio.run(_run())
+
+
 async def _enqueue_reprovision(pool: AsyncConnectionPool, system_id: str) -> Job:
     async with pool.connection() as conn:
         return await queue.enqueue(
@@ -1484,6 +1542,26 @@ def test_define_foreign_allocation_is_not_found(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_define_rejects_unsupported_artifact_rootfs_without_opening_upload_window(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            resp = await _define(pool, _ctx(), alloc_id, _artifact_rootfs_profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
+                alloc_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert sys_n is not None and sys_n["n"] == 0
+        assert alloc_row is not None and alloc_row["state"] == "granted"
+
+    asyncio.run(_run())
+
+
 # --- systems.provision_defined admits a DEFINED System -------------------------------------
 
 
@@ -1537,6 +1615,37 @@ def test_provision_defined_refuses_released_allocation(migrated_url: str) -> Non
         assert resp.data["current_status"] == "released"
         assert sys_row is not None and sys_row["state"] == "defined"  # not advanced
         assert job_row is not None and job_row["n"] == 0  # no provision job enqueued
+
+    asyncio.run(_run())
+
+
+def test_provision_defined_revalidates_stored_profile_against_provider(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            async with pool.connection() as conn:
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.ACTIVE)
+            sys_id = await _seed_system_with_profile(
+                pool,
+                alloc_id,
+                SystemState.DEFINED,
+                _artifact_rootfs_profile(),
+            )
+            resp = await _provision_defined(pool, _ctx(), sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
+                sys_row = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
+                    (f"{alloc_id}:provision",),
+                )
+                job_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert sys_row is not None and sys_row["state"] == "defined"
+        assert job_row is not None and job_row["n"] == 0
 
     asyncio.run(_run())
 
