@@ -222,6 +222,28 @@ def _read_bytes_file(path: Path, *, category: ErrorCategory, output: str) -> byt
         ) from exc
 
 
+def _launch_failure(tool: str, exc: OSError, *, category: ErrorCategory) -> CategorizedError:
+    if isinstance(exc, FileNotFoundError):
+        return CategorizedError(
+            f"{tool} is required for kernel builds",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"tool": tool},
+        )
+    return CategorizedError(
+        f"{tool} failed to launch",
+        category=category,
+        details={"tool": tool, "op": "launch"},
+    )
+
+
+def _workspace_failure(op: str, path_label: str, exc: OSError) -> CategorizedError:
+    return CategorizedError(
+        f"build workspace {op} failed",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"op": op, "path": path_label},
+    )
+
+
 def _real_read_config(workspace: Path) -> str:  # pragma: no cover - live_vm
     return _read_text_file(
         workspace / ".config",
@@ -259,6 +281,8 @@ def _real_run_make(workspace: Path) -> int:  # pragma: no cover - live_vm
             category=ErrorCategory.BUILD_FAILURE,
             details={"timeout_s": _MAKE_TIMEOUT_S},
         ) from exc
+    except OSError as exc:
+        raise _launch_failure("make", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
 
 
 def _real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
@@ -295,6 +319,10 @@ def _real_read_build_id(workspace: Path) -> str:  # pragma: no cover - live_vm
             raise CategorizedError(
                 "objcopy failed to extract vmlinux notes",
                 category=ErrorCategory.BUILD_FAILURE,
+            ) from exc
+        except OSError as exc:
+            raise _launch_failure(
+                "objcopy", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE
             ) from exc
         notes = _read_bytes_file(
             Path(note_file.name),
@@ -341,7 +369,10 @@ def _resolve_local_ref(ref: str, *, kind: str) -> Path:
 def _stage_config(config_ref: str, workspace: Path) -> None:
     """Copy the resolved ``config_ref`` to ``workspace/.config`` (overwriting any existing one)."""
     source = _resolve_local_ref(config_ref, kind="config_ref")
-    shutil.copyfile(source, workspace / ".config")
+    try:
+        shutil.copyfile(source, workspace / ".config")
+    except OSError as exc:
+        raise _workspace_failure("copy_config", ".config", exc) from exc
 
 
 def _redacted_tail(text: str) -> str:
@@ -409,7 +440,10 @@ def _sync_tree(kernel_src: str, workspace: Path) -> None:
             "rsync is required to materialize the warm kernel tree",
             category=ErrorCategory.MISSING_DEPENDENCY,
         )
-    workspace.mkdir(parents=True, exist_ok=True)
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _workspace_failure("mkdir", "build_workspace", exc) from exc
     # `--` ends option parsing so a path is never mistaken for an rsync flag; the trailing
     # slash on the source copies its *contents* into the workspace, not a nested dir.
     try:
@@ -426,6 +460,8 @@ def _sync_tree(kernel_src: str, workspace: Path) -> None:
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"timeout_s": _RSYNC_TIMEOUT_S},
         ) from exc
+    except OSError as exc:
+        raise _launch_failure("rsync", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
     if result.returncode != 0:
         raise CategorizedError(
             "rsync failed to materialize the workspace tree",

@@ -315,6 +315,36 @@ def test_real_run_make_timeout_is_build_failure(monkeypatch: pytest.MonkeyPatch)
     assert caught.value.details["timeout_s"] == build_module._MAKE_TIMEOUT_S
 
 
+def test_real_run_make_missing_binary_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError("make")
+
+    monkeypatch.setattr(subprocess, "run", _missing)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_module._real_run_make(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert caught.value.details == {"tool": "make"}
+
+
+def test_real_run_make_launch_oserror_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _launch_fault(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise OSError("fork failed")
+
+    monkeypatch.setattr(subprocess, "run", _launch_fault)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_module._real_run_make(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"tool": "make", "op": "launch"}
+
+
 def test_real_read_build_id_reads_merged_notes_section(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -350,6 +380,21 @@ def test_real_read_build_id_objcopy_timeout_is_build_failure(
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
     assert caught.value.details["timeout_s"] == build_module._OBJCOPY_TIMEOUT_S
+
+
+def test_real_read_build_id_missing_objcopy_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _missing(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError("objcopy")
+
+    monkeypatch.setattr(subprocess, "run", _missing)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_module._real_read_build_id(tmp_path)
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert caught.value.details == {"tool": "objcopy"}
 
 
 # --- live_vm real-make build ---------------------------------------------------------
@@ -492,6 +537,26 @@ def test_stage_config_missing_ref_is_configuration_error(tmp_path: Path) -> None
     with pytest.raises(CategorizedError) as caught:
         _stage_config(str(tmp_path / "absent.config"), workspace)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_stage_config_copy_fault_is_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = tmp_path / "x.config"
+    config.write_text("CONFIG_FROM_REF=y\n")
+
+    def _copy_fault(*_: object, **__: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(build_module.shutil, "copyfile", _copy_fault)
+
+    with pytest.raises(CategorizedError) as caught:
+        _stage_config(str(config), workspace)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"op": "copy_config", "path": ".config"}
 
 
 # --- _apply_patch -------------------------------------------------------------------
@@ -654,6 +719,31 @@ def test_sync_tree_creates_workspace_and_invokes_rsync(
     assert workspace.is_dir()  # mkdir(parents=True) ran before rsync
     # `--` terminates option parsing so a path is never read as an rsync flag.
     assert calls == [["rsync", "-a", "--delete", "--", f"{src}/", f"{workspace}/"]]
+
+
+def test_sync_tree_workspace_mkdir_fault_is_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "linux"
+    src.mkdir()
+    workspace = tmp_path / "runs" / "abc" / "ws"
+    original_mkdir = Path.mkdir
+
+    def _mkdir_fault(
+        self: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        if self == workspace:
+            raise OSError("permission denied")
+        original_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(build_module.shutil, "which", lambda _name: "/usr/bin/rsync")
+    monkeypatch.setattr(Path, "mkdir", _mkdir_fault)
+
+    with pytest.raises(CategorizedError) as caught:
+        _sync_tree(str(src), workspace)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"op": "mkdir", "path": "build_workspace"}
 
 
 def test_sync_tree_rsync_nonzero_is_infrastructure_failure(
