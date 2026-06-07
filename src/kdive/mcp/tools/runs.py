@@ -41,7 +41,7 @@ from kdive.domain.state import (
 from kdive.jobs import queue
 from kdive.jobs.payloads import BuildPayload
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import (
@@ -68,6 +68,7 @@ from kdive.providers.composition import (
 )
 from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.security import audit
+from kdive.security.context import RequestContext
 from kdive.security.rbac import Role, require_role
 from kdive.store.objectstore import (
     HeadResult,

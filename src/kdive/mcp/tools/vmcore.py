@@ -28,7 +28,7 @@ from kdive.domain.models import Job, JobKind
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools import artifacts as artifacts_tools
@@ -53,6 +53,7 @@ from kdive.providers.composition import (
     crash_postmortem_from_env,
 )
 from kdive.providers.ports import CrashPostmortem
+from kdive.security.context import RequestContext
 from kdive.security.rbac import Role, require_role
 from kdive.security.redaction import Redactor
 

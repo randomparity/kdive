@@ -26,7 +26,7 @@ from kdive.db.repositories import DEBUG_SESSIONS, RUNS
 from kdive.domain.errors import CategorizedError
 from kdive.domain.state import DebugSessionState
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -37,6 +37,7 @@ from kdive.providers.composition import (
     vmcore_introspector_from_env,
 )
 from kdive.providers.ports import LiveIntrospector, VmcoreIntrospector
+from kdive.security.context import RequestContext
 from kdive.security.rbac import Role, require_role
 
 # The fixed live-helper set (ADR-0033 §2 / ADR-0039 §3): the same three in-tree helpers as the

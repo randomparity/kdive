@@ -16,12 +16,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from kdive.mcp.auth import AuthError
+from kdive.security.context import AuthError
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
-    from kdive.mcp.auth import RequestContext
+    from kdive.security.context import RequestContext
 
 
 def args_digest(args: Mapping[str, object]) -> str:

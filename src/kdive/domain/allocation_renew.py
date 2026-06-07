@@ -54,8 +54,7 @@ from kdive.domain.state import AllocationState
 from kdive.security import audit
 
 if TYPE_CHECKING:
-    # Annotation-only (PEP 563): keep this domain module free of a runtime mcp import.
-    from kdive.mcp.auth import RequestContext
+    from kdive.security.context import RequestContext
 
 # The idempotency-store ``kind`` discriminator for a renew (ADR-0040 §3); distinct from
 # the request grant's kind so a request key and a renew key never collide in the store.

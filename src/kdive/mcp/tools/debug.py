@@ -34,7 +34,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import DebugSession, Run, System
 from kdive.domain.state import DebugSessionState, RunState, SystemState
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -49,6 +49,7 @@ from kdive.providers.composition import (
 from kdive.providers.interfaces import SystemHandle, TransportHandle
 from kdive.providers.ports import Connector
 from kdive.security import audit
+from kdive.security.context import RequestContext
 from kdive.security.paths import PathSafetyError
 from kdive.security.rbac import Role, require_role
 from kdive.security.secrets import SecretBackend, secret_backend_from_env

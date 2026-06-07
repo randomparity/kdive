@@ -55,8 +55,7 @@ from kdive.domain.state import AllocationState
 from kdive.security import audit
 
 if TYPE_CHECKING:
-    # Annotation-only (PEP 563): keep this domain module free of a runtime mcp import.
-    from kdive.mcp.auth import RequestContext
+    from kdive.security.context import RequestContext
 
 _SECONDS_PER_HOUR = 3600
 

@@ -28,7 +28,7 @@ from kdive.domain.models import Job, JobKind, System
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import (
@@ -44,6 +44,7 @@ from kdive.mcp.tools._common import job_envelope
 from kdive.profiles.provisioning import ProvisioningProfile, destructive_opt_in
 from kdive.providers.ports import PowerAction
 from kdive.security import audit
+from kdive.security.context import RequestContext
 from kdive.security.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.rbac import Role, require_role
 

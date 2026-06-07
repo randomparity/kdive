@@ -23,9 +23,10 @@ from kdive.db.repositories import RESOURCES
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Resource, ResourceKind
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.security.context import RequestContext
 
 _log = logging.getLogger(__name__)
 

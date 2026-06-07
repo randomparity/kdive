@@ -29,10 +29,11 @@ from kdive.domain.models import Job
 from kdive.domain.state import IllegalTransition, JobState
 from kdive.jobs import queue
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.security.context import RequestContext
 from kdive.security.rbac import AuthorizationError, Role, require_role
 
 _log = logging.getLogger(__name__)

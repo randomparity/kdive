@@ -38,12 +38,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Resource
 from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context, require_project
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.security import audit
+from kdive.security.context import RequestContext, require_project
 from kdive.security.rbac import Role, require_role
 
 _log = logging.getLogger(__name__)

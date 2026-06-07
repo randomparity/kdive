@@ -38,10 +38,11 @@ from kdive.domain.cost import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Budget, Quota
 from kdive.log import bind_context
-from kdive.mcp.auth import RequestContext, current_context, require_project
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.security import audit
+from kdive.security.context import RequestContext, require_project
 from kdive.security.rbac import (
     AuthorizationError,
     PlatformRole,
