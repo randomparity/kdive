@@ -228,7 +228,12 @@ SYSTEMS = StatefulRepository(
 INVESTIGATIONS = StatefulRepository(
     Investigation, "investigations", InvestigationState, json_columns=frozenset({"external_refs"})
 )
-RUNS = StatefulRepository(Run, "runs", RunState, json_columns=frozenset({"build_profile"}))
+RUNS = StatefulRepository(
+    Run,
+    "runs",
+    RunState,
+    json_columns=frozenset({"build_profile", "expected_boot_failure"}),
+)
 DEBUG_SESSIONS = StatefulRepository(DebugSession, "debug_sessions", DebugSessionState)
 JOBS = StatefulRepository(
     Job,
