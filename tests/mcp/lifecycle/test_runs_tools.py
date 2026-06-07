@@ -680,6 +680,40 @@ def test_build_malformed_profile_is_config_error_no_job(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_build_rejects_unsupported_artifact_config_before_state_change(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            profile = {
+                **copy.deepcopy(_VALID_BUILD),
+                "config": {
+                    "kind": "artifact",
+                    "artifact_id": "00000000-0000-0000-0000-000000000001",
+                    "sha256": "sha256:" + "1" * 64,
+                },
+            }
+            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
+
+            resp = await runs_tools.build_run(pool, _ctx(Role.OPERATOR), run_id)
+
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
+                run_row = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
+                    (f"{run_id}:build",),
+                )
+                jobs = await cur.fetchone()
+
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert run_row is not None and run_row["state"] == "created"
+        assert jobs is not None and jobs["n"] == 0
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("state", [RunState.FAILED, RunState.CANCELED])
 def test_build_on_terminal_run_is_config_error(migrated_url: str, state: RunState) -> None:
     async def _run() -> None:

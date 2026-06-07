@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+from pathlib import Path
 from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
@@ -29,16 +31,25 @@ class _ObjectStore:
         return self.heads.get(key)
 
 
-def test_project_component_visible_only_to_same_project(migrated_url: str) -> None:
+def _component_file(tmp_path: Path, name: str = "component.img") -> tuple[Path, str]:
+    path = tmp_path / name
+    content = b"component bytes"
+    path.write_bytes(content)
+    return path, f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def test_project_component_visible_only_to_same_project(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
+        path, sha256 = _component_file(tmp_path)
         async with AsyncConnectionPool(migrated_url, open=False) as pool:
             await pool.open()
             component_id = await link_local_component(
                 pool,
                 provider="local-libvirt",
                 component_kind="rootfs",
-                path="/var/lib/kdive/rootfs/local/base.qcow2",
-                sha256="sha256:" + "0" * 64,
+                path=str(path),
+                sha256=sha256,
+                allowed_roots=[tmp_path],
                 visibility="project",
                 project="proj-a",
                 principal="alice",
@@ -57,16 +68,20 @@ def test_project_component_visible_only_to_same_project(migrated_url: str) -> No
     asyncio.run(_run())
 
 
-def test_get_visible_component_respects_project_visibility(migrated_url: str) -> None:
+def test_get_visible_component_respects_project_visibility(
+    migrated_url: str, tmp_path: Path
+) -> None:
     async def _run() -> None:
+        path, sha256 = _component_file(tmp_path)
         async with AsyncConnectionPool(migrated_url, open=False) as pool:
             await pool.open()
             component_id = await link_local_component(
                 pool,
                 provider="local-libvirt",
                 component_kind="rootfs",
-                path="/var/lib/kdive/rootfs/local/base.qcow2",
-                sha256="sha256:" + "0" * 64,
+                path=str(path),
+                sha256=sha256,
+                allowed_roots=[tmp_path],
                 visibility="project",
                 project="proj-a",
                 principal="alice",
@@ -78,6 +93,76 @@ def test_get_visible_component_respects_project_visibility(migrated_url: str) ->
         assert denied is None
         assert allowed is not None
         assert allowed.source.kind == "local"
+
+    asyncio.run(_run())
+
+
+def test_link_local_component_rejects_path_outside_allowed_roots(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        outside = tmp_path / "outside.img"
+        outside.write_bytes(b"outside")
+        root = tmp_path / "allowed"
+        root.mkdir()
+        sha256 = f"sha256:{hashlib.sha256(b'outside').hexdigest()}"
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            try:
+                await link_local_component(
+                    pool,
+                    provider="local-libvirt",
+                    component_kind="rootfs",
+                    path=str(outside),
+                    sha256=sha256,
+                    allowed_roots=[root],
+                    visibility="project",
+                    project="proj-a",
+                    principal="alice",
+                )
+            except CategorizedError as exc:
+                assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+            else:
+                raise AssertionError("outside local component path should be rejected")
+
+            visible = await list_visible_components(
+                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+            )
+
+        assert visible == []
+
+    asyncio.run(_run())
+
+
+def test_link_local_component_rejects_bad_sha_without_poisoning_listing(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        path, _sha256 = _component_file(tmp_path)
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            try:
+                await link_local_component(
+                    pool,
+                    provider="local-libvirt",
+                    component_kind="rootfs",
+                    path=str(path),
+                    sha256="not-a-sha",
+                    allowed_roots=[tmp_path],
+                    visibility="project",
+                    project="proj-a",
+                    principal="alice",
+                )
+            except CategorizedError as exc:
+                assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+            else:
+                raise AssertionError("bad local component sha should be rejected")
+
+            visible = await list_visible_components(
+                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+            )
+
+        assert visible == []
 
     asyncio.run(_run())
 
@@ -107,6 +192,35 @@ def test_artifact_component_visible_only_to_same_project(migrated_url: str) -> N
 
         assert [component.id for component in same_project] == [component_id]
         assert other_project == []
+
+    asyncio.run(_run())
+
+
+def test_create_artifact_component_rejects_bad_sha(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            try:
+                await create_artifact_component(
+                    pool,
+                    provider="local-libvirt",
+                    component_kind="rootfs",
+                    artifact_id=UUID("00000000-0000-0000-0000-000000000001"),
+                    sha256="not-a-sha",
+                    visibility="project",
+                    project="proj-a",
+                    principal="alice",
+                )
+            except CategorizedError as exc:
+                assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+            else:
+                raise AssertionError("bad artifact component sha should be rejected")
+
+            visible = await list_visible_components(
+                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+            )
+
+        assert visible == []
 
     asyncio.run(_run())
 

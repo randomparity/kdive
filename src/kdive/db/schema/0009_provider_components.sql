@@ -8,7 +8,8 @@ CREATE TABLE provider_components (
         CHECK (visibility IN ('public', 'project', 'host-policy')),
     project text,
     principal text NOT NULL,
-    sha256 text,
+    sha256 text CONSTRAINT provider_components_sha256_check
+        CHECK (sha256 IS NULL OR sha256 ~ '^sha256:[0-9a-f]{64}$'),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT provider_components_project_visibility_check
@@ -26,7 +27,8 @@ CREATE TABLE component_uploads (
     provider text NOT NULL,
     component_kind text NOT NULL,
     artifact_id uuid,
-    sha256 text NOT NULL,
+    sha256 text NOT NULL CONSTRAINT component_uploads_sha256_check
+        CHECK (sha256 IS NULL OR sha256 ~ '^sha256:[0-9a-f]{64}$'),
     size_bytes bigint NOT NULL CONSTRAINT component_uploads_size_positive_check
         CHECK (size_bytes > 0),
     visibility text NOT NULL CONSTRAINT component_uploads_visibility_check

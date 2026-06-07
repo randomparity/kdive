@@ -49,7 +49,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _plain(allocations.register),
     lambda app, pool, runtime: systems_tools.register(app, pool, provider_runtime=runtime),
     _plain(investigations.register),
-    _plain(runs_tools.register),
+    lambda app, pool, runtime: runs_tools.register(app, pool, provider_runtime=runtime),
     _plain(control_tools.register),
     _plain(artifacts.register),
     lambda app, pool, runtime: vmcore_tools.register(app, pool, provider_runtime=runtime),

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import timedelta
+from pathlib import Path
 from typing import Literal, NamedTuple, Protocol, cast
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.local_paths import validate_local_component_path
 from kdive.components.references import ComponentRef, parse_component_ref
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import HeadResult
@@ -44,17 +46,27 @@ async def link_local_component(
     component_kind: str,
     path: str,
     sha256: str,
+    allowed_roots: Iterable[Path],
     visibility: Visibility,
     project: str | None,
     principal: str,
 ) -> UUID:
-    source = {"kind": "local", "path": path, "sha256": sha256}
+    resolved = validate_local_component_path(path, allowed_roots=allowed_roots, sha256=sha256)
+    source = parse_component_ref({"kind": "local", "path": str(resolved), "sha256": sha256})
     async with pool.connection() as conn:
         row = await conn.execute(
             "INSERT INTO provider_components "
             "(provider, component_kind, source, visibility, project, principal, sha256) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-            (provider, component_kind, Jsonb(source), visibility, project, principal, sha256),
+            (
+                provider,
+                component_kind,
+                Jsonb(source.model_dump(mode="json")),
+                visibility,
+                project,
+                principal,
+                sha256,
+            ),
         )
         found = await row.fetchone()
     assert found is not None
@@ -72,7 +84,9 @@ async def create_artifact_component(
     project: str | None,
     principal: str,
 ) -> UUID:
-    source = {"kind": "artifact", "artifact_id": str(artifact_id), "sha256": sha256}
+    source = parse_component_ref(
+        {"kind": "artifact", "artifact_id": str(artifact_id), "sha256": sha256}
+    )
     async with pool.connection() as conn:
         row = await conn.execute(
             "INSERT INTO provider_components "
@@ -82,7 +96,7 @@ async def create_artifact_component(
             (
                 provider,
                 component_kind,
-                Jsonb(source),
+                Jsonb(source.model_dump(mode="json")),
                 artifact_id,
                 visibility,
                 project,

@@ -36,6 +36,11 @@ from kdive.planes.runs_shared import existing_build_result as _existing_build_re
 from kdive.planes.runs_shared import platform_owned_cmdline_token
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.providers.build_validation import validate_external_artifacts
+from kdive.providers.component_validation import (
+    ComponentSourceCapabilities,
+    reject_unsupported_component_source,
+)
+from kdive.providers.composition import build_default_provider_runtime
 from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.security import audit
 from kdive.security.context import RequestContext
@@ -49,7 +54,12 @@ from kdive.store.objectstore import (
 
 
 async def build_run(
-    pool: AsyncConnectionPool, ctx: RequestContext, run_id: str, *, cmdline: str | None = None
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    run_id: str,
+    *,
+    cmdline: str | None = None,
+    component_sources: ComponentSourceCapabilities | None = None,
 ) -> ToolResponse:
     """Admit an idempotent server build for a Run and enqueue the build job."""
     uid = _as_uuid(run_id)
@@ -72,7 +82,23 @@ async def build_run(
                 return ToolResponse.failure(run_id, exc.category)
             if parsed.source != "server":
                 return _config_error(run_id, data={"reason": "external_source_uses_complete_build"})
+            try:
+                reject_unsupported_component_source(
+                    _component_sources(component_sources),
+                    component_kind="config",
+                    ref=parsed.config,
+                )
+            except CategorizedError as exc:
+                return ToolResponse.failure(run_id, exc.category)
             return await _build_locked(conn, ctx, run, cmdline)
+
+
+def _component_sources(
+    capabilities: ComponentSourceCapabilities | None,
+) -> ComponentSourceCapabilities:
+    if capabilities is not None:
+        return capabilities
+    return build_default_provider_runtime().component_sources
 
 
 async def _build_locked(
