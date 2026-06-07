@@ -19,13 +19,13 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
-from kdive.domain import accounting
-from kdive.domain.allocation_renew import _RENEW_KIND
 from kdive.domain.models import Allocation, Budget, Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import allocations as alloc_tools
 from kdive.security.rbac import AuthorizationError, Role
+from kdive.services import accounting
+from kdive.services.allocation_renew import _RENEW_KIND
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 

@@ -11,7 +11,6 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import ResourceKind
 from kdive.domain.state import ResourceStatus
@@ -20,6 +19,7 @@ from kdive.providers.local_libvirt.discovery import (
     ensure_local_host_registered,
     register_local_libvirt_resource,
 )
+from kdive.services.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 

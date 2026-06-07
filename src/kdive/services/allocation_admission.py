@@ -38,7 +38,6 @@ from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
-from kdive.domain import accounting
 from kdive.domain.cost import (
     Selector,
     cost,
@@ -53,6 +52,7 @@ from kdive.domain.lease import resolve_window_hours
 from kdive.domain.models import Allocation, Resource
 from kdive.domain.state import AllocationState
 from kdive.security import audit
+from kdive.services import accounting
 
 if TYPE_CHECKING:
     from kdive.security.context import RequestContext

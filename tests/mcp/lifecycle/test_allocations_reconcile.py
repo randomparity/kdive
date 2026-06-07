@@ -21,12 +21,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
-from kdive.domain import accounting
 from kdive.domain.models import Allocation, Budget, Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import allocations as alloc_tools
 from kdive.security.rbac import Role
+from kdive.services import accounting
 from tests.db_waits import wait_until_any_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

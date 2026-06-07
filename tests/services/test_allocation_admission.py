@@ -21,16 +21,16 @@ import pytest
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
-from kdive.domain.allocation_admission import (
-    CONCURRENT_ALLOCATION_CAP_KEY,
-    AllocationRequest,
-    admit,
-)
 from kdive.domain.cost import Selector
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
+from kdive.services.allocation_admission import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    AllocationRequest,
+    admit,
+)
 from tests.db_waits import wait_until_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

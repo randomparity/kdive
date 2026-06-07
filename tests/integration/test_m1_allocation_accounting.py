@@ -39,7 +39,6 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain import accounting
 from kdive.domain.cost import cost, quantize_kcu, rate
 from kdive.domain.models import Allocation, Investigation, Job, Run, System
 from kdive.domain.state import (
@@ -57,6 +56,7 @@ from kdive.planes import systems as systems_handlers
 from kdive.providers.local_libvirt.provisioning import domain_name_for
 from kdive.reconciler import loop
 from kdive.security.rbac import AuthorizationError, Role
+from kdive.services import accounting
 from tests.integration._seed import (
     provisioning_profile,
     register_resource,
@@ -818,8 +818,8 @@ async def _alloc(pool: AsyncConnectionPool, alloc_id: UUID) -> Allocation:
 # === Criterion 6: role separation ==========================================================
 
 
-def test_c6_operator_refused_admin_bare_require_role_ops(migrated_url: str) -> None:
-    """#6: set_budget/set_quota/power-off/teardown raise AuthorizationError for an operator."""
+def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
+    """#6: operator is refused admin operations through each operation's policy path."""
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
@@ -842,8 +842,8 @@ def test_c6_operator_refused_admin_bare_require_role_ops(migrated_url: str) -> N
             sys_id = prov.data["system_id"]
             async with pool.connection() as conn:
                 await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (sys_id,))
-            with pytest.raises(AuthorizationError):
-                await control_tools.power_system(pool, op, system_id=sys_id, action="off")
+            power = await control_tools.power_system(pool, op, system_id=sys_id, action="off")
+            assert power.status == "error" and power.error_category == "authorization_denied"
             with pytest.raises(AuthorizationError):
                 await systems_tools.teardown_system(pool, op, sys_id)
 

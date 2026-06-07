@@ -27,11 +27,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
-from kdive.domain import accounting
 from kdive.domain.models import JobKind
 from kdive.domain.state import AllocationState
 from kdive.jobs import queue
 from kdive.security import audit
+from kdive.services import accounting
 
 _log = logging.getLogger(__name__)
 

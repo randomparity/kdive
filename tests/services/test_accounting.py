@@ -27,7 +27,6 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
-from kdive.domain import accounting
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -45,6 +44,7 @@ from kdive.domain.state import (
     RunState,
     SystemState,
 )
+from kdive.services import accounting
 from tests.db_waits import wait_until_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

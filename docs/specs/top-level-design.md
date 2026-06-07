@@ -318,6 +318,11 @@ Applied across every plane.
   approval over budget. The budget/quota **check and the resulting ledger debit
   are atomic** under a per-project lock (see Concurrency) — otherwise two
   concurrent requests can both pass the check and overspend.
+- **Service-layer boundary** — `kdive.domain` owns pure domain models, state
+  machines, and cost/lease rules. DB-coordinating workflows that compose locks,
+  repositories, idempotency rows, audit rows, and ledger writes live in
+  `kdive.services` (for example allocation admission, renewal, and accounting
+  rollups), so persistence orchestration is not hidden inside domain modules.
 - **Destructive-op policy gate** — `control.power(off/cycle/reset)`,
   `force_crash`, `teardown`, disk delete, and PCI passthrough are gated by three
   independent, all-required checks: (a) the allocation's granted capability

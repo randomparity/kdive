@@ -25,7 +25,6 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
-from kdive.domain import accounting
 from kdive.domain.models import (
     Allocation,
     Budget,
@@ -45,6 +44,7 @@ from kdive.domain.state import (
 from kdive.mcp.auth import AuthError, RequestContext
 from kdive.mcp.tools.accounting import usage as acct_tools
 from kdive.security.rbac import AuthorizationError, Role
+from kdive.services import accounting
 from tests.mcp.roles import PROJECT_A, PROJECT_B, make_role_fixture
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

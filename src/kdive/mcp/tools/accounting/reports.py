@@ -12,7 +12,6 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.domain import accounting as accounting_domain
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -27,6 +26,7 @@ from kdive.security.rbac import (
     require_platform_role,
     require_role,
 )
+from kdive.services import accounting as accounting_domain
 
 _USAGE_OBJECT_ID = "usage"
 _REPORT_OBJECT_ID = "report"

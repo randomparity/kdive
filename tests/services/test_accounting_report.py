@@ -20,9 +20,9 @@ from uuid import UUID, uuid4
 import psycopg
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
-from kdive.domain import accounting
 from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
+from kdive.services import accounting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 

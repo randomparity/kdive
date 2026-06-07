@@ -24,11 +24,11 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import RESOURCES
-from kdive.domain.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Resource, ResourceKind
 from kdive.domain.state import ResourceStatus
 from kdive.providers.interfaces import OwnedInfra, ResourceRecord
+from kdive.services.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY
 
 _KDIVE_METADATA_NS = "https://kdive.dev/libvirt/1"
 _URI_ENV = "KDIVE_LIBVIRT_URI"

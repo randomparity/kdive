@@ -24,15 +24,6 @@ from pydantic import Field
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
-from kdive.domain import accounting
-from kdive.domain.allocation_admission import (
-    AdmissionOutcome,
-    admit,
-)
-from kdive.domain.allocation_admission import (
-    AllocationRequest as DomainAllocationRequest,
-)
-from kdive.domain.allocation_renew import RenewOutcome, renew
 from kdive.domain.cost import Selector
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Resource
@@ -47,6 +38,15 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.security import audit
 from kdive.security.context import RequestContext, require_project
 from kdive.security.rbac import Role, require_role
+from kdive.services import accounting
+from kdive.services.allocation_admission import (
+    AdmissionOutcome,
+    admit,
+)
+from kdive.services.allocation_admission import (
+    AllocationRequest as DomainAllocationRequest,
+)
+from kdive.services.allocation_renew import RenewOutcome, renew
 
 _log = logging.getLogger(__name__)
 
