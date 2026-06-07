@@ -34,7 +34,6 @@ from kdive.mcp.tools import control as control_tools
 from kdive.mcp.tools import runs as runs_tools
 from kdive.mcp.tools import systems as systems_tools
 from kdive.mcp.tools import vmcore as vmcore_tools
-from kdive.planes import vmcore
 from kdive.providers.composition import ProviderRuntime, build_default_provider_runtime
 
 type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool, ProviderRuntime], None]
@@ -64,7 +63,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     lambda app, pool, runtime: introspect.register(app, pool, provider_runtime=runtime),
 )
 
-# Handler seam: each plane exposes register_handlers(registry); the worker calls them all.
+# Handler seam: each concrete worker module exposes register_handlers(registry).
 # jobs.* register no JobHandler; the provisioning plane (#16) registers the provision/teardown
 # handlers, the build plane (#18) registers the build handler, the control plane (#23)
 # registers the power/force_crash handlers, and the retrieve plane (#24) registers the
@@ -77,7 +76,7 @@ _HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
     ),
     lambda registry, runtime: runs_handlers.register_handlers(registry, provider_runtime=runtime),
     lambda registry, runtime: control_tools.register_handlers(registry, provider_runtime=runtime),
-    lambda registry, runtime: vmcore.register_handlers(registry, provider_runtime=runtime),
+    lambda registry, runtime: vmcore_tools.register_handlers(registry, provider_runtime=runtime),
 )
 
 
