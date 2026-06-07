@@ -30,11 +30,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from psycopg import AsyncConnection
-from psycopg.errors import UniqueViolation
-from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
@@ -54,6 +52,11 @@ from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState
 from kdive.security import audit
 from kdive.services import accounting
+from kdive.services.allocation_idempotency import (
+    record_key,
+    resolve_replay,
+    within_budget,
+)
 
 if TYPE_CHECKING:
     from kdive.security.context import RequestContext
@@ -165,7 +168,13 @@ async def _admit_under_project_lock(
 ) -> AdmissionOutcome:
     """Run idempotency + the check-then-debit holding the PROJECT lock (RESOURCE nested)."""
     if request.idempotency_key is not None:
-        replay = await _resolve_replay(conn, request.ctx.principal, request.idempotency_key)
+        replay = await resolve_replay(
+            conn,
+            principal=request.ctx.principal,
+            key=request.idempotency_key,
+            kind=_REQUEST_KIND,
+            operation_label="request",
+        )
         if replay is not None:
             if replay.project != request.project:
                 # The key already names a grant in another project. Returning that foreign
@@ -180,7 +189,7 @@ async def _admit_under_project_lock(
         return AdmissionOutcome(
             granted=False, allocation=None, category=ErrorCategory.QUOTA_EXCEEDED
         )
-    budget_ok = await _within_budget(conn, request.project, estimate)
+    budget_ok = await within_budget(conn, request.project, estimate)
     if not budget_ok:
         return AdmissionOutcome(
             granted=False, allocation=None, category=ErrorCategory.ALLOCATION_DENIED
@@ -226,12 +235,13 @@ async def _grant(
     )
     await accounting.reserve(conn, allocation, estimate)
     if request.idempotency_key is not None:
-        await _record_key(
+        await record_key(
             conn,
-            request.ctx.principal,
-            request.idempotency_key,
-            request.project,
-            allocation.id,
+            principal=request.ctx.principal,
+            key=request.idempotency_key,
+            project=request.project,
+            kind=_REQUEST_KIND,
+            allocation_id=allocation.id,
         )
     await audit.record(
         conn,
@@ -317,79 +327,3 @@ async def _within_alloc_quota(conn: AsyncConnection, project: str) -> bool:
     if count_row is None:  # Invariant: count(*) always yields a row.
         raise RuntimeError("count(*) returned no row")
     return int(count_row[0]) < cap
-
-
-async def _within_budget(conn: AsyncConnection, project: str, estimate: Decimal) -> bool:
-    """Report whether ``(limit_kcu − spent_kcu) ≥ estimate``, read O(1) from the budget row.
-
-    Fail-closed: a project with **no budget row** is over budget (read as
-    ``limit_kcu = 0``, ADR-0007 §4). The O(1) ``spent_kcu`` running total is read under
-    the held PROJECT lock, never reconstructed from the append-only ledger.
-    """
-    async with conn.cursor() as cur:
-        await cur.execute("SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", (project,))
-        row = await cur.fetchone()
-    if row is None:
-        return False
-    remaining = Decimal(row[0]) - Decimal(row[1])
-    return remaining >= estimate
-
-
-async def _resolve_replay(conn: AsyncConnection, principal: str, key: str) -> Allocation | None:
-    """Return the allocation a prior ``(principal, key)`` **request** grant stored, or ``None``.
-
-    Scoped to ``_REQUEST_KIND``: a key the same principal used for a *renew* must not
-    resolve here, or a request would return that renew's allocation as a fresh grant
-    (a cross-kind replay — the same key cannot mean a grant and a renew). The renew path
-    is symmetrically scoped to its own kind; a genuine cross-kind reuse is then caught by
-    :func:`_record_key`'s shared-PK fence. A stored key whose allocation row is somehow
-    gone is a consistency violation surfaced loudly rather than silently re-granting.
-    """
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT result FROM idempotency_keys WHERE principal = %s AND key = %s AND kind = %s",
-            (principal, key, _REQUEST_KIND),
-        )
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    allocation_id = UUID(row[0]["allocation_id"])
-    allocation = await ALLOCATIONS.get(conn, allocation_id)
-    if allocation is None:
-        raise RuntimeError(
-            f"idempotency key ({principal}, {key}) references missing allocation {allocation_id}"
-        )
-    return allocation
-
-
-async def _record_key(
-    conn: AsyncConnection, principal: str, key: str, project: str, allocation_id: UUID
-) -> None:
-    """Record the ``(principal, key) → allocation_id`` request idempotency row in the grant txn.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if ``(principal, key)`` is already used
-            for a different ``kind`` (a renew) — the same key cannot mean a grant and a
-            renew. The ``(principal, key)`` PK is shared across kinds, so the replay scope
-            in :func:`_resolve_replay` passed this through; the INSERT then fails closed
-            here (symmetric with the renew path), rolling the grant back.
-    """
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (
-                    key,
-                    principal,
-                    project,
-                    _REQUEST_KIND,
-                    Jsonb({"allocation_id": str(allocation_id)}),
-                ),
-            )
-    except UniqueViolation as exc:
-        raise CategorizedError(
-            f"idempotency key ({principal}, {key}) is already in use",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"principal": principal},
-        ) from exc

@@ -34,8 +34,6 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from psycopg import AsyncConnection
-from psycopg.errors import UniqueViolation
-from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
@@ -53,6 +51,11 @@ from kdive.domain.models import Allocation
 from kdive.domain.state import AllocationState
 from kdive.security import audit
 from kdive.services import accounting
+from kdive.services.allocation_idempotency import (
+    record_key,
+    resolve_replay,
+    within_budget,
+)
 
 if TYPE_CHECKING:
     from kdive.security.context import RequestContext
@@ -148,7 +151,13 @@ async def _renew_under_project_lock(
 ) -> RenewOutcome:
     """Resolve idempotency, clamp, re-check budget, and extend — holding the PROJECT lock."""
     if idempotency_key is not None:
-        replay = await _resolve_replay(conn, ctx.principal, idempotency_key)
+        replay = await resolve_replay(
+            conn,
+            principal=ctx.principal,
+            key=idempotency_key,
+            kind=_RENEW_KIND,
+            operation_label="renew",
+        )
         if replay is not None:
             if replay.id != allocation_id:
                 # The key already names a renew of a different allocation; the same key
@@ -183,7 +192,7 @@ async def _renew_under_project_lock(
             renewed=False, allocation=None, category=ErrorCategory.CONFIGURATION_ERROR
         )
     estimate = await _extension_estimate(conn, alloc, extension.added_hours)
-    if not await _within_budget(conn, alloc.project, estimate):
+    if not await within_budget(conn, alloc.project, estimate):
         return RenewOutcome(
             renewed=False, allocation=None, category=ErrorCategory.ALLOCATION_DENIED
         )
@@ -210,7 +219,14 @@ async def _apply_renew(
     extended = alloc.model_copy(update={"lease_expiry": extension.new_expiry})
     await accounting.reserve(conn, extended, estimate)
     if idempotency_key is not None:
-        await _record_key(conn, ctx.principal, idempotency_key, alloc.project, alloc.id)
+        await record_key(
+            conn,
+            principal=ctx.principal,
+            key=idempotency_key,
+            project=alloc.project,
+            kind=_RENEW_KIND,
+            allocation_id=alloc.id,
+        )
     await audit.record(
         conn,
         ctx,
@@ -258,67 +274,3 @@ async def _cost_class(conn: AsyncConnection, alloc: Allocation) -> str:
             details={"allocation_id": str(alloc.id)},
         )
     return str(row[0])
-
-
-async def _within_budget(conn: AsyncConnection, project: str, estimate: Decimal) -> bool:
-    """Report whether ``(limit_kcu − spent_kcu) ≥ estimate`` (O(1), under the PROJECT lock).
-
-    Fail-closed: a project with no budget row is over budget (read as ``limit_kcu = 0``).
-    """
-    async with conn.cursor() as cur:
-        await cur.execute("SELECT limit_kcu, spent_kcu FROM budgets WHERE project = %s", (project,))
-        row = await cur.fetchone()
-    if row is None:
-        return False
-    return Decimal(row[0]) - Decimal(row[1]) >= estimate
-
-
-async def _resolve_replay(conn: AsyncConnection, principal: str, key: str) -> Allocation | None:
-    """Return the allocation a prior ``(principal, key)`` renew stored, or ``None``."""
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT result FROM idempotency_keys WHERE principal = %s AND key = %s AND kind = %s",
-            (principal, key, _RENEW_KIND),
-        )
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    allocation_id = UUID(row[0]["allocation_id"])
-    allocation = await ALLOCATIONS.get(conn, allocation_id)
-    if allocation is None:
-        raise RuntimeError(
-            f"renew idempotency key ({principal}, {key}) references missing "
-            f"allocation {allocation_id}"
-        )
-    return allocation
-
-
-async def _record_key(
-    conn: AsyncConnection, principal: str, key: str, project: str, allocation_id: UUID
-) -> None:
-    """Record the ``(principal, key) → allocation_id`` renew idempotency row in the txn.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if ``(principal, key)`` is already used
-            for a different ``kind`` (a request grant) — the same key cannot mean a grant
-            and a renew. The ``(principal, key)`` PK is shared across kinds.
-    """
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (
-                    key,
-                    principal,
-                    project,
-                    _RENEW_KIND,
-                    Jsonb({"allocation_id": str(allocation_id)}),
-                ),
-            )
-    except UniqueViolation as exc:
-        raise CategorizedError(
-            f"idempotency key ({principal}, {key}) is already in use",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"principal": principal},
-        ) from exc
