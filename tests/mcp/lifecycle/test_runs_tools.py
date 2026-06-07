@@ -1215,7 +1215,7 @@ def test_install_nonkdump_system_admits_cmdline_without_crashkernel(migrated_url
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(
-                pool, build_profile={**_VALID_BUILD, "cmdline": "console=ttyS0"}
+                pool, build_profile={**_VALID_BUILD, "cmdline": "dhash_entries=1"}
             )  # bare System (default seed profile) => method console
             resp = await _install(pool, _ctx(), run_id)
             njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
@@ -2000,11 +2000,11 @@ def test_install_handler_forwards_default_cmdline_when_ledger_has_none(migrated_
 
 @pytest.mark.parametrize(
     "cmdline",
-    ["console=ttyS0 dhash_entries=1 panic_on_oops=1", "console=ttyS0"],
+    ["dhash_entries=1 panic_on_oops=1", "panic_on_oops=1"],
 )
-def test_install_tier0_demo_cmdlines_pass_boundary(migrated_url: str, cmdline: str) -> None:
-    # Acceptance (#116): the Tier-0 demo cmdlines carry no crashkernel=; a bare (console)
-    # System admits them through runs.install.
+def test_install_debug_args_pass_boundary(migrated_url: str, cmdline: str) -> None:
+    # The platform injects console/root; agent-supplied debug args carry no crashkernel= and
+    # a bare (console) System admits them through runs.install.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_succeeded_run(

@@ -28,7 +28,7 @@ Mint a presigned PUT for a DEFINED System's rootfs. Requires operator.
 
 `partial` · `read-only`
 
-Fetch one redacted artifact by id; sensitive ids are not-found (no raw vmcore leak).
+Fetch one redacted artifact by id. Requires viewer; sensitive ids are not-found.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -38,7 +38,7 @@ Fetch one redacted artifact by id; sensitive ids are not-found (no raw vmcore le
 
 `partial` · `read-only`
 
-List the redacted artifacts for a System. Requires project membership.
+List the redacted artifacts for a System. Requires viewer.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

@@ -132,6 +132,17 @@ def test_every_parameter_has_a_description() -> None:
     assert not offenders, f"parameters missing a description: {offenders}"
 
 
+def test_run_cmdline_docs_describe_debug_args_only() -> None:
+    """The agent-provided cmdline must not document platform-owned boot args."""
+    tools = {t.name: t for t in TOOLS}
+    for tool_name in ("runs.build", "runs.complete_build"):
+        schema = tools[tool_name].parameters["properties"]["cmdline"]
+        description = schema["description"]
+        assert "dhash_entries=1" in description
+        assert "console=ttyS0" not in description
+        assert "root=/dev/vda" not in description
+
+
 def test_every_tool_has_a_valid_maturity() -> None:
     valid = {"implemented", "partial", "planned"}
     offenders = [t.name for t in TOOLS if (t.meta or {}).get("maturity") not in valid]
@@ -170,6 +181,7 @@ def test_backstop_actually_detects_the_known_gate_callers() -> None:
     assert _gate_reachers() == {
         "control.force_crash",
         "control.power",
+        "systems.teardown",
         "systems.reprovision",
     }
 

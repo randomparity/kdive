@@ -72,9 +72,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         cmdline: Annotated[
             str | None,
             Field(
-                description="Kernel command line recorded in the build ledger and applied at "
-                "boot (e.g. 'console=ttyS0 dhash_entries=1'). Omit for the method default. "
-                "Bound on the first build of a Run."
+                description="Kernel debug args appended to the platform-required boot args "
+                "(e.g. 'dhash_entries=1'). Omit for no extra debug args. Bound on the first "
+                "build of a Run."
             ),
         ] = None,
     ) -> ToolResponse:
@@ -91,9 +91,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         cmdline: Annotated[
             str,
             Field(
-                description="Kernel command line (e.g. 'console=ttyS0 dhash_entries=1'). "
-                "Recorded in the build ledger and applied at boot via runs.install/runs.boot "
-                "(ADR-0061)."
+                description="Kernel debug args appended to the platform-required boot args "
+                "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
+                "via runs.install/runs.boot (ADR-0061)."
             ),
         ],
         build_id: Annotated[
