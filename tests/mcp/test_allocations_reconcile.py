@@ -27,6 +27,7 @@ from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools import allocations as alloc_tools
 from kdive.security.rbac import Role
+from tests.db_waits import wait_until_any_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -215,7 +216,7 @@ def test_concurrent_release_vs_expired_sweep_reconciles_once(migrated_url: str) 
                     task = asyncio.ensure_future(
                         alloc_tools.release_allocation(pool, _ctx(), str(alloc_id))
                     )
-                    await asyncio.sleep(0.3)
+                    await wait_until_any_backend_waiting(sweep, locktype="advisory")
                     assert not task.done()  # blocked on the sweep's locks
                     # The sweep flips ->expired and reconciles, then releases the locks.
                     alloc = await ALLOCATIONS.update_state(sweep, alloc_id, AllocationState.EXPIRED)

@@ -40,6 +40,7 @@ from kdive.mcp.tools import runs as runs_tools
 from kdive.planes import runs as runs_handlers
 from kdive.planes import runs_shared
 from kdive.security.rbac import AuthorizationError, Role
+from tests.db_waits import wait_until_any_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _PROFILE: dict[str, Any] = {"kernel_source_ref": "git+https://git.kernel.org#v6.9"}
@@ -486,7 +487,7 @@ def test_create_blocks_on_held_investigation_lock(migrated_url: str) -> None:
                     advisory_xact_lock(holder, LockScope.INVESTIGATION, UUID(inv_id)),
                 ):
                     task = asyncio.create_task(_create(pool, _ctx(), inv_id, sys_id))
-                    await asyncio.sleep(0.3)
+                    await wait_until_any_backend_waiting(holder, locktype="advisory")
                     assert not task.done()  # blocked on the held INVESTIGATION lock
                 resp = await task
             assert resp.status == "created"

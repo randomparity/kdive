@@ -45,6 +45,7 @@ from kdive.domain.state import (
     RunState,
     SystemState,
 )
+from tests.db_waits import wait_until_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -423,7 +424,7 @@ def test_stamp_active_ended_blocks_on_inflight_start(migrated_url: str) -> None:
                     (_DT, alloc.id),
                 )
                 task = asyncio.create_task(_do_stamp())
-                await asyncio.sleep(0.3)
+                await wait_until_backend_waiting(writer, stamper.info.backend_pid)
                 assert not task.done()  # blocked on the writer's row lock, did not skip
             result = await asyncio.wait_for(task, timeout=5.0)
             assert result.active_started_at == _DT  # committed start observed after unblock

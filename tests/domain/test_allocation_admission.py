@@ -31,6 +31,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
+from tests.db_waits import wait_until_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 CTX = RequestContext(principal="alice", agent_session="s", projects=("proj",))
@@ -218,7 +219,7 @@ def test_admit_blocks_behind_a_held_resource_lock(migrated_url: str) -> None:
             await _seed_budget_quota(seed)
             async with a.transaction(), advisory_xact_lock(a, LockScope.RESOURCE, res.id):
                 task = asyncio.ensure_future(_admit(b, res))
-                await asyncio.sleep(0.3)
+                await wait_until_backend_waiting(a, b.info.backend_pid, locktype="advisory")
                 assert not task.done()  # blocked on the resource lock
             # leaving the lock + transaction releases the lock
             outcome = await task

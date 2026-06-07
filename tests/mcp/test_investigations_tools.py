@@ -16,6 +16,7 @@ from kdive.domain.state import InvestigationState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools import investigations as inv_tools
 from kdive.security.rbac import AuthorizationError, Role
+from tests.db_waits import wait_until_any_backend_waiting
 
 
 def _ctx(
@@ -397,7 +398,7 @@ def test_link_acquires_investigation_lock(migrated_url: str) -> None:
                             {"tracker": "bz", "id": "7", "url": "https://bz/7"},
                         )
                     )
-                    await asyncio.sleep(0.3)
+                    await wait_until_any_backend_waiting(holder, locktype="advisory")
                     assert not task.done()  # blocked on the held INVESTIGATION lock
                 # holder transaction committed here -> lock released
                 resp = await task
