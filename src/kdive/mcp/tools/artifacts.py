@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import timedelta
-from typing import Annotated, Any, LiteralString, Protocol
+from typing import Annotated, Any, LiteralString, NamedTuple, Protocol
 from uuid import UUID
 
 from fastmcp import FastMCP
@@ -80,6 +80,12 @@ class _PresignStore(Protocol):
     ) -> PresignedUpload: ...
 
 
+class _MaterializedUpload(NamedTuple):
+    entry: ManifestEntry
+    key: str
+    presigned: PresignedUpload
+
+
 def _allowed_names(owner_kind: str) -> frozenset[str]:
     return _BUILD_ARTIFACT_NAMES if owner_kind == "run" else frozenset({_ROOTFS_NAME})
 
@@ -104,6 +110,29 @@ def _validate_artifact_declarations(
     if not entries:
         return _config_error(object_id, data={"reason": "no_artifacts_declared"})
     return entries
+
+
+def _materialize_uploads(
+    entries: list[ManifestEntry],
+    *,
+    kind: str,
+    owner_id: UUID,
+    store: _PresignStore,
+) -> list[_MaterializedUpload]:
+    uploads: list[_MaterializedUpload] = []
+    expires_in = _presign_ttl_seconds()
+    for entry in entries:
+        key = artifact_key(_TENANT, kind, str(owner_id), entry.name)
+        presigned = store.presign_put(
+            key,
+            sha256=entry.sha256,
+            size_bytes=entry.size_bytes,
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class=_RETENTION_CLASS,
+            expires_in=expires_in,
+        )
+        uploads.append(_MaterializedUpload(entry, key, presigned))
+    return uploads
 
 
 async def _owner_accepts_upload(conn: AsyncConnection, owner_kind: str, owner_id: UUID) -> bool:
@@ -260,21 +289,12 @@ async def create_upload(
                         return [
                             _config_error(owner_id, data={"reason": "owner_not_accepting_upload"})
                         ]
-                    uploads = [
-                        (
-                            entry,
-                            artifact_key(_TENANT, kind, str(uid), entry.name),
-                            store.presign_put(
-                                artifact_key(_TENANT, kind, str(uid), entry.name),
-                                sha256=entry.sha256,
-                                size_bytes=entry.size_bytes,
-                                sensitivity=Sensitivity.SENSITIVE,
-                                retention_class=_RETENTION_CLASS,
-                                expires_in=_presign_ttl_seconds(),
-                            ),
-                        )
-                        for entry in entries
-                    ]
+                    uploads = _materialize_uploads(
+                        entries,
+                        kind=kind,
+                        owner_id=uid,
+                        store=store,
+                    )
                     await upload_manifest.replace_manifest(
                         conn,
                         owner_kind=kind,
@@ -291,17 +311,17 @@ async def create_upload(
 
     return [
         ToolResponse.success(
-            key,
+            upload.key,
             "upload_ready",
             suggested_next_actions=[next_action],
-            refs={"upload_url": presigned.url},
+            refs={"upload_url": upload.presigned.url},
             data={
-                "name": entry.name,
+                "name": upload.entry.name,
                 "expires_in": str(_presign_ttl_seconds()),
-                **presigned.required_headers,
+                **upload.presigned.required_headers,
             },
         )
-        for entry, key, presigned in uploads
+        for upload in uploads
     ]
 
 
