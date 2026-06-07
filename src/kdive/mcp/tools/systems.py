@@ -11,7 +11,6 @@ domain. Handlers reconstruct a RequestContext from the job's authorizing tuple t
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -24,15 +23,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ALLOCATIONS, ARTIFACTS, SYSTEMS
+from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, Job, JobKind, Sensitivity, System
+from kdive.domain.models import Allocation, Job, JobKind, System
 from kdive.domain.state import AllocationState, IllegalTransition, RunState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.job_context import authorizing as job_authorizing
@@ -42,8 +39,6 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._jobs import job_envelope
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.composition import (
-    domain_name_for,
-    provisioner_from_env,
     reject_rootfs_without_upload_window,
     validate_profile,
 )
@@ -51,12 +46,7 @@ from kdive.providers.ports import Provisioner
 from kdive.security import audit
 from kdive.security.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.rbac import Role, require_role
-from kdive.store.objectstore import (
-    StoredArtifact,
-    artifact_key,
-    object_store_from_env,
-    register_artifact_row,
-)
+from kdive.store import objectstore as _objectstore
 
 _log = logging.getLogger(__name__)
 
@@ -65,6 +55,10 @@ _TERMINAL_SYSTEM = frozenset({SystemState.TORN_DOWN, SystemState.FAILED})
 # System's prior boot is invalid against the new install.
 _NON_TERMINAL_RUN = frozenset({RunState.CREATED, RunState.RUNNING})
 _REPROVISION = "reprovision"
+
+
+def object_store_from_env() -> _objectstore.ObjectStore:
+    return _objectstore.object_store_from_env()
 
 
 def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
@@ -485,133 +479,12 @@ async def _define_locked(
         return _defined_envelope(system)
 
 
-async def _commit_uploaded_rootfs(
-    conn: AsyncConnection, system: System, profile: ProvisioningProfile
-) -> None:
-    """Commit the write-once artifacts row for an 'upload'-kind rootfs (ADR-0048 §6).
-
-    Called inside the locked provisioning->ready transition. For an ``upload`` rootfs it
-    verifies the System-owned object exists (HEAD, off-thread), writes the write-once
-    ``artifacts`` row, and deletes the upload manifest so the reaper exempts the object.
-    Other kinds are a no-op.
-
-    Reachable via the rootfs-upload lane (#111): ``systems.define`` + ``create_upload`` open
-    the window and ``systems.provision`` admits the System, so a persisted ``upload`` profile
-    reaches this commit. The absent-object guard below fails a profile whose upload never
-    landed; ``path``/``url``/``catalog`` are a no-op here.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if an ``upload`` rootfs was never uploaded.
-    """
-    rootfs = profile.provider.local_libvirt.rootfs
-    if rootfs.kind != "upload":
-        return
-    key = artifact_key("local", "systems", str(system.id), "rootfs")
-    head = await asyncio.to_thread(object_store_from_env().head, key)
-    if head is None:
-        raise CategorizedError(
-            "upload-kind rootfs was never uploaded",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"system_id": str(system.id)},
-        )
-    stored = StoredArtifact(key, head.etag, Sensitivity.SENSITIVE, "rootfs")
-    await ARTIFACTS.insert(
-        conn, register_artifact_row(stored, owner_kind="systems", owner_id=system.id)
-    )
-    await upload_manifest.delete_manifest(conn, "systems", system.id)
-
-
-async def _finalize_provision_ready(
-    conn: AsyncConnection, job: Job, system: System, profile: ProvisioningProfile
-) -> None:
-    """Run the provisioning->ready follow-on (caller holds the System lock + transaction).
-
-    Must be called from within the caller's open ``conn.transaction()`` under the held
-    ``LockScope.SYSTEM`` advisory lock — it opens neither, so the artifacts commit, billing
-    open, and audit land atomically with the UPDATE-to-READY in the same locked transaction.
-    """
-    await _commit_uploaded_rootfs(conn, system, profile)
-    await _open_billing_interval(conn, system.allocation_id)
-    await _audit_transition(
-        conn,
-        job,
-        project=system.project,
-        object_id=system.id,
-        transition="provisioning->ready",
-        tool="systems.provision",
-    )
-
-
 async def provision_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
-    """Define+start the tagged domain and drive the System ``provisioning -> ready``."""
-    system_id = UUID(load_payload(job, SystemPayload).system_id)
-    system = await SYSTEMS.get(conn, system_id)
-    if system is None:
-        raise CategorizedError(
-            "provision target system is gone",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"system_id": str(system_id)},
-        )
-    if system.state is not SystemState.PROVISIONING:
-        # ready/crashed: a concurrent same-job run already finalized — the domain belongs to the
-        # live System, so leave it. terminal (torn_down/failed): a teardown or failure raced
-        # ahead; idempotently reap any domain a prior run of THIS job may have created before it
-        # was superseded. Doing it here (not only inline after provisioning) makes the
-        # compensation durable: a requeue after a failed finalize-reap retries it rather than
-        # leaking the domain — the teardown job may have already no-op'd before the domain
-        # existed, and the reaper that would otherwise catch it is deferred (ADR-0025 §8).
-        if system.state in _TERMINAL_SYSTEM:
-            provisioning.teardown(system.domain_name or domain_name_for(system_id))
-        return str(system_id)
-    profile = ProvisioningProfile.parse(system.provisioning_profile)
-    try:
-        domain_name = provisioning.provision(system_id, profile)
-    except CategorizedError:
-        # update_state + audit MUST share one transaction: audit.record does not open its own,
-        # so on a non-autocommit pool connection a bare audit INSERT would be rolled back when
-        # the connection is returned. (update_state's own transaction nests as a savepoint.)
-        # Tolerate IllegalTransition: a concurrent teardown may have already driven the System
-        # terminal, in which case there is nothing to mark failed — re-raise the original
-        # PROVISIONING_FAILURE (not the masking IllegalTransition) so the job dead-letters
-        # with the correct category.
-        try:
-            async with conn.transaction():
-                await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
-                await _audit_transition(
-                    conn,
-                    job,
-                    project=system.project,
-                    object_id=system_id,
-                    transition="provisioning->failed",
-                    tool="systems.provision",
-                )
-        except IllegalTransition:
-            _log.info("provision of system %s failed but it is already terminal", system_id)
-        raise
-    current: SystemState | None = None
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT state FROM systems WHERE id = %s FOR UPDATE", (system_id,))
-            row = await cur.fetchone()
-            current = SystemState(row["state"]) if row is not None else None
-        # The FOR UPDATE row lock and the advisory lock are held until this transaction
-        # commits, so the UPDATE + finalize run after the cursor closes but still under both.
-        if current is SystemState.PROVISIONING:
-            await conn.execute(
-                "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
-                (SystemState.READY.value, domain_name, system_id),
-            )
-            await _finalize_provision_ready(conn, job, system, profile)
-    # Outside the lock. If a concurrent *teardown* drove the System terminal while we were
-    # mid-provision, clean up the domain we just created. A non-terminal, non-provisioning
-    # state (``ready``/``crashed``) means a concurrent *same-job* provision (lease lapse →
-    # double-run) already finalized — that domain is the live System's, so leave it.
-    if current in _TERMINAL_SYSTEM:
-        provisioning.teardown(domain_name)
-        _log.info("provision of system %s superseded by teardown; domain reaped", system_id)
-    return str(system_id)
+    from kdive.mcp.tools import systems_handlers
+
+    return await systems_handlers.provision_handler(conn, job, provisioning)
 
 
 def _reprovision_opt_in(profile: ProvisioningProfile) -> bool:
@@ -748,65 +621,9 @@ async def _admit_reprovision(
 async def reprovision_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
-    """Apply the new profile in place and drive ``reprovisioning -> ready`` (or ``-> failed``).
+    from kdive.mcp.tools import systems_handlers
 
-    Idempotent on re-run: a System already finalized to ``ready`` (or terminal) is left
-    alone — the destructive apply runs once per ``reprovisioning`` entry. A provider
-    ``CategorizedError`` drives ``reprovisioning -> failed`` (interrupted apply leaves the
-    System terminal-failed, not a half-defined ``ready``) and re-raises so the job
-    dead-letters with the provisioning category.
-    """
-    system_id = UUID(load_payload(job, ReprovisionPayload).system_id)
-    system = await SYSTEMS.get(conn, system_id)
-    if system is None:
-        raise CategorizedError(
-            "reprovision target system is gone",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"system_id": str(system_id)},
-        )
-    if system.state is not SystemState.REPROVISIONING:
-        return str(system_id)  # a concurrent same-job run finalized, or it went terminal
-    profile = ProvisioningProfile.parse(system.provisioning_profile)
-    try:
-        domain_name = provisioning.reprovision(system_id, profile)
-    except CategorizedError:
-        try:
-            async with conn.transaction():
-                await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
-                await _audit_transition(
-                    conn,
-                    job,
-                    project=system.project,
-                    object_id=system_id,
-                    transition="reprovisioning->failed",
-                    tool="systems.reprovision",
-                )
-        except IllegalTransition:
-            _log.info("reprovision of system %s failed but it is already terminal", system_id)
-        raise
-    fingerprint = profile_digest(profile)
-    current: SystemState | None = None
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT state FROM systems WHERE id = %s FOR UPDATE", (system_id,))
-            row = await cur.fetchone()
-            current = SystemState(row["state"]) if row is not None else None
-            if current is SystemState.REPROVISIONING:
-                await cur.execute(
-                    "UPDATE systems SET state = %s, domain_name = %s, "
-                    "target_fingerprint = %s WHERE id = %s",
-                    (SystemState.READY.value, domain_name, fingerprint, system_id),
-                )
-        if current is SystemState.REPROVISIONING:
-            await _audit_transition(
-                conn,
-                job,
-                project=system.project,
-                object_id=system_id,
-                transition="reprovisioning->ready",
-                tool="systems.reprovision",
-            )
-    return str(system_id)
+    return await systems_handlers.reprovision_handler(conn, job, provisioning)
 
 
 async def teardown_system(
@@ -849,32 +666,9 @@ async def teardown_system(
 async def teardown_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
-    """Destroy+undefine the domain and drive the System ``-> torn_down`` (idempotent)."""
-    system_id = UUID(load_payload(job, SystemPayload).system_id)
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        system = await SYSTEMS.get(conn, system_id)
-        if system is None:
-            return None  # nothing to tear down
-        domain_name = system.domain_name or domain_name_for(system_id)
-        # Transition only if not already terminal; a re-run (e.g. after a post-commit destroy
-        # failure dead-lettered and requeued) still proceeds to the destroy below.
-        if system.state is not SystemState.TORN_DOWN:
-            old = system.state
-            await SYSTEMS.update_state(conn, system_id, SystemState.TORN_DOWN)
-            await _audit_transition(
-                conn,
-                job,
-                project=system.project,
-                object_id=system_id,
-                transition=f"{old.value}->torn_down",
-                tool="systems.teardown",
-            )
-    # Always attempt the idempotent destroy outside the lock (slow libvirt call). The state is
-    # committed *before* the destroy so a concurrent provision re-reads ``torn_down`` and cleans
-    # up the domain it created; running the destroy unconditionally (even when the row was
-    # already ``torn_down``) lets a retry recover a destroy that failed after that commit.
-    provisioning.teardown(domain_name)
-    return str(system_id)
+    from kdive.mcp.tools import systems_handlers
+
+    return await systems_handlers.teardown_handler(conn, job, provisioning)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -968,22 +762,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
 def register_handlers(
     registry: HandlerRegistry, *, provisioning: Provisioner | None = None
 ) -> None:
-    """Bind the `provision`/`teardown` job handlers; build the provider lazily from env.
+    """Bind the worker handlers while keeping the public app seam unchanged."""
+    from kdive.mcp.tools import systems_handlers
 
-    Building the provider does not open a libvirt connection (the ``connect`` lambda is lazy),
-    so the worker boots without a reachable host; the first job is the first connection.
-    """
-    prov = provisioning or provisioner_from_env()
-
-    async def _provision(conn: AsyncConnection, job: Job) -> str | None:
-        return await provision_handler(conn, job, prov)
-
-    async def _teardown(conn: AsyncConnection, job: Job) -> str | None:
-        return await teardown_handler(conn, job, prov)
-
-    async def _reprovision(conn: AsyncConnection, job: Job) -> str | None:
-        return await reprovision_handler(conn, job, prov)
-
-    registry.register(JobKind.PROVISION, _provision)
-    registry.register(JobKind.TEARDOWN, _teardown)
-    registry.register(JobKind.REPROVISION, _reprovision)
+    systems_handlers.register_handlers(registry, provisioning=provisioning)

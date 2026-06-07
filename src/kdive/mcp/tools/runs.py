@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Any, LiteralString, NamedTuple, Protocol
+from pathlib import Path
+from typing import Annotated, Any, Protocol
 from uuid import UUID, uuid4
 
 from fastmcp import FastMCP
@@ -26,7 +27,6 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db import upload_manifest
-from kdive.db.idempotency import run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, ARTIFACTS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.db.upload_manifest import ManifestEntry
@@ -35,14 +35,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Investigation, Job, JobKind, ResourceKind, Run, Sensitivity, System
 from kdive.domain.state import (
     AllocationState,
-    IllegalTransition,
     InvestigationState,
     RunState,
     SystemState,
 )
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import BuildPayload, RunPayload, load_payload
+from kdive.jobs.payloads import BuildPayload
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.job_context import authorizing as job_authorizing
@@ -50,18 +49,19 @@ from kdive.mcp.job_context import context_from_job as job_context_from_job
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._jobs import job_envelope
-from kdive.profiles.build import BuildProfile, ExternalBuildProfile, ServerBuildProfile
+from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.providers.composition import (
-    builder_from_env,
-    console_log_path,
-    install_boot_from_env,
-    read_console_log,
+    console_log_path as _console_log_path,
+)
+from kdive.providers.composition import (
+    read_console_log as _read_console_log,
+)
+from kdive.providers.composition import (
     validate_external_artifacts,
 )
 from kdive.providers.ports import Booter, Builder, BuildOutput, Installer, ValidatedUpload
 from kdive.security import audit
 from kdive.security.rbac import Role, require_role
-from kdive.security.redaction import Redactor
 from kdive.store.objectstore import (
     HeadResult,
     StoredArtifact,
@@ -75,6 +75,14 @@ _RUN_HOSTABLE = frozenset({SystemState.READY})
 _SYSTEM_GONE = frozenset({SystemState.TORN_DOWN, SystemState.FAILED, SystemState.CRASHED})
 _ALLOC_HOSTABLE = frozenset({AllocationState.ACTIVE})
 _INVESTIGATION_OPEN_FOR_RUN = frozenset({InvestigationState.OPEN, InvestigationState.ACTIVE})
+
+
+def console_log_path(system_id: UUID) -> Path:
+    return _console_log_path(system_id)
+
+
+def read_console_log(path: Path) -> bytes:
+    return _read_console_log(path)
 
 
 def _config_error(object_id: str, *, data: dict[str, str] | None = None) -> ToolResponse:
@@ -581,83 +589,10 @@ async def _finalize_external_build(
     return _complete_envelope(run.id, result)
 
 
-async def _fail_build(conn: AsyncConnection, job: Job, run: Run, category: ErrorCategory) -> None:
-    """Drive `running → failed` with ``category``; tolerate a concurrent cancel."""
-    try:
-        async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
-            await conn.execute(
-                "UPDATE runs SET state = 'failed', failure_category = %s "
-                "WHERE id = %s AND state = 'running'",
-                (category.value, run.id),
-            )
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id = %s", (run.id,))
-                row = await cur.fetchone()
-            if row is None or RunState(row["state"]) is not RunState.FAILED:
-                raise IllegalTransition(f"run {run.id} was not running at build failure")
-            await audit.record(
-                conn,
-                job_context_from_job(job, run.project),
-                tool="runs.build",
-                object_kind="runs",
-                object_id=run.id,
-                transition="running->failed",
-                args={"run_id": str(run.id)},
-                project=run.project,
-            )
-    except IllegalTransition:
-        _log.warning(
-            "build of run %s failed (%s) but it is already terminal; failure not recorded "
-            "on the Run (a concurrent cancel won)",
-            run.id,
-            category.value,
-        )
-
-
 async def build_handler(conn: AsyncConnection, job: Job, builder: Builder) -> str | None:
-    """Build the Run's kernel and drive it `running → succeeded` (or `-> failed`).
+    from kdive.mcp.tools import runs_handlers
 
-    The build (`make` + the two artifact puts) runs with **no DB transaction held** (the
-    worker contract). The ledger record and the Run finalize commit together in one short
-    transaction under the per-Run lock; a re-dispatch with a recorded ledger row skips the
-    rebuild (ADR-0029). On a build failure the Run is driven `failed` with the build's
-    category and the error re-raised so the worker dead-letters the job.
-    """
-    payload = load_payload(job, BuildPayload)
-    run_id = UUID(payload.run_id)
-    run = await RUNS.get(conn, run_id)
-    if run is None:
-        raise CategorizedError(
-            "build target run is gone",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"run_id": str(run_id)},
-        )
-    parsed = BuildProfile.parse(run.build_profile)
-    if not isinstance(parsed, ServerBuildProfile):
-        # The runs.build gate (Task 8) prevents an external Run from enqueueing a build
-        # job; this is the defensive backstop if one ever reaches the handler.
-        raise CategorizedError(
-            "external-source run reached the server build handler",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"run_id": str(run_id)},
-        )
-    profile = parsed
-    result = await _existing_build_result(conn, run_id)
-    if result is None:
-        try:
-            output: BuildOutput = await asyncio.to_thread(builder.build, run_id, profile)
-        except CategorizedError as exc:
-            await _fail_build(conn, job, run, exc.category)
-            raise
-        result = {
-            "kernel_ref": output.kernel_ref,
-            "debuginfo_ref": output.debuginfo_ref,
-            "build_id": output.build_id,
-        }
-        if payload.cmdline is not None:
-            result["cmdline"] = payload.cmdline
-    await _finalize_build(conn, job, run, result)
-    return str(run_id)
+    return await runs_handlers.build_handler(conn, job, builder)
 
 
 # --- install + boot plane (#19, ADR-0030) --------------------------------------------
@@ -825,205 +760,16 @@ async def _enqueue_step(
     return _run_job_envelope(job, run.id)
 
 
-async def _run_step_locked(
-    conn: AsyncConnection,
-    run_id: UUID,
-    step: str,
-    fn: Callable[[], Awaitable[dict[str, Any]]],
-) -> None:
-    """Run an idempotent step under the per-Run lock so the side effect runs at most once.
-
-    `run_step` alone de-dupes only the **ledger row**: two concurrent dispatches of the same
-    job (the queue's at-least-once delivery, lease lapse → double-run) would both read no row
-    and both invoke ``fn`` (the libvirt redefine / power-cycle) before racing on the insert.
-    Holding ``LockScope.RUN`` for the whole `run_step` serializes them, so the second dispatch
-    blocks, then sees the committed row and skips ``fn`` — the build handler's finalize fence
-    applied to the install/boot side effect. The lock is released at transaction commit.
-    """
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
-        await run_step(conn, run_id, step, fn)
-
-
 async def install_handler(conn: AsyncConnection, job: Job, installer: Installer) -> str | None:
-    """Stage the built kernel for direct-kernel boot, recording the `install` step (ADR-0030).
+    from kdive.mcp.tools import runs_handlers
 
-    The Run's `state` is never changed (it is already `succeeded` on build): a succeeded
-    install records a `(run_id, "install")` ledger row under the per-Run lock; a failure
-    records no row and re-raises so the worker dead-letters the job with the step's category
-    (ADR-0030 §2). The libvirt redefine is idempotent (`defineXML` overwrites), so a crash
-    between the redefine and the ledger commit is recovered by a re-dispatch with no orphan.
-    """
-    run_id = UUID(load_payload(job, RunPayload).run_id)
-    run = await RUNS.get(conn, run_id)
-    if run is None or run.kernel_ref is None:
-        raise CategorizedError(
-            "install target run is gone or unbuilt (no kernel_ref)",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"run_id": str(run_id)},
-        )
-    system = await SYSTEMS.get(conn, run.system_id)
-    if system is None:  # defensive: runs.system_id is NOT NULL REFERENCES systems(id)
-        raise CategorizedError(
-            "install target system is gone",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"run_id": str(run_id), "system_id": str(run.system_id)},
-        )
-    method = _install_method_for(system)
-    kernel_ref = run.kernel_ref
-    cmdline = await _cmdline_for(conn, run, method)
-    _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
-    initrd_ref = await _installed_initrd_ref(conn, run_id)
-    job_ctx = job_context_from_job(job, run.project)
-
-    async def _do() -> dict[str, Any]:
-        await asyncio.to_thread(
-            installer.install,
-            run.system_id,
-            run_id,
-            kernel_ref,
-            cmdline=cmdline,
-            method=method,
-            initrd_ref=initrd_ref,
-        )
-        await audit.record(
-            conn,
-            job_ctx,
-            tool="runs.install",
-            object_kind="runs",
-            object_id=run_id,
-            transition="install",
-            args={"run_id": str(run_id)},
-            project=run.project,
-        )
-        return {"system_id": str(run.system_id)}
-
-    await _run_step_locked(conn, run_id, "install", _do)
-    return str(run_id)
-
-
-_CONSOLE_ROW_SQL: LiteralString = (
-    "SELECT id, etag FROM artifacts "
-    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key LIKE %s"
-)
-
-_REFRESH_CONSOLE_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
-
-
-class _ConsoleRow(NamedTuple):
-    """An existing console artifact row's id and etag (replay idempotency + etag refresh)."""
-
-    id: UUID
-    etag: str
-
-
-async def _existing_console_row(conn: AsyncConnection, system_id: UUID) -> _ConsoleRow | None:
-    """Return the System's console artifact row (id, etag), or ``None`` if unregistered."""
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_CONSOLE_ROW_SQL, (system_id, "%/console"))
-        row = await cur.fetchone()
-    return None if row is None else _ConsoleRow(row["id"], str(row["etag"]))
+    return await runs_handlers.install_handler(conn, job, installer)
 
 
 async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str | None:
-    """Boot the installed kernel and confirm run-readiness, recording the `boot` step (ADR-0030).
+    from kdive.mcp.tools import runs_handlers
 
-    Like install, the Run's `state` is untouched: a succeeded boot records a
-    `(run_id, "boot")` ledger row under the per-Run lock; a `boot_timeout`/`readiness_failure`
-    records no row and re-raises for the worker to dead-letter. The per-Run lock makes a
-    concurrent re-dispatch serialize and skip a *recorded* boot. A crash between the
-    power-cycle and the ledger commit re-boots the (freshly provisioned, not-yet-in-use M0)
-    System on the next dispatch — acceptable because the System carries no in-use state until
-    a Run's debug session attaches (a later plane); recorded so the re-boot is a decision.
-    """
-    run_id = UUID(load_payload(job, RunPayload).run_id)
-    run = await RUNS.get(conn, run_id)
-    if run is None:
-        raise CategorizedError(
-            "boot target run is gone",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"run_id": str(run_id)},
-        )
-    job_ctx = job_context_from_job(job, run.project)
-
-    async def _do() -> dict[str, Any]:
-        await asyncio.to_thread(booter.boot, run.system_id)
-        await audit.record(
-            conn,
-            job_ctx,
-            tool="runs.boot",
-            object_kind="runs",
-            object_id=run_id,
-            transition="boot",
-            args={"run_id": str(run_id)},
-            project=run.project,
-        )
-        return {"system_id": str(run.system_id)}
-
-    try:
-        await _run_step_locked(conn, run_id, "boot", _do)
-    finally:
-        # Register the console log as a `redacted` artifact regardless of boot outcome —
-        # a kernel panic fires *before* readiness so the console is the crash signal.
-        # Guard so a store/insert failure never masks the boot error that caused the finally.
-        try:
-            raw = await asyncio.to_thread(read_console_log, console_log_path(run.system_id))
-            if not raw:
-                # An empty read means the console was never captured (the log is absent or
-                # unreadable). A real boot's console is non-empty — even a clean boot prints
-                # the readiness marker. Registering empty bytes as an `available` artifact
-                # would be indistinguishable from a crash-free console and could drive a
-                # false "fixed" A/B verdict, so skip registration and log the miss instead.
-                _log.warning(
-                    "console log for system %s is empty or unreadable; "
-                    "registering no console artifact",
-                    run.system_id,
-                )
-            else:
-                redacted = Redactor().redact_text(raw.decode("utf-8", "replace")).encode("utf-8")
-                stored = await asyncio.to_thread(
-                    lambda: object_store_from_env().put_artifact(
-                        "local",
-                        "systems",
-                        str(run.system_id),
-                        "console",
-                        data=redacted,
-                        sensitivity=Sensitivity.REDACTED,
-                        retention_class="console",
-                    )
-                )
-                # The console object key is System-scoped, so a re-boot of the same System
-                # (a new Run) overwrites the object with a fresh etag. Insert the row on the
-                # first registration; on a re-boot refresh the existing row's etag so it tracks
-                # the rewritten object — otherwise the row keeps the first boot's etag while the
-                # object holds the latest content, and a later conditional `If-Match` read of
-                # the row's etag hits STALE_HANDLE (#117).
-                #
-                # Idempotency rests on the etag compare, not a lock: the (run_id, "boot") dedup
-                # key serializes a single Run's re-dispatch, and a replay re-puts identical bytes
-                # (same etag), so the refresh is a no-op. Two *different* Runs booting one System
-                # concurrently is NOT serialized here — put_artifact ran before this transaction
-                # and the key is shared, so a FOR UPDATE on the row would not order the put vs the
-                # update; making that race consistent needs an advisory lock spanning the put
-                # (vmcore.py's capture pattern). M0 boots a System's Runs sequentially, so that
-                # race is out of scope for this latent fix.
-                async with conn.transaction():
-                    existing = await _existing_console_row(conn, run.system_id)
-                    if existing is None:
-                        await ARTIFACTS.insert(
-                            conn,
-                            register_artifact_row(
-                                stored, owner_kind="systems", owner_id=run.system_id
-                            ),
-                        )
-                    elif existing.etag != stored.etag:
-                        await conn.execute(_REFRESH_CONSOLE_ETAG_SQL, (stored.etag, existing.id))
-        except Exception:
-            _log.warning(
-                "console artifact registration failed for system %s; boot outcome unaffected",
-                run.system_id,
-                exc_info=True,
-            )
-    return str(run_id)
+    return await runs_handlers.boot_handler(conn, job, booter)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -1138,29 +884,7 @@ def register_handlers(
     installer: Installer | None = None,
     booter: Booter | None = None,
 ) -> None:
-    """Bind the `build`/`install`/`boot` job handlers; build the providers lazily from env.
+    """Bind the worker handlers while keeping the public app seam unchanged."""
+    from kdive.mcp.tools import runs_handlers
 
-    Building the providers does not spawn ``make``, open an object-store connection, or
-    connect to libvirt (the real ops run only when the handler is dispatched), so the worker
-    boots without a toolchain or a host.
-    """
-    build = builder or builder_from_env()
-    if installer is None or booter is None:
-        default_installer, default_booter = install_boot_from_env()
-        install: Installer = installer or default_installer
-        boot: Booter = booter or default_booter
-    else:
-        install, boot = installer, booter
-
-    async def _build(conn: AsyncConnection, job: Job) -> str | None:
-        return await build_handler(conn, job, build)
-
-    async def _install(conn: AsyncConnection, job: Job) -> str | None:
-        return await install_handler(conn, job, install)
-
-    async def _boot(conn: AsyncConnection, job: Job) -> str | None:
-        return await boot_handler(conn, job, boot)
-
-    registry.register(JobKind.BUILD, _build)
-    registry.register(JobKind.INSTALL, _install)
-    registry.register(JobKind.BOOT, _boot)
+    runs_handlers.register_handlers(registry, builder=builder, installer=installer, booter=booter)
