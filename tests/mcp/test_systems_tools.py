@@ -3,11 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import copy
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,15 +14,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db import upload_manifest
-from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
+from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
-    Budget,
     Investigation,
     Job,
     JobKind,
-    Quota,
     Run,
     Sensitivity,
     System,
@@ -37,100 +31,35 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools import systems as systems_tools
 from kdive.planes import systems as systems_handlers
-from kdive.providers.local_libvirt.discovery import (
-    LocalLibvirtDiscovery,
-    register_local_libvirt_resource,
-)
 from kdive.security.rbac import AuthorizationError, Role
 from kdive.store.objectstore import ObjectStore, artifact_key
-from tests.providers.local_libvirt.conftest import FakeLibvirtConn
-
-_DT = datetime(2026, 1, 1, tzinfo=UTC)
-
-_PROFILE: dict[str, Any] = {
-    "schema_version": 1,
-    "arch": "x86_64",
-    "vcpu": 4,
-    "memory_mb": 4096,
-    "disk_gb": 20,
-    "boot_method": "direct-kernel",
-    "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
-    "provider": {
-        "local-libvirt": {
-            "domain_xml_params": {"machine": "q35"},
-            "rootfs": {
-                "kind": "path",
-                "path": "oci://registry.internal/rootfs/fedora-40@sha256:abc",
-            },
-            "crashkernel": "256M",
-        }
-    },
-}
-
-
-def _profile() -> dict[str, Any]:
-    return copy.deepcopy(_PROFILE)
-
-
-def _ctx(
-    role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
-) -> RequestContext:
-    roles = {"proj": role} if role is not None else {}
-    return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
-
-
-@asynccontextmanager
-async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
-    pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
-    await pool.open()
-    try:
-        yield pool
-    finally:
-        await pool.close()
-
-
-async def _granted_allocation(
-    pool: AsyncConnectionPool, *, cap: int = 2, systems_quota: int = 1_000_000
-) -> str:
-    disc = LocalLibvirtDiscovery(
-        host_uri="qemu:///system",
-        connect=lambda: FakeLibvirtConn(),
-        concurrent_allocation_cap=cap,
-    )
-    async with pool.connection() as conn:
-        res = await register_local_libvirt_resource(
-            conn, disc, pool="local-libvirt", cost_class="local"
-        )
-        # systems.provision enforces a per-project max_concurrent_systems (ADR-0007 §4);
-        # seed a generous quota + budget so the existing provision paths are not denied.
-        await QUOTAS.upsert(
-            conn,
-            Quota(
-                project="proj",
-                max_concurrent_allocations=1_000_000,
-                max_concurrent_systems=systems_quota,
-                updated_at=_DT,
-            ),
-        )
-        await BUDGETS.upsert(
-            conn,
-            Budget(
-                project="proj", limit_kcu=Decimal("1000000"), spent_kcu=Decimal(0), updated_at=_DT
-            ),
-        )
-        alloc = await ALLOCATIONS.insert(
-            conn,
-            Allocation(
-                id=uuid4(),
-                created_at=_DT,
-                updated_at=_DT,
-                principal="user-1",
-                project="proj",
-                resource_id=res.id,
-                state=AllocationState.GRANTED,
-            ),
-        )
-    return str(alloc.id)
+from tests.mcp.systems_support import (
+    TEST_DT as _DT,
+)
+from tests.mcp.systems_support import (
+    FakeProvisioning as _FakeProvisioning,
+)
+from tests.mcp.systems_support import (
+    ctx as _ctx,
+)
+from tests.mcp.systems_support import (
+    define_system as _define,
+)
+from tests.mcp.systems_support import (
+    enqueue_provision as _enqueue_provision,
+)
+from tests.mcp.systems_support import (
+    granted_allocation as _granted_allocation,
+)
+from tests.mcp.systems_support import (
+    pool as _pool,
+)
+from tests.mcp.systems_support import (
+    provisioning_profile as _profile,
+)
+from tests.mcp.systems_support import (
+    upload_profile as _upload_profile,
+)
 
 
 async def _seed_system(pool: AsyncConnectionPool, alloc_id: str, state: SystemState) -> str:
@@ -210,43 +139,6 @@ def test_get_malformed_uuid_is_config_error(migrated_url: str) -> None:
 
 
 # --- shared fakes/helpers for provision/teardown handler + tool tests ---------------------
-
-
-class _FakeProvisioning:
-    """Records provision/teardown/reprovision calls; provision returns a name or raises."""
-
-    def __init__(self, *, provision_error: bool = False, reprovision_error: bool = False) -> None:
-        self.provisioned: list[UUID] = []
-        self.torn_down: list[str] = []
-        self.reprovisioned: list[UUID] = []
-        self._provision_error = provision_error
-        self._reprovision_error = reprovision_error
-
-    def provision(self, system_id: UUID, profile: Any) -> str:
-        self.provisioned.append(system_id)
-        if self._provision_error:
-            raise CategorizedError("boom", category=ErrorCategory.PROVISIONING_FAILURE)
-        return f"kdive-{system_id}"
-
-    def teardown(self, domain_name: str) -> None:
-        self.torn_down.append(domain_name)
-
-    def reprovision(self, system_id: UUID, profile: Any) -> str:
-        self.reprovisioned.append(system_id)
-        if self._reprovision_error:
-            raise CategorizedError("boom", category=ErrorCategory.PROVISIONING_FAILURE)
-        return f"kdive-{system_id}"
-
-
-async def _enqueue_provision(pool: AsyncConnectionPool, system_id: str, alloc_id: str) -> Job:
-    async with pool.connection() as conn:
-        return await queue.enqueue(
-            conn,
-            JobKind.PROVISION,
-            {"system_id": system_id},
-            {"principal": "user-1", "agent_session": "s", "project": "proj"},
-            f"{alloc_id}:provision",
-        )
 
 
 async def _enqueue_teardown(pool: AsyncConnectionPool, system_id: str) -> Job:
@@ -752,12 +644,6 @@ def test_provision_handler_concurrent_same_job_ready_does_not_tear_down(migrated
 # test the worker-side provisioning->ready commit in isolation. The full lane is reachable
 # end-to-end via systems.define + artifacts.create_system_upload + systems.provision (#111); see
 # tests/integration/test_systems_define_upload_provision.py for that reachability proof.
-
-
-def _upload_profile() -> dict[str, Any]:
-    p = _profile()
-    p["provider"]["local-libvirt"]["rootfs"] = {"kind": "upload"}
-    return p
 
 
 async def _seed_system_with_profile(
@@ -1398,10 +1284,6 @@ def test_reprovision_rejects_upload_rootfs(migrated_url: str) -> None:
 
 
 # --- systems.define ------------------------------------------------------------------------
-
-
-async def _define(pool: AsyncConnectionPool, ctx: RequestContext, alloc_id: str, profile):
-    return await systems_tools.define_system(pool, ctx, allocation_id=alloc_id, profile=profile)
 
 
 def test_define_inserts_defined_system_and_activates_allocation(migrated_url: str) -> None:

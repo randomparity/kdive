@@ -37,7 +37,7 @@ from kdive.mcp.tools import artifacts as artifacts_tools
 from kdive.mcp.tools import systems as systems_tools
 from kdive.security.rbac import AuthorizationError, Role
 from kdive.store.objectstore import PresignedUpload
-from tests.mcp.test_systems_tools import _granted_allocation
+from tests.mcp.systems_support import granted_allocation as _granted_allocation
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _EXTERNAL_PROFILE: dict[str, Any] = {"schema_version": 1, "source": "external"}

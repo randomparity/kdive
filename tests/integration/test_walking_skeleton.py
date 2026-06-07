@@ -17,8 +17,6 @@ PR against the disposable Postgres (ADR-0015):
 from __future__ import annotations
 
 import asyncio
-import os
-from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -299,38 +297,3 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
         assert all(not ("/vmcore-" in key and not key.endswith("-redacted")) for key in refs)
 
     asyncio.run(_run())
-
-
-# --- live_vm fixture preflight (shared by the M1 live introspection test) -------------------
-# The M0 full-path tier (`test_walking_skeleton_full_path`) was superseded by the M1.2
-# phase-structured spine driver `tests/integration/test_live_stack.py` and deleted
-# (ADR-0042 §5, replace-don't-deprecate). This preflight remains because the M1
-# `test_c8_live_introspect_over_ssh` (test_m1_allocation_accounting.py) reuses it.
-
-_GUEST_IMAGE_ENV = "KDIVE_GUEST_IMAGE"
-_KERNEL_TREE_ENV = "KDIVE_KERNEL_SRC"
-_LIVE_SSH_ENV = "KDIVE_LIVE_SSH_TARGET"
-
-
-def _live_vm_preflight(*, require_ssh: bool = False) -> tuple[Path, Path]:
-    """Resolve the operator-provided fixtures or skip with the exact script to run (ADR-0035 §4).
-
-    A missing fixture is an actionable skip, never a confusing mid-path failure. When
-    ``require_ssh`` is set (the M1 live introspection criterion, #71), also require an
-    SSH-reachable guest named by ``KDIVE_LIVE_SSH_TARGET`` and verified by
-    ``scripts/live-vm/check-ssh-reachable.sh`` — drgn-over-SSH needs the live transport, not
-    just a built image (ADR-0039 §2,4).
-    """
-    image = os.environ.get(_GUEST_IMAGE_ENV)
-    if not image or not Path(image).exists():
-        pytest.skip(
-            f"{_GUEST_IMAGE_ENV} unset or missing; run scripts/live-vm/build-guest-image.sh"
-        )
-    tree = os.environ.get(_KERNEL_TREE_ENV)
-    if not tree or not Path(tree).exists():
-        pytest.skip(
-            f"{_KERNEL_TREE_ENV} unset or missing; run scripts/live-vm/fetch-kernel-tree.sh"
-        )
-    if require_ssh and not os.environ.get(_LIVE_SSH_ENV):
-        pytest.skip(f"{_LIVE_SSH_ENV} unset; run scripts/live-vm/check-ssh-reachable.sh <host>")
-    return Path(image), Path(tree)

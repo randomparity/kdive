@@ -1050,7 +1050,7 @@ def test_c8_live_introspect_over_ssh(migrated_url: str) -> None:  # pragma: no c
     contract is already covered by ``tests/mcp/test_introspect_tools.py`` against a fake live
     introspector, so CI retains a real signal for the redaction invariant.
     """
-    from tests.integration.test_walking_skeleton import _live_vm_preflight
+    from tests.integration.conftest import live_vm_preflight
 
-    _live_vm_preflight(require_ssh=True)
+    live_vm_preflight(require_ssh=True)
     raise NotImplementedError("live_vm SSH/introspect harness wired by the live_vm runner")

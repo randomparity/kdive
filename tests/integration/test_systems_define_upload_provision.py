@@ -18,14 +18,26 @@ from kdive.mcp.tools import artifacts as artifacts_tools
 from kdive.mcp.tools import systems as systems_tools
 from kdive.planes import systems as systems_handlers
 from kdive.store.objectstore import ObjectStore, artifact_key
-from tests.mcp.test_systems_tools import (
-    _ctx,
-    _define,
-    _enqueue_provision,
-    _FakeProvisioning,
-    _granted_allocation,
-    _pool,
-    _upload_profile,
+from tests.mcp.systems_support import (
+    FakeProvisioning as _FakeProvisioning,
+)
+from tests.mcp.systems_support import (
+    ctx as _ctx,
+)
+from tests.mcp.systems_support import (
+    define_system as _define,
+)
+from tests.mcp.systems_support import (
+    enqueue_provision as _enqueue_provision,
+)
+from tests.mcp.systems_support import (
+    granted_allocation as _granted_allocation,
+)
+from tests.mcp.systems_support import (
+    pool as _pool,
+)
+from tests.mcp.systems_support import (
+    upload_profile as _upload_profile,
 )
 
 
