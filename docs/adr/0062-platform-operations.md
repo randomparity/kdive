@@ -50,17 +50,24 @@ control-plane actions (reconcile, queue, tuning) and the break-glass tools take 
 namespace. Break-glass is its own `ops.*` tool, not an extension of `systems.teardown` /
 `allocations.release`, so the override path is separate and the per-project tools are untouched.
 
-### 3. `cordoned` is a new healthy host status; `drain` is an action, not a status
+### 3. Schedulability (`cordoned`) is a separate axis from health (`status`); `drain` is an action
 
-The `resources.status` enum gains **`cordoned`** — a healthy host that admission skips — kept
-distinct from `offline` so a host drained for maintenance and a crashed host read differently.
-`resources.cordon`/`uncordon` toggle it; `resources.set_status` covers the operational triad
-(`available`/`degraded`/`offline`) and deliberately cannot reach `cordoned` (separate verb,
-separate audit transition). **Drain is modeled as an action, not a persisted state**
-(*decision 1a*): `resources.drain` cordons, then `mode=passive` (default — report live
-allocations, let them finish) or `mode=force_release` (gated — force-release each). There is no
-`draining` status; "a drain is in progress" is not modeled as state. A future `mode=migrate`
-(M2) slots in without reshaping the tool.
+Cordon and host health are **orthogonal** — a host can be cordoned for maintenance *and*
+degraded, or healthy *and* cordoned — so they are separate columns, not values of one enum (the
+k8s lesson the rationale here invokes: the `Unschedulable` flag lives apart from the `Ready`
+condition precisely so a node can be both). We add a boolean **`cordoned`** column to
+`resources`, independent of the existing `status` (`available`/`degraded`/`offline`). Putting
+`cordoned` into the `status` enum instead would mean a crashed cordoned host cannot read as both,
+and `set_status offline` would clobber an operator's cordon (and a recovered host could strand);
+separate columns never clobber each other. Placement excludes a host that is `cordoned` **or**
+not `available`. `resources.cordon`/`uncordon` toggle the boolean; `resources.set_status` sets the
+health triad; the verbs stay on their own axes.
+
+**Drain is modeled as an action, not a persisted state** (*decision 1a*): `resources.drain` sets
+`cordoned`, then `mode=passive` (default — report live allocations, let them finish) or
+`mode=force_release` (gated — force-release each). There is no `draining` flag; "a drain is in
+progress" is not modeled as state. A future `mode=migrate` (M2) slots in without reshaping the
+tool.
 
 ### 4. Break-glass is a separate path that fully overrides the three-check gate
 
@@ -70,34 +77,63 @@ profile opt-in) protects a member acting within their own project; a stuck cross
 typically fails all three, which is precisely when break-glass is needed. Authority comes
 solely from `require_platform_role(PLATFORM_ADMIN)` + a mandatory non-blank `reason` + an
 always-written `platform_audit_log` row. They reuse the per-project tools' internal
-teardown/release execution; only authorization differs. The per-project tools are unchanged.
+teardown/release **execution**, but not its audit attribution: `audit.record()` enforces
+`project in ctx.projects` (a misattribution guard), and a break-glass `platform_admin` is by
+definition **not a member** of the target project — so the reused path must write its audit
+through a guard-exempt attribution writer (the `audit.record_system`/`record_platform` pattern),
+recording the platform principal against the target's project. **Both authorization and audit
+attribution differ** from the per-project tools; only the teardown/release mechanics are shared.
+The per-project tools are unchanged.
 
-### 5. `require_role` denials are audited by a centralized dispatch-boundary catch into `audit_log`
+### 5. `require_role` over-reach denials are audited via a dedicated `RoleDenied` exception caught at the dispatch boundary
 
-The retrofit catches `AuthorizationError` **once at the MCP tool-dispatch boundary**, records a
-denial row, and re-raises — one code path covering every current and future tool, with no edits
-to the ~40 `require_role` call sites (*centralized*, not per-site, not via an enriched
-exception). Denial rows land in **`audit_log`** (*decision 2a*) via a new guard-exempt
-`audit.record_denial()` writer, following `audit.record_system()`'s precedent (it already
-writes `audit_log` without the membership guard): a denial records a would-be-non-member, which
-is legitimate, not the misattribution `audit.record()` defends against. Because a
-dispatch-boundary catch is object-agnostic, the retrofit makes `audit_log.project` /
-`object_kind` / `object_id` **nullable**, guarded by a CHECK that keeps them `NOT NULL` for
-every transition except `'denied'` — every real-transition row retains the original invariant.
-`require_platform_role` denials stay out of scope (already audited to `platform_audit_log` in
-M1.1).
+`require_role` raises a dedicated **`RoleDenied`** subclass of `AuthorizationError`; the MCP
+tool-dispatch boundary catches **`RoleDenied` specifically** — not the `AuthorizationError`
+base — records a denial row, and re-raises. Catching the base class would also swallow
+`require_platform_role` denials and `DestructiveOpDenied` (both `AuthorizationError` subclasses,
+the latter already audited by its own handler), double-writing them; the dedicated subclass is
+the discriminator that confines the catch to exactly the bare per-project gate. It is still
+**one** code path covering every current and future tool with no edits to the ~40 call sites —
+the discriminator lives at the single `require_role` raise site, not in the tools, so this is
+*not* the rejected per-field exception enrichment (§Alternatives).
+
+`require_role` denies in two cases (`rbac.py`): the caller is **not a member** of the project,
+or is a member whose role **ranks below** the requirement. The retrofit audits the
+**member-over-reach** case only. The non-membership case is the routine "no grant" denial on a
+broadly-registered tool, and auditing it would let any authenticated token amplify calls into
+unbounded `audit_log` INSERTs — the exact write-amplification ADR-0043 §4 declined to take on
+for platform denials; the same reasoning carries here (a non-member *probing* objects is real
+signal, but recording it safely needs a rate-limited mechanism, deferred). Because a
+member-over-reach denial means the project **is** in `ctx.projects`, the `project` is always
+resolvable — so denial rows keep a **non-null `project`** and are visible to `audit.query`'s
+project-scoped form (the auditor read this milestone also ships).
+
+Denial rows land in **`audit_log`** (*decision 2a*) via a new guard-exempt
+`audit.record_denial()` writer, following `audit.record_system()`'s precedent (it already writes
+`audit_log` without the membership guard). The boundary is object-agnostic — it knows the actor,
+tool, and project, but not the object the handler would have resolved — so the retrofit makes
+`audit_log.object_kind` / `object_id` **nullable** (`project` stays `NOT NULL`), guarded by a
+CHECK that keeps them `NOT NULL` for every transition except `'denied'`; every real-transition
+row retains the original invariant. `require_platform_role` denials stay out of scope (audited to
+`platform_audit_log` in M1.1, and now excluded from the boundary catch by the `RoleDenied`
+discriminator).
 
 ## Consequences
 
 - The full `platform_operator`/`platform_admin` tool surface becomes callable; the
   separation-of-duties the role model expressed (operator ≠ data reader ≠ break-glass admin) is
   now exercised by real tools and tests.
-- New migrations: a `cordoned` enum value, a single-row `ops_control` table (`queue_paused`),
-  and an `audit_log` change (nullable object columns + CHECK + a `reason` column). The
-  `audit_log` change relaxes a long-standing `NOT NULL` invariant — mitigated by the CHECK, but
-  any consumer that assumed non-null object columns must now handle `'denied'` rows.
+- New migrations: a `cordoned` boolean column on `resources` (orthogonal to `status`), a
+  single-row `ops_control` table (`queue_paused`), and an `audit_log` change (nullable
+  `object_kind`/`object_id` + CHECK + a `reason` column; `project` stays `NOT NULL`). The
+  `audit_log` change relaxes the object columns' `NOT NULL` for `'denied'` rows only — mitigated
+  by the CHECK, but any consumer that assumed non-null object columns must now handle `'denied'`
+  rows.
 - The worker gains a pre-`dequeue` read of `queue_paused` — one extra cheap query per claim
-  loop while idle.
+  loop while idle. `queue_pause` freezes the **worker's claim loop only**; the reconciler's
+  periodic pass keeps running and may still enqueue repair/teardown jobs. Pause is a processing
+  freeze, not a control-plane freeze — stated so an operator does not mistake it for the latter;
+  jobs enqueued while paused simply wait for resume.
 - Break-glass is a deliberately un-gated-by-the-three-checks path: its only brakes are the
   `platform_admin` grant and the audit trail. This is the intended trade for break-glass
   utility; the audit row + mandatory reason is the accountability mechanism.
@@ -125,10 +161,22 @@ M1.1).
   (decision 2a): per-project denials belong with the per-project trail; reusing `audit_log` via
   a guard-exempt writer keeps one table and follows the existing `record_system` precedent. A
   dedicated table is more separation than the data warrants.
+- **Catch the `AuthorizationError` base at the boundary** (the obvious "one catch" form).
+  Rejected: `require_platform_role` and `DestructiveOpDenied` are also `AuthorizationError`,
+  so the base catch double-audits platform and destructive-gate denials. A dedicated `RoleDenied`
+  subclass on the `require_role` raise site is the minimal discriminator (§5) — not per-field
+  exception enrichment, and not a per-call-site change.
 - **Per-call-site denial try/except** or **enriching `AuthorizationError`** with structured
-  fields. Rejected: per-site is ~40 near-identical edits, easy to miss, and re-required for
-  every new tool; enriching the exception raises fidelity but was declined in favor of the
-  smallest central change — it remains a possible later refinement, not M1.3 scope.
+  per-field context. Rejected: per-site is ~40 near-identical edits, easy to miss, and
+  re-required for every new tool; field-enrichment is more than the central catch needs (the
+  `RoleDenied` type alone suffices). Higher-fidelity object attribution remains a possible later
+  refinement, not M1.3 scope.
+- **Audit non-membership denials too** (audit *every* `require_role` denial). Rejected (§5): a
+  broadly-registered tool's non-member denial is the routine no-grant case, and recording it
+  lets any authenticated token amplify writes into `audit_log` — the amplification ADR-0043 §4
+  already declined for platform denials. Member-over-reach denials carry no such risk (they
+  require valid membership) and are the high-value signal; non-member probe detection is deferred
+  to a rate-limited mechanism.
 - **Job requeue/force-fail and worker orchestration** in queue control; **runtime `W_CPU`/`W_MEM`
   weights** in cost tuning. Rejected as over-build (decision 1): no current caller, and they
   overlap the reconciler (requeue) or belong in version-controlled config (weights).
