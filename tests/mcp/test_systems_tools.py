@@ -1288,7 +1288,7 @@ async def _enqueue_reprovision(pool: AsyncConnectionPool, system_id: str) -> Job
         return await queue.enqueue(
             conn,
             JobKind.REPROVISION,
-            {"system_id": system_id},
+            {"system_id": system_id, "profile_digest": "deadbeef"},
             {"principal": "user-1", "agent_session": "s", "project": "proj"},
             f"{system_id}:reprovision:deadbeef",
         )

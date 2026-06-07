@@ -1,18 +1,17 @@
 """Fakes and helpers for the provider-seam tests (issue #13).
 
-``FakeProvider`` implements every plane method (satisfies all eight Protocols and
-can be registered for any operation). ``PartialFakeProvider`` implements only
-Build + Discovery. ``UnhonoredProvider`` has no plane methods. ``MutableProvider``
-exposes ``build`` as an instance attribute so a test can delete it after
-registration to exercise the at-dispatch honored-method re-check.
+``FakeProvider`` exposes generic plane operation names and can be registered for any
+operation. ``PartialFakeProvider`` implements only Build + Discovery.
+``UnhonoredProvider`` has no plane methods. ``MutableProvider`` exposes ``build`` as an
+instance attribute so a test can delete it after registration to exercise the
+at-dispatch honored-method re-check.
 """
 
 from __future__ import annotations
 
-from kdive.domain.models import ResourceKind
+from kdive.domain.models import Allocation, ResourceKind, Run
 from kdive.providers.capability import Capability, CleanupGuarantee, OpContract, Plane
 from kdive.providers.interfaces import (
-    Allocation,
     ArtifactRef,
     BreakLocation,
     BreakpointId,
@@ -23,7 +22,6 @@ from kdive.providers.interfaces import (
     ProvisioningProfile,
     Registers,
     ResourceRecord,
-    Run,
     SystemHandle,
     TransportHandle,
 )

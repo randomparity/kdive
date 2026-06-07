@@ -31,11 +31,21 @@ from kdive.domain.models import Job, JobKind, System
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools import artifacts as artifacts_tools
+from kdive.mcp.tools._jobs import (
+    authorizing as job_authorizing,
+)
+from kdive.mcp.tools._jobs import (
+    context_from_job as job_context_from_job,
+)
+from kdive.mcp.tools._jobs import (
+    job_envelope,
+)
 from kdive.providers.local_libvirt.retrieve import (
     CrashPostmortem,
     LocalLibvirtRetrieve,
@@ -106,24 +116,8 @@ def _as_uuid(value: str) -> UUID | None:
         return None
 
 
-def _authorizing(ctx: RequestContext, project: str) -> dict[str, Any]:
-    return {"principal": ctx.principal, "agent_session": ctx.agent_session, "project": project}
-
-
-def _ctx_from_job(job: Job, project: str) -> RequestContext:
-    auth = job.authorizing
-    agent_session: str | None = auth.get("agent_session")
-    return RequestContext(
-        principal=str(auth["principal"]),
-        agent_session=agent_session,
-        projects=(project,),
-        roles={},
-    )
-
-
 def _system_job_envelope(job: Job, system_id: UUID) -> ToolResponse:
-    base = ToolResponse.from_job(job)
-    return base.model_copy(update={"data": {**base.data, "system_id": str(system_id)}})
+    return job_envelope(job, "system_id", system_id)
 
 
 # --- vmcore.fetch (admission) --------------------------------------------------------------
@@ -172,7 +166,7 @@ async def fetch_vmcore(
                 conn,
                 JobKind.CAPTURE_VMCORE,
                 {"system_id": system_id, "method": capture_method.value},
-                _authorizing(ctx, system.project),
+                job_authorizing(ctx, system.project),
                 f"{system_id}:capture_vmcore:{capture_method.value}",
             )
         return _system_job_envelope(job, uid)
@@ -261,7 +255,7 @@ async def _finalize_capture(
         )
         await audit.record(
             conn,
-            _ctx_from_job(job, system.project),
+            job_context_from_job(job, system.project),
             tool="vmcore.fetch",
             object_kind="systems",
             object_id=system.id,
@@ -280,8 +274,9 @@ async def capture_handler(conn: AsyncConnection, job: Job, retriever: Retriever)
     finalize that inserts both `artifacts` rows. A capture `CategorizedError` (e.g.
     `readiness_failure` for no core) propagates so the worker dead-letters the job.
     """
-    system_id = UUID(job.payload["system_id"])
-    method = CaptureMethod(job.payload["method"])
+    payload = load_payload(job, CaptureVmcorePayload)
+    system_id = UUID(payload.system_id)
+    method = CaptureMethod(payload.method)
     precheck = await _precheck_system(conn, system_id, method)
     if isinstance(precheck, str):
         return precheck
@@ -293,7 +288,6 @@ async def capture_handler(conn: AsyncConnection, job: Job, retriever: Retriever)
 
 
 def _is_redacted_vmcore(object_key: str) -> bool:
-    """True for a redacted vmcore derivative key (`.../vmcore-{method}-redacted`)."""
     return "/vmcore-" in object_key and object_key.endswith("-redacted")
 
 

@@ -67,7 +67,6 @@ class PresignedUpload(NamedTuple):
 
 
 def _normalize_etag(raw: str) -> str:
-    """Strip S3's surrounding double quotes from an ETag, leaving the bare value."""
     return raw.strip('"')
 
 
@@ -92,7 +91,6 @@ def _validate_component(label: str, value: str) -> str:
 
 
 def _artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
-    """Build the validated ``{tenant}/{kind}/{object_id}/{name}`` object key."""
     return "/".join(
         (
             _validate_component("tenant", tenant),

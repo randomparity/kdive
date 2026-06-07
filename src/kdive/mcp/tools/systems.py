@@ -32,10 +32,20 @@ from kdive.domain.models import Allocation, Job, JobKind, Sensitivity, System
 from kdive.domain.state import AllocationState, IllegalTransition, RunState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._jobs import (
+    authorizing as job_authorizing,
+)
+from kdive.mcp.tools._jobs import (
+    context_from_job as job_context_from_job,
+)
+from kdive.mcp.tools._jobs import (
+    job_envelope,
+)
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.local_libvirt.provisioning import (
     LocalLibvirtProvisioning,
@@ -97,7 +107,6 @@ def _envelope_for_system(system: System) -> ToolResponse:
 
 
 def _defined_envelope(system: System) -> ToolResponse:
-    """Render a freshly-defined System: status ``defined``, pointing at the upload window."""
     return ToolResponse.success(
         str(system.id),
         SystemState.DEFINED.value,
@@ -121,26 +130,8 @@ async def get_system(
         return _envelope_for_system(system)
 
 
-def _authorizing(ctx: RequestContext, project: str) -> dict[str, Any]:
-    return {"principal": ctx.principal, "agent_session": ctx.agent_session, "project": project}
-
-
 def _system_job_envelope(job: Job, system_id: UUID) -> ToolResponse:
-    """A job-handle envelope (like `from_job`) carrying the System id in ``data``."""
-    base = ToolResponse.from_job(job)
-    return base.model_copy(update={"data": {**base.data, "system_id": str(system_id)}})
-
-
-def _ctx_from_job(job: Job, project: str) -> RequestContext:
-    """Reconstruct an attribution context from a job's authorizing tuple (ADR-0025 §9)."""
-    auth = job.authorizing
-    agent_session: str | None = auth.get("agent_session")
-    return RequestContext(
-        principal=str(auth["principal"]),
-        agent_session=agent_session,
-        projects=(project,),
-        roles={},
-    )
+    return job_envelope(job, "system_id", system_id)
 
 
 async def _audit_transition(
@@ -148,7 +139,7 @@ async def _audit_transition(
 ) -> None:
     await audit.record(
         conn,
-        _ctx_from_job(job, project),
+        job_context_from_job(job, project),
         tool=tool,
         object_kind="systems",
         object_id=object_id,
@@ -299,7 +290,7 @@ async def _provision_locked(
                 conn,
                 JobKind.PROVISION,
                 {"system_id": str(existing.id)},
-                _authorizing(ctx, alloc.project),
+                job_authorizing(ctx, alloc.project),
                 f"{alloc_id}:provision",
             )
             return _system_job_envelope(job, existing.id)
@@ -360,7 +351,7 @@ async def _provision_locked(
             conn,
             JobKind.PROVISION,
             {"system_id": str(system.id)},
-            _authorizing(ctx, alloc.project),
+            job_authorizing(ctx, alloc.project),
             f"{alloc_id}:provision",
         )
         return _system_job_envelope(job, system.id)
@@ -390,7 +381,7 @@ async def _admit_defined(
         conn,
         JobKind.PROVISION,
         {"system_id": str(system.id)},
-        _authorizing(ctx, alloc.project),
+        job_authorizing(ctx, alloc.project),
         f"{alloc.id}:provision",
     )
     return _system_job_envelope(job, system.id)
@@ -561,7 +552,7 @@ async def provision_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
     """Define+start the tagged domain and drive the System ``provisioning -> ready``."""
-    system_id = UUID(job.payload["system_id"])
+    system_id = UUID(load_payload(job, SystemPayload).system_id)
     system = await SYSTEMS.get(conn, system_id)
     if system is None:
         raise CategorizedError(
@@ -635,7 +626,6 @@ def _reprovision_opt_in(profile: ProvisioningProfile) -> bool:
 
 
 async def _has_live_run(conn: AsyncConnection, system_id: UUID) -> bool:
-    """Report whether the System has a non-terminal Run (created/running)."""
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT 1 FROM runs WHERE system_id = %s AND state = ANY(%s) LIMIT 1",
@@ -678,7 +668,6 @@ async def reprovision_system(
 async def _reprovision_locked(
     pool: AsyncConnectionPool, ctx: RequestContext, system_id: UUID, profile: ProvisioningProfile
 ) -> ToolResponse:
-    """The gate-then-admit body, serialized on the per-System lock (closes the run race)."""
     async with (
         pool.connection() as conn,
         conn.transaction(),
@@ -756,7 +745,7 @@ async def _admit_reprovision(
         conn,
         JobKind.REPROVISION,
         {"system_id": str(system.id), "profile_digest": digest},
-        _authorizing(ctx, system.project),
+        job_authorizing(ctx, system.project),
         dedup_key,
     )
     return _system_job_envelope(job, system.id)
@@ -773,7 +762,7 @@ async def reprovision_handler(
     System terminal-failed, not a half-defined ``ready``) and re-raises so the job
     dead-letters with the provisioning category.
     """
-    system_id = UUID(job.payload["system_id"])
+    system_id = UUID(load_payload(job, ReprovisionPayload).system_id)
     system = await SYSTEMS.get(conn, system_id)
     if system is None:
         raise CategorizedError(
@@ -857,7 +846,7 @@ async def teardown_system(
                 conn,
                 JobKind.TEARDOWN,
                 {"system_id": str(uid)},
-                _authorizing(ctx, system.project),
+                job_authorizing(ctx, system.project),
                 f"{uid}:teardown",
             )
         return _system_job_envelope(job, uid)
@@ -867,7 +856,7 @@ async def teardown_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
     """Destroy+undefine the domain and drive the System ``-> torn_down`` (idempotent)."""
-    system_id = UUID(job.payload["system_id"])
+    system_id = UUID(load_payload(job, SystemPayload).system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:

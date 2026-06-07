@@ -78,6 +78,18 @@ _NON_TERMINAL = (
 
 
 @dataclass(frozen=True)
+class AllocationRequest:
+    """Inputs for one allocation admission attempt."""
+
+    ctx: RequestContext
+    resource: Resource
+    project: str
+    selector: Selector
+    window: object | None = None
+    idempotency_key: str | None = None
+
+
+@dataclass(frozen=True)
 class AdmissionOutcome:
     """The result of an admission attempt.
 
@@ -99,13 +111,7 @@ class AdmissionOutcome:
 
 async def admit(
     conn: AsyncConnection,
-    ctx: RequestContext,
-    *,
-    resource: Resource,
-    project: str,
-    selector: Selector,
-    window: object | None = None,
-    idempotency_key: str | None = None,
+    request: AllocationRequest,
 ) -> AdmissionOutcome:
     """Admit an allocation against the project budget/quota and the host cap.
 
@@ -115,40 +121,38 @@ async def admit(
 
     Args:
         conn: An async connection (the transaction is opened here).
-        ctx: The authenticated request context (attribution + idempotency principal).
-        resource: The chosen host Resource (its ``cost_class`` and caps are read here).
-        project: The owning project (the budget/quota key and the lock key).
-        selector: The requested size (``vcpus``/``memory_gb``); priced and persisted.
-        window: The requested lease window in hours (a number or decimal string), or
-            ``None`` for the configured default; validated ``> 0`` and clamped.
-        idempotency_key: An optional client retry key, scoped to ``ctx.principal``.
+        request: The authenticated principal, target Resource/project, requested size,
+            lease window, and optional retry key.
 
     Returns:
         An :class:`AdmissionOutcome`: a grant, or a typed denial with no durable write.
     """
     try:
-        window_hours = resolve_window_hours(window)
-        validate_size(selector)
-        validate_against_resource(selector, resource)
-        coeff = await resolve_coeff(conn, resource.cost_class)
+        window_hours = resolve_window_hours(request.window)
+        validate_size(request.selector)
+        validate_against_resource(request.selector, request.resource)
+        coeff = await resolve_coeff(conn, request.resource.cost_class)
         # quantize_kcu can fail closed (value-too-large) on an extreme window×size; keep
         # it inside the guard so it returns a typed denial, never an uncaught exception.
         estimate = quantize_kcu(
-            cost(rate(coeff, vcpus=selector.vcpus, memory_gb=selector.memory_gb), window_hours)
+            cost(
+                rate(
+                    coeff,
+                    vcpus=request.selector.vcpus,
+                    memory_gb=request.selector.memory_gb,
+                ),
+                window_hours,
+            )
         )
     except CategorizedError as exc:
         return AdmissionOutcome(granted=False, allocation=None, category=exc.category)
     try:
-        async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, request.project):
             return await _admit_under_project_lock(
                 conn,
-                ctx,
-                resource=resource,
-                project=project,
-                selector=selector,
+                request,
                 window_hours=window_hours,
                 estimate=estimate,
-                idempotency_key=idempotency_key,
             )
     except CategorizedError as exc:
         # The M0 host-cap resolve (decision 5) fails closed on an invalid cap; the
@@ -158,20 +162,16 @@ async def admit(
 
 async def _admit_under_project_lock(
     conn: AsyncConnection,
-    ctx: RequestContext,
+    request: AllocationRequest,
     *,
-    resource: Resource,
-    project: str,
-    selector: Selector,
     window_hours: Decimal,
     estimate: Decimal,
-    idempotency_key: str | None,
 ) -> AdmissionOutcome:
     """Run idempotency + the check-then-debit holding the PROJECT lock (RESOURCE nested)."""
-    if idempotency_key is not None:
-        replay = await _resolve_replay(conn, ctx.principal, idempotency_key)
+    if request.idempotency_key is not None:
+        replay = await _resolve_replay(conn, request.ctx.principal, request.idempotency_key)
         if replay is not None:
-            if replay.project != project:
+            if replay.project != request.project:
                 # The key already names a grant in another project. Returning that foreign
                 # allocation would be a cross-project replay; the same key cannot mean two
                 # requests. Fail closed (the client must use a fresh key per request).
@@ -179,42 +179,34 @@ async def _admit_under_project_lock(
                     granted=False, allocation=None, category=ErrorCategory.CONFIGURATION_ERROR
                 )
             return AdmissionOutcome(granted=True, allocation=replay)
-    quota_ok = await _within_alloc_quota(conn, project)
+    quota_ok = await _within_alloc_quota(conn, request.project)
     if not quota_ok:
         return AdmissionOutcome(
             granted=False, allocation=None, category=ErrorCategory.QUOTA_EXCEEDED
         )
-    budget_ok = await _within_budget(conn, project, estimate)
+    budget_ok = await _within_budget(conn, request.project, estimate)
     if not budget_ok:
         return AdmissionOutcome(
             granted=False, allocation=None, category=ErrorCategory.ALLOCATION_DENIED
         )
-    async with advisory_xact_lock(conn, LockScope.RESOURCE, resource.id):
-        host = await _host_cap_check(conn, resource)
+    async with advisory_xact_lock(conn, LockScope.RESOURCE, request.resource.id):
+        host = await _host_cap_check(conn, request.resource)
         if host is not None:
             return host
         return await _grant(
             conn,
-            ctx,
-            resource=resource,
-            project=project,
-            selector=selector,
+            request,
             window_hours=window_hours,
             estimate=estimate,
-            idempotency_key=idempotency_key,
         )
 
 
 async def _grant(
     conn: AsyncConnection,
-    ctx: RequestContext,
+    request: AllocationRequest,
     *,
-    resource: Resource,
-    project: str,
-    selector: Selector,
     window_hours: Decimal,
     estimate: Decimal,
-    idempotency_key: str | None,
 ) -> AdmissionOutcome:
     """Insert the granted Allocation, reserve, record the key, and audit (one txn)."""
     now = datetime.now(UTC)  # the DB sets created_at/updated_at; lease_expiry is explicit
@@ -225,29 +217,35 @@ async def _grant(
             id=uuid4(),
             created_at=now,
             updated_at=now,
-            principal=ctx.principal,
-            agent_session=ctx.agent_session,
-            project=project,
-            resource_id=resource.id,
+            principal=request.ctx.principal,
+            agent_session=request.ctx.agent_session,
+            project=request.project,
+            resource_id=request.resource.id,
             state=AllocationState.GRANTED,
             lease_expiry=lease_expiry,
-            requested_vcpus=selector.vcpus,
-            requested_memory_gb=selector.memory_gb,
+            requested_vcpus=request.selector.vcpus,
+            requested_memory_gb=request.selector.memory_gb,
             capability_scope={},
         ),
     )
     await accounting.reserve(conn, allocation, estimate)
-    if idempotency_key is not None:
-        await _record_key(conn, ctx.principal, idempotency_key, project, allocation.id)
+    if request.idempotency_key is not None:
+        await _record_key(
+            conn,
+            request.ctx.principal,
+            request.idempotency_key,
+            request.project,
+            allocation.id,
+        )
     await audit.record(
         conn,
-        ctx,
+        request.ctx,
         tool="allocations.request",
         object_kind="allocations",
         object_id=allocation.id,
         transition="->granted",
-        args={"resource_id": str(resource.id), "project": project},
-        project=project,
+        args={"resource_id": str(request.resource.id), "project": request.project},
+        project=request.project,
     )
     return AdmissionOutcome(granted=True, allocation=allocation)
 

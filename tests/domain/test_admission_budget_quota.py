@@ -21,7 +21,11 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from kdive.db.repositories import BUDGETS, QUOTAS, RESOURCES
-from kdive.domain.allocation_admission import CONCURRENT_ALLOCATION_CAP_KEY, admit
+from kdive.domain.allocation_admission import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    AllocationRequest,
+    admit,
+)
 from kdive.domain.cost import Selector
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Budget, Quota, Resource, ResourceKind
@@ -103,12 +107,14 @@ async def _count(conn: psycopg.AsyncConnection, table: str) -> int:
 def _admit(conn: psycopg.AsyncConnection, **kw: object):  # type: ignore[no-untyped-def]
     return admit(
         conn,
-        CTX,
-        resource=kw.pop("resource"),  # ty: ignore[invalid-argument-type]
-        project="proj",
-        selector=kw.pop("selector", SEL),  # ty: ignore[invalid-argument-type]
-        window=kw.pop("window", 2),
-        idempotency_key=kw.pop("idempotency_key", None),  # ty: ignore[invalid-argument-type]
+        AllocationRequest(
+            ctx=CTX,
+            resource=kw.pop("resource"),  # ty: ignore[invalid-argument-type]
+            project="proj",
+            selector=kw.pop("selector", SEL),  # ty: ignore[invalid-argument-type]
+            window=kw.pop("window", 2),
+            idempotency_key=kw.pop("idempotency_key", None),  # ty: ignore[invalid-argument-type]
+        ),
     )
 
 
@@ -287,22 +293,26 @@ def test_same_key_reused_across_projects_is_config_error(migrated_url: str) -> N
             ctx = RequestContext(principal="alice", agent_session="s", projects=("proj", "proj2"))
             first = await admit(
                 conn,
-                ctx,
-                resource=res,
-                project="proj",
-                selector=SEL,
-                window=2,
-                idempotency_key="dup",
+                AllocationRequest(
+                    ctx=ctx,
+                    resource=res,
+                    project="proj",
+                    selector=SEL,
+                    window=2,
+                    idempotency_key="dup",
+                ),
             )
             assert first.granted is True
             clash = await admit(
                 conn,
-                ctx,
-                resource=res,
-                project="proj2",
-                selector=SEL,
-                window=2,
-                idempotency_key="dup",
+                AllocationRequest(
+                    ctx=ctx,
+                    resource=res,
+                    project="proj2",
+                    selector=SEL,
+                    window=2,
+                    idempotency_key="dup",
+                ),
             )
             assert clash.granted is False
             assert clash.category is ErrorCategory.CONFIGURATION_ERROR
@@ -336,21 +346,25 @@ def test_same_key_two_principals_are_isolated(migrated_url: str) -> None:
             bob = RequestContext(principal="bob", agent_session="s", projects=("proj2",))
             a = await admit(
                 conn,
-                alice,
-                resource=res,
-                project="proj2",
-                selector=SEL,
-                window=2,
-                idempotency_key="shared",
+                AllocationRequest(
+                    ctx=alice,
+                    resource=res,
+                    project="proj2",
+                    selector=SEL,
+                    window=2,
+                    idempotency_key="shared",
+                ),
             )
             b = await admit(
                 conn,
-                bob,
-                resource=res,
-                project="proj2",
-                selector=SEL,
-                window=2,
-                idempotency_key="shared",
+                AllocationRequest(
+                    ctx=bob,
+                    resource=res,
+                    project="proj2",
+                    selector=SEL,
+                    window=2,
+                    idempotency_key="shared",
+                ),
             )
             assert a.granted and b.granted
             assert a.allocation is not None and b.allocation is not None

@@ -23,6 +23,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.allocation_admission import (
     CONCURRENT_ALLOCATION_CAP_KEY,
+    AllocationRequest,
     admit,
 )
 from kdive.domain.cost import Selector
@@ -46,7 +47,10 @@ async def _conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
 
 
 def _admit(conn: psycopg.AsyncConnection, resource: Resource):  # type: ignore[no-untyped-def]
-    return admit(conn, CTX, resource=resource, project="proj", selector=SEL, window=1)
+    return admit(
+        conn,
+        AllocationRequest(ctx=CTX, resource=resource, project="proj", selector=SEL, window=1),
+    )
 
 
 async def _seed_budget_quota(conn: psycopg.AsyncConnection) -> None:

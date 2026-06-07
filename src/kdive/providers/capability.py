@@ -261,7 +261,6 @@ class CapabilityRegistry:
 
     @staticmethod
     def _select(candidates: list[_Candidate], pin: str | None) -> tuple[_Candidate | None, str]:
-        """Pick the winning candidate and the step that decided it."""
         if pin is not None:
             for candidate in candidates:
                 if candidate.provider_id == pin:

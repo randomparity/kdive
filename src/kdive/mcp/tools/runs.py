@@ -42,10 +42,20 @@ from kdive.domain.state import (
 )
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import BuildPayload, RunPayload, load_payload
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._jobs import (
+    authorizing as job_authorizing,
+)
+from kdive.mcp.tools._jobs import (
+    context_from_job as job_context_from_job,
+)
+from kdive.mcp.tools._jobs import (
+    job_envelope,
+)
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile, ServerBuildProfile
 from kdive.providers.local_libvirt.build import (
     Builder,
@@ -261,40 +271,19 @@ async def create_run(
 _RUN_BUILD_TERMINAL = frozenset({RunState.FAILED, RunState.CANCELED})
 
 
-def _authorizing(ctx: RequestContext, project: str) -> dict[str, Any]:
-    """The job's authorizing tuple (ADR-0029); mirrors `systems._authorizing`."""
-    return {"principal": ctx.principal, "agent_session": ctx.agent_session, "project": project}
-
-
-def _ctx_from_job(job: Job, project: str) -> RequestContext:
-    """Reconstruct an attribution context from a job's authorizing tuple (handler audit)."""
-    auth = job.authorizing
-    agent_session: str | None = auth.get("agent_session")
-    return RequestContext(
-        principal=str(auth["principal"]),
-        agent_session=agent_session,
-        projects=(project,),
-        roles={},
-    )
-
-
 def _run_job_envelope(job: Job, run_id: UUID) -> ToolResponse:
-    """A job-handle envelope (like `from_job`) carrying the Run id in ``data``."""
-    base = ToolResponse.from_job(job)
-    return base.model_copy(update={"data": {**base.data, "run_id": str(run_id)}})
+    return job_envelope(job, "run_id", run_id)
 
 
 async def _enqueue_build(
     conn: AsyncConnection, ctx: RequestContext, run: Run, cmdline: str | None
 ) -> Job:
-    payload: dict[str, Any] = {"run_id": str(run.id)}
-    if isinstance(cmdline, str) and cmdline.strip():
-        payload["cmdline"] = cmdline
+    payload = BuildPayload(run_id=str(run.id), cmdline=cmdline if cmdline else None)
     return await queue.enqueue(
         conn,
         JobKind.BUILD,
         payload,
-        _authorizing(ctx, run.project),
+        job_authorizing(ctx, run.project),
         f"{run.id}:build",
     )
 
@@ -413,7 +402,7 @@ async def _finalize_build(
         )
         await audit.record(
             conn,
-            _ctx_from_job(job, run.project),
+            job_context_from_job(job, run.project),
             tool="runs.build",
             object_kind="runs",
             object_id=run.id,
@@ -620,7 +609,7 @@ async def _fail_build(conn: AsyncConnection, job: Job, run: Run, category: Error
                 raise IllegalTransition(f"run {run.id} was not running at build failure")
             await audit.record(
                 conn,
-                _ctx_from_job(job, run.project),
+                job_context_from_job(job, run.project),
                 tool="runs.build",
                 object_kind="runs",
                 object_id=run.id,
@@ -646,7 +635,8 @@ async def build_handler(conn: AsyncConnection, job: Job, builder: Builder) -> st
     rebuild (ADR-0029). On a build failure the Run is driven `failed` with the build's
     category and the error re-raised so the worker dead-letters the job.
     """
-    run_id = UUID(job.payload["run_id"])
+    payload = load_payload(job, BuildPayload)
+    run_id = UUID(payload.run_id)
     run = await RUNS.get(conn, run_id)
     if run is None:
         raise CategorizedError(
@@ -676,9 +666,8 @@ async def build_handler(conn: AsyncConnection, job: Job, builder: Builder) -> st
             "debuginfo_ref": output.debuginfo_ref,
             "build_id": output.build_id,
         }
-        cmdline = job.payload.get("cmdline")
-        if isinstance(cmdline, str) and cmdline.strip():
-            result["cmdline"] = cmdline
+        if payload.cmdline is not None:
+            result["cmdline"] = payload.cmdline
     await _finalize_build(conn, job, run, result)
     return str(run_id)
 
@@ -810,7 +799,6 @@ async def boot_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) 
 
 
 async def _has_succeeded_step(conn: AsyncConnection, run_id: UUID, step: str) -> bool:
-    """Report whether a succeeded `(run_id, step)` ledger row exists (a short read)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT 1 FROM run_steps WHERE run_id = %s AND step = %s AND state = 'succeeded'",
@@ -830,7 +818,11 @@ async def _enqueue_step(
     """Enqueue an install/boot step job under the per-Run lock; the Run state is untouched."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         job = await queue.enqueue(
-            conn, kind, {"run_id": str(run.id)}, _authorizing(ctx, run.project), f"{run.id}:{step}"
+            conn,
+            kind,
+            {"run_id": str(run.id)},
+            job_authorizing(ctx, run.project),
+            f"{run.id}:{step}",
         )
         await audit.record(
             conn,
@@ -873,7 +865,7 @@ async def install_handler(conn: AsyncConnection, job: Job, installer: Installer)
     (ADR-0030 §2). The libvirt redefine is idempotent (`defineXML` overwrites), so a crash
     between the redefine and the ledger commit is recovered by a re-dispatch with no orphan.
     """
-    run_id = UUID(job.payload["run_id"])
+    run_id = UUID(load_payload(job, RunPayload).run_id)
     run = await RUNS.get(conn, run_id)
     if run is None or run.kernel_ref is None:
         raise CategorizedError(
@@ -893,7 +885,7 @@ async def install_handler(conn: AsyncConnection, job: Job, installer: Installer)
     cmdline = await _cmdline_for(conn, run, method)
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = await _installed_initrd_ref(conn, run_id)
-    job_ctx = _ctx_from_job(job, run.project)
+    job_ctx = job_context_from_job(job, run.project)
 
     async def _do() -> dict[str, Any]:
         await asyncio.to_thread(
@@ -955,7 +947,7 @@ async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str |
     System on the next dispatch — acceptable because the System carries no in-use state until
     a Run's debug session attaches (a later plane); recorded so the re-boot is a decision.
     """
-    run_id = UUID(job.payload["run_id"])
+    run_id = UUID(load_payload(job, RunPayload).run_id)
     run = await RUNS.get(conn, run_id)
     if run is None:
         raise CategorizedError(
@@ -963,7 +955,7 @@ async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str |
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"run_id": str(run_id)},
         )
-    job_ctx = _ctx_from_job(job, run.project)
+    job_ctx = job_context_from_job(job, run.project)
 
     async def _do() -> dict[str, Any]:
         await asyncio.to_thread(booter.boot, run.system_id)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -17,6 +17,12 @@ from kdive.domain.state import JobState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.worker import Worker
+
+_AUTHORIZING = {"principal": "p", "project": "a"}
+
+
+def _build_payload() -> dict[str, str]:
+    return {"run_id": str(uuid4())}
 
 
 async def _final_state(url: str, job_id: UUID) -> Job:
@@ -72,7 +78,9 @@ def test_run_once_happy_path(migrated_url: str) -> None:
             reg.register(JobKind.BUILD, handler)
             worker = Worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
-                job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-happy")
+                job = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-happy"
+                )
 
             processed = await worker.run_once()
             assert processed is not None and processed.id == job.id
@@ -91,7 +99,9 @@ def test_run_once_unknown_kind_dead_letters(migrated_url: str) -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             worker = Worker(pool, HandlerRegistry(), worker_id="w1")  # no handlers
             async with pool.connection() as conn:
-                job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-unk")
+                job = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-unk"
+                )
             await worker.run_once()
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.FAILED
@@ -115,8 +125,12 @@ def test_run_once_dedup_runs_handler_once(migrated_url: str) -> None:
             reg.register(JobKind.BUILD, handler)
             worker = Worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
-                first = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-dedup")
-                second = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-dedup")
+                first = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-dedup"
+                )
+                second = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-dedup"
+                )
             assert second.id == first.id
 
             await worker.run_once()
@@ -141,7 +155,7 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
             worker = Worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
-                    conn, JobKind.BUILD, {}, {"p": "a"}, "dk-poison", max_attempts=3
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-poison", max_attempts=3
                 )
 
             for _ in range(3):
@@ -169,7 +183,9 @@ def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
             reg.register(JobKind.BUILD, handler)
             worker = Worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
-                job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-lapse")
+                job = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-lapse"
+                )
                 # Simulate a dead worker holding a now-lapsed lease.
                 await conn.execute(
                     "UPDATE jobs SET state = 'running', worker_id = 'dead', "
@@ -206,7 +222,9 @@ def test_heartbeat_renews_live_lease(migrated_url: str) -> None:
                 heartbeat_interval=timedelta(milliseconds=250),
             )
             async with pool.connection() as conn:
-                job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-hb-live")
+                job = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-hb-live"
+                )
 
             task = asyncio.create_task(worker.run_once())
             await started.wait()
@@ -257,7 +275,9 @@ def test_heartbeat_error_does_not_crash_dispatch(
                 heartbeat_interval=timedelta(milliseconds=100),
             )
             async with pool.connection() as conn:
-                job = await queue.enqueue(conn, JobKind.BUILD, {}, {"p": "a"}, "dk-hberr")
+                job = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-hberr"
+                )
 
             processed = await worker.run_once()  # a failing heartbeat must not raise here
             assert processed is not None

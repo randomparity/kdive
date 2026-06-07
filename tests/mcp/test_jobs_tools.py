@@ -7,14 +7,27 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
+import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.models import JobKind
 from kdive.jobs import queue
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools import jobs as jobs_tools
+from kdive.security.rbac import AuthorizationError, Role
 
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
+OP_CTX = RequestContext(
+    principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.OPERATOR}
+)
+VIEWER_CTX = RequestContext(
+    principal="user-1", agent_session="s", projects=("proj",), roles={"proj": Role.VIEWER}
+)
+
+
+def _build_payload() -> dict[str, str]:
+    return {"run_id": str(uuid4())}
 
 
 @asynccontextmanager
@@ -31,7 +44,7 @@ async def _enqueue_in(pool: AsyncConnectionPool, dedup: str, project: str) -> st
     """Enqueue a job whose authorizing tuple is owned by ``project``."""
     async with pool.connection() as conn:
         job = await queue.enqueue(
-            conn, JobKind.BUILD, {}, {"principal": "p", "project": project}, dedup
+            conn, JobKind.BUILD, _build_payload(), {"principal": "p", "project": project}, dedup
         )
     return str(job.id)
 
@@ -45,7 +58,7 @@ def test_get_known_job_returns_status(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            resp = await jobs_tools.get_job(pool, CTX, job_id)
+            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
         assert resp.object_id == job_id
         assert resp.status == "queued"
         assert resp.data == {"kind": "build"}
@@ -78,7 +91,7 @@ def test_cancel_queued_job_transitions(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            resp = await jobs_tools.cancel_job(pool, CTX, job_id)
+            resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)
         assert resp.status == "canceled"
 
     asyncio.run(_run())
@@ -88,8 +101,8 @@ def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            await jobs_tools.cancel_job(pool, CTX, job_id)  # -> canceled (terminal)
-            resp = await jobs_tools.cancel_job(pool, CTX, job_id)  # again
+            await jobs_tools.cancel_job(pool, OP_CTX, job_id)  # -> canceled (terminal)
+            resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)  # again
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         # The agent learns the current state without a second jobs.get.
@@ -102,8 +115,8 @@ def test_wait_returns_immediately_for_terminal(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            await jobs_tools.cancel_job(pool, CTX, job_id)
-            resp = await jobs_tools.wait_job(pool, CTX, job_id, timeout_s=5.0)
+            await jobs_tools.cancel_job(pool, OP_CTX, job_id)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=5.0)
         assert resp.status == "canceled"
 
     asyncio.run(_run())
@@ -113,7 +126,7 @@ def test_wait_zero_timeout_is_single_read(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")  # stays queued (no worker)
-            resp = await jobs_tools.wait_job(pool, CTX, job_id, timeout_s=0.0)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0.0)
         assert resp.status == "queued"  # one read, no wait
 
     asyncio.run(_run())
@@ -130,10 +143,10 @@ def test_wait_loops_until_terminal(migrated_url: str) -> None:
 
             async def _cancel_after_delay() -> None:
                 await asyncio.sleep(jobs_tools.POLL_INTERVAL_S + 0.1)
-                await jobs_tools.cancel_job(pool, CTX, job_id)
+                await jobs_tools.cancel_job(pool, OP_CTX, job_id)
 
             canceller = asyncio.create_task(_cancel_after_delay())
-            resp = await jobs_tools.wait_job(pool, CTX, job_id, timeout_s=5.0)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=5.0)
             await canceller
         assert resp.status == "canceled"
 
@@ -145,7 +158,7 @@ def test_list_jobs_newest_first_and_capped(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             for i in range(3):
                 await _enqueue(pool, f"d{i}")
-            resp = await jobs_tools.list_jobs(pool, CTX, limit=2)
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
         assert len(resp) == 2
         assert all(r.status == "queued" for r in resp)
 
@@ -155,7 +168,7 @@ def test_list_jobs_newest_first_and_capped(migrated_url: str) -> None:
 def test_list_jobs_empty(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.list_jobs(pool, CTX, limit=50)
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp == []
 
     asyncio.run(_run())
@@ -175,7 +188,7 @@ def test_list_jobs_isolates_invariant_violating_row(migrated_url: str) -> None:
                     "UPDATE jobs SET state = 'failed', error_category = NULL WHERE id = %s",
                     (bad_id,),
                 )
-            resp = await jobs_tools.list_jobs(pool, CTX, limit=50)
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
         by_id = {r.object_id: r for r in resp}
         assert len(resp) == 2  # the bad row did not blank the list
         assert by_id[good_id].status == "queued"
@@ -214,15 +227,59 @@ def test_wait_job_in_unowned_project_is_not_found(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_get_job_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "d1")
+            with pytest.raises(AuthorizationError):
+                await jobs_tools.get_job(pool, CTX, job_id)
+
+    asyncio.run(_run())
+
+
+def test_wait_job_requires_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "d1")
+            with pytest.raises(AuthorizationError):
+                await jobs_tools.wait_job(pool, CTX, job_id, timeout_s=0.0)
+
+    asyncio.run(_run())
+
+
 def test_cancel_job_in_unowned_project_is_denied_and_does_not_mutate(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue_in(pool, "d1", "proj")
             denied = await jobs_tools.cancel_job(pool, _OTHER, job_id)
             # The owning project's member still sees it queued — the cancel did not land.
-            owned = await jobs_tools.get_job(pool, CTX, job_id)
+            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
         assert denied.status == "error"
         assert denied.error_category == "configuration_error"
+        assert owned.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_cancel_job_requires_operator_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "d1")
+            with pytest.raises(AuthorizationError):
+                await jobs_tools.cancel_job(pool, VIEWER_CTX, job_id)
+            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+        assert owned.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_cancel_job_requires_a_project_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "d1")
+            with pytest.raises(AuthorizationError):
+                await jobs_tools.cancel_job(pool, CTX, job_id)
+            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
         assert owned.status == "queued"
 
     asyncio.run(_run())
@@ -233,9 +290,19 @@ def test_list_jobs_only_returns_callers_project(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             mine = await _enqueue_in(pool, "mine", "proj")
             await _enqueue_in(pool, "theirs", "other")
-            resp = await jobs_tools.list_jobs(pool, CTX, limit=50)
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
         ids = {r.object_id for r in resp}
         assert ids == {mine}  # the "other"-project job is not listed
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_excludes_roleless_projects(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _enqueue(pool, "d1")
+            resp = await jobs_tools.list_jobs(pool, CTX, limit=50)
+        assert resp == []
 
     asyncio.run(_run())
 
@@ -245,8 +312,12 @@ def test_list_jobs_excludes_jobs_with_no_project(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
-                await queue.enqueue(conn, JobKind.BUILD, {}, {"principal": "p"}, "noproj")
-            resp = await jobs_tools.list_jobs(pool, CTX, limit=50)
+                await conn.execute(
+                    "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+                    "VALUES ('build', %s, 'queued', 3, %s, 'noproj')",
+                    (Jsonb(_build_payload()), Jsonb({"principal": "p"})),
+                )
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
         assert resp == []
 
     asyncio.run(_run())

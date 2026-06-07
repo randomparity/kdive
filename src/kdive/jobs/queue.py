@@ -22,6 +22,12 @@ from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Job, JobKind
+from kdive.jobs.payloads import (
+    Authorizing,
+    PayloadModel,
+    dump_authorizing,
+    dump_payload,
+)
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE = timedelta(minutes=5)
@@ -30,8 +36,8 @@ DEFAULT_LEASE = timedelta(minutes=5)
 async def enqueue(
     conn: AsyncConnection,
     kind: JobKind,
-    payload: dict[str, Any],
-    authorizing: dict[str, Any],
+    payload: PayloadModel | dict[str, Any],
+    authorizing: Authorizing | dict[str, Any],
     dedup_key: str,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
@@ -48,6 +54,8 @@ async def enqueue(
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    payload = dump_payload(kind, payload)
+    authorizing = dump_authorizing(authorizing)
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "

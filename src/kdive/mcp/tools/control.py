@@ -17,7 +17,7 @@ authorizing tuple to audit (ADR-0025 §9).
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastmcp import FastMCP
@@ -32,10 +32,20 @@ from kdive.domain.models import Job, JobKind, System
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
 from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._jobs import (
+    authorizing as job_authorizing,
+)
+from kdive.mcp.tools._jobs import (
+    context_from_job as job_context_from_job,
+)
+from kdive.mcp.tools._jobs import (
+    job_envelope,
+)
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.control import Controller, LocalLibvirtControl, PowerAction
 from kdive.providers.local_libvirt.provisioning import domain_name_for
@@ -71,26 +81,8 @@ def _as_uuid(value: str) -> UUID | None:
         return None
 
 
-def _authorizing(ctx: RequestContext, project: str) -> dict[str, Any]:
-    return {"principal": ctx.principal, "agent_session": ctx.agent_session, "project": project}
-
-
-def _ctx_from_job(job: Job, project: str) -> RequestContext:
-    """Reconstruct an attribution context from a job's authorizing tuple (ADR-0025 §9)."""
-    auth = job.authorizing
-    agent_session: str | None = auth.get("agent_session")
-    return RequestContext(
-        principal=str(auth["principal"]),
-        agent_session=agent_session,
-        projects=(project,),
-        roles={},
-    )
-
-
 def _system_job_envelope(job: Job, system_id: UUID) -> ToolResponse:
-    """A job-handle envelope (like `from_job`) carrying the System id in ``data``."""
-    base = ToolResponse.from_job(job)
-    return base.model_copy(update={"data": {**base.data, "system_id": str(system_id)}})
+    return job_envelope(job, "system_id", system_id)
 
 
 def _domain_name(system: System) -> str:
@@ -126,7 +118,7 @@ async def power_system(
                 conn,
                 JobKind.POWER,
                 {"system_id": system_id, "action": power_action.value},
-                _authorizing(ctx, system.project),
+                job_authorizing(ctx, system.project),
                 f"{system_id}:power:{power_action.value}:{uuid4()}",
             )
         return _system_job_envelope(job, uid)
@@ -134,8 +126,9 @@ async def power_system(
 
 async def power_handler(conn: AsyncConnection, job: Job, control: Controller) -> str | None:
     """Drive the domain's power; audit `power:{action}`; move no System state (ADR-0028 §3)."""
-    system_id = UUID(job.payload["system_id"])
-    action = PowerAction(job.payload["action"])
+    payload = load_payload(job, PowerPayload)
+    system_id = UUID(payload.system_id)
+    action = PowerAction(payload.action)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -147,7 +140,7 @@ async def power_handler(conn: AsyncConnection, job: Job, control: Controller) ->
         control.power(_domain_name(system), action)
         await audit.record(
             conn,
-            _ctx_from_job(job, system.project),
+            job_context_from_job(job, system.project),
             tool="control.power",
             object_kind="systems",
             object_id=system_id,
@@ -205,7 +198,7 @@ async def force_crash_system(
                 conn,
                 JobKind.FORCE_CRASH,
                 {"system_id": system_id},
-                _authorizing(ctx, system.project),
+                job_authorizing(ctx, system.project),
                 f"{system_id}:force_crash",
             )
         return _system_job_envelope(job, uid)
@@ -222,7 +215,7 @@ async def force_crash_handler(conn: AsyncConnection, job: Job, control: Controll
     transition. The NMI runs before the transition so a provider failure leaves the System
     untouched and the job retryable.
     """
-    system_id = UUID(job.payload["system_id"])
+    system_id = UUID(load_payload(job, SystemPayload).system_id)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -238,7 +231,7 @@ async def force_crash_handler(conn: AsyncConnection, job: Job, control: Controll
             await SYSTEMS.update_state(conn, system_id, SystemState.CRASHED)
             await audit.record(
                 conn,
-                _ctx_from_job(job, system.project),
+                job_context_from_job(job, system.project),
                 tool="control.force_crash",
                 object_kind="systems",
                 object_id=system_id,
@@ -274,7 +267,7 @@ async def _detach_sessions(conn: AsyncConnection, job: Job, system: System) -> N
     for session_id, old_state in rows:
         await audit.record(
             conn,
-            _ctx_from_job(job, system.project),
+            job_context_from_job(job, system.project),
             tool="control.force_crash",
             object_kind="debug_sessions",
             object_id=session_id,

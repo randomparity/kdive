@@ -25,7 +25,7 @@ from pydantic import Field
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain import accounting
-from kdive.domain.allocation_admission import AdmissionOutcome, admit
+from kdive.domain.allocation_admission import AdmissionOutcome, AllocationRequest, admit
 from kdive.domain.allocation_renew import RenewOutcome, renew
 from kdive.domain.cost import Selector
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -120,12 +120,14 @@ async def request_allocation(
                 return _config_error(resource_id or (kind or _DEFAULT_KIND))
             outcome = await admit(
                 conn,
-                ctx,
-                resource=resource,
-                project=project,
-                selector=selector,
-                window=window,
-                idempotency_key=idempotency_key,
+                AllocationRequest(
+                    ctx=ctx,
+                    resource=resource,
+                    project=project,
+                    selector=selector,
+                    window=window,
+                    idempotency_key=idempotency_key,
+                ),
             )
         if outcome.granted and outcome.allocation is not None:
             return ToolResponse.success(

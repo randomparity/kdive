@@ -79,7 +79,7 @@ def _parse_system_id(meta_xml: str) -> str | None:
 
 
 class LocalLibvirtDiscovery:
-    """The `DiscoveryPlane` for the local libvirt host."""
+    """The realized discovery port for the local libvirt host."""
 
     def __init__(self, *, host_uri: str, connect: Connect, concurrent_allocation_cap: int) -> None:
         self.host_uri = host_uri

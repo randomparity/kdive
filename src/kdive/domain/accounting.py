@@ -460,7 +460,6 @@ def _active_hours(allocation: Allocation) -> Decimal:
 
 
 async def _has_budget(conn: AsyncConnection, project: str) -> bool:
-    """Report whether ``project`` has a budget row (i.e. opted into metering)."""
     async with conn.cursor() as cur:
         await cur.execute("SELECT 1 FROM budgets WHERE project = %s", (project,))
         return await cur.fetchone() is not None

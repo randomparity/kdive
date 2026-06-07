@@ -70,9 +70,8 @@ class BuildOutput(NamedTuple):
 class Builder(Protocol):
     """The handler-facing build port (the realized M0 contract, ADR-0029 §4).
 
-    Distinct from :class:`kdive.providers.interfaces.BuildPlane`, the capability-dispatch
-    placeholder that returns a single artifact: the realized port stores **two** artifacts
-    and returns both refs plus the build-id the symbolization planes key on.
+    The realized port stores **two** artifacts and returns both refs plus the build-id
+    the symbolization planes key on.
     """
 
     def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput: ...

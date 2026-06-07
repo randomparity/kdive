@@ -60,7 +60,7 @@ class OwnedDomain(Protocol):
 
 @runtime_checkable
 class InfraReaper(Protocol):
-    """The narrow provider port the reconciler consumes (a subset of DiscoveryPlane)."""
+    """The narrow discovery provider port the reconciler consumes."""
 
     async def list_owned(self) -> list[OwnedDomain]: ...
     async def destroy(self, name: str) -> None: ...

@@ -14,7 +14,7 @@ import asyncio
 import psycopg
 import pytest
 
-from kdive.domain.allocation_admission import admit
+from kdive.domain.allocation_admission import AllocationRequest, admit
 from kdive.domain.models import Resource
 from kdive.domain.state import AllocationState
 from kdive.mcp.auth import RequestContext
@@ -36,11 +36,13 @@ def _admit(conn: psycopg.AsyncConnection, resource: Resource):  # type: ignore[n
     # admission's per-project checks never deny. Each racer is keyless (a distinct grant).
     return admit(
         conn,
-        CTX,
-        resource=resource,
-        project="proj",
-        selector=SMALL_SELECTOR,
-        window=1,
+        AllocationRequest(
+            ctx=CTX,
+            resource=resource,
+            project="proj",
+            selector=SMALL_SELECTOR,
+            window=1,
+        ),
     )
 
 

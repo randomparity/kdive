@@ -90,7 +90,6 @@ async def _has_succeeded_boot(conn: AsyncConnection, run_id: UUID) -> bool:
 
 
 async def _system_occupied(conn: AsyncConnection, system_id: UUID, transport: str) -> bool:
-    """Report whether the System already has an ``attach``/``live`` session on ``transport``."""
     async with conn.cursor() as cur:
         await cur.execute(_OCCUPIED_SQL, (system_id, transport))
         return await cur.fetchone() is not None

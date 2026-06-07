@@ -33,6 +33,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import RequestContext, current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.security.rbac import AuthorizationError, Role, require_role
 
 _log = logging.getLogger(__name__)
 
@@ -65,6 +66,22 @@ def _in_scope(job: Job, ctx: RequestContext) -> bool:
     return isinstance(project, str) and project in ctx.projects
 
 
+def _project(job: Job) -> str:
+    project = job.authorizing["project"]
+    return str(project)
+
+
+def _readable_projects(ctx: RequestContext) -> list[str]:
+    readable: list[str] = []
+    for project in ctx.projects:
+        try:
+            require_role(ctx, project, Role.VIEWER)
+        except AuthorizationError:
+            continue
+        readable.append(project)
+    return readable
+
+
 async def get_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
     """Return the job's handle envelope, or an error envelope if absent/malformed.
 
@@ -80,6 +97,7 @@ async def get_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -
             job = await JOBS.get(conn, uid)
         if job is None or not _in_scope(job, ctx):
             return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        require_role(ctx, _project(job), Role.VIEWER)
         return ToolResponse.from_job(job)
 
 
@@ -102,6 +120,7 @@ async def wait_job(
                 job = await JOBS.get(conn, uid)
             if job is None or not _in_scope(job, ctx):
                 return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+            require_role(ctx, _project(job), Role.VIEWER)
             if job.state in _TERMINAL or loop.time() >= deadline:
                 return ToolResponse.from_job(job)
             await asyncio.sleep(POLL_INTERVAL_S)
@@ -129,6 +148,8 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
             existing = await JOBS.get(conn, uid)
         if existing is None or not _in_scope(existing, ctx):
             return _error(job_id, ErrorCategory.CONFIGURATION_ERROR)
+        project = existing.authorizing["project"]
+        require_role(ctx, str(project), Role.OPERATOR)
         try:
             async with pool.connection() as conn:
                 job = await JOBS.update_state(conn, uid, JobState.CANCELED)
@@ -154,7 +175,7 @@ async def list_jobs(
     capped = max(1, min(limit, MAX_LIST_LIMIT))
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            jobs = await queue.recent_jobs(conn, capped, ctx.projects)
+            jobs = await queue.recent_jobs(conn, capped, _readable_projects(ctx))
         responses: list[ToolResponse] = []
         for job in jobs:
             try:

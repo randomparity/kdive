@@ -89,14 +89,11 @@ def _close(conn: _LibvirtConn) -> None:
 class Provisioner(Protocol):
     """The handler-facing provisioning port (the realized M0 contract).
 
-    Distinct from :class:`kdive.providers.interfaces.ProvisioningPlane`, the capability-dispatch
-    placeholder that keys on the *Allocation*: row-first ordering (ADR-0021/0025) mints the
-    System **before** provisioning, so this port keys on the already-minted ``system_id`` and
-    returns the libvirt domain name the handler stores and later tears down.
+    Row-first ordering (ADR-0021/0025) mints the System **before** provisioning, so
+    this port keys on the already-minted ``system_id`` and returns the libvirt domain
+    name the handler stores and later tears down.
     :class:`LocalLibvirtProvisioning` satisfies it structurally; the `systems.*` job handlers
-    depend on it so tests can inject a fake provider without a libvirt host. Reconciling the
-    capability-dispatch Protocol with the realized providers is deferred to the
-    capability-dispatch integration (provisioning is not dispatched through the registry in M0).
+    depend on it so tests can inject a fake provider without a libvirt host.
     """
 
     def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str: ...
@@ -294,7 +291,6 @@ def _real_remove_overlay(overlay: str) -> None:
 
 
 def _real_overlay_exists(overlay: str) -> bool:
-    """Whether a System's overlay file is already present (a fresh provision created it)."""
     return Path(overlay).exists()
 
 
@@ -304,7 +300,7 @@ type OverlayExists = Callable[[str], bool]
 
 
 class LocalLibvirtProvisioning:
-    """The `ProvisioningPlane` for the local libvirt host (define/start, destroy/undefine)."""
+    """The realized provisioning port for the local libvirt host."""
 
     def __init__(
         self,
