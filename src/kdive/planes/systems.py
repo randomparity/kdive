@@ -105,6 +105,49 @@ async def _finalize_provision_ready(
     )
 
 
+async def _record_provision_failure(
+    conn: AsyncConnection, job: Job, *, system_id: UUID, project: str
+) -> None:
+    try:
+        async with conn.transaction():
+            await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
+            await audit_transition(
+                conn,
+                job,
+                project=project,
+                object_id=system_id,
+                transition="provisioning->failed",
+                tool="systems.provision",
+            )
+    except IllegalTransition:
+        _log.info("provision of system %s failed but it is already terminal", system_id)
+
+
+async def _locked_system_state(conn: AsyncConnection, system_id: UUID) -> SystemState | None:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT state FROM systems WHERE id = %s FOR UPDATE", (system_id,))
+        row = await cur.fetchone()
+    return SystemState(row["state"]) if row is not None else None
+
+
+async def _commit_provision_result(
+    conn: AsyncConnection,
+    job: Job,
+    system: System,
+    profile: ProvisioningProfile,
+    domain_name: str,
+) -> SystemState | None:
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
+        current = await _locked_system_state(conn, system.id)
+        if current is SystemState.PROVISIONING:
+            await conn.execute(
+                "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
+                (SystemState.READY.value, domain_name, system.id),
+            )
+            await _finalize_provision_ready(conn, job, system, profile)
+        return current
+
+
 async def provision_handler(
     conn: AsyncConnection, job: Job, provisioning: Provisioner
 ) -> str | None:
@@ -127,32 +170,9 @@ async def provision_handler(
     try:
         domain_name = await asyncio.to_thread(provisioning.provision, system_id, profile)
     except CategorizedError:
-        try:
-            async with conn.transaction():
-                await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
-                await audit_transition(
-                    conn,
-                    job,
-                    project=system.project,
-                    object_id=system_id,
-                    transition="provisioning->failed",
-                    tool="systems.provision",
-                )
-        except IllegalTransition:
-            _log.info("provision of system %s failed but it is already terminal", system_id)
+        await _record_provision_failure(conn, job, system_id=system_id, project=system.project)
         raise
-    current: SystemState | None = None
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("SELECT state FROM systems WHERE id = %s FOR UPDATE", (system_id,))
-            row = await cur.fetchone()
-            current = SystemState(row["state"]) if row is not None else None
-        if current is SystemState.PROVISIONING:
-            await conn.execute(
-                "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
-                (SystemState.READY.value, domain_name, system_id),
-            )
-            await _finalize_provision_ready(conn, job, system, profile)
+    current = await _commit_provision_result(conn, job, system, profile, domain_name)
     if current in TERMINAL_SYSTEM:
         await asyncio.to_thread(provisioning.teardown, domain_name)
         _log.info("provision of system %s superseded by teardown; domain reaped", system_id)
