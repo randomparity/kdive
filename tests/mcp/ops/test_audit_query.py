@@ -451,3 +451,23 @@ def test_naive_window_bound_is_config_error(migrated_url: str) -> None:
         assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
+
+
+def test_inverted_window_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            resp = await audit_tools.query_all_projects(
+                pool,
+                ctx,
+                request=_all_projects_query(
+                    window=[
+                        "2026-01-02T00:00:00+00:00",
+                        "2026-01-01T00:00:00+00:00",
+                    ]
+                ),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())

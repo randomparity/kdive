@@ -24,6 +24,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
     Investigation,
+    Job,
+    JobKind,
     Resource,
     ResourceKind,
     Run,
@@ -32,11 +34,13 @@ from kdive.domain.models import (
 from kdive.domain.state import (
     AllocationState,
     InvestigationState,
+    JobState,
     ResourceStatus,
     RunState,
     SystemState,
 )
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.create import create_run
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
@@ -64,6 +68,41 @@ def _ctx(
 ) -> RequestContext:
     roles = {"proj": role} if role is not None else {}
     return RequestContext(principal="user-1", agent_session="s", projects=projects, roles=roles)
+
+
+def _run_model(
+    state: RunState,
+    *,
+    failure: ErrorCategory | None = None,
+    expected_boot_failure: dict[str, str] | None = None,
+) -> Run:
+    return Run(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        investigation_id=uuid4(),
+        system_id=uuid4(),
+        state=state,
+        build_profile=_profile(),
+        expected_boot_failure=expected_boot_failure,
+        failure_category=failure,
+    )
+
+
+def _job_model(state: JobState = JobState.QUEUED) -> Job:
+    return Job(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        kind=JobKind.BUILD,
+        payload={"run_id": str(uuid4())},
+        state=state,
+        max_attempts=3,
+        authorizing={"principal": "user-1", "agent_session": "s", "project": "proj"},
+        dedup_key="run-build",
+    )
 
 
 @asynccontextmanager
@@ -179,6 +218,75 @@ async def _seed_run(
             ),
         )
     return str(run.id)
+
+
+def test_envelope_for_run_failed_uses_run_failure_category() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE)
+    )
+
+    assert resp.status == "error"
+    assert resp.error_category == "build_failure"
+    assert resp.data == {"current_status": "failed"}
+
+
+def test_envelope_for_run_failed_defaults_to_infrastructure_failure() -> None:
+    resp = runs_common.envelope_for_run(_run_model(RunState.FAILED))
+
+    assert resp.status == "error"
+    assert resp.error_category == "infrastructure_failure"
+
+
+def test_envelope_for_run_expected_boot_failure_json_is_deterministic() -> None:
+    expected = {
+        "pattern": "__d_lookup|Oops",
+        "kind": "console_crash",
+        "description": "known crash",
+    }
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.CREATED, expected_boot_failure=expected),
+        required_cmdline="panic_on_oops=1",
+    )
+
+    assert resp.status == "created"
+    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+    assert resp.data["required_cmdline"] == "panic_on_oops=1"
+    assert resp.data["expected_boot_failure"] == "console_crash"
+    assert (
+        resp.data["expected_boot_failure_json"]
+        == '{"description":"known crash","kind":"console_crash","pattern":"__d_lookup|Oops"}'
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "actions"),
+    [
+        (RunState.CREATED, ["runs.get", "runs.build"]),
+        (RunState.RUNNING, ["runs.get", "runs.build"]),
+        (RunState.SUCCEEDED, ["runs.get"]),
+        (RunState.CANCELED, ["runs.get"]),
+    ],
+)
+def test_envelope_for_run_suggests_build_only_before_terminal_states(
+    state: RunState, actions: list[str]
+) -> None:
+    resp = runs_common.envelope_for_run(_run_model(state))
+
+    assert resp.status == state.value
+    assert resp.suggested_next_actions == actions
+    assert resp.data == {"project": "proj"}
+
+
+def test_run_job_envelope_adds_run_id_to_standard_job_envelope() -> None:
+    run_id = uuid4()
+    job = _job_model()
+
+    resp = runs_common.run_job_envelope(job, run_id)
+
+    assert resp.object_id == str(job.id)
+    assert resp.status == "queued"
+    assert resp.suggested_next_actions == ["jobs.wait", "jobs.cancel"]
+    assert resp.data == {"kind": "build", "run_id": str(run_id)}
 
 
 def test_get_created_run(migrated_url: str) -> None:
@@ -856,7 +964,6 @@ def test_build_concurrent_flips_once(migrated_url: str) -> None:
 
 # --- build_handler (the worker) ------------------------------------------------------
 
-from kdive.domain.models import Job, JobKind  # noqa: E402
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
 from kdive.providers.ports import BuildOutput  # noqa: E402
