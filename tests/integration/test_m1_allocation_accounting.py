@@ -38,7 +38,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.mcp.tools.accounting as acct_tools
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.cost import cost, quantize_kcu, rate
 from kdive.domain.models import Allocation, Investigation, Job, Run, System
@@ -49,6 +48,9 @@ from kdive.domain.state import (
     SystemState,
 )
 from kdive.mcp.auth import AuthError
+from kdive.mcp.tools.accounting.admin import set_budget, set_quota
+from kdive.mcp.tools.accounting.estimate import estimate
+from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project
 from kdive.mcp.tools.lifecycle import allocations as alloc_tools
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
@@ -435,7 +437,7 @@ def test_c3_estimate_equals_reserved_row(migrated_url: str) -> None:
         async with open_pool(migrated_url) as pool:
             await register_resource(pool)
             await seed_project_limits(pool, limit_kcu=1000)
-            est = await acct_tools.estimate(
+            est = await estimate(
                 pool,
                 _viewer_ctx(),
                 project="proj",
@@ -523,7 +525,7 @@ def test_c3_reconciliation_nets_to_actual_and_usage_matches(migrated_url: str) -
             assert net == actual  # billed the active interval, not credited back in full
             assert actual != estimate  # the lease did not run the full 3h window
             assert net != Decimal(0)  # the bug would have netted 0 (active_hours = 0)
-            usage = await acct_tools.usage_project(pool, _viewer_ctx(), project="proj")
+            usage = await usage_project(pool, _viewer_ctx(), project="proj")
             assert Decimal(usage.data["spent_kcu"]) == net
 
     asyncio.run(_run())
@@ -848,9 +850,9 @@ def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
             await seed_project_limits(pool, limit_kcu=1000)
             op = _operator_ctx()
             with pytest.raises(AuthorizationError):
-                await acct_tools.set_budget(pool, op, project="proj", limit_kcu="10")
+                await set_budget(pool, op, project="proj", limit_kcu="10")
             with pytest.raises(AuthorizationError):
-                await acct_tools.set_quota(
+                await set_quota(
                     pool, op, project="proj", max_concurrent_allocations=1, max_concurrent_systems=1
                 )
             # power off / teardown bind their admin check to a real System's project.
@@ -914,10 +916,10 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
             await register_resource(pool)
             admin = _admin_ctx()
             assert (
-                await acct_tools.set_budget(pool, admin, project="proj", limit_kcu="1000")
+                await set_budget(pool, admin, project="proj", limit_kcu="1000")
             ).status != "error"
             assert (
-                await acct_tools.set_quota(
+                await set_quota(
                     pool,
                     admin,
                     project="proj",
@@ -974,7 +976,7 @@ def test_c6_viewer_refused_cross_project_usage_by_investigation(migrated_url: st
             # and authorizes on it; a proj-a-only viewer is not a member, so the resolve
             # raises before any spend is read (the tenant-isolation boundary, ADR-0007 §6).
             with pytest.raises((AuthError, AuthorizationError)):
-                await acct_tools.usage_investigation(pool, viewer_a, investigation_id=str(inv_b))
+                await usage_investigation(pool, viewer_a, investigation_id=str(inv_b))
 
     asyncio.run(_run())
 
