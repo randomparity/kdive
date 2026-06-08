@@ -38,9 +38,14 @@ class _CountingValidator:
         self._inner = FakeValidator(output)
         self.calls = 0
 
-    def validate(self, run_id, manifest, keys, declared_build_id, profile_requirements=None):
+    def validate(self, *, manifest, keys, declared_build_id, profile_requirements=None):
         self.calls += 1
-        return self._inner.validate(run_id, manifest, keys, declared_build_id, profile_requirements)
+        return self._inner.validate(
+            manifest=manifest,
+            keys=keys,
+            declared_build_id=declared_build_id,
+            profile_requirements=profile_requirements,
+        )
 
 
 def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> None:

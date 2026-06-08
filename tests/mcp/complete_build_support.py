@@ -167,7 +167,7 @@ class FakeValidator:
 
     def validate(
         self,
-        run_id,
+        *,
         manifest,
         keys,
         declared_build_id,

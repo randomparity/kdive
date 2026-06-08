@@ -83,8 +83,7 @@ class _RealValidator:
     def __init__(self, store: _ValidationStore) -> None:
         self._store = store
 
-    def validate(self, run_id, manifest, keys, declared_build_id, profile_requirements=None):
-        _ = run_id
+    def validate(self, *, manifest, keys, declared_build_id, profile_requirements=None):
         return validate_external_artifacts(
             self._store,
             manifest=manifest,

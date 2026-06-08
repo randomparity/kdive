@@ -107,7 +107,7 @@ class CompleteBuildValidator(Protocol):
 
     def validate(
         self,
-        run_id: UUID,
+        *,
         manifest: Sequence[ManifestEntry],
         keys: Mapping[str, str],
         declared_build_id: str | None,
@@ -120,7 +120,7 @@ class StoreBackedValidator:
 
     def validate(
         self,
-        run_id: UUID,
+        *,
         manifest: Sequence[ManifestEntry],
         keys: Mapping[str, str],
         declared_build_id: str | None,
@@ -236,11 +236,10 @@ class RunBuildHandlers:
                     requirements = _external_config_requirements(profile)
                     validated = await asyncio.to_thread(
                         self.complete_validator.validate,
-                        uid,
-                        list(manifest_row.entries),
-                        keys,
-                        build_id,
-                        requirements,
+                        manifest=list(manifest_row.entries),
+                        keys=keys,
+                        declared_build_id=build_id,
+                        profile_requirements=requirements,
                     )
                 except CategorizedError as exc:
                     return ToolResponse.failure(run_id, exc.category)
