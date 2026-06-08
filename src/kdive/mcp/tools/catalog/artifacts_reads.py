@@ -25,6 +25,7 @@ from kdive.security.artifacts.artifact_search import (
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.artifact_listing import RedactedArtifact, list_redacted_system_artifacts
 from kdive.store.objectstore import (
     FetchedArtifact,
     HeadResult,
@@ -34,11 +35,6 @@ from kdive.store.objectstore import (
 _log = logging.getLogger(__name__)
 
 _MAX_SEARCHABLE_ARTIFACT_BYTES = 1024 * 1024
-_LIST_SQL: LiteralString = (
-    "SELECT id, object_key FROM artifacts "
-    "WHERE owner_kind = 'systems' AND owner_id = %s AND sensitivity = 'redacted' "
-    "ORDER BY created_at DESC"
-)
 _GET_SQL: LiteralString = (
     "SELECT id, object_key, owner_id FROM artifacts "
     "WHERE id = %s AND owner_kind = 'systems' AND sensitivity = 'redacted'"
@@ -118,40 +114,26 @@ async def artifacts_list(
     return ToolResponse.collection(
         system_id,
         "ok",
-        await _artifact_list_items(pool, ctx, system_id=system_id),
+        _artifact_list_items(await list_redacted_system_artifacts(pool, ctx, system_id=system_id)),
         suggested_next_actions=["artifacts.get"],
     )
 
 
-async def _artifact_list_items(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str
-) -> list[ToolResponse]:
-    """Return redacted artifact item envelopes; absent systems produce an empty list."""
-    uid = _as_uuid(system_id)
-    if uid is None:
-        return []
-    with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_PROJECT_SQL, (uid,))
-            owner = await cur.fetchone()
-            if owner is None or owner["project"] not in ctx.projects:
-                return []
-            require_role(ctx, owner["project"], Role.VIEWER)
-            await cur.execute(_LIST_SQL, (uid,))
-            rows = await cur.fetchall()
+def _artifact_list_items(artifacts: list[RedactedArtifact]) -> list[ToolResponse]:
+    """Return redacted artifact item envelopes."""
     responses: list[ToolResponse] = []
-    for row in rows:
+    for artifact in artifacts:
         try:
             responses.append(
                 ToolResponse.success(
-                    str(row["id"]),
+                    artifact.id,
                     "available",
                     suggested_next_actions=["artifacts.get"],
-                    refs={"object": row["object_key"]},
+                    refs={"object": artifact.object_key},
                 )
             )
         except ValueError:
-            _log.warning("artifact %s violates the envelope invariant; degraded", row["id"])
+            _log.warning("artifact %s violates the envelope invariant; degraded", artifact.id)
     return responses
 
 

@@ -42,13 +42,13 @@ from kdive.mcp.tools._common import (
     job_envelope,
 )
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target
-from kdive.mcp.tools.catalog.artifacts_reads import _artifact_list_items
 from kdive.providers.ports import CrashPostmortem
 from kdive.providers.runtime import ProviderRuntime
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.redaction import Redactor
+from kdive.services.artifact_listing import RedactedArtifact, list_redacted_system_artifacts
 
 _log = logging.getLogger(__name__)
 
@@ -194,13 +194,22 @@ async def list_vmcores(
     pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str
 ) -> ToolResponse:
     """Return the System's `redacted` vmcore artifacts in one collection envelope."""
-    listed = await _artifact_list_items(pool, ctx, system_id=system_id)
-    items = [r for r in listed if _is_redacted_vmcore(r.refs.get("object", ""))]
+    listed = await list_redacted_system_artifacts(pool, ctx, system_id=system_id)
+    items = [_vmcore_item(row) for row in listed if _is_redacted_vmcore(row.object_key)]
     return ToolResponse.collection(
         system_id,
         "ok",
         items,
         suggested_next_actions=["artifacts.get", "postmortem.crash"],
+    )
+
+
+def _vmcore_item(artifact: RedactedArtifact) -> ToolResponse:
+    return ToolResponse.success(
+        artifact.id,
+        "available",
+        suggested_next_actions=["artifacts.get"],
+        refs={"object": artifact.object_key},
     )
 
 

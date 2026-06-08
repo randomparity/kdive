@@ -42,11 +42,11 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
-from kdive.mcp.tools.lifecycle.allocations import AuditWriter, release_with_backstops
 from kdive.mcp.tools.ops._auth import audit_platform_denial, held_platform_roles
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
+from kdive.services.allocation_release import AuditWriter, release_with_backstops
 
 _log = logging.getLogger(__name__)
 
