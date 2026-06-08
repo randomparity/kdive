@@ -68,13 +68,13 @@ class FileRefBackend:
         return value
 
 
-def secret_backend_from_env() -> FileRefBackend:
-    """Build the file-ref secret backend from ``KDIVE_SECRETS_ROOT`` (process-global scope).
+def secret_backend_from_env(*, scope: object | None = None) -> FileRefBackend:
+    """Build the file-ref secret backend from ``KDIVE_SECRETS_ROOT``.
 
     Resolves credentials only within the allowlisted secrets root and registers each resolved
-    value into the process-global redaction registry (``scope=None``, retained for the process
-    lifetime per ADR-0012). Opens no file at construction — the root is read on the first
-    ``resolve``.
+    value into the process-global redaction registry under ``scope``. Passing ``None`` keeps
+    the original process-lifetime scope. Opens no file at construction — the root is read on
+    the first ``resolve``.
     """
     root = Path(os.environ.get(_SECRETS_ROOT_ENV, _DEFAULT_SECRETS_ROOT))
-    return FileRefBackend(root)
+    return FileRefBackend(root, scope=scope)

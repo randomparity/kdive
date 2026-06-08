@@ -18,6 +18,7 @@ insert, and a lost race closes the just-opened transport (ADR-0032 §6a). The
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any, LiteralString
 from uuid import UUID, uuid4
@@ -48,6 +49,7 @@ from kdive.security import audit
 from kdive.security.context import RequestContext
 from kdive.security.paths import PathSafetyError
 from kdive.security.rbac import Role, require_role
+from kdive.security.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
 from kdive.security.secrets import SecretBackend, secret_backend_from_env
 
 _GDBSTUB = "gdbstub"
@@ -66,6 +68,10 @@ _OCCUPIED_SQL: LiteralString = (
     "JOIN runs r ON r.id = s.run_id "
     "WHERE r.system_id = %s AND s.transport = %s AND s.state IN ('attach', 'live') LIMIT 1"
 )
+
+
+def _secret_scope(session_id: UUID) -> str:
+    return f"debug-session:{session_id}"
 
 
 async def _system_for_run(conn: AsyncConnection, run: Run) -> System | None:
@@ -123,6 +129,8 @@ async def start_session(
     transport: str = _GDBSTUB,
     connector: Connector,
     secret_backend: SecretBackend | None = None,
+    secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
+    secret_registry: SecretRegistry | None = None,
 ) -> ToolResponse:
     """Open a single-attach transport and insert a `live` DebugSession (operator).
 
@@ -136,6 +144,9 @@ async def start_session(
         return _config_error(run_id)
     if transport not in _TRANSPORTS:
         return _config_error(run_id)
+    session_id = uuid4()
+    registry = PROCESS_SECRET_REGISTRY if secret_registry is None else secret_registry
+    secret_scope = _secret_scope(session_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)
@@ -146,15 +157,22 @@ async def start_session(
             if isinstance(guard, ToolResponse):
                 return guard
             system = guard
-            resolved = _resolve_credential(system, transport, secret_backend)
+            backend = secret_backend
+            if backend is None and secret_backend_factory is not None and transport == _SSH:
+                backend = secret_backend_factory(session_id)
+            resolved = _resolve_credential(system, transport, backend)
             if isinstance(resolved, ToolResponse):
                 return resolved
             opened = _open_transport(connector, system, transport)
             if isinstance(opened, ToolResponse):
+                registry.release(secret_scope)
                 return opened
-            return await _insert_session_locked(
-                conn, ctx, run, system, opened, connector, transport
+            response = await _insert_session_locked(
+                conn, ctx, run, system, opened, connector, transport, session_id
             )
+            if response.status != "live":
+                registry.release(secret_scope)
+            return response
 
 
 def _resolve_credential(
@@ -225,6 +243,7 @@ async def _insert_session_locked(
     handle: TransportHandle,
     connector: Connector,
     transport: str,
+    session_id: UUID,
 ) -> ToolResponse:
     """Re-check conflict + ready under the per-System lock, then insert + drive `-> live`.
 
@@ -245,7 +264,7 @@ async def _insert_session_locked(
         session = await DEBUG_SESSIONS.insert(
             conn,
             DebugSession(
-                id=uuid4(),
+                id=session_id,
                 created_at=now,
                 updated_at=now,
                 principal=ctx.principal,
@@ -311,6 +330,7 @@ async def end_session(
     *,
     connector: Connector,
     runtime: DebugEngineRuntime | None = None,
+    secret_registry: SecretRegistry | None = None,
 ) -> ToolResponse:
     """Drive a live/attach DebugSession `-> detached` (idempotent on detached; operator).
 
@@ -322,6 +342,7 @@ async def end_session(
     uid = _as_uuid(session_id)
     if uid is None:
         return _config_error(session_id)
+    registry = PROCESS_SECRET_REGISTRY if secret_registry is None else secret_registry
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             session = await DEBUG_SESSIONS.get(conn, uid)
@@ -336,6 +357,7 @@ async def end_session(
         if runtime is not None:
             async with runtime.lock_for(session_id):
                 runtime.reap(session_id)
+        registry.release(_secret_scope(uid))
         return envelope
 
 
@@ -403,7 +425,6 @@ def register(
         raise RuntimeError("debug registrar requires an injected provider runtime")
     provider = provider_runtime
     connector: Connector = provider.connector
-    secret_backend: SecretBackend = secret_backend_from_env()
     attach = provider.attach_seam
     engine = provider.debug_engine
     runtime = DebugEngineRuntime(engine=engine, attach=attach)
@@ -427,7 +448,9 @@ def register(
             run_id=run_id,
             transport=transport,
             connector=connector,
-            secret_backend=secret_backend,
+            secret_backend_factory=lambda session_id: secret_backend_from_env(
+                scope=_secret_scope(session_id)
+            ),
         )
 
     @app.tool(
