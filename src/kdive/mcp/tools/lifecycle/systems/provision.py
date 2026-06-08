@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -116,6 +117,19 @@ type RootfsValidator = Callable[[RootfsSource], None]
 type LockedAllocationSystem = tuple[AsyncConnection, Allocation, System | None]
 
 
+class _CreateSystemResponse(Protocol):
+    async def __call__(
+        self,
+        conn: AsyncConnection,
+        ctx: RequestContext,
+        alloc: Allocation,
+        existing: System | None,
+        *,
+        profile: ProvisioningProfile,
+        rootfs_validator: RootfsValidator,
+    ) -> ToolResponse: ...
+
+
 @dataclass(frozen=True, slots=True)
 class MissingAllocation:
     """A not-found or out-of-scope Allocation encountered while acquiring locks."""
@@ -164,33 +178,13 @@ class SystemProvisionHandlers:
         profile: ProvisioningProfileInput,
     ) -> ToolResponse:
         """Mint a System for a ``granted`` Allocation and enqueue its provision job."""
-        uid = _as_uuid(allocation_id)
-        if uid is None:
-            return _config_error(allocation_id)
-        try:
-            parsed = ProvisioningProfile.parse(profile)
-            _validate_profile_for_provider(parsed, self.component_sources)
-        except CategorizedError as exc:
-            return ToolResponse.failure(allocation_id, exc.category)
-        with bind_context(principal=ctx.principal):
-            try:
-                async with _locked_allocation_system(pool, ctx, uid) as locked:
-                    if isinstance(locked, MissingAllocation):
-                        return _config_error(str(locked.allocation_id))
-                    conn, alloc, existing = locked
-                    return await _provision_create_response(
-                        conn,
-                        ctx,
-                        alloc,
-                        existing,
-                        profile=parsed,
-                        rootfs_validator=self.rootfs_validator,
-                    )
-            except IllegalTransition:
-                async with pool.connection() as conn:
-                    latest = await ALLOCATIONS.get(conn, uid)
-                data = {"current_status": latest.state.value} if latest else {}
-                return _config_error(allocation_id, data=data)
+        return await self._create_for_allocation(
+            pool,
+            ctx,
+            allocation_id=allocation_id,
+            profile=profile,
+            create_response=_provision_create_response,
+        )
 
     async def provision_defined_system(
         self,
@@ -221,6 +215,24 @@ class SystemProvisionHandlers:
         profile: ProvisioningProfileInput,
     ) -> ToolResponse:
         """Create a System in ``defined`` for a ``granted`` Allocation."""
+        return await self._create_for_allocation(
+            pool,
+            ctx,
+            allocation_id=allocation_id,
+            profile=profile,
+            create_response=_define_create_response,
+        )
+
+    async def _create_for_allocation(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        *,
+        allocation_id: str,
+        profile: ProvisioningProfileInput,
+        create_response: _CreateSystemResponse,
+    ) -> ToolResponse:
+        """Parse, authorize, and lock the shared create-lane admission path."""
         uid = _as_uuid(allocation_id)
         if uid is None:
             return _config_error(allocation_id)
@@ -235,7 +247,7 @@ class SystemProvisionHandlers:
                     if isinstance(locked, MissingAllocation):
                         return _config_error(str(locked.allocation_id))
                     conn, alloc, existing = locked
-                    return await _define_create_response(
+                    return await create_response(
                         conn,
                         ctx,
                         alloc,
