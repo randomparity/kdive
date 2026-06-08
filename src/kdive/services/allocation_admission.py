@@ -233,11 +233,12 @@ async def capacity_gate(
 ) -> _GateResult:
     """Replay the check-then-debit gate against the project + the chosen host.
 
-    The single, shared admission gate (no fork): the grant-quota and budget checks under the
-    held ``PROJECT`` lock, then the host cap and PCIe resolution under the per-``RESOURCE``
-    lock this function acquires. The caller must already hold the ``PROJECT`` lock; for the
-    promotion sweep the caller also holds the per-``ALLOCATION`` lock on the queued row
-    (``PROJECT → RESOURCE → ALLOCATION``), and this acquires ``RESOURCE`` nested inside.
+    The single, shared admission gate (no fork): the grant-quota and budget checks, then the
+    host cap and PCIe resolution. **The caller must already hold the ``PROJECT`` and per-
+    ``RESOURCE`` locks** (the global order ``PROJECT → RESOURCE → ALLOCATION``); this function
+    acquires no lock itself, so synchronous admit (``PROJECT → RESOURCE``) and the promotion
+    sweep (``PROJECT → RESOURCE → ALLOCATION``) both keep the documented order and never
+    invert against each other.
 
     Returns a structured result carrying either the claimed PCIe devices to grant, or the
     typed denial. The denial's ``queueable`` flag (NOT its category) is what routes
@@ -269,14 +270,13 @@ async def capacity_gate(
             ),
             devices=[],
         )
-    async with advisory_xact_lock(conn, LockScope.RESOURCE, request.resource.id):
-        host = await _host_cap_check(conn, request.resource)
-        if host is not None:
-            return _GateResult(denial=host, devices=[])
-        claim = await _resolve_pcie_claim(conn, request)
-        if claim.denial is not None:
-            return _GateResult(denial=claim.denial, devices=[])
-        return _GateResult(denial=None, devices=claim.devices)
+    host = await _host_cap_check(conn, request.resource)
+    if host is not None:
+        return _GateResult(denial=host, devices=[])
+    claim = await _resolve_pcie_claim(conn, request)
+    if claim.denial is not None:
+        return _GateResult(denial=claim.denial, devices=[])
+    return _GateResult(denial=None, devices=claim.devices)
 
 
 async def _admit_under_project_lock(
@@ -309,16 +309,21 @@ async def _admit_under_project_lock(
                     granted=False, allocation=None, category=ErrorCategory.CONFIGURATION_ERROR
                 )
             return AdmissionOutcome(granted=True, allocation=replay)
-    gate = await capacity_gate(conn, request, estimate=estimate)
-    if gate.denial is not None:
-        return await _deny_or_enqueue(conn, request, gate.denial)
-    return await _grant(
-        conn,
-        request,
-        window_hours=window_hours,
-        estimate=estimate,
-        claimed_devices=gate.devices,
-    )
+    # Acquire RESOURCE before the gate (the global order PROJECT → RESOURCE); the gate itself
+    # takes no lock so the promotion sweep can keep the same order with ALLOCATION nested
+    # innermost. A queue-position enqueue holds no host, but running it under the already-held
+    # RESOURCE lock is harmless and keeps the check-then-debit + insert in one locked scope.
+    async with advisory_xact_lock(conn, LockScope.RESOURCE, request.resource.id):
+        gate = await capacity_gate(conn, request, estimate=estimate)
+        if gate.denial is not None:
+            return await _deny_or_enqueue(conn, request, gate.denial)
+        return await _grant(
+            conn,
+            request,
+            window_hours=window_hours,
+            estimate=estimate,
+            claimed_devices=gate.devices,
+        )
 
 
 async def _deny_or_enqueue(

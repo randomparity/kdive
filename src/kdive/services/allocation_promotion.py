@@ -135,14 +135,21 @@ async def _try_one_host(
     """Replay the gate on one host under RESOURCE → ALLOCATION; return (terminated, granted).
 
     ``(False, True)`` granted; ``(True, False)`` budget recheck terminated the request;
-    ``(False, False)`` a wait denial (try the next host / stay queued).
+    ``(False, False)`` a wait denial (try the next host / stay queued). RESOURCE is acquired
+    **before** ALLOCATION (the global order ``PROJECT → RESOURCE → ALLOCATION``, the caller
+    already holds PROJECT): RESOURCE is the capacity lock admit also uses, so promotion and a
+    concurrent synchronous admit on the same host serialize on it (no double-grant), and
+    ALLOCATION fences the released-while-queued race.
     """
     request = _request_from_queued(alloc, resource)
     window_hours, estimate = await price_window_and_estimate(conn, request)
-    async with advisory_xact_lock(conn, LockScope.ALLOCATION, alloc.id):
+    async with (
+        advisory_xact_lock(conn, LockScope.RESOURCE, resource.id),
+        advisory_xact_lock(conn, LockScope.ALLOCATION, alloc.id),
+    ):
         gate = await capacity_gate(conn, request, estimate=estimate)
         if gate.denial is None:
-            await _grant_queued(
+            granted = await _grant_queued(
                 conn,
                 alloc,
                 resource,
@@ -150,7 +157,7 @@ async def _try_one_host(
                 estimate=estimate,
                 devices=gate.devices,
             )
-            return False, True
+            return False, granted
         if _is_budget_terminate(gate.denial):
             await _terminate(conn, alloc, resource, reason="budget_exceeded")
             return True, False
@@ -178,26 +185,36 @@ async def _grant_queued(
     window_hours: Decimal,
     estimate: Decimal,
     devices: list[PCIeClaim],
-) -> None:
-    """Stamp resource_id + lease + claim, transition requested → granted, reserve, audit."""
+) -> bool:
+    """Stamp resource_id + lease + claim, transition requested → granted, reserve, audit.
+
+    Returns ``True`` when this call performed the grant, ``False`` if the fenced UPDATE
+    matched no row (the candidate was no longer ``requested`` — a release that holds the
+    ALLOCATION lock won the race). On a no-match the reserve and audit are skipped, so a
+    released-while-queued row is never charged a phantom reserve or audited a phantom grant —
+    the fence is self-contained, not reliant only on the outer PROJECT lock.
+    """
     now = datetime.now(UTC)
     lease_expiry = now + timedelta(seconds=int(window_hours * _SECONDS_PER_HOUR))
     ensure_transition(alloc.state, AllocationState.GRANTED)
     # PCIeClaim is a TypedDict (plain dict at runtime), already JSON-serializable.
     pcie_json = Jsonb([dict(d) for d in devices])
-    await conn.execute(
-        "UPDATE allocations "
-        "SET state = %s, resource_id = %s, lease_expiry = %s, pcie_claim = %s "
-        "WHERE id = %s AND state = %s",
-        (
-            AllocationState.GRANTED.value,
-            resource.id,
-            lease_expiry,
-            pcie_json,
-            alloc.id,
-            _REQUESTED_VALUE,
-        ),
-    )
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE allocations "
+            "SET state = %s, resource_id = %s, lease_expiry = %s, pcie_claim = %s "
+            "WHERE id = %s AND state = %s",
+            (
+                AllocationState.GRANTED.value,
+                resource.id,
+                lease_expiry,
+                pcie_json,
+                alloc.id,
+                _REQUESTED_VALUE,
+            ),
+        )
+        if cur.rowcount != 1:
+            return False  # the row left `requested` since the locked re-read — skip writes
     granted = alloc.model_copy(
         update={
             "resource_id": resource.id,
@@ -225,6 +242,7 @@ async def _grant_queued(
         alloc.id,
         resource.id,
     )
+    return True
 
 
 async def _terminate(
