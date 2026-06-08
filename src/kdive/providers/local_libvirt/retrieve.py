@@ -89,8 +89,11 @@ class LocalLibvirtRetrieve:
         """Capture a core via ``method``; store raw + redacted; return refs + build-id.
 
         Raises:
-            CategorizedError: ``READINESS_FAILURE`` if no complete core appears in the
-                window; ``INFRASTRUCTURE_FAILURE`` propagated from a failed artifact store.
+            CategorizedError: ``CONFIGURATION_ERROR`` for capture/build-id provenance or
+                input failures propagated by injected seams; ``MISSING_DEPENDENCY`` when a
+                capture, build-id, or redaction seam is unavailable; ``READINESS_FAILURE``
+                if no complete core appears in the window; or ``INFRASTRUCTURE_FAILURE``
+                propagated from a failed artifact store.
         """
         if method is CaptureMethod.HOST_DUMP:
             data = self._host_dump_capture(system_id)
