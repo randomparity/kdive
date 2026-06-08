@@ -18,6 +18,7 @@ from kdive.providers.local_libvirt.debug_gdbmi import (
     MAX_MEMORY_READ_BYTES,
     GdbMiEngine,
     MiRecord,
+    PygdbmiController,
     parse_mi_records,
 )
 from kdive.providers.ports import GdbMiAttachment, GdbMiSessionRegistry
@@ -32,9 +33,11 @@ class _FakeMiController:
         *,
         responses: dict[str, list[dict[str, object]]] | None = None,
         reads: list[list[dict[str, object]]] | None = None,
+        response_timeout: bool = False,
     ) -> None:
         self._responses = responses or {}
         self._reads = list(reads or [])
+        self._response_timeout = response_timeout
         self.written: list[str] = []
         self.read_timeouts: list[float] = []
         self.exited = False
@@ -53,11 +56,31 @@ class _FakeMiController:
     def get_gdb_response(
         self, *, timeout_sec: float, raise_error_on_timeout: bool = True
     ) -> list[dict[str, object]]:
-        del timeout_sec, raise_error_on_timeout
+        if self._response_timeout and raise_error_on_timeout:
+            raise debug_gdbmi._timeout_error("get_gdb_response", timeout_sec)
         return []
 
     def exit(self) -> None:
         self.exited = True
+
+
+class _TimeoutGdbController:
+    def get_gdb_response(
+        self, *, timeout_sec: float, raise_error_on_timeout: bool = True
+    ) -> list[dict[str, object]]:
+        from pygdbmi.constants import GdbTimeoutError
+
+        del timeout_sec, raise_error_on_timeout
+        raise GdbTimeoutError("timed out")
+
+    def exit(self) -> None:
+        pass
+
+
+def _pygdbmi_controller(controller: object) -> PygdbmiController:
+    wrapped = object.__new__(PygdbmiController)
+    wrapped._controller = controller
+    return wrapped
 
 
 def _attachment(controller: _FakeMiController, tmp_path: Path) -> GdbMiAttachment:
@@ -85,6 +108,22 @@ def test_mi_record_from_raw_whitelists_keys() -> None:
     record = MiRecord.from_raw({"type": "result", "message": "done", "extra": "dropped"})
     assert record.type == "result"
     assert record.message == "done"
+
+
+def test_pygdbmi_response_timeout_raises_by_default() -> None:
+    controller = _pygdbmi_controller(_TimeoutGdbController())
+
+    with pytest.raises(CategorizedError) as exc:
+        controller.get_gdb_response(timeout_sec=0.25)
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details["code"] == "transport_stall"
+
+
+def test_pygdbmi_response_timeout_can_return_empty_when_requested() -> None:
+    controller = _pygdbmi_controller(_TimeoutGdbController())
+
+    assert controller.get_gdb_response(timeout_sec=0.25, raise_error_on_timeout=False) == []
 
 
 # --- breakpoints ---------------------------------------------------------------------------

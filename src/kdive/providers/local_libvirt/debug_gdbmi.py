@@ -179,7 +179,9 @@ class PygdbmiController:  # pragma: no cover - live_vm
             return self._controller.get_gdb_response(
                 timeout_sec=timeout_sec, raise_error_on_timeout=raise_error_on_timeout
             )
-        except GdbTimeoutError:
+        except GdbTimeoutError as exc:
+            if raise_error_on_timeout:
+                raise _timeout_error("get_gdb_response", timeout_sec) from exc
             return []
 
     def exit(self) -> None:
