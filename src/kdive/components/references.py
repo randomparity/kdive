@@ -23,6 +23,12 @@ type NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_l
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 
 
+def _validate_sha256_value(value: str | None) -> str | None:
+    if value is not None and not _SHA256.match(value):
+        raise ValueError("sha256 must be 'sha256:<64 lowercase hex chars>'")
+    return value
+
+
 class _ComponentRefBase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -42,9 +48,7 @@ class LocalComponentRef(_ComponentRefBase):
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, value: str | None) -> str | None:
-        if value is not None and not _SHA256.match(value):
-            raise ValueError("sha256 must be 'sha256:<64 lowercase hex chars>'")
-        return value
+        return _validate_sha256_value(value)
 
 
 class ArtifactComponentRef(_ComponentRefBase):
@@ -55,9 +59,7 @@ class ArtifactComponentRef(_ComponentRefBase):
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, value: str | None) -> str | None:
-        if value is not None and not _SHA256.match(value):
-            raise ValueError("sha256 must be 'sha256:<64 lowercase hex chars>'")
-        return value
+        return _validate_sha256_value(value)
 
 
 class ComponentUploadRef(_ComponentRefBase):
@@ -68,9 +70,7 @@ class ComponentUploadRef(_ComponentRefBase):
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, value: str | None) -> str | None:
-        if value is not None and not _SHA256.match(value):
-            raise ValueError("sha256 must be 'sha256:<64 lowercase hex chars>'")
-        return value
+        return _validate_sha256_value(value)
 
 
 class CatalogComponentRef(_ComponentRefBase):
