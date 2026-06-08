@@ -9,9 +9,9 @@ in ``kdive.planes.systems``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from enum import Enum
+from functools import partial
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -112,11 +112,6 @@ _NON_TERMINAL_SYSTEM = (
 )
 
 type RootfsValidator = Callable[[RootfsSource], None]
-
-
-class _CreateLane(Enum):
-    PROVISION_NOW = "provision_now"
-    DEFINE_ONLY = "define_only"
 
 
 def _component_sources(
@@ -221,9 +216,11 @@ async def provision_system(
                 pool,
                 ctx,
                 uid,
-                parsed,
-                lane=_CreateLane.PROVISION_NOW,
-                rootfs_validator=rootfs_validator,
+                create_response=partial(
+                    _provision_create_response,
+                    profile=parsed,
+                    rootfs_validator=rootfs_validator,
+                ),
             )
         except IllegalTransition:
             async with pool.connection() as conn:
@@ -236,10 +233,11 @@ async def _create_from_allocation_locked(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     alloc_id: UUID,
-    profile: ProvisioningProfile,
     *,
-    lane: _CreateLane,
-    rootfs_validator: RootfsValidator | None,
+    create_response: Callable[
+        [AsyncConnection, RequestContext, Allocation, System | None],
+        Awaitable[ToolResponse],
+    ],
 ) -> ToolResponse:
     # Resolve the allocation's project (immutable) before locking so the PROJECT lock key
     # is known up front; a missing/foreign allocation is a not-found-shaped config error.
@@ -262,22 +260,20 @@ async def _create_from_allocation_locked(
             return _config_error(str(alloc_id))
         require_role(ctx, alloc.project, Role.OPERATOR)
         existing = await _find_system_for_allocation(conn, alloc_id)
-        if existing is not None:
-            return await _existing_create_response(conn, ctx, alloc, existing, lane)
-        return await _insert_created_system(conn, ctx, alloc, profile, lane, rootfs_validator)
+        return await create_response(conn, ctx, alloc, existing)
 
 
-async def _existing_create_response(
+async def _provision_create_response(
     conn: AsyncConnection,
     ctx: RequestContext,
     alloc: Allocation,
-    existing: System,
-    lane: _CreateLane,
+    existing: System | None,
+    *,
+    profile: ProvisioningProfile,
+    rootfs_validator: RootfsValidator | None,
 ) -> ToolResponse:
-    if lane is _CreateLane.DEFINE_ONLY:
-        if existing.state is SystemState.DEFINED:
-            return _defined_envelope(existing)  # idempotent re-define
-        return _config_error(str(existing.id), data={"current_status": existing.state.value})
+    if existing is None:
+        return await _insert_provisioning_system(conn, ctx, alloc, profile, rootfs_validator)
     if existing.state in _TERMINAL_SYSTEM:
         return _config_error(str(existing.id), data={"current_status": existing.state.value})
     if existing.state is SystemState.DEFINED:
@@ -298,6 +294,22 @@ async def _existing_create_response(
     return _system_job_envelope(job, existing.id)
 
 
+async def _define_create_response(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    alloc: Allocation,
+    existing: System | None,
+    *,
+    profile: ProvisioningProfile,
+    rootfs_validator: RootfsValidator | None,
+) -> ToolResponse:
+    if existing is None:
+        return await _insert_defined_system(conn, ctx, alloc, profile, rootfs_validator)
+    if existing.state is SystemState.DEFINED:
+        return _defined_envelope(existing)  # idempotent re-define
+    return _config_error(str(existing.id), data={"current_status": existing.state.value})
+
+
 async def _admit_defined(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -307,8 +319,8 @@ async def _admit_defined(
     """Drive a ``defined`` System ``defined -> provisioning`` and enqueue its provision job.
 
     The stored profile is provisioned (ADR-0025 decision 7); the Allocation is already
-    ``active`` (flipped at ``define``), so it is not touched. Keyed on the allocation, like
-    the create lane, so a retried ``systems.provision`` dedups to the same job.
+    ``active`` (flipped at ``define``), so it is not touched. Keyed on the allocation, so
+    a retried ``systems.provision`` dedups to the same job.
     """
     await SYSTEMS.update_state(conn, system.id, SystemState.PROVISIONING)
     await audit.record(
@@ -387,20 +399,12 @@ async def provision_defined_system(
             return _system_job_envelope(job, system.id)
 
 
-async def _insert_created_system(
+async def _new_system_allowed(
     conn: AsyncConnection,
-    ctx: RequestContext,
     alloc: Allocation,
     profile: ProvisioningProfile,
-    lane: _CreateLane,
     rootfs_validator: RootfsValidator | None,
-) -> ToolResponse:
-    """Insert a System, activate its Allocation, and apply the lane's visible delta."""
-    if lane is _CreateLane.PROVISION_NOW:
-        try:
-            reject_rootfs_upload_without_window(profile)
-        except CategorizedError as exc:
-            return ToolResponse.failure(str(alloc.id), exc.category)
+) -> ToolResponse | None:
     if alloc.state is not AllocationState.GRANTED:
         return _config_error(str(alloc.id), data={"current_status": alloc.state.value})
     # New System: enforce the per-project max_concurrent_systems quota under the held
@@ -416,12 +420,20 @@ async def _insert_created_system(
         _validate_rootfs_for_provider(profile, rootfs_validator)
     except CategorizedError as exc:
         return ToolResponse.failure(str(alloc.id), exc.category)
+    return None
+
+
+async def _insert_system_and_activate(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    alloc: Allocation,
+    profile: ProvisioningProfile,
+    *,
+    state: SystemState,
+    tool: str,
+    transition: str,
+) -> System:
     now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
-    system_state = (
-        SystemState.PROVISIONING if lane is _CreateLane.PROVISION_NOW else SystemState.DEFINED
-    )
-    tool = "systems.provision" if lane is _CreateLane.PROVISION_NOW else "systems.define"
-    transition = "->provisioning" if lane is _CreateLane.PROVISION_NOW else "->defined"
     system = await SYSTEMS.insert(
         conn,
         System(
@@ -432,7 +444,7 @@ async def _insert_created_system(
             agent_session=ctx.agent_session,
             project=alloc.project,
             allocation_id=alloc.id,
-            state=system_state,
+            state=state,
             provisioning_profile=profile.model_dump(by_alias=True),
         ),
     )
@@ -461,8 +473,54 @@ async def _insert_created_system(
             project=alloc.project,
         ),
     )
-    if lane is _CreateLane.DEFINE_ONLY:
-        return _defined_envelope(system)
+    return system
+
+
+async def _insert_defined_system(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    alloc: Allocation,
+    profile: ProvisioningProfile,
+    rootfs_validator: RootfsValidator | None,
+) -> ToolResponse:
+    blocked = await _new_system_allowed(conn, alloc, profile, rootfs_validator)
+    if blocked is not None:
+        return blocked
+    system = await _insert_system_and_activate(
+        conn,
+        ctx,
+        alloc,
+        profile,
+        state=SystemState.DEFINED,
+        tool="systems.define",
+        transition="->defined",
+    )
+    return _defined_envelope(system)
+
+
+async def _insert_provisioning_system(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    alloc: Allocation,
+    profile: ProvisioningProfile,
+    rootfs_validator: RootfsValidator | None,
+) -> ToolResponse:
+    try:
+        reject_rootfs_upload_without_window(profile)
+    except CategorizedError as exc:
+        return ToolResponse.failure(str(alloc.id), exc.category)
+    blocked = await _new_system_allowed(conn, alloc, profile, rootfs_validator)
+    if blocked is not None:
+        return blocked
+    system = await _insert_system_and_activate(
+        conn,
+        ctx,
+        alloc,
+        profile,
+        state=SystemState.PROVISIONING,
+        tool="systems.provision",
+        transition="->provisioning",
+    )
     job = await queue.enqueue(
         conn,
         JobKind.PROVISION,
@@ -504,9 +562,11 @@ async def define_system(
                 pool,
                 ctx,
                 uid,
-                parsed,
-                lane=_CreateLane.DEFINE_ONLY,
-                rootfs_validator=rootfs_validator,
+                create_response=partial(
+                    _define_create_response,
+                    profile=parsed,
+                    rootfs_validator=rootfs_validator,
+                ),
             )
         except IllegalTransition:
             async with pool.connection() as conn:
