@@ -62,43 +62,24 @@ class SystemAdminHandlers:
         system_id: str,
         profile: ProvisioningProfileInput,
     ) -> ToolResponse:
-        return await reprovision_system(
-            pool,
-            ctx,
-            system_id=system_id,
-            profile=profile,
-            component_sources=self.component_sources,
-            rootfs_validator=self.rootfs_validator,
-        )
-
-
-async def reprovision_system(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    *,
-    system_id: str,
-    profile: ProvisioningProfileInput,
-    component_sources: ComponentSourceCapabilities,
-    rootfs_validator: RootfsValidator,
-) -> ToolResponse:
-    """Reprovision a `ready` System in place under the same Allocation."""
-    uid = _as_uuid(system_id)
-    if uid is None:
-        return _config_error(system_id)
-    try:
-        parsed = ProvisioningProfile.parse(profile)
-        _validate_profile_for_provider(parsed, component_sources)
-        reject_rootfs_upload_without_window(parsed)
-    except CategorizedError as exc:
-        return ToolResponse.failure(system_id, exc.category)
-    with bind_context(principal=ctx.principal):
+        """Reprovision a `ready` System in place under the same Allocation."""
+        uid = _as_uuid(system_id)
+        if uid is None:
+            return _config_error(system_id)
         try:
-            return await _reprovision_locked(pool, ctx, uid, parsed, rootfs_validator)
-        except IllegalTransition:
-            async with pool.connection() as conn:
-                latest = await SYSTEMS.get(conn, uid)
-            data = {"current_status": latest.state.value} if latest else {}
-            return _config_error(system_id, data=data)
+            parsed = ProvisioningProfile.parse(profile)
+            _validate_profile_for_provider(parsed, self.component_sources)
+            reject_rootfs_upload_without_window(parsed)
+        except CategorizedError as exc:
+            return ToolResponse.failure(system_id, exc.category)
+        with bind_context(principal=ctx.principal):
+            try:
+                return await _reprovision_locked(pool, ctx, uid, parsed, self.rootfs_validator)
+            except IllegalTransition:
+                async with pool.connection() as conn:
+                    latest = await SYSTEMS.get(conn, uid)
+                data = {"current_status": latest.state.value} if latest else {}
+                return _config_error(system_id, data=data)
 
 
 async def _reprovision_locked(

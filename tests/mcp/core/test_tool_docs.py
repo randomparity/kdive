@@ -127,7 +127,7 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     depth cap, because a numeric horizon would silently fail open (report "no gate reached")
     for a call buried below it — the very vacuity this backstop exists to prevent.
     """
-    seen: set[Any] = set()
+    seen: set[int] = set()
 
     def _walk(f: Callable[..., Any]) -> bool:
         try:
@@ -135,7 +135,12 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
         except (OSError, TypeError):
             return False
         glb = getattr(f, "__globals__", {})
+        try:
+            nonlocals = inspect.getclosurevars(f).nonlocals
+        except TypeError:
+            nonlocals = {}
         local_calls: set[str] = set()
+        attribute_calls: list[Callable[..., Any]] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 callee = node.func
@@ -145,10 +150,20 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
                     local_calls.add(callee.id)
                 elif isinstance(callee, ast.Attribute) and callee.attr == target:
                     return True
+                elif isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
+                    owner = nonlocals.get(callee.value.id, glb.get(callee.value.id))
+                    delegate = getattr(owner, callee.attr, None)
+                    if callable(delegate):
+                        attribute_calls.append(delegate)
         for name in local_calls:
             delegate = glb.get(name)
-            if inspect.isfunction(delegate) and delegate not in seen:
-                seen.add(delegate)
+            if inspect.isfunction(delegate) and id(delegate) not in seen:
+                seen.add(id(delegate))
+                if _walk(delegate):
+                    return True
+        for delegate in attribute_calls:
+            if id(delegate) not in seen:
+                seen.add(id(delegate))
                 if _walk(delegate):
                     return True
         return False

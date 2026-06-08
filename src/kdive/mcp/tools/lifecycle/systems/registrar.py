@@ -13,7 +13,6 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools.lifecycle.systems.admin import (
     SystemAdminHandlers,
-    reprovision_system,
     teardown_system,
 )
 from kdive.mcp.tools.lifecycle.systems.provision import (
@@ -43,6 +42,10 @@ def register(
         raise RuntimeError("systems registrar requires an injected rootfs validator")
     rootfs_validator = runtime.rootfs_validator
     provision_handlers = SystemProvisionHandlers(
+        runtime.component_sources,
+        rootfs_validator,
+    )
+    admin_handlers = SystemAdminHandlers(
         runtime.component_sources,
         rootfs_validator,
     )
@@ -147,11 +150,9 @@ def register(
         ],
     ) -> ToolResponse:
         """Enqueue in-place reprovision for a ready System. Requires operator and opt-in."""
-        return await reprovision_system(
+        return await admin_handlers.reprovision_system(
             pool,
             current_context(),
             system_id=system_id,
             profile=profile,
-            component_sources=runtime.component_sources,
-            rootfs_validator=rootfs_validator,
         )
