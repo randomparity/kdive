@@ -304,9 +304,7 @@ def register_debug_ops(
         session_id: Annotated[
             str, Field(description="The live DebugSession to set a breakpoint on.")
         ],
-        location: Annotated[
-            str, Field(description="Symbol or address to break at (gdb location syntax).")
-        ],
+        location: Annotated[str, Field(description="Bare C function or symbol name to break at.")],
     ) -> ToolResponse:
         """Set a breakpoint on a live DebugSession via gdb-MI. Requires operator."""
         return await run_engine_op(
