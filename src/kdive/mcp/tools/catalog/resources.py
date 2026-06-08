@@ -50,7 +50,7 @@ def _error(object_id: str) -> ToolResponse:
     return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR)
 
 
-def _project_capabilities(resource: Resource) -> dict[str, str]:
+def _resource_capability_data(resource: Resource) -> dict[str, str]:
     """Flatten the capabilities jsonb to string values for the envelope."""
     caps = resource.capabilities
     data: dict[str, str] = {"kind": resource.kind.value}
@@ -68,7 +68,7 @@ def _resource_envelope(resource: Resource, *, next_actions: list[str]) -> ToolRe
         str(resource.id),
         resource.status.value,
         suggested_next_actions=next_actions,
-        data=_project_capabilities(resource),
+        data=_resource_capability_data(resource),
     )
 
 
