@@ -9,6 +9,7 @@ at-dispatch honored-method re-check.
 
 from __future__ import annotations
 
+from kdive.domain.discovery import ResourceRecord
 from kdive.domain.models import Allocation, PowerAction, ResourceKind, Run
 from kdive.profiles.build import ParsedBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -20,7 +21,6 @@ from kdive.providers.interfaces import (
     KernelArtifact,
     OwnedInfra,
     Registers,
-    ResourceRecord,
     SystemHandle,
     TransportHandle,
 )
