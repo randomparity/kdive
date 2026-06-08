@@ -22,7 +22,11 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.tools.ops._auth import ALL_PROJECTS_SCOPE, held_platform_roles
+from kdive.mcp.tools.ops._auth import (
+    ALL_PROJECTS_SCOPE,
+    audit_platform_denial,
+    held_platform_roles,
+)
 from kdive.security import audit
 
 if TYPE_CHECKING:
@@ -121,18 +125,4 @@ async def audit_denial(
     on this openly-callable read. The role check runs before any pool connection is open, so
     the denial-audit opens its own connection and transaction here.
     """
-    held = held_platform_roles(ctx)
-    if held is None:
-        return
-    async with pool.connection() as conn, conn.transaction():
-        await audit.record_platform(
-            conn,
-            principal=ctx.principal,
-            agent_session=ctx.agent_session,
-            event=audit.PlatformAuditEvent(
-                tool=tool,
-                scope=ALL_PROJECTS_SCOPE,
-                args=args,
-                platform_role=held,
-            ),
-        )
+    await audit_platform_denial(pool, ctx, tool=tool, scope=ALL_PROJECTS_SCOPE, args=args)
