@@ -168,6 +168,12 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
     }
 
 
+def test_default_runtime_exposes_build_config_validator() -> None:
+    runtime = composition.build_default_provider_runtime()
+
+    assert runtime.build_config_validator is not None
+
+
 def test_provider_runtime_discovery_hook_is_optional() -> None:
     install = _InstallProvider()
     retrieve = _RetrieveProvider()

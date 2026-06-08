@@ -335,6 +335,30 @@ def test_from_env_defaults_build_component_roots(monkeypatch: pytest.MonkeyPatch
     assert builder._allowed_component_roots == [Path("/var/lib/kdive/build/components")]
 
 
+def test_validate_config_ref_rejects_local_file_outside_allowed_roots(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside.config"
+    outside.write_text("CONFIG_CRASH_DUMP=y\n", encoding="utf-8")
+    builder = LocalLibvirtBuild(
+        tenant=_TENANT,
+        workspace_root=tmp_path / "workspace",
+        store_factory=lambda: _FakeStore(),
+        checkout=lambda _run, _profile, _workspace: None,
+        read_config=lambda _workspace: _GOOD_CONFIG,
+        run_make=lambda _workspace: 0,
+        read_kernel_image=lambda _workspace: b"kernel",
+        read_vmlinux=lambda _workspace: b"vmlinux",
+        read_build_id=lambda _workspace: "deadbeef",
+        allowed_component_roots=[allowed],
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        builder.validate_config_ref(LocalComponentRef(kind="local", path=str(outside)))
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 # --- real seam argv (the wrappers that only run under live_vm, but whose argv is testable) ----
 
 

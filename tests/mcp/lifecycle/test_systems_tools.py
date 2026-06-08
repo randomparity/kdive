@@ -203,6 +203,14 @@ def _rootfs_validator(allowed_root: Path):
     return _validate
 
 
+def _failing_rootfs_validator(calls: list[ComponentRef]):
+    def _validate(rootfs: ComponentRef) -> None:
+        calls.append(rootfs)
+        raise AssertionError("rootfs validator must not run before authorization")
+
+    return _validate
+
+
 # --- systems.provision tool ----------------------------------------------------------------
 
 
@@ -443,6 +451,29 @@ def test_provision_without_operator_raises(migrated_url: str) -> None:
                 await _provision(pool, _ctx(Role.VIEWER), alloc_id, _profile())
 
     asyncio.run(_run())
+
+
+def test_provision_viewer_denied_before_provider_rootfs_validation(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    calls: list[ComponentRef] = []
+    outside = tmp_path / "outside.qcow2"
+    outside.write_bytes(b"rootfs")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            with pytest.raises(AuthorizationError):
+                await systems_tools.provision_system(
+                    pool,
+                    _ctx(Role.VIEWER),
+                    allocation_id=alloc_id,
+                    profile=_local_rootfs_profile(outside),
+                    rootfs_validator=_failing_rootfs_validator(calls),
+                )
+
+    asyncio.run(_run())
+    assert calls == []
 
 
 def test_provision_malformed_uuid_is_config_error(migrated_url: str) -> None:
@@ -1300,6 +1331,40 @@ def test_reprovision_viewer_denied(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_reprovision_viewer_denied_before_provider_rootfs_validation(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    calls: list[ComponentRef] = []
+    outside = tmp_path / "outside.qcow2"
+    outside.write_bytes(b"rootfs")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            profile = _local_rootfs_profile(outside)
+            profile["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
+            resp = await systems_tools.reprovision_system(
+                pool,
+                _ctx(Role.VIEWER),
+                system_id=sys_id,
+                profile=profile,
+                rootfs_validator=_failing_rootfs_validator(calls),
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
+                sys_row = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs")
+                job_n = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "authorization_denied"
+        assert sys_row is not None and sys_row["state"] == "ready"
+        assert job_n is not None and job_n["n"] == 0
+
+    asyncio.run(_run())
+    assert calls == []
+
+
 def test_reprovision_without_scope_denied(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -1642,6 +1707,29 @@ def test_define_requires_operator(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_define_viewer_denied_before_provider_rootfs_validation(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    calls: list[ComponentRef] = []
+    outside = tmp_path / "outside.qcow2"
+    outside.write_bytes(b"rootfs")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            with pytest.raises(AuthorizationError):
+                await systems_tools.define_system(
+                    pool,
+                    _ctx(Role.VIEWER),
+                    allocation_id=alloc_id,
+                    profile=_local_rootfs_profile(outside),
+                    rootfs_validator=_failing_rootfs_validator(calls),
+                )
+
+    asyncio.run(_run())
+    assert calls == []
+
+
 def test_define_foreign_allocation_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -1831,6 +1919,36 @@ def test_provision_defined_revalidates_stored_local_rootfs_against_provider_root
         assert job_row is not None and job_row["n"] == 0
 
     asyncio.run(_run())
+
+
+def test_provision_defined_viewer_denied_before_provider_rootfs_validation(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    calls: list[ComponentRef] = []
+    outside = tmp_path / "outside.qcow2"
+    outside.write_bytes(b"rootfs")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            async with pool.connection() as conn:
+                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.ACTIVE)
+            sys_id = await _seed_system_with_profile(
+                pool,
+                alloc_id,
+                SystemState.DEFINED,
+                _local_rootfs_profile(outside),
+            )
+            with pytest.raises(AuthorizationError):
+                await systems_tools.provision_defined_system(
+                    pool,
+                    _ctx(Role.VIEWER),
+                    system_id=sys_id,
+                    rootfs_validator=_failing_rootfs_validator(calls),
+                )
+
+    asyncio.run(_run())
+    assert calls == []
 
 
 def test_provision_create_lane_rejects_upload(migrated_url: str) -> None:

@@ -182,6 +182,10 @@ class LocalLibvirtBuild:
         vmlinux = self._put(run_id, "vmlinux", self._read_vmlinux(workspace))
         return BuildOutput(kernel_ref=kernel.key, debuginfo_ref=vmlinux.key, build_id=build_id)
 
+    def validate_config_ref(self, ref: ComponentRef) -> None:
+        """Validate that a build config ref is available within provider roots."""
+        _resolve_config_ref(ref, allowed_component_roots=self._allowed_component_roots)
+
     def _put(self, run_id: UUID, name: str, data: bytes) -> StoredArtifact:
         if self._store is None:
             self._store = self._store_factory()

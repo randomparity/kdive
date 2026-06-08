@@ -96,12 +96,16 @@ def register(
     ) -> ToolResponse:
         """Enqueue the kernel build job for a Run; poll jobs.* for completion. Requires operator."""
         component_sources = None if provider_runtime is None else provider_runtime.component_sources
+        config_validator = (
+            None if provider_runtime is None else provider_runtime.build_config_validator
+        )
         return await build_run(
             pool,
             current_context(),
             run_id,
             cmdline=cmdline,
             component_sources=component_sources,
+            config_validator=config_validator,
         )
 
     @app.tool(

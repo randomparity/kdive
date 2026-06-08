@@ -714,6 +714,53 @@ def test_build_rejects_unsupported_artifact_config_before_state_change(
     asyncio.run(_run())
 
 
+def test_build_rejects_local_config_outside_provider_roots_before_state_change(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside.config"
+    outside.write_text("CONFIG_CRASH_DUMP=y\n", encoding="utf-8")
+    calls: list[Any] = []
+
+    def _reject_config(config: Any) -> None:
+        calls.append(config)
+        raise CategorizedError(
+            "config is outside provider roots",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            profile = {
+                **copy.deepcopy(_VALID_BUILD),
+                "config": {"kind": "local", "path": str(outside)},
+            }
+            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
+
+            resp = await runs_tools.build_run(
+                pool,
+                _ctx(Role.OPERATOR),
+                run_id,
+                config_validator=_reject_config,
+            )
+
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
+                run_row = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind='build' AND dedup_key=%s",
+                    (f"{run_id}:build",),
+                )
+                jobs = await cur.fetchone()
+
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert run_row is not None and run_row["state"] == "created"
+        assert jobs is not None and jobs["n"] == 0
+
+    asyncio.run(_run())
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("state", [RunState.FAILED, RunState.CANCELED])
 def test_build_on_terminal_run_is_config_error(migrated_url: str, state: RunState) -> None:
     async def _run() -> None:

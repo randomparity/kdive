@@ -26,6 +26,7 @@ from kdive.mcp.tools._common import stale_handle as _stale_handle
 from kdive.mcp.tools.lifecycle.systems.provision import (
     RootfsValidator,
     _validate_profile_for_provider,
+    _validate_rootfs_for_provider,
 )
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
@@ -59,13 +60,13 @@ async def reprovision_system(
         return _config_error(system_id)
     try:
         parsed = ProvisioningProfile.parse(profile)
-        _validate_profile_for_provider(parsed, component_sources, rootfs_validator)
+        _validate_profile_for_provider(parsed, component_sources)
         reject_rootfs_upload_without_window(parsed)
     except CategorizedError as exc:
         return ToolResponse.failure(system_id, exc.category)
     with bind_context(principal=ctx.principal):
         try:
-            return await _reprovision_locked(pool, ctx, uid, parsed)
+            return await _reprovision_locked(pool, ctx, uid, parsed, rootfs_validator)
         except IllegalTransition:
             async with pool.connection() as conn:
                 latest = await SYSTEMS.get(conn, uid)
@@ -74,7 +75,11 @@ async def reprovision_system(
 
 
 async def _reprovision_locked(
-    pool: AsyncConnectionPool, ctx: RequestContext, system_id: UUID, profile: ProvisioningProfile
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    system_id: UUID,
+    profile: ProvisioningProfile,
+    rootfs_validator: RootfsValidator | None,
 ) -> ToolResponse:
     async with (
         pool.connection() as conn,
@@ -104,6 +109,10 @@ async def _reprovision_locked(
             return _config_error(str(system_id), data={"current_status": system.state.value})
         if await _has_live_run(conn, system_id):
             return _stale_handle(str(system_id), current_status=system.state.value)
+        try:
+            _validate_rootfs_for_provider(profile, rootfs_validator)
+        except CategorizedError as exc:
+            return ToolResponse.failure(str(system_id), exc.category)
         return await _admit_reprovision(conn, ctx, system, profile, digest, dedup_key)
 
 

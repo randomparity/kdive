@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.catalog import load_fixture_catalog
+from kdive.components.references import ComponentRef
 from kdive.components.requirements import ConfigRequirements
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -52,6 +53,8 @@ from kdive.store.objectstore import (
     register_artifact_row,
 )
 
+type ConfigValidator = Callable[[ComponentRef], None]
+
 
 async def build_run(
     pool: AsyncConnectionPool,
@@ -60,6 +63,7 @@ async def build_run(
     *,
     cmdline: str | None = None,
     component_sources: ComponentSourceCapabilities | None = None,
+    config_validator: ConfigValidator | None = None,
 ) -> ToolResponse:
     """Admit an idempotent server build for a Run and enqueue the build job."""
     uid = _as_uuid(run_id)
@@ -90,6 +94,11 @@ async def build_run(
                 )
             except CategorizedError as exc:
                 return ToolResponse.failure(run_id, exc.category)
+            if config_validator is not None:
+                try:
+                    config_validator(parsed.config)
+                except CategorizedError as exc:
+                    return ToolResponse.failure(run_id, exc.category)
             return await _build_locked(conn, ctx, run, cmdline)
 
 
