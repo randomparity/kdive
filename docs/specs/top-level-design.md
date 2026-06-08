@@ -212,10 +212,11 @@ introspection ports) and passes those ports to MCP tool registrars and worker
 handlers. The only concrete provider today is local-libvirt; composition is
 centralized in `src/kdive/providers/composition.py`.
 
-The capability registry from ADR-0009/ADR-0022 remains a prototype for a later
-multi-provider milestone, not the live dispatch path. It is not used for job
-routing, destructive-op gating, or reconciler behavior in M0/M1. ADR-0063 records
-this narrowing so contributors extend the runtime that actually serves requests.
+The capability registry from ADR-0009/ADR-0022 is historical design context, not an
+in-tree prototype or the live dispatch path. It is not used for job routing,
+destructive-op gating, or reconciler behavior in M0/M1. ADR-0063 records this narrowing
+and ADR-0066 removed the prototype source so contributors extend the runtime that actually
+serves requests.
 
 ## Lifecycle planes
 
@@ -366,7 +367,7 @@ partial spend to the Allocation regardless of completion. **Cancel/abandon clean
 part of each typed worker operation's policy: each op declares in code whether cancel yields
 clean-rollback, best-effort, or orphan-flagged state — `jobs.cancel` on a half-done
 `provision` / `install` is never undefined. ADR-0063 narrows the M0/M1 provider seam to typed
-runtime ports; the dormant capability registry does not drive this behavior today.
+runtime ports; the historical capability-registry design does not drive this behavior.
 
 ## Error taxonomy
 
