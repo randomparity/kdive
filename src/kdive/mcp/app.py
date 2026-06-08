@@ -19,7 +19,10 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.middleware import DenialAuditMiddleware
-from kdive.mcp.tools import accounting as accounting_tools
+from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
+from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
+from kdive.mcp.tools.accounting.reports import register as register_accounting_reports
+from kdive.mcp.tools.accounting.usage import register as register_accounting_usage
 from kdive.mcp.tools.catalog import artifacts, investigations, jobs, resources
 from kdive.mcp.tools.debug import introspect
 from kdive.mcp.tools.debug import sessions as debug_tools
@@ -52,7 +55,10 @@ def _plain(register: Callable[[FastMCP, AsyncConnectionPool], None]) -> PlaneReg
 _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _plain(jobs.register),
     _plain(resources.register),
-    _plain(accounting_tools.register),
+    _plain(register_accounting_estimate),
+    _plain(register_accounting_usage),
+    _plain(register_accounting_reports),
+    _plain(register_accounting_admin),
     _plain(ops_reconcile_tools.register),
     _plain(allocations.register),
     _plain(ops_breakglass_tools.register),
