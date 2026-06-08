@@ -293,7 +293,7 @@ class _ExecutionControl:
 
     def _redact_stop(self, stop: GdbStopRecord) -> GdbStopRecord:
         return GdbStopRecord.model_validate(
-            self._engine.redactor.redact_value(stop.model_dump(mode="json"))
+            self._engine._redactor().redact_value(stop.model_dump(mode="json"))
         )
 
 
@@ -306,15 +306,19 @@ class GdbMiEngine:
         controller_factory: Callable[[list[str]], GdbController] | None = None,
         gdb_path_finder: Callable[[str], str | None] = shutil.which,
         redactor: Redactor | None = None,
+        redactor_factory: Callable[[], Redactor] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._controller_factory = controller_factory or (
             lambda command: PygdbmiController(command)
         )
         self._gdb_path_finder = gdb_path_finder
-        self.redactor = redactor or Redactor()
+        self._redactor_factory = _redactor_factory(redactor, redactor_factory)
         self._sleep = sleep
         self._execution = _ExecutionControl(self)
+
+    def _redactor(self) -> Redactor:
+        return self._redactor_factory()
 
     # --- attach (live_vm) -----------------------------------------------------------------
 
@@ -433,7 +437,7 @@ class GdbMiEngine:
 
     def _breakpoint_ref_from(self, entry: dict[str, Any]) -> GdbBreakpointRef:
         return GdbBreakpointRef.model_validate(
-            self.redactor.redact_value(
+            self._redactor().redact_value(
                 {
                     "number": str(entry.get("number")),
                     "type": entry.get("type") if isinstance(entry.get("type"), str) else None,
@@ -477,7 +481,7 @@ class GdbMiEngine:
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
                 details={"code": "missing_registers", "requested": requested, "missing": missing},
             )
-        return self.redactor.redact_value({"registers": registers})
+        return self._redactor().redact_value({"registers": registers})
 
     def read_memory(self, attachment: GdbMiAttachment, *, address: int, byte_count: int) -> bytes:
         """Read ``byte_count`` bytes from ``address``, returned **verbatim** (not redacted).
@@ -584,7 +588,10 @@ class GdbMiEngine:
             raise CategorizedError(
                 f"gdb/MI command failed: {command}",
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
-                details={"command": command, "payload": self.redactor.redact_value(result.payload)},
+                details={
+                    "command": command,
+                    "payload": self._redactor().redact_value(result.payload),
+                },
             )
         return records
 
@@ -620,8 +627,18 @@ class GdbMiEngine:
             "records": [record.model_dump(mode="json") for record in records],
         }
         with transcript_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(self.redactor.redact_value(entry), default=str))
+            handle.write(json.dumps(self._redactor().redact_value(entry), default=str))
             handle.write("\n")
+
+
+def _redactor_factory(
+    redactor: Redactor | None, redactor_factory: Callable[[], Redactor] | None
+) -> Callable[[], Redactor]:
+    if redactor_factory is not None:
+        return redactor_factory
+    if redactor is not None:
+        return lambda: redactor
+    return Redactor
 
 
 def _resolve_debuginfo_ref(run_id: str) -> str:  # pragma: no cover - live_vm

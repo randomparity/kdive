@@ -23,6 +23,7 @@ from kdive.providers.local_libvirt.debug_gdbmi import (
 )
 from kdive.providers.ports import GdbMiAttachment, GdbMiSessionRegistry
 from kdive.security.redaction import Redactor
+from kdive.security.secret_registry import PROCESS_SECRET_REGISTRY
 
 
 class _FakeMiController:
@@ -412,6 +413,28 @@ def test_read_memory_transcript_line_is_redacted(tmp_path: Path) -> None:
         "-break-insert -h panic",
         [MiRecord(type="console", payload=f"loaded {secret}")],
     )
+    transcript = attachment.transcript_path.read_text(encoding="utf-8")
+    assert secret not in transcript
+    assert "[REDACTED]" in transcript
+
+
+def test_transcript_redactor_sees_secrets_registered_after_engine_creation(
+    tmp_path: Path,
+) -> None:
+    secret = "lateprocesssecret"  # pragma: allowlist secret - fake test value
+    scope = object()
+    engine = GdbMiEngine()
+    attachment = _attachment(_memory_controller(0x5000, 4, "00112233"), tmp_path)
+    PROCESS_SECRET_REGISTRY.register(secret, scope=scope)
+    try:
+        engine.append_transcript(
+            attachment.transcript_path,
+            "-break-insert -h panic",
+            [MiRecord(type="console", payload=f"loaded {secret}")],
+        )
+    finally:
+        PROCESS_SECRET_REGISTRY.release(scope)
+
     transcript = attachment.transcript_path.read_text(encoding="utf-8")
     assert secret not in transcript
     assert "[REDACTED]" in transcript
