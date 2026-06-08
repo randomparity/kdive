@@ -2,6 +2,19 @@
 
 # `resources` tools
 
+## `resources.availability`
+
+`implemented` · `read-only`
+
+Report fleet availability (headroom, free PCIe, fitting shapes, queue depth). Viewer.
+
+A point-in-time hint, not a reservation; the admission path stays the authority.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `pcie` | `any` | no | Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); narrows to hosts with a free matching device. |
+| `shape` | `any` | no | Optional shape name; restricts the fitting computation to it. |
+
 ## `resources.cordon`
 
 `implemented`

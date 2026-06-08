@@ -55,6 +55,7 @@
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |
 | [`postmortem.crash`](postmortem.md#postmortemcrash) | `partial` |
 | [`postmortem.triage`](postmortem.md#postmortemtriage) | `partial` |
+| [`resources.availability`](resources.md#resourcesavailability) | `implemented` |
 | [`resources.cordon`](resources.md#resourcescordon) | `implemented` |
 | [`resources.describe`](resources.md#resourcesdescribe) | `implemented` |
 | [`resources.drain`](resources.md#resourcesdrain) | `implemented` |
