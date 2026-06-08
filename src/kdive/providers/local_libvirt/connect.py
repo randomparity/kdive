@@ -25,7 +25,7 @@ from collections.abc import Callable
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.interfaces import SystemHandle, TransportHandle
-from kdive.providers.ports import Connector, TransportHandleData
+from kdive.providers.ports import TransportHandleData
 
 _GDBSTUB = "gdbstub"
 _SSH = "ssh"
@@ -245,10 +245,7 @@ def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_
 
 
 __all__ = [
-    "Connector",
     "LocalLibvirtConnect",
-    "TransportHandle",
-    "TransportHandleData",
     "rsp_frame",
     "rsp_reachable",
     "valid_rsp_frame",

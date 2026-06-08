@@ -9,11 +9,10 @@ import pytest
 
 from kdive.components.references import ArtifactComponentRef, CatalogComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import _UploadRootfs
+from kdive.profiles.provisioning import _UploadRootfs, validate_rootfs_reference
 from kdive.providers.local_libvirt.provisioning import (
     reject_rootfs_without_upload_window,
     resolve_rootfs_path,
-    validate_rootfs_reference,
 )
 
 _SID = uuid4()

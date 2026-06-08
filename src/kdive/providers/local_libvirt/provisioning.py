@@ -33,14 +33,12 @@ from kdive.profiles.provisioning import (
     ProvisioningProfile,
     RootfsSource,
     _UploadRootfs,
-    validate_profile,
 )
 from kdive.profiles.provisioning import (
-    validate_rootfs_reference as validate_rootfs_reference,
+    validate_profile as _validate_profile,
 )
 from kdive.providers.local_libvirt.discovery import _KDIVE_METADATA_NS
 from kdive.providers.local_libvirt.materialize import materialize_rootfs_base
-from kdive.providers.ports import Provisioner as Provisioner
 from kdive.providers.runtime_paths import console_log_path, domain_name_for
 
 _log = logging.getLogger(__name__)
@@ -175,7 +173,7 @@ def render_domain_xml(
     per-System overlay (ADR-0060); a bare render (tests) defaults to the resolved base image.
     """
     _ensure_kdive_namespace_registered()
-    validate_profile(profile)
+    _validate_profile(profile)
     section = profile.provider.local_libvirt
     machine = section.domain_xml_params.get("machine", _DEFAULT_MACHINE)
 

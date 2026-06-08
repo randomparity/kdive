@@ -17,7 +17,7 @@ import pytest
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.profiles.provisioning import ProvisioningProfile, validate_profile
 from kdive.providers.local_libvirt import discovery
 from kdive.providers.local_libvirt import provisioning as provisioning_module
 from kdive.providers.local_libvirt.provisioning import (
@@ -26,7 +26,6 @@ from kdive.providers.local_libvirt.provisioning import (
     domain_name_for,
     overlay_path,
     render_domain_xml,
-    validate_profile,
 )
 from tests.providers.local_libvirt.fakes import libvirt_error
 

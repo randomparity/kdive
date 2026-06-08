@@ -1180,10 +1180,7 @@ def test_register_handlers_requires_provider_runtime_or_run_ports() -> None:
 # --- runs.install / runs.boot (install + boot plane, #19) ----------------------------
 
 from kdive.domain.capture import CaptureMethod  # noqa: E402
-from kdive.providers.local_libvirt.install import (  # noqa: E402
-    Booter,
-    Installer,
-)
+from kdive.providers.ports import Booter, Installer  # noqa: E402
 
 _SUCCEEDED_BUILD: dict[str, Any] = {
     **_VALID_BUILD,

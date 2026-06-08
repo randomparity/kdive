@@ -14,10 +14,10 @@ from kdive.providers.interfaces import SystemHandle
 from kdive.providers.local_libvirt import connect as connect_mod
 from kdive.providers.local_libvirt.connect import (
     LocalLibvirtConnect,
-    TransportHandleData,
     rsp_frame,
     valid_rsp_frame,
 )
+from kdive.providers.ports import TransportHandleData
 
 # --- RSP framing codec ---------------------------------------------------------------------
 

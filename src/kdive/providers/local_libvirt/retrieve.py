@@ -25,9 +25,7 @@ from kdive.domain.models import Sensitivity
 from kdive.providers.ports import (
     CaptureOutput,
     CrashOutput,
-    CrashPostmortem,
     CrashResult,
-    Retriever,
 )
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
 from kdive.security.secrets.redaction import Redactor
@@ -229,11 +227,6 @@ def _real_run_crash(  # pragma: no cover - live_vm
 
 
 __all__ = [
-    "CaptureOutput",
-    "CrashOutput",
-    "CrashPostmortem",
-    "CrashResult",
     "LocalLibvirtRetrieve",
-    "Retriever",
     "crash_command_rejection_reason",
 ]

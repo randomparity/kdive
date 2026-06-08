@@ -42,7 +42,6 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import Booter, Installer
 from kdive.providers.runtime_paths import console_log_path, domain_name_for, read_console_log
 from kdive.store.objectstore import FetchedArtifact, object_store_from_env
 
@@ -456,8 +455,6 @@ def _real_readiness(system_id: UUID) -> ReadinessResult:  # pragma: no cover - l
 
 
 __all__ = [
-    "Booter",
-    "Installer",
     "LocalLibvirtInstall",
     "ReadinessResult",
     "classify_console",
