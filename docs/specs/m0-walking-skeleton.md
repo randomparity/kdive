@@ -327,21 +327,11 @@ handlers receive those typed ports directly. Capability-registry dispatch from A
 ADR-0022 is historical design context for a future multi-provider milestone, not runtime
 infrastructure in this implementation.
 
-See [top-level design](top-level-design.md) for the current extension path. A new provider
-adds concrete port implementations and `ProviderRuntime` wiring; reintroducing capability
-matching requires a new ADR.
-
-```python
-@dataclass(frozen=True)
-class ProviderRuntime:
-    discovery: DiscoveryPort
-    provisioner: Provisioner
-    builder: Builder
-    controller: Controller
-    retriever: Retriever
-
-    def install_boot(self) -> tuple[Installer, Booter]: ...
-```
+See [top-level design](top-level-design.md) for the current extension path. The source of
+truth for the contract is `src/kdive/providers/runtime.py`; the default local-libvirt
+assembly lives in `src/kdive/providers/composition.py`. A new provider adds concrete port
+implementations and `ProviderRuntime` wiring; reintroducing capability matching requires a
+new ADR.
 
 The `AllocationPlane` in M0 is the always-yes capacity-checked path implemented in
 core, not the provider (a provider-supplied lease arrives at M1).

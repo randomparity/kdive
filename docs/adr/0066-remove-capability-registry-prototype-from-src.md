@@ -20,8 +20,8 @@ to extend the wrong seam.
 ## Decision
 
 Remove the capability-registry prototype from production source and remove its dedicated
-tests. The active provider seam remains `providers.composition.ProviderRuntime` and the
-typed provider port protocols in `providers.ports`.
+tests. The active provider seam remains `providers.runtime.ProviderRuntime`, assembled by
+`providers.composition`, and the typed provider port protocols in `providers.ports`.
 
 Historical design material stays in ADR-0009/ADR-0022 and the dated superpowers specs. A
 future multi-provider milestone must write a new ADR before reintroducing capability-based

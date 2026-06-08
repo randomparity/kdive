@@ -19,12 +19,12 @@ did not use it.
 ADR-0066 later removed that prototype from production source after this ADR established typed
 ports as the live runtime seam.
 
-The actual M0/M1 runtime is `providers.composition.ProviderRuntime`: startup constructs one
-local-libvirt implementation for each typed port (`Provisioner`, `Builder`, `Installer`,
-`Controller`, `Retriever`, debug/introspection ports) and passes those ports to MCP registrars
-and worker handlers. That path is deliberate for the single-provider milestones: it keeps the
-entrypoint explicit, type-checkable, and simple while the service stabilizes the DB/job/state
-spine.
+The actual M0/M1 runtime contract is `providers.runtime.ProviderRuntime`; startup constructs
+one local-libvirt implementation for each typed port (`Provisioner`, `Builder`, `Installer`,
+`Controller`, `Retriever`, debug/introspection ports) in `providers.composition` and passes
+those ports to MCP registrars and worker handlers. That path is deliberate for the
+single-provider milestones: it keeps the entrypoint explicit, type-checkable, and simple
+while the service stabilizes the DB/job/state spine.
 
 Leaving the old dispatch ADRs as the apparent current architecture is misleading. New work could
 extend the dormant registry instead of the runtime that actually serves requests.
