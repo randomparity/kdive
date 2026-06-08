@@ -116,9 +116,11 @@ async def delete_shape(
     """Delete a shape preset (platform_operator; audited).
 
     The ``shape`` label on allocations/systems is not an FK, so the delete never FK-blocks
-    or orphans a live row. An unknown name is a ``configuration_error`` and is not audited
-    (nothing was removed).
+    or orphans a live row. The name is stripped before lookup so a padded argument resolves
+    the same canonical key ``set`` stores. An unknown name is a ``configuration_error`` and
+    is not audited (nothing was removed).
     """
+    name = name.strip()
     with bind_context(principal=ctx.principal):
         try:
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)

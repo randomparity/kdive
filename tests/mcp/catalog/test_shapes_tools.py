@@ -365,6 +365,21 @@ def test_delete_removes_shape_and_audits(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_delete_normalizes_padded_name(migrated_url: str) -> None:
+    # A padded delete resolves the same canonical key set stores (symmetry with set).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await shapes.delete_shape(pool, _OPERATOR, name="  medium  ")
+            assert resp.status == "deleted"
+            assert resp.object_id == "medium"
+            async with pool.connection() as conn:
+                assert await SYSTEM_SHAPES.get(conn, "medium") is None
+        rows = await _platform_audit_rows(migrated_url)
+        assert rows == [("op-1", "platform_operator", "shapes.delete", "medium")]
+
+    asyncio.run(_run())
+
+
 def test_delete_unknown_is_configuration_error_unaudited(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
