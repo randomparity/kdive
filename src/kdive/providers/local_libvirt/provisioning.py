@@ -295,6 +295,20 @@ type MakeOverlay = Callable[[str, str], None]
 type RemoveOverlay = Callable[[str], None]
 type OverlayExists = Callable[[str], bool]
 type MaterializeRootfs = Callable[[RootfsSource, UUID], str]
+type PrepareConsoleLog = Callable[[Path], None]
+
+
+def _prepare_console_log(path: Path) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(mode=0o644, exist_ok=True)
+        path.chmod(0o644)
+    except OSError as exc:
+        raise CategorizedError(
+            "failed to prepare libvirt console log",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"path": str(path)},
+        ) from exc
 
 
 class LocalLibvirtProvisioning:
@@ -310,6 +324,7 @@ class LocalLibvirtProvisioning:
         allowed_roots: list[Path] | None = None,
         cache_dir: Path = Path(_ROOTFS_CACHE_DIR),
         materialize_rootfs: MaterializeRootfs | None = None,
+        prepare_console_log: PrepareConsoleLog = _prepare_console_log,
     ) -> None:
         self._connect = connect
         self._make_overlay = make_overlay
@@ -318,6 +333,7 @@ class LocalLibvirtProvisioning:
         self._allowed_roots = allowed_roots or [Path(_ROOTFS_DIR)]
         self._cache_dir = cache_dir
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
+        self._prepare_console_log = prepare_console_log
 
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
@@ -346,6 +362,7 @@ class LocalLibvirtProvisioning:
         created_overlay = not self._overlay_exists(overlay)
         if created_overlay:
             self._make_overlay(base, overlay)  # the domain boots this overlay, not the base
+        self._prepare_console_log(console_log_path(system_id))
         try:
             conn = self._connect()
             try:

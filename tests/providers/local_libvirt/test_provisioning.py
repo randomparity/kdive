@@ -8,6 +8,7 @@ import subprocess
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -320,6 +321,29 @@ def test_provision_creates_overlay_over_base_and_attaches_it() -> None:
     assert overlay == overlay_path(_SYS)
     disk = _safe_fromstring(conn.recorded_xml[0]).find("devices/disk/source")
     assert disk is not None and disk.get("file") == overlay  # the domain boots the overlay
+
+
+def test_provision_prepares_console_log_before_define() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def prepare(path: Path) -> None:
+        calls.append(("prepare", path.name))
+
+    class RecordingConn(_ProvConn):
+        def defineXML(self, xml: str) -> _ProvDomain:  # noqa: N802 - mirrors libvirt binding
+            calls.append(("define", "xml"))
+            return super().defineXML(xml)
+
+    conn = RecordingConn()
+    LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        make_overlay=lambda _base, _overlay: None,
+        overlay_exists=lambda _overlay: False,
+        materialize_rootfs=lambda _rootfs, _system_id: "/var/lib/kdive/rootfs/base.qcow2",
+        prepare_console_log=prepare,
+    ).provision(_SYS, _profile())
+
+    assert calls == [("prepare", f"{_SYS}.log"), ("define", "xml")]
 
 
 def test_real_make_overlay_timeout_is_provisioning_failure(
