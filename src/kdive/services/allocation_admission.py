@@ -48,10 +48,11 @@ from kdive.domain.cost import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lease import resolve_window_hours
 from kdive.domain.models import Allocation, Resource
+from kdive.domain.pcie import MatchOutcome, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState
 from kdive.security import audit
-from kdive.services import accounting
+from kdive.services import accounting, pcie_claim
 from kdive.services.allocation_idempotency import (
     record_key,
     resolve_replay,
@@ -76,7 +77,13 @@ _NON_TERMINAL = NON_TERMINAL_STATES
 
 @dataclass(frozen=True)
 class AllocationRequest:
-    """Inputs for one allocation admission attempt."""
+    """Inputs for one allocation admission attempt.
+
+    ``pcie_specs`` is the resolved PCIe device-spec **union** (explicit ``pcie_devices``
+    plus, when #161 lands, a shape's ``pcie_match``) — already composed by the caller. An
+    empty union is a non-PCIe request. The specs are resolved to distinct free devices and
+    claimed inside the per-Resource lock (ADR-0068), never pre-lock.
+    """
 
     ctx: RequestContext
     resource: Resource
@@ -84,6 +91,7 @@ class AllocationRequest:
     selector: Selector
     window: object | None = None
     idempotency_key: str | None = None
+    pcie_specs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -196,12 +204,65 @@ async def _admit_under_project_lock(
         host = await _host_cap_check(conn, request.resource)
         if host is not None:
             return host
+        claim = await _resolve_pcie_claim(conn, request)
+        if claim.denial is not None:
+            return claim.denial
         return await _grant(
             conn,
             request,
             window_hours=window_hours,
             estimate=estimate,
+            claimed_devices=claim.devices,
         )
+
+
+@dataclass(frozen=True)
+class _PCIeClaimResult:
+    """The in-lock PCIe resolution: a denial to return, or the devices to claim."""
+
+    denial: AdmissionOutcome | None
+    devices: list[PCIeClaim]
+
+
+async def _resolve_pcie_claim(
+    conn: AsyncConnection, request: AllocationRequest
+) -> _PCIeClaimResult:
+    """Resolve the requested device union to distinct free devices under the held lock.
+
+    A locked read-modify-write (ADR-0068 Consequences): the host's occupancy set is read
+    under the per-Resource lock this caller already holds, so two requests cannot both
+    resolve the last free device. An empty union short-circuits to no devices. The matcher
+    splits the two denial modes — ``CONFIG`` (no host descriptor matches; the card is not
+    on this host) maps to ``configuration_error``; ``CAPACITY`` (matches exist but every
+    one is claimed) maps to ``allocation_denied``, the queueable case (#164). Malformed
+    grammar raises a ``CategorizedError`` that ``admit`` catches and rolls back — no write.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if any requested spec is malformed.
+    """
+    if not request.pcie_specs:
+        return _PCIeClaimResult(denial=None, devices=[])
+    descriptors = pcie_claim.descriptors_for(request.resource)
+    claims = await pcie_claim.active_claims(conn, request.resource.id)
+    resolution = pcie_claim.resolve_union(list(request.pcie_specs), descriptors, claims=claims)
+    if resolution.outcome is MatchOutcome.MATCHED:
+        return _PCIeClaimResult(denial=None, devices=_claims_from(resolution.devices))
+    category = (
+        ErrorCategory.CONFIGURATION_ERROR
+        if resolution.outcome is MatchOutcome.CONFIG
+        else ErrorCategory.ALLOCATION_DENIED
+    )
+    return _PCIeClaimResult(
+        denial=AdmissionOutcome(granted=False, allocation=None, category=category),
+        devices=[],
+    )
+
+
+def _claims_from(devices: list[PCIeDescriptor]) -> list[PCIeClaim]:
+    """Project the matched descriptors to the persisted claim snapshot (no host-local label)."""
+    return [
+        PCIeClaim(bdf=d["bdf"], vendor_id=d["vendor_id"], device_id=d["device_id"]) for d in devices
+    ]
 
 
 async def _grant(
@@ -210,6 +271,7 @@ async def _grant(
     *,
     window_hours: Decimal,
     estimate: Decimal,
+    claimed_devices: list[PCIeClaim],
 ) -> AdmissionOutcome:
     """Insert the granted Allocation, reserve, record the key, and audit (one txn)."""
     now = datetime.now(UTC)  # the DB sets created_at/updated_at; lease_expiry is explicit
@@ -229,6 +291,7 @@ async def _grant(
             requested_vcpus=request.selector.vcpus,
             requested_memory_gb=request.selector.memory_gb,
             capability_scope={},
+            pcie_claim=claimed_devices,
         ),
     )
     await accounting.reserve(conn, allocation, estimate)
