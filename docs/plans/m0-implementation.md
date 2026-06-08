@@ -39,7 +39,9 @@ src/kdive/
   services/    allocation_admission.py · allocation_idempotency.py · resource_discovery.py
   security/    rbac.py · audit.py · gate.py · redaction.py · secret_registry.py · paths.py · secrets.py
   reconciler/  loop.py
-  providers/   composition.py · ports.py · local_libvirt/{discovery,provisioning,build,install,connect,debug_gdbmi,introspect_drgn,control,retrieve}.py
+  providers/   composition.py · ports/ · local_libvirt/{build,discovery,retrieve}.py
+               local_libvirt/lifecycle/{provisioning,install,connect,control}.py
+               local_libvirt/debug/{debug_gdbmi,introspect_drgn,execution,mi_*}.py
   profiles/    provisioning.py · build.py
   log.py       structured-logging config (JSON, stdlib logging)
   __main__.py  (server | worker | reconciler entrypoints)
@@ -234,6 +236,11 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 
 ## Phase 3 — Planes (local-libvirt)
 
+These issue recipes are historical M0 slices, but the file paths below name the
+current runtime layout. Provider work should extend typed ports wired by
+`providers/composition.py`; the removed capability-registry dispatch path is
+only ADR history.
+
 ### Issue 12 — Discovery + Allocation (admission)
 - **Labels:** `area:allocation` · `provider:local-libvirt`
 - **Depends on:** #11, #9
@@ -261,7 +268,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Labels:** `area:provisioning` · `provider:local-libvirt`
 - **Depends on:** #11, #13
 - **Goal:** Provision and tear down a libvirt System as a job.
-- **Files:** Create `src/kdive/providers/local_libvirt/provisioning.py`,
+- **Files:** Create `src/kdive/providers/local_libvirt/lifecycle/provisioning.py`,
   `src/kdive/mcp/tools/lifecycle/systems/`, `src/kdive/planes/systems.py`; register
   `provision`/`teardown` job handlers; tests.
 - **Scope:**
@@ -299,7 +306,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Labels:** `area:build-install` · `provider:local-libvirt`
 - **Depends on:** #16, #14
 - **Goal:** Install the built kernel onto the System and boot it, with kdump in effect.
-- **Files:** Create `src/kdive/providers/local_libvirt/install.py`,
+- **Files:** Create `src/kdive/providers/local_libvirt/lifecycle/install.py`,
   `mcp/tools/lifecycle/runs/steps.py` (add `runs.install`, `runs.boot`); register
   handlers in `src/kdive/planes/runs.py`; tests.
 - **Scope:**
@@ -311,7 +318,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Labels:** `area:debug` · `provider:local-libvirt`
 - **Depends on:** #11, #17, #23
 - **Goal:** Open a single-attach gdbstub transport and manage the DebugSession row.
-- **Files:** Create `src/kdive/providers/local_libvirt/connect.py`,
+- **Files:** Create `src/kdive/providers/local_libvirt/lifecycle/connect.py`,
   `mcp/tools/debug/sessions.py` (start/end session); port
   `~/src/kdive-v1/.../transport/backends/qemu_gdbstub.py`; tests.
 - **Scope:**
@@ -323,11 +330,11 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Labels:** `area:debug`
 - **Depends on:** #18
 - **Goal:** Constrained debug ops over the gdbstub via the ported gdb-MI tier.
-- **Files:** Create `src/kdive/providers/local_libvirt/debug_gdbmi.py` (port
-  `~/src/kdive-v1/.../providers/local/debug/gdb_mi.py`, 854 LOC); add to
+- **Files:** Create `src/kdive/providers/local_libvirt/debug/debug_gdbmi.py` plus
+  sibling MI protocol/controller/execution/transcript helpers as needed; add to
   `mcp/tools/debug/ops.py`; tests.
 - **Scope:**
-  - Port gdb-MI behind the `DebugPlane` Protocol; expose `debug.set_breakpoint/.clear/.list`, `.read_memory` (enforce the **4096-byte cap**, ported invariant), `.read_registers`, `.continue`, `.interrupt`.
+  - Port gdb-MI behind the typed `GdbMiEngine` runtime port; expose `debug.set_breakpoint/.clear/.list`, `.read_memory` (enforce the **4096-byte cap**, ported invariant), `.read_registers`, `.continue`, `.interrupt`.
   - All transcript output passes through the redactor (#23) before persistence/response.
 - **Acceptance (live_vm):** set a breakpoint at a symbol, continue, hit it, read registers and ≤4096 bytes of memory; a >4096 read is rejected; a known secret in the gdb-MI **textual transcript** is masked in the response (this is transcript redaction — raw `read_memory` bytes are returned verbatim under the 4096-byte cap, not redacted).
 
@@ -335,7 +342,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Labels:** `area:debug`
 - **Depends on:** #22
 - **Goal:** Offline drgn introspection of a captured vmcore on the host — no live guest, no SSH.
-- **Files:** Create `src/kdive/providers/local_libvirt/introspect_drgn.py` (port the M0 subset of the vmcore path in `~/src/kdive-v1/src/kdive/introspect/*` + `prereqs/drgn_probe.py`); add `introspect.from_vmcore`; tests.
+- **Files:** Create `src/kdive/providers/local_libvirt/debug/introspect_drgn.py` (port the M0 subset of the vmcore path in `~/src/kdive-v1/src/kdive/introspect/*` + `prereqs/drgn_probe.py`); add `introspect.from_vmcore`; tests.
 - **Scope:**
   - drgn opens the fetched vmcore on the host (`drgn.program_from_core`-style), **loading the Run's `debuginfo_ref` (`vmlinux`) from #16 for symbols/types**, and runs a minimal helper set (tasks, modules, sysinfo).
   - **Live drgn (`introspect.run`) is deferred to M1.** v1 implements it as drgn-over-SSH (`local-drgn-introspect`, `transports=["ssh"]`), which needs a guest SSH transport + credentials (secret backend) that the M0 walking-skeleton path does not otherwise require; introducing it here is scope creep and `introspect.run` is not in the M0 tool subset.
@@ -346,7 +353,7 @@ The core platform (#3–#10) is the gating path; planes parallelize once #11 lan
 - **Labels:** `area:control-retrieve` · `provider:local-libvirt`
 - **Depends on:** #11, #14, #9
 - **Goal:** Power/reset and force_crash, behind the destructive-op gate.
-- **Files:** Create `src/kdive/providers/local_libvirt/control.py`,
+- **Files:** Create `src/kdive/providers/local_libvirt/lifecycle/control.py`,
   `mcp/tools/lifecycle/control.py`, `src/kdive/planes/control.py`; register
   `force_crash`/power job handlers; tests.
 - **Scope:**
