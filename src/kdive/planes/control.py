@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import NamedTuple
 from uuid import UUID
 
@@ -50,7 +51,7 @@ async def power_handler(conn: AsyncConnection, job: Job, control: Controller) ->
     system_id = UUID(payload.system_id)
     action = payload.action
     target = await _control_target(conn, system_id, op="power")
-    control.power(target.domain_name, action)
+    await asyncio.to_thread(control.power, target.domain_name, action)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -80,7 +81,7 @@ async def force_crash_handler(conn: AsyncConnection, job: Job, control: Controll
     target = await _force_crash_target(conn, system_id)
     if target is None:
         return str(system_id)
-    control.force_crash(target.domain_name)
+    await asyncio.to_thread(control.force_crash, target.domain_name)
     await _finalize_force_crash(conn, job, system_id, target.project)
     return str(system_id)
 

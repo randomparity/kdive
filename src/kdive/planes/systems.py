@@ -119,11 +119,13 @@ async def provision_handler(
         )
     if system.state is not SystemState.PROVISIONING:
         if system.state in TERMINAL_SYSTEM:
-            provisioning.teardown(system.domain_name or domain_name_for(system_id))
+            await asyncio.to_thread(
+                provisioning.teardown, system.domain_name or domain_name_for(system_id)
+            )
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     try:
-        domain_name = provisioning.provision(system_id, profile)
+        domain_name = await asyncio.to_thread(provisioning.provision, system_id, profile)
     except CategorizedError:
         try:
             async with conn.transaction():
@@ -152,7 +154,7 @@ async def provision_handler(
             )
             await _finalize_provision_ready(conn, job, system, profile)
     if current in TERMINAL_SYSTEM:
-        provisioning.teardown(domain_name)
+        await asyncio.to_thread(provisioning.teardown, domain_name)
         _log.info("provision of system %s superseded by teardown; domain reaped", system_id)
     return str(system_id)
 
@@ -173,7 +175,7 @@ async def reprovision_handler(
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     try:
-        domain_name = provisioning.reprovision(system_id, profile)
+        domain_name = await asyncio.to_thread(provisioning.reprovision, system_id, profile)
     except CategorizedError:
         try:
             async with conn.transaction():
@@ -212,7 +214,7 @@ async def reprovision_handler(
                 tool="systems.reprovision",
             )
     if current in TERMINAL_SYSTEM:
-        provisioning.teardown(domain_name)
+        await asyncio.to_thread(provisioning.teardown, domain_name)
         _log.info("reprovision of system %s superseded by teardown; domain reaped", system_id)
     return str(system_id)
 
@@ -238,7 +240,7 @@ async def teardown_handler(
                 transition=f"{old.value}->torn_down",
                 tool="systems.teardown",
             )
-    provisioning.teardown(domain_name)
+    await asyncio.to_thread(provisioning.teardown, domain_name)
     return str(system_id)
 
 
