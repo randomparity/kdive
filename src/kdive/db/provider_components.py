@@ -232,6 +232,7 @@ async def finalize_component_upload(
     *,
     object_store: UploadVerifier,
 ) -> UUID:
+    """Validate an upload intent and return the finalized provider component id."""
     async with pool.connection() as conn, conn.transaction():
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
@@ -245,7 +246,7 @@ async def finalize_component_upload(
                 "component upload does not exist",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        existing = upload["artifact_id"]
+        existing = upload["component_id"]
         if existing is not None:
             return existing
         if upload["state"] != "pending" or upload["expired"]:
@@ -274,19 +275,18 @@ async def finalize_component_upload(
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
         source = {
-            "kind": "artifact",
-            "artifact_id": str(upload_id),
+            "kind": "component-upload",
+            "upload_id": str(upload_id),
             "sha256": upload["sha256"],
         }
         row = await conn.execute(
             "INSERT INTO provider_components "
-            "(provider, component_kind, source, artifact_id, visibility, project, "
-            "principal, sha256) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            "(provider, component_kind, source, visibility, project, principal, sha256) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
             (
                 upload["provider"],
                 upload["component_kind"],
                 Jsonb(source),
-                upload_id,
                 upload["visibility"],
                 upload["project"],
                 upload["principal"],
@@ -296,7 +296,7 @@ async def finalize_component_upload(
         inserted = await row.fetchone()
         component_id = _inserted_id(inserted)
         await conn.execute(
-            "UPDATE component_uploads SET artifact_id = %s, state = 'finalized' WHERE id = %s",
+            "UPDATE component_uploads SET component_id = %s, state = 'finalized' WHERE id = %s",
             (component_id, upload_id),
         )
         return component_id

@@ -60,6 +60,19 @@ class ArtifactComponentRef(_ComponentRefBase):
         return value
 
 
+class ComponentUploadRef(_ComponentRefBase):
+    kind: Literal["component-upload"]
+    upload_id: UUID
+    sha256: str | None = None
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str | None) -> str | None:
+        if value is not None and not _SHA256.match(value):
+            raise ValueError("sha256 must be 'sha256:<64 lowercase hex chars>'")
+        return value
+
+
 class CatalogComponentRef(_ComponentRefBase):
     kind: Literal["catalog"]
     provider: NonEmptyStr
@@ -67,7 +80,7 @@ class CatalogComponentRef(_ComponentRefBase):
 
 
 type ComponentRef = Annotated[
-    LocalComponentRef | ArtifactComponentRef | CatalogComponentRef,
+    LocalComponentRef | ArtifactComponentRef | ComponentUploadRef | CatalogComponentRef,
     Field(discriminator="kind"),
 ]
 

@@ -306,8 +306,24 @@ def test_component_upload_finalization_is_idempotent(migrated_url: str) -> None:
 
             first = await finalize_component_upload(pool, upload_id, object_store=store)
             second = await finalize_component_upload(pool, upload_id, object_store=store)
+            async with pool.connection() as conn:
+                row = await conn.execute(
+                    "SELECT component_uploads.component_id, provider_components.artifact_id, "
+                    "provider_components.source "
+                    "FROM component_uploads "
+                    "JOIN provider_components "
+                    "ON provider_components.id = component_uploads.component_id "
+                    "WHERE component_uploads.id = %s",
+                    (upload_id,),
+                )
+                finalized = await row.fetchone()
 
         assert first == second
+        assert finalized is not None
+        assert finalized[0] == first
+        assert finalized[1] is None
+        assert finalized[2]["kind"] == "component-upload"
+        assert finalized[2]["upload_id"] == str(upload_id)
 
     asyncio.run(_run())
 

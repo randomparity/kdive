@@ -12,6 +12,7 @@ from kdive.components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
     ComponentRef,
+    ComponentUploadRef,
     LocalComponentRef,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -62,7 +63,11 @@ def materialize_rootfs_base(
         )
     if isinstance(ref, CatalogComponentRef):
         return _materialize_catalog_rootfs(ref, allowed_roots=allowed_roots)
-    if isinstance(ref, ArtifactComponentRef) or component_store is None or object_store is None:
+    if (
+        isinstance(ref, ArtifactComponentRef | ComponentUploadRef)
+        or component_store is None
+        or object_store is None
+    ):
         raise CategorizedError(
             "artifact-backed rootfs materialization is not wired yet",
             category=ErrorCategory.MISSING_DEPENDENCY,

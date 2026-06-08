@@ -10,7 +10,7 @@ from kdive.components.references import ComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 type ComponentKind = Literal["rootfs", "kernel", "initrd", "config", "patch", "vmlinux"]
-type ComponentSourceKind = Literal["local", "artifact", "catalog"]
+type ComponentSourceKind = Literal["local", "artifact", "component-upload", "catalog"]
 
 
 @dataclass(frozen=True, slots=True)
