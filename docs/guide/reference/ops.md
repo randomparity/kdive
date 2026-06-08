@@ -24,3 +24,9 @@ Pause the worker's claim loop (jobs in flight finish). Requires platform operato
 `implemented`
 
 Resume the worker's claim loop. Requires platform operator.
+
+## `ops.reconcile_now`
+
+`implemented`
+
+Run one reconcile pass on demand; return the repair summary. Platform operator.

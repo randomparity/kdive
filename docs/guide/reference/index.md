@@ -46,6 +46,7 @@
 | [`ops.jobs_list`](ops.md#opsjobs_list) | `implemented` |
 | [`ops.queue_pause`](ops.md#opsqueue_pause) | `implemented` |
 | [`ops.queue_resume`](ops.md#opsqueue_resume) | `implemented` |
+| [`ops.reconcile_now`](ops.md#opsreconcile_now) | `implemented` |
 | [`postmortem.crash`](postmortem.md#postmortemcrash) | `partial` |
 | [`postmortem.triage`](postmortem.md#postmortemtriage) | `partial` |
 | [`resources.cordon`](resources.md#resourcescordon) | `implemented` |
