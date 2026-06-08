@@ -8,6 +8,7 @@ the `attach()` subprocess path are `live_vm`-gated and not unit-tested here.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -501,6 +502,20 @@ def test_continue_zero_timeout_uses_interactive_wait_cap(tmp_path: Path) -> None
     assert stop.timed_out is True
     assert controller.written == ["-exec-continue", "-exec-interrupt"]
     assert len(controller.read_timeouts) == resume_reads + 1
+
+
+@pytest.mark.parametrize("timeout_sec", [-1.0, math.inf, math.nan])
+def test_continue_rejects_invalid_timeout(timeout_sec: float, tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={"-exec-continue": [{"type": "result", "message": "running", "payload": None}]},
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        _engine().continue_(_attachment(controller, tmp_path), timeout_sec=timeout_sec)
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_continue_timeout"
+    assert controller.written == []
 
 
 def test_continue_raises_transport_stall_on_silent_link(tmp_path: Path) -> None:

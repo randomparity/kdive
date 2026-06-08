@@ -270,6 +270,12 @@ class _ExecutionControl:
     def resume(
         self, attachment: GdbMiAttachment, verb: str, *, timeout_sec: float
     ) -> GdbStopRecord:
+        if timeout_sec < 0 or not math.isfinite(timeout_sec):
+            raise CategorizedError(
+                "gdb/MI continue timeout must be a finite non-negative number",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"code": "bad_continue_timeout", "timeout_sec": timeout_sec},
+            )
         # Round fractional requests up: a sub-second request still waits its full span (and the
         # floor of 1s below), never truncating toward zero (5.7 -> 6, not 5).
         requested = math.ceil(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC
