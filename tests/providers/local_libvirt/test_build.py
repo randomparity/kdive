@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import struct
 import subprocess
@@ -560,6 +561,36 @@ def test_stage_config_overwrites_existing_dotconfig(tmp_path: Path) -> None:
     _stage_config(LocalComponentRef(kind="local", path=str(config)), workspace)
 
     assert (workspace / ".config").read_text() == "CONFIG_FROM_REF=y\n"
+
+
+def test_stage_config_rejects_sha256_mismatch_before_copy(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = tmp_path / "x.config"
+    config.write_text("CONFIG_FROM_REF=y\n")
+
+    with pytest.raises(CategorizedError) as caught:
+        _stage_config(
+            LocalComponentRef(kind="local", path=str(config), sha256="sha256:" + "0" * 64),
+            workspace,
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {"kind": "config"}
+    assert not (workspace / ".config").exists()
+
+
+def test_stage_config_copies_config_with_matching_sha256(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = tmp_path / "x.config"
+    content = b"CONFIG_FROM_REF=y\n"
+    config.write_bytes(content)
+    sha256 = f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+    _stage_config(LocalComponentRef(kind="local", path=str(config), sha256=sha256), workspace)
+
+    assert (workspace / ".config").read_bytes() == content
 
 
 def test_stage_config_missing_ref_is_configuration_error(tmp_path: Path) -> None:

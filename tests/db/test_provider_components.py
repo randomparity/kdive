@@ -97,6 +97,36 @@ def test_get_visible_component_respects_project_visibility(
     asyncio.run(_run())
 
 
+def test_host_policy_component_hidden_from_project_lookup(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        path, sha256 = _component_file(tmp_path)
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            component_id = await link_local_component(
+                pool,
+                provider="local-libvirt",
+                component_kind="rootfs",
+                path=str(path),
+                sha256=sha256,
+                allowed_roots=[tmp_path],
+                visibility="host-policy",
+                project="proj-a",
+                principal="alice",
+            )
+
+            listed = await list_visible_components(
+                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+            )
+            fetched = await get_visible_component(pool, component_id, project="proj-a")
+
+        assert listed == []
+        assert fetched is None
+
+    asyncio.run(_run())
+
+
 def test_link_local_component_rejects_path_outside_allowed_roots(
     migrated_url: str, tmp_path: Path
 ) -> None:

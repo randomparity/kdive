@@ -118,7 +118,7 @@ async def get_visible_component(
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT * FROM provider_components WHERE id = %s "
-            "AND (visibility = 'public' OR project = %s)",
+            "AND (visibility = 'public' OR (visibility = 'project' AND project = %s))",
             (component_id, project),
         )
         row = await cur.fetchone()
@@ -136,7 +136,8 @@ async def list_visible_components(
         await cur.execute(
             "SELECT * FROM provider_components "
             "WHERE provider = %s AND component_kind = %s "
-            "AND (visibility = 'public' OR project = %s) ORDER BY created_at, id",
+            "AND (visibility = 'public' OR (visibility = 'project' AND project = %s)) "
+            "ORDER BY created_at, id",
             (provider, component_kind, project),
         )
         rows = await cur.fetchall()

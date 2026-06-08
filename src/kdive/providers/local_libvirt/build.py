@@ -16,6 +16,7 @@ synchronous; the async build handler offloads the whole call via ``asyncio.to_th
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess  # noqa: S404 - make is invoked with a fixed argv, no shell
@@ -390,7 +391,15 @@ def _resolve_local_ref(ref: str, *, kind: str) -> Path:
 def _resolve_config_ref(ref: ComponentRef) -> Path:
     if not isinstance(ref, LocalComponentRef):
         raise _ref_error("config", "config component ref must be local for local-libvirt builds")
-    return _resolve_local_ref(ref.path, kind="config")
+    source = _resolve_local_ref(ref.path, kind="config")
+    if ref.sha256 is not None:
+        try:
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise _ref_error("config", "config ref does not resolve to a readable file") from exc
+        if digest != ref.sha256.removeprefix("sha256:"):
+            raise _ref_error("config", "config ref sha256 does not match the resolved file")
+    return source
 
 
 def _stage_config(config: ComponentRef, workspace: Path) -> None:
