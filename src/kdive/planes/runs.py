@@ -33,6 +33,7 @@ from kdive.providers.ports import Booter, Builder, BuildOutput, Installer
 from kdive.providers.runtime_paths import console_log_path, read_console_log
 from kdive.security import audit
 from kdive.security.artifact_search import ArtifactSearchInputError, search_text
+from kdive.security.context import RequestContext
 from kdive.security.redaction import Redactor
 from kdive.store.objectstore import (
     ArtifactWriteRequest,
@@ -281,6 +282,59 @@ async def _boot_step_locked(
         await run_step(conn, run_id, "boot", fn)
 
 
+async def _record_boot_audit(
+    conn: AsyncConnection,
+    job_ctx: RequestContext,
+    run: Run,
+) -> None:
+    await audit.record(
+        conn,
+        job_ctx,
+        audit.AuditEvent(
+            tool="runs.boot",
+            object_kind="runs",
+            object_id=run.id,
+            transition="boot",
+            args={"run_id": str(run.id)},
+            project=run.project,
+        ),
+    )
+
+
+async def _run_boot_and_capture_outcome(
+    conn: AsyncConnection,
+    job_ctx: RequestContext,
+    run: Run,
+    booter: Booter,
+) -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(booter.boot, run.system_id)
+    except CategorizedError as exc:
+        artifact = None
+        if (
+            exc.category is ErrorCategory.READINESS_FAILURE
+            and run.expected_boot_failure is not None
+        ):
+            artifact = await _capture_console_artifact(conn, run.system_id)
+        if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
+            await _record_boot_audit(conn, job_ctx, run)
+            return {
+                "system_id": str(run.system_id),
+                "boot_outcome": "expected_crash_observed",
+                "expectation_matched": True,
+                "evidence_kind": "console",
+                "evidence_artifact_id": str(artifact.id),
+            }
+        raise
+    artifact = await _capture_console_artifact(conn, run.system_id)
+    await _record_boot_audit(conn, job_ctx, run)
+    return {
+        "system_id": str(run.system_id),
+        "boot_outcome": "ready",
+        **({"evidence_artifact_id": str(artifact.id)} if artifact else {}),
+    }
+
+
 async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str | None:
     """Boot the installed kernel and confirm run-readiness, recording the `boot` step."""
     run_id = UUID(load_payload(job, RunPayload).run_id)
@@ -293,55 +347,13 @@ async def boot_handler(conn: AsyncConnection, job: Job, booter: Booter) -> str |
         )
     job_ctx = job_context_from_job(job, run.project)
 
-    async def _record_boot_audit() -> None:
-        await audit.record(
-            conn,
-            job_ctx,
-            audit.AuditEvent(
-                tool="runs.boot",
-                object_kind="runs",
-                object_id=run_id,
-                transition="boot",
-                args={"run_id": str(run_id)},
-                project=run.project,
-            ),
-        )
-
     try:
-
-        async def _do() -> dict[str, Any]:
-            try:
-                await asyncio.to_thread(booter.boot, run.system_id)
-            except CategorizedError as exc:
-                artifact = None
-                if (
-                    exc.category is ErrorCategory.READINESS_FAILURE
-                    and run.expected_boot_failure is not None
-                ):
-                    artifact = await _capture_console_artifact(conn, run.system_id)
-                if (
-                    artifact is not None
-                    and artifact.data
-                    and _expected_crash_matches(run, artifact.data)
-                ):
-                    await _record_boot_audit()
-                    return {
-                        "system_id": str(run.system_id),
-                        "boot_outcome": "expected_crash_observed",
-                        "expectation_matched": True,
-                        "evidence_kind": "console",
-                        "evidence_artifact_id": str(artifact.id),
-                    }
-                raise
-            artifact = await _capture_console_artifact(conn, run.system_id)
-            await _record_boot_audit()
-            return {
-                "system_id": str(run.system_id),
-                "boot_outcome": "ready",
-                **({"evidence_artifact_id": str(artifact.id)} if artifact else {}),
-            }
-
-        await _boot_step_locked(conn, run.system_id, run_id, _do)
+        await _boot_step_locked(
+            conn,
+            run.system_id,
+            run_id,
+            lambda: _run_boot_and_capture_outcome(conn, job_ctx, run, booter),
+        )
     except CategorizedError:
         try:
             await _capture_console_artifact(conn, run.system_id)
