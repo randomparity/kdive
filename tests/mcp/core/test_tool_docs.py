@@ -80,6 +80,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "ops.reconcile_now": ("tests/mcp/ops/test_reconcile_now.py",),
     "ops.set_cost_class_coeff": ("tests/mcp/ops/test_ops_tuning.py",),
     "ops.set_host_capacity": ("tests/mcp/ops/test_ops_tuning.py",),
+    "resources.availability": ("tests/mcp/catalog/test_availability_tools.py",),
     "resources.cordon": ("tests/mcp/catalog/test_resources_tools.py",),
     "resources.describe": ("tests/mcp/catalog/test_resources_tools.py",),
     "resources.drain": ("tests/mcp/catalog/test_resources_tools.py",),
