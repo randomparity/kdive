@@ -10,6 +10,7 @@ envelope (ADR-0019 `data` is `dict[str, str]`).
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -340,19 +341,18 @@ async def _force_release_allocations(
     remaining set (ADR-0062 §3).
     """
     items: list[ToolResponse] = []
-    tally = {"released": 0, "skipped": 0, "failed": 0}
     for alloc in live:
         outcome = await breakglass_release_allocation(
             pool, ctx, alloc=alloc, tool=_DRAIN_TOOL, reason=reason
         )
-        item = _classify_drain_release(str(alloc.id), outcome)
-        items.append(item)
-        if item.status == "released":
-            tally["released"] += 1
-        elif item.status == "skipped":
-            tally["skipped"] += 1
-        else:
-            tally["failed"] += 1
+        items.append(_classify_drain_release(str(alloc.id), outcome))
+    counts = Counter(item.status for item in items)
+    # Report the ADR-0062 §3 vocabulary (a failure item carries the `error` status).
+    tally = {
+        "released": counts["released"],
+        "skipped": counts["skipped"],
+        "failed": counts["error"],
+    }
     return items, tally
 
 
