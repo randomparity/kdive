@@ -158,7 +158,11 @@ class Worker:
                     if not await queue.heartbeat(conn, job_id, self._worker_id, lease=self._lease):
                         return
         except Exception:  # noqa: BLE001 - a failing heartbeat must not crash the worker; stop beating and let the lease lapse
-            _log.warning("heartbeat for job %s failed; stopping (lease will lapse)", job_id)
+            _log.warning(
+                "heartbeat for job %s failed; stopping (lease will lapse)",
+                job_id,
+                exc_info=True,
+            )
 
 
 def _failure_context(exc: Exception) -> dict[str, str]:

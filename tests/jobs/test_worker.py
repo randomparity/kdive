@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from uuid import UUID, uuid4
 
@@ -306,7 +307,7 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
 
 
 def test_heartbeat_error_does_not_crash_dispatch(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=3, max_size=10) as pool:
@@ -340,7 +341,12 @@ def test_heartbeat_error_does_not_crash_dispatch(
             assert processed is not None
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.SUCCEEDED  # finalized despite the bad heartbeat
+            records = [
+                record for record in caplog.records if "heartbeat for job" in record.getMessage()
+            ]
+            assert records and records[0].exc_info is not None
 
+    caplog.set_level(logging.WARNING, logger="kdive.jobs.worker")
     asyncio.run(_run())
 
 
