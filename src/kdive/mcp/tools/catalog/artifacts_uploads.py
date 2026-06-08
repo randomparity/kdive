@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import NamedTuple, Protocol, TypedDict
+from typing import NamedTuple, Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -80,12 +80,8 @@ class _MaterializedUpload(NamedTuple):
     presigned: PresignedUpload
 
 
-class ArtifactDeclaration(TypedDict):
-    """Raw MCP declaration for one artifact upload before value validation."""
-
-    name: str
-    sha256: str
-    size_bytes: int
+type ArtifactDeclaration = Mapping[str, object]
+"""Raw MCP declaration for one artifact upload before value validation."""
 
 
 @dataclass(frozen=True)
@@ -107,7 +103,12 @@ def _validate_artifact_declarations(
             name, sha256, size = art["name"], art["sha256"], art["size_bytes"]
         except KeyError:
             return _config_error(object_id, data={"reason": "bad_artifact_declaration"})
-        if name not in allowed or not isinstance(sha256, str) or not isinstance(size, int):
+        if (
+            not isinstance(name, str)
+            or name not in allowed
+            or not isinstance(sha256, str)
+            or not isinstance(size, int)
+        ):
             return _config_error(object_id, data={"reason": "bad_artifact_declaration"})
         artifact_cap = _EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES if name == "effective_config" else cap
         if size <= 0 or size > artifact_cap:

@@ -201,11 +201,6 @@ async def _seed_created_run(
     return str(run.id)
 
 
-def _raw_artifacts(value: object) -> Any:
-    """Represent malformed JSON-shaped tool input at the typed handler boundary."""
-    return value
-
-
 def test_create_upload_mints_presigned_puts_and_persists_manifest(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -323,7 +318,7 @@ def test_create_upload_rejects_missing_artifact_key_before_minting(migrated_url:
                 pool,
                 _ctx(),
                 run_id=run_id,
-                artifacts=_raw_artifacts([{"name": "kernel", "sha256": "aaa"}]),
+                artifacts=[{"name": "kernel", "sha256": "aaa"}],
                 store=store,
             )
         assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
@@ -342,7 +337,7 @@ def test_create_upload_rejects_bad_artifact_types_before_minting(migrated_url: s
                 pool,
                 _ctx(),
                 run_id=run_id,
-                artifacts=_raw_artifacts([{"name": "kernel", "sha256": b"aaa", "size_bytes": 100}]),
+                artifacts=[{"name": "kernel", "sha256": b"aaa", "size_bytes": 100}],
                 store=store,
             )
         assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
