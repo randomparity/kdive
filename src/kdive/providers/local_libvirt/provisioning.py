@@ -363,23 +363,17 @@ class LocalLibvirtProvisioning:
             self._make_overlay(base, overlay)  # the domain boots this overlay, not the base
         try:
             self._prepare_console_log(console_log_path(system_id))
-            self._define_and_start(xml)
-        except libvirt.libvirtError as exc:
-            if created_overlay:
-                self._cleanup_created_overlay(overlay)
-            raise CategorizedError(
-                "libvirt failed to define/start the domain",
-                category=ErrorCategory.PROVISIONING_FAILURE,
-                details={"system_id": str(system_id)},
-            ) from exc
+            self._define_and_start(xml, system_id)
         except CategorizedError:
-            if created_overlay:
-                self._cleanup_created_overlay(overlay)
+            self._cleanup_overlay_if_created(created_overlay, overlay)
             raise
         return domain_name_for(system_id)
 
-    def _define_and_start(self, xml: str) -> None:
-        conn = self._connect()
+    def _define_and_start(self, xml: str, system_id: UUID) -> None:
+        try:
+            conn = self._connect()
+        except libvirt.libvirtError as exc:
+            raise self._provisioning_failure(system_id) from exc
         try:
             domain = conn.defineXML(xml)
             try:
@@ -398,14 +392,26 @@ class LocalLibvirtProvisioning:
                         exc_info=True,
                     )
                 raise
+        except libvirt.libvirtError as exc:
+            raise self._provisioning_failure(system_id) from exc
         finally:
             _close(conn)
 
-    def _cleanup_created_overlay(self, overlay: str) -> None:
+    def _cleanup_overlay_if_created(self, created_overlay: bool, overlay: str) -> None:
+        if not created_overlay:
+            return
         try:
             self._remove_overlay(overlay)
         except CategorizedError:
             _log.warning("failed to remove overlay after failed provision", exc_info=True)
+
+    @staticmethod
+    def _provisioning_failure(system_id: UUID) -> CategorizedError:
+        return CategorizedError(
+            "libvirt failed to define/start the domain",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+            details={"system_id": str(system_id)},
+        )
 
     def validate_rootfs_ref(self, rootfs: RootfsSource) -> None:
         """Validate that a rootfs ref can materialize within provider roots."""
