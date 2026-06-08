@@ -478,6 +478,22 @@ def test_provision_create_failure_removes_the_overlay() -> None:
     assert removed == [overlay_path(_SYS)]
 
 
+def test_provision_cleanup_failure_preserves_start_failure_category() -> None:
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_INTERNAL_ERROR)})
+
+    def fail_remove(_overlay: str) -> None:
+        raise CategorizedError(
+            "synthetic overlay cleanup failure",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn, remove_overlay=fail_remove).provision(_SYS, _profile())
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+
+
 def test_provision_console_log_failure_removes_the_overlay() -> None:
     removed: list[str] = []
     conn = _ProvConn()

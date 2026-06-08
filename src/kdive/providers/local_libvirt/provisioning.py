@@ -388,7 +388,7 @@ class LocalLibvirtProvisioning:
                 _close(conn)
         except libvirt.libvirtError as exc:
             if created_overlay:
-                self._remove_overlay(overlay)  # no started domain; reclaim the overlay we created
+                self._cleanup_created_overlay(overlay)
             raise CategorizedError(
                 "libvirt failed to define/start the domain",
                 category=ErrorCategory.PROVISIONING_FAILURE,
@@ -396,9 +396,15 @@ class LocalLibvirtProvisioning:
             ) from exc
         except CategorizedError:
             if created_overlay:
-                self._remove_overlay(overlay)
+                self._cleanup_created_overlay(overlay)
             raise
         return domain_name_for(system_id)
+
+    def _cleanup_created_overlay(self, overlay: str) -> None:
+        try:
+            self._remove_overlay(overlay)
+        except CategorizedError:
+            _log.warning("failed to remove overlay after failed provision", exc_info=True)
 
     def validate_rootfs_ref(self, rootfs: RootfsSource) -> None:
         """Validate that a rootfs ref can materialize within provider roots."""
