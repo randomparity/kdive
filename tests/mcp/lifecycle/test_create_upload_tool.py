@@ -34,10 +34,9 @@ from kdive.domain.state import (
 )
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog import artifacts as artifacts_tools
-from kdive.mcp.tools.lifecycle import systems as systems_tools
 from kdive.security.rbac import AuthorizationError, Role
 from kdive.store.objectstore import PresignedUpload
-from tests.mcp.systems_support import TEST_COMPONENT_SOURCES
+from tests.mcp.systems_support import SYSTEM_PROVISION_HANDLERS
 from tests.mcp.systems_support import granted_allocation as _granted_allocation
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -150,13 +149,11 @@ async def _defined_system_via_tool(
 ) -> str:
     """Produce a DEFINED System through systems.define (the real producer, #111)."""
     alloc_id = await _granted_allocation(pool)
-    resp = await systems_tools.define_system(
+    resp = await SYSTEM_PROVISION_HANDLERS.define_system(
         pool,
         _ctx(),
         allocation_id=alloc_id,
         profile=_provisioning_profile(rootfs_kind),
-        component_sources=TEST_COMPONENT_SOURCES,
-        rootfs_validator=lambda _: None,
     )
     return resp.object_id
 

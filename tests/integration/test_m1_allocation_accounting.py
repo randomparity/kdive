@@ -64,9 +64,20 @@ from tests.integration._seed import (
 )
 from tests.integration.conftest import open_pool, request_context
 from tests.mcp.roles import PROJECT_A, PROJECT_B, make_role_fixture
+from tests.mcp.systems_support import (
+    TEST_COMPONENT_SOURCES as _TEST_COMPONENT_SOURCES,
+)
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _COEFF_LOCAL = Decimal("1.0")
+_SYSTEM_PROVISION_HANDLERS = systems_tools.SystemProvisionHandlers(
+    _TEST_COMPONENT_SOURCES,
+    lambda _: None,
+)
+_SYSTEM_ADMIN_HANDLERS = systems_tools.SystemAdminHandlers(
+    _TEST_COMPONENT_SOURCES,
+    lambda _: None,
+)
 
 
 def _rate(vcpus: int, memory_gb: int) -> Decimal:
@@ -351,21 +362,19 @@ def test_c2_system_quota_denied(migrated_url: str) -> None:
             )
             assert first.status == "granted" and second.status == "granted"
             # First provision occupies the single System slot (inserts as provisioning).
-            prov_one = await systems_tools.provision_system(
+            prov_one = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool,
                 ctx,
                 allocation_id=first.object_id,
                 profile=provisioning_profile(),
-                rootfs_validator=lambda _: None,
             )
             assert prov_one.status == "queued"
             # Second provision is on a DISTINCT allocation -> reaches the new-System quota branch.
-            prov_two = await systems_tools.provision_system(
+            prov_two = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool,
                 ctx,
                 allocation_id=second.object_id,
                 profile=provisioning_profile(),
-                rootfs_validator=lambda _: None,
             )
             assert prov_two.status == "error"
             assert prov_two.error_category == "quota_exceeded"
@@ -486,12 +495,11 @@ def test_c3_reconciliation_nets_to_actual_and_usage_matches(migrated_url: str) -
             assert grant.status == "granted"
             alloc_id = UUID(grant.object_id)
             estimate = _estimate(2, 4, 3)  # rate 3.0 * 3h window = 9.0 reserved
-            prov = await systems_tools.provision_system(
+            prov = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool,
                 op,
                 allocation_id=grant.object_id,
                 profile=provisioning_profile(),
-                rootfs_validator=lambda _: None,
             )
             assert prov.status == "queued"
             job = await _provision_job_for_system(pool, prov.data["system_id"])
@@ -848,12 +856,11 @@ def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
             grant = await _request_allocation(
                 pool, op, project="proj", vcpus=2, memory_gb=4, window=3
             )
-            prov = await systems_tools.provision_system(
+            prov = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool,
                 op,
                 allocation_id=grant.object_id,
                 profile=provisioning_profile(),
-                rootfs_validator=lambda _: None,
             )
             sys_id = prov.data["system_id"]
             async with pool.connection() as conn:
@@ -878,12 +885,11 @@ def test_c6_operator_force_crash_returns_authorization_denied_envelope(migrated_
             grant = await _request_allocation(
                 pool, op, project="proj", vcpus=2, memory_gb=4, window=3
             )
-            prov = await systems_tools.provision_system(
+            prov = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool,
                 op,
                 allocation_id=grant.object_id,
                 profile=provisioning_profile(destructive_ops=["force_crash"]),
-                rootfs_validator=lambda _: None,
             )
             sys_id = prov.data["system_id"]
             async with pool.connection() as conn:
@@ -922,12 +928,11 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
             grant = await _request_allocation(
                 pool, op, project="proj", vcpus=2, memory_gb=4, window=3
             )
-            prov = await systems_tools.provision_system(
+            prov = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool,
                 op,
                 allocation_id=grant.object_id,
                 profile=provisioning_profile(destructive_ops=["reprovision"]),
-                rootfs_validator=lambda _: None,
             )
             sys_id = prov.data["system_id"]
             async with pool.connection() as conn:
@@ -938,12 +943,11 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
                 )
             power_on = await control_tools.power_system(pool, op, system_id=sys_id, action="on")
             assert power_on.status == "queued"
-            reprov = await systems_tools.reprovision_system(
+            reprov = await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
                 pool,
                 op,
                 system_id=sys_id,
                 profile=provisioning_profile(destructive_ops=["reprovision"]),
-                rootfs_validator=lambda _: None,
             )
             assert reprov.status == "queued"
 
@@ -1005,12 +1009,11 @@ def test_c7_reprovision_in_place_cycle(migrated_url: str) -> None:
             grant = await _request_allocation(
                 pool, op, project="proj", vcpus=2, memory_gb=4, window=3
             )
-            prov = await systems_tools.provision_system(
+            prov = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool,
                 op,
                 allocation_id=grant.object_id,
                 profile=provisioning_profile(destructive_ops=["reprovision"]),
-                rootfs_validator=lambda _: None,
             )
             sys_id = prov.data["system_id"]
             async with pool.connection() as conn:
@@ -1024,12 +1027,11 @@ def test_c7_reprovision_in_place_cycle(migrated_url: str) -> None:
                 )
             new_profile = provisioning_profile(destructive_ops=["reprovision"])
             new_profile["vcpu"] = 8
-            resp = await systems_tools.reprovision_system(
+            resp = await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
                 pool,
                 op,
                 system_id=sys_id,
                 profile=new_profile,
-                rootfs_validator=lambda _: None,
             )
             assert resp.status == "queued"
             # Drive the reprovision job handler -> reprovisioning -> ready (same row).

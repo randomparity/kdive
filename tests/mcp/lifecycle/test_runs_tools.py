@@ -587,15 +587,11 @@ _TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={"config": frozenset({"local"})},
 )
+_BUILD_HANDLERS = runs_tools.RunBuildHandlers(_TEST_COMPONENT_SOURCES)
 
 
 async def _build(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> Any:
-    return await runs_tools.build_run(
-        pool,
-        ctx,
-        run_id,
-        component_sources=_TEST_COMPONENT_SOURCES,
-    )
+    return await _BUILD_HANDLERS.build_run(pool, ctx, run_id)
 
 
 async def _count(pool: AsyncConnectionPool, query: LiteralString, params: tuple[Any, ...]) -> int:
@@ -705,11 +701,10 @@ def test_build_rejects_unsupported_artifact_config_before_state_change(
             }
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
 
-            resp = await runs_tools.build_run(
+            resp = await _BUILD_HANDLERS.build_run(
                 pool,
                 _ctx(Role.OPERATOR),
                 run_id,
-                component_sources=_TEST_COMPONENT_SOURCES,
             )
 
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -751,12 +746,13 @@ def test_build_rejects_local_config_outside_provider_roots_before_state_change(
             }
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
 
-            resp = await runs_tools.build_run(
+            resp = await runs_tools.RunBuildHandlers(
+                _TEST_COMPONENT_SOURCES,
+                config_validator=_reject_config,
+            ).build_run(
                 pool,
                 _ctx(Role.OPERATOR),
                 run_id,
-                component_sources=_TEST_COMPONENT_SOURCES,
-                config_validator=_reject_config,
             )
 
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -928,12 +924,11 @@ def test_build_run_records_cmdline_in_the_build_ledger(migrated_url: str) -> Non
             run_id = await _seed_run(
                 pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
             )
-            env = await runs_tools.build_run(
+            env = await _BUILD_HANDLERS.build_run(
                 pool,
                 _ctx(Role.OPERATOR),
                 run_id,
                 cmdline="dhash_entries=1",
-                component_sources=_TEST_COMPONENT_SOURCES,
             )
             assert env.status != "error"
             async with pool.connection() as conn:
@@ -957,12 +952,11 @@ def test_build_run_rejects_a_cmdline_that_overrides_platform_args(migrated_url: 
             run_id = await _seed_run(
                 pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
             )
-            resp = await runs_tools.build_run(
+            resp = await _BUILD_HANDLERS.build_run(
                 pool,
                 _ctx(Role.OPERATOR),
                 run_id,
                 cmdline="root=/dev/sda1 dhash_entries=1",
-                component_sources=_TEST_COMPONENT_SOURCES,
             )
             njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -978,11 +972,10 @@ def test_build_run_without_cmdline_records_none(migrated_url: str) -> None:
             run_id = await _seed_run(
                 pool, state=RunState.CREATED, build_profile=copy.deepcopy(_VALID_BUILD)
             )
-            await runs_tools.build_run(
+            await _BUILD_HANDLERS.build_run(
                 pool,
                 _ctx(Role.OPERATOR),
                 run_id,
-                component_sources=_TEST_COMPONENT_SOURCES,
             )
             async with pool.connection() as conn:
                 job = await _build_job_for(conn, run_id)

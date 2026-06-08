@@ -11,23 +11,19 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools.lifecycle.systems.admin import reprovision_system, teardown_system
+from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import (
-    define_system,
+    SystemProvisionHandlers,
     get_system,
-    provision_defined_system,
-    provision_system,
 )
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.providers.composition import ProviderRuntime
 
 __all__ = [
-    "define_system",
     "get_system",
-    "provision_defined_system",
-    "provision_system",
     "register",
-    "reprovision_system",
+    "SystemAdminHandlers",
+    "SystemProvisionHandlers",
     "teardown_system",
 ]
 
@@ -39,6 +35,16 @@ def register(
     if provider_runtime is None:
         raise RuntimeError("systems registrar requires an injected provider runtime")
     runtime = provider_runtime
+    if runtime.rootfs_validator is None:
+        raise RuntimeError("systems registrar requires an injected rootfs validator")
+    provision_handlers = SystemProvisionHandlers(
+        runtime.component_sources,
+        runtime.rootfs_validator,
+    )
+    admin_handlers = SystemAdminHandlers(
+        runtime.component_sources,
+        runtime.rootfs_validator,
+    )
 
     @app.tool(
         name="systems.define",
@@ -58,13 +64,11 @@ def register(
         ],
     ) -> ToolResponse:
         """Create a System in 'defined' for a granted Allocation (upload window). Operator only."""
-        return await define_system(
+        return await provision_handlers.define_system(
             pool,
             current_context(),
             allocation_id=allocation_id,
             profile=profile,
-            component_sources=runtime.component_sources,
-            rootfs_validator=runtime.rootfs_validator,
         )
 
     @app.tool(
@@ -82,13 +86,11 @@ def register(
         ],
     ) -> ToolResponse:
         """Mint a System for a granted Allocation and enqueue provision. Operator only."""
-        return await provision_system(
+        return await provision_handlers.provision_system(
             pool,
             current_context(),
             allocation_id=allocation_id,
             profile=profile,
-            component_sources=runtime.component_sources,
-            rootfs_validator=runtime.rootfs_validator,
         )
 
     @app.tool(
@@ -103,12 +105,10 @@ def register(
         ],
     ) -> ToolResponse:
         """Admit a DEFINED System after its upload window is complete. Requires operator."""
-        return await provision_defined_system(
+        return await provision_handlers.provision_defined_system(
             pool,
             current_context(),
             system_id=system_id,
-            component_sources=runtime.component_sources,
-            rootfs_validator=runtime.rootfs_validator,
         )
 
     @app.tool(
@@ -146,11 +146,9 @@ def register(
         ],
     ) -> ToolResponse:
         """Reprovision a ready System in place under its Allocation. Requires operator + gate."""
-        return await reprovision_system(
+        return await admin_handlers.reprovision_system(
             pool,
             current_context(),
             system_id=system_id,
             profile=profile,
-            component_sources=runtime.component_sources,
-            rootfs_validator=runtime.rootfs_validator,
         )

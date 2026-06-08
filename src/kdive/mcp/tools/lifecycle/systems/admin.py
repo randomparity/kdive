@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -46,14 +47,39 @@ _REPROVISION = "reprovision"
 _TEARDOWN = "teardown"
 
 
-async def reprovision_system(
+@dataclass(frozen=True, slots=True)
+class SystemAdminHandlers:
+    """Destructive system handlers with provider validation seams bound at construction."""
+
+    component_sources: ComponentSourceCapabilities
+    rootfs_validator: RootfsValidator
+
+    async def reprovision_system(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        *,
+        system_id: str,
+        profile: ProvisioningProfileInput,
+    ) -> ToolResponse:
+        return await _reprovision_system(
+            pool,
+            ctx,
+            system_id=system_id,
+            profile=profile,
+            component_sources=self.component_sources,
+            rootfs_validator=self.rootfs_validator,
+        )
+
+
+async def _reprovision_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     system_id: str,
     profile: ProvisioningProfileInput,
-    component_sources: ComponentSourceCapabilities | None = None,
-    rootfs_validator: RootfsValidator | None = None,
+    component_sources: ComponentSourceCapabilities,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     """Reprovision a `ready` System in place under the same Allocation."""
     uid = _as_uuid(system_id)
@@ -80,7 +106,7 @@ async def _reprovision_locked(
     ctx: RequestContext,
     system_id: UUID,
     profile: ProvisioningProfile,
-    rootfs_validator: RootfsValidator | None,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     async with (
         pool.connection() as conn,

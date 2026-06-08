@@ -15,9 +15,11 @@ from psycopg.rows import dict_row
 
 from kdive.domain.models import Sensitivity
 from kdive.mcp.tools.catalog import artifacts as artifacts_tools
-from kdive.mcp.tools.lifecycle import systems as systems_tools
 from kdive.planes import systems as systems_handlers
 from kdive.store.objectstore import ArtifactWriteRequest, ObjectStore, artifact_key
+from tests.mcp.systems_support import (
+    SYSTEM_PROVISION_HANDLERS as _SYSTEM_PROVISION_HANDLERS,
+)
 from tests.mcp.systems_support import (
     FakeProvisioning as _FakeProvisioning,
 )
@@ -78,7 +80,9 @@ def test_define_upload_provision_reaches_ready_with_committed_rootfs(
             )
 
             # 4. provision_defined admits the DEFINED System by System id
-            resp = await systems_tools.provision_defined_system(pool, _ctx(), system_id=sys_id)
+            resp = await _SYSTEM_PROVISION_HANDLERS.provision_defined_system(
+                pool, _ctx(), system_id=sys_id
+            )
             assert resp.status == "queued"
 
             # 5. the provision handler drives provisioning -> ready and commits the rootfs

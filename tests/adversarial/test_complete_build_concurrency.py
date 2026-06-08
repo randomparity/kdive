@@ -16,12 +16,18 @@ import asyncio
 from kdive.db.repositories import RUNS
 from kdive.domain.state import RunState
 from kdive.mcp.tools.lifecycle import runs as runs_tools
+from kdive.providers.component_validation import ComponentSourceCapabilities
 from kdive.providers.ports import BuildOutput
 from tests.mcp.complete_build_support import (
     FakeValidator,
     ctx,
     pool,
     seed_external_run_with_manifest,
+)
+
+_TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
+    provider="test-provider",
+    accepted_component_sources={"config": frozenset({"local"})},
 )
 
 
@@ -42,13 +48,13 @@ def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> N
         async with pool(migrated_url) as conn_pool:
             run_id = await seed_external_run_with_manifest(conn_pool)
             validator = _CountingValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            handlers = runs_tools.RunBuildHandlers(
+                _TEST_COMPONENT_SOURCES,
+                complete_validator=validator,
+            )
             results = await asyncio.gather(
-                runs_tools.complete_build(
-                    conn_pool, ctx(), str(run_id), build_id=None, cmdline="c", validator=validator
-                ),
-                runs_tools.complete_build(
-                    conn_pool, ctx(), str(run_id), build_id=None, cmdline="c", validator=validator
-                ),
+                handlers.complete_build(conn_pool, ctx(), str(run_id), build_id=None, cmdline="c"),
+                handlers.complete_build(conn_pool, ctx(), str(run_id), build_id=None, cmdline="c"),
             )
             assert all(r.status == "succeeded" for r in results), (
                 f"Expected both results to succeed, got: {[r.status for r in results]}"

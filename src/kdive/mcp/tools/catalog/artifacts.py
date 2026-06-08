@@ -12,16 +12,16 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools.catalog.artifacts_reads import (
+    ArtifactReadHandlers,
     artifacts_get,
     artifacts_list,
-    artifacts_search_text,
 )
 from kdive.mcp.tools.catalog.artifacts_uploads import create_run_upload, create_system_upload
 
 __all__ = [
     "artifacts_get",
     "artifacts_list",
-    "artifacts_search_text",
+    "ArtifactReadHandlers",
     "create_run_upload",
     "create_system_upload",
     "register",
@@ -30,6 +30,7 @@ __all__ = [
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `artifacts.*` tools on ``app``, bound to ``pool``."""
+    read_handlers = ArtifactReadHandlers()
 
     @app.tool(
         name="artifacts.list",
@@ -74,7 +75,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         max_matches: Annotated[int, Field(description="Maximum match windows to return.")] = 20,
     ) -> ToolResponse:
         """Search a redacted System artifact with bounded literal line context."""
-        return await artifacts_search_text(
+        return await read_handlers.artifacts_search_text(
             pool,
             current_context(),
             artifact_id=artifact_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import LiteralString, NamedTuple, Protocol
 
 from psycopg.rows import dict_row
@@ -50,6 +51,39 @@ class _SearchStore(Protocol):
 
 class _AuthorizedArtifact(NamedTuple):
     key: str
+
+
+def _default_search_store() -> _SearchStore:
+    return object_store_from_env()
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReadHandlers:
+    """Artifact read handlers with the object-store search seam bound at construction."""
+
+    search_store: _SearchStore = field(default_factory=_default_search_store)
+
+    async def artifacts_search_text(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        *,
+        artifact_id: str,
+        pattern: str,
+        before_lines: int = 2,
+        after_lines: int = 4,
+        max_matches: int = 20,
+    ) -> ToolResponse:
+        return await _artifacts_search_text(
+            pool,
+            ctx,
+            artifact_id=artifact_id,
+            pattern=pattern,
+            before_lines=before_lines,
+            after_lines=after_lines,
+            max_matches=max_matches,
+            store=self.search_store,
+        )
 
 
 async def _authorized_redacted_artifact(
@@ -119,7 +153,7 @@ async def artifacts_get(
     )
 
 
-async def artifacts_search_text(
+async def _artifacts_search_text(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
@@ -128,7 +162,7 @@ async def artifacts_search_text(
     before_lines: int = 2,
     after_lines: int = 4,
     max_matches: int = 20,
-    store: _SearchStore | None = None,
+    store: _SearchStore,
 ) -> ToolResponse:
     """Search one redacted System-owned text artifact with bounded literal context."""
     authorized = await _authorized_redacted_artifact(pool, ctx, artifact_id=artifact_id)
@@ -138,7 +172,6 @@ async def artifacts_search_text(
         parse_literal_terms(pattern)
     except ArtifactSearchInputError:
         return _config_error(artifact_id, data={"reason": "bad_search_input"})
-    store = store or object_store_from_env()
     key = authorized.key
     try:
         head = await asyncio.to_thread(store.head, key)

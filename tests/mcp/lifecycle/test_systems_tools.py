@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -33,10 +34,17 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import systems as systems_tools
 from kdive.planes import systems as systems_handlers
+from kdive.profiles.provisioning import RootfsSource
 from kdive.providers.local_libvirt.materialize import materialize_rootfs_base
 from kdive.security.audit import args_digest
 from kdive.security.rbac import AuthorizationError, Role
 from kdive.store.objectstore import ArtifactWriteRequest, ObjectStore, artifact_key
+from tests.mcp.systems_support import (
+    SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
+)
+from tests.mcp.systems_support import (
+    SYSTEM_PROVISION_HANDLERS as _SYSTEM_PROVISION_HANDLERS,
+)
 from tests.mcp.systems_support import (
     TEST_COMPONENT_SOURCES as _TEST_COMPONENT_SOURCES,
 )
@@ -162,23 +170,35 @@ async def _enqueue_teardown(pool: AsyncConnectionPool, system_id: str) -> Job:
 async def _provision(
     pool: AsyncConnectionPool, ctx: RequestContext, alloc_id: str, profile: dict[str, Any]
 ):
-    return await systems_tools.provision_system(
+    return await _SYSTEM_PROVISION_HANDLERS.provision_system(
         pool,
         ctx,
         allocation_id=alloc_id,
         profile=profile,
-        component_sources=_TEST_COMPONENT_SOURCES,
-        rootfs_validator=lambda _: None,
     )
 
 
+def _noop_rootfs_validator(_: RootfsSource) -> None:
+    return None
+
+
+def _provision_handlers(
+    rootfs_validator: Callable[[RootfsSource], None] = _noop_rootfs_validator,
+) -> systems_tools.SystemProvisionHandlers:
+    return systems_tools.SystemProvisionHandlers(_TEST_COMPONENT_SOURCES, rootfs_validator)
+
+
+def _admin_handlers(
+    rootfs_validator: Callable[[RootfsSource], None] = _noop_rootfs_validator,
+) -> systems_tools.SystemAdminHandlers:
+    return systems_tools.SystemAdminHandlers(_TEST_COMPONENT_SOURCES, rootfs_validator)
+
+
 async def _provision_defined(pool: AsyncConnectionPool, ctx: RequestContext, system_id: str):
-    return await systems_tools.provision_defined_system(
+    return await _SYSTEM_PROVISION_HANDLERS.provision_defined_system(
         pool,
         ctx,
         system_id=system_id,
-        component_sources=_TEST_COMPONENT_SOURCES,
-        rootfs_validator=lambda _: None,
     )
 
 
@@ -197,12 +217,12 @@ def _local_rootfs_profile(path: Path) -> dict[str, Any]:
     return profile
 
 
-def _rootfs_validator(allowed_root: Path):
+def _rootfs_validator(allowed_root: Path) -> Callable[[RootfsSource], None]:
     cache_dir = allowed_root.parent / "cache"
 
-    def _validate(rootfs: ComponentRef) -> None:
+    def _validate(rootfs: RootfsSource) -> None:
         materialize_rootfs_base(
-            rootfs,
+            cast(ComponentRef, rootfs),
             allowed_roots=[allowed_root],
             cache_dir=cache_dir,
             project="proj",
@@ -213,9 +233,9 @@ def _rootfs_validator(allowed_root: Path):
     return _validate
 
 
-def _failing_rootfs_validator(calls: list[ComponentRef]):
-    def _validate(rootfs: ComponentRef) -> None:
-        calls.append(rootfs)
+def _failing_rootfs_validator(calls: list[ComponentRef]) -> Callable[[RootfsSource], None]:
+    def _validate(rootfs: RootfsSource) -> None:
+        calls.append(cast(ComponentRef, rootfs))
         raise AssertionError("rootfs validator must not run before authorization")
 
     return _validate
@@ -428,13 +448,11 @@ def test_provision_rejects_local_rootfs_outside_allowed_root_before_system_and_j
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            resp = await systems_tools.provision_system(
+            resp = await _provision_handlers(_rootfs_validator(allowed_root)).provision_system(
                 pool,
                 _ctx(),
                 allocation_id=alloc_id,
                 profile=_local_rootfs_profile(outside),
-                component_sources=_TEST_COMPONENT_SOURCES,
-                rootfs_validator=_rootfs_validator(allowed_root),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
@@ -475,13 +493,11 @@ def test_provision_viewer_denied_before_provider_rootfs_validation(
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             with pytest.raises(AuthorizationError):
-                await systems_tools.provision_system(
+                await _provision_handlers(_failing_rootfs_validator(calls)).provision_system(
                     pool,
                     _ctx(Role.VIEWER),
                     allocation_id=alloc_id,
                     profile=_local_rootfs_profile(outside),
-                    component_sources=_TEST_COMPONENT_SOURCES,
-                    rootfs_validator=_failing_rootfs_validator(calls),
                 )
 
     asyncio.run(_run())
@@ -1183,13 +1199,11 @@ async def _seed_run(pool: AsyncConnectionPool, sys_id: str, state: RunState) -> 
 async def _reprovision(
     pool: AsyncConnectionPool, ctx: RequestContext, system_id: str, profile: dict[str, Any]
 ):
-    return await systems_tools.reprovision_system(
+    return await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
         pool,
         ctx,
         system_id=system_id,
         profile=profile,
-        component_sources=_TEST_COMPONENT_SOURCES,
-        rootfs_validator=lambda _: None,
     )
 
 
@@ -1357,13 +1371,11 @@ def test_reprovision_viewer_denied_before_provider_rootfs_validation(
             sys_id = await _seed_ready_system(pool, alloc_id)
             profile = _local_rootfs_profile(outside)
             profile["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
-            resp = await systems_tools.reprovision_system(
+            resp = await _admin_handlers(_failing_rootfs_validator(calls)).reprovision_system(
                 pool,
                 _ctx(Role.VIEWER),
                 system_id=sys_id,
                 profile=profile,
-                component_sources=_TEST_COMPONENT_SOURCES,
-                rootfs_validator=_failing_rootfs_validator(calls),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -1492,13 +1504,11 @@ def test_reprovision_rejects_local_rootfs_outside_allowed_root_before_mutating_r
             sys_id = await _seed_ready_system(pool, alloc_id)
             profile = _local_rootfs_profile(outside)
             profile["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
-            resp = await systems_tools.reprovision_system(
+            resp = await _admin_handlers(_rootfs_validator(allowed_root)).reprovision_system(
                 pool,
                 _ctx(),
                 system_id=sys_id,
                 profile=profile,
-                component_sources=_TEST_COMPONENT_SOURCES,
-                rootfs_validator=_rootfs_validator(allowed_root),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -1618,13 +1628,11 @@ def test_reprovision_rejects_upload_rootfs(migrated_url: str) -> None:
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             profile = _upload_profile()
             profile["provider"]["local-libvirt"]["destructive_ops"] = ["reprovision"]
-            resp = await systems_tools.reprovision_system(
+            resp = await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
                 pool,
                 _ctx(),
                 system_id=sys_id,
                 profile=profile,
-                component_sources=_TEST_COMPONENT_SOURCES,
-                rootfs_validator=lambda _: None,
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -1744,13 +1752,11 @@ def test_define_viewer_denied_before_provider_rootfs_validation(
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             with pytest.raises(AuthorizationError):
-                await systems_tools.define_system(
+                await _provision_handlers(_failing_rootfs_validator(calls)).define_system(
                     pool,
                     _ctx(Role.VIEWER),
                     allocation_id=alloc_id,
                     profile=_local_rootfs_profile(outside),
-                    component_sources=_TEST_COMPONENT_SOURCES,
-                    rootfs_validator=_failing_rootfs_validator(calls),
                 )
 
     asyncio.run(_run())
@@ -1799,13 +1805,11 @@ def test_define_rejects_local_rootfs_outside_allowed_root_without_opening_upload
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            resp = await systems_tools.define_system(
+            resp = await _provision_handlers(_rootfs_validator(allowed_root)).define_system(
                 pool,
                 _ctx(),
                 allocation_id=alloc_id,
                 profile=_local_rootfs_profile(outside),
-                component_sources=_TEST_COMPONENT_SOURCES,
-                rootfs_validator=_rootfs_validator(allowed_root),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
@@ -1927,12 +1931,12 @@ def test_provision_defined_revalidates_stored_local_rootfs_against_provider_root
                 SystemState.DEFINED,
                 _local_rootfs_profile(outside),
             )
-            resp = await systems_tools.provision_defined_system(
+            resp = await _provision_handlers(
+                _rootfs_validator(allowed_root)
+            ).provision_defined_system(
                 pool,
                 _ctx(),
                 system_id=sys_id,
-                component_sources=_TEST_COMPONENT_SOURCES,
-                rootfs_validator=_rootfs_validator(allowed_root),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -1969,12 +1973,12 @@ def test_provision_defined_viewer_denied_before_provider_rootfs_validation(
                 _local_rootfs_profile(outside),
             )
             with pytest.raises(AuthorizationError):
-                await systems_tools.provision_defined_system(
+                await _provision_handlers(
+                    _failing_rootfs_validator(calls)
+                ).provision_defined_system(
                     pool,
                     _ctx(Role.VIEWER),
                     system_id=sys_id,
-                    component_sources=_TEST_COMPONENT_SOURCES,
-                    rootfs_validator=_failing_rootfs_validator(calls),
                 )
 
     asyncio.run(_run())
@@ -1985,7 +1989,7 @@ def test_provision_create_lane_rejects_upload(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            resp = await systems_tools.provision_system(
+            resp = await _SYSTEM_PROVISION_HANDLERS.provision_system(
                 pool, _ctx(), allocation_id=alloc_id, profile=_upload_profile()
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

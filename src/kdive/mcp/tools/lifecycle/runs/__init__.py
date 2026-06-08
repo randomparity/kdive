@@ -11,7 +11,7 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools.lifecycle.runs.build import build_run, complete_build
+from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.create import create_run
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run
@@ -20,12 +20,11 @@ from kdive.providers.composition import ProviderRuntime
 
 __all__ = [
     "boot_run",
-    "build_run",
-    "complete_build",
     "create_run",
     "get_run",
     "install_run",
     "register",
+    "RunBuildHandlers",
 ]
 
 
@@ -39,6 +38,10 @@ def register(
     if provider_runtime is None:
         raise RuntimeError("runs registrar requires an injected provider runtime")
     runtime = provider_runtime
+    build_handlers = RunBuildHandlers(
+        runtime.component_sources,
+        config_validator=runtime.build_config_validator,
+    )
 
     @app.tool(
         name="runs.get",
@@ -99,13 +102,11 @@ def register(
         ] = None,
     ) -> ToolResponse:
         """Enqueue the kernel build job for a Run; poll jobs.* for completion. Requires operator."""
-        return await build_run(
+        return await build_handlers.build_run(
             pool,
             current_context(),
             run_id,
             cmdline=cmdline,
-            component_sources=runtime.component_sources,
-            config_validator=runtime.build_config_validator,
         )
 
     @app.tool(
@@ -132,7 +133,7 @@ def register(
         ] = None,
     ) -> ToolResponse:
         """Validate an external Run's uploads and finalize it to succeeded. Operator only."""
-        return await complete_build(
+        return await build_handlers.complete_build(
             pool, current_context(), run_id, build_id=build_id, cmdline=cmdline
         )
 

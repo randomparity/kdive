@@ -10,6 +10,7 @@ in ``kdive.planes.systems``.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from uuid import UUID, uuid4
@@ -114,30 +115,16 @@ _NON_TERMINAL_SYSTEM = (
 type RootfsValidator = Callable[[RootfsSource], None]
 
 
-def _component_sources(
-    capabilities: ComponentSourceCapabilities | None,
-) -> ComponentSourceCapabilities:
-    if capabilities is not None:
-        return capabilities
-    raise RuntimeError("component source capabilities must be injected by the registrar")
-
-
-def _rootfs_validator(rootfs_validator: RootfsValidator | None) -> RootfsValidator:
-    if rootfs_validator is not None:
-        return rootfs_validator
-    raise RuntimeError("rootfs validator must be injected by the registrar")
-
-
 def _validate_profile_for_provider(
     profile: ProvisioningProfile,
-    capabilities: ComponentSourceCapabilities | None,
+    capabilities: ComponentSourceCapabilities,
 ) -> None:
     validate_profile(profile)
     rootfs = profile.provider.local_libvirt.rootfs
     if isinstance(rootfs, _UploadRootfs):
         return
     reject_unsupported_component_source(
-        _component_sources(capabilities),
+        capabilities,
         component_kind="rootfs",
         ref=rootfs,
     )
@@ -145,12 +132,69 @@ def _validate_profile_for_provider(
 
 def _validate_rootfs_for_provider(
     profile: ProvisioningProfile,
-    rootfs_validator: RootfsValidator | None,
+    rootfs_validator: RootfsValidator,
 ) -> None:
     rootfs = profile.provider.local_libvirt.rootfs
     if isinstance(rootfs, _UploadRootfs):
         return
-    _rootfs_validator(rootfs_validator)(rootfs)
+    rootfs_validator(rootfs)
+
+
+@dataclass(frozen=True, slots=True)
+class SystemProvisionHandlers:
+    """Provisioning handlers with provider validation seams bound at construction."""
+
+    component_sources: ComponentSourceCapabilities
+    rootfs_validator: RootfsValidator
+
+    async def provision_system(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        *,
+        allocation_id: str,
+        profile: ProvisioningProfileInput,
+    ) -> ToolResponse:
+        return await _provision_system(
+            pool,
+            ctx,
+            allocation_id=allocation_id,
+            profile=profile,
+            component_sources=self.component_sources,
+            rootfs_validator=self.rootfs_validator,
+        )
+
+    async def provision_defined_system(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        *,
+        system_id: str,
+    ) -> ToolResponse:
+        return await _provision_defined_system(
+            pool,
+            ctx,
+            system_id=system_id,
+            component_sources=self.component_sources,
+            rootfs_validator=self.rootfs_validator,
+        )
+
+    async def define_system(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        *,
+        allocation_id: str,
+        profile: ProvisioningProfileInput,
+    ) -> ToolResponse:
+        return await _define_system(
+            pool,
+            ctx,
+            allocation_id=allocation_id,
+            profile=profile,
+            component_sources=self.component_sources,
+            rootfs_validator=self.rootfs_validator,
+        )
 
 
 async def _within_system_quota(conn: AsyncConnection, project: str) -> bool:
@@ -189,14 +233,14 @@ async def _find_system_for_allocation(conn: AsyncConnection, alloc_id: UUID) -> 
     return System.model_validate(row) if row else None
 
 
-async def provision_system(
+async def _provision_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     allocation_id: str,
     profile: ProvisioningProfileInput,
-    component_sources: ComponentSourceCapabilities | None = None,
-    rootfs_validator: RootfsValidator | None = None,
+    component_sources: ComponentSourceCapabilities,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     """Mint a System for a ``granted`` Allocation and enqueue its provision job."""
     uid = _as_uuid(allocation_id)
@@ -267,7 +311,7 @@ async def _provision_create_response(
     existing: System | None,
     *,
     profile: ProvisioningProfile,
-    rootfs_validator: RootfsValidator | None,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     if existing is None:
         return await _insert_provisioning_system(conn, ctx, alloc, profile, rootfs_validator)
@@ -298,7 +342,7 @@ async def _define_create_response(
     existing: System | None,
     *,
     profile: ProvisioningProfile,
-    rootfs_validator: RootfsValidator | None,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     if existing is None:
         return await _insert_defined_system(conn, ctx, alloc, profile, rootfs_validator)
@@ -342,13 +386,13 @@ async def _admit_defined(
     return _system_job_envelope(job, system.id)
 
 
-async def provision_defined_system(
+async def _provision_defined_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     system_id: str,
-    component_sources: ComponentSourceCapabilities | None = None,
-    rootfs_validator: RootfsValidator | None = None,
+    component_sources: ComponentSourceCapabilities,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     """Admit a ``defined`` System after its upload window is complete."""
     uid = _as_uuid(system_id)
@@ -400,7 +444,7 @@ async def _new_system_allowed(
     conn: AsyncConnection,
     alloc: Allocation,
     profile: ProvisioningProfile,
-    rootfs_validator: RootfsValidator | None,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse | None:
     if alloc.state is not AllocationState.GRANTED:
         return _config_error(str(alloc.id), data={"current_status": alloc.state.value})
@@ -478,7 +522,7 @@ async def _insert_defined_system(
     ctx: RequestContext,
     alloc: Allocation,
     profile: ProvisioningProfile,
-    rootfs_validator: RootfsValidator | None,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     blocked = await _new_system_allowed(conn, alloc, profile, rootfs_validator)
     if blocked is not None:
@@ -500,7 +544,7 @@ async def _insert_provisioning_system(
     ctx: RequestContext,
     alloc: Allocation,
     profile: ProvisioningProfile,
-    rootfs_validator: RootfsValidator | None,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     try:
         reject_rootfs_upload_without_window(profile)
@@ -528,14 +572,14 @@ async def _insert_provisioning_system(
     return _system_job_envelope(job, system.id)
 
 
-async def define_system(
+async def _define_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     allocation_id: str,
     profile: ProvisioningProfileInput,
-    component_sources: ComponentSourceCapabilities | None = None,
-    rootfs_validator: RootfsValidator | None = None,
+    component_sources: ComponentSourceCapabilities,
+    rootfs_validator: RootfsValidator,
 ) -> ToolResponse:
     """Create a System in ``defined`` for a ``granted`` Allocation (ADR-0025 decision 10).
 

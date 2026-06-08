@@ -33,6 +33,14 @@ TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
         "config": frozenset({"local"}),
     },
 )
+SYSTEM_PROVISION_HANDLERS = systems_tools.SystemProvisionHandlers(
+    TEST_COMPONENT_SOURCES,
+    lambda _: None,
+)
+SYSTEM_ADMIN_HANDLERS = systems_tools.SystemAdminHandlers(
+    TEST_COMPONENT_SOURCES,
+    lambda _: None,
+)
 
 PROVISIONING_PROFILE: dict[str, Any] = {
     "schema_version": 1,
@@ -170,11 +178,9 @@ async def define_system(
     alloc_id: str,
     profile: dict[str, Any],
 ):
-    return await systems_tools.define_system(
+    return await SYSTEM_PROVISION_HANDLERS.define_system(
         conn_pool,
         request_ctx,
         allocation_id=alloc_id,
         profile=profile,
-        component_sources=TEST_COMPONENT_SOURCES,
-        rootfs_validator=lambda _: None,
     )

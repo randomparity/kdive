@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
 
@@ -53,60 +54,6 @@ from kdive.store.objectstore import (
 )
 
 type ConfigValidator = Callable[[ComponentRef], None]
-
-
-async def build_run(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    run_id: str,
-    *,
-    cmdline: str | None = None,
-    component_sources: ComponentSourceCapabilities | None = None,
-    config_validator: ConfigValidator | None = None,
-) -> ToolResponse:
-    """Admit an idempotent server build for a Run and enqueue the build job."""
-    uid = _as_uuid(run_id)
-    if uid is None:
-        return _config_error(run_id)
-    owned = platform_owned_cmdline_token(cmdline)
-    if owned is not None:
-        return _config_error(
-            run_id, data={"reason": "cmdline_overrides_platform_args", "token": owned}
-        )
-    with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
-            run = await RUNS.get(conn, uid)
-            if run is None or run.project not in ctx.projects:
-                return _config_error(run_id)
-            require_role(ctx, run.project, Role.OPERATOR)
-            try:
-                parsed = BuildProfile.parse(run.build_profile)
-            except CategorizedError as exc:
-                return ToolResponse.failure(run_id, exc.category)
-            if parsed.source != "server":
-                return _config_error(run_id, data={"reason": "external_source_uses_complete_build"})
-            try:
-                reject_unsupported_component_source(
-                    _component_sources(component_sources),
-                    component_kind="config",
-                    ref=parsed.config,
-                )
-            except CategorizedError as exc:
-                return ToolResponse.failure(run_id, exc.category)
-            if config_validator is not None:
-                try:
-                    config_validator(parsed.config)
-                except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
-            return await _build_locked(conn, ctx, run, cmdline)
-
-
-def _component_sources(
-    capabilities: ComponentSourceCapabilities | None,
-) -> ComponentSourceCapabilities:
-    if capabilities is not None:
-        return capabilities
-    raise RuntimeError("component source capabilities must be injected by the registrar")
 
 
 async def _build_locked(
@@ -189,17 +136,90 @@ class StoreBackedValidator:
         )
 
 
-async def complete_build(
+@dataclass(frozen=True, slots=True)
+class RunBuildHandlers:
+    """Handlers with provider validation seams bound by the registrar or test fixture."""
+
+    component_sources: ComponentSourceCapabilities
+    config_validator: ConfigValidator | None = None
+    complete_validator: CompleteBuildValidator = field(default_factory=StoreBackedValidator)
+
+    async def build_run(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        run_id: str,
+        *,
+        cmdline: str | None = None,
+    ) -> ToolResponse:
+        """Admit an idempotent server build for a Run and enqueue the build job."""
+        uid = _as_uuid(run_id)
+        if uid is None:
+            return _config_error(run_id)
+        owned = platform_owned_cmdline_token(cmdline)
+        if owned is not None:
+            return _config_error(
+                run_id, data={"reason": "cmdline_overrides_platform_args", "token": owned}
+            )
+        with bind_context(principal=ctx.principal):
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, uid)
+                if run is None or run.project not in ctx.projects:
+                    return _config_error(run_id)
+                require_role(ctx, run.project, Role.OPERATOR)
+                try:
+                    parsed = BuildProfile.parse(run.build_profile)
+                except CategorizedError as exc:
+                    return ToolResponse.failure(run_id, exc.category)
+                if parsed.source != "server":
+                    return _config_error(
+                        run_id, data={"reason": "external_source_uses_complete_build"}
+                    )
+                try:
+                    reject_unsupported_component_source(
+                        self.component_sources,
+                        component_kind="config",
+                        ref=parsed.config,
+                    )
+                except CategorizedError as exc:
+                    return ToolResponse.failure(run_id, exc.category)
+                if self.config_validator is not None:
+                    try:
+                        self.config_validator(parsed.config)
+                    except CategorizedError as exc:
+                        return ToolResponse.failure(run_id, exc.category)
+                return await _build_locked(conn, ctx, run, cmdline)
+
+    async def complete_build(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        run_id: str,
+        *,
+        build_id: str | None,
+        cmdline: str,
+    ) -> ToolResponse:
+        """Validate an external Run's uploads and finalize it ``created -> succeeded``."""
+        return await _complete_build(
+            pool,
+            ctx,
+            run_id,
+            build_id=build_id,
+            cmdline=cmdline,
+            validator=self.complete_validator,
+        )
+
+
+async def _complete_build(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     run_id: str,
     *,
     build_id: str | None,
     cmdline: str,
-    validator: CompleteBuildValidator | None = None,
+    validator: CompleteBuildValidator,
 ) -> ToolResponse:
     """Validate an external Run's uploads and finalize it ``created -> succeeded``."""
-    validator = validator or StoreBackedValidator()
     uid = _as_uuid(run_id)
     if uid is None:
         return _config_error(run_id)
