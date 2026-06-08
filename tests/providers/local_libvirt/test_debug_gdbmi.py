@@ -228,7 +228,7 @@ def _register_controller() -> _FakeMiController:
 
 def test_read_registers_maps_names_to_values(tmp_path: Path) -> None:
     result = _engine().read_registers(_attachment(_register_controller(), tmp_path), ["rax", "rcx"])
-    assert result["registers"] == {"rax": "0xdead", "rcx": "0xcafe"}
+    assert result == {"rax": "0xdead", "rcx": "0xcafe"}
 
 
 def test_read_registers_rejects_empty_list(tmp_path: Path) -> None:

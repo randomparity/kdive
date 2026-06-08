@@ -487,7 +487,8 @@ class GdbMiEngine:
                 category=ErrorCategory.DEBUG_ATTACH_FAILURE,
                 details={"code": "missing_registers", "requested": requested, "missing": missing},
             )
-        return self._redactor().redact_value({"registers": registers})
+        redacted = self._redactor().redact_value(registers)
+        return redacted if isinstance(redacted, dict) else {}
 
     def read_memory(self, attachment: GdbMiAttachment, *, address: int, byte_count: int) -> bytes:
         """Read ``byte_count`` bytes from ``address``, returned **verbatim** (not redacted).

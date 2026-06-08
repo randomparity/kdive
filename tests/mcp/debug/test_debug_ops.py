@@ -305,6 +305,47 @@ def test_read_memory_returns_verbatim_hex(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_read_registers_returns_direct_values(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-data-list-register-names": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"register-names": ["rax", "rbx", "rcx"]},
+                        }
+                    ],
+                    "-data-list-register-values x": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {
+                                "register-values": [
+                                    {"number": "0", "value": "0xdead"},
+                                    {"number": "2", "value": "0xcafe"},
+                                ]
+                            },
+                        }
+                    ],
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("read_registers", runtime, session_id, registers=["rax", "rcx"]),
+            )
+        assert resp.status == "read"
+        assert resp.data == {"rax": "0xdead", "rcx": "0xcafe"}
+
+    asyncio.run(_run())
+
+
 def test_read_memory_over_cap_is_rejected_without_attach(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

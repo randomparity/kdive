@@ -239,9 +239,8 @@ def _read_registers_op(
     runtime: DebugEngineRuntime, session_id: str, registers: list[str]
 ) -> _EngineOp:
     def op(attachment: GdbMiAttachment) -> ToolResponse:
-        result = runtime.engine.read_registers(attachment, registers)
-        values = result.get("registers")
-        rendered = {str(k): str(v) for k, v in values.items()} if isinstance(values, dict) else {}
+        values = runtime.engine.read_registers(attachment, registers)
+        rendered = {str(k): str(v) for k, v in values.items()}
         return ToolResponse.success(
             session_id,
             "read",
