@@ -1,11 +1,11 @@
 """The ``audit.query`` auditor-read tool (ADR-0062 §6, #141).
 
-Reads ``audit_log`` in two forms selected by the presence of a ``project`` filter:
+Reads ``audit_log`` in two explicit scopes:
 
-* **project-scoped** (``project`` given) — requires ``require_role(project, admin)``; the
-  audit trail is sensitive, so only a project admin reads their own. Not written to
+* **project** — requires ``project`` and ``require_role(project, admin)``; the audit trail
+  is sensitive, so only a project admin reads their own. Not written to
   ``platform_audit_log`` (a member reading their own trail is not a cross-tenant read).
-* **cross-project** (``project`` omitted) — requires ``platform_auditor`` (satisfied by
+* **all-projects** — forbids ``project`` and requires ``platform_auditor`` (satisfied by
   ``platform_admin``); read-audited to ``platform_audit_log``. The read target is
   ``audit_log`` while the read-access record lands in ``platform_audit_log``, so a platform
   read never pollutes the per-project trail it inspects (ADR-0043 §4).
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Annotated, LiteralString
+from typing import Annotated, Literal, LiteralString
 from uuid import UUID
 
 from fastmcp import FastMCP
@@ -46,19 +46,23 @@ from kdive.security.rbac import (
 _TOOL = "audit.query"
 _OBJECT_ID = "audit.query"
 _MAX_ROWS = 500
+type AuditQueryScope = Literal["project", "all-projects"]
+_PROJECT_SCOPE = "project"
+_ALL_PROJECTS_SCOPE = "all-projects"
 
 
 async def query(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
+    scope: AuditQueryScope | None = None,
     project: str | None = None,
     principal: str | None = None,
     object_id: str | None = None,
     transition: str | None = None,
     window: object = None,
 ) -> ToolResponse:
-    """Read ``audit_log``; project-scoped (``project`` given) or cross-project (omitted)."""
+    """Read ``audit_log`` with explicit project or all-projects scope."""
     with bind_context(principal=ctx.principal):
         try:
             object_uuid = _parse_object_id(object_id)
@@ -66,8 +70,13 @@ async def query(
         except CategorizedError as exc:
             return ToolResponse.failure(_OBJECT_ID, exc.category, suggested_next_actions=[_TOOL])
         filters = _Filters(principal, object_uuid, transition, parsed_window)
-        if project is not None:
+        scope_error = _scope_error(scope, project)
+        if scope_error is not None:
+            return scope_error
+        if scope == _PROJECT_SCOPE:
+            assert project is not None
             return await _query_project(pool, ctx, project, filters)
+        assert scope == _ALL_PROJECTS_SCOPE
         return await _query_cross_project(pool, ctx, filters)
 
 
@@ -99,6 +108,29 @@ def _parse_object_id(object_id: str | None) -> UUID | None:
             f"object_id {object_id!r} is not a uuid",
             category=ErrorCategory.CONFIGURATION_ERROR,
         ) from None
+
+
+def _scope_error(scope: str | None, project: str | None) -> ToolResponse | None:
+    if scope is None:
+        return _config_failure("scope_required")
+    if scope == _PROJECT_SCOPE:
+        if project is None:
+            return _config_failure("project_required")
+        return None
+    if scope == _ALL_PROJECTS_SCOPE:
+        if project is not None:
+            return _config_failure("project_not_allowed")
+        return None
+    return _config_failure("unknown_scope")
+
+
+def _config_failure(reason: str) -> ToolResponse:
+    return ToolResponse.failure(
+        _OBJECT_ID,
+        ErrorCategory.CONFIGURATION_ERROR,
+        suggested_next_actions=[_TOOL],
+        data={"reason": reason},
+    )
 
 
 async def _query_project(
@@ -234,9 +266,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def audit_query(
+        scope: Annotated[
+            AuditQueryScope,
+            Field(description="'project' for one project, or 'all-projects' for platform audit."),
+        ],
         project: Annotated[
             str | None,
-            Field(description="Project to read (project form, requires admin); omit for cross."),
+            Field(description="Project to read when scope is 'project'; forbidden otherwise."),
         ] = None,
         principal: Annotated[str | None, Field(description="Filter by acting principal.")] = None,
         object_id: Annotated[
@@ -258,6 +294,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await query(
             pool,
             current_context(),
+            scope=scope,
             project=project,
             principal=principal,
             object_id=object_id,
