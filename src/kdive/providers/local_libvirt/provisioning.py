@@ -26,7 +26,7 @@ from uuid import UUID
 
 import libvirt
 
-from kdive.components.catalog import DEFAULT_FIXTURE_CATALOG_PATH, load_fixture_catalog
+from kdive.components.catalog import load_fixture_catalog
 from kdive.components.references import ArtifactComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import (
@@ -125,9 +125,7 @@ def resolve_rootfs_path(rootfs: RootfsSource, *, tenant: str, system_id: UUID) -
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
         return f"{_ROOTFS_CACHE_DIR}/sha256/{rootfs.sha256.removeprefix('sha256:')}.qcow2"
-    entry = load_fixture_catalog(DEFAULT_FIXTURE_CATALOG_PATH).rootfs_entry(
-        rootfs.provider, rootfs.name
-    )
+    entry = load_fixture_catalog().rootfs_entry(rootfs.provider, rootfs.name)
     if entry is None:
         raise CategorizedError(
             f"unknown rootfs catalog name: {rootfs.name}",

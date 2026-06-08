@@ -61,10 +61,7 @@ def test_materialize_local_backed_catalog_rootfs(
         "capabilities: [kdive-ready-console]\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        "kdive.providers.local_libvirt.materialize.DEFAULT_FIXTURE_CATALOG_PATH",
-        fixture,
-    )
+    monkeypatch.setenv("KDIVE_FIXTURE_CATALOG_PATH", str(fixture))
 
     result = materialize_rootfs_base(
         CatalogComponentRef(kind="catalog", provider="local-libvirt", name="base"),
@@ -112,10 +109,7 @@ def test_materialize_host_policy_catalog_rootfs_is_unavailable(
         "capabilities: [kdive-ready-console]\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        "kdive.providers.local_libvirt.materialize.DEFAULT_FIXTURE_CATALOG_PATH",
-        fixture,
-    )
+    monkeypatch.setenv("KDIVE_FIXTURE_CATALOG_PATH", str(fixture))
 
     with pytest.raises(CategorizedError) as error:
         materialize_rootfs_base(

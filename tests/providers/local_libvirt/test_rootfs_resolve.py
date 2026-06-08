@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -40,6 +41,45 @@ def test_unknown_catalog_rejected() -> None:
     with pytest.raises(CategorizedError) as e:
         resolve_rootfs_path(r, tenant="local", system_id=_SID)
     assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_catalog_resolution_uses_fixture_catalog_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = tmp_path / "local-libvirt"
+    image = tmp_path / "rootfs" / "base.qcow2"
+    image.parent.mkdir()
+    image.write_bytes(b"data")
+    (fixture / "rootfs").mkdir(parents=True)
+    (fixture / "profiles").mkdir()
+    (fixture / "manifest.yaml").write_text(
+        "schema_version: 1\n"
+        "provider: local-libvirt\n"
+        "storage:\n"
+        f"  allowed_component_roots: [{image.parent}]\n"
+        f"  cache_dir: {tmp_path / 'cache'}\n"
+        f"  overlay_dir: {tmp_path / 'overlays'}\n"
+        "rootfs: [rootfs/base.yaml]\n"
+        "profiles: []\n",
+        encoding="utf-8",
+    )
+    (fixture / "rootfs" / "base.yaml").write_text(
+        "provider: local-libvirt\n"
+        "name: base\n"
+        "arch: x86_64\n"
+        "format: qcow2\n"
+        "root_device: /dev/vda\n"
+        "source:\n"
+        "  kind: local\n"
+        f"  path: {image}\n"
+        "visibility: public\n"
+        "capabilities: [kdive-ready-console]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KDIVE_FIXTURE_CATALOG_PATH", str(fixture))
+
+    r = CatalogComponentRef(kind="catalog", provider="local-libvirt", name="base")
+    assert resolve_rootfs_path(r, tenant="local", system_id=_SID) == str(image)
 
 
 def test_validate_rootfs_reference_accepts_well_formed_upload() -> None:

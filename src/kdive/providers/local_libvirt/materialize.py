@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from kdive.components.catalog import DEFAULT_FIXTURE_CATALOG_PATH, load_fixture_catalog
+from kdive.components.catalog import load_fixture_catalog
 from kdive.components.local_paths import validate_local_component_path
 from kdive.components.references import (
     ArtifactComponentRef,
@@ -79,7 +79,7 @@ def materialize_rootfs_base(
 
 
 def _materialize_catalog_rootfs(ref: CatalogComponentRef, *, allowed_roots: list[Path]) -> Path:
-    catalog = load_fixture_catalog(DEFAULT_FIXTURE_CATALOG_PATH)
+    catalog = load_fixture_catalog()
     entry = catalog.rootfs_entry(ref.provider, ref.name)
     if entry is None:
         raise CategorizedError(
