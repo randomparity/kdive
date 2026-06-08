@@ -148,22 +148,27 @@ def test_wait_non_finite_timeout_is_configuration_error(
 
 
 def test_wait_loops_until_terminal(migrated_url: str) -> None:
-    """Exercise the sleep-then-re-poll branch: a concurrent task cancels the job
-    after one poll interval, and wait must return the canceled envelope having
-    looped at least once (timeout long enough to require a real poll)."""
+    """Exercise the sleep-then-re-poll branch without a wall-clock delay."""
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
+            polls = 0
 
-            async def _cancel_after_delay() -> None:
-                await asyncio.sleep(jobs_tools.POLL_INTERVAL_S + 0.1)
+            async def _cancel_after_first_poll(_: float) -> None:
+                nonlocal polls
+                polls += 1
                 await jobs_tools.cancel_job(pool, OP_CTX, job_id)
 
-            canceller = asyncio.create_task(_cancel_after_delay())
-            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=5.0)
-            await canceller
+            resp = await jobs_tools.wait_job(
+                pool,
+                VIEWER_CTX,
+                job_id,
+                timeout_s=5.0,
+                sleep=_cancel_after_first_poll,
+            )
         assert resp.status == "canceled"
+        assert polls == 1
 
     asyncio.run(_run())
 

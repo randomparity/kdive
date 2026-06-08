@@ -27,6 +27,7 @@ from kdive.mcp.tools.ops import reconcile as ops_reconcile
 from kdive.reconciler.loop import NullReaper, reconcile_once
 from kdive.security.context import RequestContext
 from kdive.security.rbac import PlatformRole
+from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, seed_system
 
 
@@ -227,8 +228,7 @@ def test_on_demand_pass_serializes_with_periodic_on_the_same_system_lock(
                         pool, _ctx(platform_roles=_OPERATOR), reaper=NullReaper(), upload_store=None
                     )
                 )
-                # Give the task time to reach and block on the per-System lock the holder owns.
-                await asyncio.sleep(0.3)
+                await wait_until_any_backend_waiting(holder, locktype="advisory")
                 assert not task.done(), "reconcile_now did not block on the held System lock"
                 assert await _teardown_job_count(migrated_url) == 0
             # holder transaction committed -> lock released; the repair now proceeds.

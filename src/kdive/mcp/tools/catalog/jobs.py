@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -97,7 +98,12 @@ async def get_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -
 
 
 async def wait_job(
-    pool: AsyncConnectionPool, ctx: RequestContext, job_id: str, timeout_s: float
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    job_id: str,
+    timeout_s: float,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> ToolResponse:
     """Poll until the job is terminal or ``timeout_s`` (clamped) elapses.
 
@@ -120,7 +126,7 @@ async def wait_job(
             require_role(ctx, _project(job), Role.VIEWER)
             if job.state in _TERMINAL or loop.time() >= deadline:
                 return ToolResponse.from_job(job)
-            await asyncio.sleep(POLL_INTERVAL_S)
+            await sleep(POLL_INTERVAL_S)
 
 
 async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
