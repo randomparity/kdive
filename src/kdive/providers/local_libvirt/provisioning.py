@@ -352,7 +352,10 @@ class LocalLibvirtProvisioning:
         the live disk), so a present overlay is left in place (ADR-0060).
 
         Raises:
-            CategorizedError: ``PROVISIONING_FAILURE`` on any other libvirt error.
+            CategorizedError: ``CONFIGURATION_ERROR`` for invalid profile/rootfs input,
+                ``MISSING_DEPENDENCY`` for unavailable rootfs materialization or ``qemu-img``,
+                ``PROVISIONING_FAILURE`` for domain/rootfs creation failures, or
+                ``INFRASTRUCTURE_FAILURE`` for provider control-plane or overlay IO faults.
         """
         base = self._materialize_rootfs(profile.provider.local_libvirt.rootfs, system_id)
         overlay = overlay_path(system_id)

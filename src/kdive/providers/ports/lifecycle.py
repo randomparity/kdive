@@ -51,7 +51,8 @@ class Provisioner(Protocol):
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for invalid provider-specific profile
-                data, ``PROVISIONING_FAILURE`` for domain/rootfs creation failures, or
+                data, ``MISSING_DEPENDENCY`` for unavailable provider tools or materialization
+                seams, ``PROVISIONING_FAILURE`` for domain/rootfs creation failures, or
                 ``INFRASTRUCTURE_FAILURE`` for provider-control-plane faults.
         """
         ...
