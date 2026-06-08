@@ -186,12 +186,11 @@ def _jobs_response(depth: dict[str, int], jobs: list[Job]) -> ToolResponse:
 
 def _job_row(job: Job) -> dict[str, str | None]:
     """One cross-project job summary for the platform view (no payload — untrusted)."""
-    project = job.authorizing.get("project")
     return {
         "id": str(job.id),
         "kind": job.kind.value,
         "state": job.state.value,
-        "project": str(project) if isinstance(project, str) else None,
+        "project": job.authorizing["project"],
         "attempt": str(job.attempt),
         "worker_id": job.worker_id,
     }

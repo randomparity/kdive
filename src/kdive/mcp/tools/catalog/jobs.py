@@ -53,13 +53,8 @@ def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
 
 
 def _in_scope(job: Job, ctx: RequestContext) -> bool:
-    """True iff ``job``'s owning project is granted to ``ctx`` (#11).
-
-    A job whose ``authorizing`` tuple carries no string ``project`` belongs to no one and
-    is therefore out of scope for every caller (fail closed).
-    """
-    project = job.authorizing.get("project")
-    return isinstance(project, str) and project in ctx.projects
+    """True iff ``job``'s owning project is granted to ``ctx`` (#11)."""
+    return job.authorizing["project"] in ctx.projects
 
 
 def _project(job: Job) -> str:
