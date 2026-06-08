@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -49,7 +50,7 @@ def local_env_defaults() -> dict[str, str]:
 def print_local_env() -> None:
     """Print shell exports for :func:`local_env_defaults`."""
     for key, value in local_env_defaults().items():
-        print(f"export {key}={value}")
+        print(f"export {key}={shlex.quote(value)}")
 
 
 def default_fixture_files() -> Mapping[str, str]:

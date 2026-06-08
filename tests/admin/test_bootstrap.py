@@ -12,6 +12,7 @@ from kdive.admin.bootstrap import (
     install_compose,
     install_fixtures,
     local_env_defaults,
+    print_local_env,
     seed_demo,
     seed_project_statements,
     supervisor_commands,
@@ -28,6 +29,20 @@ def test_local_env_defaults_are_repo_independent(monkeypatch: pytest.MonkeyPatch
     assert env["KDIVE_STACK_BASE_URL"] == "http://127.0.0.1:8000/mcp"
     assert env["KDIVE_KERNEL_SRC"] == "/home/operator/src/linux"
     assert "/home/operator/src/kdive" not in " ".join(env.values())
+
+
+def test_print_local_env_shell_quotes_values(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("HOME", "/home/operator with spaces")
+    monkeypatch.setenv("KDIVE_HTTP_HOST", "$(touch /tmp/kdive-pwn)")
+
+    print_local_env()
+
+    output = capsys.readouterr().out
+    assert "export KDIVE_HTTP_HOST='$(touch /tmp/kdive-pwn)'" in output
+    assert "export KDIVE_STACK_BASE_URL='http://$(touch /tmp/kdive-pwn):8000/mcp'" in output
+    assert "export KDIVE_KERNEL_SRC='/home/operator with spaces/src/linux'" in output
 
 
 def test_seed_project_sql_contains_budget_and_quota_upserts() -> None:

@@ -89,8 +89,8 @@ export KDIVE_KERNEL_SRC=/path/to/kernel-tree
 ```
 
 The builder runs unprivileged and writes the rootfs to `KDIVE_ROOTFS` (default
-`/var/lib/kdive/rootfs/minimal.qcow2`). For the default root-owned path, an OS admin
-pre-prepares the output directory once and makes it writable by the build user; the
+`/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2`). For the default root-owned path,
+an OS admin pre-prepares the output directory once and makes it writable by the build user; the
 per-build write and the final `chmod 0644` are unprivileged. The image is left `0644` so
 the separate `qemu` user can read it under `qemu:///system`. Under SELinux the file also
 needs the `virt_image_t` label (the standard label for libvirt-managed images); this is the
