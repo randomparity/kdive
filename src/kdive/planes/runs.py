@@ -37,6 +37,7 @@ from kdive.services.run_steps import (
 )
 from kdive.store.objectstore import (
     ArtifactWriteRequest,
+    StoredArtifact,
     object_store_from_env,
     register_artifact_row,
 )
@@ -211,37 +212,11 @@ async def _capture_console_artifact(
     conn: AsyncConnection, system_id: UUID
 ) -> _ConsoleArtifact | None:
     try:
-        raw = await asyncio.to_thread(read_console_log, console_log_path(system_id))
-        if not raw:
-            _log.warning(
-                "console log for system %s is empty or unreadable; registering no console artifact",
-                system_id,
-            )
+        redacted = await _read_redacted_console(system_id)
+        if redacted is None:
             return None
-        redacted = Redactor().redact_text(raw.decode("utf-8", "replace")).encode("utf-8")
-        stored = await asyncio.to_thread(
-            lambda: object_store_from_env().put_artifact(
-                ArtifactWriteRequest(
-                    tenant="local",
-                    owner_kind="systems",
-                    owner_id=str(system_id),
-                    name="console",
-                    data=redacted,
-                    sensitivity=Sensitivity.REDACTED,
-                    retention_class="console",
-                )
-            )
-        )
-        async with conn.transaction():
-            existing = await _existing_console_row(conn, system_id)
-            if existing is None:
-                inserted = await ARTIFACTS.insert(
-                    conn, register_artifact_row(stored, owner_kind="systems", owner_id=system_id)
-                )
-                return _ConsoleArtifact(inserted.id, inserted.object_key, redacted)
-            if existing.etag != stored.etag:
-                await conn.execute(_REFRESH_CONSOLE_ETAG_SQL, (stored.etag, existing.id))
-            return _ConsoleArtifact(existing.id, stored.key, redacted)
+        stored = await _store_console_artifact(system_id, redacted)
+        return await _upsert_console_artifact_row(conn, system_id, stored, redacted)
     except Exception:
         _log.warning(
             "console artifact registration failed for system %s; boot outcome unaffected",
@@ -249,6 +224,52 @@ async def _capture_console_artifact(
             exc_info=True,
         )
         return None
+
+
+async def _read_redacted_console(system_id: UUID) -> bytes | None:
+    raw = await asyncio.to_thread(read_console_log, console_log_path(system_id))
+    if not raw:
+        _log.warning(
+            "console log for system %s is empty or unreadable; registering no console artifact",
+            system_id,
+        )
+        return None
+    return Redactor().redact_text(raw.decode("utf-8", "replace")).encode("utf-8")
+
+
+async def _store_console_artifact(system_id: UUID, redacted: bytes) -> StoredArtifact:
+    def _put() -> StoredArtifact:
+        return object_store_from_env().put_artifact(
+            ArtifactWriteRequest(
+                tenant="local",
+                owner_kind="systems",
+                owner_id=str(system_id),
+                name="console",
+                data=redacted,
+                sensitivity=Sensitivity.REDACTED,
+                retention_class="console",
+            )
+        )
+
+    return await asyncio.to_thread(_put)
+
+
+async def _upsert_console_artifact_row(
+    conn: AsyncConnection,
+    system_id: UUID,
+    stored: StoredArtifact,
+    redacted: bytes,
+) -> _ConsoleArtifact:
+    async with conn.transaction():
+        existing = await _existing_console_row(conn, system_id)
+        if existing is None:
+            inserted = await ARTIFACTS.insert(
+                conn, register_artifact_row(stored, owner_kind="systems", owner_id=system_id)
+            )
+            return _ConsoleArtifact(inserted.id, inserted.object_key, redacted)
+        if existing.etag != stored.etag:
+            await conn.execute(_REFRESH_CONSOLE_ETAG_SQL, (stored.etag, existing.id))
+        return _ConsoleArtifact(existing.id, stored.key, redacted)
 
 
 def _expected_crash_matches(run: Run, redacted_console: bytes) -> bool:
