@@ -464,6 +464,31 @@ def test_provision_create_failure_removes_the_overlay() -> None:
     assert removed == [overlay_path(_SYS)]
 
 
+def test_provision_console_log_failure_removes_the_overlay() -> None:
+    removed: list[str] = []
+    conn = _ProvConn()
+
+    def fail_prepare(_path: Path) -> None:
+        raise CategorizedError(
+            "synthetic console log failure",
+            category=ErrorCategory.PROVISIONING_FAILURE,
+        )
+
+    with pytest.raises(CategorizedError) as caught:
+        LocalLibvirtProvisioning(
+            connect=lambda: conn,
+            make_overlay=lambda _base, _overlay: None,
+            remove_overlay=removed.append,
+            overlay_exists=lambda _overlay: False,
+            materialize_rootfs=lambda _rootfs, _system_id: "/var/lib/kdive/rootfs/base.qcow2",
+            prepare_console_log=fail_prepare,
+        ).provision(_SYS, _profile())
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert removed == [overlay_path(_SYS)]
+    assert conn.recorded_xml == []
+
+
 def test_provision_failure_keeps_preexisting_overlay() -> None:
     # A retry can fail after finding an existing overlay. That overlay may belong to a live or
     # recoverable previous attempt, so this call must not remove a file it did not create.

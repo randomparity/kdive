@@ -362,8 +362,8 @@ class LocalLibvirtProvisioning:
         created_overlay = not self._overlay_exists(overlay)
         if created_overlay:
             self._make_overlay(base, overlay)  # the domain boots this overlay, not the base
-        self._prepare_console_log(console_log_path(system_id))
         try:
+            self._prepare_console_log(console_log_path(system_id))
             conn = self._connect()
             try:
                 domain = conn.defineXML(xml)
@@ -394,6 +394,10 @@ class LocalLibvirtProvisioning:
                 category=ErrorCategory.PROVISIONING_FAILURE,
                 details={"system_id": str(system_id)},
             ) from exc
+        except CategorizedError:
+            if created_overlay:
+                self._remove_overlay(overlay)
+            raise
         return domain_name_for(system_id)
 
     def validate_rootfs_ref(self, rootfs: RootfsSource) -> None:
