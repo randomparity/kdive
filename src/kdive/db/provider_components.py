@@ -24,6 +24,11 @@ from kdive.store.objectstore import HeadResult
 type Visibility = Literal["public", "project", "host-policy"]
 type UploadVisibility = Literal["public", "project"]
 
+_COMPONENT_KINDS: frozenset[str] = frozenset(
+    {"rootfs", "kernel", "initrd", "config", "patch", "vmlinux"}
+)
+_VISIBILITIES: frozenset[str] = frozenset({"public", "project", "host-policy"})
+
 
 @dataclass(frozen=True, slots=True)
 class ComponentRegistration:
@@ -347,14 +352,34 @@ def _component_from_row(row: dict[str, object]) -> ProviderComponent:
             "stored provider component source is invalid",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         ) from exc
+    component_kind = _component_kind_from_row(row["component_kind"])
+    visibility = _visibility_from_row(row["visibility"])
     return ProviderComponent(
         id=cast(UUID, row["id"]),
         provider=cast(str, row["provider"]),
-        component_kind=cast(ComponentKind, row["component_kind"]),
+        component_kind=component_kind,
         source=source,
         artifact_id=cast(UUID | None, row["artifact_id"]),
-        visibility=cast(Visibility, row["visibility"]),
+        visibility=visibility,
         project=cast(str | None, row["project"]),
         principal=cast(str, row["principal"]),
         sha256=cast(str | None, row["sha256"]),
+    )
+
+
+def _component_kind_from_row(value: object) -> ComponentKind:
+    if isinstance(value, str) and value in _COMPONENT_KINDS:
+        return cast(ComponentKind, value)
+    raise CategorizedError(
+        "stored provider component kind is invalid",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
+
+
+def _visibility_from_row(value: object) -> Visibility:
+    if isinstance(value, str) and value in _VISIBILITIES:
+        return cast(Visibility, value)
+    raise CategorizedError(
+        "stored provider component visibility is invalid",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
     )

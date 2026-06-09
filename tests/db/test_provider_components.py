@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.provider_components import (
@@ -18,6 +19,7 @@ from kdive.db.provider_components import (
     ComponentUploadIntentRequest,
     ComponentUploadRegistration,
     LinkLocalComponentRequest,
+    _component_from_row,
     component_upload_object_key,
     create_artifact_component,
     create_component_upload_intent,
@@ -112,6 +114,36 @@ def _upload_request(
         size_bytes=size_bytes,
         ttl=ttl,
     )
+
+
+def _component_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": UUID("00000000-0000-0000-0000-000000000001"),
+        "provider": "local-libvirt",
+        "component_kind": "rootfs",
+        "source": {"kind": "local", "path": "/tmp/rootfs.img"},
+        "artifact_id": None,
+        "visibility": "project",
+        "project": "proj-a",
+        "principal": "alice",
+        "sha256": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_component_row_rejects_invalid_component_kind() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _component_from_row(_component_row(component_kind="firmware"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_component_row_rejects_invalid_visibility() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        _component_from_row(_component_row(visibility="private"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_project_component_visible_only_to_same_project(migrated_url: str, tmp_path: Path) -> None:
