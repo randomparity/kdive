@@ -343,22 +343,38 @@ def _request_from_queued(alloc: Allocation, resource: Resource) -> AllocationReq
         agent_session=alloc.agent_session,
         projects=(alloc.project,),
     )
-    selector = Selector(
-        vcpus=alloc.requested_vcpus or 0,
-        memory_gb=alloc.requested_memory_gb or 0,
-        cost_class=resource.cost_class,
-    )
     return AllocationRequest(
         ctx=ctx,
         resource=resource,
         project=alloc.project,
-        selector=selector,
+        selector=_selector_from_snapshot(alloc, resource),
         window=None,
         disk_gb=alloc.requested_disk_gb,
         shape=alloc.shape,
         pcie_specs=tuple(alloc.requested_pcie_specs),
         requested_kind=alloc.requested_kind,
         requested_resource_id=alloc.requested_resource_id,
+    )
+
+
+def _selector_from_snapshot(alloc: Allocation, resource: Resource) -> Selector:
+    vcpus = alloc.requested_vcpus
+    memory_gb = alloc.requested_memory_gb
+    if vcpus is None or memory_gb is None:
+        missing: list[str] = []
+        if vcpus is None:
+            missing.append("requested_vcpus")
+        if memory_gb is None:
+            missing.append("requested_memory_gb")
+        raise CategorizedError(
+            "queued allocation is missing requested sizing snapshot",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"allocation_id": str(alloc.id), "missing": missing},
+        )
+    return Selector(
+        vcpus=vcpus,
+        memory_gb=memory_gb,
+        cost_class=resource.cost_class,
     )
 
 

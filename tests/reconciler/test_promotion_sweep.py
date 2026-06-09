@@ -27,7 +27,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.cost import Selector
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
@@ -208,6 +208,48 @@ def test_freed_slot_promotes_and_charges_at_grant(migrated_url: str) -> None:
             assert spent_row is not None and Decimal(spent_row[0]) > 0
 
     asyncio.run(_run())
+
+
+def test_missing_sizing_snapshot_does_not_promote_as_zero(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _run() -> UUID:
+        async with await connect(migrated_url) as seed:
+            res = await _seed_resource(seed, cap=1)
+            await _seed_quota(seed)
+            holder = await _seed_granted(seed, res.id)
+            queued = await _enqueue(seed, res)
+            await seed.execute(
+                "UPDATE allocations SET requested_vcpus = NULL WHERE id = %s",
+                (queued,),
+            )
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASING)
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASED)
+        caplog.set_level(logging.WARNING, logger="kdive.services.allocation.promotion")
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, loop._promote_pending)
+        assert count == 0
+        return queued
+
+    queued = asyncio.run(_run())
+
+    async def _check() -> None:
+        async with await connect(migrated_url) as check:
+            assert await _state(check, queued) == "requested"
+            assert await _ledger_kinds(check, queued) == []
+
+    asyncio.run(_check())
+    errors = [
+        record.exc_info[1]
+        for record in caplog.records
+        if record.exc_info is not None and str(queued) in record.message
+    ]
+    assert any(
+        isinstance(exc, CategorizedError)
+        and exc.category is ErrorCategory.CONFIGURATION_ERROR
+        and exc.details["missing"] == ["requested_vcpus"]
+        for exc in errors
+    )
 
 
 def test_work_conserving_fills_free_host_behind_busy_global_oldest(migrated_url: str) -> None:
