@@ -75,6 +75,21 @@ def test_provision_latency_sleeps_for_the_engine_computed_delay() -> None:
     assert expected > 0.0  # a real seed-derived delay, not a no-op
 
 
+def test_latency_and_fail_both_drawn_sleeps_before_raising() -> None:
+    # A slow-then-failing op spends its delay (ADR-0074 _apply ordering): the sleep is recorded
+    # AND the failure is raised, proving the sleep happens before the raise.
+    engine = FaultEngine(
+        seed=7, fault_rate={FaultPlane.PROVISION.value: 1.0}, max_latency_s={"provision": 1000.0}
+    )
+    recorded: list[float] = []
+    wrapper = _provision(engine, sleep_s=recorded.append)
+    with pytest.raises(CategorizedError) as exc:
+        wrapper.provision(_SYSTEM, object())
+    assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
+    expected = engine.decide(system_id=_SYSTEM, plane=FaultPlane.PROVISION, attempt=1).latency_s
+    assert recorded == [expected] and expected > 0.0  # the delay was spent before the raise
+
+
 def test_provision_absent_plane_config_neither_sleeps_nor_raises() -> None:
     engine = FaultEngine(seed=7, fault_rate={}, max_latency_s={})
     recorded: list[float] = []
