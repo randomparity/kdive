@@ -1,9 +1,8 @@
-"""M0 object lifecycles and the transition guard (ADR-0003).
+"""Durable object lifecycles and the transition guard (ADR-0003).
 
 A :class:`~enum.StrEnum` per durable object plus :func:`can_transition`, the guard
 the repository layer consults before persisting a state change. The legal edges
-encode the M0-subset state machines from ``m0-walking-skeleton.md`` ("Domain
-objects in M0").
+encode the current durable-object state machines.
 
 Two readings of that table are pinned here because its notation is ambiguous:
 
@@ -11,12 +10,11 @@ Two readings of that table are pinned here because its notation is ambiguous:
   the walking-skeleton path, and ``force_crash`` all transition out of it
   (``ready → crashed`` and ``ready → torn_down``); only ``torn_down`` and
   ``failed`` are terminal.
-* **DebugSession is forward-only in M0.** The spec draws ``attach ↔ live ↔
-  detached`` conceptually, but no M0 tool reattaches or steps backward, and the
-  session "ends at reboot/crash" — so M0 drives ``attach → live → detached`` with
-  ``detached`` terminal. ``attach → detached`` is also legal: a failed attach
-  aborts straight to the terminal rather than stranding the row in ``attach``
-  (no reconciler rule sweeps a stuck ``attach``). Reattach returns when M1 needs it.
+* **DebugSession is forward-only.** The conceptual model is ``attach ↔ live ↔
+  detached``, but runtime tools do not reattach or step backward. The platform
+  drives ``attach → live → detached`` with ``detached`` terminal. ``attach → detached``
+  is also legal: a failed attach aborts straight to the terminal rather than stranding
+  the row in ``attach``.
 
 ``failed`` is reachable from every non-terminal state of the objects that carry
 it. Resource health (``available``/``degraded``/``offline``) is not a lifecycle —
@@ -37,15 +35,14 @@ class ResourceStatus(StrEnum):
 
 
 class AllocationState(StrEnum):
-    """Capacity- and budget-checked allocation lifecycle (M1 adds ``expired``).
+    """Capacity- and budget-checked allocation lifecycle.
 
     ``granted → releasing`` lets an admitted-but-unprovisioned allocation be released
     without first reaching ``active`` (which provisioning produces); see ADR-0023.
-    ``granted/active → expired`` is the M1 reconciler ``→expired`` sweep reclaiming a
-    lease past its window (ADR-0036, ADR-0040); ``expired`` is terminal and distinct
-    from ``failed`` (a reclaimed lease is not an operation failure).
-    ``requested → released`` is the M1.4 cancellation edge for a queued request (ADR-0069):
-    a queued row was never reserved, so it releases directly to ``released`` without the
+    ``granted/active → expired`` is the reconciler sweep reclaiming a lease past its
+    window (ADR-0036, ADR-0040); ``expired`` is terminal and distinct from ``failed``.
+    ``requested → released`` is the cancellation edge for a queued request (ADR-0069): a
+    queued row was never reserved, so it releases directly to ``released`` without the
     ``releasing`` hop and writes no ledger credit.
     """
 
@@ -59,13 +56,13 @@ class AllocationState(StrEnum):
 
 
 class SystemState(StrEnum):
-    """A provisioned target's lifecycle (M1 adds ``reprovisioning``).
+    """A provisioned target's lifecycle.
 
-    M1 reprovision-in-place (ADR-0038) cycles a ready System through
-    ``ready → reprovisioning → ready`` on the same row; an interrupted reprovision
-    fails to ``reprovisioning → failed``. ``defined → torn_down`` (ADR-0025 decision 10,
-    #111) lets an abandoned create-without-provision System be torn down without first
-    advancing to ``provisioning``.
+    Reprovision-in-place (ADR-0038) cycles a ready System through
+    ``ready → reprovisioning → ready`` on the same row; an interrupted reprovision fails to
+    ``reprovisioning → failed``. ``defined → torn_down`` lets an abandoned
+    create-without-provision System be torn down without first advancing to
+    ``provisioning``.
     """
 
     DEFINED = "defined"
@@ -115,7 +112,7 @@ class JobState(StrEnum):
 
 
 class IllegalTransition(ValueError):
-    """Raised when a state change is not permitted by the M0 guard table.
+    """Raised when a state change is not permitted by the guard table.
 
     A programming/invariant error, distinct from the operational failures in
     :class:`kdive.domain.errors.ErrorCategory`.
@@ -208,7 +205,7 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
 
 
 def can_transition(frm: StrEnum, to: StrEnum) -> bool:
-    """Report whether ``frm → to`` is a legal M0 transition.
+    """Report whether ``frm → to`` is a legal transition.
 
     Args:
         frm: The current state.

@@ -1,4 +1,4 @@
-"""The `resources.availability` fleet read (M1.4 issue #163, ADR-0070).
+"""The `resources.availability` fleet read (ADR-0070).
 
 A `viewer` aggregate over the fleet: per host it reports the free capacity headroom, the
 free PCIe devices, and the shapes that fit **now**; at fleet/kind granularity it reports

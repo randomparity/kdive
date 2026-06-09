@@ -1,4 +1,4 @@
-"""Runtime capacity/cost tuning `ops.*` MCP tools (M1.3 issue 5, ADR-0062 §4).
+"""Runtime capacity/cost tuning `ops.*` MCP tools (ADR-0062 §4).
 
 Two `platform_operator` knobs, both audited to ``platform_audit_log``:
 
