@@ -524,12 +524,19 @@ def test_start_session_connector_failure_maps_category(
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             run_id = await _seed_run(pool, sys_id)
-            conn_fake = _FakeConnector(raises=CategorizedError("x", category=category))
+            conn_fake = _FakeConnector(
+                raises=CategorizedError(
+                    "x",
+                    category=category,
+                    details={"provider": "local-libvirt", "retryable": False},
+                )
+            )
             resp = await _start_session(
                 pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == expected
+        assert resp.data == {"provider": "local-libvirt", "retryable": False}
         assert count == 0
 
     asyncio.run(_run())

@@ -127,7 +127,7 @@ async def _open_transport(
             if exc.category in _ATTACH_FAILURE
             else _map_attach_failure_category(exc.category)
         )
-        return ToolResponse.failure(str(system.id), category)
+        return ToolResponse.failure_from_error(str(system.id), exc, category=category)
 
 
 def _map_attach_failure_category(category: ErrorCategory) -> ErrorCategory:

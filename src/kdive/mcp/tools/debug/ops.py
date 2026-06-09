@@ -158,8 +158,7 @@ def _op_failure(session_id: str, exc: CategorizedError) -> ToolResponse:
     category = exc.category
     if category is ErrorCategory.MISSING_DEPENDENCY:
         category = ErrorCategory.DEBUG_ATTACH_FAILURE
-    data = {"code": str(exc.details["code"])} if "code" in exc.details else {}
-    return ToolResponse.failure(session_id, category, data=data)
+    return ToolResponse.failure_from_error(session_id, exc, category=category)
 
 
 def _coded_error(session_id: str, code: str, *, current_status: str | None = None) -> ToolResponse:

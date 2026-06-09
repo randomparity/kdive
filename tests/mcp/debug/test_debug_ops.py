@@ -488,6 +488,7 @@ def test_missing_dependency_attach_surfaces_as_debug_attach_failure(migrated_url
             )
         assert resp.status == "error"
         assert resp.error_category == "debug_attach_failure"
+        assert resp.data["run_id"]
 
     asyncio.run(_run())
 
