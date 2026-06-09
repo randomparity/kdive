@@ -1,4 +1,4 @@
-"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018, issue #9).
+"""Connection-scoped operations over the durable ``jobs`` queue (ADR-0018).
 
 ``enqueue`` admits a job idempotently on ``dedup_key``; ``dequeue`` claims the oldest
 eligible job with ``FOR UPDATE SKIP LOCKED``, charging an attempt and reclaiming a
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -38,7 +37,7 @@ async def enqueue(
     conn: AsyncConnection,
     kind: JobKind,
     payload: PayloadModel,
-    authorizing: Authorizing | JobAuthorizing | dict[str, Any],
+    authorizing: Authorizing | JobAuthorizing,
     dedup_key: str,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
@@ -262,7 +261,7 @@ async def recent_jobs(conn: AsyncConnection, limit: int, projects: Sequence[str]
     """Return the caller's most recent jobs, newest first, capped at ``limit``.
 
     Scoped to ``projects``: only jobs whose ``authorizing->>'project'`` is one of the
-    caller's granted projects are returned (#11). An empty ``projects`` yields no rows,
+    caller's granted projects are returned. An empty ``projects`` yields no rows,
     and a job whose ``authorizing`` carries no ``project`` belongs to no one (fail
     closed). The cap applies after the project filter, so the caller gets up to ``limit``
     of *their* jobs. The ``id`` tiebreaker makes the order total when two jobs share a

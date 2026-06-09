@@ -15,7 +15,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.components.references import ComponentRef
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -30,20 +29,24 @@ from kdive.domain.models import (
 )
 from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.jobs import queue
+from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
-from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers, get_system
-from kdive.planes import systems as systems_handlers
+from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
+from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.profiles.provisioning import RootfsSource
+from kdive.provider_components.artifacts import ArtifactWriteRequest
+from kdive.provider_components.references import ComponentRef
+from kdive.provider_components.uploads import ManifestEntry
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     RootfsMaterializationContext,
     materialize_rootfs_base,
 )
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.store.objectstore import ArtifactWriteRequest, ObjectStore, artifact_key
+from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
 )
@@ -856,11 +859,13 @@ def test_provision_handler_commits_uploaded_rootfs_artifact(
             async with pool.connection() as conn:
                 await upload_manifest.replace_manifest(
                     conn,
-                    owner_kind="systems",
-                    owner_id=UUID(sys_id),
-                    prefix=f"local/systems/{sys_id}/",
-                    entries=[upload_manifest.ManifestEntry("rootfs", "sha256:x", 18)],
-                    ttl=timedelta(hours=1),
+                    upload_manifest.UploadManifestReplaceRequest(
+                        owner_kind="systems",
+                        owner_id=UUID(sys_id),
+                        prefix=f"local/systems/{sys_id}/",
+                        entries=[ManifestEntry("rootfs", "sha256:x", 18)],
+                        ttl=timedelta(hours=1),
+                    ),
                 )
             job = await _enqueue_provision(pool, sys_id, alloc_id)
             async with pool.connection() as conn:
@@ -1946,6 +1951,33 @@ def test_provision_defined_refuses_released_allocation(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize(
+    "state",
+    [SystemState.READY, SystemState.REPROVISIONING, SystemState.CRASHED],
+)
+def test_provision_defined_reports_existing_system_state(
+    migrated_url: str, state: SystemState
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, state)
+            resp = await _provision_defined(pool, _ctx(), sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
+                    (f"{alloc_id}:provision",),
+                )
+                job_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == sys_id
+        assert resp.data["current_status"] == state.value
+        assert job_row is not None and job_row["n"] == 0
+
+    asyncio.run(_run())
+
+
 def test_provision_defined_revalidates_stored_profile_against_provider(
     migrated_url: str,
 ) -> None:
@@ -2077,6 +2109,33 @@ def test_provision_create_lane_refuses_defined_system(migrated_url: str) -> None
         assert resp.error_category == "configuration_error"
         assert resp.object_id == sys_id
         assert resp.data["reason"] == "use_systems.provision_defined"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "state",
+    [SystemState.READY, SystemState.REPROVISIONING, SystemState.CRASHED],
+)
+def test_provision_create_lane_reports_existing_system_state(
+    migrated_url: str, state: SystemState
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, state)
+            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
+                    (f"{alloc_id}:provision",),
+                )
+                job_row = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == sys_id
+        assert resp.data["current_status"] == state.value
+        assert job_row is not None and job_row["n"] == 0
 
     asyncio.run(_run())
 

@@ -3,8 +3,8 @@
 `FaultInjectDiscovery` advertises one synthetic resource row — there is no host to
 enumerate, so the "discovered" resource is the mock itself. Its ``capabilities`` jsonb
 carries the per-plane concurrent-allocation cap plus the fault-engine keys (``seed`` /
-``fault_rate`` / ``max_latency_s`` / ``secret_ref``); the seeded engine (issue 3) and
-forced secret resolution (issue 4) read those keys. Happy-path discovery writes an empty
+``fault_rate`` / ``max_latency_s`` / ``secret_ref``); the seeded engine and forced secret
+resolution read those keys. Happy-path discovery writes an empty
 ``fault_rate``/``max_latency_s`` so no fault is drawn until a deployment configures one.
 """
 
@@ -74,8 +74,8 @@ class FaultInjectDiscovery:
     def from_env(cls) -> FaultInjectDiscovery:
         """Build from ``KDIVE_FAULT_INJECT_*`` env; happy-path defaults draw no fault.
 
-        The per-plane ``fault_rate``/``max_latency_s`` maps default empty — the seeded
-        engine (issue 3) owns their configuration; issue 2 ships the inert happy path.
+        The per-plane ``fault_rate``/``max_latency_s`` maps default empty for the inert
+        happy path; the seeded engine owns their configuration.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the cap or seed env var is not an

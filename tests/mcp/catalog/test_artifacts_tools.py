@@ -20,8 +20,8 @@ from kdive.mcp.tools.catalog.artifacts_reads import (
     artifacts_get,
     artifacts_list,
 )
+from kdive.provider_components.artifacts import FetchedArtifact, HeadResult
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.store.objectstore import FetchedArtifact, HeadResult
 from tests.mcp._seed import seed_crashed_system
 
 

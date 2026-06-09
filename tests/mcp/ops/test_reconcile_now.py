@@ -24,7 +24,8 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.state import AllocationState, SystemState
 from kdive.mcp.tools.ops import reconcile as ops_reconcile
-from kdive.reconciler.loop import NullReaper, reconcile_once
+from kdive.providers.reaping import NullReaper
+from kdive.reconciler.loop import reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from tests.db_waits import wait_until_any_backend_waiting
@@ -276,4 +277,4 @@ def test_register_resolves_upload_store_off_without_s3_env(monkeypatch: pytest.M
     # rather than raising, so the on-demand pass repairs the same set as the periodic one.
     monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
     monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    assert ops_reconcile._resolve_upload_store() is None
+    assert ops_reconcile.resolve_upload_store() is None

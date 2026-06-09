@@ -9,22 +9,24 @@ from uuid import UUID
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.components.references import LocalComponentRef
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.provider_components.artifacts import StoredArtifact
+from kdive.provider_components.references import LocalComponentRef
 from kdive.providers import composition
 from kdive.providers.ports import (
     BuildOutput,
     CaptureOutput,
     CrashOutput,
+    InstallRequest,
     IntrospectOutput,
     SystemHandle,
     TransportHandle,
 )
 from kdive.providers.runtime import ProviderRuntime
-from kdive.store.objectstore import StoredArtifact
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
 
@@ -83,17 +85,8 @@ class _ProvisionProvider:
 
 
 class _InstallProvider:
-    def install(
-        self,
-        system_id: UUID,
-        run_id: UUID,
-        kernel_ref: str,
-        *,
-        cmdline: str,
-        method: CaptureMethod = CaptureMethod.HOST_DUMP,
-        initrd_ref: str | None = None,
-    ) -> None:
-        self.installed = (system_id, run_id, kernel_ref, cmdline, method, initrd_ref)
+    def install(self, request: InstallRequest) -> None:
+        self.installed = request
 
     def boot(self, system_id: UUID) -> None:
         self.booted = system_id
@@ -168,7 +161,7 @@ def test_provider_runtime_returns_typed_provider_ports_directly() -> None:
 
 
 def test_default_runtime_advertises_implemented_component_sources_only() -> None:
-    runtime = composition.build_local_runtime()
+    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
 
     assert runtime.component_sources.provider == "local-libvirt"
     assert runtime.component_sources.accepted_component_sources == {
@@ -182,7 +175,7 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
 
 
 def test_default_runtime_exposes_build_config_validator() -> None:
-    runtime = composition.build_local_runtime()
+    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
 
     assert runtime.build_config_validator is not None
 
@@ -281,6 +274,38 @@ def test_fault_inject_runtime_provision_is_visible_to_a_reaper_on_the_same_inven
     assert [d.name for d in owned] == [domain]
 
 
+def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> None:
+    import asyncio
+    from uuid import UUID
+
+    from kdive.domain.models import ResourceKind
+
+    owner = composition.ProviderComposition()
+    resolver = owner.build_provider_resolver(enable_fault_inject=True)
+    reaper = owner.build_reconciler_reaper(enable_fault_inject=True)
+    system_id = UUID("44444444-4444-4444-4444-444444444444")
+
+    domain = resolver.resolve(ResourceKind.FAULT_INJECT).provisioner.provision(
+        system_id, _provisioning_profile()
+    )
+
+    owned = asyncio.run(reaper.list_owned())
+    assert domain in [item.name for item in owned]
+    asyncio.run(reaper.destroy(domain))
+
+
+def test_reconciler_reaper_defaults_to_null_when_fault_inject_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.providers.reaping import NullReaper
+
+    monkeypatch.delenv("KDIVE_FAULT_INJECT", raising=False)
+
+    owner = composition.ProviderComposition()
+
+    assert isinstance(owner.build_reconciler_reaper(), NullReaper)
+
+
 def test_fault_inject_opt_in_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     from kdive.domain.models import ResourceKind
 
@@ -292,7 +317,10 @@ def test_fault_inject_opt_in_reads_the_environment(monkeypatch: pytest.MonkeyPat
 
 
 def test_fault_inject_runtime_without_engine_uses_bare_happy_path_ports() -> None:
-    from kdive.providers.fault_inject.provider import FaultInjectInstall, FaultInjectProvision
+    from kdive.providers.fault_inject.lifecycle.provider import (
+        FaultInjectInstall,
+        FaultInjectProvision,
+    )
 
     runtime = composition.build_faultinject_runtime()
 
@@ -303,8 +331,8 @@ def test_fault_inject_runtime_without_engine_uses_bare_happy_path_ports() -> Non
 
 
 def test_fault_inject_runtime_with_engine_wraps_ports_in_faulting_decorators() -> None:
-    from kdive.providers.fault_inject.engine import FaultEngine
-    from kdive.providers.fault_inject.faulted import FaultedInstall, FaultedProvision
+    from kdive.providers.fault_inject.faulting.engine import FaultEngine
+    from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvision
 
     engine = FaultEngine(seed=7, fault_rate={"provision": 1.0}, max_latency_s={})
     runtime = composition.build_faultinject_runtime(engine=engine)

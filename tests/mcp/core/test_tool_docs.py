@@ -12,9 +12,9 @@ import ast
 import asyncio
 import inspect
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_type_hints
 
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.function_tool import FunctionTool
@@ -22,6 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.app import build_app
 from kdive.mcp.tools import _docmeta
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 _HERE = Path(__file__).resolve()
@@ -114,7 +115,7 @@ def _build_tools() -> list[FunctionTool]:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     kp = make_keypair()
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
-    app = build_app(pool, verifier=verifier)
+    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
     # list_tools() is typed as Sequence[mcp.types.Tool] but the fastmcp runtime
     # returns list[FunctionTool] — cast to the concrete type so the rest of the
     # module can access .fn / .meta / .annotations without type errors.
@@ -134,6 +135,23 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     for a call buried below it — the very vacuity this backstop exists to prevent.
     """
     seen: set[int] = set()
+
+    def _method_from_factory_return(
+        factory: Callable[..., Any],
+        attr: str,
+        nonlocals: Mapping[str, Any],
+    ) -> Callable[..., Any] | None:
+        if inspect.ismethod(factory):
+            factory = factory.__func__
+        if not inspect.isfunction(factory):
+            return None
+        try:
+            hints = get_type_hints(factory, globalns=factory.__globals__, localns=nonlocals)
+        except (NameError, TypeError):
+            return None
+        owner_type = hints.get("return")
+        delegate = getattr(owner_type, attr, None)
+        return delegate if callable(delegate) else None
 
     def _walk(f: Callable[..., Any]) -> bool:
         try:
@@ -161,6 +179,23 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
                     delegate = getattr(owner, callee.attr, None)
                     if callable(delegate):
                         attribute_calls.append(delegate)
+                elif isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Call):
+                    factory_call = callee.value.func
+                    if isinstance(factory_call, ast.Name):
+                        factory = nonlocals.get(factory_call.id, glb.get(factory_call.id))
+                        if callable(factory):
+                            delegate = _method_from_factory_return(factory, callee.attr, nonlocals)
+                            if delegate is not None:
+                                attribute_calls.append(delegate)
+                    elif isinstance(factory_call, ast.Attribute) and isinstance(
+                        factory_call.value, ast.Name
+                    ):
+                        owner = nonlocals.get(factory_call.value.id, glb.get(factory_call.value.id))
+                        factory = getattr(owner, factory_call.attr, None)
+                        if callable(factory):
+                            delegate = _method_from_factory_return(factory, callee.attr, nonlocals)
+                            if delegate is not None:
+                                attribute_calls.append(delegate)
         for name in local_calls:
             delegate = glb.get(name)
             if inspect.isfunction(delegate) and id(delegate) not in seen:

@@ -4,10 +4,10 @@
 "gdbstub")` resolves the System's gdbstub endpoint, enforces loopback-only **before any
 network IO** (the ported v1 "F2" SSRF control), probes RSP reachability over an injected
 seam, and returns an opaque `TransportHandle` (an encoded `TransportHandleData`) the session
-row persists; `close_transport(handle)` is a best-effort no-op (the M0 gdbstub is
+row persists; `close_transport(handle)` validates the handle and then no-ops (gdbstub is
 connectionless RSP). The slow/host-bound steps — resolving the libvirt domain's gdbstub
-host:port and the real socket probe — are **injected, `live_vm`-gated seams** that default to
-implementations raising `MISSING_DEPENDENCY` (resolver) / `# pragma: no cover - live_vm`
+host:port and the real socket probe — are **injected, `live_vm`-gated seams** that default
+to implementations raising `MISSING_DEPENDENCY` (resolver) / `# pragma: no cover - live_vm`
 (prober), so the orchestration and the full error contract are unit-tested with fakes.
 
 The RSP-framing codec (`rsp_frame`/`valid_rsp_frame`) and the bounded probe are ported from
@@ -54,11 +54,11 @@ def valid_rsp_frame(buffer: bytes) -> bool:
     ``#``, a non-hex checksum, or a checksum mismatch is invalid — so a non-RSP listener that
     merely writes ``+`` or ``$hello`` is rejected.
     """
-    start = buffer.find(b"$")
-    if start == -1:
+    start = 1 if buffer.startswith((b"+", b"-")) else 0
+    if not buffer[start:].startswith(b"$"):
         return False
     hash_idx = buffer.find(b"#", start)
-    if hash_idx == -1 or hash_idx + 2 >= len(buffer):
+    if hash_idx == -1 or hash_idx + 3 != len(buffer):
         return False
     payload = buffer[start + 1 : hash_idx]
     checksum_hex = buffer[hash_idx + 1 : hash_idx + 3]
@@ -82,7 +82,7 @@ def _is_loopback_literal(host: str) -> bool:
 
 
 class LocalLibvirtConnect:
-    """The realized `Connector` for local-libvirt transports: gdbstub (M0) and ssh (M1).
+    """The realized `Connector` for local-libvirt transports: gdbstub and ssh.
 
     Both transports enforce loopback-only **before any network IO** (the ported v1 "F2"
     SSRF control, ADR-0032 §5 / ADR-0039 §1) and probe reachability over an injected,
@@ -174,8 +174,8 @@ class LocalLibvirtConnect:
         return TransportHandle(TransportHandleData(kind=_SSH, host=host, port=port).encode())
 
     def close_transport(self, handle: TransportHandle) -> None:
-        """Best-effort teardown — a no-op for these transports (never raises)."""
-        del handle
+        """Validate the handle, then no-op for these connectionless transports."""
+        TransportHandleData.decode(handle)
 
 
 def rsp_reachable(host: str, port: int) -> bool:  # pragma: no cover - live_vm

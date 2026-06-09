@@ -8,15 +8,14 @@ from psycopg.rows import dict_row
 
 from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.state import RunState
 from kdive.mcp.tools.catalog.artifacts_uploads import create_run_upload
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
-from kdive.providers.build_validation import validate_external_artifacts
-from kdive.providers.component_validation import ComponentSourceCapabilities
+from kdive.provider_components.artifacts import HeadResult, PresignedUpload, PresignPutRequest
+from kdive.provider_components.uploads import ManifestEntry
+from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.ports import BuildOutput
-from kdive.store.objectstore import HeadResult, PresignedUpload
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )
@@ -56,14 +55,14 @@ _DEFAULT_BUILD_HANDLERS = RunBuildHandlers(_TEST_COMPONENT_SOURCES)
 
 
 def _build_handlers(validator) -> RunBuildHandlers:
-    return RunBuildHandlers(_TEST_COMPONENT_SOURCES, complete_validator=validator)
+    return RunBuildHandlers(_TEST_COMPONENT_SOURCES, validate_complete_build=validator)
 
 
 class _UploadStore:
-    def presign_put(self, key, *, sha256, size_bytes, sensitivity, retention_class, expires_in):
-        _ = (sensitivity, retention_class, expires_in)
+    def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
         return PresignedUpload(
-            url=f"https://store/{key}", required_headers={"x-amz-checksum-sha256": sha256}
+            url=f"https://store/{request.key}",
+            required_headers={"x-amz-checksum-sha256": request.sha256},
         )
 
 
@@ -77,20 +76,6 @@ class _ValidationStore:
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         return self._blobs[key][start : start + length]
-
-
-class _RealValidator:
-    def __init__(self, store: _ValidationStore) -> None:
-        self._store = store
-
-    def validate(self, *, manifest, keys, declared_build_id, profile_requirements=None):
-        return validate_external_artifacts(
-            self._store,
-            manifest=manifest,
-            keys=keys,
-            declared_build_id=declared_build_id,
-            profile_requirements=profile_requirements,
-        )
 
 
 async def _artifact_keys(pool, run_id) -> set[str]:
@@ -274,17 +259,18 @@ def test_complete_build_writes_artifacts_after_effective_config_validation(
             assert await _artifact_keys(pool, run_id) == set()
             kernel_key = f"local/runs/{run_id}/kernel"
             config_key = f"local/runs/{run_id}/effective_config"
-            validator = _RealValidator(
-                _ValidationStore(
-                    {kernel_key: _BZIMAGE_HEAD, config_key: config},
-                    {
-                        kernel_key: HeadResult(len(_BZIMAGE_HEAD), "ck", "e-k"),
-                        config_key: HeadResult(len(config), "cc", "e-c"),
-                    },
-                )
+            store = _ValidationStore(
+                {kernel_key: _BZIMAGE_HEAD, config_key: config},
+                {
+                    kernel_key: HeadResult(len(_BZIMAGE_HEAD), "ck", "e-k"),
+                    config_key: HeadResult(len(config), "cc", "e-c"),
+                },
             )
 
-            resp = await _build_handlers(validator).complete_build(
+            resp = await RunBuildHandlers(
+                _TEST_COMPONENT_SOURCES,
+                object_store_factory=lambda: store,
+            ).complete_build(
                 pool,
                 _ctx(),
                 str(run_id),
@@ -316,14 +302,15 @@ def test_complete_build_rejects_missing_effective_config_without_artifacts(
             )
             assert {response.status for response in responses.items} == {"upload_ready"}
             kernel_key = f"local/runs/{run_id}/kernel"
-            validator = _RealValidator(
-                _ValidationStore(
-                    {kernel_key: _BZIMAGE_HEAD},
-                    {kernel_key: HeadResult(len(_BZIMAGE_HEAD), "ck", "e-k")},
-                )
+            store = _ValidationStore(
+                {kernel_key: _BZIMAGE_HEAD},
+                {kernel_key: HeadResult(len(_BZIMAGE_HEAD), "ck", "e-k")},
             )
 
-            resp = await _build_handlers(validator).complete_build(
+            resp = await RunBuildHandlers(
+                _TEST_COMPONENT_SOURCES,
+                object_store_factory=lambda: store,
+            ).complete_build(
                 pool,
                 _ctx(),
                 str(run_id),

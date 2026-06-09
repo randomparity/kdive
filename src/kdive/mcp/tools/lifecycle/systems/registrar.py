@@ -11,6 +11,7 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_allocation, with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import (
     SystemAdminHandlers as _SystemAdminHandlers,
 )
@@ -18,40 +19,57 @@ from kdive.mcp.tools.lifecycle.systems.admin import (
     teardown_system as _teardown_system,
 )
 from kdive.mcp.tools.lifecycle.systems.provision import (
-    DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT,
-)
-from kdive.mcp.tools.lifecycle.systems.provision import (
     SystemProvisionHandlers as _SystemProvisionHandlers,
 )
-from kdive.mcp.tools.lifecycle.systems.provision import (
+from kdive.mcp.tools.lifecycle.systems.view import (
+    DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT,
+)
+from kdive.mcp.tools.lifecycle.systems.view import (
+    SystemsListRequest as _SystemsListRequest,
+)
+from kdive.mcp.tools.lifecycle.systems.view import (
     get_system as _get_system,
 )
-from kdive.mcp.tools.lifecycle.systems.provision import (
+from kdive.mcp.tools.lifecycle.systems.view import (
     list_systems as _list_systems,
 )
 from kdive.profiles.types import ProvisioningProfileInput
+from kdive.providers.resolver import ProviderResolver
 from kdive.providers.runtime import ProviderRuntime
 
 
 def register(
-    app: FastMCP, pool: AsyncConnectionPool, *, provider_runtime: ProviderRuntime | None = None
+    app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver | None = None
 ) -> None:
     """Register the `systems.*` tools on ``app``, bound to ``pool``."""
-    if provider_runtime is None:
-        raise RuntimeError("systems registrar requires an injected provider runtime")
-    runtime = provider_runtime
+    if resolver is None:
+        raise RuntimeError("systems registrar requires an injected provider resolver")
+    _register_systems_define(app, pool, resolver)
+    _register_systems_provision(app, pool, resolver)
+    _register_systems_provision_defined(app, pool, resolver)
+    _register_systems_get(app, pool)
+    _register_systems_list(app, pool)
+    _register_systems_teardown(app, pool)
+    _register_systems_reprovision(app, pool, resolver)
+
+
+def _rootfs_validator(runtime: ProviderRuntime):
     if runtime.rootfs_validator is None:
         raise RuntimeError("systems registrar requires an injected rootfs validator")
-    rootfs_validator = runtime.rootfs_validator
-    provision_handlers = _SystemProvisionHandlers(
-        runtime.component_sources,
-        rootfs_validator,
-    )
-    admin_handlers = _SystemAdminHandlers(
-        runtime.component_sources,
-        rootfs_validator,
-    )
+    return runtime.rootfs_validator
 
+
+def _provision_handlers(runtime: ProviderRuntime) -> _SystemProvisionHandlers:
+    return _SystemProvisionHandlers(runtime.component_sources, _rootfs_validator(runtime))
+
+
+def _admin_handlers(runtime: ProviderRuntime) -> _SystemAdminHandlers:
+    return _SystemAdminHandlers(runtime.component_sources, _rootfs_validator(runtime))
+
+
+def _register_systems_define(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="systems.define",
         annotations=_docmeta.mutating(),
@@ -70,13 +88,22 @@ def register(
         ],
     ) -> ToolResponse:
         """Create a System in 'defined' for a granted Allocation (upload window). Operator only."""
-        return await provision_handlers.define_system(
+        return await with_runtime_for_allocation(
             pool,
-            current_context(),
-            allocation_id=allocation_id,
-            profile=profile,
+            resolver,
+            allocation_id,
+            lambda runtime: _provision_handlers(runtime).define_system(
+                pool,
+                current_context(),
+                allocation_id=allocation_id,
+                profile=profile,
+            ),
         )
 
+
+def _register_systems_provision(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="systems.provision",
         annotations=_docmeta.mutating(),
@@ -92,13 +119,22 @@ def register(
         ],
     ) -> ToolResponse:
         """Mint a System for a granted Allocation and enqueue provision. Operator only."""
-        return await provision_handlers.provision_system(
+        return await with_runtime_for_allocation(
             pool,
-            current_context(),
-            allocation_id=allocation_id,
-            profile=profile,
+            resolver,
+            allocation_id,
+            lambda runtime: _provision_handlers(runtime).provision_system(
+                pool,
+                current_context(),
+                allocation_id=allocation_id,
+                profile=profile,
+            ),
         )
 
+
+def _register_systems_provision_defined(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="systems.provision_defined",
         annotations=_docmeta.mutating(),
@@ -111,12 +147,19 @@ def register(
         ],
     ) -> ToolResponse:
         """Admit a DEFINED System after its upload window is complete. Requires operator."""
-        return await provision_handlers.provision_defined_system(
+        return await with_runtime_for_system(
             pool,
-            current_context(),
-            system_id=system_id,
+            resolver,
+            system_id,
+            lambda runtime: _provision_handlers(runtime).provision_defined_system(
+                pool,
+                current_context(),
+                system_id=system_id,
+            ),
         )
 
+
+def _register_systems_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="systems.get",
         annotations=_docmeta.read_only(),
@@ -128,6 +171,8 @@ def register(
         """Return a System the caller can view."""
         return await _get_system(pool, current_context(), system_id)
 
+
+def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="systems.list",
         annotations=_docmeta.read_only(),
@@ -159,16 +204,21 @@ def register(
         ] = _DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires viewer."""
-        return await _list_systems(
-            pool,
-            current_context(),
+        request = _SystemsListRequest(
             allocation_id=allocation_id,
             state=state,
             shape=shape,
             pcie=pcie,
             limit=limit,
         )
+        return await _list_systems(
+            pool,
+            current_context(),
+            request,
+        )
 
+
+def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="systems.teardown",
         annotations=_docmeta.destructive(),
@@ -180,6 +230,10 @@ def register(
         """Enqueue teardown for a System. Requires admin and destructive-op opt-in."""
         return await _teardown_system(pool, current_context(), system_id)
 
+
+def _register_systems_reprovision(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="systems.reprovision",
         annotations=_docmeta.destructive(),
@@ -193,9 +247,14 @@ def register(
         ],
     ) -> ToolResponse:
         """Enqueue in-place reprovision for a ready System. Requires operator and opt-in."""
-        return await admin_handlers.reprovision_system(
+        return await with_runtime_for_system(
             pool,
-            current_context(),
-            system_id=system_id,
-            profile=profile,
+            resolver,
+            system_id,
+            lambda runtime: _admin_handlers(runtime).reprovision_system(
+                pool,
+                current_context(),
+                system_id=system_id,
+                profile=profile,
+            ),
         )

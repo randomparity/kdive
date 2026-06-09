@@ -17,7 +17,6 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import Sensitivity
 from kdive.domain.state import RunState, SystemState
@@ -27,10 +26,11 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile, rootfs_upload_window_allowed
+from kdive.provider_components.artifacts import PresignedUpload, PresignPutRequest
+from kdive.provider_components.uploads import ManifestEntry
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.store.objectstore import (
-    PresignedUpload,
     artifact_key,
     object_store_from_env,
     owner_prefix,
@@ -62,16 +62,7 @@ def _presign_ttl_seconds() -> int:
 
 
 class _PresignStore(Protocol):
-    def presign_put(
-        self,
-        key: str,
-        *,
-        sha256: str,
-        size_bytes: int,
-        sensitivity: Sensitivity,
-        retention_class: str,
-        expires_in: int,
-    ) -> PresignedUpload: ...
+    def presign_put(self, request: PresignPutRequest) -> PresignedUpload: ...
 
 
 class _MaterializedUpload(NamedTuple):
@@ -131,12 +122,14 @@ def _materialize_uploads(
     for entry in entries:
         key = artifact_key(_TENANT, kind, str(owner_id), entry.name)
         presigned = store.presign_put(
-            key,
-            sha256=entry.sha256,
-            size_bytes=entry.size_bytes,
-            sensitivity=Sensitivity.SENSITIVE,
-            retention_class=_RETENTION_CLASS,
-            expires_in=expires_in,
+            PresignPutRequest(
+                key=key,
+                sha256=entry.sha256,
+                size_bytes=entry.size_bytes,
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class=_RETENTION_CLASS,
+                expires_in=expires_in,
+            )
         )
         uploads.append(_MaterializedUpload(entry, key, presigned))
     return uploads
@@ -233,15 +226,17 @@ async def _create_upload(
                     )
                     await upload_manifest.replace_manifest(
                         conn,
-                        owner_kind=spec.owner_kind,
-                        owner_id=uid,
-                        prefix=prefix,
-                        entries=entries,
-                        ttl=_upload_ttl(),
+                        upload_manifest.UploadManifestReplaceRequest(
+                            owner_kind=spec.owner_kind,
+                            owner_id=uid,
+                            prefix=prefix,
+                            entries=entries,
+                            ttl=_upload_ttl(),
+                        ),
                     )
             except CategorizedError as exc:
                 _log.warning("create_upload failed for %s %s: %s", spec.owner_kind, owner_id, exc)
-                return ToolResponse.failure(owner_id, exc.category)
+                return ToolResponse.failure_from_error(owner_id, exc)
 
     items = [_upload_response(upload, next_action=spec.next_action) for upload in uploads]
     return ToolResponse.collection(

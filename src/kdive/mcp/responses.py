@@ -15,12 +15,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job
 from kdive.domain.state import JobState
 
-# Literal next tool names by the job's state. Only `jobs.*` exist in M0; the
-# artifact-retrieval action joins the succeeded row when `artifacts.get` ships (#19).
+# Literal next tool names by the job's state.
 # See the design doc's suggested_next_actions table.
 _NEXT_ACTIONS: dict[JobState, list[str]] = {
     JobState.QUEUED: ["jobs.wait", "jobs.cancel"],
@@ -33,6 +32,9 @@ _NEXT_ACTIONS: dict[JobState, list[str]] = {
 # A response reports a failure under the job's `failed` lifecycle status or the
 # tool-level `error` status; both require an error category, all others forbid one.
 _FAILURE_STATUSES = frozenset({JobState.FAILED.value, "error"})
+
+JsonValue = str | int | float | bool | None | list[object] | dict[str, object]
+ResponseData = Mapping[str, object]
 
 
 def _validate_json_value(value: object, *, path: str) -> None:
@@ -53,6 +55,26 @@ def _validate_json_value(value: object, *, path: str) -> None:
             _validate_json_value(item, path=f"{path}.{key}")
         return
     raise ValueError(f"{path} contains non-JSON value {type(value).__name__}")
+
+
+def current_status_data(current_status: str) -> dict[str, JsonValue]:
+    return {"current_status": current_status}
+
+
+def reason_data(reason: str) -> dict[str, JsonValue]:
+    return {"reason": reason}
+
+
+def _safe_error_details(details: Mapping[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for key, value in details.items():
+        if isinstance(value, float):
+            if math.isfinite(value):
+                safe[key] = value
+            continue
+        if isinstance(value, (str, bool, int)):
+            safe[key] = value
+    return safe
 
 
 class ToolResponse(BaseModel):
@@ -96,7 +118,7 @@ class ToolResponse(BaseModel):
         *,
         suggested_next_actions: list[str] | None = None,
         refs: dict[str, str] | None = None,
-        data: Mapping[str, Any] | None = None,
+        data: ResponseData | None = None,
     ) -> ToolResponse:
         """Build a non-failure envelope.
 
@@ -120,7 +142,7 @@ class ToolResponse(BaseModel):
         *,
         suggested_next_actions: list[str] | None = None,
         refs: dict[str, str] | None = None,
-        data: Mapping[str, Any] | None = None,
+        data: ResponseData | None = None,
     ) -> ToolResponse:
         """Build one envelope for a collection-returning tool."""
         payload = dict(data or {})
@@ -141,7 +163,7 @@ class ToolResponse(BaseModel):
         category: ErrorCategory,
         *,
         suggested_next_actions: list[str] | None = None,
-        data: Mapping[str, Any] | None = None,
+        data: ResponseData | None = None,
     ) -> ToolResponse:
         return cls(
             object_id=object_id,
@@ -152,9 +174,28 @@ class ToolResponse(BaseModel):
         )
 
     @classmethod
+    def failure_from_error(
+        cls,
+        object_id: str,
+        exc: CategorizedError,
+        *,
+        category: ErrorCategory | None = None,
+        suggested_next_actions: list[str] | None = None,
+        data: ResponseData | None = None,
+    ) -> ToolResponse:
+        payload: dict[str, object] = _safe_error_details(exc.details)
+        payload.update(data or {})
+        return cls.failure(
+            object_id,
+            category or exc.category,
+            suggested_next_actions=suggested_next_actions,
+            data=payload,
+        )
+
+    @classmethod
     def from_job(cls, job: Job) -> ToolResponse:
         refs = {"result": job.result_ref} if job.result_ref else {}
-        data: dict[str, Any] = {"kind": job.kind.value}
+        data: dict[str, JsonValue] = {"kind": job.kind.value}
         if job.state is JobState.FAILED:
             data.update(job.failure_context)
         return cls(

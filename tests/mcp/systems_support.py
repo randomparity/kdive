@@ -21,10 +21,10 @@ from kdive.jobs.payloads import SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
-from kdive.providers.component_validation import ComponentSourceCapabilities
+from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import Role
-from kdive.services.resource_discovery import register_discovered_resource
+from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -67,6 +67,12 @@ PROVISIONING_PROFILE: dict[str, Any] = {
 
 def provisioning_profile() -> dict[str, Any]:
     return copy.deepcopy(PROVISIONING_PROFILE)
+
+
+def fault_inject_profile() -> dict[str, Any]:
+    profile = provisioning_profile()
+    profile["provider"] = {"fault-inject": {"capture_method": "host_dump"}}
+    return profile
 
 
 def upload_profile() -> dict[str, Any]:

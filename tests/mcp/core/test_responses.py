@@ -7,10 +7,10 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job, JobKind
 from kdive.domain.state import JobState
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import ToolResponse, current_status_data, reason_data
 from kdive.mcp.tools import _common
 
 _NOW = dt.datetime(2026, 6, 3, 12, 0, tzinfo=dt.UTC)
@@ -135,6 +135,50 @@ def test_failure_factory_sets_error_status_and_category() -> None:
     assert resp.error_category == "allocation_denied"
     assert resp.data == {"reason": "at_capacity"}
     assert resp.suggested_next_actions == []
+
+
+def test_common_detail_helpers_build_named_payloads() -> None:
+    assert reason_data("bad_id") == {"reason": "bad_id"}
+    assert current_status_data("released") == {"current_status": "released"}
+
+
+def test_failure_from_error_carries_safe_scalar_details() -> None:
+    exc = CategorizedError(
+        "bad component",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "field": "rootfs",
+            "retryable": False,
+            "attempt": 2,
+            "ratio": 1.5,
+            "nested": {"internal": "do not expose"},
+            "items": ["do", "not", "expose"],
+        },
+    )
+
+    resp = ToolResponse.failure_from_error("profile", exc, data={"reason": "invalid"})
+
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+    assert resp.data == {
+        "field": "rootfs",
+        "retryable": False,
+        "attempt": 2,
+        "ratio": 1.5,
+        "reason": "invalid",
+    }
+
+
+def test_failure_from_error_rejects_non_finite_float_detail() -> None:
+    exc = CategorizedError(
+        "bad component",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"ratio": float("inf")},
+    )
+
+    resp = ToolResponse.failure_from_error("profile", exc)
+
+    assert resp.data == {}
 
 
 def test_collection_factory_wraps_item_envelopes() -> None:

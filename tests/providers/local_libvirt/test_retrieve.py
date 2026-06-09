@@ -10,12 +10,11 @@ import pytest
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.providers.local_libvirt.retrieve import (
-    LocalLibvirtRetrieve,
-    crash_command_rejection_reason,
-)
+from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
+from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
-from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
+from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _ALLOW = frozenset({"bt", "log", "ps", "p", "rd"})
 
@@ -72,6 +71,7 @@ def _retriever(store: _FakeStore, *, core: bytes | None) -> LocalLibvirtRetrieve
         read_vmcore_build_id=lambda data: "deadbeef",
         extract_redacted=lambda data: b"dmesg: password=[REDACTED]",
         host_dump_capture=lambda _sid: pytest.fail("host_dump seam used on kdump path"),
+        secret_registry=SecretRegistry(),
     )
 
 
@@ -109,6 +109,7 @@ def _crash_retriever(*, observed_build_id: str, crash: CrashResult) -> LocalLibv
         read_vmcore_build_id=lambda data: observed_build_id,
         extract_redacted=lambda data: b"",
         host_dump_capture=lambda s: None,
+        secret_registry=SecretRegistry(),
         fetch_object=lambda ref: b"BYTES",
         run_crash=lambda vmlinux, vmcore, script: crash,
     )
@@ -138,6 +139,34 @@ def test_run_build_id_mismatch_is_configuration_error() -> None:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_run_rejects_bad_command_before_fetching_or_running_crash() -> None:
+    fetched: list[str] = []
+
+    retriever = LocalLibvirtRetrieve(
+        tenant=_TENANT,
+        store_factory=_FakeStore,
+        wait_for_vmcore=lambda s: None,
+        read_vmcore_build_id=lambda data: "deadbeef",
+        extract_redacted=lambda data: b"",
+        host_dump_capture=lambda s: None,
+        secret_registry=SecretRegistry(),
+        fetch_object=lambda ref: fetched.append(ref) or b"BYTES",
+        run_crash=lambda vmlinux, vmcore, script: pytest.fail("crash seam should not run"),
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        retriever.run_crash_postmortem(
+            vmcore_ref="v",
+            debuginfo_ref="d",
+            expected_build_id="deadbeef",
+            commands=["bt | sh"],
+        )
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["reason"] == "disallowed metacharacter '|'"
+    assert fetched == []
+
+
 def test_capture_host_dump_uses_dump_seam() -> None:
     store = _FakeStore()
     retr = LocalLibvirtRetrieve(
@@ -147,6 +176,7 @@ def test_capture_host_dump_uses_dump_seam() -> None:
         read_vmcore_build_id=lambda _b: "bid",
         extract_redacted=lambda _b: b"dmesg",
         host_dump_capture=lambda _sid: b"\x7fELFcore",
+        secret_registry=SecretRegistry(),
     )
     out = retr.capture(_SYS, CaptureMethod.HOST_DUMP)
     assert out.vmcore_build_id == "bid"

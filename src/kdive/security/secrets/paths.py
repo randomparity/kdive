@@ -1,10 +1,9 @@
 """Scoped path-safety for the file-ref secret backend (ADR-0027 §4).
 
-A scoped port of the PoC ``kdive.safety.paths``: only the single
-``confine_to_root`` primitive the file-ref backend needs is ported. The PoC's
-run-id / Linux-tree / external-artifact / ``vmlinux`` validators depend on modules
-out of scope for #25 (``SecretReference``, ``read_elf_build_id``, run-dir
-confinement) and return with the planes that own them.
+The file-ref backend needs one primitive: resolve a caller-provided path and prove
+it stays under an allowed root before any file read. Plane-specific validators live
+with the code that owns those input shapes; this module stays limited to generic
+filesystem containment and character-safety checks.
 """
 
 from __future__ import annotations
@@ -41,8 +40,8 @@ def confine_to_root(path: Path, *, allowed_root: Path) -> Path:
     lexically. Existence is **not** asserted here — the caller layers that check.
 
     The check is point-in-time: a TOCTOU window exists between confining a path and
-    any later use. For M0 this is bounded by worker-host filesystem trust (ADR-0012);
-    a caller that acts much later must re-confine.
+    any later use. This is bounded by worker-host filesystem trust (ADR-0012); a
+    caller that acts much later must re-confine.
 
     Operator contract: a confined path must not contain shell-control characters
     (``;|&`` `` ` `` ``$<>\``) or control characters. These are legal on a POSIX

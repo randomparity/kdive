@@ -15,6 +15,7 @@ import pytest
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
+from kdive.provider_components.artifacts import FetchedArtifact
 from kdive.providers.local_libvirt.lifecycle import install
 from kdive.providers.local_libvirt.lifecycle.install import (
     LocalLibvirtInstall,
@@ -23,7 +24,7 @@ from kdive.providers.local_libvirt.lifecycle.install import (
     _verdict_to_result,
     classify_console,
 )
-from kdive.store.objectstore import FetchedArtifact
+from kdive.providers.ports import InstallRequest
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
@@ -55,9 +56,10 @@ class _Readiness:
 
     answered: bool = True
     ok: bool = True
+    probe_error: str | None = None
 
     def readiness(self, system_id: UUID) -> ReadinessResult:
-        return ReadinessResult(answered=self.answered, ok=self.ok)
+        return ReadinessResult(answered=self.answered, ok=self.ok, probe_error=self.probe_error)
 
 
 def _existing_domain() -> FakeDomain:
@@ -89,13 +91,29 @@ def _install(
     )
 
 
+def _request(
+    *,
+    cmdline: str = _CMDLINE,
+    method: CaptureMethod = CaptureMethod.HOST_DUMP,
+    initrd_ref: str | None = None,
+) -> InstallRequest:
+    return InstallRequest(
+        system_id=_SYS,
+        run_id=_RUN,
+        kernel_ref=_KERNEL_REF,
+        cmdline=cmdline,
+        method=method,
+        initrd_ref=initrd_ref,
+    )
+
+
 # --- install: render + staging -------------------------------------------------------
 
 
 def test_install_redefines_direct_kernel_os(tmp_path: Path) -> None:
     conn = _conn_with_existing()
     inst = _install(conn=conn, staging_root=tmp_path)
-    inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE, initrd_ref=_INITRD_REF)
+    inst.install(_request(initrd_ref=_INITRD_REF))
 
     assert len(conn.defined_xml) == 1
     domain = ET.fromstring(conn.defined_xml[0])  # noqa: S314 - self-rendered, trusted
@@ -115,7 +133,7 @@ def test_install_stages_kernel_and_initrd_to_per_run_path(tmp_path: Path) -> Non
     conn = _conn_with_existing()
     fetch = _Fetch()
     inst = _install(conn=conn, fetch=fetch, staging_root=tmp_path)
-    inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE, initrd_ref=_INITRD_REF)
+    inst.install(_request(initrd_ref=_INITRD_REF))
 
     staged_dir = tmp_path / str(_SYS) / str(_RUN)
     assert (staged_dir / "kernel").exists()
@@ -129,7 +147,7 @@ def test_install_does_not_inject_xml_from_cmdline(tmp_path: Path) -> None:
     hostile = "crashkernel=256M </cmdline><evil/>"
     conn = _conn_with_existing()
     inst = _install(conn=conn, staging_root=tmp_path)
-    inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=hostile)
+    inst.install(_request(cmdline=hostile))
     domain = ET.fromstring(conn.defined_xml[0])  # noqa: S314 - self-rendered, trusted
     os_el = domain.find("os")
     assert os_el is not None and os_el.find("evil") is None  # not injected
@@ -146,7 +164,7 @@ def test_install_kdump_without_initrd_is_config_error_before_redefine(tmp_path: 
     conn = _conn_with_existing()
     inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
-        inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE, method=CaptureMethod.KDUMP)
+        inst.install(_request(method=CaptureMethod.KDUMP))
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert conn.defined_xml == []  # nothing redefined on a missing capture path
 
@@ -155,14 +173,7 @@ def test_install_kdump_with_initrd_proceeds(tmp_path: Path) -> None:
     # method=KDUMP with a staged initrd present: install proceeds and redefines once.
     conn = _conn_with_existing()
     inst = _install(conn=conn, staging_root=tmp_path)
-    inst.install(
-        _SYS,
-        _RUN,
-        _KERNEL_REF,
-        cmdline=_CMDLINE,
-        method=CaptureMethod.KDUMP,
-        initrd_ref=_INITRD_REF,
-    )
+    inst.install(_request(method=CaptureMethod.KDUMP, initrd_ref=_INITRD_REF))
     assert len(conn.defined_xml) == 1  # redefined once, no CONFIGURATION_ERROR raised
 
 
@@ -173,7 +184,7 @@ def test_install_definexml_error_is_install_failure(tmp_path: Path) -> None:
     conn = _conn_with_existing(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
-        inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE)
+        inst.install(_request())
     assert caught.value.category is ErrorCategory.INSTALL_FAILURE
 
 
@@ -182,7 +193,7 @@ def test_install_fetch_failure_leaves_no_final_file(tmp_path: Path) -> None:
     fetch = _Fetch(fail=True)
     inst = _install(conn=conn, fetch=fetch, staging_root=tmp_path)
     with pytest.raises(CategorizedError):
-        inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE)
+        inst.install(_request())
     staged_dir = tmp_path / str(_SYS) / str(_RUN)
     assert not (staged_dir / "kernel").exists()  # rename never happened
 
@@ -218,6 +229,19 @@ def test_boot_never_answered_is_boot_timeout(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as caught:
         inst.boot(_SYS)
     assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
+
+
+def test_boot_timeout_includes_first_readiness_probe_error(tmp_path: Path) -> None:
+    domain = _domain()
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    seam = _Readiness(answered=False, probe_error="virsh domstate timed out after 2s")
+    inst = _install(conn=conn, seam=seam, staging_root=tmp_path)
+
+    with pytest.raises(CategorizedError) as caught:
+        inst.boot(_SYS)
+
+    assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
+    assert caught.value.details["probe_error"] == "virsh domstate timed out after 2s"
 
 
 def test_boot_answered_but_failed_is_readiness_failure(tmp_path: Path) -> None:
@@ -300,9 +324,7 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
         staging_root=tmp_path,
     )
     # CONSOLE + no initrd_ref: no initrd fetched, no <initrd> rendered.
-    installer.install(
-        _SYS, _RUN, _KERNEL_REF, cmdline="console=ttyS0", method=CaptureMethod.CONSOLE
-    )
+    installer.install(_request(cmdline="console=ttyS0", method=CaptureMethod.CONSOLE))
     assert len(conn.defined_xml) == 1
     domain = ET.fromstring(conn.defined_xml[0])  # noqa: S314 - self-rendered, trusted
     os_el = domain.find("os")
@@ -387,7 +409,7 @@ def test_install_categorizes_staging_mkdir_failure(tmp_path: Path) -> None:
     inst = _install(conn=_conn_with_existing(), staging_root=tmp_path)
 
     with pytest.raises(CategorizedError) as excinfo:
-        inst.install(_SYS, _RUN, _KERNEL_REF, cmdline=_CMDLINE, initrd_ref=_INITRD_REF)
+        inst.install(_request(initrd_ref=_INITRD_REF))
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert excinfo.value.details["op"] == "mkdir"
@@ -504,7 +526,7 @@ def test_real_readiness_treats_missing_domain_as_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(install, "read_console_log", lambda path: b"")
-    monkeypatch.setattr(install, "_domain_exited", lambda name: True)
+    monkeypatch.setattr(install, "_domain_exit_probe", lambda name: install._DomainExitProbe(True))
 
     result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
@@ -526,6 +548,22 @@ def test_domain_exited_treats_missing_kdive_domain_as_terminal(
     monkeypatch.setattr(install.subprocess, "run", domstate_missing)
 
     assert install._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is True
+
+
+def test_real_readiness_reports_domstate_probe_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def domstate_timeout(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(["virsh"], timeout=2)
+
+    monkeypatch.setattr(install, "read_console_log", lambda path: b"")
+    monkeypatch.setattr(install.time, "sleep", lambda _: None)
+    monkeypatch.setattr(install.subprocess, "run", domstate_timeout)
+
+    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+
+    assert result.answered is False
+    assert result.probe_error == "virsh domstate timed out after 2s"
 
 
 def test_crash_fixture_classifies_crashed() -> None:

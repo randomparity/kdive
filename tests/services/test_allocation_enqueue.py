@@ -24,15 +24,23 @@ from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.cost import Selector
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
+from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
-from kdive.services.allocation_admission import AllocationRequest, admit
+from kdive.services.allocation.admission import AllocationRequest, admit
 from tests.db_waits import wait_until_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 CTX = RequestContext(principal="alice", agent_session="s", projects=("proj",))
 SEL = Selector(vcpus=1, memory_gb=0, cost_class="local")
+_X710 = PCIeDescriptor(
+    bdf="0000:3b:00.0",
+    vendor_id="8086",
+    device_id="1572",
+    class_code="020000",
+    label="x710",
+)
 
 
 @asynccontextmanager
@@ -49,7 +57,8 @@ def _request(
     *,
     on_capacity: Literal["deny", "queue"] = "queue",
     idempotency_key: str | None = None,
-    requested_kind: str | None = "local-libvirt",
+    requested_kind: ResourceKind | None = ResourceKind.LOCAL_LIBVIRT,
+    pcie_specs: tuple[str, ...] = (),
 ) -> AllocationRequest:
     return AllocationRequest(
         ctx=CTX,
@@ -61,11 +70,20 @@ def _request(
         idempotency_key=idempotency_key,
         disk_gb=10,
         requested_kind=requested_kind,
-        pcie_specs=(),
+        pcie_specs=pcie_specs,
     )
 
 
-async def _seed_resource(conn: psycopg.AsyncConnection, *, cap: int) -> Resource:
+async def _seed_resource(
+    conn: psycopg.AsyncConnection, *, cap: int, pcie: list[PCIeDescriptor] | None = None
+) -> Resource:
+    capabilities: dict[str, object] = {
+        CONCURRENT_ALLOCATION_CAP_KEY: cap,
+        "vcpus": 64,
+        "memory_mb": 65536,
+    }
+    if pcie is not None:
+        capabilities[PCIE_DEVICES_KEY] = pcie
     return await RESOURCES.insert(
         conn,
         Resource(
@@ -73,7 +91,7 @@ async def _seed_resource(conn: psycopg.AsyncConnection, *, cap: int) -> Resource
             created_at=_DT,
             updated_at=_DT,
             kind=ResourceKind.LOCAL_LIBVIRT,
-            capabilities={CONCURRENT_ALLOCATION_CAP_KEY: cap, "vcpus": 64, "memory_mb": 65536},
+            capabilities=capabilities,
             pool="local-libvirt",
             cost_class="local",
             status=ResourceStatus.AVAILABLE,
@@ -105,7 +123,12 @@ async def _seed_quota(
     )
 
 
-async def _seed_granted(conn: psycopg.AsyncConnection, resource_id: UUID) -> Allocation:
+async def _seed_granted(
+    conn: psycopg.AsyncConnection,
+    resource_id: UUID,
+    *,
+    pcie_claim: list[PCIeClaim] | None = None,
+) -> Allocation:
     return await ALLOCATIONS.insert(
         conn,
         Allocation(
@@ -116,6 +139,7 @@ async def _seed_granted(conn: psycopg.AsyncConnection, resource_id: UUID) -> All
             project="proj",
             resource_id=resource_id,
             state=AllocationState.GRANTED,
+            pcie_claim=pcie_claim or [],
         ),
     )
 
@@ -149,7 +173,7 @@ def test_host_cap_denial_with_queue_enqueues_a_requested_row(migrated_url: str) 
             # Request inputs persisted to re-admit (#165).
             assert alloc.requested_vcpus == 1
             assert alloc.requested_disk_gb == 10
-            assert alloc.requested_kind == "local-libvirt"
+            assert alloc.requested_kind is ResourceKind.LOCAL_LIBVIRT
             # No reserve: the ledger holds nothing for a queued row (only the seeded grant
             # was inserted directly, never via accounting, so the ledger is empty).
             assert await _count_ledger(conn) == 0
@@ -169,6 +193,28 @@ def test_grant_quota_denial_with_queue_enqueues(migrated_url: str) -> None:
             assert outcome.granted is True
             assert outcome.allocation is not None
             assert outcome.allocation.state is AllocationState.REQUESTED
+
+    asyncio.run(_run())
+
+
+def test_pcie_capacity_denial_with_queue_enqueues(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn, cap=10, pcie=[_X710])
+            await _seed_quota(conn)
+            await _seed_granted(
+                conn,
+                res.id,
+                pcie_claim=[PCIeClaim(bdf="0000:3b:00.0", vendor_id="8086", device_id="1572")],
+            )
+            outcome = await admit(conn, _request(res, pcie_specs=("8086:1572",)))
+            assert outcome.granted is True
+            alloc = outcome.allocation
+            assert alloc is not None
+            assert alloc.state is AllocationState.REQUESTED
+            assert alloc.resource_id is None
+            assert alloc.pcie_claim == []
+            assert await _count_ledger(conn) == 0
 
     asyncio.run(_run())
 

@@ -11,7 +11,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload
+from kdive.domain.models import ResourceKind
+from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload, ResourceByKind
 
 
 def test_shape_only_is_valid() -> None:
@@ -26,6 +27,21 @@ def test_full_custom_triple_is_valid() -> None:
     payload = AllocationRequestPayload.model_validate({"vcpus": 2, "memory_gb": 4, "disk_gb": 20})
     assert payload.shape is None
     assert (payload.vcpus, payload.memory_gb, payload.disk_gb) == (2, 4, 20)
+
+
+def test_by_kind_selector_uses_resource_kind_enum() -> None:
+    payload = AllocationRequestPayload.model_validate({"shape": "medium"})
+    assert isinstance(payload.resource, ResourceByKind)
+    assert payload.resource.kind is ResourceKind.LOCAL_LIBVIRT
+
+    explicit = AllocationRequestPayload.model_validate(
+        {
+            "shape": "medium",
+            "resource": {"mode": "kind", "kind": "fault-inject"},
+        }
+    )
+    assert isinstance(explicit.resource, ResourceByKind)
+    assert explicit.resource.kind is ResourceKind.FAULT_INJECT
 
 
 def test_shape_and_custom_together_is_rejected() -> None:

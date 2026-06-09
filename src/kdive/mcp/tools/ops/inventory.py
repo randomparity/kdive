@@ -1,4 +1,4 @@
-"""The ``inventory.list`` auditor-read tool (ADR-0062 §6, #141).
+"""The ``inventory.list`` auditor-read tool (ADR-0062 §6).
 
 A cross-project systems/allocations summary (host, status, project, lifecycle state) —
 the fleet-wide view the operator uses to confirm a drain has emptied a host. Gated
@@ -51,7 +51,7 @@ async def list_inventory(
         try:
             resource_uuid = _parse_resource_id(resource_id)
         except CategorizedError as exc:
-            return ToolResponse.failure(_OBJECT_ID, exc.category, suggested_next_actions=[_TOOL])
+            return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
         args = _audit_args(project, resource_uuid)
         try:
             require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)

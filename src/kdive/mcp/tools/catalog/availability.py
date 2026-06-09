@@ -1,4 +1,4 @@
-"""The `resources.availability` fleet read (M1.4 issue #163, ADR-0070).
+"""The `resources.availability` fleet read (ADR-0070).
 
 A `viewer` aggregate over the fleet: per host it reports the free capacity headroom, the
 free PCIe devices, and the shapes that fit **now**; at fleet/kind granularity it reports
@@ -8,7 +8,7 @@ scheduler path stays the authority (ADR-0070).
 
 Headroom uses the **same occupancy predicate as admission** — :data:`OCCUPYING` (the
 `GRANTED/ACTIVE/RELEASING` states, ADR-0069), imported from
-:mod:`kdive.services.allocation_admission` so the two reads can never disagree; a queued
+:mod:`kdive.services.allocation.admission` so the two reads can never disagree; a queued
 `requested` row holds only a queue position and is excluded. Availability is
 **schedulability-aware**: a `cordoned`, non-`available`, or invalid-cap host is flagged
 non-schedulable and never counts as "fits now", so the view never points the agent at a
@@ -47,8 +47,8 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.services import pcie_claim
-from kdive.services.allocation_admission import OCCUPYING_VALUES
+from kdive.services.allocation import pcie_claim
+from kdive.services.allocation.admission import OCCUPYING_VALUES
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext
@@ -266,7 +266,7 @@ async def availability_tool(
         try:
             parse_match_spec(pcie)
         except CategorizedError as exc:
-            return ToolResponse.failure(_TOOL, exc.category, suggested_next_actions=[_TOOL])
+            return ToolResponse.failure_from_error(_TOOL, exc, suggested_next_actions=[_TOOL])
     # One REPEATABLE READ transaction so the whole aggregate reflects a single snapshot:
     # without it a grant committing mid-read could be counted in occupancy but its device
     # still read as free (or vice-versa). The view is a point-in-time hint either way, but a
@@ -277,7 +277,7 @@ async def availability_tool(
             try:
                 shapes = await _resolve_shapes(conn, shape)
             except CategorizedError as exc:
-                return ToolResponse.failure(_TOOL, exc.category, suggested_next_actions=[_TOOL])
+                return ToolResponse.failure_from_error(_TOOL, exc, suggested_next_actions=[_TOOL])
             resources = await _fetch_resources(conn)
             occupancy = await _occupancy_by_resource(conn)
             claims = await _claims_by_resource(conn)

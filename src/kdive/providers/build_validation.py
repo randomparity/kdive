@@ -6,11 +6,11 @@ import struct
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from kdive.components.requirements import ConfigRequirements, validate_config_requirements
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.provider_components.artifacts import HeadResult
+from kdive.provider_components.requirements import ConfigRequirements, validate_config_requirements
+from kdive.provider_components.uploads import ManifestEntry
 from kdive.providers.ports import BuildOutput, ValidatedUpload
-from kdive.store.objectstore import HeadResult
 
 _NT_GNU_BUILD_ID = 3
 _ELF_MAGIC = b"\x7fELF"

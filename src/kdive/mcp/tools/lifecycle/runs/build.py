@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Protocol
+from dataclasses import dataclass
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -13,13 +12,9 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.components.catalog import load_fixture_catalog
-from kdive.components.references import ComponentRef
-from kdive.components.requirements import ConfigRequirements
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job, JobKind, Run, Sensitivity
 from kdive.domain.state import RunState
@@ -35,26 +30,33 @@ from kdive.mcp.tools.lifecycle.runs.common import (
     run_job_envelope,
 )
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
-from kdive.providers.build_validation import validate_external_artifacts
-from kdive.providers.component_validation import (
-    CONFIG_COMPONENT,
+from kdive.provider_components.artifacts import HeadResult, StoredArtifact
+from kdive.provider_components.catalog import load_fixture_catalog
+from kdive.provider_components.references import CONFIG_COMPONENT, ComponentRef
+from kdive.provider_components.requirements import ConfigRequirements
+from kdive.provider_components.uploads import ManifestEntry
+from kdive.provider_components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
+from kdive.providers.build_validation import ValidatorStore, validate_external_artifacts
 from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.run_steps import BuildStepResult, platform_owned_cmdline_token
-from kdive.services.run_steps import existing_build_result as _existing_build_result
+from kdive.services.runs.steps import BuildStepResult, platform_owned_cmdline_token
+from kdive.services.runs.steps import existing_build_result as _existing_build_result
 from kdive.store.objectstore import (
-    HeadResult,
-    StoredArtifact,
     object_store_from_env,
     register_artifact_row,
 )
 
 type ConfigValidator = Callable[[ComponentRef], None]
+type CompleteBuildValidation = Callable[
+    [Sequence[ManifestEntry], Mapping[str, str], str | None, ConfigRequirements | None],
+    ValidatedUpload,
+]
+type ObjectStoreFactory = Callable[[], ValidatorStore]
 
 
 async def _build_locked(
@@ -103,47 +105,14 @@ async def _enqueue_build(
     )
 
 
-class CompleteBuildValidator(Protocol):
-    """Validator seam for external build uploads."""
-
-    def validate(
-        self,
-        *,
-        manifest: Sequence[ManifestEntry],
-        keys: Mapping[str, str],
-        declared_build_id: str | None,
-        profile_requirements: ConfigRequirements | None = None,
-    ) -> ValidatedUpload: ...
-
-
-class StoreBackedValidator:
-    """Default validator: builds an ObjectStore from env and runs the provider validator."""
-
-    def validate(
-        self,
-        *,
-        manifest: Sequence[ManifestEntry],
-        keys: Mapping[str, str],
-        declared_build_id: str | None,
-        profile_requirements: ConfigRequirements | None = None,
-    ) -> ValidatedUpload:
-        store = object_store_from_env()
-        return validate_external_artifacts(
-            store,
-            manifest=manifest,
-            keys=keys,
-            declared_build_id=declared_build_id,
-            profile_requirements=profile_requirements,
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class RunBuildHandlers:
     """Handlers with provider validation seams bound by the registrar or test fixture."""
 
     component_sources: ComponentSourceCapabilities
     config_validator: ConfigValidator | None = None
-    complete_validator: CompleteBuildValidator = field(default_factory=StoreBackedValidator)
+    validate_complete_build: CompleteBuildValidation | None = None
+    object_store_factory: ObjectStoreFactory = object_store_from_env
 
     async def build_run(
         self,
@@ -171,7 +140,7 @@ class RunBuildHandlers:
                 try:
                     parsed = BuildProfile.parse(run.build_profile)
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
+                    return ToolResponse.failure_from_error(run_id, exc)
                 if parsed.source != "server":
                     return _config_error(
                         run_id, data={"reason": "external_source_uses_complete_build"}
@@ -183,12 +152,12 @@ class RunBuildHandlers:
                         ref=parsed.config,
                     )
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
+                    return ToolResponse.failure_from_error(run_id, exc)
                 if self.config_validator is not None:
                     try:
                         self.config_validator(parsed.config)
                     except CategorizedError as exc:
-                        return ToolResponse.failure(run_id, exc.category)
+                        return ToolResponse.failure_from_error(run_id, exc)
                 return await _build_locked(conn, ctx, run, cmdline)
 
     async def complete_build(
@@ -223,8 +192,8 @@ class RunBuildHandlers:
                 try:
                     profile = _external_build_profile(run)
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
-                guard = _complete_build_guard(run, profile)
+                    return ToolResponse.failure_from_error(run_id, exc)
+                guard = _created_run_guard(run)
                 if guard is not None:
                     return guard
 
@@ -236,18 +205,37 @@ class RunBuildHandlers:
                 try:
                     requirements = _external_config_requirements(profile)
                     validated = await asyncio.to_thread(
-                        self.complete_validator.validate,
-                        manifest=list(manifest_row.entries),
-                        keys=keys,
-                        declared_build_id=build_id,
-                        profile_requirements=requirements,
+                        self._validate_complete_build,
+                        list(manifest_row.entries),
+                        keys,
+                        build_id,
+                        requirements,
                     )
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
+                    return ToolResponse.failure_from_error(run_id, exc)
 
                 return await _finalize_external_build(
                     conn, ctx, run, validated.output, cmdline, keys, validated.heads
                 )
+
+    def _validate_complete_build(
+        self,
+        manifest: Sequence[ManifestEntry],
+        keys: Mapping[str, str],
+        declared_build_id: str | None,
+        profile_requirements: ConfigRequirements | None,
+    ) -> ValidatedUpload:
+        if self.validate_complete_build is not None:
+            return self.validate_complete_build(
+                manifest, keys, declared_build_id, profile_requirements
+            )
+        return validate_external_artifacts(
+            self.object_store_factory(),
+            manifest=manifest,
+            keys=keys,
+            declared_build_id=declared_build_id,
+            profile_requirements=profile_requirements,
+        )
 
 
 def _external_build_profile(run: Run) -> ExternalBuildProfile:
@@ -260,9 +248,8 @@ def _external_build_profile(run: Run) -> ExternalBuildProfile:
     return parsed
 
 
-def _complete_build_guard(run: Run, profile: ExternalBuildProfile) -> ToolResponse | None:
-    """Reject a non-external or non-CREATED Run; ``None`` means proceed to finalize."""
-    _ = profile
+def _created_run_guard(run: Run) -> ToolResponse | None:
+    """Reject a non-CREATED Run; ``None`` means proceed to finalize."""
     if run.state is not RunState.CREATED:
         return _config_error(str(run.id), data={"current_status": run.state.value})
     return None

@@ -6,7 +6,7 @@ from typing import NamedTuple, Protocol
 from uuid import UUID
 
 from kdive.domain.capture import CaptureMethod
-from kdive.store.objectstore import StoredArtifact
+from kdive.provider_components.artifacts import StoredArtifact
 
 
 class CaptureOutput(NamedTuple):
@@ -43,7 +43,8 @@ class Retriever(Protocol):
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for build-id provenance mismatch or
                 invalid capture input, ``MISSING_DEPENDENCY`` for unavailable provider/store
-                seams, or ``READINESS_FAILURE`` when no complete vmcore is available.
+                seams, ``READINESS_FAILURE`` when no complete vmcore is available, or
+                ``INFRASTRUCTURE_FAILURE`` for object-store IO failures.
         """
         ...
 

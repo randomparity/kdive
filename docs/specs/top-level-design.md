@@ -206,11 +206,15 @@ Providers are the extension seam.
 ### Current status
 
 In M0/M1 the production seam is
-`ProviderRuntime`: startup builds typed ports for the active provider
+`ProviderRuntime`: startup builds typed ports for each configured provider
 (`Provisioner`, `Builder`, `Installer`, `Controller`, `Retriever`, debug and
 introspection ports) and passes those ports to MCP tool registrars and worker
-handlers. The only concrete provider today is local-libvirt; composition is
-centralized in `src/kdive/providers/composition.py`.
+handlers. Production defaults to the local-libvirt runtime; fault-inject is also a
+concrete provider, enabled only by explicit profiles for test and failure-path coverage.
+Runtime selection flows through `ProviderResolver`, so tools and handlers resolve the
+provider attached to the Allocation or System instead of assuming local-libvirt. Future
+providers still extend this typed runtime seam. Composition is centralized in
+`src/kdive/providers/composition.py`.
 
 The capability registry from ADR-0009/ADR-0022 is historical design context, not an
 in-tree prototype or the live dispatch path. It is not used for job routing,

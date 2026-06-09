@@ -28,15 +28,16 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Job, JobKind
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
-from kdive.jobs.payloads import BuildPayload, CaptureVmcorePayload
+from kdive.jobs.handlers import runs as runs_handlers
+from kdive.jobs.handlers import vmcore as vmcore_plane
+from kdive.jobs.payloads import Authorizing, BuildPayload, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts_reads import artifacts_get, artifacts_list
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
-from kdive.planes import runs as runs_handlers
-from kdive.planes import vmcore as vmcore_plane
 from kdive.providers.ports import BuildOutput, CaptureOutput, CrashOutput
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (
     seed_crashed_system_with_run,
     seed_granted_allocation,
@@ -45,7 +46,7 @@ from tests.integration._seed import (
 )
 from tests.integration.conftest import open_pool, request_context
 
-_AUTH = {"principal": "user-1", "agent_session": "sess-1", "project": "proj"}
+_AUTH = Authorizing(principal="user-1", agent_session="sess-1", project="proj")
 
 
 def _admin_ctx() -> RequestContext:
@@ -79,7 +80,7 @@ class _SecretBearingRetriever:
 
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
         from kdive.domain.models import Sensitivity
-        from kdive.store.objectstore import StoredArtifact
+        from kdive.provider_components.artifacts import StoredArtifact
 
         self.calls += 1
         raw = StoredArtifact(
@@ -249,9 +250,12 @@ def test_planted_secret_is_redacted(migrated_url: str) -> None:
             job = await _enqueue_capture(pool, sys_id)
             async with pool.connection() as conn:
                 await vmcore_plane.capture_handler(conn, job, _SecretBearingRetriever(sys_id))
+            secret_registry = SecretRegistry()
+            secret_registry.register(_SecretBearingCrash.PLANTED_SECRET, scope="test")
             handlers = vmcore_tools.VmcoreHandlers(
                 supported_methods=frozenset({CaptureMethod.HOST_DUMP}),
                 crash=_SecretBearingCrash(),
+                secret_registry=secret_registry,
             )
             resp = await handlers.postmortem_crash(
                 pool,

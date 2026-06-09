@@ -6,12 +6,17 @@ the Run's `debuginfo_ref` (the build-plane `vmlinux`), the build plane's recorde
 `mcp.tools._vmcore_targets` helper. It then runs the `VmcoreIntrospector` port and returns the
 **already-redacted** report (the port is the single redaction boundary, ADR-0033 §6) as
 structured data in `data["report"]`.
+
+Real drgn is an operator-provided live-host prerequisite. Normal service startup leaves the
+drgn-backed seams disabled; the live runner injects them only on hosts prepared for
+``live_vm`` debugging.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, NamedTuple
+from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
@@ -19,7 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import DEBUG_SESSIONS
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.state import DebugSessionState
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -27,9 +32,10 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target
 from kdive.providers.ports import LiveIntrospector, VmcoreIntrospector
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 
@@ -51,12 +57,15 @@ async def introspect_from_vmcore(
     Requires the viewer role. A Run with a null `debuginfo_ref`, no recorded `build` step, or a
     System with no captured core is a `configuration_error`; a provenance mismatch or a drgn
     open/decode fault surfaces as the port's typed `CategorizedError` category, never a 500.
+    Off a prepared live host, the provider seam reports ``missing_dependency`` instead of
+    importing drgn.
     """
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
-        if isinstance(resolved, ToolResponse):
-            return resolved
+            try:
+                resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(run_id, exc)
         try:
             output = await asyncio.to_thread(
                 introspector.from_vmcore,
@@ -65,7 +74,7 @@ async def introspect_from_vmcore(
                 expected_build_id=resolved.build_id,
             )
         except CategorizedError as exc:
-            return ToolResponse.failure(run_id, exc.category)
+            return ToolResponse.failure_from_error(run_id, exc)
         report = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
         return ToolResponse.success(
             run_id,
@@ -75,26 +84,41 @@ async def introspect_from_vmcore(
         )
 
 
-async def _live_ssh_session(
+class LiveSshSession(NamedTuple):
+    """The resolved inputs needed to run live ssh introspection."""
+
+    project: str
+    transport_handle: str
+    session_id: UUID
+
+
+async def resolve_live_ssh_session(
     conn: AsyncConnection, ctx: RequestContext, session_id: str
-) -> tuple[str, str] | ToolResponse:
-    """Resolve a `live` ssh DebugSession, returning its (project, transport_handle), or a failure.
+) -> LiveSshSession:
+    """Resolve a `live` ssh DebugSession to the domain inputs required by the port.
 
     Gates on UUID shape, project scope, ``operator`` role, ``live`` state, and an ``ssh``
     transport (a live `introspect.run` requires the ssh transport, not gdbstub; ADR-0039 §4).
     """
     uid = _as_uuid(session_id)
     if uid is None:
-        return _config_error(session_id)
+        raise _session_config_error()
     session = await DEBUG_SESSIONS.get(conn, uid)
     if session is None or session.project not in ctx.projects:
-        return _config_error(session_id)
+        raise _session_config_error()
     require_role(ctx, session.project, Role.OPERATOR)
     if session.state is not DebugSessionState.LIVE or session.transport != _SSH:
-        return _config_error(session_id)
+        raise _session_config_error()
     if session.transport_handle is None:
-        return _config_error(session_id)
-    return session.project, session.transport_handle
+        raise _session_config_error()
+    return LiveSshSession(session.project, session.transport_handle, uid)
+
+
+def _session_config_error() -> CategorizedError:
+    return CategorizedError(
+        "debug session does not resolve to a live ssh session",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+    )
 
 
 async def introspect_run(
@@ -111,44 +135,62 @@ async def introspect_run(
     in-tree helpers — there is no caller-supplied drgn script. The port is the single redaction
     boundary, so the returned report is already masked; the raw drgn-over-ssh transcript is
     ``sensitive`` and is never returned (the response only advertises that, ADR-0039 §2/§3).
+    Off a prepared live host, the provider seam reports ``missing_dependency`` instead of
+    importing drgn.
     """
     if helper not in _LIVE_HELPERS:
         return _config_error(session_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            resolved = await _live_ssh_session(conn, ctx, session_id)
-        if isinstance(resolved, ToolResponse):
-            return resolved
-        _project, transport_handle = resolved
-        try:
-            output = await asyncio.to_thread(
-                introspector.introspect_live, transport_handle=transport_handle, helper=helper
-            )
-        except CategorizedError as exc:
-            return ToolResponse.failure(session_id, exc.category)
-        sections = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
-        report = {helper: sections[helper]}
-        return ToolResponse.success(
+            try:
+                resolved = await resolve_live_ssh_session(conn, ctx, session_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(session_id, exc)
+        return await _introspect_live_session(
             session_id,
-            "succeeded",
-            suggested_next_actions=["introspect.run", "debug.end_session"],
-            data={
-                "report": report,
-                "truncated": str(output.truncated).lower(),
-                "transcript_sensitivity": "sensitive",
-            },
+            resolved=resolved,
+            helper=helper,
+            introspector=introspector,
         )
 
 
+async def _introspect_live_session(
+    response_id: str,
+    *,
+    resolved: LiveSshSession,
+    helper: str,
+    introspector: LiveIntrospector,
+) -> ToolResponse:
+    if helper not in _LIVE_HELPERS:
+        return _config_error(response_id)
+    try:
+        output = await asyncio.to_thread(
+            introspector.introspect_live,
+            transport_handle=resolved.transport_handle,
+            helper=helper,
+        )
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(response_id, exc)
+    sections = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
+    report = {helper: sections[helper]}
+    return ToolResponse.success(
+        response_id,
+        "succeeded",
+        suggested_next_actions=["introspect.run", "debug.end_session"],
+        data={
+            "report": report,
+            "truncated": str(output.truncated).lower(),
+            "transcript_sensitivity": "sensitive",
+        },
+    )
+
+
 def register(
-    app: FastMCP, pool: AsyncConnectionPool, *, provider_runtime: ProviderRuntime | None = None
+    app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver | None = None
 ) -> None:
     """Register the `introspect.from_vmcore` and `introspect.run` tools on ``app``."""
-    if provider_runtime is None:
-        raise RuntimeError("introspect registrar requires an injected provider runtime")
-    runtime = provider_runtime
-    introspector = runtime.vmcore_introspector
-    live_introspector = runtime.live_introspector
+    if resolver is None:
+        raise RuntimeError("introspect registrar requires an injected provider resolver")
 
     @app.tool(
         name="introspect.from_vmcore",
@@ -157,12 +199,25 @@ def register(
     )
     async def introspect_from_vmcore_tool(
         run_id: Annotated[
-            str, Field(description="The Run whose captured core to introspect with drgn.")
+            str,
+            Field(
+                description=(
+                    "The Run whose captured core to introspect with operator-provided drgn."
+                )
+            ),
         ],
     ) -> ToolResponse:
         """Run offline drgn introspection over a Run's captured core; returns redacted report."""
-        return await introspect_from_vmcore(
-            pool, current_context(), run_id=run_id, introspector=introspector
+        return await with_runtime_for_run(
+            pool,
+            resolver,
+            run_id,
+            lambda runtime: introspect_from_vmcore(
+                pool,
+                current_context(),
+                run_id=run_id,
+                introspector=runtime.vmcore_introspector,
+            ),
         )
 
     @app.tool(
@@ -174,14 +229,28 @@ def register(
         session_id: Annotated[str, Field(description="A live ssh DebugSession to introspect.")],
         helper: Annotated[
             str,
-            Field(description="In-tree drgn helper to run: tasks, modules, or sysinfo."),
+            Field(
+                description=(
+                    "In-tree drgn helper to run with operator-provided drgn: tasks, modules, "
+                    "or sysinfo."
+                )
+            ),
         ],
     ) -> ToolResponse:
         """Run live drgn introspection over a live ssh DebugSession. Requires operator."""
-        return await introspect_run(
-            pool,
-            current_context(),
-            session_id=session_id,
+        async with pool.connection() as conn:
+            try:
+                resolved = await resolve_live_ssh_session(conn, current_context(), session_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(session_id, exc)
+        async with pool.connection() as conn:
+            try:
+                runtime = await resolver.runtime_for_session(conn, resolved.session_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(session_id, exc)
+        return await _introspect_live_session(
+            session_id,
+            resolved=resolved,
             helper=helper,
-            introspector=live_introspector,
+            introspector=runtime.live_introspector,
         )

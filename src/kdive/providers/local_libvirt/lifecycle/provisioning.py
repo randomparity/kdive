@@ -10,7 +10,7 @@ The domain XML is *constructed* with `xml.etree.ElementTree` (no string interpol
 profile value cannot inject XML; no untrusted-input parse here, so no XXE surface). It renders
 the domain shell, the rootfs disk, and the metadata tag — no `<kernel>`/`<cmdline>`: libvirt
 ignores `<os><cmdline>` without a `<kernel>` element, and the test kernel plus its
-`crashkernel=` kdump reservation are the install/boot plane's (#17).
+`crashkernel=` kdump reservation are the install/boot plane's.
 """
 
 from __future__ import annotations
@@ -38,6 +38,10 @@ from kdive.profiles.provisioning import (
     validate_profile as _validate_profile,
 )
 from kdive.providers.local_libvirt.discovery import _KDIVE_METADATA_NS
+from kdive.providers.local_libvirt.lifecycle.constants import (
+    DEFAULT_LIBVIRT_URI,
+    LIBVIRT_URI_ENV,
+)
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     RootfsMaterializationContext,
     RootfsUploadContext,
@@ -47,11 +51,8 @@ from kdive.providers.runtime_paths import console_log_path, domain_name_for
 
 _log = logging.getLogger(__name__)
 
-_URI_ENV = "KDIVE_LIBVIRT_URI"
-_DEFAULT_URI = "qemu:///system"
 _DEFAULT_MACHINE = "q35"
 _ROOTFS_DIR = "/var/lib/kdive/rootfs"
-_ROOTFS_CACHE_DIR = f"{_ROOTFS_DIR}/cache"
 _QEMU_IMG_TIMEOUT_S = 5 * 60
 
 
@@ -128,7 +129,7 @@ def render_domain_xml(system_id: UUID, profile: ProvisioningProfile, *, disk_pat
 
     Renders the domain shell, the rootfs disk, the always-on serial console with a ``<log>``
     tee to ``_CONSOLE_DIR``, and the kdive metadata tag — no ``<kernel>``/``<cmdline>`` (the
-    kdump ``crashkernel=`` reservation is the install/boot plane's, #17, and is inert without a
+    kdump ``crashkernel=`` reservation is the install/boot plane's and is inert without a
     ``<kernel>`` element). ``disk_path`` is explicit so rootfs materialization policy stays in
     the materialization plane; production passes the per-System overlay (ADR-0060).
     """
@@ -307,29 +308,19 @@ class LocalLibvirtProvisioning:
         self,
         *,
         connect: Connect,
-        make_overlay: MakeOverlay = _real_make_overlay,
-        remove_overlay: RemoveOverlay = _real_remove_overlay,
-        overlay_exists: OverlayExists = _real_overlay_exists,
+        files: ProvisioningFiles | None = None,
         allowed_roots: list[Path] | None = None,
-        cache_dir: Path = Path(_ROOTFS_CACHE_DIR),
         materialize_rootfs: MaterializeRootfs | None = None,
-        prepare_console_log: PrepareConsoleLog = _prepare_console_log,
     ) -> None:
         self._connect = connect
-        self._files = ProvisioningFiles(
-            make_overlay=make_overlay,
-            remove_overlay=remove_overlay,
-            overlay_exists=overlay_exists,
-            prepare_console_log=prepare_console_log,
-        )
+        self._files = files or ProvisioningFiles()
         self._allowed_roots = allowed_roots or [Path(_ROOTFS_DIR)]
-        self._cache_dir = cache_dir
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
 
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect."""
-        host_uri = os.environ.get(_URI_ENV, _DEFAULT_URI)
+        host_uri = os.environ.get(LIBVIRT_URI_ENV, DEFAULT_LIBVIRT_URI)
         # `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol (only
         # `defineXML`/`lookupByName`), so no suppression is needed at this seam.
         return cls(connect=lambda: libvirt.open(host_uri))

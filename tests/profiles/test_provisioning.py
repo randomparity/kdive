@@ -11,17 +11,19 @@ from pydantic import ValidationError
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import JobKind
+from kdive.domain.sizing import AllocationSizing
 from kdive.profiles.provisioning import (
-    AllocationSizing,
     BootMethod,
     ProvisioningProfile,
     capture_method,
     destructive_opt_in,
+    dump_profile,
     profile_digest,
     reconcile_profile_sizing,
     reject_rootfs_upload_without_window,
     require_concrete_sizing,
     rootfs_upload_window_allowed,
+    ssh_credential_ref,
 )
 
 _VALID: dict[str, Any] = {
@@ -66,6 +68,40 @@ def test_valid_libvirt_profile_parses() -> None:
     assert rootfs.path == "/var/lib/kdive/rootfs/fedora-40.qcow2"
 
 
+def test_valid_fault_inject_profile_parses_and_dumps_alias() -> None:
+    data = _valid()
+    data["provider"] = {
+        "fault-inject": {
+            "capture_method": "host_dump",
+            "destructive_ops": ["reprovision"],
+        }
+    }
+
+    profile = ProvisioningProfile.parse(data)
+
+    assert profile.provider.fault_inject.capture_method is CaptureMethod.HOST_DUMP
+    assert destructive_opt_in(profile, JobKind.REPROVISION) is True
+    assert rootfs_upload_window_allowed(profile) is False
+    assert dump_profile(profile)["provider"] == {
+        "fault-inject": {
+            "capture_method": "host_dump",
+            "destructive_ops": ["reprovision"],
+        }
+    }
+
+
+def test_provider_section_rejects_multiple_providers() -> None:
+    data = _valid()
+    data["provider"]["fault-inject"] = {}
+    _expect_configuration_error(data)
+
+
+def test_fault_inject_capture_method_defaults_to_console() -> None:
+    data = _valid()
+    data["provider"] = {"fault-inject": {}}
+    assert capture_method(data) is CaptureMethod.CONSOLE
+
+
 def test_crashkernel_is_present() -> None:
     # The crashkernel reservation is the kdump prerequisite (acceptance criterion).
     profile = ProvisioningProfile.parse(_valid())
@@ -86,6 +122,15 @@ def test_ssh_credential_ref_parses_when_present() -> None:
     data["provider"]["local-libvirt"]["ssh_credential_ref"] = "ssh/guest-key"
     profile = ProvisioningProfile.parse(data)
     assert profile.provider.local_libvirt.ssh_credential_ref == "ssh/guest-key"
+    assert ssh_credential_ref(profile) == "ssh/guest-key"
+
+
+def test_ssh_credential_ref_returns_none_for_provider_without_ssh_credentials() -> None:
+    data = _valid()
+    data["provider"] = {"fault-inject": {}}
+    profile = ProvisioningProfile.parse(data)
+
+    assert ssh_credential_ref(profile) is None
 
 
 def test_ssh_credential_ref_rejects_blank() -> None:

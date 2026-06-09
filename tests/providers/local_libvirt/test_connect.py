@@ -34,6 +34,14 @@ def test_valid_rsp_frame_ignores_leading_ack() -> None:
     assert valid_rsp_frame(b"+$?#3f") is True
 
 
+def test_valid_rsp_frame_rejects_trailing_bytes() -> None:
+    assert valid_rsp_frame(b"$?#3fJUNK") is False
+
+
+def test_valid_rsp_frame_rejects_trailing_bytes_after_leading_ack() -> None:
+    assert valid_rsp_frame(b"+$?#3fJUNK") is False
+
+
 def test_valid_rsp_frame_rejects_bare_ack() -> None:
     assert valid_rsp_frame(b"+") is False
 
@@ -165,11 +173,14 @@ def test_close_transport_is_noop_and_never_raises() -> None:
     connector.close_transport(handle)  # no raise
 
 
-def test_close_transport_tolerates_malformed_handle() -> None:
+def test_close_transport_rejects_malformed_handle() -> None:
     probe = _FakeProbe()
-    connect_mod.LocalLibvirtConnect(
+    connector = connect_mod.LocalLibvirtConnect(
         resolve_endpoint=lambda _s: ("127.0.0.1", 1), probe=probe
-    ).close_transport(connect_mod.TransportHandle("garbage"))  # no raise
+    )
+    with pytest.raises(CategorizedError) as exc:
+        connector.close_transport(connect_mod.TransportHandle("garbage"))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 # --- SSH transport orchestration (ADR-0039) ------------------------------------------------

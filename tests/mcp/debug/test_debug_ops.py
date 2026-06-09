@@ -16,7 +16,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -24,7 +25,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.models import Allocation, DebugSession, Investigation, Run, System
+from kdive.domain.models import Allocation, DebugSession, Investigation, ResourceKind, Run, System
 from kdive.domain.state import (
     AllocationState,
     DebugSessionState,
@@ -42,8 +43,11 @@ from kdive.mcp.tools.debug.ops import (
 from kdive.providers.local_libvirt.debug.debug_gdbmi import GdbMiEngine
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.ports import GdbMiAttachment, TransportHandleData
+from kdive.providers.resolver import ProviderBinding, ProviderResolver
+from kdive.providers.runtime import ProviderRuntime
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.services.resource_discovery import register_discovered_resource
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -233,6 +237,7 @@ async def _seed_live_session(pool: AsyncConnectionPool, *, state: DebugSessionSt
 
 
 def _op_for(name: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any) -> Any:
+    del runtime
     factory = {
         "set_breakpoint": debug_ops._set_breakpoint_op,
         "clear_breakpoint": debug_ops._clear_breakpoint_op,
@@ -242,7 +247,7 @@ def _op_for(name: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: A
         "continue": debug_ops._continue_op,
         "interrupt": debug_ops._interrupt_op,
     }[name]
-    return factory(runtime, session_id, **kwargs)
+    return factory(session_id, **kwargs)
 
 
 # --- happy paths ---------------------------------------------------------------------------
@@ -486,6 +491,7 @@ def test_missing_dependency_attach_surfaces_as_debug_attach_failure(migrated_url
             )
         assert resp.status == "error"
         assert resp.error_category == "debug_attach_failure"
+        assert resp.data["run_id"]
 
     asyncio.run(_run())
 
@@ -516,6 +522,28 @@ def test_attach_runs_once_for_concurrent_ops(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_provider_debug_runtime_cache_uses_binding_kind() -> None:
+    resolver = debug_ops.DebugRuntimeResolver(cast(ProviderResolver, object()))
+    first_attach = _CountingAttach()
+    first_provider = cast(
+        ProviderRuntime,
+        SimpleNamespace(debug_engine=GdbMiEngine(), attach_seam=first_attach),
+    )
+    runtime = resolver.runtime_for_binding(
+        ProviderBinding(kind=ResourceKind.LOCAL_LIBVIRT, runtime=first_provider)
+    )
+
+    second_provider = cast(
+        ProviderRuntime,
+        SimpleNamespace(debug_engine=GdbMiEngine(), attach_seam=_CountingAttach()),
+    )
+    same_runtime = resolver.runtime_for_binding(
+        ProviderBinding(kind=ResourceKind.LOCAL_LIBVIRT, runtime=second_provider)
+    )
+
+    assert same_runtime is runtime
+
+
 def test_end_session_reaps_engine(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -526,7 +554,9 @@ def test_end_session_reaps_engine(migrated_url: str) -> None:
                 pool, _ctx(), session_id, runtime, _op_for("list_breakpoints", runtime, session_id)
             )
             # The engine is registered; end_session must exit + drop it.
-            handlers = debug_tools.DebugSessionHandlers(_FakeConnector(), runtime=runtime)
+            handlers = debug_tools.DebugSessionHandlers(
+                _FakeConnector(), runtime=runtime, secret_registry=SecretRegistry()
+            )
             resp = await handlers.end_session(pool, _ctx(), session_id)
             assert resp.status == "detached"
             assert attach.controller.exited is True
@@ -544,7 +574,9 @@ def test_end_session_reap_is_noop_without_engine(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             runtime = _runtime(_CountingAttach())
-            handlers = debug_tools.DebugSessionHandlers(_FakeConnector(), runtime=runtime)
+            handlers = debug_tools.DebugSessionHandlers(
+                _FakeConnector(), runtime=runtime, secret_registry=SecretRegistry()
+            )
             resp = await handlers.end_session(pool, _ctx(), session_id)
         assert resp.status == "detached"  # reap of a never-attached session is a no-op
 

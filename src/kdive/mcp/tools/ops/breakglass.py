@@ -41,13 +41,14 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.ops._auth import audit_platform_denial, held_platform_roles
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
-from kdive.services.allocation_release import AuditWriter, ReleaseOutcome, release_with_backstops
+from kdive.services.allocation.release import AuditWriter, ReleaseOutcome, release_with_backstops
 
 _log = logging.getLogger(__name__)
 
@@ -286,7 +287,7 @@ async def _enqueue_teardown(
         conn,
         JobKind.TEARDOWN,
         SystemPayload(system_id=str(system_id)),
-        {"principal": ctx.principal, "agent_session": ctx.agent_session, "project": project},
+        job_authorizing(ctx, project),
         f"{system_id}:teardown",
     )
 

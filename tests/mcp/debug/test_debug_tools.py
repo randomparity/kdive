@@ -44,7 +44,7 @@ from kdive.providers.ports import SystemHandle, TransportHandle, TransportHandle
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.resource_discovery import register_discovered_resource
+from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -118,11 +118,12 @@ def _handlers(
             return secret_backend
 
         secret_backend_factory = _backend_factory
+    registry = secret_registry if secret_registry is not None else SecretRegistry()
     return debug_tools.DebugSessionHandlers(
         connector,
         runtime=runtime,
         secret_backend_factory=secret_backend_factory,
-        secret_registry=secret_registry,
+        secret_registry=registry,
     )
 
 
@@ -523,12 +524,19 @@ def test_start_session_connector_failure_maps_category(
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             run_id = await _seed_run(pool, sys_id)
-            conn_fake = _FakeConnector(raises=CategorizedError("x", category=category))
+            conn_fake = _FakeConnector(
+                raises=CategorizedError(
+                    "x",
+                    category=category,
+                    details={"provider": "local-libvirt", "retryable": False},
+                )
+            )
             resp = await _start_session(
                 pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == expected
+        assert resp.data == {"provider": "local-libvirt", "retryable": False}
         assert count == 0
 
     asyncio.run(_run())
@@ -652,6 +660,12 @@ class _ConnectionRecordingPool:
 def _ssh_profile() -> dict[str, Any]:
     profile = copy.deepcopy(_PROFILE)
     profile["provider"]["local-libvirt"]["ssh_credential_ref"] = "ssh/guest-key"
+    return profile
+
+
+def _fault_inject_profile() -> dict[str, Any]:
+    profile = copy.deepcopy(_PROFILE)
+    profile["provider"] = {"fault-inject": {}}
     return profile
 
 
@@ -787,6 +801,32 @@ def test_start_session_ssh_missing_credential_ref_is_config_error(migrated_url: 
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert count == 0
         assert connector.opened == []  # no transport opened without a credential
+
+    asyncio.run(_run())
+
+
+def test_start_session_ssh_fault_inject_profile_is_missing_credential_ref(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_profiled_system(pool, alloc_id, _fault_inject_profile())
+            run_id = await _seed_run(pool, sys_id)
+            connector = _FakeConnector()
+            resp = await _start_session(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                transport="ssh",
+                connector=connector,
+                secret_backend=_OrderRecordingBackend([]),
+            )
+            count = await _session_count(pool)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data == {"reason": "ssh_credential_ref_missing"}
+        assert count == 0
+        assert connector.opened == []
 
     asyncio.run(_run())
 

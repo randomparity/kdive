@@ -40,15 +40,15 @@ from kdive.domain.state import (
     SystemState,
 )
 from kdive.jobs import queue
+from kdive.jobs.handlers import control as control_plane
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import control as control_tools
-from kdive.planes import control as control_plane
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.services.resource_discovery import register_discovered_resource
+from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

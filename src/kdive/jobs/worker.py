@@ -1,4 +1,4 @@
-"""The worker tier: claim, heartbeat, dispatch, finalize (ADR-0018, issue #9).
+"""The worker tier: claim, heartbeat, dispatch, finalize (ADR-0018).
 
 A :class:`Worker` owns an ``AsyncConnectionPool`` and processes one job per
 :meth:`Worker.run_once`: ``dequeue`` claims and charges an attempt, a background
@@ -25,8 +25,9 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry, JobHandler
+from kdive.jobs.payloads import PayloadValidationError
 from kdive.security.secrets.redaction import Redactor
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
 _CONTEXT_VALUE_MAX = 1000
@@ -45,7 +46,7 @@ class Worker:
         lease: timedelta = queue.DEFAULT_LEASE,
         heartbeat_interval: timedelta = timedelta(seconds=30),
         poll_interval: timedelta = timedelta(seconds=1),
-        secret_registry: SecretRegistry | None = None,
+        secret_registry: SecretRegistry,
     ) -> None:
         """Build a worker.
 
@@ -73,9 +74,7 @@ class Worker:
         self._lease = lease
         self._heartbeat_interval = heartbeat_interval
         self._poll_interval = poll_interval
-        self._secret_registry = (
-            PROCESS_SECRET_REGISTRY if secret_registry is None else secret_registry
-        )
+        self._secret_registry = secret_registry
 
     async def run_once(self) -> Job | None:
         """Claim and dispatch one job; return it, or ``None`` if idle.
@@ -127,11 +126,7 @@ class Worker:
                 async with self._pool.connection() as conn:
                     result_ref = await handler(conn, job)
             except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
-                category = (
-                    exc.category
-                    if isinstance(exc, CategorizedError)
-                    else ErrorCategory.INFRASTRUCTURE_FAILURE
-                )
+                category = _failure_category(exc)
                 async with self._pool.connection() as conn:
                     await queue.fail(
                         conn,
@@ -173,6 +168,14 @@ class Worker:
                 job_id,
                 exc_info=True,
             )
+
+
+def _failure_category(exc: Exception) -> ErrorCategory:
+    if isinstance(exc, CategorizedError):
+        return exc.category
+    if isinstance(exc, PayloadValidationError):
+        return ErrorCategory.CONFIGURATION_ERROR
+    return ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def _failure_context(exc: Exception, registry: SecretRegistry) -> dict[str, str]:

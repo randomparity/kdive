@@ -8,7 +8,12 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.models import Sensitivity
-from kdive.providers.fault_inject.quarantine_console import (
+from kdive.provider_components.artifacts import (
+    ArtifactWriteRequest,
+    FetchedArtifact,
+    StoredArtifact,
+)
+from kdive.providers.fault_inject.artifacts.quarantine_console import (
     FaultInjectQuarantineConsole,
     QuarantineHealOutput,
     _quarantined_transcript,
@@ -16,7 +21,6 @@ from kdive.providers.fault_inject.quarantine_console import (
 from kdive.security.secrets.redaction import REDACTION, Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
-from kdive.store.objectstore import ArtifactWriteRequest, FetchedArtifact, StoredArtifact
 
 _SENTINEL = "quar-1a2b3c4d5e6f70819273645566778899aabbccddeeff0011"  # high-entropy, unique
 

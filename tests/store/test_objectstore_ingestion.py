@@ -7,10 +7,9 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
+from kdive.provider_components.artifacts import HeadResult, PresignedUpload, PresignPutRequest
 from kdive.store.objectstore import (
-    HeadResult,
     ObjectStore,
-    PresignedUpload,
     artifact_key,
     owner_prefix,
 )
@@ -117,12 +116,14 @@ def test_presign_put_signs_checksum_and_metadata() -> None:
     client = _PresignClient()
     store = ObjectStore(client, "bucket")
     out = store.presign_put(
-        "local/runs/r1/kernel",
-        sha256="Zm9vYmFy",
-        size_bytes=10,
-        sensitivity=Sensitivity.SENSITIVE,
-        retention_class="build",
-        expires_in=900,
+        PresignPutRequest(
+            key="local/runs/r1/kernel",
+            sha256="Zm9vYmFy",
+            size_bytes=10,
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="build",
+            expires_in=900,
+        )
     )
     assert isinstance(out, PresignedUpload)
     assert out.url == "https://store/put?exp=900"
@@ -158,12 +159,14 @@ def test_presign_put_maps_error_to_infrastructure_failure() -> None:
     store = ObjectStore(_FailingPresignClient(), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
         store.presign_put(
-            "local/runs/r1/kernel",
-            sha256="Zm9v",
-            size_bytes=10,
-            sensitivity=Sensitivity.SENSITIVE,
-            retention_class="build",
-            expires_in=900,
+            PresignPutRequest(
+                key="local/runs/r1/kernel",
+                sha256="Zm9v",
+                size_bytes=10,
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class="build",
+                expires_in=900,
+            )
         )
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 

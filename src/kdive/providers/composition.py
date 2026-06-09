@@ -1,8 +1,9 @@
 """Active provider composition boundary.
 
-This module is the only place the MCP and worker assembly path constructs local-libvirt
-providers. It exposes typed runtime ports for the single local-libvirt provider shipped today;
-ADR-0066 removed the superseded capability-registry prototype from production source.
+This module is the only place the MCP and worker assembly path constructs concrete provider
+ports. The default production resolver registers local-libvirt; the fault-inject provider is
+an opt-in runtime behind the same ProviderRuntime/ProviderResolver seam. ADR-0066 removed the
+superseded capability-registry prototype from production source.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import ResourceKind
-from kdive.providers.component_validation import (
+from kdive.provider_components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
     KERNEL_COMPONENT,
@@ -21,14 +22,16 @@ from kdive.providers.component_validation import (
     ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
     ComponentKind,
-    ComponentSourceCapabilities,
     ComponentSourceKind,
 )
+from kdive.provider_components.validation import (
+    ComponentSourceCapabilities,
+)
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
-from kdive.providers.fault_inject.engine import FaultEngine
-from kdive.providers.fault_inject.faulted import FaultedInstall, FaultedProvision
-from kdive.providers.fault_inject.inventory import FaultInjectInventory
-from kdive.providers.fault_inject.provider import (
+from kdive.providers.fault_inject.faulting.engine import FaultEngine
+from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
+from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvision
+from kdive.providers.fault_inject.lifecycle.provider import (
     FaultInjectBuild,
     FaultInjectConnect,
     FaultInjectControl,
@@ -58,9 +61,12 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
 )
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
+from kdive.providers.reaping import InfraReaper, NullReaper, OwnedDomain
 from kdive.providers.resolver import ProviderResolver
 from kdive.providers.runtime import ProviderRuntime
-from kdive.services.resource_discovery import ensure_discovered_resource_registered
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.resources.discovery import ensure_discovered_resource_registered
 from kdive.store.objectstore import object_store_from_env
 
 _LOCAL_POOL = "local-libvirt"
@@ -87,16 +93,16 @@ def _local_component_sources() -> ComponentSourceCapabilities:
     )
 
 
-def build_local_runtime() -> ProviderRuntime:
+def build_local_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
     """Build the typed local-libvirt provider ports without opening live provider connections."""
     provisioner = LocalLibvirtProvisioning.from_env()
-    builder = LocalLibvirtBuild.from_env()
+    builder = LocalLibvirtBuild.from_env(secret_registry=secret_registry)
     install = LocalLibvirtInstall.from_env()
     connector = LocalLibvirtConnect.from_env()
     controller = LocalLibvirtControl.from_env()
-    retrieve = LocalLibvirtRetrieve.from_env()
-    vmcore_introspector = LocalLibvirtVmcoreIntrospect.from_env()
-    live_introspector = LocalLibvirtLiveIntrospect.from_env()
+    retrieve = LocalLibvirtRetrieve.from_env(secret_registry=secret_registry)
+    vmcore_introspector = LocalLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
+    live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
     return ProviderRuntime(
         provisioner=provisioner,
         builder=builder,
@@ -113,7 +119,7 @@ def build_local_runtime() -> ProviderRuntime:
         ),
         discovery_registrar=ensure_local_host_registered,
         attach_seam=default_attach_seam,
-        debug_engine=LocalGdbMiEngine(),
+        debug_engine=LocalGdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),
         component_sources=_local_component_sources(),
         build_config_validator=builder.validate_config_ref,
         rootfs_validator=provisioner.validate_rootfs_ref,
@@ -174,6 +180,7 @@ def build_faultinject_runtime(
         attach_seam=fault_inject_attach_seam,
         debug_engine=FaultInjectDebugEngine(),
         component_sources=_faultinject_component_sources(),
+        rootfs_validator=lambda _rootfs: None,
     )
 
 
@@ -184,7 +191,63 @@ def _fault_inject_enabled(enable_fault_inject: bool | None) -> bool:
     return os.environ.get(_FAULTINJECT_ENABLE_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
-def build_provider_resolver(*, enable_fault_inject: bool | None = None) -> ProviderResolver:
+class _CompositeReaper:
+    """Fan out leaked-domain reconciliation across configured provider reapers."""
+
+    def __init__(self, reapers: tuple[InfraReaper, ...]) -> None:
+        self._reapers = reapers
+
+    async def list_owned(self) -> list[OwnedDomain]:
+        domains: list[OwnedDomain] = []
+        for reaper in self._reapers:
+            domains.extend(await reaper.list_owned())
+        return domains
+
+    async def destroy(self, name: str) -> None:
+        for reaper in self._reapers:
+            await reaper.destroy(name)
+
+
+class ProviderComposition:
+    """Own provider assembly state that must be shared across constructed ports."""
+
+    def __init__(
+        self,
+        *,
+        faultinject_inventory: FaultInjectInventory | None = None,
+        secret_registry: SecretRegistry | None = None,
+    ) -> None:
+        self._faultinject_inventory = faultinject_inventory or FaultInjectInventory()
+        self._secret_registry = secret_registry or SecretRegistry()
+
+    def build_provider_resolver(
+        self, *, enable_fault_inject: bool | None = None
+    ) -> ProviderResolver:
+        """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry."""
+        runtimes = {
+            ResourceKind.LOCAL_LIBVIRT: build_local_runtime(secret_registry=self._secret_registry)
+        }
+        if _fault_inject_enabled(enable_fault_inject):
+            runtimes[ResourceKind.FAULT_INJECT] = build_faultinject_runtime(
+                inventory=self._faultinject_inventory
+            )
+        return ProviderResolver(runtimes)
+
+    def build_reconciler_reaper(self, *, enable_fault_inject: bool | None = None) -> InfraReaper:
+        """Assemble the provider-aware leaked-infra reaper for reconciliation."""
+        reapers: list[InfraReaper] = []
+        if _fault_inject_enabled(enable_fault_inject):
+            reapers.append(FaultInjectReaper(self._faultinject_inventory))
+        if not reapers:
+            return NullReaper()
+        if len(reapers) == 1:
+            return reapers[0]
+        return _CompositeReaper(tuple(reapers))
+
+
+def build_provider_resolver(
+    *, enable_fault_inject: bool | None = None, secret_registry: SecretRegistry | None = None
+) -> ProviderResolver:
     """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry.
 
     The default production composition registers only ``local-libvirt``. The
@@ -193,10 +256,9 @@ def build_provider_resolver(*, enable_fault_inject: bool | None = None) -> Provi
     ``KDIVE_FAULT_INJECT`` env var. A default production deployment has no bookable
     fault-inject Resource.
     """
-    runtimes = {ResourceKind.LOCAL_LIBVIRT: build_local_runtime()}
-    if _fault_inject_enabled(enable_fault_inject):
-        runtimes[ResourceKind.FAULT_INJECT] = build_faultinject_runtime()
-    return ProviderResolver(runtimes)
+    return ProviderComposition(secret_registry=secret_registry).build_provider_resolver(
+        enable_fault_inject=enable_fault_inject
+    )
 
 
 async def ensure_local_host_registered(pool: AsyncConnectionPool) -> None:
@@ -213,8 +275,8 @@ async def ensure_local_host_registered(pool: AsyncConnectionPool) -> None:
 
 async def ensure_faultinject_resource_registered(pool: AsyncConnectionPool) -> None:
     # Insert-if-absent (like local): the happy path's capabilities are inert, so this never
-    # needs to update an existing row. When #182 makes seed/fault_rate live config, a change
-    # to an already-registered resource needs the upsert path or a fresh row, not a restart.
+    # updates an existing row. Mutable fault-inject resource config needs an explicit upsert
+    # path or a fresh resource row, not a restart-only refresh.
     discovery = FaultInjectDiscovery.from_env()
     await ensure_discovered_resource_registered(
         pool,
@@ -232,4 +294,5 @@ __all__ = [
     "build_provider_resolver",
     "ensure_faultinject_resource_registered",
     "ensure_local_host_registered",
+    "ProviderComposition",
 ]

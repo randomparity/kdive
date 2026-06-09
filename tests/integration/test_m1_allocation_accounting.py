@@ -18,10 +18,11 @@ The criterion → test-function map (acceptance: each criterion has an assertion
 * #5 renewal → ``test_c5_renew_extends`` / ``test_c5_over_budget_renew_denied``
 * #6 role separation → ``test_c6_*``
 * #7 reprovision-in-place → ``test_c7_reprovision_in_place_cycle``
-* #8 live introspection (``live_vm``-gated) → ``test_c8_live_introspect_over_ssh``
+* #8 live introspection contract → non-live fake-backed introspection/redaction tests
 
-Real libvirt/SSH/drgn stay behind the ``live_vm`` marker (criterion 8); the non-gated
-redaction contract is already covered by ``tests/mcp/test_introspect_tools.py``.
+Real libvirt/SSH/drgn acceptance remains deferred until a runnable harness exists; this
+module does not keep ``live_vm`` placeholders that would fail a correctly prepared runner.
+The non-gated redaction contract is covered by ``tests/mcp/test_introspect_tools.py``.
 """
 
 from __future__ import annotations
@@ -47,19 +48,21 @@ from kdive.domain.state import (
     RunState,
     SystemState,
 )
+from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.auth import AuthError
-from kdive.mcp.tools.accounting.admin import set_budget, set_quota
+from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload
+from kdive.mcp.tools.accounting.admin import QuotaSetRequest, set_budget, set_quota
 from kdive.mcp.tools.accounting.estimate import estimate
 from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project
 from kdive.mcp.tools.lifecycle import allocations as alloc_tools
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
-from kdive.planes import systems as systems_handlers
 from kdive.providers.local_libvirt.lifecycle.provisioning import domain_name_for
+from kdive.providers.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.services import accounting
+from kdive.services.accounting import ledger as accounting
 from tests.integration._seed import (
     provisioning_profile,
     register_resource,
@@ -114,13 +117,15 @@ async def _request_allocation(
         pool,
         ctx,
         project=project,
-        request={
-            "vcpus": vcpus,
-            "memory_gb": memory_gb,
-            "disk_gb": disk_gb,
-            "window": window,
-            "resource": resource,
-        },
+        request=AllocationRequestPayload.model_validate(
+            {
+                "vcpus": vcpus,
+                "memory_gb": memory_gb,
+                "disk_gb": disk_gb,
+                "window": window,
+                "resource": resource,
+            }
+        ),
         idempotency_key=idempotency_key,
     )
 
@@ -448,7 +453,9 @@ def test_c3_estimate_equals_reserved_row(migrated_url: str) -> None:
                 pool,
                 _viewer_ctx(),
                 project="proj",
-                request={"vcpus": 2, "memory_gb": 4, "window": 3},
+                request=EstimateRequestPayload.model_validate(
+                    {"vcpus": 2, "memory_gb": 4, "window": 3}
+                ),
             )
             assert est.status != "error"
             grant = await _request_allocation(
@@ -691,7 +698,7 @@ def test_c4_idle_lease_expiry_sweeps_and_credits(migrated_url: str) -> None:
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
             alloc_id, system_id = await _seed_expired_active_alloc_with_system(pool)
-            report = await loop.reconcile_once(pool, loop.NullReaper())
+            report = await loop.reconcile_once(pool, NullReaper())
             assert report.expired_allocations == 1
             assert report.orphaned_systems == 1  # the now-expired allocation orphaned its System
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -769,7 +776,7 @@ def test_c4_abandoned_job_fails_run_lease_expired(migrated_url: str) -> None:
                         f"{run.id}:build",
                     ),
                 )
-            await loop.reconcile_once(pool, loop.NullReaper())
+            await loop.reconcile_once(pool, NullReaper())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT state, failure_category FROM runs WHERE id = %s", (run.id,)
@@ -860,7 +867,13 @@ def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
                 await set_budget(pool, op, project="proj", limit_kcu="10")
             with pytest.raises(AuthorizationError):
                 await set_quota(
-                    pool, op, project="proj", max_concurrent_allocations=1, max_concurrent_systems=1
+                    pool,
+                    op,
+                    request=QuotaSetRequest(
+                        project="proj",
+                        max_concurrent_allocations=1,
+                        max_concurrent_systems=1,
+                    ),
                 )
             # power off / teardown bind their admin check to a real System's project.
             grant = await _request_allocation(
@@ -931,9 +944,11 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
                 await set_quota(
                     pool,
                     admin,
-                    project="proj",
-                    max_concurrent_allocations=4,
-                    max_concurrent_systems=4,
+                    request=QuotaSetRequest(
+                        project="proj",
+                        max_concurrent_allocations=4,
+                        max_concurrent_systems=4,
+                    ),
                 )
             ).status != "error"
             op = _operator_ctx()
@@ -1078,27 +1093,3 @@ def test_c7_reprovision_in_place_cycle(migrated_url: str) -> None:
             assert alloc_n is not None and alloc_n["n"] == 1  # no new Allocation row
 
     asyncio.run(_run())
-
-
-# === Criterion 8: live introspection (live_vm-gated) =======================================
-
-
-_LIVE_SSH_ENV = "KDIVE_LIVE_SSH_TARGET"
-
-
-@pytest.mark.live_vm
-def test_c8_live_introspect_over_ssh(migrated_url: str) -> None:  # pragma: no cover - live_vm
-    """#8: live drgn over SSH returns task/module/sysinfo, secret redacted, transcript sensitive.
-
-    SKIPs in CI: the body is wired by the live_vm runner against an operator-provided
-    SSH-reachable kdump guest (the same fixtures as the M0 full-path test, plus
-    ``KDIVE_LIVE_SSH_TARGET``). On a real host it asserts: ``debug.start_session(transport=
-    "ssh")`` then ``introspect.run`` returns a live report; a planted secret is ``[REDACTED]``
-    in the response; and the raw transcript is marked ``sensitive``. The non-gated redaction
-    contract is already covered by ``tests/mcp/test_introspect_tools.py`` against a fake live
-    introspector, so CI retains a real signal for the redaction invariant.
-    """
-    from tests.integration.conftest import live_vm_preflight
-
-    live_vm_preflight(require_ssh=True)
-    raise NotImplementedError("live_vm SSH/introspect harness wired by the live_vm runner")

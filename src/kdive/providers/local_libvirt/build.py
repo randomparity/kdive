@@ -26,23 +26,21 @@ from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from kdive.components.catalog import load_fixture_catalog
-from kdive.components.local_paths import validate_local_component_path
-from kdive.components.references import ComponentRef, LocalComponentRef
-from kdive.components.requirements import ConfigRequirements, validate_config_requirements
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
+from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
+from kdive.provider_components.catalog import load_fixture_catalog
+from kdive.provider_components.local_paths import validate_local_component_path
+from kdive.provider_components.references import ComponentRef, LocalComponentRef
+from kdive.provider_components.requirements import ConfigRequirements, validate_config_requirements
 from kdive.providers.build_validation import (
     parse_gnu_build_id,
 )
 from kdive.providers.ports import BuildOutput
 from kdive.security.secrets.redaction import Redactor
-from kdive.store.objectstore import (
-    ArtifactWriteRequest,
-    StoredArtifact,
-    object_store_from_env,
-)
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import object_store_from_env
 
 _WORKSPACE_ENV = "KDIVE_BUILD_WORKSPACE"
 _KERNEL_SRC_ENV = "KDIVE_KERNEL_SRC"
@@ -104,6 +102,7 @@ class LocalLibvirtBuild:
         read_kernel_image: _ReadBytes,
         read_vmlinux: _ReadBytes,
         read_build_id: _ReadBuildId,
+        secret_registry: SecretRegistry,
         allowed_component_roots: list[Path] | None = None,
     ) -> None:
         self._tenant = tenant
@@ -120,9 +119,10 @@ class LocalLibvirtBuild:
         self._read_kernel_image = read_kernel_image
         self._read_vmlinux = read_vmlinux
         self._read_build_id = read_build_id
+        self._secret_registry = secret_registry
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtBuild:
+    def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtBuild:
         """Build from the ``KDIVE_*`` environment; does not spawn ``make`` or connect S3.
 
         Reads the workspace root (``KDIVE_BUILD_WORKSPACE``) and the warm source tree
@@ -138,7 +138,7 @@ class LocalLibvirtBuild:
             tenant="local",
             workspace_root=workspace_root,
             store_factory=object_store_from_env,
-            checkout=_make_checkout(kernel_src, allowed_component_roots),
+            checkout=_make_checkout(kernel_src, allowed_component_roots, secret_registry),
             run_olddefconfig=_real_run_olddefconfig,
             read_config=_real_read_config,
             run_make=_real_run_make,
@@ -146,6 +146,7 @@ class LocalLibvirtBuild:
             read_vmlinux=_real_read_vmlinux,
             read_build_id=_real_read_build_id,
             allowed_component_roots=allowed_component_roots,
+            secret_registry=secret_registry,
         )
 
     def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
@@ -228,13 +229,16 @@ def _build_component_roots_from_env() -> list[Path]:
     return [Path(part) for part in raw.split(":") if part]
 
 
-def _make_checkout(kernel_src: str, allowed_component_roots: list[Path]) -> _Checkout:
+def _make_checkout(
+    kernel_src: str, allowed_component_roots: list[Path], secret_registry: SecretRegistry
+) -> _Checkout:
     def _checkout(run_id: UUID, profile: ServerBuildProfile, workspace: Path) -> None:
         _real_checkout(
             kernel_src,
             profile,
             workspace,
             allowed_component_roots=allowed_component_roots,
+            secret_registry=secret_registry,
         )
 
     return _checkout
@@ -245,6 +249,7 @@ def _real_checkout(
     profile: ServerBuildProfile,
     workspace: Path,
     *,
+    secret_registry: SecretRegistry,
     allowed_component_roots: list[Path] | None = None,
 ) -> None:
     """Materialize a warm per-Run workspace, stage the ``.config``, apply any patch.
@@ -254,14 +259,14 @@ def _real_checkout(
     later ``make`` run only on a real build host (``live_vm``); this composition itself is
     unit-tested with the steps stubbed.
     """
-    _sync_tree(kernel_src, workspace)
+    _sync_tree(kernel_src, workspace, secret_registry)
     _stage_config(
         profile.config,
         workspace,
         allowed_component_roots=allowed_component_roots or [Path(_DEFAULT_BUILD_COMPONENT_ROOT)],
     )
     if profile.patch_ref is not None:
-        _apply_patch(profile.patch_ref, workspace)
+        _apply_patch(profile.patch_ref, workspace, secret_registry)
 
 
 def _read_text_file(path: Path, *, category: ErrorCategory, file_label: str) -> str:
@@ -474,12 +479,15 @@ def _stage_config(
         raise _workspace_failure("copy_config", ".config", exc) from exc
 
 
-def _redacted_tail(text: str) -> str:
+def _redacted_tail(text: str, secret_registry: SecretRegistry | None = None) -> str:
     """Redact known secrets/``key=value`` pairs, then return the trailing ``_STDERR_TAIL`` chars."""
-    return Redactor().redact_text(text)[-_STDERR_TAIL:]
+    secret_registry = secret_registry or SecretRegistry()
+    return Redactor(registry=secret_registry).redact_text(text)[-_STDERR_TAIL:]
 
 
-def _apply_patch(patch_ref: str, workspace: Path) -> None:
+def _apply_patch(
+    patch_ref: str, workspace: Path, secret_registry: SecretRegistry | None = None
+) -> None:
     """Apply the resolved ``patch_ref`` to the workspace tree with ``git apply -p1``.
 
     Raises:
@@ -512,11 +520,13 @@ def _apply_patch(patch_ref: str, workspace: Path) -> None:
         raise CategorizedError(
             "patch_ref does not apply against the kernel tree",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"stderr": _redacted_tail(result.stderr)},
+            details={"stderr": _redacted_tail(result.stderr, secret_registry)},
         )
 
 
-def _sync_tree(kernel_src: str, workspace: Path) -> None:
+def _sync_tree(
+    kernel_src: str, workspace: Path, secret_registry: SecretRegistry | None = None
+) -> None:
     """Mirror the warm ``kernel_src`` tree into ``workspace`` with ``rsync -a --delete``.
 
     Creates ``workspace`` (and missing parents) first, since ``build()`` does not and rsync
@@ -565,7 +575,7 @@ def _sync_tree(kernel_src: str, workspace: Path) -> None:
         raise CategorizedError(
             "rsync failed to materialize the workspace tree",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"stderr": _redacted_tail(result.stderr)},
+            details={"stderr": _redacted_tail(result.stderr, secret_registry)},
         )
 
 

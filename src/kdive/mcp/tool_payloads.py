@@ -6,7 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-_DEFAULT_KIND = "local-libvirt"
+from kdive.domain.models import ResourceKind
+
 _DEFAULT_COST_CLASS = "local"
 
 
@@ -37,7 +38,7 @@ class ResourceById(ToolPayload):
 
 class ResourceByKind(ToolPayload):
     mode: Literal["kind"] = "kind"
-    kind: str = _DEFAULT_KIND
+    kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT
 
 
 type ResourceSelector = ResourceById | ResourceByKind

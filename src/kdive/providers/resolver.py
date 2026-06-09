@@ -10,6 +10,7 @@ Concrete runtimes are still constructed only in :mod:`kdive.providers.compositio
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import LiteralString
 from uuid import UUID
 
@@ -34,6 +35,27 @@ _KIND_FOR_RUN: LiteralString = (
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE rn.id = %s"
 )
+_KIND_FOR_ALLOCATION: LiteralString = (
+    "SELECT r.kind AS kind FROM allocations a "
+    "JOIN resources r ON r.id = a.resource_id "
+    "WHERE a.id = %s"
+)
+_KIND_FOR_SESSION: LiteralString = (
+    "SELECT res.kind AS kind FROM debug_sessions ds "
+    "JOIN runs rn ON rn.id = ds.run_id "
+    "JOIN systems s ON s.id = rn.system_id "
+    "JOIN allocations a ON a.id = s.allocation_id "
+    "JOIN resources res ON res.id = a.resource_id "
+    "WHERE ds.id = %s"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderBinding:
+    """A resolved provider runtime paired with the Resource kind that selected it."""
+
+    kind: ResourceKind
+    runtime: ProviderRuntime
 
 
 class ProviderResolver:
@@ -83,6 +105,19 @@ class ProviderResolver:
 
     async def runtime_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderRuntime:
         return self.resolve(await self._kind(conn, _KIND_FOR_RUN, run_id, "run"))
+
+    async def runtime_for_allocation(
+        self, conn: AsyncConnection, allocation_id: UUID
+    ) -> ProviderRuntime:
+        kind = await self._kind(conn, _KIND_FOR_ALLOCATION, allocation_id, "allocation")
+        return self.resolve(kind)
+
+    async def runtime_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderRuntime:
+        return (await self.binding_for_session(conn, session_id)).runtime
+
+    async def binding_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderBinding:
+        kind = await self._kind(conn, _KIND_FOR_SESSION, session_id, "session")
+        return ProviderBinding(kind=kind, runtime=self.resolve(kind))
 
     async def _kind(
         self, conn: AsyncConnection, sql: LiteralString, object_id: UUID, object_kind: str

@@ -31,6 +31,7 @@ from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEM_SHAPES
 from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import shapes
 from kdive.security.authz.rbac import PlatformRole, Role
 
@@ -56,6 +57,29 @@ def _ctx(
 
 _OPERATOR = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_OPERATOR}))
 _VIEWER = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",), principal="viewer-1")
+
+
+async def _set_shape(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    name: str,
+    vcpus: int,
+    memory_mb: int,
+    disk_gb: int,
+    pcie_match: str | None = None,
+) -> ToolResponse:
+    return await shapes.set_shape(
+        pool,
+        ctx,
+        shapes.ShapeSetRequest(
+            name=name,
+            vcpus=vcpus,
+            memory_mb=memory_mb,
+            disk_gb=disk_gb,
+            pcie_match=pcie_match,
+        ),
+    )
 
 
 @asynccontextmanager
@@ -137,9 +161,7 @@ def test_list_returns_seed_sorted(migrated_url: str) -> None:
 def test_list_reflects_a_set(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            await shapes.set_shape(
-                pool, _OPERATOR, name="gpu-xl", vcpus=16, memory_mb=32768, disk_gb=200
-            )
+            await _set_shape(pool, _OPERATOR, name="gpu-xl", vcpus=16, memory_mb=32768, disk_gb=200)
             resp = await shapes.list_shapes(pool, _VIEWER)
         assert "gpu-xl" in [item.object_id for item in resp.items]
 
@@ -152,7 +174,7 @@ def test_list_reflects_a_set(migrated_url: str) -> None:
 def test_set_inserts_new_shape(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await shapes.set_shape(
+            resp = await _set_shape(
                 pool, _OPERATOR, name="gpu", vcpus=8, memory_mb=8192, disk_gb=100
             )
             assert resp.status == "ok"
@@ -173,7 +195,7 @@ def test_set_inserts_new_shape(migrated_url: str) -> None:
 def test_set_upserts_existing_shape(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await shapes.set_shape(
+            resp = await _set_shape(
                 pool, _OPERATOR, name="small", vcpus=2, memory_mb=2048, disk_gb=15
             )
             assert resp.status == "ok"
@@ -194,7 +216,7 @@ def test_set_upserts_existing_shape(migrated_url: str) -> None:
 def test_set_stores_valid_pcie_match(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await shapes.set_shape(
+            resp = await _set_shape(
                 pool,
                 _OPERATOR,
                 name="nic",
@@ -216,7 +238,7 @@ def test_set_stores_valid_pcie_match(migrated_url: str) -> None:
 def test_set_rejects_non_whole_gb_memory(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await shapes.set_shape(
+            resp = await _set_shape(
                 pool, _OPERATOR, name="odd", vcpus=2, memory_mb=4097, disk_gb=20
             )
             assert resp.status == "error"
@@ -232,7 +254,7 @@ def test_set_rejects_malformed_pcie_match(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             for bad in ("not-a-spec", "8086:157", "class=zz", "8086:1572 "):
-                resp = await shapes.set_shape(
+                resp = await _set_shape(
                     pool, _OPERATOR, name="nic", vcpus=2, memory_mb=4096, disk_gb=20, pcie_match=bad
                 )
                 assert resp.status == "error", bad
@@ -249,7 +271,7 @@ def test_set_normalizes_padded_name(migrated_url: str) -> None:
     # unresolvable shadow row) and the audit scope matches.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await shapes.set_shape(
+            resp = await _set_shape(
                 pool, _OPERATOR, name="  gpu  ", vcpus=8, memory_mb=8192, disk_gb=100
             )
             assert resp.status == "ok"
@@ -267,7 +289,7 @@ def test_set_normalizes_padded_name(migrated_url: str) -> None:
 def test_set_rejects_over_long_name(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await shapes.set_shape(
+            resp = await _set_shape(
                 pool, _OPERATOR, name="x" * 65, vcpus=2, memory_mb=4096, disk_gb=20
             )
             assert resp.status == "error"
@@ -281,7 +303,7 @@ def test_set_rejects_blank_name(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             for bad in ("", "   "):
-                resp = await shapes.set_shape(
+                resp = await _set_shape(
                     pool, _OPERATOR, name=bad, vcpus=2, memory_mb=4096, disk_gb=20
                 )
                 assert resp.status == "error", repr(bad)
@@ -301,7 +323,7 @@ def test_set_rejects_non_positive_dims(migrated_url: str) -> None:
                 (-1, 4096, 20),
             )
             for vcpus, memory_mb, disk_gb in cases:
-                resp = await shapes.set_shape(
+                resp = await _set_shape(
                     pool, _OPERATOR, name="bad", vcpus=vcpus, memory_mb=memory_mb, disk_gb=disk_gb
                 )
                 assert resp.status == "error", (vcpus, memory_mb, disk_gb)
@@ -317,9 +339,7 @@ def test_set_denied_for_project_only_token_unaudited(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             ctx = _ctx(roles={"proj-a": Role.ADMIN}, projects=("proj-a",))
-            resp = await shapes.set_shape(
-                pool, ctx, name="gpu", vcpus=8, memory_mb=8192, disk_gb=100
-            )
+            resp = await _set_shape(pool, ctx, name="gpu", vcpus=8, memory_mb=8192, disk_gb=100)
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
             async with pool.connection() as conn:
@@ -333,9 +353,7 @@ def test_set_denied_for_auditor_but_audited(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-            resp = await shapes.set_shape(
-                pool, ctx, name="gpu", vcpus=8, memory_mb=8192, disk_gb=100
-            )
+            resp = await _set_shape(pool, ctx, name="gpu", vcpus=8, memory_mb=8192, disk_gb=100)
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
             async with pool.connection() as conn:

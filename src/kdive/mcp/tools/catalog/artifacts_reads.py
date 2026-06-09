@@ -18,6 +18,7 @@ from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.provider_components.artifacts import FetchedArtifact, HeadResult
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
     parse_literal_terms,
@@ -25,10 +26,8 @@ from kdive.security.artifacts.artifact_search import (
 )
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.artifact_listing import RedactedArtifact, list_redacted_system_artifacts
+from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
 from kdive.store.objectstore import (
-    FetchedArtifact,
-    HeadResult,
     object_store_from_env,
 )
 
@@ -37,7 +36,7 @@ _log = logging.getLogger(__name__)
 _MAX_SEARCHABLE_ARTIFACT_BYTES = 1024 * 1024
 _GET_SQL: LiteralString = (
     "SELECT id, object_key, owner_id FROM artifacts "
-    "WHERE id = %s AND owner_kind = 'systems' AND sensitivity = 'redacted'"
+    "WHERE id = %s AND owner_kind = 'systems' AND sensitivity = %s"
 )
 _PROJECT_SQL: LiteralString = "SELECT project FROM systems WHERE id = %s"
 
@@ -95,7 +94,7 @@ async def _authorized_redacted_artifact(
         return _config_error(artifact_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_GET_SQL, (uid,))
+            await cur.execute(_GET_SQL, (uid, Sensitivity.REDACTED.value))
             row = await cur.fetchone()
             if row is None:
                 return _config_error(artifact_id)
@@ -172,7 +171,7 @@ async def _artifacts_search_text(
     try:
         head = await asyncio.to_thread(store.head, key)
     except CategorizedError as exc:
-        return ToolResponse.failure(artifact_id, exc.category)
+        return ToolResponse.failure_from_error(artifact_id, exc)
     if head is None:
         return _config_error(artifact_id)
     if head.size_bytes > _MAX_SEARCHABLE_ARTIFACT_BYTES:
@@ -194,7 +193,7 @@ async def _artifacts_search_text(
     except ArtifactSearchInputError:
         return _config_error(artifact_id, data={"reason": "bad_search_input"})
     except CategorizedError as exc:
-        return ToolResponse.failure(artifact_id, exc.category)
+        return ToolResponse.failure_from_error(artifact_id, exc)
     return ToolResponse.success(
         artifact_id,
         "searched",

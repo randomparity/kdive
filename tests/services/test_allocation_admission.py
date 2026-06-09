@@ -27,7 +27,7 @@ from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKin
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
-from kdive.services.allocation_admission import (
+from kdive.services.allocation.admission import (
     AllocationRequest,
     admit,
 )
@@ -116,7 +116,7 @@ async def _seed_queued(conn: psycopg.AsyncConnection, resource_id: UUID) -> Allo
             project="proj",
             resource_id=None,
             state=AllocationState.REQUESTED,
-            requested_kind=ResourceKind.LOCAL_LIBVIRT.value,
+            requested_kind=ResourceKind.LOCAL_LIBVIRT,
         ),
     )
 
@@ -233,6 +233,8 @@ def test_admit_bad_cap_fails_closed(migrated_url: str, cap: object) -> None:
             outcome = await _admit(conn, res)
             assert outcome.granted is False
             assert outcome.category is ErrorCategory.CONFIGURATION_ERROR
+            assert outcome.details["resource_id"] == str(res.id)
+            assert outcome.details["cap"] == repr(cap)
             assert await _count_allocs(conn) == 0
 
     asyncio.run(_run())

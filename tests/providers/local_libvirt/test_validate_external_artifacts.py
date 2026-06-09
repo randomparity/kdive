@@ -6,14 +6,14 @@ import struct
 
 import pytest
 
-from kdive.components.requirements import ConfigRequirements
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.provider_components.artifacts import HeadResult
+from kdive.provider_components.requirements import ConfigRequirements
+from kdive.provider_components.uploads import ManifestEntry
 from kdive.providers.build_validation import (
     extract_build_id_ranged,
     validate_external_artifacts,
 )
-from kdive.store.objectstore import HeadResult
 
 _BZIMAGE_HEAD = b"\x00" * 0x202 + b"HdrS"  # bzImage magic at offset 0x202
 

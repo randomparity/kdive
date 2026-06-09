@@ -39,16 +39,21 @@ from kdive.domain.state import (
     RunState,
     SystemState,
 )
+from kdive.jobs.handlers import runs as runs_handlers
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
-from kdive.mcp.tools.lifecycle.runs.create import create_run
+from kdive.mcp.tools.lifecycle.runs.create import (
+    RunCreateRequest,
+    RunReuseRequirementInput,
+    create_run,
+)
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run
-from kdive.planes import runs as runs_handlers
-from kdive.providers.component_validation import ComponentSourceCapabilities
+from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.services import run_steps
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.runs import steps as run_steps
 from tests.db_waits import wait_until_any_backend_waiting
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -388,10 +393,23 @@ def test_get_run_exposes_expected_boot_failure(migrated_url: str) -> None:
 
 
 async def _create(
-    pool: AsyncConnectionPool, ctx: RequestContext, inv_id: str, sys_id: str, profile=None
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    inv_id: str,
+    sys_id: str,
+    *,
+    profile=None,
+    reuse_requirement: RunReuseRequirementInput | None = None,
 ):
     return await create_run(
-        pool, ctx, investigation_id=inv_id, system_id=sys_id, build_profile=profile or _profile()
+        pool,
+        ctx,
+        RunCreateRequest(
+            investigation_id=inv_id,
+            system_id=sys_id,
+            build_profile=profile or _profile(),
+            reuse_requirement=reuse_requirement,
+        ),
     )
 
 
@@ -434,7 +452,9 @@ def test_create_rejects_empty_build_profile(migrated_url: str) -> None:
             # Call create_run directly: the _create helper's `profile or _profile()` would
             # coalesce a falsy {} away, so it cannot exercise the empty-profile path.
             resp = await create_run(
-                pool, _ctx(), investigation_id=inv_id, system_id=sys_id, build_profile={}
+                pool,
+                _ctx(),
+                RunCreateRequest(investigation_id=inv_id, system_id=sys_id, build_profile={}),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -459,10 +479,12 @@ def test_create_run_persists_expected_boot_failure(migrated_url: str) -> None:
             resp = await create_run(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                expected_boot_failure=expected,
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=sys_id,
+                    build_profile=_profile(),
+                    expected_boot_failure=expected,
+                ),
             )
             assert resp.status == "created"
             assert resp.data["expected_boot_failure"] == "console_crash"
@@ -486,10 +508,12 @@ def test_create_run_rejects_bad_expected_boot_failure(migrated_url: str) -> None
             resp = await create_run(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                expected_boot_failure={"kind": "console_crash", "pattern": ""},
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=sys_id,
+                    build_profile=_profile(),
+                    expected_boot_failure={"kind": "console_crash", "pattern": ""},
+                ),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -597,7 +621,13 @@ def test_create_cross_project_join_is_config_error(migrated_url: str) -> None:
                 roles={"proj": Role.OPERATOR, "p2": Role.OPERATOR},
             )
             resp = await create_run(
-                pool, ctx, investigation_id=other_inv, system_id=sys_id, build_profile=_profile()
+                pool,
+                ctx,
+                RunCreateRequest(
+                    investigation_id=other_inv,
+                    system_id=sys_id,
+                    build_profile=_profile(),
+                ),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -611,7 +641,9 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
             sys_id = await _seed_system(pool)
             bad: Any = "nope"
             resp = await create_run(
-                pool, _ctx(), investigation_id=inv_id, system_id=sys_id, build_profile=bad
+                pool,
+                _ctx(),
+                RunCreateRequest(investigation_id=inv_id, system_id=sys_id, build_profile=bad),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -735,17 +767,36 @@ def test_reuse_optional_assertion_satisfied_creates(migrated_url: str) -> None:
             sys_id = await _seed_system(
                 pool, requested_vcpus=8, requested_memory_gb=16, requested_disk_gb=100
             )
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_vcpus=4,
-                require_memory_gb=8,
-                require_disk_gb=40,
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(vcpus=4, memory_gb=8, disk_gb=40),
             )
         assert resp.status == "created"
+
+    asyncio.run(_run())
+
+
+def test_reuse_rejects_non_positive_sizing_requirement(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool)
+            sys_id = await _seed_system(
+                pool, requested_vcpus=8, requested_memory_gb=16, requested_disk_gb=100
+            )
+            resp = await _create(
+                pool,
+                _ctx(),
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(vcpus=0),
+            )
+            n = await _count(pool, "SELECT count(*) AS n FROM runs", ())
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["field"] == "vcpus"
+        assert n == 0
 
     asyncio.run(_run())
 
@@ -771,15 +822,16 @@ def test_reuse_assertion_miss_is_config_error_no_run(
             sys_id = await _seed_system(
                 pool, requested_vcpus=8, requested_memory_gb=16, requested_disk_gb=100
             )
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_vcpus=req_vcpus,
-                require_memory_gb=req_memory_gb,
-                require_disk_gb=req_disk_gb,
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(
+                    vcpus=req_vcpus,
+                    memory_gb=req_memory_gb,
+                    disk_gb=req_disk_gb,
+                ),
             )
             n = await _count(pool, "SELECT count(*) AS n FROM runs", ())
         assert resp.status == "error" and resp.error_category == "configuration_error"
@@ -796,13 +848,12 @@ def test_reuse_pcie_assertion_contained_creates(migrated_url: str) -> None:
                 pool,
                 pcie_claim=[{"bdf": "0000:01:00.0", "vendor_id": "8086", "device_id": "1572"}],
             )
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_pcie=["8086:1572"],
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(pcie=["8086:1572"]),
             )
         assert resp.status == "created"
 
@@ -817,13 +868,12 @@ def test_reuse_pcie_assertion_missing_device_is_config_error(migrated_url: str) 
                 pool,
                 pcie_claim=[{"bdf": "0000:01:00.0", "vendor_id": "8086", "device_id": "1572"}],
             )
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_pcie=["10de:1eb8"],
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(pcie=["10de:1eb8"]),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -838,13 +888,12 @@ def test_reuse_pcie_class_spec_is_config_error(migrated_url: str) -> None:
                 pool,
                 pcie_claim=[{"bdf": "0000:01:00.0", "vendor_id": "8086", "device_id": "1572"}],
             )
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_pcie=["class=02"],
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(pcie=["class=02"]),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -857,13 +906,12 @@ def test_reuse_empty_pcie_list_is_a_no_op(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool)
             sys_id = await _seed_system(pool)  # no pcie_claim at all
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_pcie=[],
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(pcie=[]),
             )
         assert resp.status == "created"
 
@@ -890,15 +938,12 @@ def test_reuse_full_custom_profile_only_sizing_assertion(migrated_url: str) -> N
             sys_id = await _seed_system(
                 pool, provisioning_profile=_profile_dump_sized(vcpu=8, memory_mb=16384, disk_gb=100)
             )
-            ok = await create_run(
+            ok = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_vcpus=4,
-                require_memory_gb=8,
-                require_disk_gb=40,
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(vcpus=4, memory_gb=8, disk_gb=40),
             )
         assert ok.status == "created"
 
@@ -912,13 +957,12 @@ def test_reuse_full_custom_profile_only_sizing_miss_is_config_error(migrated_url
             sys_id = await _seed_system(
                 pool, provisioning_profile=_profile_dump_sized(vcpu=2, memory_mb=2048, disk_gb=10)
             )
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_vcpus=8,
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(vcpus=8),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -964,13 +1008,12 @@ def test_reuse_precondition_beats_assertion_miss(migrated_url: str) -> None:
                 requested_memory_gb=2,
                 requested_disk_gb=10,
             )
-            resp = await create_run(
+            resp = await _create(
                 pool,
                 _ctx(),
-                investigation_id=inv_id,
-                system_id=sys_id,
-                build_profile=_profile(),
-                require_vcpus=99,
+                inv_id,
+                sys_id,
+                reuse_requirement=RunReuseRequirementInput(vcpus=99),
             )
         assert resp.status == "error" and resp.error_category == "stale_handle"
 
@@ -1633,7 +1676,11 @@ def test_build_handler_crash_window_re_dispatch_overwrites_no_orphan(migrated_ur
 def test_register_handlers_binds_build() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
-        registry, builder=_FakeBuilder(), installer=_FakeInstaller(), booter=_FakeBooter()
+        registry,
+        builder=_FakeBuilder(),
+        installer=_FakeInstaller(),
+        booter=_FakeBooter(),
+        secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.BUILD) is not None
 
@@ -1641,13 +1688,13 @@ def test_register_handlers_binds_build() -> None:
 def test_register_handlers_requires_resolver_or_run_ports() -> None:
     registry = HandlerRegistry()
     with pytest.raises(RuntimeError, match="resolver or explicit run ports"):
-        runs_handlers.register_handlers(registry)
+        runs_handlers.register_handlers(registry, secret_registry=SecretRegistry())
 
 
 # --- runs.install / runs.boot (install + boot plane, #19) ----------------------------
 
 from kdive.domain.capture import CaptureMethod  # noqa: E402
-from kdive.providers.ports import Booter, Installer  # noqa: E402
+from kdive.providers.ports import Booter, Installer, InstallRequest  # noqa: E402
 
 _SUCCEEDED_BUILD: dict[str, Any] = {
     **_VALID_BUILD,
@@ -1659,20 +1706,11 @@ class _FakeInstaller:
     """Records install() calls (incl. method/initrd_ref); returns or raises a canned category."""
 
     def __init__(self, *, error: ErrorCategory | None = None) -> None:
-        self.calls: list[tuple[UUID, UUID, str, str, CaptureMethod, str | None]] = []
+        self.calls: list[InstallRequest] = []
         self._error = error
 
-    def install(
-        self,
-        system_id: UUID,
-        run_id: UUID,
-        kernel_ref: str,
-        *,
-        cmdline: str,
-        method: CaptureMethod = CaptureMethod.HOST_DUMP,
-        initrd_ref: str | None = None,
-    ) -> None:
-        self.calls.append((system_id, run_id, kernel_ref, cmdline, method, initrd_ref))
+    def install(self, request: InstallRequest) -> None:
+        self.calls.append(request)
         if self._error is not None:
             raise CategorizedError("boom", category=self._error)
 
@@ -2105,17 +2143,8 @@ class _SlowInstaller:
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    def install(
-        self,
-        system_id: UUID,
-        run_id: UUID,
-        kernel_ref: str,
-        *,
-        cmdline: str,
-        method: CaptureMethod = CaptureMethod.HOST_DUMP,
-        initrd_ref: str | None = None,
-    ) -> None:
-        self.calls.append(run_id)
+    def install(self, request: InstallRequest) -> None:
+        self.calls.append(request.run_id)
         self.entered.set()
         assert self.release.wait(timeout=5), "test did not release the installer"
 
@@ -2223,7 +2252,9 @@ def test_boot_handler_records_step_run_stays_succeeded(migrated_url: str) -> Non
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             assert len(booter.calls) == 1
             nsteps = await _count(
@@ -2244,9 +2275,13 @@ def test_boot_handler_replay_does_not_reboot(migrated_url: str) -> None:
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job, booter)
+                await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job, booter)
+                await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
         assert len(booter.calls) == 1
 
     asyncio.run(_run())
@@ -2262,7 +2297,9 @@ def test_boot_handler_failure_records_no_step(migrated_url: str, category: Error
             booter = _FakeBooter(error=category)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
             assert caught.value.category is category
             nsteps = await _count(
                 pool,
@@ -2289,7 +2326,9 @@ def test_boot_handler_cleanup_failure_preserves_provider_category(
             monkeypatch.setattr(runs_handlers, "abandon_run_step", _fail_cleanup)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
 
         assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
 
@@ -2299,7 +2338,11 @@ def test_boot_handler_cleanup_failure_preserves_provider_category(
 def test_register_handlers_binds_install_and_boot() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
-        registry, builder=_FakeBuilder(), installer=_FakeInstaller(), booter=_FakeBooter()
+        registry,
+        builder=_FakeBuilder(),
+        installer=_FakeInstaller(),
+        booter=_FakeBooter(),
+        secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
@@ -2326,7 +2369,9 @@ def test_boot_handler_registers_console_on_success(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()  # clean success, no error
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             nsteps = await _count(
                 pool,
@@ -2365,7 +2410,9 @@ def test_boot_handler_registers_console_even_on_failure(
             booter = _FakeBooter(error=ErrorCategory.BOOT_TIMEOUT)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
             n = await _count(
                 pool,
                 "SELECT count(*) AS n FROM artifacts WHERE object_key LIKE %s",
@@ -2395,7 +2442,9 @@ def test_boot_handler_records_expected_crash_observed(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -2436,7 +2485,9 @@ def test_expected_crash_observed_system_can_host_next_run(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job, booter)
+                await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
 
             inv_id = await _seed_investigation(pool)
             resp = await _create(pool, _ctx(), inv_id, sys_id)
@@ -2471,7 +2522,9 @@ def test_boot_handler_expected_crash_requires_matching_console(
             booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
             nsteps = await _count(
                 pool,
                 "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='boot'",
@@ -2502,7 +2555,9 @@ def test_boot_handler_skips_empty_console(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()  # clean success, but no console file was written
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             nsteps = await _count(
                 pool,
@@ -2516,6 +2571,49 @@ def test_boot_handler_skips_empty_console(
             )
         assert nsteps == 1  # boot itself succeeded
         assert n == 0  # but an empty console capture registers nothing
+
+    asyncio.run(_run())
+
+
+def test_boot_handler_preserves_console_read_failure(
+    migrated_url: str,
+    minio_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
+
+    def fail_read_console_log(_path: Path) -> bytes:
+        raise CategorizedError(
+            "failed to read console log",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={
+                "operation": "read_console_log",
+                "path": "/var/lib/kdive/console/example.log",
+                "error": "PermissionError",
+            },
+        )
+
+    monkeypatch.setattr(runs_handlers, "read_console_log", fail_read_console_log)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _record_install_step(pool, run_id)
+            job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
+            booter = _FakeBooter()
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as caught:
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
+            nsteps = await _count(
+                pool,
+                "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='boot'",
+                (run_id,),
+            )
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert caught.value.details["operation"] == "read_console_log"
+        assert nsteps == 0
 
     asyncio.run(_run())
 
@@ -2545,7 +2643,9 @@ def test_boot_handler_console_is_readable_via_artifacts(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()  # clean success
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
 
             # artifacts_list must return the console as a redacted artifact envelope.
@@ -2590,7 +2690,9 @@ def test_boot_handler_reboot_refreshes_console_etag(
             (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] FIRST-BOOT-MARKER ready\n")
             job1 = await _enqueue_job(pool, JobKind.BOOT, run1, "boot")
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job1, _FakeBooter())
+                await runs_handlers.boot_handler(
+                    conn, job1, _FakeBooter(), secret_registry=SecretRegistry()
+                )
 
             # Second boot of the SAME System (new Run): the host console log is overwritten
             # with different content, so put_artifact rewrites the object at the same key.
@@ -2599,7 +2701,9 @@ def test_boot_handler_reboot_refreshes_console_etag(
             (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] SECOND-BOOT-MARKER oops\n")
             job2 = await _enqueue_job(pool, JobKind.BOOT, run2, "boot")
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job2, _FakeBooter())
+                await runs_handlers.boot_handler(
+                    conn, job2, _FakeBooter(), secret_registry=SecretRegistry()
+                )
 
             n = await _count(
                 pool,
@@ -2745,8 +2849,8 @@ def test_install_handler_forwards_console_method_for_bare_system(migrated_url: s
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 await runs_handlers.install_handler(conn, job, installer)
-        assert installer.calls[0][4] is CaptureMethod.CONSOLE
-        assert installer.calls[0][5] is None  # no initrd
+        assert installer.calls[0].method is CaptureMethod.CONSOLE
+        assert installer.calls[0].initrd_ref is None  # no initrd
 
     asyncio.run(_run())
 
@@ -2761,7 +2865,7 @@ def test_install_handler_forwards_host_dump_for_preserve_on_crash(migrated_url: 
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 await runs_handlers.install_handler(conn, job, installer)
-        assert installer.calls[0][4] is CaptureMethod.HOST_DUMP
+        assert installer.calls[0].method is CaptureMethod.HOST_DUMP
 
     asyncio.run(_run())
 
@@ -2777,7 +2881,7 @@ def test_install_handler_forwards_initrd_ref_from_build_ledger(migrated_url: str
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 await runs_handlers.install_handler(conn, job, installer)
-        assert installer.calls[0][5] == "local/runs/x/initrd"
+        assert installer.calls[0].initrd_ref == "local/runs/x/initrd"
 
     asyncio.run(_run())
 
@@ -2791,7 +2895,7 @@ def test_install_handler_no_initrd_when_ledger_initrd_blank(migrated_url: str) -
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 await runs_handlers.install_handler(conn, job, installer)
-        assert installer.calls[0][5] is None
+        assert installer.calls[0].initrd_ref is None
 
     asyncio.run(_run())
 
@@ -2808,7 +2912,7 @@ def test_install_handler_forwards_ledger_cmdline_to_installer(migrated_url: str)
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 await runs_handlers.install_handler(conn, job, installer)
-        assert installer.calls[0][3] == "console=ttyS0 root=/dev/vda dhash_entries=1"
+        assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda dhash_entries=1"
 
     asyncio.run(_run())
 
@@ -2826,7 +2930,7 @@ def test_install_handler_forwards_default_cmdline_when_ledger_has_none(migrated_
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 await runs_handlers.install_handler(conn, job, installer)
-        assert installer.calls[0][3] == "console=ttyS0 root=/dev/vda"  # required base only
+        assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda"  # required base only
 
     asyncio.run(_run())
 

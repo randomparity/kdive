@@ -1,4 +1,4 @@
-"""On-demand reconcile MCP tool (``ops.reconcile_now``) — ADR-0062 §reconcile, M1.3.
+"""On-demand reconcile MCP tool (``ops.reconcile_now``) — ADR-0062 §reconcile.
 
 ``ops.reconcile_now`` runs one :func:`kdive.reconciler.loop.reconcile_once` pass on
 demand and returns its per-class repair summary. It calls the **same** ``reconcile_once``
@@ -23,13 +23,8 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools.ops._auth import audit_platform_denial, held_platform_roles
-from kdive.reconciler.loop import (
-    InfraReaper,
-    NullReaper,
-    ReconcileReport,
-    UploadStore,
-    reconcile_once,
-)
+from kdive.providers.reaping import InfraReaper
+from kdive.reconciler.loop import ReconcileReport, UploadStore, reconcile_once
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
@@ -59,8 +54,8 @@ async def reconcile_now(
             from — the same pool the periodic reconciler uses, so the two passes share the
             advisory locks.
         ctx: The caller's request context; must hold ``platform_operator``.
-        reaper: The infra reaper the leaked-domain repair consumes (``NullReaper`` until
-            the provider ships a real one — mirrors the periodic loop's wiring).
+        reaper: The infra reaper the leaked-domain repair consumes; registration resolves
+            it through the same provider composition seam as the periodic loop.
         upload_store: The object store the abandoned-upload reaper consumes, or ``None`` to
             skip that repair (mirrors the periodic loop when ``KDIVE_S3_*`` is unconfigured).
 
@@ -124,7 +119,7 @@ def _reconcile_response(report: ReconcileReport) -> ToolResponse:
     )
 
 
-def _resolve_upload_store() -> UploadStore | None:
+def resolve_upload_store() -> UploadStore | None:
     """Resolve the upload store from the ``KDIVE_S3_*`` env, or ``None`` if unconfigured.
 
     Mirrors the periodic reconciler's wiring (``kdive.__main__._run_reconciler``): no S3
@@ -139,15 +134,14 @@ def _resolve_upload_store() -> UploadStore | None:
         return None
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register ``ops.reconcile_now`` on ``app``, bound to ``pool``.
-
-    The reaper and upload store are resolved once at registration — the same construction
-    the periodic reconciler uses (``NullReaper`` plus the env-built object store) — so the
-    on-demand pass and the periodic loop run an identical ``reconcile_once``.
-    """
-    reaper: InfraReaper = NullReaper()
-    upload_store = _resolve_upload_store()
+def register_with_reaper(
+    app: FastMCP,
+    pool: AsyncConnectionPool,
+    *,
+    reaper: InfraReaper,
+    upload_store: UploadStore | None,
+) -> None:
+    """Register ``ops.reconcile_now`` with explicitly assembled repair ports."""
 
     @app.tool(
         name=_RECONCILE_TOOL,

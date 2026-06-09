@@ -12,32 +12,36 @@ not re-queue; a request never placeable past the max-wait window is reaped to
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.cost import Selector
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
+from kdive.providers.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.security.audit import args_digest
-from kdive.services.allocation_admission import AllocationRequest, admit
+from kdive.services.allocation.admission import AllocationRequest, admit
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, run_repair
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-_KIND = "local-libvirt"
+_KIND = ResourceKind.LOCAL_LIBVIRT
 _NIC = {
     "bdf": "0000:01:00.0",
     "vendor_id": "8086",
@@ -206,6 +210,48 @@ def test_freed_slot_promotes_and_charges_at_grant(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_missing_sizing_snapshot_does_not_promote_as_zero(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _run() -> UUID:
+        async with await connect(migrated_url) as seed:
+            res = await _seed_resource(seed, cap=1)
+            await _seed_quota(seed)
+            holder = await _seed_granted(seed, res.id)
+            queued = await _enqueue(seed, res)
+            await seed.execute(
+                "UPDATE allocations SET requested_vcpus = NULL WHERE id = %s",
+                (queued,),
+            )
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASING)
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASED)
+        caplog.set_level(logging.WARNING, logger="kdive.services.allocation.promotion")
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, loop._promote_pending)
+        assert count == 0
+        return queued
+
+    queued = asyncio.run(_run())
+
+    async def _check() -> None:
+        async with await connect(migrated_url) as check:
+            assert await _state(check, queued) == "requested"
+            assert await _ledger_kinds(check, queued) == []
+
+    asyncio.run(_check())
+    errors = [
+        record.exc_info[1]
+        for record in caplog.records
+        if record.exc_info is not None and str(queued) in record.message
+    ]
+    assert any(
+        isinstance(exc, CategorizedError)
+        and exc.category is ErrorCategory.CONFIGURATION_ERROR
+        and exc.details["missing"] == ["requested_vcpus"]
+        for exc in errors
+    )
+
+
 def test_work_conserving_fills_free_host_behind_busy_global_oldest(migrated_url: str) -> None:
     # The global-oldest request targets host A (busy); a younger request placeable on free
     # host B is promoted first — a free host is never idled behind a request on a busy host.
@@ -371,6 +417,38 @@ def test_pcie_aware_promotion_claims_a_freed_device(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_pcie_promotion_logs_malformed_persisted_spec(
+    migrated_url: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def _run() -> tuple[UUID, UUID]:
+        async with await connect(migrated_url) as seed:
+            res = await _seed_resource(seed, cap=1, pcie=True)
+            await _seed_quota(seed)
+            holder = await _seed_granted(seed, res.id)
+            queued = await _enqueue(seed, res)
+            await seed.execute(
+                "UPDATE allocations SET requested_pcie_specs = %s WHERE id = %s",
+                (Jsonb(["not-a-spec"]), queued),
+            )
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASING)
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASED)
+        caplog.set_level(logging.WARNING, logger="kdive.services.allocation.promotion")
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, loop._promote_pending)
+        assert count == 0
+        return queued, res.id
+
+    queued, resource_id = asyncio.run(_run())
+    assert any(
+        record.exc_info is not None
+        and "configuration_error" in record.message
+        and str(queued) in record.message
+        and str(resource_id) in record.message
+        for record in caplog.records
+    )
+
+
 def test_grant_audit_attributed_to_original_principal(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
@@ -495,7 +573,7 @@ def test_aged_but_placeable_is_promoted_not_reaped(migrated_url: str) -> None:
             await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASED)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             report = await loop.reconcile_once(
-                pool, loop.NullReaper(), queue_max_wait=timedelta(hours=24)
+                pool, NullReaper(), queue_max_wait=timedelta(hours=24)
             )
         assert report.promoted_allocations == 1
         assert report.queue_timeouts == 0

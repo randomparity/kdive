@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import JOBS
@@ -17,11 +19,11 @@ from kdive.domain.models import Job, JobKind
 from kdive.domain.state import JobState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import BuildPayload
+from kdive.jobs.payloads import Authorizing, BuildPayload, load_payload
 from kdive.jobs.worker import Worker
 from kdive.security.secrets.secret_registry import SecretRegistry
 
-_AUTHORIZING = {"principal": "p", "agent_session": None, "project": "a"}
+_AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
 
 def _build_payload() -> BuildPayload:
@@ -42,14 +44,19 @@ def _unopened_pool(max_size: int = 4) -> AsyncConnectionPool:
     )
 
 
+def _worker(pool: AsyncConnectionPool, registry: HandlerRegistry, **kwargs: Any) -> Worker:
+    kwargs.setdefault("secret_registry", SecretRegistry())
+    return Worker(pool, registry, **kwargs)
+
+
 def test_init_rejects_pool_too_small_for_dispatch_plus_heartbeat() -> None:
     with pytest.raises(ValueError, match="max_size"):
-        Worker(_unopened_pool(max_size=1), HandlerRegistry(), worker_id="w1")
+        _worker(_unopened_pool(max_size=1), HandlerRegistry(), worker_id="w1")
 
 
 def test_init_rejects_interval_above_third_of_lease() -> None:
     with pytest.raises(ValueError, match="heartbeat_interval"):
-        Worker(
+        _worker(
             _unopened_pool(),
             HandlerRegistry(),
             worker_id="w1",
@@ -59,7 +66,7 @@ def test_init_rejects_interval_above_third_of_lease() -> None:
 
 
 def test_init_accepts_interval_at_third_of_lease() -> None:
-    Worker(
+    _worker(
         _unopened_pool(),
         HandlerRegistry(),
         worker_id="w1",
@@ -79,7 +86,7 @@ def test_run_once_happy_path(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, handler)
-            worker = Worker(pool, reg, worker_id="w1")
+            worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-happy"
@@ -100,7 +107,7 @@ def test_run_once_happy_path(migrated_url: str) -> None:
 def test_run_once_unknown_kind_dead_letters(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
-            worker = Worker(pool, HandlerRegistry(), worker_id="w1")  # no handlers
+            worker = _worker(pool, HandlerRegistry(), worker_id="w1")  # no handlers
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-unk"
@@ -126,7 +133,7 @@ def test_run_once_dedup_runs_handler_once(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, handler)
-            worker = Worker(pool, reg, worker_id="w1")
+            worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 first = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-dedup"
@@ -155,7 +162,7 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, always_raises)
-            worker = Worker(pool, reg, worker_id="w1")
+            worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-poison", max_attempts=3
@@ -190,7 +197,7 @@ def test_failed_job_persists_redacted_failure_context(
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, always_raises)
-            worker = Worker(pool, reg, worker_id="w1", secret_registry=secret_registry)
+            worker = _worker(pool, reg, worker_id="w1", secret_registry=secret_registry)
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-context"
@@ -211,6 +218,44 @@ def test_failed_job_persists_redacted_failure_context(
     asyncio.run(_run())
 
 
+def test_invalid_persisted_payload_fails_as_configuration_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+
+            async def handler(conn: psycopg.AsyncConnection, job: Job) -> str:
+                load_payload(job, BuildPayload)
+                raise AssertionError("malformed payload should not validate")
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.BUILD, handler)
+            worker = _worker(pool, reg, worker_id="w1")
+            async with pool.connection() as conn, conn.transaction():
+                cur = await conn.execute(
+                    "INSERT INTO jobs "
+                    "(kind, payload, state, max_attempts, authorizing, dedup_key) "
+                    "VALUES (%s, %s, 'queued', 1, %s, %s) "
+                    "RETURNING id",
+                    (
+                        JobKind.BUILD,
+                        Jsonb({"run_id": "not-a-uuid"}),
+                        Jsonb(_AUTHORIZING.model_dump(mode="json")),
+                        "dk-invalid-payload",
+                    ),
+                )
+                row = await cur.fetchone()
+
+            assert row is not None
+            job_id = row[0]
+            await worker.run_once()
+
+            final = await _final_state(migrated_url, job_id)
+            assert final.state is JobState.FAILED
+            assert final.error_category is ErrorCategory.CONFIGURATION_ERROR
+            assert final.failure_context["failure_message"].startswith("invalid build payload:")
+
+    asyncio.run(_run())
+
+
 def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
@@ -223,7 +268,7 @@ def test_run_once_reclaims_lapsed_lease(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, handler)
-            worker = Worker(pool, reg, worker_id="w1")
+            worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-lapse"
@@ -279,7 +324,7 @@ def test_heartbeat_renews_live_lease(migrated_url: str, monkeypatch: pytest.Monk
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, slow)
-            worker = Worker(
+            worker = _worker(
                 pool,
                 reg,
                 worker_id="w1",
@@ -334,7 +379,7 @@ def test_heartbeat_error_does_not_crash_dispatch(
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, handler)
-            worker = Worker(
+            worker = _worker(
                 pool,
                 reg,
                 worker_id="w1",
@@ -371,7 +416,7 @@ def test_run_once_claims_nothing_while_paused(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, handler)
-            worker = Worker(pool, reg, worker_id="w1")
+            worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-paused"
@@ -396,7 +441,7 @@ def test_resume_restores_claiming(migrated_url: str) -> None:
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, handler)
-            worker = Worker(pool, reg, worker_id="w1")
+            worker = _worker(pool, reg, worker_id="w1")
             async with pool.connection() as conn:
                 job = await queue.enqueue(
                     conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-resume"
@@ -427,7 +472,7 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
 
             reg = HandlerRegistry()
             reg.register(JobKind.BUILD, slow)
-            worker = Worker(
+            worker = _worker(
                 pool,
                 reg,
                 worker_id="w1",
@@ -464,7 +509,7 @@ def test_paused_worker_completes_job_already_in_flight(migrated_url: str) -> Non
 def test_run_survives_run_once_error(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
-            worker = Worker(
+            worker = _worker(
                 pool, HandlerRegistry(), worker_id="w1", poll_interval=timedelta(milliseconds=10)
             )
             stop = asyncio.Event()
@@ -487,7 +532,7 @@ def test_run_survives_run_once_error(migrated_url: str, monkeypatch: pytest.Monk
 
 def test_run_stops_while_idle_sleep_is_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run() -> None:
-        worker = Worker(
+        worker = _worker(
             _unopened_pool(),
             HandlerRegistry(),
             worker_id="w1",
@@ -511,7 +556,7 @@ def test_run_stops_while_idle_sleep_is_pending(monkeypatch: pytest.MonkeyPatch) 
 
 def test_run_stops_while_error_sleep_is_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run() -> None:
-        worker = Worker(
+        worker = _worker(
             _unopened_pool(),
             HandlerRegistry(),
             worker_id="w1",

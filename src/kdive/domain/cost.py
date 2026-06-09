@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.sizing import MB_PER_GB
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
 # ≤ resource-caps check (ADR-0007 §2): you cannot be billed for more than the host has.
 _CAP_VCPUS_KEY = "vcpus"
 _CAP_MEMORY_MB_KEY = "memory_mb"
-_MB_PER_GB = 1024
 
 # Global reference weights (ADR-0007 §1): one vcpu-hour costs 1.0 kcu, one GB-hour 0.25.
 W_CPU = Decimal("1.0")
@@ -190,7 +190,7 @@ def validate_against_resource(selector: Selector, resource: Resource) -> None:
     cap_memory_mb = _resource_cap(resource, _CAP_MEMORY_MB_KEY)
     if selector.vcpus > cap_vcpus:
         raise _caps_error("vcpus", selector.vcpus, cap_vcpus, resource)
-    requested_mb = selector.memory_gb * _MB_PER_GB
+    requested_mb = selector.memory_gb * MB_PER_GB
     if requested_mb > cap_memory_mb:
         raise _caps_error("memory_mb", requested_mb, cap_memory_mb, resource)
 

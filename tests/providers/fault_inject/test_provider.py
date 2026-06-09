@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import pytest
 
+import kdive.providers.fault_inject.lifecycle.provider as provider_module
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import PowerAction, Sensitivity
+from kdive.profiles.build import ServerBuildProfile
+from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
-from kdive.providers.fault_inject.provider import (
+from kdive.providers.fault_inject.lifecycle.provider import (
     FaultInjectBuild,
     FaultInjectConnect,
     FaultInjectControl,
@@ -22,12 +27,13 @@ from kdive.providers.fault_inject.provider import (
     FaultInjectRetrieve,
     fault_inject_attach_seam,
 )
-from kdive.providers.ports import SystemHandle
+from kdive.providers.ports import InstallRequest, SystemHandle
 from kdive.providers.ports.lifecycle import TransportHandleData
-from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
 
 _SYSTEM = UUID("11111111-1111-1111-1111-111111111111")
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
+_PROVISIONING_PROFILE = cast(ProvisioningProfile, object())
+_BUILD_PROFILE = cast(ServerBuildProfile, object())
 
 
 class _FakeStore:
@@ -46,7 +52,7 @@ def test_provision_returns_a_synthetic_domain_and_records_it_as_owned() -> None:
     inventory = FaultInjectInventory()
     provision = FaultInjectProvision(inventory)
 
-    domain = provision.provision(_SYSTEM, profile=object())
+    domain = provision.provision(_SYSTEM, profile=_PROVISIONING_PROFILE)
 
     assert str(_SYSTEM) in domain
     assert inventory.owned_domains()[0].name == domain
@@ -56,7 +62,7 @@ def test_provision_returns_a_synthetic_domain_and_records_it_as_owned() -> None:
 def test_teardown_forgets_the_domain_so_it_is_no_longer_owned() -> None:
     inventory = FaultInjectInventory()
     provision = FaultInjectProvision(inventory)
-    domain = provision.provision(_SYSTEM, profile=object())
+    domain = provision.provision(_SYSTEM, profile=_PROVISIONING_PROFILE)
 
     provision.teardown(domain)
 
@@ -66,9 +72,9 @@ def test_teardown_forgets_the_domain_so_it_is_no_longer_owned() -> None:
 def test_reprovision_leaves_the_system_owning_exactly_one_domain() -> None:
     inventory = FaultInjectInventory()
     provision = FaultInjectProvision(inventory)
-    provision.provision(_SYSTEM, profile=object())
+    provision.provision(_SYSTEM, profile=_PROVISIONING_PROFILE)
 
-    second = provision.reprovision(_SYSTEM, profile=object())
+    second = provision.reprovision(_SYSTEM, profile=_PROVISIONING_PROFILE)
 
     # The synthetic name is deterministic per System, so reprovision never leaks the old
     # domain: the inventory holds exactly one entry for the System after replacement.
@@ -83,7 +89,7 @@ def test_build_stores_a_synthetic_kernel_and_returns_consistent_refs() -> None:
     store = _FakeStore()
     builder = FaultInjectBuild(store_factory=lambda: store)
 
-    output = builder.build(_RUN, profile=object())
+    output = builder.build(_RUN, profile=_BUILD_PROFILE)
 
     assert output.kernel_ref and output.debuginfo_ref
     assert len(output.build_id) == 40  # a plausible GNU build-id length
@@ -95,11 +101,36 @@ def test_install_and_boot_succeed_on_the_happy_path() -> None:
     install = FaultInjectInstall()
 
     # No fault drawn → the synthetic install/boot reach a ready state without raising.
-    install.install(_SYSTEM, _RUN, "kernel-ref", cmdline="console=ttyS0")
+    install.install(
+        InstallRequest(
+            system_id=_SYSTEM,
+            run_id=_RUN,
+            kernel_ref="kernel-ref",
+            cmdline="console=ttyS0",
+        )
+    )
     install.boot(_SYSTEM)
 
 
 # --- Connect ---------------------------------------------------------------------------
+
+
+class _MaxDigest:
+    def digest(self) -> bytes:
+        return b"\xfb\xff"
+
+
+def test_synthetic_port_includes_documented_upper_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def blake2b(data: bytes, *, digest_size: int) -> _MaxDigest:
+        assert data == b"fault-inject-domain"
+        assert digest_size == 2
+        return _MaxDigest()
+
+    monkeypatch.setattr(provider_module.hashlib, "blake2b", blake2b)
+
+    assert provider_module._synthetic_port("fault-inject-domain") == 65535
 
 
 def test_open_transport_returns_a_decodable_loopback_handle() -> None:
@@ -156,7 +187,9 @@ def test_capture_stores_a_synthetic_vmcore_with_raw_and_redacted_artifacts() -> 
 
 def test_capture_build_id_matches_the_builder_so_provenance_holds() -> None:
     store = _FakeStore()
-    build_id = FaultInjectBuild(store_factory=lambda: store).build(_RUN, profile=object()).build_id
+    build_id = (
+        FaultInjectBuild(store_factory=lambda: store).build(_RUN, profile=_BUILD_PROFILE).build_id
+    )
     captured = FaultInjectRetrieve(store_factory=lambda: store).capture(
         _SYSTEM, CaptureMethod.HOST_DUMP
     )
@@ -178,6 +211,20 @@ def test_crash_postmortem_returns_a_bounded_synthetic_transcript() -> None:
 
     assert output.truncated is False
     assert isinstance(output.results, dict)
+
+
+def test_crash_postmortem_rejects_disallowed_commands() -> None:
+    retrieve = FaultInjectRetrieve(store_factory=_FakeStore)
+
+    with pytest.raises(CategorizedError) as exc:
+        retrieve.run_crash_postmortem(
+            vmcore_ref="v",
+            debuginfo_ref="d",
+            expected_build_id="b",
+            commands=["bt | sh"],
+        )
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_introspect_from_vmcore_and_live_return_plausible_shapes() -> None:

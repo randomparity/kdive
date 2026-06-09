@@ -7,7 +7,9 @@ object store, verifying the core's build-id against the Run's recorded build-id
 (tasks, modules, sysinfo). The drgn open/helper path is `live_vm`-gated, so the
 orchestration, provenance, dispatch, byte-cap, and redaction are unit-tested with a fake
 `_Program`. The assembled report is `Redactor`-scrubbed **inside the port** — the port is
-the single redaction boundary, so any later persistence is of already-redacted text.
+the single redaction boundary, so any later persistence is of already-redacted text. The
+real drgn package is an operator-provided live-host prerequisite, not a normal service
+dependency; these ports stay disabled until the live runner injects drgn-backed seams.
 """
 
 from __future__ import annotations
@@ -21,8 +23,9 @@ from typing import Protocol
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import IntrospectOutput, LiveIntrospector, VmcoreIntrospector
 from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 
-# Fixed in-tree caps (no caller args in M0; ADR-0033 §"Output bounds").
+# Fixed in-tree caps (no caller args; ADR-0033 §"Output bounds").
 _TASK_LIMIT = 200
 _BLOCKED_STATES = frozenset({"D"})
 _REPORT_BYTE_CAP = 1 << 20  # 1 MiB serialized-report cap; tasks trimmed first.
@@ -64,7 +67,7 @@ class _Program(Protocol):
     def mem_total_pages(self) -> int: ...
 
 
-# --- helpers (M0 subset ported from v1 introspect/helpers/) --------------------------------
+# --- helpers (ported from v1 introspect/helpers/) -------------------------------------------
 
 
 def helper_tasks(prog: _Program) -> dict[str, object]:
@@ -174,26 +177,29 @@ class LocalLibvirtVmcoreIntrospect:
         *,
         fetch_object: _FetchObject,
         read_vmcore_build_id: _ReadBuildId,
+        secret_registry: SecretRegistry,
         open_program: _OpenProgram | None = None,
         run_helper: _RunHelper | None = None,
     ) -> None:
         self._fetch_object = fetch_object
         self._read_vmcore_build_id = read_vmcore_build_id
+        self._secret_registry = secret_registry
         self._open_program = open_program
         self._run_helper = run_helper
         self._report_byte_cap = _REPORT_BYTE_CAP
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtVmcoreIntrospect:
+    def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtVmcoreIntrospect:
         """Build from env; does not import drgn or open the store (lazy ``live_vm`` seams).
 
         The drgn seams are left ``None``, so ``from_vmcore`` raises ``MISSING_DEPENDENCY``
         up front off-gate — it never reads the store or imports drgn. The ``live_vm`` runner
-        constructs the port with the real seams injected.
+        constructs the port with real seams on a host where the operator has provided drgn.
         """
         return cls(
             fetch_object=_real_fetch_object,
             read_vmcore_build_id=_real_read_vmcore_build_id,
+            secret_registry=secret_registry,
         )
 
     def from_vmcore(
@@ -258,7 +264,13 @@ class LocalLibvirtVmcoreIntrospect:
         modules: dict[str, object],
         sysinfo: dict[str, object],
     ) -> IntrospectOutput:
-        return assemble_report(tasks, modules, sysinfo, byte_cap=self._report_byte_cap)
+        return assemble_report(
+            tasks,
+            modules,
+            sysinfo,
+            byte_cap=self._report_byte_cap,
+            secret_registry=self._secret_registry,
+        )
 
 
 def assemble_report(
@@ -267,6 +279,7 @@ def assemble_report(
     sysinfo: dict[str, object],
     *,
     byte_cap: int,
+    secret_registry: SecretRegistry,
 ) -> IntrospectOutput:
     """Redact first (the single redaction boundary), then byte-cap the redacted report.
 
@@ -275,7 +288,7 @@ def assemble_report(
     pre-redaction size that never ships.
     """
     helper_truncated = bool(tasks.get("truncated"))
-    redactor = Redactor()
+    redactor = Redactor(registry=secret_registry)
     tasks = redactor.redact_value(tasks)
     modules = redactor.redact_value(modules)
     sysinfo = redactor.redact_value(sysinfo)
@@ -332,24 +345,27 @@ class LocalLibvirtLiveIntrospect:
 
     The drgn seams (``open_live_program``/``run_helper``) are ``None`` off-gate; ``run`` then
     raises ``MISSING_DEPENDENCY``, mirroring the offline port's seam guard. The ``live_vm``
-    runner injects the real ``open_live_program`` (which opens drgn against the live kernel
-    over the already-authenticated transport).
+    runner injects the real ``open_live_program`` on a host where the operator has provided
+    drgn; that seam opens drgn against the live kernel over the already-authenticated
+    transport.
     """
 
     def __init__(
         self,
         *,
+        secret_registry: SecretRegistry,
         open_live_program: _OpenLiveProgram | None = None,
         run_helper: _RunHelper | None = None,
     ) -> None:
+        self._secret_registry = secret_registry
         self._open_live_program = open_live_program
         self._run_helper = run_helper
         self._report_byte_cap = _REPORT_BYTE_CAP
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtLiveIntrospect:
+    def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtLiveIntrospect:
         """Build from env; the drgn seam is left ``None`` so ``introspect_live`` raises off-gate."""
-        return cls()
+        return cls(secret_registry=secret_registry)
 
     def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
         """Attach drgn to the live kernel, run one helper, return a redacted report.
@@ -390,7 +406,13 @@ class LocalLibvirtLiveIntrospect:
                 f"unknown live introspection helper: {helper}",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        return assemble_report(tasks, modules, sysinfo, byte_cap=self._report_byte_cap)
+        return assemble_report(
+            tasks,
+            modules,
+            sysinfo,
+            byte_cap=self._report_byte_cap,
+            secret_registry=self._secret_registry,
+        )
 
 
 def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm

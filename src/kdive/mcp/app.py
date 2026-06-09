@@ -1,11 +1,10 @@
-"""FastMCP application assembly and the two plane registrar seams (issue #10).
+"""FastMCP application assembly and the two plane registrar seams.
 
-A plane issue (#11+) ships a tool surface *and* a job handler. The skeleton exposes
-two symmetric seams so a plane is added by appending to a tuple here and never edits
-the entrypoint: `_PLANE_REGISTRARS` (tools, called by :func:`build_app`) and
-`_HANDLER_REGISTRARS` (worker job handlers, called by :func:`build_handler_registry`).
-Provider-aware registrars receive the injected provider resolver (ADR-0071), while
-`jobs.*` register tools but no job handler (they are read/cancel tools, not job kinds).
+Tool registration and worker-handler registration are both table-driven. A plane adds
+tool registrars to ``_PLANE_REGISTRARS`` and long-running job handlers to
+``_HANDLER_REGISTRARS``; the entrypoint stays stable. Provider-aware registrars receive
+the injected provider resolver (ADR-0071), while read-only/cancel-only tool groups
+register no job handler because they do not own a ``JobKind``.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.models import ResourceKind
+from kdive.jobs.handlers import control, runs, systems, vmcore
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.middleware import DenialAuditMiddleware
@@ -44,30 +43,33 @@ from kdive.mcp.tools.ops import breakglass as ops_breakglass_tools
 from kdive.mcp.tools.ops import inventory as inventory_tools
 from kdive.mcp.tools.ops import queue as ops_queue_tools
 from kdive.mcp.tools.ops import reconcile as ops_reconcile_tools
+from kdive.mcp.tools.ops import resources as ops_resources_tools
 from kdive.mcp.tools.ops import tuning as ops_tuning_tools
-from kdive.planes import control, runs, systems, vmcore
-from kdive.providers.composition import build_provider_resolver
+from kdive.providers.composition import ProviderComposition, build_provider_resolver
+from kdive.providers.reaping import InfraReaper
 from kdive.providers.resolver import ProviderResolver
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY, SecretRegistry
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 type PlaneRegistrar = Callable[
-    [FastMCP, AsyncConnectionPool, ProviderResolver, SecretRegistry], None
+    [FastMCP, AsyncConnectionPool, ProviderResolver, SecretRegistry, InfraReaper], None
 ]
-type HandlerRegistrar = Callable[[HandlerRegistry, ProviderResolver], None]
+type HandlerRegistrar = Callable[[HandlerRegistry, ProviderResolver, SecretRegistry], None]
 
 
 def _plain(register: Callable[[FastMCP, AsyncConnectionPool], None]) -> PlaneRegistrar:
     def _register(
-        app: FastMCP, pool: AsyncConnectionPool, _: ProviderResolver, __: SecretRegistry
+        app: FastMCP,
+        pool: AsyncConnectionPool,
+        _: ProviderResolver,
+        __: SecretRegistry,
+        ___: InfraReaper,
     ) -> None:
         register(app, pool)
 
     return _register
 
 
-# Tool seam: each plane exposes register(app, pool); provider-aware planes receive the resolver
-# and resolve the local-libvirt runtime for their registration-time facets (per-target MCP
-# resolution lands with the second provider kind, M1.5 issues 2/4).
+# Tool seam: each plane exposes register(app, pool); provider-aware planes receive the resolver.
 _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _plain(jobs.register),
     _plain(resources.register),
@@ -77,48 +79,55 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _plain(register_accounting_usage),
     _plain(register_accounting_reports),
     _plain(register_accounting_admin),
-    _plain(ops_reconcile_tools.register),
-    _plain(allocations.register),
-    _plain(ops_breakglass_tools.register),
-    lambda app, pool, resolver, registry: systems_tools.register(
-        app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
-    ),
-    _plain(investigations.register),
-    lambda app, pool, resolver, registry: runs_tools.register(
-        app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
-    ),
-    _plain(control_tools.register),
-    _plain(artifacts.register),
-    lambda app, pool, resolver, registry: vmcore_tools.register(
-        app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
-    ),
-    lambda app, pool, resolver, registry: debug_tools.register(
+    lambda app, pool, resolver, registry, reaper: ops_reconcile_tools.register_with_reaper(
         app,
         pool,
-        provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT),
+        reaper=reaper,
+        upload_store=ops_reconcile_tools.resolve_upload_store(),
+    ),
+    _plain(ops_resources_tools.register),
+    _plain(allocations.register),
+    _plain(ops_breakglass_tools.register),
+    lambda app, pool, resolver, registry, reaper: systems_tools.register(
+        app, pool, resolver=resolver
+    ),
+    _plain(investigations.register),
+    lambda app, pool, resolver, registry, reaper: runs_tools.register(app, pool, resolver=resolver),
+    _plain(control_tools.register),
+    _plain(artifacts.register),
+    lambda app, pool, resolver, registry, reaper: vmcore_tools.register(
+        app, pool, resolver=resolver, secret_registry=registry
+    ),
+    lambda app, pool, resolver, registry, reaper: debug_tools.register(
+        app,
+        pool,
+        resolver=resolver,
         secret_registry=registry,
     ),
-    lambda app, pool, resolver, registry: introspect.register(
-        app, pool, provider_runtime=resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
-    ),
+    lambda app, pool, resolver, registry, reaper: introspect.register(app, pool, resolver=resolver),
     _plain(ops_queue_tools.register),
     _plain(ops_tuning_tools.register),
     _plain(audit_tools.register),
     _plain(inventory_tools.register),
 )
 
-# Handler seam: each concrete worker module exposes register_handlers(registry).
-# jobs.* register no JobHandler; the provisioning plane (#16) registers the provision/teardown
-# handlers, the build plane (#18) registers the build handler, the control plane (#23)
-# registers the power/force_crash handlers, and the retrieve plane (#24) registers the
-# capture_vmcore handler (each builds its provider/builder lazily from env — no libvirt/
-# toolchain connection at registration). The Connect plane (#20) registers tools only — its
-# debug.start_session/end_session are synchronous, so they have no JobKind and no handler.
+# Handler seam: worker modules expose register_handlers(registry). Long-running lifecycle,
+# build, control, and retrieval operations register JobKind handlers here; synchronous tools
+# register only in _PLANE_REGISTRARS. Handler construction receives the provider resolver and
+# redaction registry without opening provider or toolchain connections at registration time.
 _HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
-    lambda registry, resolver: systems.register_handlers(registry, resolver=resolver),
-    lambda registry, resolver: runs.register_handlers(registry, resolver=resolver),
-    lambda registry, resolver: control.register_handlers(registry, resolver=resolver),
-    lambda registry, resolver: vmcore.register_handlers(registry, resolver=resolver),
+    lambda registry, resolver, secret_registry: systems.register_handlers(
+        registry, resolver=resolver
+    ),
+    lambda registry, resolver, secret_registry: runs.register_handlers(
+        registry, resolver=resolver, secret_registry=secret_registry
+    ),
+    lambda registry, resolver, secret_registry: control.register_handlers(
+        registry, resolver=resolver
+    ),
+    lambda registry, resolver, secret_registry: vmcore.register_handlers(
+        registry, resolver=resolver
+    ),
 )
 
 
@@ -126,8 +135,8 @@ def build_app(
     pool: AsyncConnectionPool,
     *,
     verifier: JWTVerifier | None = None,
-    provider_resolver: ProviderResolver | None = None,
-    secret_registry: SecretRegistry | None = None,
+    provider_composition: ProviderComposition | None = None,
+    secret_registry: SecretRegistry,
 ) -> FastMCP:
     """Construct the FastMCP app and register every plane's tools.
 
@@ -135,29 +144,32 @@ def build_app(
         pool: The shared async connection pool tools read through.
         verifier: An injected verifier (tests pass a local-keypair one); when
             ``None``, built from the OIDC env vars via :func:`build_verifier`.
-        provider_resolver: Injected per-kind provider resolver passed to provider-aware
-            tool registrars; when ``None``, built from the default provider composition.
-        secret_registry: App-owned registry shared by secret backends and logging. When
-            ``None``, the process-global default is used for tests and CLI helpers.
+        provider_composition: Provider assembly owner used when the app constructs its own
+            resolver/reaper pair.
+        secret_registry: App-owned registry shared by secret backends and logging.
     """
     app: FastMCP = FastMCP(name="kdive", auth=verifier or build_verifier())
     app.add_middleware(DenialAuditMiddleware(pool))
-    resolver = provider_resolver or build_provider_resolver()
-    registry = PROCESS_SECRET_REGISTRY if secret_registry is None else secret_registry
+    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    resolver = composition.build_provider_resolver()
+    reaper = composition.build_reconciler_reaper()
     for register in _PLANE_REGISTRARS:
-        register(app, pool, resolver, registry)
+        register(app, pool, resolver, secret_registry, reaper)
     return app
 
 
-def build_handler_registry(*, provider_resolver: ProviderResolver | None = None) -> HandlerRegistry:
+def build_handler_registry(
+    *, provider_resolver: ProviderResolver | None = None, secret_registry: SecretRegistry
+) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars.
 
     Args:
         provider_resolver: Injected per-kind provider resolver passed to worker handler
             registrars; when ``None``, built from the default provider composition.
+        secret_registry: Worker-owned registry shared by redaction boundaries and logging.
     """
     registry = HandlerRegistry()
-    resolver = provider_resolver or build_provider_resolver()
+    resolver = provider_resolver or build_provider_resolver(secret_registry=secret_registry)
     for register in _HANDLER_REGISTRARS:
-        register(registry, resolver)
+        register(registry, resolver, secret_registry)
     return registry

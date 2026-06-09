@@ -6,7 +6,7 @@ from typing import NamedTuple, Protocol
 from uuid import UUID
 
 from kdive.profiles.build import ServerBuildProfile
-from kdive.store.objectstore import HeadResult
+from kdive.provider_components.artifacts import HeadResult
 
 
 class BuildOutput(NamedTuple):

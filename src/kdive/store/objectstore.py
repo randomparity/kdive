@@ -11,9 +11,8 @@ returned sensitivity).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import Any
 from uuid import UUID, uuid4
 
 import boto3
@@ -21,6 +20,13 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Artifact, Sensitivity
+from kdive.provider_components import artifacts as artifact_types
+from kdive.provider_components.artifacts import (
+    artifact_key as artifact_key,
+)
+from kdive.provider_components.artifacts import (
+    owner_prefix as owner_prefix,
+)
 
 # boto3 ships no inline types and boto3-stubs is not a dependency; alias the S3
 # client type to Any at this single site rather than add a stubs package.
@@ -35,104 +41,8 @@ _DEFAULT_REGION = "us-east-1"
 _STALE_STATUSES = frozenset({404, 412})
 
 
-class StoredArtifact(NamedTuple):
-    """A put result: the row's ``key``/``etag`` plus the class written to the object."""
-
-    key: str
-    etag: str
-    sensitivity: Sensitivity
-    retention_class: str
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class ArtifactWriteRequest:
-    """Object-store write identity, metadata, and bytes."""
-
-    tenant: str
-    owner_kind: str
-    owner_id: str
-    name: str
-    data: bytes
-    sensitivity: Sensitivity
-    retention_class: str
-
-    def key(self) -> str:
-        return _artifact_key(self.tenant, self.owner_kind, self.owner_id, self.name)
-
-
-class FetchedArtifact(NamedTuple):
-    """A fetched object's bytes and the class read back from its metadata."""
-
-    data: bytes
-    sensitivity: Sensitivity
-    retention_class: str
-
-
-class HeadResult(NamedTuple):
-    """An object's stored size, base64 SHA-256 checksum (if any), and bare etag."""
-
-    size_bytes: int
-    checksum_sha256: str | None
-    etag: str
-
-
-class PresignedUpload(NamedTuple):
-    """A presigned PUT URL plus the headers the client must send for it to validate."""
-
-    url: str
-    required_headers: dict[str, str]
-
-
 def _normalize_etag(raw: str) -> str:
     return raw.strip('"')
-
-
-def _validate_component(label: str, value: str) -> str:
-    """Return ``value`` if it is a safe single key segment, else raise.
-
-    Raises:
-        CategorizedError: ``value`` is empty or contains ``/`` or a control
-            character (:attr:`ErrorCategory.CONFIGURATION_ERROR`).
-    """
-    if not value:
-        raise CategorizedError(
-            f"artifact key component {label!r} must not be empty",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    if "/" in value or any(ord(char) < 0x20 for char in value):
-        raise CategorizedError(
-            f"artifact key component {label!r} has an illegal character: {value!r}",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    return value
-
-
-def _artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
-    return "/".join(
-        (
-            _validate_component("tenant", tenant),
-            _validate_component("kind", kind),
-            _validate_component("object_id", object_id),
-            _validate_component("name", name),
-        )
-    )
-
-
-def artifact_key(tenant: str, kind: str, object_id: str, name: str) -> str:
-    """Public, validated ``{tenant}/{kind}/{object_id}/{name}`` key (ingestion + reaper)."""
-    return _artifact_key(tenant, kind, object_id, name)
-
-
-def owner_prefix(tenant: str, kind: str, object_id: str) -> str:
-    """The validated ``{tenant}/{kind}/{object_id}/`` key prefix for an owner's objects."""
-    base = "/".join(
-        (
-            _validate_component("tenant", tenant),
-            _validate_component("kind", kind),
-            _validate_component("object_id", object_id),
-        )
-    )
-    return base + "/"
 
 
 def _infrastructure_error(op: str, key: str, err: BotoCoreError | ClientError) -> CategorizedError:
@@ -160,7 +70,9 @@ class ObjectStore:
         self._client = client
         self._bucket = bucket
 
-    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+    def put_artifact(
+        self, request: artifact_types.ArtifactWriteRequest
+    ) -> artifact_types.StoredArtifact:
         """Write ``data`` under the key scheme; return its key, etag, and class.
 
         The object carries the request's ``sensitivity`` and ``retention_class`` as user metadata.
@@ -184,14 +96,14 @@ class ObjectStore:
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("put_object", key, err) from err
-        return StoredArtifact(
+        return artifact_types.StoredArtifact(
             key,
             _normalize_etag(resp["ETag"]),
             request.sensitivity,
             request.retention_class,
         )
 
-    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+    def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
         """Fetch the object at ``key``, optionally guarded by an ``If-Match`` on ``etag``.
 
         When ``etag`` is a bare value (from :class:`StoredArtifact`), the GET is
@@ -240,9 +152,9 @@ class ObjectStore:
             # The download streams here, after the headers; a mid-stream timeout or
             # dropped connection raises a BotoCoreError that must stay typed too.
             raise _infrastructure_error("get_object", key, err) from err
-        return FetchedArtifact(data, sensitivity, retention_class)
+        return artifact_types.FetchedArtifact(data, sensitivity, retention_class)
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str) -> artifact_types.HeadResult | None:
         """Return the object's size/checksum/etag, or ``None`` if it does not exist.
 
         Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned.
@@ -260,7 +172,7 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("head_object", key, err) from err
-        return HeadResult(
+        return artifact_types.HeadResult(
             size_bytes=int(resp["ContentLength"]),
             checksum_sha256=resp.get("ChecksumSHA256"),
             etag=_normalize_etag(resp["ETag"]),
@@ -283,15 +195,8 @@ class ObjectStore:
             raise _infrastructure_error("get_range", key, err) from err
 
     def presign_put(
-        self,
-        key: str,
-        *,
-        sha256: str,
-        size_bytes: int,
-        sensitivity: Sensitivity,
-        retention_class: str,
-        expires_in: int,
-    ) -> PresignedUpload:
+        self, request: artifact_types.PresignPutRequest
+    ) -> artifact_types.PresignedUpload:
         """Mint a presigned PUT that signs the checksum + object metadata into the URL.
 
         The agent must send the returned ``required_headers`` (the signed
@@ -306,27 +211,30 @@ class ObjectStore:
             CategorizedError: presigning fails
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
-        metadata = {"sensitivity": sensitivity.value, "retention-class": retention_class}
+        metadata = {
+            "sensitivity": request.sensitivity.value,
+            "retention-class": request.retention_class,
+        }
         try:
             url = self._client.generate_presigned_url(
                 "put_object",
                 Params={
                     "Bucket": self._bucket,
-                    "Key": key,
-                    "ChecksumSHA256": sha256,
+                    "Key": request.key,
+                    "ChecksumSHA256": request.sha256,
                     "Metadata": metadata,
                 },
-                ExpiresIn=expires_in,
+                ExpiresIn=request.expires_in,
                 HttpMethod="PUT",
             )
         except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("presign_put", key, err) from err
+            raise _infrastructure_error("presign_put", request.key, err) from err
         headers = {
-            "x-amz-checksum-sha256": sha256,
-            "x-amz-meta-sensitivity": sensitivity.value,
-            "x-amz-meta-retention-class": retention_class,
+            "x-amz-checksum-sha256": request.sha256,
+            "x-amz-meta-sensitivity": request.sensitivity.value,
+            "x-amz-meta-retention-class": request.retention_class,
         }
-        return PresignedUpload(url=url, required_headers=headers)
+        return artifact_types.PresignedUpload(url=url, required_headers=headers)
 
     def list_prefix(self, prefix: str) -> list[str]:
         """Return every object key under ``prefix`` (paginated), or ``[]``.
@@ -358,7 +266,9 @@ class ObjectStore:
             raise _infrastructure_error("delete_object", key, err) from err
 
 
-def register_artifact_row(stored: StoredArtifact, *, owner_kind: str, owner_id: UUID) -> Artifact:
+def register_artifact_row(
+    stored: artifact_types.StoredArtifact, *, owner_kind: str, owner_id: UUID
+) -> Artifact:
     """Build the ``artifacts`` row for a stored object (no database access).
 
     The sensitivity/retention come from ``stored`` so the row matches the object by

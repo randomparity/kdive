@@ -24,11 +24,6 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
-from kdive.mcp.tools.lifecycle.systems.provision import (
-    RootfsValidator,
-    _validate_profile_for_provider,
-    _validate_rootfs_for_provider,
-)
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     destructive_opt_in,
@@ -37,11 +32,16 @@ from kdive.profiles.provisioning import (
     reject_rootfs_upload_without_window,
 )
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.component_validation import ComponentSourceCapabilities
+from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role
+from kdive.services.systems.validation import (
+    RootfsValidator,
+    validate_profile_for_provider,
+    validate_rootfs_for_provider,
+)
 
 _NON_TERMINAL_RUN = frozenset({RunState.CREATED, RunState.RUNNING})
 _REPROVISION = JobKind.REPROVISION
@@ -69,10 +69,10 @@ class SystemAdminHandlers:
             return _config_error(system_id)
         try:
             parsed = ProvisioningProfile.parse(profile)
-            _validate_profile_for_provider(parsed, self.component_sources)
+            validate_profile_for_provider(parsed, self.component_sources)
             reject_rootfs_upload_without_window(parsed)
         except CategorizedError as exc:
-            return ToolResponse.failure(system_id, exc.category)
+            return ToolResponse.failure_from_error(system_id, exc)
         with bind_context(principal=ctx.principal):
             try:
                 return await _reprovision_locked(pool, ctx, uid, parsed, self.rootfs_validator)
@@ -119,9 +119,9 @@ async def _reprovision_locked(
         if await _has_live_run(conn, system_id):
             return _stale_handle(str(system_id), current_status=system.state.value)
         try:
-            _validate_rootfs_for_provider(profile, rootfs_validator)
+            validate_rootfs_for_provider(profile, rootfs_validator)
         except CategorizedError as exc:
-            return ToolResponse.failure(str(system_id), exc.category)
+            return ToolResponse.failure_from_error(str(system_id), exc)
         return await _admit_reprovision(conn, ctx, system, profile, digest, dedup_key)
 
 
@@ -229,7 +229,7 @@ async def teardown_system(
             try:
                 profile = ProvisioningProfile.parse(system.provisioning_profile)
             except CategorizedError as exc:
-                return ToolResponse.failure(system_id, exc.category)
+                return ToolResponse.failure_from_error(system_id, exc)
             op = DestructiveOp(kind=_TEARDOWN, profile_opt_in=_teardown_opt_in(profile))
             try:
                 assert_destructive_allowed(ctx, allocation, op, required_role=Role.ADMIN)

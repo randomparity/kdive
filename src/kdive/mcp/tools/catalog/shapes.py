@@ -1,7 +1,7 @@
-"""The shapes-catalog `shapes.*` MCP tools (M1.4 issue #160, ADR-0067).
+"""The shapes-catalog `shapes.*` MCP tools (ADR-0067).
 
 A `viewer` read plus two `platform_operator` knobs over the `system_shapes` catalog seeded
-by migration 0013 — the same authority class and audit seam as M1.3's `ops.set_host_capacity`
+by migration 0013 — the same authority class and audit seam as platform resource tuning
 (ADR-0062):
 
 * **``shapes.list()``** returns every preset, sorted by name. The catalog is shared fleet
@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Annotated
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -62,6 +62,18 @@ _MAX_NAME_LEN = 64
 _PLACEHOLDER_TS = datetime(1970, 1, 1, tzinfo=UTC)
 
 
+class ShapeSetRequest(BaseModel):
+    """A complete shape definition for the handler boundary."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    vcpus: int
+    memory_mb: int
+    disk_gb: int
+    pcie_match: str | None = None
+
+
 async def list_shapes(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
     """Return every shape preset in one sorted collection envelope (viewer; no RBAC scope)."""
     with bind_context(principal=ctx.principal):
@@ -79,12 +91,7 @@ async def list_shapes(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolRes
 async def set_shape(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
-    *,
-    name: str,
-    vcpus: int,
-    memory_mb: int,
-    disk_gb: int,
-    pcie_match: str | None = None,
+    request: ShapeSetRequest,
 ) -> ToolResponse:
     """Upsert a shape preset (platform_operator; audited).
 
@@ -96,12 +103,14 @@ async def set_shape(
         try:
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
-            await audit_platform_denial(pool, ctx, tool=_SET_TOOL, scope=name)
-            return _denied(name, _SET_TOOL)
+            await audit_platform_denial(pool, ctx, tool=_SET_TOOL, scope=request.name)
+            return _denied(request.name, _SET_TOOL)
         try:
-            shape = _build_shape(name, vcpus, memory_mb, disk_gb, pcie_match)
+            shape = _build_shape(request)
         except CategorizedError as exc:
-            return ToolResponse.failure(name, exc.category, suggested_next_actions=[_SET_TOOL])
+            return ToolResponse.failure_from_error(
+                request.name, exc, suggested_next_actions=[_SET_TOOL]
+            )
         # `shape.name` is the canonical (stripped) key actually persisted; audit/scope on it,
         # not the raw argument, so the trail matches what the resolver will look up.
         async with pool.connection() as conn, conn.transaction():
@@ -137,9 +146,7 @@ async def delete_shape(
         return ToolResponse.success(name, "deleted", suggested_next_actions=[_LIST_TOOL, _SET_TOOL])
 
 
-def _build_shape(
-    name: str, vcpus: int, memory_mb: int, disk_gb: int, pcie_match: str | None
-) -> SystemShape:
+def _build_shape(request: ShapeSetRequest) -> SystemShape:
     """Validate inputs and build the candidate :class:`SystemShape` (fail-closed).
 
     Normalizes ``name`` by stripping surrounding whitespace so a padded name cannot create a
@@ -149,7 +156,7 @@ def _build_shape(
     catalog. ``parse_match_spec`` already raises a ``CONFIGURATION_ERROR``
     :class:`CategorizedError` on bad grammar.
     """
-    name = name.strip()
+    name = request.name.strip()
     if not name:
         raise CategorizedError(
             "shape name must be a non-blank string", category=ErrorCategory.CONFIGURATION_ERROR
@@ -159,16 +166,16 @@ def _build_shape(
             f"shape name must be at most {_MAX_NAME_LEN} characters",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    if pcie_match is not None:
-        parse_match_spec(pcie_match)
+    if request.pcie_match is not None:
+        parse_match_spec(request.pcie_match)
     try:
         return SystemShape.model_validate(
             {
                 "name": name,
-                "vcpus": vcpus,
-                "memory_mb": memory_mb,
-                "disk_gb": disk_gb,
-                "pcie_match": pcie_match,
+                "vcpus": request.vcpus,
+                "memory_mb": request.memory_mb,
+                "disk_gb": request.disk_gb,
+                "pcie_match": request.pcie_match,
                 "updated_at": _PLACEHOLDER_TS,
             }
         )
@@ -264,11 +271,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await set_shape(
             pool,
             current_context(),
-            name=name,
-            vcpus=vcpus,
-            memory_mb=memory_mb,
-            disk_gb=disk_gb,
-            pcie_match=pcie_match,
+            ShapeSetRequest(
+                name=name,
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_gb=disk_gb,
+                pcie_match=pcie_match,
+            ),
         )
 
     @app.tool(

@@ -2,10 +2,11 @@
 
 `vmcore.fetch(system_id, method)` admits a `capture_vmcore` job on a `crashed` System
 (dedup `{system_id}:capture_vmcore:{method}`). Worker-owned capture execution lives in
-``kdive.planes.vmcore``; `vmcore.list` is a `redacted`-only read.
-`postmortem.crash`/`.triage` are synchronous, ungated offline reads that load the Run's
-`debuginfo_ref`, validate caller commands against the allowlist, run the `CrashPostmortem`
-port over the captured core, and redact output before returning it.
+``kdive.jobs.handlers.vmcore``; `vmcore.list` is a `redacted`-only read.
+`postmortem.crash`/`.triage` are synchronous, viewer-gated offline reads over an
+authorized Run. They resolve the Run's `debuginfo_ref` and captured vmcore through the
+shared target resolver, validate caller commands against the allowlist, run the
+`CrashPostmortem` port over the captured core, and redact output before returning it.
 """
 
 from __future__ import annotations
@@ -42,51 +43,19 @@ from kdive.mcp.tools._common import (
 from kdive.mcp.tools._common import (
     job_envelope,
 )
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run, with_runtime_for_system
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target
 from kdive.providers.ports import CrashPostmortem
-from kdive.providers.runtime import ProviderRuntime
-from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
+from kdive.providers.resolver import ProviderResolver
+from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.redaction import Redactor
-from kdive.services.artifact_listing import RedactedArtifact, list_redacted_system_artifacts
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
 
 _log = logging.getLogger(__name__)
 
-# The ported v1 crash-command allowlist (read-only crash verbs).
-_CRASH_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "bt",
-        "ps",
-        "log",
-        "kmem",
-        "sys",
-        "mod",
-        "struct",
-        "union",
-        "p",
-        "rd",
-        "vtop",
-        "task",
-        "files",
-        "vm",
-        "net",
-        "dev",
-        "irq",
-        "mach",
-        "runq",
-        "mount",
-        "swap",
-        "timer",
-        "dis",
-        "sym",
-        "list",
-        "tree",
-        "search",
-        "foreach",
-        "help",
-    }
-)
 _TRIAGE_COMMANDS: tuple[str, ...] = ("log", "bt")
 
 
@@ -103,8 +72,10 @@ _VMCORE_METHODS: frozenset[CaptureMethod] = frozenset(
 class VmcoreHandlers:
     """vmcore/postmortem MCP handlers with provider seams bound at construction."""
 
-    supported_methods: frozenset[CaptureMethod]
-    crash: CrashPostmortem
+    resolver: ProviderResolver | None = None
+    supported_methods: frozenset[CaptureMethod] | None = None
+    crash: CrashPostmortem | None = None
+    secret_registry: SecretRegistry | None = None
 
     async def fetch_vmcore(
         self,
@@ -114,12 +85,26 @@ class VmcoreHandlers:
         system_id: str,
         method: str = "host_dump",
     ) -> ToolResponse:
-        return await _fetch_vmcore(
+        if self.resolver is None:
+            supported_methods = self.supported_methods or frozenset()
+            return await _fetch_vmcore(
+                pool,
+                ctx,
+                system_id=system_id,
+                method=method,
+                supported_methods=supported_methods,
+            )
+        return await with_runtime_for_system(
             pool,
-            ctx,
-            system_id=system_id,
-            method=method,
-            supported_methods=self.supported_methods,
+            self.resolver,
+            system_id,
+            lambda runtime: _fetch_vmcore(
+                pool,
+                ctx,
+                system_id=system_id,
+                method=method,
+                supported_methods=runtime.supported_capture_methods,
+            ),
         )
 
     async def postmortem_crash(
@@ -130,14 +115,66 @@ class VmcoreHandlers:
         run_id: str,
         commands: list[str],
     ) -> ToolResponse:
+        if self.resolver is None:
+            if self.crash is None:
+                raise RuntimeError("vmcore handler requires crash port or resolver")
+            crash = self.crash
+        if self.secret_registry is None:
+            raise RuntimeError("vmcore handler requires an injected secret registry")
+        secret_registry = self.secret_registry
+        if self.resolver is not None:
+            return await with_runtime_for_run(
+                pool,
+                self.resolver,
+                run_id,
+                lambda runtime: _postmortem_crash(
+                    pool,
+                    ctx,
+                    run_id=run_id,
+                    commands=commands,
+                    crash=runtime.crash_postmortem,
+                    secret_registry=secret_registry,
+                ),
+            )
         return await _postmortem_crash(
-            pool, ctx, run_id=run_id, commands=commands, crash=self.crash
+            pool,
+            ctx,
+            run_id=run_id,
+            commands=commands,
+            crash=crash,
+            secret_registry=secret_registry,
         )
 
     async def postmortem_triage(
         self, pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
     ) -> ToolResponse:
-        return await _postmortem_triage(pool, ctx, run_id=run_id, crash=self.crash)
+        if self.resolver is None:
+            if self.crash is None:
+                raise RuntimeError("vmcore handler requires crash port or resolver")
+            crash = self.crash
+        if self.secret_registry is None:
+            raise RuntimeError("vmcore handler requires an injected secret registry")
+        secret_registry = self.secret_registry
+        if self.resolver is not None:
+            return await with_runtime_for_run(
+                pool,
+                self.resolver,
+                run_id,
+                lambda runtime: _postmortem_triage(
+                    pool,
+                    ctx,
+                    run_id=run_id,
+                    crash=runtime.crash_postmortem,
+                    secret_registry=secret_registry,
+                ),
+            )
+        return await _postmortem_triage(
+            pool,
+            ctx,
+            run_id=run_id,
+            crash=crash,
+            secret_registry=secret_registry,
+        )
 
 
 async def _fetch_vmcore(
@@ -224,16 +261,17 @@ async def _postmortem_crash(
     run_id: str,
     commands: list[str],
     crash: CrashPostmortem,
+    secret_registry: SecretRegistry,
 ) -> ToolResponse:
-    """Run the crash command batch over the Run's captured core; redact and return (ungated)."""
+    """Run the crash command batch over the viewer-authorized Run's captured core."""
     with bind_context(principal=ctx.principal):
-        for command in commands:
-            if crash_command_rejection_reason(command, _CRASH_ALLOWLIST) is not None:
-                return _config_error(run_id)
+        if validate_crash_commands(commands) is not None:
+            return _config_error(run_id)
         async with pool.connection() as conn:
-            resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
-        if isinstance(resolved, ToolResponse):
-            return resolved
+            try:
+                resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error(run_id, exc)
         try:
             output = await asyncio.to_thread(
                 crash.run_crash_postmortem,
@@ -245,8 +283,8 @@ async def _postmortem_crash(
         except CategorizedError as exc:
             # A provenance mismatch (configuration_error) or an unavailable crash
             # dependency (missing_dependency) becomes a typed failure, never a 500.
-            return ToolResponse.failure(run_id, exc.category)
-        redactor = Redactor()
+            return ToolResponse.failure_from_error(run_id, exc)
+        redactor = Redactor(registry=secret_registry)
         return ToolResponse.success(
             run_id,
             "succeeded",
@@ -256,11 +294,21 @@ async def _postmortem_crash(
 
 
 async def _postmortem_triage(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str, crash: CrashPostmortem
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: str,
+    crash: CrashPostmortem,
+    secret_registry: SecretRegistry,
 ) -> ToolResponse:
     """Run the fixed triage command batch and return the redacted report."""
     resp = await _postmortem_crash(
-        pool, ctx, run_id=run_id, commands=list(_TRIAGE_COMMANDS), crash=crash
+        pool,
+        ctx,
+        run_id=run_id,
+        commands=list(_TRIAGE_COMMANDS),
+        crash=crash,
+        secret_registry=secret_registry,
     )
     if resp.status == "error":
         return resp
@@ -273,16 +321,16 @@ async def _postmortem_triage(
 
 
 def register(
-    app: FastMCP, pool: AsyncConnectionPool, *, provider_runtime: ProviderRuntime | None = None
+    app: FastMCP,
+    pool: AsyncConnectionPool,
+    *,
+    resolver: ProviderResolver | None = None,
+    secret_registry: SecretRegistry,
 ) -> None:
     """Register the `vmcore.*` / `postmortem.*` tools on ``app``, bound to ``pool``."""
-    if provider_runtime is None:
-        raise RuntimeError("vmcore registrar requires an injected provider runtime")
-    runtime = provider_runtime
-    handlers = VmcoreHandlers(
-        supported_methods=runtime.supported_capture_methods,
-        crash=runtime.crash_postmortem,
-    )
+    if resolver is None:
+        raise RuntimeError("vmcore registrar requires an injected provider resolver")
+    handlers = VmcoreHandlers(resolver=resolver, secret_registry=secret_registry)
 
     @app.tool(
         name="vmcore.fetch",

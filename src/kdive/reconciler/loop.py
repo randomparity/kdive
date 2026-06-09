@@ -1,14 +1,14 @@
 """The reconciler loop: periodic drift repair between Postgres and libvirt (ADR-0021).
 
 A :class:`Reconciler` owns an ``AsyncConnectionPool`` and an :class:`InfraReaper`, and
-runs :func:`reconcile_once` on an interval. Each pass runs the repairs — the M1
-``→expired`` allocation sweep, orphaned System, abandoned (zombie) job, dead
-DebugSession, leaked libvirt domain, and the M1 idempotency-key GC — each on a fresh
+runs :func:`reconcile_once` on an interval. Each pass runs the repairs — allocation
+expiry, orphaned System, abandoned (zombie) job, dead DebugSession, leaked libvirt domain,
+and idempotency-key GC — each on a fresh
 pooled connection, each fencing its writes, each isolated so one failing repair does not
 starve the others. The expiry sweep runs first so an allocation it reclaims orphans its
 System in the same pass. Time predicates use Postgres ``now()`` (never a Python clock).
-The local-libvirt :class:`InfraReaper` implementation lands with the provider (#15); M0
-ships :class:`NullReaper` so the Postgres-only repairs run today.
+Provider reaper contracts live in :mod:`kdive.providers.reaping`; the Postgres-only repair
+path can use ``NullReaper`` there when no provider contributes leaked-infra repair.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -33,8 +32,17 @@ from kdive.domain.models import JobKind
 from kdive.domain.state import AllocationState, DebugSessionState, JobState, RunState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import PayloadValidationError, SystemPayload, run_id_from_payload
+from kdive.providers.reaping import InfraReaper
+from kdive.reconciler.provider_reaping import repair_leaked_domains as _repair_leaked_domains
+from kdive.reconciler.uploads import (
+    UploadStore,
+)
+from kdive.reconciler.uploads import (
+    repair_abandoned_uploads as _repair_abandoned_uploads,
+)
 from kdive.security import audit
-from kdive.services import accounting, allocation_promotion
+from kdive.services.accounting import ledger as accounting
+from kdive.services.allocation import promotion as allocation_promotion
 
 _log = logging.getLogger(__name__)
 
@@ -55,7 +63,6 @@ _TERMINAL_ALLOCATION_STATES = (
     AllocationState.FAILED,
 )
 _ORPHANED_SYSTEM_TERMINAL_STATES = (SystemState.TORN_DOWN, SystemState.FAILED)
-_TEARDOWN_JOB_IN_FLIGHT_STATES = (JobState.QUEUED, JobState.RUNNING)
 _RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
 _EXPIRED_ALLOCATION_STATE = AllocationState.EXPIRED
 _FAILED_JOB_STATE = JobState.FAILED
@@ -63,22 +70,12 @@ _RUNNING_JOB_STATE = JobState.RUNNING
 _FAILED_RUN_STATE = RunState.FAILED
 _DETACHED_DEBUG_SESSION_STATE = DebugSessionState.DETACHED
 _LIVE_DEBUG_SESSION_STATE = DebugSessionState.LIVE
-_TORN_DOWN_SYSTEM_STATE = SystemState.TORN_DOWN
 _TEARDOWN_JOB_KIND = JobKind.TEARDOWN
 _LEASE_EXPIRED_CATEGORY = ErrorCategory.LEASE_EXPIRED
-_UPLOAD_RUN_OWNER_KIND = "runs"
-_UPLOAD_SYSTEM_OWNER_KIND = "systems"
-_UPLOAD_PRE_FINALIZE = {
-    _UPLOAD_RUN_OWNER_KIND: RunState.CREATED,
-    _UPLOAD_SYSTEM_OWNER_KIND: SystemState.DEFINED,
-}
 
 _TERMINAL_ALLOCATION_STATE_VALUES = tuple(state.value for state in _TERMINAL_ALLOCATION_STATES)
 _ORPHANED_SYSTEM_TERMINAL_STATE_VALUES = tuple(
     state.value for state in _ORPHANED_SYSTEM_TERMINAL_STATES
-)
-_TEARDOWN_JOB_IN_FLIGHT_STATE_VALUES = tuple(
-    state.value for state in _TEARDOWN_JOB_IN_FLIGHT_STATES
 )
 _RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
 _EXPIRED_ALLOCATION_STATE_VALUE = _EXPIRED_ALLOCATION_STATE.value
@@ -87,56 +84,21 @@ _RUNNING_JOB_STATE_VALUE = _RUNNING_JOB_STATE.value
 _FAILED_RUN_STATE_VALUE = _FAILED_RUN_STATE.value
 _DETACHED_DEBUG_SESSION_STATE_VALUE = _DETACHED_DEBUG_SESSION_STATE.value
 _LIVE_DEBUG_SESSION_STATE_VALUE = _LIVE_DEBUG_SESSION_STATE.value
-_TORN_DOWN_SYSTEM_STATE_VALUE = _TORN_DOWN_SYSTEM_STATE.value
 _TEARDOWN_JOB_KIND_VALUE = _TEARDOWN_JOB_KIND.value
 _LEASE_EXPIRED_CATEGORY_VALUE = _LEASE_EXPIRED_CATEGORY.value
-_UPLOAD_PRE_FINALIZE_VALUES = {
-    owner_kind: state.value for owner_kind, state in _UPLOAD_PRE_FINALIZE.items()
-}
 
 # Reserved principal for system-initiated GC teardowns (ADR-0021): a reconciler
 # teardown bypasses the interactive destructive-op gate by design, made auditable
 # by this attribution rather than the owning user's.
 SYSTEM_RECONCILER_PRINCIPAL = "system:reconciler"
 
+type _RepairFn = Callable[[AsyncConnection], Awaitable[int]]
 
-@runtime_checkable
-class OwnedDomain(Protocol):
-    """A libvirt domain the provider owns; ``system_id`` is its metadata tag."""
 
+@dataclass(frozen=True, slots=True)
+class _RepairSpec:
     name: str
-    system_id: UUID | None
-
-
-@runtime_checkable
-class InfraReaper(Protocol):
-    """The narrow discovery provider port the reconciler consumes."""
-
-    async def list_owned(self) -> list[OwnedDomain]: ...
-    async def destroy(self, name: str) -> None: ...
-
-
-@runtime_checkable
-class UploadStore(Protocol):
-    """The narrow object-store port the upload reaper consumes."""
-
-    def list_prefix(self, prefix: str) -> list[str]: ...
-    def delete(self, key: str) -> None: ...
-
-
-class NullReaper:
-    """The M0 default reaper: owns nothing, destroys nothing.
-
-    Until the libvirt provider (#15) ships a real :class:`InfraReaper`, this lets the
-    three Postgres-only repairs run in production; leaked-domain reaping activates when
-    #15 injects the real reaper. It is the honest "no provider yet" default, not a stub.
-    """
-
-    async def list_owned(self) -> list[OwnedDomain]:
-        return []
-
-    async def destroy(self, name: str) -> None:
-        return None
+    repair: _RepairFn
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,10 +117,44 @@ class ReconcileReport:
     queue_timeouts: int = 0
 
 
-async def _promote_pending(conn: AsyncConnection) -> int:
-    """Promote the oldest placeable queued request per resource (ADR-0069, #165).
+def _repair_plan(
+    *,
+    reaper: InfraReaper,
+    upload_store: UploadStore | None,
+    debug_session_stale_after: timedelta,
+    idempotency_retention: timedelta,
+    queue_max_wait: timedelta,
+) -> tuple[_RepairSpec, ...]:
+    repairs = [
+        _RepairSpec("expired_allocations", _sweep_expired_allocations),
+        _RepairSpec("promoted_allocations", _promote_pending),
+        _RepairSpec("queue_timeouts", _reap_queue_timeouts_for(queue_max_wait)),
+        _RepairSpec("orphaned_systems", _repair_orphaned_systems),
+        _RepairSpec("abandoned_jobs", _repair_abandoned_jobs),
+        _RepairSpec(
+            "dead_sessions",
+            lambda conn: _repair_dead_sessions(conn, debug_session_stale_after),
+        ),
+        _RepairSpec("leaked_domains", lambda conn: _repair_leaked_domains(conn, reaper)),
+        _RepairSpec(
+            "idempotency_keys_gc_count",
+            lambda conn: _gc_idempotency_keys(conn, idempotency_retention),
+        ),
+    ]
+    if upload_store is not None:
+        repairs.append(
+            _RepairSpec(
+                "abandoned_uploads",
+                lambda conn: _repair_abandoned_uploads(conn, upload_store),
+            )
+        )
+    return tuple(repairs)
 
-    Delegates to :func:`kdive.services.allocation_promotion.promote_pending`, which replays
+
+async def _promote_pending(conn: AsyncConnection) -> int:
+    """Promote the oldest placeable queued request per resource (ADR-0069).
+
+    Delegates to :func:`kdive.services.allocation.promotion.promote_pending`, which replays
     the shared admission gate under ``PROJECT → RESOURCE → ALLOCATION`` — sharing admission's
     RESOURCE lock and the expiry sweep's ALLOCATION fence, so the sweep never double-grants
     against a synchronous admit nor promotes a released-while-queued row.
@@ -192,7 +188,7 @@ async def _sweep_expired_allocations(conn: AsyncConnection) -> int:
     per-Allocation lock, the **same** lock ``allocations.release`` takes, so the two can
     never double-reconcile one allocation (ADR-0040 §4). The flip ``→ expired`` orphans
     the allocation's System; the existing :func:`_repair_orphaned_systems` pass (run after
-    this one) hands it to the M0 teardown, which honors the in-flight-job grace window — so
+    this one) hands it to teardown, which honors the in-flight-job grace window — so
     the ``→expired`` flip never bypasses the drain (ADR-0036 §4).
 
     Idempotent: a second pass selects no row already ``expired``, and the per-allocation
@@ -311,11 +307,11 @@ async def _repair_orphaned_systems(conn: AsyncConnection) -> int:
 
     A System is orphaned when it is non-terminal but its Allocation is terminal —
     ``released``, ``failed``, or ``expired`` ("a System never outlives its Allocation").
-    ``expired`` is the M1 lease-reclamation terminal (ADR-0036 §4): the ``→expired`` sweep
+    ``expired`` is the lease-reclamation terminal (ADR-0036 §4): the ``→expired`` sweep
     runs earlier in the same pass, so an allocation it reclaims orphans its System here.
     The teardown job carries the ``system:reconciler`` attribution and bypasses the
-    tool-layer destructive gate by design (ADR-0021); the teardown handler (#15) drives
-    the System to ``torn_down`` honoring the M0 in-flight-job grace window. Counts only a
+    tool-layer destructive gate by design (ADR-0021); the teardown handler drives
+    the System to ``torn_down`` honoring the in-flight-job grace window. Counts only a
     genuinely new enqueue (a re-pass on an already-queued teardown is 0).
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
@@ -424,7 +420,7 @@ async def _repair_dead_sessions(conn: AsyncConnection, stale_after: timedelta) -
 
     A NULL heartbeat is never swept — it may be a session that just attached and has
     not beaten yet. ``stale_after`` is a provisional cadence contract (ADR-0021): the
-    debug plane (#16) must beat at most every ``stale_after / 3``.
+    debug plane must beat at most every ``stale_after / 3``.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -437,145 +433,6 @@ async def _repair_dead_sessions(conn: AsyncConnection, stale_after: timedelta) -
     for row in rows:
         _log.info("reconciler: dead debug_session %s -> detached", row["id"])
     return len(rows)
-
-
-async def _repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> int:
-    """Destroy libvirt domains whose tagged System is gone and no teardown is in flight.
-
-    Reap a tagged domain iff its ``systems`` row is absent or ``torn_down`` (guard a)
-    and no ``teardown`` job for it is in flight (guard b). Guard (a) protects a
-    mid-provision domain (row-first ordering gives it a ``provisioning`` row). The guards
-    are read under the per-System advisory lock; ``destroy`` then runs **unlocked** (a
-    slow provider call never holds a Postgres lock), so the idempotent-``destroy``
-    contract — not the lock — is what makes a concurrent teardown safe. A ``destroy``
-    that raises is logged and the pass continues to the next domain.
-    """
-    domains = await reaper.list_owned()
-    reaped = 0
-    for domain in domains:
-        if domain.system_id is None:
-            continue
-        async with (
-            conn.transaction(),
-            advisory_xact_lock(conn, LockScope.SYSTEM, domain.system_id),
-            conn.cursor(row_factory=dict_row) as cur,
-        ):
-            await cur.execute(
-                "SELECT 1 FROM systems WHERE id = %s AND state <> %s",
-                (domain.system_id, _TORN_DOWN_SYSTEM_STATE_VALUE),
-            )
-            has_live_row = await cur.fetchone() is not None
-            await cur.execute(
-                "SELECT 1 FROM jobs WHERE state = ANY(%s) "
-                "  AND kind = %s AND payload->>'system_id' = %s",
-                (
-                    list(_TEARDOWN_JOB_IN_FLIGHT_STATE_VALUES),
-                    _TEARDOWN_JOB_KIND_VALUE,
-                    str(domain.system_id),
-                ),
-            )
-            teardown_in_flight = await cur.fetchone() is not None
-        if has_live_row or teardown_in_flight:
-            continue
-        try:
-            await reaper.destroy(domain.name)
-        except Exception:  # noqa: BLE001 - one domain's failure must not strand the others
-            _log.warning(
-                "reconciler: destroy of leaked domain %s failed; retry next pass",
-                domain.name,
-                exc_info=True,
-            )
-            continue
-        reaped += 1
-        _log.info("reconciler: leaked domain %s (system %s) reaped", domain.name, domain.system_id)
-    return reaped
-
-
-async def _repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) -> int:
-    """Prefix-reap uncommitted objects of pre-finalize owners past their upload deadline.
-
-    Candidate-selects ``upload_manifests`` rows with ``deadline < now()`` whose owner is
-    still pre-finalize (a ``created`` Run or a ``defined`` System), then reaps each under
-    its per-owner advisory lock. Returns the number of owners reaped (ADR-0048 §6).
-    """
-    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT m.owner_kind, m.owner_id FROM upload_manifests m "
-            "WHERE m.deadline < now() AND ("
-            "  (m.owner_kind = %s AND EXISTS ("
-            "     SELECT 1 FROM runs r WHERE r.id = m.owner_id AND r.state = %s)) "
-            "  OR (m.owner_kind = %s AND EXISTS ("
-            "     SELECT 1 FROM systems s WHERE s.id = m.owner_id AND s.state = %s)))",
-            (
-                _UPLOAD_RUN_OWNER_KIND,
-                _UPLOAD_PRE_FINALIZE_VALUES[_UPLOAD_RUN_OWNER_KIND],
-                _UPLOAD_SYSTEM_OWNER_KIND,
-                _UPLOAD_PRE_FINALIZE_VALUES[_UPLOAD_SYSTEM_OWNER_KIND],
-            ),
-        )
-        candidates = await cur.fetchall()
-    reaped = 0
-    for cand in candidates:
-        scope = LockScope.RUN if cand["owner_kind"] == _UPLOAD_RUN_OWNER_KIND else LockScope.SYSTEM
-        if await _reap_one_owner(conn, store, cand["owner_kind"], cand["owner_id"], scope):
-            reaped += 1
-    return reaped
-
-
-async def _reap_one_owner(
-    conn: AsyncConnection, store: UploadStore, owner_kind: str, owner_id: UUID, scope: LockScope
-) -> bool:
-    """Re-validate under the per-owner lock, then prefix-reap + delete the manifest.
-
-    The lock serializes against a concurrent ``create_upload`` re-mint, ``complete_build``,
-    or provision-consume on the **same** owner (which all take this lock), so a renewed
-    deadline or a finalized owner is observed *before* any delete — mirroring
-    :func:`_expire_one`'s locked re-read fence. Unlike :func:`_repair_leaked_domains`
-    (whose ``destroy`` runs unlocked because libvirt can hang), the bounded S3 deletes run
-    under the narrow per-owner lock so a re-mint cannot interleave between the re-check and
-    the manifest delete. Deletes only objects with **no committed ``artifacts`` row**, so a
-    referenced/consumed object (a slow-but-real rootfs) is never destroyed. The synchronous
-    boto3-backed ``list_prefix``/``delete`` are offloaded via ``asyncio.to_thread`` so they
-    do not block the event loop; the ``await`` only yields the loop — nothing else touches
-    ``conn`` meanwhile, so the lock + transaction stay held across the deletes (the fence).
-    """
-    async with conn.transaction(), advisory_xact_lock(conn, scope, owner_id):
-        async with conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(
-                "SELECT prefix FROM upload_manifests "
-                "WHERE owner_kind = %s AND owner_id = %s AND deadline < now()",
-                (owner_kind, owner_id),
-            )
-            row = await cur.fetchone()
-        if row is None:
-            return False  # renewed (deadline pushed out) or already reaped since the select
-        if not await _owner_pre_finalize(conn, owner_kind, owner_id):
-            return False  # owner finalized between the candidate select and this lock
-        for key in await asyncio.to_thread(store.list_prefix, row["prefix"]):
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT 1 FROM artifacts WHERE object_key = %s", (key,))
-                if await cur.fetchone() is None:
-                    await asyncio.to_thread(store.delete, key)
-        await conn.execute(
-            "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
-            (owner_kind, owner_id),
-        )
-    _log.info("reconciler: abandoned upload owner %s/%s reaped", owner_kind, owner_id)
-    return True
-
-
-async def _owner_pre_finalize(conn: AsyncConnection, owner_kind: str, owner_id: UUID) -> bool:
-    """Report whether the owner is still in its pre-finalize state (locked re-read)."""
-    if owner_kind == _UPLOAD_RUN_OWNER_KIND:
-        table = _UPLOAD_RUN_OWNER_KIND
-    else:
-        table = _UPLOAD_SYSTEM_OWNER_KIND
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            f"SELECT 1 FROM {table} WHERE id = %s AND state = %s",  # noqa: S608 - 2-value whitelist
-            (owner_id, _UPLOAD_PRE_FINALIZE_VALUES[owner_kind]),
-        )
-        return await cur.fetchone() is not None
 
 
 async def reconcile_once(
@@ -605,44 +462,16 @@ async def reconcile_once(
     per-domain ``destroy`` in :func:`_repair_leaked_domains` is caught individually, so
     the irreversible case (a domain destroyed, then a later failure) keeps its count.
     """
-    counts: dict[str, int] = {
-        "expired_allocations": 0,
-        "promoted_allocations": 0,
-        "queue_timeouts": 0,
-        "orphaned_systems": 0,
-        "abandoned_jobs": 0,
-        "dead_sessions": 0,
-        "leaked_domains": 0,
-        "idempotency_keys_gc_count": 0,
-        "abandoned_uploads": 0,
-    }
-    failures: list[str] = []
-
-    async def _isolated(name: str, repair: Callable[[AsyncConnection], Awaitable[int]]) -> None:
-        try:
-            async with pool.connection() as conn:
-                counts[name] = await repair(conn)
-        except Exception:  # noqa: BLE001 - isolate each repair; one failure must not starve the rest
-            _log.warning("reconciler: repair %s failed this pass", name, exc_info=True)
-            failures.append(name)
-
-    await _isolated("expired_allocations", _sweep_expired_allocations)
-    await _isolated("promoted_allocations", _promote_pending)
-    await _isolated("queue_timeouts", _reap_queue_timeouts_for(queue_max_wait))
-    await _isolated("orphaned_systems", _repair_orphaned_systems)
-    await _isolated("abandoned_jobs", _repair_abandoned_jobs)
-    await _isolated(
-        "dead_sessions", lambda conn: _repair_dead_sessions(conn, debug_session_stale_after)
+    counts, failures = await _run_repair_plan(
+        pool,
+        _repair_plan(
+            reaper=reaper,
+            upload_store=upload_store,
+            debug_session_stale_after=debug_session_stale_after,
+            idempotency_retention=idempotency_retention,
+            queue_max_wait=queue_max_wait,
+        ),
     )
-    await _isolated("leaked_domains", lambda conn: _repair_leaked_domains(conn, reaper))
-    await _isolated(
-        "idempotency_keys_gc_count",
-        lambda conn: _gc_idempotency_keys(conn, idempotency_retention),
-    )
-    if upload_store is not None:
-        await _isolated(
-            "abandoned_uploads", lambda conn: _repair_abandoned_uploads(conn, upload_store)
-        )
 
     return ReconcileReport(
         expired_allocations=counts["expired_allocations"],
@@ -656,6 +485,22 @@ async def reconcile_once(
         promoted_allocations=counts["promoted_allocations"],
         queue_timeouts=counts["queue_timeouts"],
     )
+
+
+async def _run_repair_plan(
+    pool: AsyncConnectionPool, repairs: tuple[_RepairSpec, ...]
+) -> tuple[dict[str, int], list[str]]:
+    counts = {spec.name: 0 for spec in repairs}
+    counts.setdefault("abandoned_uploads", 0)
+    failures: list[str] = []
+    for spec in repairs:
+        try:
+            async with pool.connection() as conn:
+                counts[spec.name] = await spec.repair(conn)
+        except Exception:  # noqa: BLE001 - isolate each repair; one failure must not starve the rest
+            _log.warning("reconciler: repair %s failed this pass", spec.name, exc_info=True)
+            failures.append(spec.name)
+    return counts, failures
 
 
 class Reconciler:

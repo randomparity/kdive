@@ -12,7 +12,6 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.models import Allocation, Investigation, Resource, ResourceKind, Run, System
 from kdive.domain.state import (
     AllocationState,
@@ -22,9 +21,10 @@ from kdive.domain.state import (
     SystemState,
 )
 from kdive.mcp.auth import RequestContext
+from kdive.provider_components.artifacts import HeadResult
+from kdive.provider_components.uploads import ManifestEntry
 from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.security.authz.rbac import Role
-from kdive.store.objectstore import HeadResult
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -139,11 +139,13 @@ async def seed_external_run_with_manifest(
     async with conn_pool.connection() as conn:
         await upload_manifest.replace_manifest(
             conn,
-            owner_kind="runs",
-            owner_id=run_id,
-            prefix=f"local/runs/{run_id}/",
-            entries=entries or [ManifestEntry("kernel", "c", 1)],
-            ttl=timedelta(hours=1),
+            upload_manifest.UploadManifestReplaceRequest(
+                owner_kind="runs",
+                owner_id=run_id,
+                prefix=f"local/runs/{run_id}/",
+                entries=entries or [ManifestEntry("kernel", "c", 1)],
+                ttl=timedelta(hours=1),
+            ),
         )
     return run_id
 
@@ -165,14 +167,14 @@ class FakeValidator:
         self._output = output
         self.calls = 0
 
-    def validate(
+    def __call__(
         self,
-        *,
         manifest,
         keys,
         declared_build_id,
-        profile_requirements=None,
+        profile_requirements,
     ) -> ValidatedUpload:
+        _ = (manifest, declared_build_id, profile_requirements)
         self.calls += 1
         if isinstance(self._output, Exception):
             raise self._output

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Annotated
@@ -29,6 +30,16 @@ _QUOTA_OBJECT_ID = "quota"
 _ACCOUNTING_AUDIT_ID = UUID(int=0)
 
 
+@dataclass(frozen=True, slots=True)
+class QuotaSetRequest:
+    """A project quota update after transport-level scalar parsing."""
+
+    project: str
+    max_concurrent_allocations: int
+    max_concurrent_systems: int
+    max_pending_allocations: int = 0
+
+
 async def set_budget(
     pool: AsyncConnectionPool, ctx: RequestContext, *, project: str, limit_kcu: object
 ) -> ToolResponse:
@@ -39,8 +50,10 @@ async def set_budget(
         try:
             limit = _parse_non_negative_kcu(limit_kcu)
         except CategorizedError as exc:
-            return ToolResponse.failure(
-                _BUDGET_OBJECT_ID, exc.category, suggested_next_actions=["accounting.set_budget"]
+            return ToolResponse.failure_from_error(
+                _BUDGET_OBJECT_ID,
+                exc,
+                suggested_next_actions=["accounting.set_budget"],
             )
         now = datetime.now(UTC)
         async with pool.connection() as conn, conn.transaction():
@@ -61,10 +74,7 @@ async def set_quota(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    project: str,
-    max_concurrent_allocations: int,
-    max_concurrent_systems: int,
-    max_pending_allocations: int = 0,
+    request: QuotaSetRequest,
 ) -> ToolResponse:
     """Set a project's concurrency caps and the pending-queue cap (admin; ADR-0007 §4,6).
 
@@ -72,13 +82,13 @@ async def set_quota(
     ``on_capacity=queue`` can backlog; it defaults to 0 (queue opt-out) and is distinct from
     ``max_concurrent_allocations`` (the grant cap, which no longer counts ``requested``).
     """
-    require_project(ctx, project)
-    require_role(ctx, project, Role.ADMIN)
+    require_project(ctx, request.project)
+    require_role(ctx, request.project, Role.ADMIN)
     with bind_context(principal=ctx.principal):
         if (
-            max_concurrent_allocations < 0
-            or max_concurrent_systems < 0
-            or max_pending_allocations < 0
+            request.max_concurrent_allocations < 0
+            or request.max_concurrent_systems < 0
+            or request.max_pending_allocations < 0
         ):
             return ToolResponse.failure(
                 _QUOTA_OBJECT_ID,
@@ -90,24 +100,24 @@ async def set_quota(
             await QUOTAS.upsert(
                 conn,
                 Quota(
-                    project=project,
-                    max_concurrent_allocations=max_concurrent_allocations,
-                    max_concurrent_systems=max_concurrent_systems,
-                    max_pending_allocations=max_pending_allocations,
+                    project=request.project,
+                    max_concurrent_allocations=request.max_concurrent_allocations,
+                    max_concurrent_systems=request.max_concurrent_systems,
+                    max_pending_allocations=request.max_pending_allocations,
                     updated_at=now,
                 ),
             )
             values = {
-                "max_concurrent_allocations": str(max_concurrent_allocations),
-                "max_concurrent_systems": str(max_concurrent_systems),
-                "max_pending_allocations": str(max_pending_allocations),
+                "max_concurrent_allocations": str(request.max_concurrent_allocations),
+                "max_concurrent_systems": str(request.max_concurrent_systems),
+                "max_pending_allocations": str(request.max_pending_allocations),
             }
-            await _audit_set(conn, ctx, project, "set_quota", values)
+            await _audit_set(conn, ctx, request.project, "set_quota", values)
             return ToolResponse.success(
                 _QUOTA_OBJECT_ID,
                 "ok",
                 suggested_next_actions=["accounting.usage_project", "allocations.request"],
-                data={"project": project, **values},
+                data={"project": request.project, **values},
             )
 
 
@@ -117,12 +127,15 @@ def _parse_non_negative_kcu(value: object) -> Decimal:
         parsed = Decimal(str(value))
     except (InvalidOperation, DecimalException, ValueError, TypeError):
         raise CategorizedError(
-            f"limit_kcu {value!r} is not a number", category=ErrorCategory.CONFIGURATION_ERROR
+            f"limit_kcu {value!r} is not a number",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"field": "limit_kcu", "value": str(value)},
         ) from None
     if not parsed.is_finite() or parsed < 0:
         raise CategorizedError(
             f"limit_kcu {value!r} must be a finite number >= 0",
             category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"field": "limit_kcu", "value": str(value)},
         )
     return parsed
 
@@ -185,8 +198,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await set_quota(
             pool,
             current_context(),
-            project=project,
-            max_concurrent_allocations=max_concurrent_allocations,
-            max_concurrent_systems=max_concurrent_systems,
-            max_pending_allocations=max_pending_allocations,
+            request=QuotaSetRequest(
+                project=project,
+                max_concurrent_allocations=max_concurrent_allocations,
+                max_concurrent_systems=max_concurrent_systems,
+                max_pending_allocations=max_pending_allocations,
+            ),
         )

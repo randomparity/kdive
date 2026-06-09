@@ -7,8 +7,8 @@
 `debuginfo_ref` over an injected `crash` subprocess. The slow, host-bound operations are
 `live_vm`-gated seams, so the orchestration and the full error contract are unit-tested with
 fakes. The crash-command
-validator is the load-bearing security control: the postmortem path is never gated, so every
-caller command is sanitized and allowlist-checked before any `crash` invocation.
+validator is the load-bearing security control at the port boundary: every caller command is
+sanitized and allowlist-checked before any `crash` invocation.
 """
 
 from __future__ import annotations
@@ -22,14 +22,16 @@ from uuid import UUID
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
+from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.ports import (
     CaptureOutput,
     CrashOutput,
     CrashResult,
 )
-from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
+from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.secrets.redaction import Redactor
-from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact, object_store_from_env
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import object_store_from_env
 
 _RETENTION_CLASS = "vmcore"
 
@@ -58,6 +60,7 @@ class LocalLibvirtRetrieve:
         read_vmcore_build_id: _ReadBuildId,
         extract_redacted: _ExtractRedacted,
         host_dump_capture: _HostDumpCapture,
+        secret_registry: SecretRegistry,
         fetch_object: _FetchObject | None = None,
         run_crash: _RunCrash | None = None,
     ) -> None:
@@ -70,9 +73,10 @@ class LocalLibvirtRetrieve:
         self._host_dump_capture = host_dump_capture
         self._fetch_object = fetch_object
         self._run_crash = run_crash
+        self._secret_registry = secret_registry
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtRetrieve:
+    def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtRetrieve:
         """Build from env; does not poll the host, open S3, or spawn `crash` (lazy seams)."""
         return cls(
             tenant="local",
@@ -83,6 +87,7 @@ class LocalLibvirtRetrieve:
             host_dump_capture=_real_host_dump_capture,
             fetch_object=_real_fetch_object,
             run_crash=_real_run_crash,
+            secret_registry=secret_registry,
         )
 
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
@@ -145,8 +150,9 @@ class LocalLibvirtRetrieve:
         returns the parsed, **redacted** transcript.
 
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for a malformed ref rejected by an
-                injected fetch/build-id seam or a build-id provenance mismatch;
+            CategorizedError: ``CONFIGURATION_ERROR`` for a rejected crash command,
+                malformed ref rejected by an injected fetch/build-id seam, or a build-id
+                provenance mismatch;
                 ``MISSING_DEPENDENCY`` if the crash seams were not configured;
                 ``STALE_HANDLE`` when a referenced object is missing; or
                 ``INFRASTRUCTURE_FAILURE`` for object-store IO failures.
@@ -155,6 +161,13 @@ class LocalLibvirtRetrieve:
             raise CategorizedError(
                 "crash seams not configured on this Retriever",
                 category=ErrorCategory.MISSING_DEPENDENCY,
+            )
+        rejected = validate_crash_commands(commands)
+        if rejected is not None:
+            raise CategorizedError(
+                "crash command batch rejected",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"reason": rejected},
             )
         vmcore_bytes = self._fetch_object(vmcore_ref)
         observed = self._read_vmcore_build_id(vmcore_bytes)
@@ -175,7 +188,7 @@ class LocalLibvirtRetrieve:
             vmlinux_file.flush()
             script = "\n".join(commands) + "\nquit\n"
             crash = self._run_crash(Path(vmlinux_file.name), Path(core_file.name), script)
-        redactor = Redactor()
+        redactor = Redactor(registry=self._secret_registry)
         transcript = redactor.redact_text(crash.stdout.decode("utf-8", "replace"))
         return CrashOutput(
             results={cmd: {"ran": True} for cmd in commands},
@@ -234,5 +247,4 @@ def _real_run_crash(  # pragma: no cover - live_vm
 
 __all__ = [
     "LocalLibvirtRetrieve",
-    "crash_command_rejection_reason",
 ]

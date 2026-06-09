@@ -10,7 +10,7 @@ Run offline drgn introspection over a Run's captured core; returns redacted repo
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `run_id` | `string` | yes | The Run whose captured core to introspect with drgn. |
+| `run_id` | `string` | yes | The Run whose captured core to introspect with operator-provided drgn. |
 
 ## `introspect.run`
 
@@ -20,5 +20,5 @@ Run live drgn introspection over a live ssh DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `helper` | `string` | yes | In-tree drgn helper to run: tasks, modules, or sysinfo. |
+| `helper` | `string` | yes | In-tree drgn helper to run with operator-provided drgn: tasks, modules, or sysinfo. |
 | `session_id` | `string` | yes | A live ssh DebugSession to introspect. |

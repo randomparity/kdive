@@ -1,4 +1,4 @@
-"""Process entrypoints: `python -m kdive server|worker|reconciler` (issues #10, #12).
+"""Process entrypoints: `python -m kdive server|worker|reconciler`.
 
 `server` runs the FastMCP streamable-HTTP app; `worker` runs the job-queue worker
 loop; `reconciler` runs the drift-repair loop (ADR-0021). All three configure the
@@ -92,7 +92,7 @@ async def _run_worker(secret_registry: SecretRegistry) -> None:
     try:
         worker = Worker(
             pool,
-            build_handler_registry(),
+            build_handler_registry(secret_registry=secret_registry),
             worker_id=worker_id,
             secret_registry=secret_registry,
         )
@@ -104,8 +104,8 @@ async def _run_worker(secret_registry: SecretRegistry) -> None:
 
 async def _run_reconciler(secret_registry: SecretRegistry) -> None:
     from kdive.domain.errors import CategorizedError
-    from kdive.providers.composition import build_provider_resolver
-    from kdive.reconciler.loop import NullReaper, Reconciler
+    from kdive.providers.composition import ProviderComposition
+    from kdive.reconciler.loop import Reconciler
     from kdive.store.objectstore import object_store_from_env
 
     pool = create_pool(min_size=1)
@@ -118,9 +118,14 @@ async def _run_reconciler(secret_registry: SecretRegistry) -> None:
         upload_store = object_store_from_env()
     except CategorizedError:
         upload_store = None  # no S3 env: the upload reaper stays off, like NullReaper
-    await _register_provider_resources(pool, build_provider_resolver())
+    provider_composition = ProviderComposition()
+    await _register_provider_resources(pool, provider_composition.build_provider_resolver())
     try:
-        reconciler = Reconciler(pool, NullReaper(), upload_store=upload_store)
+        reconciler = Reconciler(
+            pool,
+            provider_composition.build_reconciler_reaper(),
+            upload_store=upload_store,
+        )
         await reconciler.run(stop)
     finally:
         secret_registry.clear()

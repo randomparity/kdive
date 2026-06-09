@@ -1,4 +1,4 @@
-"""The system-reuse snapshot-≥ match predicate (ADR-0070, #166).
+"""The system-reuse snapshot-≥ match predicate (ADR-0070).
 
 Reuse attaches a Run to a ``ready`` System the agent did not self-provision. The
 *candidacy* predicate (ADR-0070 §Decision) is the persisted **sizing snapshot**, never the
@@ -24,14 +24,7 @@ from dataclasses import dataclass, field
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, System
 from kdive.domain.pcie import PCIeClaim, parse_match_spec
-from kdive.profiles.provisioning import (
-    AllocationSizing,
-    ProvisioningProfile,
-    require_concrete_sizing,
-)
-
-_MB_PER_GB = 1024
-"""Maps the Allocation's GB memory snapshot to the profile's MB sizing (ADR-0067)."""
+from kdive.domain.sizing import MB_PER_GB, AllocationSizing, concrete_sizing_from_mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,18 +71,10 @@ def read_system_sizing(alloc: Allocation, system: System) -> AllocationSizing:
     ):
         return AllocationSizing(
             vcpu=alloc.requested_vcpus,
-            memory_mb=alloc.requested_memory_gb * _MB_PER_GB,
+            memory_mb=alloc.requested_memory_gb * MB_PER_GB,
             disk_gb=alloc.requested_disk_gb,
         )
-    profile = ProvisioningProfile.parse(system.provisioning_profile)
-    require_concrete_sizing(profile)  # raises CONFIGURATION_ERROR if any size is NULL
-    vcpu, memory_mb, disk_gb = profile.vcpu, profile.memory_mb, profile.disk_gb
-    if vcpu is None or memory_mb is None or disk_gb is None:  # pragma: no cover - guarded above
-        raise CategorizedError(
-            "provisioning profile is missing concrete sizing",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    return AllocationSizing(vcpu=vcpu, memory_mb=memory_mb, disk_gb=disk_gb)
+    return concrete_sizing_from_mapping(system.provisioning_profile)
 
 
 def _parse_vendor_device(spec: str) -> tuple[str, str]:
@@ -151,7 +136,7 @@ def snapshot_satisfies(
     pcie_ok = _pcie_claims_contain_all(claims, req.pcie)
     if req.vcpus is not None and sizing.vcpu < req.vcpus:
         return False
-    if req.memory_gb is not None and sizing.memory_mb < req.memory_gb * _MB_PER_GB:
+    if req.memory_gb is not None and sizing.memory_mb < req.memory_gb * MB_PER_GB:
         return False
     if req.disk_gb is not None and sizing.disk_gb < req.disk_gb:
         return False
