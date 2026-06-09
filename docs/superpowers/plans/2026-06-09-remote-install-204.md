@@ -59,7 +59,7 @@ from kdive.providers.remote_libvirt.guest_agent import AgentExecResult
 from kdive.providers.remote_libvirt.install import RemoteLibvirtInstall
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.providers.remote_libvirt.conftest import libvirt_error
+from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 
 _URL = "https://store.example/t/runs/r1/kernel?X-Amz-Signature=deadbeefcafe&X-Amz-Expires=3600"
 
@@ -152,12 +152,10 @@ def _config() -> RemoteLibvirtConfig:
     )
 
 
-def _backend():
-    class _B:
-        def resolve(self, ref: str) -> str:
-            return f"PEM::{ref}"
-
-    return _B()
+def _backend() -> RecordingBackend:
+    # The conftest SecretBackend double; materialized_pkipath resolves the cert refs through it
+    # into a real temp pkipath (created+deleted per op) without touching a real secrets root.
+    return RecordingBackend()
 
 
 def _install(handler: _Handler, store: _FakeStore, registry: SecretRegistry) -> RemoteLibvirtInstall:
