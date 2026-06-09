@@ -69,6 +69,12 @@ def provisioning_profile() -> dict[str, Any]:
     return copy.deepcopy(PROVISIONING_PROFILE)
 
 
+def fault_inject_profile() -> dict[str, Any]:
+    profile = provisioning_profile()
+    profile["provider"] = {"fault-inject": {"capture_method": "host_dump"}}
+    return profile
+
+
 def upload_profile() -> dict[str, Any]:
     profile = provisioning_profile()
     profile["provider"]["local-libvirt"]["rootfs"] = {"kind": "upload"}

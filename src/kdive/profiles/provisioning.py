@@ -29,6 +29,7 @@ from pydantic import (
     Field,
     StringConstraints,
     ValidationError,
+    model_validator,
 )
 
 from kdive.components.catalog import load_fixture_catalog
@@ -111,14 +112,58 @@ class LibvirtProfile(_ProfileBase):
     debug: LibvirtDebugOptions = Field(default_factory=LibvirtDebugOptions)
 
 
+class FaultInjectProfile(_ProfileBase):
+    """The ``fault-inject`` provider section (ADR-0072).
+
+    The mock provider owns no rootfs/domain XML materialization; its section carries only
+    the knobs shared by generic control/retrieve gates.
+    """
+
+    destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
+    capture_method: CaptureMethod = CaptureMethod.CONSOLE
+
+
 class ProviderSection(_ProfileBase):
     """The provider-specific section, keyed by provider name (ADR-0024 decision 1).
 
-    M0 requires exactly the ``local-libvirt`` section; an unknown provider key is
-    rejected by ``extra="forbid"``.
+    Exactly one concrete provider section is required. The public properties return the
+    concrete section for callers that have already selected a provider-specific path.
     """
 
-    local_libvirt: LibvirtProfile = Field(alias=ResourceKind.LOCAL_LIBVIRT.value)
+    local_libvirt_section: LibvirtProfile | None = Field(
+        default=None,
+        validation_alias=ResourceKind.LOCAL_LIBVIRT.value,
+        serialization_alias=ResourceKind.LOCAL_LIBVIRT.value,
+    )
+    fault_inject_section: FaultInjectProfile | None = Field(
+        default=None,
+        validation_alias=ResourceKind.FAULT_INJECT.value,
+        serialization_alias=ResourceKind.FAULT_INJECT.value,
+    )
+
+    @model_validator(mode="after")
+    def _require_exactly_one_provider(self) -> ProviderSection:
+        present = [
+            self.local_libvirt_section is not None,
+            self.fault_inject_section is not None,
+        ]
+        if sum(present) != 1:
+            raise ValueError("profile provider must contain exactly one provider section")
+        return self
+
+    @property
+    def local_libvirt(self) -> LibvirtProfile:
+        """Return the local-libvirt section for local-libvirt-specific callers."""
+        if self.local_libvirt_section is None:
+            raise AttributeError("profile has no local-libvirt provider section")
+        return self.local_libvirt_section
+
+    @property
+    def fault_inject(self) -> FaultInjectProfile:
+        """Return the fault-inject section for fault-inject-specific callers."""
+        if self.fault_inject_section is None:
+            raise AttributeError("profile has no fault-inject provider section")
+        return self.fault_inject_section
 
 
 class ProvisioningProfile(_ProfileBase):
@@ -255,7 +300,7 @@ def dump_profile(profile: ProvisioningProfile) -> SerializedProvisioningProfile:
     """Serialize a parsed provisioning profile for JSON persistence."""
     return cast(
         SerializedProvisioningProfile,
-        profile.model_dump(mode="json", by_alias=True),
+        profile.model_dump(mode="json", by_alias=True, exclude_none=True),
     )
 
 
@@ -284,7 +329,8 @@ def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> Prov
 
 def rootfs_upload_window_allowed(profile: ProvisioningProfile) -> bool:
     """Return whether the profile's rootfs expects a System upload window."""
-    return profile.provider.local_libvirt.rootfs.kind == "upload"
+    rootfs = rootfs_source(profile)
+    return rootfs is not None and rootfs.kind == "upload"
 
 
 def reject_rootfs_upload_without_window(profile: ProvisioningProfile) -> None:
@@ -316,9 +362,18 @@ def validate_rootfs_reference(rootfs: RootfsSource) -> None:
         )
 
 
+def rootfs_source(profile: ProvisioningProfile) -> RootfsSource | None:
+    """Return the profile's rootfs source, or ``None`` for providers that do not use one."""
+    section = profile.provider.local_libvirt_section
+    return section.rootfs if section is not None else None
+
+
 def validate_profile(profile: ProvisioningProfile) -> None:
     """Reject unsupported provider params and unresolvable rootfs references."""
-    params = profile.provider.local_libvirt.domain_xml_params
+    section = profile.provider.local_libvirt_section
+    if section is None:
+        return
+    params = section.domain_xml_params
     unknown = sorted(set(params) - SUPPORTED_DOMAIN_XML_PARAMS)
     if unknown:
         raise CategorizedError(
@@ -326,18 +381,22 @@ def validate_profile(profile: ProvisioningProfile) -> None:
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"unsupported": unknown, "supported": sorted(SUPPORTED_DOMAIN_XML_PARAMS)},
         )
-    validate_rootfs_reference(profile.provider.local_libvirt.rootfs)
+    validate_rootfs_reference(section.rootfs)
 
 
 def destructive_opt_in(profile: ProvisioningProfile, op: DestructiveJobKind) -> bool:
     """Return whether the profile opts into a destructive operation."""
-    return op.value in profile.provider.local_libvirt.destructive_ops
+    if profile.provider.local_libvirt_section is not None:
+        return op.value in profile.provider.local_libvirt_section.destructive_ops
+    return op.value in profile.provider.fault_inject.destructive_ops
 
 
 def capture_method(profile: ProvisioningProfile | Mapping[str, object]) -> CaptureMethod:
     """Resolve the crash-capture method a provisioning profile enables."""
     parsed = _parsed_profile(profile)
-    section = parsed.provider.local_libvirt
+    section = parsed.provider.local_libvirt_section
+    if section is None:
+        return parsed.provider.fault_inject.capture_method
     if section.crashkernel is not None:
         return CaptureMethod.KDUMP
     if section.debug.gdbstub:

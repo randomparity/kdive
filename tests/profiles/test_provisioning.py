@@ -17,6 +17,7 @@ from kdive.profiles.provisioning import (
     ProvisioningProfile,
     capture_method,
     destructive_opt_in,
+    dump_profile,
     profile_digest,
     reconcile_profile_sizing,
     reject_rootfs_upload_without_window,
@@ -64,6 +65,40 @@ def test_valid_libvirt_profile_parses() -> None:
     rootfs = profile.provider.local_libvirt.rootfs
     assert rootfs.kind == "local"
     assert rootfs.path == "/var/lib/kdive/rootfs/fedora-40.qcow2"
+
+
+def test_valid_fault_inject_profile_parses_and_dumps_alias() -> None:
+    data = _valid()
+    data["provider"] = {
+        "fault-inject": {
+            "capture_method": "host_dump",
+            "destructive_ops": ["reprovision"],
+        }
+    }
+
+    profile = ProvisioningProfile.parse(data)
+
+    assert profile.provider.fault_inject.capture_method is CaptureMethod.HOST_DUMP
+    assert destructive_opt_in(profile, JobKind.REPROVISION) is True
+    assert rootfs_upload_window_allowed(profile) is False
+    assert dump_profile(profile)["provider"] == {
+        "fault-inject": {
+            "capture_method": "host_dump",
+            "destructive_ops": ["reprovision"],
+        }
+    }
+
+
+def test_provider_section_rejects_multiple_providers() -> None:
+    data = _valid()
+    data["provider"]["fault-inject"] = {}
+    _expect_configuration_error(data)
+
+
+def test_fault_inject_capture_method_defaults_to_console() -> None:
+    data = _valid()
+    data["provider"] = {"fault-inject": {}}
+    assert capture_method(data) is CaptureMethod.CONSOLE
 
 
 def test_crashkernel_is_present() -> None:

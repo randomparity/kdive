@@ -30,7 +30,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.resource_discovery import register_discovered_resource
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
-from tests.mcp.systems_support import provisioning_profile
+from tests.mcp.systems_support import fault_inject_profile
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -230,7 +230,7 @@ def test_systems_provision_resolves_fault_inject_runtime(
                 provisioned = await _call_tool(
                     client,
                     "systems.provision",
-                    {"allocation_id": granted.object_id, "profile": provisioning_profile()},
+                    {"allocation_id": granted.object_id, "profile": fault_inject_profile()},
                 )
         return granted, provisioned
 

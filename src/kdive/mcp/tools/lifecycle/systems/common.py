@@ -8,6 +8,7 @@ from kdive.profiles.provisioning import (
     ProvisioningProfile,
     RootfsSource,
     _UploadRootfs,
+    rootfs_source,
     validate_profile,
 )
 from kdive.providers.component_validation import (
@@ -24,7 +25,9 @@ def _validate_profile_for_provider(
     capabilities: ComponentSourceCapabilities,
 ) -> None:
     validate_profile(profile)
-    rootfs = profile.provider.local_libvirt.rootfs
+    rootfs = rootfs_source(profile)
+    if rootfs is None:
+        return
     if isinstance(rootfs, _UploadRootfs):
         return
     reject_unsupported_component_source(
@@ -38,7 +41,9 @@ def _validate_rootfs_for_provider(
     profile: ProvisioningProfile,
     rootfs_validator: RootfsValidator,
 ) -> None:
-    rootfs = profile.provider.local_libvirt.rootfs
+    rootfs = rootfs_source(profile)
+    if rootfs is None:
+        return
     if isinstance(rootfs, _UploadRootfs):
         return
     rootfs_validator(rootfs)
