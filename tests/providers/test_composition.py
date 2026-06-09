@@ -301,7 +301,9 @@ def test_reconciler_reaper_defaults_to_null_when_fault_inject_is_disabled(
 
     monkeypatch.delenv("KDIVE_FAULT_INJECT", raising=False)
 
-    assert isinstance(composition.build_reconciler_reaper(), NullReaper)
+    owner = composition.ProviderComposition()
+
+    assert isinstance(owner.build_reconciler_reaper(), NullReaper)
 
 
 def test_fault_inject_opt_in_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

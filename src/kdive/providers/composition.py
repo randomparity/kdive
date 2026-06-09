@@ -261,16 +261,6 @@ def build_provider_resolver(
     )
 
 
-def build_reconciler_reaper(*, enable_fault_inject: bool | None = None) -> InfraReaper:
-    """Assemble the provider-aware leaked-infra reaper for reconciliation.
-
-    Providers without a reaper simply contribute nothing. Callers that need a resolver and
-    reaper over the same fault-inject inventory should construct one :class:`ProviderComposition`
-    and call both methods on it.
-    """
-    return ProviderComposition().build_reconciler_reaper(enable_fault_inject=enable_fault_inject)
-
-
 async def ensure_local_host_registered(pool: AsyncConnectionPool) -> None:
     discovery = LocalLibvirtDiscovery.from_env()
     await ensure_discovered_resource_registered(
@@ -302,7 +292,6 @@ __all__ = [
     "build_faultinject_runtime",
     "build_local_runtime",
     "build_provider_resolver",
-    "build_reconciler_reaper",
     "ensure_faultinject_resource_registered",
     "ensure_local_host_registered",
     "ProviderComposition",
