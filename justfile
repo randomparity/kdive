@@ -129,6 +129,11 @@ lint-workflows:
 check-mermaid:
     git ls-files -z '*.md' | xargs -0 -r node .github/scripts/mermaid-check/mermaid-check.mjs
 
+# M2 portability gate: cumulative core-touch measurement vs the pre-M2 tag (ADR-0076).
+# Stdlib-only (plain python3, no uv sync); needs the pre-M2 tag fetched.
+m2-gate:
+    python3 scripts/m2_portability_gate.py
+
 # Audit runtime dependencies for known vulnerabilities.
 audit:
     reqs="$(mktemp)" && trap 'rm -f "$reqs"' EXIT && uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > "$reqs" && uv run --with 'pip-audit==2.10.0' pip-audit --no-deps --strict -r "$reqs"
@@ -185,4 +190,4 @@ docs-check:
     fi
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check m2-gate test
