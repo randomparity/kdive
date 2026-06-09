@@ -231,3 +231,82 @@ def test_install_unreachable_agent_is_transport_failure() -> None:
             _request(CaptureMethod.HOST_DUMP, "console=ttyS0")
         )
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
+class _FakeClock:
+    """A monotonic fake advancing a fixed step per read (shared by GuestAgentExec + the poller)."""
+
+    def __init__(self, step: float = 1.0) -> None:
+        self._t = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        self._t += self._step
+        return self._t
+
+
+def _boot_install(handler: _Handler, *, boot_timeout_s: float = 60.0) -> RemoteLibvirtInstall:
+    return RemoteLibvirtInstall(
+        secret_registry=SecretRegistry(),
+        config_factory=_config,
+        open_connection=lambda _uri: _FakeConn(),
+        store_factory=_FakeStore,
+        agent_command=_ScriptedAgent(handler),
+        secret_backend_factory=_backend,
+        boot_timeout_s=boot_timeout_s,
+        boot_poll_s=0.0,
+        sleep=lambda _s: None,
+        monotonic=_FakeClock(),
+    )
+
+
+def test_boot_ready_when_boot_id_changes_after_reboot() -> None:
+    state = {"reboots": 0, "down": 0}
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        sub = argv[1]
+        if sub == "boot":
+            state["reboots"] += 1
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)  # reboot tears down the agent
+        # boot-id
+        if state["reboots"] == 0:
+            return AgentExecResult(0, b"BASELINE-ID\n", b"")
+        state["down"] += 1
+        if state["down"] <= 2:
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)  # still rebooting
+        return AgentExecResult(0, b"FRESH-ID\n", b"")
+
+    _boot_install(handler).boot(uuid4())  # returns -> ready
+    assert state["reboots"] == 1
+
+
+def test_boot_times_out_when_boot_id_never_changes() -> None:
+    def handler(argv: list[str]) -> AgentExecResult:
+        if argv[1] == "boot":
+            return AgentExecResult(0, b"scheduled", b"")  # clean detached return
+        return AgentExecResult(0, b"SAME-ID\n", b"")  # never changes
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _boot_install(handler, boot_timeout_s=5.0).boot(uuid4())
+    assert excinfo.value.category is ErrorCategory.BOOT_TIMEOUT
+
+
+def test_boot_tolerates_clean_nonzero_reboot_exit() -> None:
+    state = {"reboots": 0}
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        if argv[1] == "boot":
+            state["reboots"] += 1
+            return AgentExecResult(1, b"", b"reboot returned 1 but took effect")
+        return AgentExecResult(0, (b"BASELINE-ID" if state["reboots"] == 0 else b"FRESH-ID"), b"")
+
+    _boot_install(handler).boot(uuid4())  # tolerated -> ready on boot-id change
+
+
+def test_boot_unreachable_agent_at_baseline_is_transport_failure() -> None:
+    def handler(argv: list[str]) -> AgentExecResult:
+        raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _boot_install(handler).boot(uuid4())
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE

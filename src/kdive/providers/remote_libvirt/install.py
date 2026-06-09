@@ -21,6 +21,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 import libvirt
 
@@ -52,6 +53,12 @@ _DEFAULT_GET_EXPIRY_S = 3600
 _DEFAULT_INSTALL_TIMEOUT_S = 1800.0
 _DEFAULT_BOOT_TIMEOUT_S = 300.0
 _DEFAULT_BOOT_POLL_S = 2.0
+# Reboot tears down the guest agent, so the boot command and the post-reboot boot-id polls expect
+# the agent to be unreachable / its reply truncated; those categories are swallowed as "still
+# rebooting" rather than treated as failures (ADR-0082 §3).
+_REBOOT_EXPECTED = frozenset(
+    {ErrorCategory.TRANSPORT_FAILURE, ErrorCategory.INFRASTRUCTURE_FAILURE}
+)
 
 
 class _StorePort(Protocol):
@@ -178,6 +185,73 @@ class RemoteLibvirtInstall:
                     "exit_status": output.result.exit_status,
                 },
             )
+
+    def boot(self, system_id: UUID) -> None:
+        """Reboot into the installed kernel and confirm a fresh boot by boot_id change.
+
+        Reads the guest's pre-reboot boot_id, runs the helper's atomic select-``kdive``-slot +
+        detached reboot, then polls boot_id until it differs from the baseline — proving a real
+        boot transition (a stale agent connection cannot fake a new boot_id, ADR-0082 §3).
+
+        Raises:
+            CategorizedError: ``INSTALL_FAILURE`` for a domain lookup fault or a non-zero
+                boot-id baseline read; ``TRANSPORT_FAILURE`` when the guest agent is unreachable
+                before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
+                window (a panic/hang manifests as the agent never reconnecting).
+        """
+        config = self._config_factory()
+        agent_exec = self._agent_exec(self._boot_timeout_s)
+        with self._connection(config) as conn:
+            domain = self._lookup(conn, domain_name_for(system_id))
+            baseline = self._read_boot_id(agent_exec, domain, system_id)
+            self._trigger_reboot(agent_exec, domain)
+            self._await_fresh_boot(agent_exec, domain, baseline, system_id)
+
+    def _read_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID) -> str:
+        result = agent_exec.run(domain, [_HELPER, "boot-id"])
+        if result.exit_status != 0:
+            raise CategorizedError(
+                "could not read the guest boot-id baseline",
+                category=ErrorCategory.INSTALL_FAILURE,
+                details={"system_id": str(system_id), "exit_status": result.exit_status},
+            )
+        return result.stdout.decode("utf-8", errors="replace").strip()
+
+    def _trigger_reboot(self, agent_exec: GuestAgentExec, domain: _Domain) -> None:
+        """Run the helper's atomic select+detached-reboot; a lost agent is the expected signal."""
+        try:
+            agent_exec.run(domain, [_HELPER, "boot"])
+        except CategorizedError as exc:
+            if exc.category not in _REBOOT_EXPECTED:
+                raise
+
+    def _await_fresh_boot(
+        self, agent_exec: GuestAgentExec, domain: _Domain, baseline: str, system_id: UUID
+    ) -> None:
+        deadline = self._monotonic() + self._boot_timeout_s
+        while True:
+            current = self._poll_boot_id(agent_exec, domain)
+            if current is not None and current != baseline:
+                return
+            if self._monotonic() >= deadline:
+                raise CategorizedError(
+                    "system did not reboot into a fresh kernel within the boot window",
+                    category=ErrorCategory.BOOT_TIMEOUT,
+                    details={"system_id": str(system_id), "timeout_s": self._boot_timeout_s},
+                )
+            self._sleep(self._boot_poll_s)
+
+    def _poll_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain) -> str | None:
+        """One post-reboot boot-id read; ``None`` means "agent down / not ready, keep polling"."""
+        try:
+            result = agent_exec.run(domain, [_HELPER, "boot-id"])
+        except CategorizedError as exc:
+            if exc.category in _REBOOT_EXPECTED:
+                return None
+            raise
+        if result.exit_status != 0:
+            return None
+        return result.stdout.decode("utf-8", errors="replace").strip()
 
     def _agent_exec(self, timeout_s: float) -> GuestAgentExec:
         return GuestAgentExec(
