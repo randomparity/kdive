@@ -25,7 +25,7 @@ from pydantic import Field
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.cost import Selector
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, Resource
+from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.pcie import MatchOutcome, parse_match_spec
 from kdive.domain.shapes import ResolvedSizing
 from kdive.domain.state import AllocationState, ResourceStatus
@@ -77,7 +77,7 @@ def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:
 
 
 async def _resolve_resource(
-    conn: AsyncConnection, resource_id: UUID | None, kind: str
+    conn: AsyncConnection, resource_id: UUID | None, kind: ResourceKind
 ) -> Resource | None:
     """Resolve the placement target, schedulability-aware on both paths (ADR-0062 §3).
 
@@ -96,7 +96,7 @@ async def _resolve_resource(
         await cur.execute(
             "SELECT * FROM resources WHERE kind = %s AND status = 'available' AND NOT cordoned "
             "ORDER BY created_at, id LIMIT 1",
-            (kind,),
+            (kind.value,),
         )
         row = await cur.fetchone()
     return Resource.model_validate(row) if row else None
@@ -115,7 +115,7 @@ class _AdmissionPreparation:
     payload: AllocationRequestPayload
     object_id: str
     resolved_id: UUID | None
-    kind: str
+    kind: ResourceKind
     sizing: ResolvedSizing
     specs: tuple[str, ...]
 
@@ -131,7 +131,7 @@ async def _prepare_admission_request(
             return _config_error(payload.resource.resource_id)
     else:
         kind = payload.resource.kind
-    object_id = str(resolved_id) if resolved_id is not None else kind
+    object_id = str(resolved_id) if resolved_id is not None else kind.value
     try:
         sizing = await resolve_request_sizing(
             conn,
@@ -161,7 +161,7 @@ async def _prepare_admission_request(
 
 
 async def _select_target(
-    conn: AsyncConnection, resource_id: UUID | None, kind: str, specs: tuple[str, ...]
+    conn: AsyncConnection, resource_id: UUID | None, kind: ResourceKind, specs: tuple[str, ...]
 ) -> _Selection:
     """Resolve the placement target, PCIe-aware when ``specs`` is non-empty (ADR-0068).
 
@@ -195,7 +195,7 @@ async def _select_target(
 
 
 async def _schedulable_candidates(
-    conn: AsyncConnection, resource_id: UUID | None, kind: str
+    conn: AsyncConnection, resource_id: UUID | None, kind: ResourceKind
 ) -> list[Resource]:
     """Return the schedulable placement candidates for the PCIe-aware selection.
 
@@ -210,7 +210,7 @@ async def _schedulable_candidates(
         await cur.execute(
             "SELECT * FROM resources WHERE kind = %s AND status = 'available' AND NOT cordoned "
             "ORDER BY created_at, id",
-            (kind,),
+            (kind.value,),
         )
         rows = await cur.fetchall()
     return [Resource.model_validate(row) for row in rows]
@@ -273,7 +273,9 @@ async def request_allocation(
                     shape=prepared.sizing.shape,
                     pcie_specs=prepared.specs,
                     on_capacity=prepared.payload.on_capacity,
-                    requested_kind=None if prepared.resolved_id is not None else prepared.kind,
+                    requested_kind=(
+                        None if prepared.resolved_id is not None else prepared.kind.value
+                    ),
                     requested_resource_id=prepared.resolved_id,
                 ),
             )
