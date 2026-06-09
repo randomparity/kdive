@@ -39,9 +39,7 @@ Describe a Resource. Requires a valid token; no project membership needed.
 
 `implemented` · `destructive`
 
-Cordon a host, then report (passive) or force-release (force_release) its allocations.
-
-passive requires platform operator; force_release requires platform admin + a reason.
+Cordon a host, then report or force-release its allocations.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

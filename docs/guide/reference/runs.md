@@ -46,7 +46,7 @@ Bind a Run to a ready System and Investigation in one transaction. Requires oper
 | `build_profile` | `object` | yes | Build profile for the Run's kernel. |
 | `expected_boot_failure` | `any` | no | Optional expected boot failure, e.g. {'kind':'console_crash','pattern':'Oops'}. |
 | `investigation_id` | `string` | yes | Investigation to attach the Run to. |
-| `reuse_requirement` | `object` | no | Optional System reuse assertion payload with `vcpus`, `memory_gb`, `disk_gb`, and `pcie` fields. Omit to skip extra reuse matching. |
+| `reuse_requirement` | `any` | no | Optional System reuse assertion payload with vcpus, memory_gb, disk_gb, and pcie fields. Omit to skip extra reuse matching. |
 | `system_id` | `string` | yes | Ready System (active Allocation) to bind. |
 
 ## `runs.get`
