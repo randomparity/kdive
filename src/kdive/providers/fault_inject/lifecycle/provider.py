@@ -57,7 +57,7 @@ def _domain_name(system_id: UUID) -> str:
 def _synthetic_port(handle: str) -> int:
     """Derive a stable loopback port in 1024..65535 from a domain handle."""
     digest = hashlib.blake2b(handle.encode(), digest_size=2).digest()
-    return 1024 + int.from_bytes(digest, "big") % (65535 - 1024)
+    return 1024 + int.from_bytes(digest, "big") % (65535 - 1024 + 1)
 
 
 class FaultInjectProvision:

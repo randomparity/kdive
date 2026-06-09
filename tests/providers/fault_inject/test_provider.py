@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+import kdive.providers.fault_inject.lifecycle.provider as provider_module
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import PowerAction, Sensitivity
@@ -107,6 +108,24 @@ def test_install_and_boot_succeed_on_the_happy_path() -> None:
 
 
 # --- Connect ---------------------------------------------------------------------------
+
+
+class _MaxDigest:
+    def digest(self) -> bytes:
+        return b"\xfb\xff"
+
+
+def test_synthetic_port_includes_documented_upper_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def blake2b(data: bytes, *, digest_size: int) -> _MaxDigest:
+        assert data == b"fault-inject-domain"
+        assert digest_size == 2
+        return _MaxDigest()
+
+    monkeypatch.setattr(provider_module.hashlib, "blake2b", blake2b)
+
+    assert provider_module._synthetic_port("fault-inject-domain") == 65535
 
 
 def test_open_transport_returns_a_decodable_loopback_handle() -> None:
