@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal, NamedTuple, Protocol, cast
+from typing import Literal, NamedTuple, Protocol, cast, get_args
 from uuid import UUID
 
 from psycopg.rows import dict_row
@@ -22,10 +22,20 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 type Visibility = Literal["public", "project", "host-policy"]
 type UploadVisibility = Literal["public", "project"]
 
-_COMPONENT_KINDS: frozenset[str] = frozenset(
-    {"rootfs", "kernel", "initrd", "config", "patch", "vmlinux"}
+
+def _literal_args(alias: object) -> tuple[str, ...]:
+    args = get_args(getattr(alias, "__value__", alias))
+    if not all(isinstance(arg, str) for arg in args):
+        raise RuntimeError("provider component Literal alias contains non-string values")
+    return cast(tuple[str, ...], args)
+
+
+_COMPONENT_KINDS: frozenset[ComponentKind] = frozenset(
+    cast(tuple[ComponentKind, ...], _literal_args(ComponentKind))
 )
-_VISIBILITIES: frozenset[str] = frozenset({"public", "project", "host-policy"})
+_VISIBILITIES: frozenset[Visibility] = frozenset(
+    cast(tuple[Visibility, ...], _literal_args(Visibility))
+)
 
 
 @dataclass(frozen=True, slots=True)
