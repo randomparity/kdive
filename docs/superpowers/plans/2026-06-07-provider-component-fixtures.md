@@ -34,7 +34,7 @@ modeled only as source-kind rejection and artifact-reference privacy rules.
   fixture YAML files.
 - **Modify** `pyproject.toml` and `uv.lock`: add direct `pyyaml==6.0.3` dependency because
   `kdive.components.catalog` imports `yaml` directly.
-- **Create** `src/kdive/providers/component_validation.py`: provider-agnostic validation service
+- **Create** `src/kdive/components/validation.py`: component-source validation service
   that checks accepted component source kinds and dispatches profile requirement checks.
 - **Modify** `src/kdive/providers/composition.py`: expose local-libvirt component capabilities and
   the validation service through `ProviderRuntime`.
@@ -751,14 +751,14 @@ git commit -m "feat: add provider-scoped fixture catalog"
 ## Milestone 5: Provider Capabilities And Preflight Validation
 
 **Files:**
-- Create: `src/kdive/providers/component_validation.py`
+- Create: `src/kdive/components/validation.py`
 - Modify: `src/kdive/providers/composition.py`
-- Test: `tests/providers/test_component_validation.py`
+- Test: `tests/components/test_validation.py`
 - Test: `tests/providers/test_composition.py`
 
 - [ ] **Step 1: Write failing tests for component/source support**
 
-Create `tests/providers/test_component_validation.py`:
+Create `tests/components/test_validation.py`:
 
 ```python
 from __future__ import annotations
@@ -767,7 +767,7 @@ import pytest
 
 from kdive.components.references import ArtifactComponentRef, LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.component_validation import (
+from kdive.components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
@@ -818,13 +818,13 @@ def test_rejects_unimplemented_local_libvirt_kernel_artifact_source() -> None:
 
 - [ ] **Step 2: Run the test and confirm missing module failure**
 
-Run: `uv run python -m pytest tests/providers/test_component_validation.py -q`
+Run: `uv run python -m pytest tests/components/test_validation.py -q`
 
-Expected: FAIL with missing `kdive.providers.component_validation`.
+Expected: FAIL with missing `kdive.components.validation`.
 
 - [ ] **Step 3: Implement capability models and rejection helper**
 
-Create `src/kdive/providers/component_validation.py` with `ComponentSourceCapabilities` and
+Create `src/kdive/components/validation.py` with `ComponentSourceCapabilities` and
 `reject_unsupported_component_source()`. The helper must include the `provider`,
 `component_kind`, `source_kind`, and accepted source kinds in error details, without echoing local
 paths.
@@ -856,14 +856,14 @@ capability must not be a future promise.
 
 - [ ] **Step 5: Run focused tests**
 
-Run: `uv run python -m pytest tests/providers/test_component_validation.py tests/providers/test_composition.py -q`
+Run: `uv run python -m pytest tests/components/test_validation.py tests/providers/test_composition.py -q`
 
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/providers/component_validation.py src/kdive/providers/composition.py tests/providers
+git add src/kdive/components/validation.py src/kdive/providers/composition.py tests/components
 git commit -m "feat: advertise provider component source support"
 ```
 
@@ -1480,7 +1480,7 @@ Run:
 ```bash
 uv run python -m pytest \
   tests/components \
-  tests/providers/test_component_validation.py \
+  tests/components/test_validation.py \
   tests/providers/local_libvirt/test_materialize.py \
   tests/mcp/catalog \
   tests/mcp/providers \

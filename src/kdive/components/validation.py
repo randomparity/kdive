@@ -1,4 +1,4 @@
-"""Provider component-source capability validation (ADR-0065)."""
+"""Component-source capability validation (ADR-0065)."""
 
 from __future__ import annotations
 

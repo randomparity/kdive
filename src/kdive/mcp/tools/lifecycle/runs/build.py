@@ -16,6 +16,10 @@ from kdive.components.catalog import load_fixture_catalog
 from kdive.components.references import CONFIG_COMPONENT, ComponentRef
 from kdive.components.requirements import ConfigRequirements
 from kdive.components.uploads import ManifestEntry
+from kdive.components.validation import (
+    ComponentSourceCapabilities,
+    reject_unsupported_component_source,
+)
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS
@@ -35,10 +39,6 @@ from kdive.mcp.tools.lifecycle.runs.common import (
 )
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.providers.build_validation import ValidatorStore, validate_external_artifacts
-from kdive.providers.component_validation import (
-    ComponentSourceCapabilities,
-    reject_unsupported_component_source,
-)
 from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

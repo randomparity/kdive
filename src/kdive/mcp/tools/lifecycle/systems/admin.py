@@ -10,6 +10,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -37,7 +38,6 @@ from kdive.profiles.provisioning import (
     reject_rootfs_upload_without_window,
 )
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.component_validation import ComponentSourceCapabilities
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed

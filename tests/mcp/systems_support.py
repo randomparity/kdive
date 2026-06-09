@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Budget, Job, JobKind, Quota
@@ -21,7 +22,6 @@ from kdive.jobs.payloads import SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
-from kdive.providers.component_validation import ComponentSourceCapabilities
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import Role
 from kdive.services.resources.discovery import register_discovered_resource

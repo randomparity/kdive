@@ -5,11 +5,11 @@ from uuid import UUID
 import pytest
 
 from kdive.components.references import ArtifactComponentRef, LocalComponentRef
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.component_validation import (
+from kdive.components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
 
 
 def test_accepts_supported_component_source() -> None:

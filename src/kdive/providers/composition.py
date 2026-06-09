@@ -22,11 +22,11 @@ from kdive.components.references import (
     ComponentKind,
     ComponentSourceKind,
 )
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
-from kdive.providers.component_validation import (
+from kdive.components.validation import (
     ComponentSourceCapabilities,
 )
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.models import ResourceKind
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper

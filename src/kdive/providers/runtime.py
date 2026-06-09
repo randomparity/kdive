@@ -15,9 +15,9 @@ from typing import NoReturn
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import ComponentRef
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
 from kdive.profiles.provisioning import RootfsSource
-from kdive.providers.component_validation import ComponentSourceCapabilities
 from kdive.providers.ports import (
     AttachSeam,
     Booter,
