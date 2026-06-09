@@ -138,8 +138,12 @@ re-poll) without it being torn down first.
 
 `teardown(domain_name)` destroys + undefines idempotently (the local-libvirt error-code
 contract, duplicated deliberately — no shared layer, ADR-0076), then deletes the overlay
-volume derived from the domain name. `reprovision` = `teardown` + `provision` (ADR-0038's
-wipe-and-replace, same as local).
+volume derived from the domain name. The overlay's **pool is read from the domain XML's
+disk element while the domain still exists** (the record travels with the domain, like the
+gdbstub port), falling back to the configured pool only when the domain is already gone —
+so an operator repointing `KDIVE_REMOTE_LIBVIRT_STORAGE_POOL` between provision and
+teardown does not silently strand the overlay in the old pool. `reprovision` = `teardown`
++ `provision` (ADR-0038's wipe-and-replace, same as local).
 
 The domain XML carries the kdive metadata tag (same namespace URI as local-libvirt,
 duplicated deliberately) so later reaping/discovery can identify kdive-owned domains. It
