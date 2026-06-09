@@ -264,6 +264,7 @@ class FakeDomain:
         self.agent_states = list(conn.agent_script.get(self.domain_name, []))
         self.active_states = list(conn.active_script.get(self.domain_name, []))
         self.xml_error: libvirt.libvirtError | None = None
+        self.destroy_error: libvirt.libvirtError | None = None
         self.destroyed = False
         self.undefined = False
 
@@ -298,6 +299,8 @@ class FakeDomain:
         return self.xml
 
     def destroy(self) -> int:
+        if self.destroy_error is not None:
+            raise self.destroy_error
         self.destroyed = True
         self.active = False
         return 0
@@ -635,3 +638,94 @@ def test_provision_domain_exit_during_agent_wait_fails_fast(tmp_path: Path) -> N
     assert "exited" in str(excinfo.value).lower()
     assert len(ticks) < 10  # failed fast, not by burning the timeout
     assert DOMAIN_NAME in conn.domains  # left defined for diagnosis
+
+
+def test_teardown_destroys_undefines_and_deletes_overlay(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    provisioner, _ = _provisioner(conn, tmp_path)
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+    domain = conn.domains[DOMAIN_NAME]
+
+    provisioner.teardown(DOMAIN_NAME)
+
+    assert domain.destroyed
+    assert domain.undefined
+    assert DOMAIN_NAME not in conn.domains
+    assert overlay_volume_name(SYSTEM_ID) not in conn.pools["default"].volumes
+    assert conn.pools["default"].deleted == [overlay_volume_name(SYSTEM_ID)]
+
+
+def test_teardown_of_absent_domain_still_deletes_overlay(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    pool = conn.pools["default"]
+    overlay = overlay_volume_name(SYSTEM_ID)
+    pool.volumes[overlay] = FakeVolume(overlay, pool=pool)
+    provisioner, _ = _provisioner(conn, tmp_path)
+
+    provisioner.teardown(DOMAIN_NAME)  # idempotent re-teardown
+
+    assert overlay not in pool.volumes
+
+
+def test_teardown_with_absent_overlay_is_noop_success(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    provisioner, _ = _provisioner(conn, tmp_path)
+
+    provisioner.teardown(DOMAIN_NAME)  # neither domain nor overlay exist
+
+    assert conn.pools["default"].deleted == []
+
+
+def test_teardown_reads_pool_from_domain_xml_on_config_drift(tmp_path: Path) -> None:
+    # Provisioned into "old-pool"; config has since been repointed to "default".
+    old_pool = FakePool({_BASE_VOLUME: FakeVolume(_BASE_VOLUME)})
+    conn = FakeProvisionConn({"default": FakePool(), "old-pool": old_pool})
+    provisioner, _ = _provisioner(conn, tmp_path, config=_config(storage_pool="old-pool"))
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+    drifted, _ = _provisioner(conn, tmp_path, config=_config(storage_pool="default"))
+
+    drifted.teardown(DOMAIN_NAME)
+
+    assert overlay_volume_name(SYSTEM_ID) not in old_pool.volumes
+
+
+def test_teardown_swallows_not_running_destroy(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    provisioner, _ = _provisioner(conn, tmp_path)
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+    domain = conn.domains[DOMAIN_NAME]
+
+    domain.destroy_error = libvirt_error(libvirt.VIR_ERR_OPERATION_INVALID)
+
+    provisioner.teardown(DOMAIN_NAME)
+
+    assert DOMAIN_NAME not in conn.domains
+
+
+def test_teardown_other_libvirt_error_is_infrastructure_failure(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    provisioner, _ = _provisioner(conn, tmp_path)
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+    domain = conn.domains[DOMAIN_NAME]
+
+    domain.destroy_error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        provisioner.teardown(DOMAIN_NAME)
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_reprovision_wipes_then_provisions(tmp_path: Path) -> None:
+    conn = _conn_with_base()
+    provisioner, _ = _provisioner(conn, tmp_path)
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+    first_overlay_creates = len(conn.pools["default"].created_xml)
+
+    name = provisioner.reprovision(SYSTEM_ID, _remote_profile(crashkernel="512M"))
+
+    assert name == DOMAIN_NAME
+    assert conn.domains[DOMAIN_NAME].active
+    # The old overlay was deleted and a fresh one created for the new profile.
+    assert conn.pools["default"].deleted == [overlay_volume_name(SYSTEM_ID)]
+    assert len(conn.pools["default"].created_xml) == first_overlay_creates + 1
