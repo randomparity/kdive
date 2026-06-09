@@ -28,6 +28,7 @@ from kdive.providers.local_libvirt.build import (
     _stage_config,
     _sync_tree,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -144,6 +145,7 @@ def _builder(store: _FakeStore, seams: _Seams, tmp_path: Path) -> LocalLibvirtBu
         read_kernel_image=seams.read_kernel_image,
         read_vmlinux=seams.read_vmlinux,
         read_build_id=seams.read_build_id,
+        secret_registry=SecretRegistry(),
     )
 
 
@@ -311,6 +313,7 @@ def test_build_missing_bzimage_after_make_is_build_failure(tmp_path: Path) -> No
         read_kernel_image=_real_read_kernel_image,
         read_vmlinux=seams.read_vmlinux,
         read_build_id=seams.read_build_id,
+        secret_registry=SecretRegistry(),
     )
 
     with pytest.raises(CategorizedError) as caught:
@@ -342,7 +345,9 @@ def test_from_env_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("from_env must not run make")
 
     monkeypatch.setattr(subprocess, "run", _no_make)
-    builder = LocalLibvirtBuild.from_env()  # building must not spawn make or connect S3
+    builder = LocalLibvirtBuild.from_env(
+        secret_registry=SecretRegistry()
+    )  # building must not spawn make or connect S3
     assert isinstance(builder, LocalLibvirtBuild)
 
 
@@ -352,7 +357,7 @@ def test_from_env_parses_build_component_roots(monkeypatch: pytest.MonkeyPatch) 
         "/srv/kdive/build/components:/mnt/kdive/components",
     )
 
-    builder = LocalLibvirtBuild.from_env()
+    builder = LocalLibvirtBuild.from_env(secret_registry=SecretRegistry())
 
     assert builder._allowed_component_roots == [
         Path("/srv/kdive/build/components"),
@@ -363,7 +368,7 @@ def test_from_env_parses_build_component_roots(monkeypatch: pytest.MonkeyPatch) 
 def test_from_env_defaults_build_component_roots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KDIVE_BUILD_COMPONENT_ROOTS", raising=False)
 
-    builder = LocalLibvirtBuild.from_env()
+    builder = LocalLibvirtBuild.from_env(secret_registry=SecretRegistry())
 
     assert builder._allowed_component_roots == [Path("/var/lib/kdive/build/components")]
 
@@ -384,6 +389,7 @@ def test_validate_config_ref_rejects_local_file_outside_allowed_roots(tmp_path: 
         read_kernel_image=lambda _workspace: b"kernel",
         read_vmlinux=lambda _workspace: b"vmlinux",
         read_build_id=lambda _workspace: "deadbeef",
+        secret_registry=SecretRegistry(),
         allowed_component_roots=[allowed],
     )
 
@@ -537,13 +543,16 @@ def test_live_vm_real_make_build_id_matches_readelf() -> None:  # pragma: no cov
             tenant=_TENANT,
             workspace_root=Path(tmp),
             store_factory=lambda: store,
-            checkout=lambda _run, profile, ws: build_module._real_checkout(src, profile, ws),
+            checkout=lambda _run, profile, ws: build_module._real_checkout(
+                src, profile, ws, secret_registry=SecretRegistry()
+            ),
             run_olddefconfig=build_module._real_run_olddefconfig,
             read_config=build_module._real_read_config,
             run_make=build_module._real_run_make,
             read_kernel_image=build_module._real_read_kernel_image,
             read_vmlinux=build_module._real_read_vmlinux,
             read_build_id=build_module._real_read_build_id,
+            secret_registry=SecretRegistry(),
         )
         profile = BuildProfile.parse(
             {
@@ -970,7 +979,8 @@ def test_real_checkout_calls_steps_in_order_with_right_args(
     order: list[str] = []
     seen: dict[str, object] = {}
 
-    def _sync(kernel_src: str, ws: Path) -> None:
+    def _sync(kernel_src: str, ws: Path, secret_registry: SecretRegistry) -> None:
+        del secret_registry
         order.append("sync")
         seen["sync"] = (kernel_src, ws)
 
@@ -978,7 +988,8 @@ def test_real_checkout_calls_steps_in_order_with_right_args(
         order.append("stage")
         seen["stage"] = (config_ref, ws, allowed_component_roots)
 
-    def _patch(patch_ref: str, ws: Path) -> None:
+    def _patch(patch_ref: str, ws: Path, secret_registry: SecretRegistry) -> None:
+        del secret_registry
         order.append("patch")
         seen["patch"] = (patch_ref, ws)
 
@@ -996,7 +1007,11 @@ def test_real_checkout_calls_steps_in_order_with_right_args(
     assert isinstance(profile, ServerBuildProfile)
     component_roots = [Path("/build/components")]
     build_module._real_checkout(
-        "/src/linux", profile, workspace, allowed_component_roots=component_roots
+        "/src/linux",
+        profile,
+        workspace,
+        secret_registry=SecretRegistry(),
+        allowed_component_roots=component_roots,
     )
 
     assert order == ["sync", "stage", "patch"]
@@ -1018,6 +1033,8 @@ def test_real_checkout_skips_patch_when_absent(
     monkeypatch.setattr(build_module, "_apply_patch", lambda *_: order.append("patch"))
 
     profile = _profile()  # patch_ref is None
-    build_module._real_checkout("/src/linux", profile, tmp_path / "ws")
+    build_module._real_checkout(
+        "/src/linux", profile, tmp_path / "ws", secret_registry=SecretRegistry()
+    )
 
     assert order == ["sync", "stage"]  # no patch step

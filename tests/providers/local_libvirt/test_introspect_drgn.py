@@ -26,6 +26,7 @@ from kdive.providers.local_libvirt.debug.introspect_drgn import (
     helper_sysinfo,
     helper_tasks,
 )
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def _rows(out: dict[str, object]) -> list[dict[str, object]]:
@@ -276,6 +277,7 @@ def _introspector(
     return LocalLibvirtVmcoreIntrospect(
         fetch_object=lambda ref: ref.encode("utf-8"),
         read_vmcore_build_id=lambda data: observed_build_id,
+        secret_registry=SecretRegistry(),
         open_program=_open,
         run_helper=lambda program, name: (
             helper_modules(program)
@@ -333,7 +335,7 @@ def test_from_vmcore_byte_cap_trims_tasks_and_sets_truncated() -> None:
 
 
 def test_from_env_real_seams_raise_missing_dependency() -> None:
-    introspector = LocalLibvirtVmcoreIntrospect.from_env()
+    introspector = LocalLibvirtVmcoreIntrospect.from_env(secret_registry=SecretRegistry())
     with pytest.raises(CategorizedError) as exc:
         introspector.from_vmcore(vmcore_ref="v", debuginfo_ref="d", expected_build_id="deadbeef")
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
@@ -356,6 +358,7 @@ def _live_introspector(
         return prog
 
     return LocalLibvirtLiveIntrospect(
+        secret_registry=SecretRegistry(),
         open_live_program=_open_live,
         run_helper=lambda program, name: (
             helper_modules(program)
@@ -401,6 +404,7 @@ def test_run_selected_helper_only_runs_that_helper() -> None:
         }[name](program)
 
     introspector = LocalLibvirtLiveIntrospect(
+        secret_registry=SecretRegistry(),
         open_live_program=lambda _handle: _FakeProgram(),
         run_helper=_run_helper,
     )
@@ -438,7 +442,9 @@ def test_run_arbitrary_open_error_becomes_debug_attach_failure() -> None:
         raise RuntimeError("kcore permission denied")
 
     introspector = LocalLibvirtLiveIntrospect(
-        open_live_program=_open_live, run_helper=lambda p, n: helper_tasks(p)
+        secret_registry=SecretRegistry(),
+        open_live_program=_open_live,
+        run_helper=lambda p, n: helper_tasks(p),
     )
     with pytest.raises(CategorizedError) as exc:
         introspector.introspect_live(transport_handle="ssh://127.0.0.1:22", helper="tasks")
@@ -465,7 +471,7 @@ def test_run_modules_decode_skew_degrades_not_raises() -> None:
 
 
 def test_live_from_env_real_seam_raises_missing_dependency() -> None:
-    introspector = LocalLibvirtLiveIntrospect.from_env()
+    introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=SecretRegistry())
     with pytest.raises(CategorizedError) as exc:
         introspector.introspect_live(transport_handle="ssh://127.0.0.1:22", helper="tasks")
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY

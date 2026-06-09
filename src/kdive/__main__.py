@@ -92,7 +92,7 @@ async def _run_worker(secret_registry: SecretRegistry) -> None:
     try:
         worker = Worker(
             pool,
-            build_handler_registry(),
+            build_handler_registry(secret_registry=secret_registry),
             worker_id=worker_id,
             secret_registry=secret_registry,
         )

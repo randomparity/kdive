@@ -50,6 +50,7 @@ from kdive.security.artifacts.crash_commands import crash_command_rejection_reas
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
 
 _log = logging.getLogger(__name__)
@@ -107,6 +108,7 @@ class VmcoreHandlers:
     resolver: ProviderResolver | None = None
     supported_methods: frozenset[CaptureMethod] | None = None
     crash: CrashPostmortem | None = None
+    secret_registry: SecretRegistry | None = None
 
     async def fetch_vmcore(
         self,
@@ -148,7 +150,16 @@ class VmcoreHandlers:
             if isinstance(runtime, ToolResponse):
                 return runtime
             crash = runtime.crash_postmortem
-        return await _postmortem_crash(pool, ctx, run_id=run_id, commands=commands, crash=crash)
+        if self.secret_registry is None:
+            raise RuntimeError("vmcore handler requires an injected secret registry")
+        return await _postmortem_crash(
+            pool,
+            ctx,
+            run_id=run_id,
+            commands=commands,
+            crash=crash,
+            secret_registry=self.secret_registry,
+        )
 
     async def postmortem_triage(
         self, pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
@@ -162,7 +173,15 @@ class VmcoreHandlers:
             if isinstance(runtime, ToolResponse):
                 return runtime
             crash = runtime.crash_postmortem
-        return await _postmortem_triage(pool, ctx, run_id=run_id, crash=crash)
+        if self.secret_registry is None:
+            raise RuntimeError("vmcore handler requires an injected secret registry")
+        return await _postmortem_triage(
+            pool,
+            ctx,
+            run_id=run_id,
+            crash=crash,
+            secret_registry=self.secret_registry,
+        )
 
 
 async def _fetch_vmcore(
@@ -249,6 +268,7 @@ async def _postmortem_crash(
     run_id: str,
     commands: list[str],
     crash: CrashPostmortem,
+    secret_registry: SecretRegistry,
 ) -> ToolResponse:
     """Run the crash command batch over the Run's captured core; redact and return (ungated)."""
     with bind_context(principal=ctx.principal):
@@ -271,7 +291,7 @@ async def _postmortem_crash(
             # A provenance mismatch (configuration_error) or an unavailable crash
             # dependency (missing_dependency) becomes a typed failure, never a 500.
             return ToolResponse.failure_from_error(run_id, exc)
-        redactor = Redactor()
+        redactor = Redactor(registry=secret_registry)
         return ToolResponse.success(
             run_id,
             "succeeded",
@@ -281,11 +301,21 @@ async def _postmortem_crash(
 
 
 async def _postmortem_triage(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str, crash: CrashPostmortem
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: str,
+    crash: CrashPostmortem,
+    secret_registry: SecretRegistry,
 ) -> ToolResponse:
     """Run the fixed triage command batch and return the redacted report."""
     resp = await _postmortem_crash(
-        pool, ctx, run_id=run_id, commands=list(_TRIAGE_COMMANDS), crash=crash
+        pool,
+        ctx,
+        run_id=run_id,
+        commands=list(_TRIAGE_COMMANDS),
+        crash=crash,
+        secret_registry=secret_registry,
     )
     if resp.status == "error":
         return resp
@@ -298,12 +328,16 @@ async def _postmortem_triage(
 
 
 def register(
-    app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver | None = None
+    app: FastMCP,
+    pool: AsyncConnectionPool,
+    *,
+    resolver: ProviderResolver | None = None,
+    secret_registry: SecretRegistry,
 ) -> None:
     """Register the `vmcore.*` / `postmortem.*` tools on ``app``, bound to ``pool``."""
     if resolver is None:
         raise RuntimeError("vmcore registrar requires an injected provider resolver")
-    handlers = VmcoreHandlers(resolver)
+    handlers = VmcoreHandlers(resolver=resolver, secret_registry=secret_registry)
 
     @app.tool(
         name="vmcore.fetch",

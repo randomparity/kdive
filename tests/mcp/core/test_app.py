@@ -104,7 +104,7 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # registers build, the install + boot plane (#19) registers install/boot, and the
     # retrieve plane (#24) registers capture_vmcore — each building its provider/builder
     # lazily from env (no libvirt/S3/toolchain connection at registration).
-    registry = build_handler_registry()
+    registry = build_handler_registry(secret_registry=SecretRegistry())
     assert isinstance(registry, HandlerRegistry)
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None

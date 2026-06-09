@@ -62,6 +62,8 @@ from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.reaping import InfraReaper, NullReaper, OwnedDomain
 from kdive.providers.resolver import ProviderResolver
 from kdive.providers.runtime import ProviderRuntime
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.resources.discovery import ensure_discovered_resource_registered
 from kdive.store.objectstore import object_store_from_env
 
@@ -89,16 +91,16 @@ def _local_component_sources() -> ComponentSourceCapabilities:
     )
 
 
-def build_local_runtime() -> ProviderRuntime:
+def build_local_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
     """Build the typed local-libvirt provider ports without opening live provider connections."""
     provisioner = LocalLibvirtProvisioning.from_env()
-    builder = LocalLibvirtBuild.from_env()
+    builder = LocalLibvirtBuild.from_env(secret_registry=secret_registry)
     install = LocalLibvirtInstall.from_env()
     connector = LocalLibvirtConnect.from_env()
     controller = LocalLibvirtControl.from_env()
-    retrieve = LocalLibvirtRetrieve.from_env()
-    vmcore_introspector = LocalLibvirtVmcoreIntrospect.from_env()
-    live_introspector = LocalLibvirtLiveIntrospect.from_env()
+    retrieve = LocalLibvirtRetrieve.from_env(secret_registry=secret_registry)
+    vmcore_introspector = LocalLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
+    live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
     return ProviderRuntime(
         provisioner=provisioner,
         builder=builder,
@@ -115,7 +117,7 @@ def build_local_runtime() -> ProviderRuntime:
         ),
         discovery_registrar=ensure_local_host_registered,
         attach_seam=default_attach_seam,
-        debug_engine=LocalGdbMiEngine(),
+        debug_engine=LocalGdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),
         component_sources=_local_component_sources(),
         build_config_validator=builder.validate_config_ref,
         rootfs_validator=provisioner.validate_rootfs_ref,
@@ -207,14 +209,22 @@ class _CompositeReaper:
 class ProviderComposition:
     """Own provider assembly state that must be shared across constructed ports."""
 
-    def __init__(self, *, faultinject_inventory: FaultInjectInventory | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        faultinject_inventory: FaultInjectInventory | None = None,
+        secret_registry: SecretRegistry | None = None,
+    ) -> None:
         self._faultinject_inventory = faultinject_inventory or FaultInjectInventory()
+        self._secret_registry = secret_registry or SecretRegistry()
 
     def build_provider_resolver(
         self, *, enable_fault_inject: bool | None = None
     ) -> ProviderResolver:
         """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry."""
-        runtimes = {ResourceKind.LOCAL_LIBVIRT: build_local_runtime()}
+        runtimes = {
+            ResourceKind.LOCAL_LIBVIRT: build_local_runtime(secret_registry=self._secret_registry)
+        }
         if _fault_inject_enabled(enable_fault_inject):
             runtimes[ResourceKind.FAULT_INJECT] = build_faultinject_runtime(
                 inventory=self._faultinject_inventory
@@ -233,7 +243,9 @@ class ProviderComposition:
         return _CompositeReaper(tuple(reapers))
 
 
-def build_provider_resolver(*, enable_fault_inject: bool | None = None) -> ProviderResolver:
+def build_provider_resolver(
+    *, enable_fault_inject: bool | None = None, secret_registry: SecretRegistry | None = None
+) -> ProviderResolver:
     """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry.
 
     The default production composition registers only ``local-libvirt``. The
@@ -242,7 +254,9 @@ def build_provider_resolver(*, enable_fault_inject: bool | None = None) -> Provi
     ``KDIVE_FAULT_INJECT`` env var. A default production deployment has no bookable
     fault-inject Resource.
     """
-    return ProviderComposition().build_provider_resolver(enable_fault_inject=enable_fault_inject)
+    return ProviderComposition(secret_registry=secret_registry).build_provider_resolver(
+        enable_fault_inject=enable_fault_inject
+    )
 
 
 def build_reconciler_reaper(*, enable_fault_inject: bool | None = None) -> InfraReaper:

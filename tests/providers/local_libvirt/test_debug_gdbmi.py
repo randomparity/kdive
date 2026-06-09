@@ -27,7 +27,7 @@ from kdive.providers.local_libvirt.debug.execution import ExecutionControl
 from kdive.providers.local_libvirt.debug.transcript import append_transcript
 from kdive.providers.ports import GdbMiAttachment, GdbStopRecord
 from kdive.security.secrets.redaction import Redactor
-from kdive.security.secrets.secret_registry import PROCESS_SECRET_REGISTRY
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 class _FakeMiController:
@@ -461,9 +461,10 @@ def test_transcript_redactor_sees_secrets_registered_after_engine_creation(
 ) -> None:
     secret = "lateprocesssecret"  # pragma: allowlist secret - fake test value
     scope = object()
-    engine = GdbMiEngine()
+    registry = SecretRegistry()
+    engine = GdbMiEngine(redactor_factory=lambda: Redactor(registry=registry))
     attachment = _attachment(_memory_controller(0x5000, 4, "00112233"), tmp_path)
-    PROCESS_SECRET_REGISTRY.register(secret, scope=scope)
+    registry.register(secret, scope=scope)
     try:
         engine.append_transcript(
             attachment.transcript_path,
@@ -471,7 +472,7 @@ def test_transcript_redactor_sees_secrets_registered_after_engine_creation(
             [MiRecord(type="console", payload=f"loaded {secret}")],
         )
     finally:
-        PROCESS_SECRET_REGISTRY.release(scope)
+        registry.release(scope)
 
     transcript = attachment.transcript_path.read_text(encoding="utf-8")
     assert secret not in transcript

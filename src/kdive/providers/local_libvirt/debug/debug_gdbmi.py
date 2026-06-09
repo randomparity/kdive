@@ -61,6 +61,7 @@ from kdive.providers.ports import (
     GdbStopRecord,
 )
 from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
     "GdbMiEngine",
@@ -452,7 +453,8 @@ def _redactor_factory(
         return redactor_factory
     if redactor is not None:
         return lambda: redactor
-    return Redactor
+    registry = SecretRegistry()
+    return lambda: Redactor(registry=registry)
 
 
 def _resolve_debuginfo_ref(run_id: str) -> str:  # pragma: no cover - live_vm

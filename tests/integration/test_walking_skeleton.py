@@ -37,6 +37,7 @@ from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.providers.ports import BuildOutput, CaptureOutput, CrashOutput
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (
     seed_crashed_system_with_run,
     seed_granted_allocation,
@@ -249,9 +250,12 @@ def test_planted_secret_is_redacted(migrated_url: str) -> None:
             job = await _enqueue_capture(pool, sys_id)
             async with pool.connection() as conn:
                 await vmcore_plane.capture_handler(conn, job, _SecretBearingRetriever(sys_id))
+            secret_registry = SecretRegistry()
+            secret_registry.register(_SecretBearingCrash.PLANTED_SECRET, scope="test")
             handlers = vmcore_tools.VmcoreHandlers(
                 supported_methods=frozenset({CaptureMethod.HOST_DUMP}),
                 crash=_SecretBearingCrash(),
+                secret_registry=secret_registry,
             )
             resp = await handlers.postmortem_crash(
                 pool,

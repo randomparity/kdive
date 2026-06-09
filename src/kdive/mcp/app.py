@@ -54,7 +54,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 type PlaneRegistrar = Callable[
     [FastMCP, AsyncConnectionPool, ProviderResolver, SecretRegistry, InfraReaper], None
 ]
-type HandlerRegistrar = Callable[[HandlerRegistry, ProviderResolver], None]
+type HandlerRegistrar = Callable[[HandlerRegistry, ProviderResolver, SecretRegistry], None]
 
 
 def _plain(register: Callable[[FastMCP, AsyncConnectionPool], None]) -> PlaneRegistrar:
@@ -97,7 +97,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _plain(control_tools.register),
     _plain(artifacts.register),
     lambda app, pool, resolver, registry, reaper: vmcore_tools.register(
-        app, pool, resolver=resolver
+        app, pool, resolver=resolver, secret_registry=registry
     ),
     lambda app, pool, resolver, registry, reaper: debug_tools.register(
         app,
@@ -120,10 +120,18 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
 # toolchain connection at registration). The Connect plane (#20) registers tools only — its
 # debug.start_session/end_session are synchronous, so they have no JobKind and no handler.
 _HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
-    lambda registry, resolver: systems.register_handlers(registry, resolver=resolver),
-    lambda registry, resolver: runs.register_handlers(registry, resolver=resolver),
-    lambda registry, resolver: control.register_handlers(registry, resolver=resolver),
-    lambda registry, resolver: vmcore.register_handlers(registry, resolver=resolver),
+    lambda registry, resolver, secret_registry: systems.register_handlers(
+        registry, resolver=resolver
+    ),
+    lambda registry, resolver, secret_registry: runs.register_handlers(
+        registry, resolver=resolver, secret_registry=secret_registry
+    ),
+    lambda registry, resolver, secret_registry: control.register_handlers(
+        registry, resolver=resolver
+    ),
+    lambda registry, resolver, secret_registry: vmcore.register_handlers(
+        registry, resolver=resolver
+    ),
 )
 
 
@@ -149,7 +157,7 @@ def build_app(
     """
     app: FastMCP = FastMCP(name="kdive", auth=verifier or build_verifier())
     app.add_middleware(DenialAuditMiddleware(pool))
-    composition = provider_composition or ProviderComposition()
+    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
     resolver = provider_resolver or composition.build_provider_resolver()
     reaper = composition.build_reconciler_reaper()
     for register in _PLANE_REGISTRARS:
@@ -157,15 +165,18 @@ def build_app(
     return app
 
 
-def build_handler_registry(*, provider_resolver: ProviderResolver | None = None) -> HandlerRegistry:
+def build_handler_registry(
+    *, provider_resolver: ProviderResolver | None = None, secret_registry: SecretRegistry
+) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars.
 
     Args:
         provider_resolver: Injected per-kind provider resolver passed to worker handler
             registrars; when ``None``, built from the default provider composition.
+        secret_registry: Worker-owned registry shared by redaction boundaries and logging.
     """
     registry = HandlerRegistry()
-    resolver = provider_resolver or build_provider_resolver()
+    resolver = provider_resolver or build_provider_resolver(secret_registry=secret_registry)
     for register in _HANDLER_REGISTRARS:
-        register(registry, resolver)
+        register(registry, resolver, secret_registry)
     return registry

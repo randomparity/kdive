@@ -29,6 +29,7 @@ from kdive.providers.ports import (
 )
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
 from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact, object_store_from_env
 
 _RETENTION_CLASS = "vmcore"
@@ -58,6 +59,7 @@ class LocalLibvirtRetrieve:
         read_vmcore_build_id: _ReadBuildId,
         extract_redacted: _ExtractRedacted,
         host_dump_capture: _HostDumpCapture,
+        secret_registry: SecretRegistry,
         fetch_object: _FetchObject | None = None,
         run_crash: _RunCrash | None = None,
     ) -> None:
@@ -70,9 +72,10 @@ class LocalLibvirtRetrieve:
         self._host_dump_capture = host_dump_capture
         self._fetch_object = fetch_object
         self._run_crash = run_crash
+        self._secret_registry = secret_registry
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtRetrieve:
+    def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtRetrieve:
         """Build from env; does not poll the host, open S3, or spawn `crash` (lazy seams)."""
         return cls(
             tenant="local",
@@ -83,6 +86,7 @@ class LocalLibvirtRetrieve:
             host_dump_capture=_real_host_dump_capture,
             fetch_object=_real_fetch_object,
             run_crash=_real_run_crash,
+            secret_registry=secret_registry,
         )
 
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
@@ -175,7 +179,7 @@ class LocalLibvirtRetrieve:
             vmlinux_file.flush()
             script = "\n".join(commands) + "\nquit\n"
             crash = self._run_crash(Path(vmlinux_file.name), Path(core_file.name), script)
-        redactor = Redactor()
+        redactor = Redactor(registry=self._secret_registry)
         transcript = redactor.redact_text(crash.stdout.decode("utf-8", "replace"))
         return CrashOutput(
             results={cmd: {"ran": True} for cmd in commands},

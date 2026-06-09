@@ -22,6 +22,7 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashPostmortem
 from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import StoredArtifact
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 
@@ -124,6 +125,7 @@ def _vmcore_handlers(crash: CrashPostmortem | None = None) -> vmcore_tools.Vmcor
     return vmcore_tools.VmcoreHandlers(
         supported_methods=_TEST_CAPTURE_METHODS,
         crash=crash or _FakeCrash(),
+        secret_registry=SecretRegistry(),
     )
 
 

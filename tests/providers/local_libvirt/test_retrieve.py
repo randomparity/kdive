@@ -15,6 +15,7 @@ from kdive.providers.local_libvirt.retrieve import (
     crash_command_rejection_reason,
 )
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
 
 _ALLOW = frozenset({"bt", "log", "ps", "p", "rd"})
@@ -72,6 +73,7 @@ def _retriever(store: _FakeStore, *, core: bytes | None) -> LocalLibvirtRetrieve
         read_vmcore_build_id=lambda data: "deadbeef",
         extract_redacted=lambda data: b"dmesg: password=[REDACTED]",
         host_dump_capture=lambda _sid: pytest.fail("host_dump seam used on kdump path"),
+        secret_registry=SecretRegistry(),
     )
 
 
@@ -109,6 +111,7 @@ def _crash_retriever(*, observed_build_id: str, crash: CrashResult) -> LocalLibv
         read_vmcore_build_id=lambda data: observed_build_id,
         extract_redacted=lambda data: b"",
         host_dump_capture=lambda s: None,
+        secret_registry=SecretRegistry(),
         fetch_object=lambda ref: b"BYTES",
         run_crash=lambda vmlinux, vmcore, script: crash,
     )
@@ -147,6 +150,7 @@ def test_capture_host_dump_uses_dump_seam() -> None:
         read_vmcore_build_id=lambda _b: "bid",
         extract_redacted=lambda _b: b"dmesg",
         host_dump_capture=lambda _sid: b"\x7fELFcore",
+        secret_registry=SecretRegistry(),
     )
     out = retr.capture(_SYS, CaptureMethod.HOST_DUMP)
     assert out.vmcore_build_id == "bid"

@@ -24,6 +24,7 @@ from kdive.providers.ports import (
     TransportHandle,
 )
 from kdive.providers.runtime import ProviderRuntime
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import StoredArtifact
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -168,7 +169,7 @@ def test_provider_runtime_returns_typed_provider_ports_directly() -> None:
 
 
 def test_default_runtime_advertises_implemented_component_sources_only() -> None:
-    runtime = composition.build_local_runtime()
+    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
 
     assert runtime.component_sources.provider == "local-libvirt"
     assert runtime.component_sources.accepted_component_sources == {
@@ -182,7 +183,7 @@ def test_default_runtime_advertises_implemented_component_sources_only() -> None
 
 
 def test_default_runtime_exposes_build_config_validator() -> None:
-    runtime = composition.build_local_runtime()
+    runtime = composition.build_local_runtime(secret_registry=SecretRegistry())
 
     assert runtime.build_config_validator is not None
 

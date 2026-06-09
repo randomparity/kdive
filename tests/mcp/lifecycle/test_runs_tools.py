@@ -52,6 +52,7 @@ from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run
 from kdive.providers.component_validation import ComponentSourceCapabilities
 from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs import steps as run_steps
 from tests.db_waits import wait_until_any_backend_waiting
 
@@ -1675,7 +1676,11 @@ def test_build_handler_crash_window_re_dispatch_overwrites_no_orphan(migrated_ur
 def test_register_handlers_binds_build() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
-        registry, builder=_FakeBuilder(), installer=_FakeInstaller(), booter=_FakeBooter()
+        registry,
+        builder=_FakeBuilder(),
+        installer=_FakeInstaller(),
+        booter=_FakeBooter(),
+        secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.BUILD) is not None
 
@@ -1683,7 +1688,7 @@ def test_register_handlers_binds_build() -> None:
 def test_register_handlers_requires_resolver_or_run_ports() -> None:
     registry = HandlerRegistry()
     with pytest.raises(RuntimeError, match="resolver or explicit run ports"):
-        runs_handlers.register_handlers(registry)
+        runs_handlers.register_handlers(registry, secret_registry=SecretRegistry())
 
 
 # --- runs.install / runs.boot (install + boot plane, #19) ----------------------------
@@ -2265,7 +2270,9 @@ def test_boot_handler_records_step_run_stays_succeeded(migrated_url: str) -> Non
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             assert len(booter.calls) == 1
             nsteps = await _count(
@@ -2286,9 +2293,13 @@ def test_boot_handler_replay_does_not_reboot(migrated_url: str) -> None:
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job, booter)
+                await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job, booter)
+                await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
         assert len(booter.calls) == 1
 
     asyncio.run(_run())
@@ -2304,7 +2315,9 @@ def test_boot_handler_failure_records_no_step(migrated_url: str, category: Error
             booter = _FakeBooter(error=category)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
             assert caught.value.category is category
             nsteps = await _count(
                 pool,
@@ -2331,7 +2344,9 @@ def test_boot_handler_cleanup_failure_preserves_provider_category(
             monkeypatch.setattr(runs_handlers, "abandon_run_step", _fail_cleanup)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
 
         assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
 
@@ -2341,7 +2356,11 @@ def test_boot_handler_cleanup_failure_preserves_provider_category(
 def test_register_handlers_binds_install_and_boot() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
-        registry, builder=_FakeBuilder(), installer=_FakeInstaller(), booter=_FakeBooter()
+        registry,
+        builder=_FakeBuilder(),
+        installer=_FakeInstaller(),
+        booter=_FakeBooter(),
+        secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
@@ -2368,7 +2387,9 @@ def test_boot_handler_registers_console_on_success(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()  # clean success, no error
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             nsteps = await _count(
                 pool,
@@ -2407,7 +2428,9 @@ def test_boot_handler_registers_console_even_on_failure(
             booter = _FakeBooter(error=ErrorCategory.BOOT_TIMEOUT)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
             n = await _count(
                 pool,
                 "SELECT count(*) AS n FROM artifacts WHERE object_key LIKE %s",
@@ -2437,7 +2460,9 @@ def test_boot_handler_records_expected_crash_observed(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
@@ -2478,7 +2503,9 @@ def test_expected_crash_observed_system_can_host_next_run(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job, booter)
+                await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
 
             inv_id = await _seed_investigation(pool)
             resp = await _create(pool, _ctx(), inv_id, sys_id)
@@ -2513,7 +2540,9 @@ def test_boot_handler_expected_crash_requires_matching_console(
             booter = _FakeBooter(error=ErrorCategory.READINESS_FAILURE)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.boot_handler(conn, job, booter)
+                    await runs_handlers.boot_handler(
+                        conn, job, booter, secret_registry=SecretRegistry()
+                    )
             nsteps = await _count(
                 pool,
                 "SELECT count(*) AS n FROM run_steps WHERE run_id=%s AND step='boot'",
@@ -2544,7 +2573,9 @@ def test_boot_handler_skips_empty_console(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()  # clean success, but no console file was written
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
             nsteps = await _count(
                 pool,
@@ -2587,7 +2618,9 @@ def test_boot_handler_console_is_readable_via_artifacts(
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter()  # clean success
             async with pool.connection() as conn:
-                result = await runs_handlers.boot_handler(conn, job, booter)
+                result = await runs_handlers.boot_handler(
+                    conn, job, booter, secret_registry=SecretRegistry()
+                )
             assert result == run_id
 
             # artifacts_list must return the console as a redacted artifact envelope.
@@ -2632,7 +2665,9 @@ def test_boot_handler_reboot_refreshes_console_etag(
             (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] FIRST-BOOT-MARKER ready\n")
             job1 = await _enqueue_job(pool, JobKind.BOOT, run1, "boot")
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job1, _FakeBooter())
+                await runs_handlers.boot_handler(
+                    conn, job1, _FakeBooter(), secret_registry=SecretRegistry()
+                )
 
             # Second boot of the SAME System (new Run): the host console log is overwritten
             # with different content, so put_artifact rewrites the object at the same key.
@@ -2641,7 +2676,9 @@ def test_boot_handler_reboot_refreshes_console_etag(
             (tmp_path / f"{sid}.log").write_bytes(b"[    0.0] SECOND-BOOT-MARKER oops\n")
             job2 = await _enqueue_job(pool, JobKind.BOOT, run2, "boot")
             async with pool.connection() as conn:
-                await runs_handlers.boot_handler(conn, job2, _FakeBooter())
+                await runs_handlers.boot_handler(
+                    conn, job2, _FakeBooter(), secret_registry=SecretRegistry()
+                )
 
             n = await _count(
                 pool,
