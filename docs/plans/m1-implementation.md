@@ -20,7 +20,7 @@
 - **Milestone:** `M1 — Allocation/accounting depth` (exists, #2).
 - Each sub-issue carries its `area:*` (and `provider:local-libvirt` where it touches the provider), a `Depends on:` line, and acceptance criteria copied into the issue body.
 
-## Package layout (M1 additions)
+## Package layout (current M1 owners)
 
 ```
 src/kdive/
@@ -30,18 +30,18 @@ src/kdive/
   domain/models.py                        # + LedgerEntry, Budget, Quota, CostClassCoefficient
   domain/state.py                         # + allocation granted/active→expired; system ready↔reprovisioning,→failed
   domain/cost.py                          # NEW — kcu rate/cost, W_CPU/W_MEM, coeff resolution
-  services/accounting.py                  # NEW — ledger emit (reserved/reconciled), rollup, budget_remaining
-  services/allocation_admission.py        # extend admit(): PROJECT lock + quota + budget + reserve + lease window
-  services/allocation_renew.py            # renew admission and idempotency
+  services/accounting/ledger.py           # ledger emit, rollup, budget_remaining
+  services/allocation/admission.py        # PROJECT lock + quota + budget + reserve + lease window
+  services/allocation/renew.py            # renew admission and idempotency
   mcp/tools/accounting/{admin,estimate,reports,usage}.py # estimate, usage, reports, set_budget, set_quota
   mcp/tools/lifecycle/allocations.py      # + renew
   mcp/tools/lifecycle/systems/{admin,provision,registrar}.py # + reprovision; + system-quota check on provision
   mcp/tools/debug/{sessions,ops,introspect}.py # + transport="ssh"; + introspect.run (live)
   jobs/handlers/systems.py                       # provision/teardown/reprovision worker handlers
   jobs/handlers/control.py · jobs/handlers/vmcore.py    # control and retrieve worker handlers
-  providers/local_libvirt/provisioning.py # + reprovision op + handler
-  providers/local_libvirt/connect.py      # + ssh transport backend + capability
-  providers/local_libvirt/introspect_drgn.py # + live introspect (drgn over ssh)
+  providers/local_libvirt/lifecycle/provisioning.py # reprovision provider operation
+  providers/local_libvirt/lifecycle/connect.py      # ssh transport backend + capability
+  providers/local_libvirt/debug/introspect_drgn.py  # live introspect (drgn over ssh)
   reconciler/loop.py                      # + →expired sweep (feeds existing teardown)
 tests/                                    # mirrors src/; tests/integration/ for the live_vm path
 ```
@@ -113,11 +113,11 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Labels:** `area:allocation`
 - **Depends on:** ②
 - **Goal:** Append-only ledger writers, the release-time reconciliation, and the usage rollup.
-- **Files:** Create `src/kdive/services/accounting.py`; extend
+- **Files:** Create `src/kdive/services/accounting/ledger.py`; extend
   `mcp/tools/accounting/usage.py`, `mcp/tools/accounting/reports.py`, and
   `mcp/tools/lifecycle/allocations.py` (wire reconcile into `release`); tests.
 - **Scope:**
-  - `services/accounting.py`: `reserve(conn, allocation, estimate)` writes a `reserved`
+  - `services/accounting/ledger.py`: `reserve(conn, allocation, estimate)` writes a `reserved`
     row **and** `budgets.spent_kcu += estimate` in one transaction; `reconcile(conn,
     allocation)` computes `actual = rate × active_hours` (`active_hours =
     active_ended_at − active_started_at`, read from the allocation row, never from
@@ -136,7 +136,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Labels:** `area:allocation` · `area:security`
 - **Depends on:** ③
 - **Goal:** Fail-closed admission: per-project quota + budget check-then-debit, composed with M0's host cap, plus the admin set tools and the lease window at grant. Concurrency/idempotency contract per [ADR-0040](../adr/0040-admission-lifecycle-concurrency.md) (lock order, idempotency key, atomic check-then-debit).
-- **Files:** Extend `src/kdive/services/allocation_admission.py`,
+- **Files:** Extend `src/kdive/services/allocation/admission.py`,
   `mcp/tools/lifecycle/allocations.py` (request selector/window),
   `mcp/tools/lifecycle/systems/provision.py` (system-quota check),
   `mcp/tools/accounting/admin.py` (set_budget/set_quota); tests.
@@ -152,7 +152,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Depends on:** ④
 - **Goal:** Renewal and automatic reclamation of expired allocations. Single-reconciliation + renew-idempotency contract per [ADR-0040](../adr/0040-admission-lifecycle-concurrency.md).
 - **Files:** Extend `mcp/tools/lifecycle/allocations.py` (renew),
-  `src/kdive/services/allocation_renew.py`, `reconciler/loop.py` (expiry sweep);
+  `src/kdive/services/allocation/renew.py`, `reconciler/loop.py` (expiry sweep);
   `__main__.py` unchanged; tests.
 - **Scope:**
   - `allocations.renew(allocation_id, extend, idempotency_key)`: validate `extend > 0` (`configuration_error`); resolve `idempotency_key` (replay → no re-extend/re-charge); under `LockScope.PROJECT`, clamp to `KDIVE_LEASE_MAX` from now, re-check budget for the **added** window, write an incremental `reserved` delta + `spent_kcu += `, extend `lease_expiry`; over budget → `allocation_denied` (window unchanged); terminal allocation → `stale_handle`; `operator` role.
@@ -179,7 +179,7 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Labels:** `area:provisioning` · `provider:local-libvirt`
 - **Depends on:** ① (state edge), M0 #16 (provisioning plane)
 - **Goal:** Reprovision a System in place under the same Allocation.
-- **Files:** Extend `providers/local_libvirt/provisioning.py` (reprovision op),
+- **Files:** Extend `providers/local_libvirt/lifecycle/provisioning.py` (reprovision op),
   `mcp/tools/lifecycle/systems/admin.py` (reprovision), and `src/kdive/jobs/handlers/systems.py`
   (handler); tests.
 - **Scope:**
@@ -191,8 +191,8 @@ Each wave's issues are independent and dispatch in parallel; the next wave waits
 - **Labels:** `area:debug` · `provider:local-libvirt`
 - **Depends on:** M0 #18 (Connect/DebugSession), #20 (offline drgn), #23 (secret backend) — no M1 accounting dep
 - **Goal:** A second Connect transport (SSH) and live drgn introspection over it.
-- **Files:** Extend `providers/local_libvirt/connect.py` (ssh backend + capability),
-  `providers/local_libvirt/introspect_drgn.py` (live path),
+- **Files:** Extend `providers/local_libvirt/lifecycle/connect.py` (ssh backend + capability),
+  `providers/local_libvirt/debug/introspect_drgn.py` (live path),
   `mcp/tools/debug/sessions.py` (`transport="ssh"`), and
   `mcp/tools/debug/introspect.py` (`introspect.run`); port the v1 SSH backend; tests.
 - **Scope:**
