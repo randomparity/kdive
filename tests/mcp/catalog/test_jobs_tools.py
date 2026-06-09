@@ -17,7 +17,7 @@ from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog import jobs as jobs_tools
-from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.security.authz.rbac import Role
 
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
 OP_CTX = RequestContext(
@@ -294,8 +294,10 @@ def test_get_job_requires_viewer_role(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            with pytest.raises(AuthorizationError):
-                await jobs_tools.get_job(pool, CTX, job_id)
+            resp = await jobs_tools.get_job(pool, CTX, job_id)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == job_id
 
     asyncio.run(_run())
 
@@ -304,8 +306,10 @@ def test_wait_job_requires_viewer_role(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            with pytest.raises(AuthorizationError):
-                await jobs_tools.wait_job(pool, CTX, job_id, timeout_s=0.0)
+            resp = await jobs_tools.wait_job(pool, CTX, job_id, timeout_s=0.0)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == job_id
 
     asyncio.run(_run())
 
@@ -328,9 +332,11 @@ def test_cancel_job_requires_operator_role(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            with pytest.raises(AuthorizationError):
-                await jobs_tools.cancel_job(pool, VIEWER_CTX, job_id)
+            denied = await jobs_tools.cancel_job(pool, VIEWER_CTX, job_id)
             owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+        assert denied.status == "error"
+        assert denied.error_category == "configuration_error"
+        assert denied.object_id == job_id
         assert owned.status == "queued"
 
     asyncio.run(_run())
@@ -340,9 +346,11 @@ def test_cancel_job_requires_a_project_role(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            with pytest.raises(AuthorizationError):
-                await jobs_tools.cancel_job(pool, CTX, job_id)
+            denied = await jobs_tools.cancel_job(pool, CTX, job_id)
             owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+        assert denied.status == "error"
+        assert denied.error_category == "configuration_error"
+        assert denied.object_id == job_id
         assert owned.status == "queued"
 
     asyncio.run(_run())
