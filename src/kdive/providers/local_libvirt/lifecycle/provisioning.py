@@ -38,6 +38,10 @@ from kdive.profiles.provisioning import (
     validate_profile as _validate_profile,
 )
 from kdive.providers.local_libvirt.discovery import _KDIVE_METADATA_NS
+from kdive.providers.local_libvirt.lifecycle.constants import (
+    DEFAULT_LIBVIRT_URI,
+    LIBVIRT_URI_ENV,
+)
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     RootfsMaterializationContext,
     RootfsUploadContext,
@@ -47,8 +51,6 @@ from kdive.providers.runtime_paths import console_log_path, domain_name_for
 
 _log = logging.getLogger(__name__)
 
-_URI_ENV = "KDIVE_LIBVIRT_URI"
-_DEFAULT_URI = "qemu:///system"
 _DEFAULT_MACHINE = "q35"
 _ROOTFS_DIR = "/var/lib/kdive/rootfs"
 _QEMU_IMG_TIMEOUT_S = 5 * 60
@@ -318,7 +320,7 @@ class LocalLibvirtProvisioning:
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect."""
-        host_uri = os.environ.get(_URI_ENV, _DEFAULT_URI)
+        host_uri = os.environ.get(LIBVIRT_URI_ENV, DEFAULT_LIBVIRT_URI)
         # `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol (only
         # `defineXML`/`lookupByName`), so no suppression is needed at this seam.
         return cls(connect=lambda: libvirt.open(host_uri))

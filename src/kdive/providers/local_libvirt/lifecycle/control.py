@@ -25,12 +25,13 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import PowerAction
+from kdive.providers.local_libvirt.lifecycle.constants import (
+    DEFAULT_LIBVIRT_URI,
+    LIBVIRT_URI_ENV,
+)
 from kdive.providers.ports import Controller as Controller
 
 _log = logging.getLogger(__name__)
-
-_URI_ENV = "KDIVE_LIBVIRT_URI"
-_DEFAULT_URI = "qemu:///system"
 
 
 class _LibvirtDomain(Protocol):
@@ -66,7 +67,7 @@ class LocalLibvirtControl:
     @classmethod
     def from_env(cls) -> LocalLibvirtControl:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect."""
-        host_uri = os.environ.get(_URI_ENV, _DEFAULT_URI)
+        host_uri = os.environ.get(LIBVIRT_URI_ENV, DEFAULT_LIBVIRT_URI)
         # The bound `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol
         # (only `lookupByName`/`close`), so no suppression is needed at this seam (ADR-0025).
         return cls(connect=lambda: libvirt.open(host_uri))
