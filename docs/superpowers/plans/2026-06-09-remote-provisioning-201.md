@@ -298,9 +298,12 @@ raising a fake `libvirtError(VIR_ERR_NO_STORAGE_VOL)` when absent; `createXML` r
 `FakeDomain` (xml, active flag, create/destroy/undefine recording; `XMLDesc` returns
 stored XML — with the agent channel `state` attribute injectable), `FakeProvisionConn`
 (domains dict, `defineXML` parses name from XML and stores, `listAllDomains`,
-`lookupByName`, `storagePoolLookupByName`, close). Use the real `libvirt` module's error
-codes via `libvirt.VIR_ERR_*` and construct `libvirt.libvirtError` test doubles the same
-way `tests/providers/remote_libvirt/test_transport.py` does (check its pattern first).
+`lookupByName`, `storagePoolLookupByName`, close). Error doubles use the **verified**
+pattern from `tests/providers/local_libvirt/fakes.py:libvirt_error(code)` — build
+`libvirt.libvirtError("synthetic")` and set `err.err = (code, 0, "synthetic", 0, "",
+None, None, 0, 0)` so `get_error_code()` returns the code. Duplicate that one helper
+into `tests/providers/remote_libvirt/conftest.py` (no shared layer with local-libvirt,
+ADR-0076 — the same deliberate duplication the source rule forces).
 
 Config/env: build `RemoteLibvirtConfig` directly in tests (no env), pass
 `config_factory=lambda: config`. Inject `sleep=lambda s: None` and a controllable
@@ -319,6 +322,9 @@ Config/env: build `RemoteLibvirtConfig` directly in tests (no env), pass
     undefined, overlay deleted **only if created this attempt**.
   - missing base volume → `CONFIGURATION_ERROR`.
   - missing storage pool → `CONFIGURATION_ERROR`.
+  - overlay `createXML` failure → `PROVISIONING_FAILURE` (no domain defined).
+  - a domain vanishing between `listAllDomains` and `XMLDesc`
+    (`VIR_ERR_NO_DOMAIN`) is skipped during port enumeration; provision succeeds.
   - profile without remote section → `CONFIGURATION_ERROR` (no connection opened).
   - `gdb_addr` unset → `CONFIGURATION_ERROR` (no connection opened).
   - agent never connects → `PROVISIONING_FAILURE`, domain NOT undefined (left running).
@@ -372,7 +378,10 @@ Config/env: build `RemoteLibvirtConfig` directly in tests (no env), pass
 - Test: `tests/providers/test_composition.py`, `tests/providers/remote_libvirt/test_planes.py`
 
 - [ ] **Step 1: Failing test** — `build_remote_runtime(...).provisioner` is a
-  `RemoteLibvirtProvision`; update/remove the planes test for the deleted stub.
+  `RemoteLibvirtProvision`; the runtime stays **constructible with no
+  `KDIVE_REMOTE_LIBVIRT_*` env set** (the ADR-0076 buildability invariant — provision
+  reads config at op time, never at construction); update/remove the planes test for
+  the deleted stub.
 - [ ] **Step 2: Run, verify failure.**
 - [ ] **Step 3: Implement** the wiring; delete the stub class and its export/usages.
 - [ ] **Step 4: Run, verify pass** — `uv run python -m pytest tests/providers -q`.
