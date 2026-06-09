@@ -34,6 +34,8 @@
 
 **Every commit must be guardrail-green:** before each task's commit step, run `just lint && just type` plus the task's test subset (full `just test` runs at Tasks 6 and 9). A formatting or cross-module type error must never be committed and discovered tasks later.
 
+**Every commit message ends with the project trailer** `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>` — the plan's `git commit -m` commands show subjects only.
+
 **Decisions pinned for this plan** (from spec/ADRs; do not relitigate):
 
 - Env names: `KDIVE_REMOTE_LIBVIRT_URI`, `KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF`, `KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF`, `KDIVE_REMOTE_LIBVIRT_CA_CERT_REF`, `KDIVE_REMOTE_LIBVIRT_ALLOCATION_CAP` (default 1). Opt-in = explicit flag, else URI env present.
@@ -384,6 +386,7 @@ from kdive.providers.remote_libvirt.transport import (
     remote_connection,
     validate_remote_uri,
 )
+from kdive.security.secrets.paths import PathSafetyError
 
 _REFS = TlsCertRefs(
     client_cert_ref="remote/clientcert.pem",
@@ -462,6 +465,23 @@ def test_pkipath_cleans_up_when_body_raises(tmp_path: Path) -> None:
         with materialized_pkipath(_RecordingBackend(), _REFS, base_dir=tmp_path):
             raise RuntimeError("boom")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_unresolvable_ref_is_a_configuration_error_and_leaves_no_residue(
+    tmp_path: Path,
+) -> None:
+    # PathSafetyError is a bare ValueError (security/secrets/paths.py); the transport
+    # maps it to the platform's typed taxonomy and resolves before any dir is created.
+    class _FailingBackend:
+        def resolve(self, ref: str) -> str:
+            raise PathSafetyError("secret file does not exist")
+
+    with pytest.raises(CategorizedError) as exc:
+        with materialized_pkipath(_FailingBackend(), _REFS, base_dir=tmp_path):
+            pytest.fail("body must not run")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "remote/clientcert.pem" in str(exc.value)  # the ref, never the value
+    assert list(tmp_path.iterdir()) == []  # nothing was materialized
 
 
 def test_pkipath_cleanup_failure_is_logged_and_never_masks_the_op_error(
@@ -577,6 +597,7 @@ from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import SecretBackend
 
 if TYPE_CHECKING:
@@ -661,10 +682,23 @@ def materialized_pkipath(
     A cleanup failure is logged at error level rather than raised, so it never
     replaces the op's typed in-flight error; the residue is bounded by worker-local
     storage (ADR-0077).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when a ref cannot be resolved
+            (missing file, escapes the secrets root, oversized) — mapped from
+            ``PathSafetyError`` so the platform's typed taxonomy holds; the message
+            names the ref, never the value.
     """
-    client_cert = secret_backend.resolve(refs.client_cert_ref)
-    client_key = secret_backend.resolve(refs.client_key_ref)
-    ca_cert = secret_backend.resolve(refs.ca_cert_ref)
+    try:
+        client_cert = secret_backend.resolve(refs.client_cert_ref)
+        client_key = secret_backend.resolve(refs.client_key_ref)
+        ca_cert = secret_backend.resolve(refs.ca_cert_ref)
+    except PathSafetyError as exc:
+        raise CategorizedError(
+            f"remote-libvirt TLS secret refs {refs.client_cert_ref!r}/"
+            f"{refs.client_key_ref!r}/{refs.ca_cert_ref!r} could not be resolved: {exc}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        ) from exc
     pkipath = Path(tempfile.mkdtemp(prefix="kdive-remote-pki-", dir=base_dir))
     try:
         _write_private(pkipath / _CLIENT_CERT_NAME, client_cert)
