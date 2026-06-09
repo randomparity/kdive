@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job
 from kdive.domain.state import JobState
 
@@ -53,6 +53,18 @@ def _validate_json_value(value: object, *, path: str) -> None:
             _validate_json_value(item, path=f"{path}.{key}")
         return
     raise ValueError(f"{path} contains non-JSON value {type(value).__name__}")
+
+
+def _safe_error_details(details: Mapping[str, object]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in details.items():
+        if isinstance(value, float):
+            if math.isfinite(value):
+                safe[key] = value
+            continue
+        if isinstance(value, (str, bool, int)):
+            safe[key] = value
+    return safe
 
 
 class ToolResponse(BaseModel):
@@ -149,6 +161,25 @@ class ToolResponse(BaseModel):
             error_category=category.value,
             suggested_next_actions=suggested_next_actions or [],
             data=dict(data or {}),
+        )
+
+    @classmethod
+    def failure_from_error(
+        cls,
+        object_id: str,
+        exc: CategorizedError,
+        *,
+        category: ErrorCategory | None = None,
+        suggested_next_actions: list[str] | None = None,
+        data: Mapping[str, Any] | None = None,
+    ) -> ToolResponse:
+        payload = _safe_error_details(exc.details)
+        payload.update(data or {})
+        return cls.failure(
+            object_id,
+            category or exc.category,
+            suggested_next_actions=suggested_next_actions,
+            data=payload,
         )
 
     @classmethod

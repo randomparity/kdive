@@ -51,7 +51,7 @@ class _SystemRuntimeFactory:
             try:
                 return await self.resolver.runtime_for_allocation(conn, uid)
             except CategorizedError as exc:
-                return ToolResponse.failure(allocation_id, exc.category)
+                return ToolResponse.failure_from_error(allocation_id, exc)
 
     async def for_system(self, system_id: str) -> ProviderRuntime | ToolResponse:
         uid = _as_uuid(system_id)
@@ -61,7 +61,7 @@ class _SystemRuntimeFactory:
             try:
                 return await self.resolver.runtime_for_system(conn, uid)
             except CategorizedError as exc:
-                return ToolResponse.failure(system_id, exc.category)
+                return ToolResponse.failure_from_error(system_id, exc)
 
     def provision_handlers(self, runtime: ProviderRuntime) -> _SystemProvisionHandlers:
         return _SystemProvisionHandlers(runtime.component_sources, self._rootfs_validator(runtime))

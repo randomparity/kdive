@@ -215,7 +215,7 @@ async def request_allocation(
                     disk_gb=payload.disk_gb,
                 )
             except CategorizedError as exc:
-                return ToolResponse.failure(object_id, exc.category, data={})
+                return ToolResponse.failure_from_error(object_id, exc)
             # The PCIe spec union is the explicit pcie_devices plus a shape's pcie_match
             # (ADR-0068/ADR-0067); resolved before host selection so a shape-required card
             # filters the candidate hosts.

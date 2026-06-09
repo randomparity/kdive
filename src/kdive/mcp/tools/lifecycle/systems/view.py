@@ -125,7 +125,7 @@ def _pcie_clause(pcie: str, params: list[object]) -> Composable | ToolResponse:
     try:
         spec = parse_match_spec(pcie.strip())
     except CategorizedError as exc:
-        return ToolResponse.failure(pcie, exc.category)
+        return ToolResponse.failure_from_error(pcie, exc)
     if spec.vendor_id is None or spec.device_id is None:
         return _config_error(pcie)
     params.extend([spec.vendor_id, spec.device_id])

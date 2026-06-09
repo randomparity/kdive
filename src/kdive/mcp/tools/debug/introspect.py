@@ -67,7 +67,7 @@ async def introspect_from_vmcore(
                 expected_build_id=resolved.build_id,
             )
         except CategorizedError as exc:
-            return ToolResponse.failure(run_id, exc.category)
+            return ToolResponse.failure_from_error(run_id, exc)
         report = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
         return ToolResponse.success(
             run_id,
@@ -127,7 +127,7 @@ async def introspect_run(
                 introspector.introspect_live, transport_handle=transport_handle, helper=helper
             )
         except CategorizedError as exc:
-            return ToolResponse.failure(session_id, exc.category)
+            return ToolResponse.failure_from_error(session_id, exc)
         sections = {"tasks": output.tasks, "modules": output.modules, "sysinfo": output.sysinfo}
         report = {helper: sections[helper]}
         return ToolResponse.success(
@@ -189,7 +189,7 @@ def register(
             try:
                 runtime = await resolver.runtime_for_session(conn, session_uid)
             except CategorizedError as exc:
-                return ToolResponse.failure(session_id, exc.category)
+                return ToolResponse.failure_from_error(session_id, exc)
         return await introspect_run(
             pool,
             current_context(),

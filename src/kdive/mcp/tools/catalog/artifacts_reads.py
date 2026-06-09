@@ -172,7 +172,7 @@ async def _artifacts_search_text(
     try:
         head = await asyncio.to_thread(store.head, key)
     except CategorizedError as exc:
-        return ToolResponse.failure(artifact_id, exc.category)
+        return ToolResponse.failure_from_error(artifact_id, exc)
     if head is None:
         return _config_error(artifact_id)
     if head.size_bytes > _MAX_SEARCHABLE_ARTIFACT_BYTES:
@@ -194,7 +194,7 @@ async def _artifacts_search_text(
     except ArtifactSearchInputError:
         return _config_error(artifact_id, data={"reason": "bad_search_input"})
     except CategorizedError as exc:
-        return ToolResponse.failure(artifact_id, exc.category)
+        return ToolResponse.failure_from_error(artifact_id, exc)
     return ToolResponse.success(
         artifact_id,
         "searched",

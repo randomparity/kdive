@@ -266,7 +266,7 @@ async def availability_tool(
         try:
             parse_match_spec(pcie)
         except CategorizedError as exc:
-            return ToolResponse.failure(_TOOL, exc.category, suggested_next_actions=[_TOOL])
+            return ToolResponse.failure_from_error(_TOOL, exc, suggested_next_actions=[_TOOL])
     # One REPEATABLE READ transaction so the whole aggregate reflects a single snapshot:
     # without it a grant committing mid-read could be counted in occupancy but its device
     # still read as free (or vice-versa). The view is a point-in-time hint either way, but a
@@ -277,7 +277,7 @@ async def availability_tool(
             try:
                 shapes = await _resolve_shapes(conn, shape)
             except CategorizedError as exc:
-                return ToolResponse.failure(_TOOL, exc.category, suggested_next_actions=[_TOOL])
+                return ToolResponse.failure_from_error(_TOOL, exc, suggested_next_actions=[_TOOL])
             resources = await _fetch_resources(conn)
             occupancy = await _occupancy_by_resource(conn)
             claims = await _claims_by_resource(conn)

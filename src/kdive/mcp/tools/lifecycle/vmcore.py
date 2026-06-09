@@ -176,7 +176,7 @@ async def _runtime_for_system(
         try:
             return await resolver.runtime_for_system(conn, uid)
         except CategorizedError as exc:
-            return ToolResponse.failure(system_id, exc.category)
+            return ToolResponse.failure_from_error(system_id, exc)
 
 
 async def _fetch_vmcore(
@@ -284,7 +284,7 @@ async def _postmortem_crash(
         except CategorizedError as exc:
             # A provenance mismatch (configuration_error) or an unavailable crash
             # dependency (missing_dependency) becomes a typed failure, never a 500.
-            return ToolResponse.failure(run_id, exc.category)
+            return ToolResponse.failure_from_error(run_id, exc)
         redactor = Redactor()
         return ToolResponse.success(
             run_id,

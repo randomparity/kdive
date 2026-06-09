@@ -241,7 +241,7 @@ async def _create_upload(
                     )
             except CategorizedError as exc:
                 _log.warning("create_upload failed for %s %s: %s", spec.owner_kind, owner_id, exc)
-                return ToolResponse.failure(owner_id, exc.category)
+                return ToolResponse.failure_from_error(owner_id, exc)
 
     items = [_upload_response(upload, next_action=spec.next_action) for upload in uploads]
     return ToolResponse.collection(

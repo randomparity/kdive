@@ -156,7 +156,7 @@ class RunBuildHandlers:
                 try:
                     parsed = BuildProfile.parse(run.build_profile)
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
+                    return ToolResponse.failure_from_error(run_id, exc)
                 if parsed.source != "server":
                     return _config_error(
                         run_id, data={"reason": "external_source_uses_complete_build"}
@@ -168,12 +168,12 @@ class RunBuildHandlers:
                         ref=parsed.config,
                     )
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
+                    return ToolResponse.failure_from_error(run_id, exc)
                 if self.config_validator is not None:
                     try:
                         self.config_validator(parsed.config)
                     except CategorizedError as exc:
-                        return ToolResponse.failure(run_id, exc.category)
+                        return ToolResponse.failure_from_error(run_id, exc)
                 return await _build_locked(conn, ctx, run, cmdline)
 
     async def complete_build(
@@ -208,7 +208,7 @@ class RunBuildHandlers:
                 try:
                     profile = _external_build_profile(run)
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
+                    return ToolResponse.failure_from_error(run_id, exc)
                 guard = _complete_build_guard(run, profile)
                 if guard is not None:
                     return guard
@@ -228,7 +228,7 @@ class RunBuildHandlers:
                         requirements,
                     )
                 except CategorizedError as exc:
-                    return ToolResponse.failure(run_id, exc.category)
+                    return ToolResponse.failure_from_error(run_id, exc)
 
                 return await _finalize_external_build(
                     conn, ctx, run, validated.output, cmdline, keys, validated.heads

@@ -44,7 +44,7 @@ class _RunRuntimeFactory:
             try:
                 return await self.resolver.runtime_for_run(conn, uid)
             except CategorizedError as exc:
-                return ToolResponse.failure(run_id, exc.category)
+                return ToolResponse.failure_from_error(run_id, exc)
 
     def build_handlers(self, runtime: ProviderRuntime) -> _RunBuildHandlers:
         return _RunBuildHandlers(

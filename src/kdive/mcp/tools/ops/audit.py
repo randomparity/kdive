@@ -96,7 +96,7 @@ async def query_project(
                 request.window,
             )
         except CategorizedError as exc:
-            return ToolResponse.failure(_OBJECT_ID, exc.category, suggested_next_actions=[_TOOL])
+            return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
         return await _query_project(pool, ctx, request.project, filters)
 
 
@@ -116,7 +116,7 @@ async def query_all_projects(
                 request.window,
             )
         except CategorizedError as exc:
-            return ToolResponse.failure(_OBJECT_ID, exc.category, suggested_next_actions=[_TOOL])
+            return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
         return await _query_cross_project(pool, ctx, filters)
 
 

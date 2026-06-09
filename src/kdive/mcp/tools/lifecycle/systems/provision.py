@@ -206,7 +206,7 @@ class SystemProvisionHandlers:
             parsed = ProvisioningProfile.parse(profile)
             validate_profile_for_provider(parsed, self.component_sources)
         except CategorizedError as exc:
-            return ToolResponse.failure(allocation_id, exc.category)
+            return ToolResponse.failure_from_error(allocation_id, exc)
         with bind_context(principal=ctx.principal):
             try:
                 async with _locked_allocation_system(pool, ctx, uid) as locked:
@@ -216,7 +216,7 @@ class SystemProvisionHandlers:
                     try:
                         stored = _stored_profile_for(profile, alloc)
                     except CategorizedError as exc:
-                        return ToolResponse.failure(str(alloc.id), exc.category)
+                        return ToolResponse.failure_from_error(str(alloc.id), exc)
                     if mode == "provision":
                         return await _provision_create_response(
                             conn,
@@ -444,7 +444,7 @@ async def _provision_defined_response(
         validate_profile_for_provider(parsed, component_sources)
         validate_rootfs_for_provider(parsed, rootfs_validator)
     except CategorizedError as exc:
-        return ToolResponse.failure(str(system.id), exc.category)
+        return ToolResponse.failure_from_error(str(system.id), exc)
     if system.state is SystemState.DEFINED:
         if alloc.state is not AllocationState.ACTIVE:
             return _config_error(str(alloc.id), data={"current_status": alloc.state.value})
@@ -479,7 +479,7 @@ async def _new_system_allowed(
     try:
         validate_rootfs_for_provider(profile, rootfs_validator)
     except CategorizedError as exc:
-        return ToolResponse.failure(str(alloc.id), exc.category)
+        return ToolResponse.failure_from_error(str(alloc.id), exc)
     return None
 
 
@@ -569,7 +569,7 @@ async def _insert_provisioning_system(
     try:
         reject_rootfs_upload_without_window(profile)
     except CategorizedError as exc:
-        return ToolResponse.failure(str(alloc.id), exc.category)
+        return ToolResponse.failure_from_error(str(alloc.id), exc)
     blocked = await _new_system_allowed(conn, alloc, profile, rootfs_validator)
     if blocked is not None:
         return blocked

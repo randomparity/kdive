@@ -92,7 +92,7 @@ async def create_run(
     try:
         parsed_build_profile = BuildProfile.parse(request.build_profile)
     except CategorizedError as exc:
-        return ToolResponse.failure(request.system_id, exc.category)
+        return ToolResponse.failure_from_error(request.system_id, exc)
     parsed_expected = _parse_expected_boot_failure(request.system_id, request.expected_boot_failure)
     if isinstance(parsed_expected, ToolResponse):
         return parsed_expected
@@ -261,7 +261,7 @@ def _assertion_block_response(
     try:
         satisfied = snapshot_satisfies(sizing, alloc.pcie_claim, requirement)
     except CategorizedError as exc:
-        return ToolResponse.failure(str(system.id), exc.category)
+        return ToolResponse.failure_from_error(str(system.id), exc)
     if not satisfied:
         return _config_error(str(system.id), data={"reason": "reuse_requirement_unmet"})
     return None

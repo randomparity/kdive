@@ -72,7 +72,7 @@ class SystemAdminHandlers:
             validate_profile_for_provider(parsed, self.component_sources)
             reject_rootfs_upload_without_window(parsed)
         except CategorizedError as exc:
-            return ToolResponse.failure(system_id, exc.category)
+            return ToolResponse.failure_from_error(system_id, exc)
         with bind_context(principal=ctx.principal):
             try:
                 return await _reprovision_locked(pool, ctx, uid, parsed, self.rootfs_validator)
@@ -121,7 +121,7 @@ async def _reprovision_locked(
         try:
             validate_rootfs_for_provider(profile, rootfs_validator)
         except CategorizedError as exc:
-            return ToolResponse.failure(str(system_id), exc.category)
+            return ToolResponse.failure_from_error(str(system_id), exc)
         return await _admit_reprovision(conn, ctx, system, profile, digest, dedup_key)
 
 
@@ -229,7 +229,7 @@ async def teardown_system(
             try:
                 profile = ProvisioningProfile.parse(system.provisioning_profile)
             except CategorizedError as exc:
-                return ToolResponse.failure(system_id, exc.category)
+                return ToolResponse.failure_from_error(system_id, exc)
             op = DestructiveOp(kind=_TEARDOWN, profile_opt_in=_teardown_opt_in(profile))
             try:
                 assert_destructive_allowed(ctx, allocation, op, required_role=Role.ADMIN)

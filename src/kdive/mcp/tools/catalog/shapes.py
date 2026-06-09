@@ -101,7 +101,7 @@ async def set_shape(
         try:
             shape = _build_shape(name, vcpus, memory_mb, disk_gb, pcie_match)
         except CategorizedError as exc:
-            return ToolResponse.failure(name, exc.category, suggested_next_actions=[_SET_TOOL])
+            return ToolResponse.failure_from_error(name, exc, suggested_next_actions=[_SET_TOOL])
         # `shape.name` is the canonical (stripped) key actually persisted; audit/scope on it,
         # not the raw argument, so the trail matches what the resolver will look up.
         async with pool.connection() as conn, conn.transaction():

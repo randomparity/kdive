@@ -230,7 +230,7 @@ class DebugSessionHandlers:
             try:
                 runtime = await self._resolver.runtime_for_run(conn, run.id)
             except CategorizedError as exc:
-                return ToolResponse.failure(str(run.id), exc.category)
+                return ToolResponse.failure_from_error(str(run.id), exc)
             connector = runtime.connector
         else:
             connector = self._resolver
@@ -277,7 +277,7 @@ class DebugSessionHandlers:
                     try:
                         runtime = await self._resolver.runtime_for_session(conn, uid)
                     except CategorizedError as exc:
-                        return ToolResponse.failure(session_id, exc.category)
+                        return ToolResponse.failure_from_error(session_id, exc)
                     connector = runtime.connector
                 else:
                     connector = self._resolver
@@ -304,7 +304,7 @@ def _resolve_credential(
     try:
         profile = ProvisioningProfile.parse(system.provisioning_profile)
     except CategorizedError as exc:
-        return ToolResponse.failure(str(system.id), exc.category)
+        return ToolResponse.failure_from_error(str(system.id), exc)
     ref = profile.provider.local_libvirt.ssh_credential_ref
     if ref is None:
         return _config_error(str(system.id), data={"reason": "ssh_credential_ref_missing"})
@@ -319,7 +319,7 @@ def _resolve_credential(
     except CategorizedError as exc:
         # Preserve the backend's own category (e.g. a manager backend's MISSING_DEPENDENCY /
         # INFRASTRUCTURE_FAILURE) so a degraded secret store is not mislabeled as bad input.
-        return ToolResponse.failure(str(system.id), exc.category)
+        return ToolResponse.failure_from_error(str(system.id), exc)
     return None
 
 
