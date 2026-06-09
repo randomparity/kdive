@@ -1,4 +1,4 @@
-"""The fault-inject forced-secret-resolution loop (ADR-0073, M1.5 issue 4).
+"""The fault-inject forced-secret-resolution loop (ADR-0073).
 
 A fault-inject-only seam — the generic provider ports stay unchanged. It resolves a
 high-entropy ``secret_ref`` through an injected ``SecretBackend`` (which registers the

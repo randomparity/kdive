@@ -1,4 +1,4 @@
-"""The `jobs.*` MCP tools over the durable queue (issue #10).
+"""The `jobs.*` MCP tools over the durable queue.
 
 Each tool is a thin FastMCP wrapper over a plain async handler that takes its
 dependencies (the pool, the request context) as arguments, so handlers are tested
@@ -6,7 +6,7 @@ directly without MCP transport. A handler that raises a domain error becomes an
 error :class:`~kdive.mcp.responses.ToolResponse` (with the most specific
 ``ErrorCategory``), never an unhandled 500.
 
-Every read/cancel is **project-scoped** (#11): a job is visible only to a caller with
+Every read/cancel is **project-scoped**: a job is visible only to a caller with
 ``viewer`` on the owning project (``authorizing->>'project'``), while cancellation requires
 ``operator``. A by-id read or cancel of a job in an ungranted project returns the same
 not-found-shaped error as a missing job, so existence is not leaked (matching
@@ -53,7 +53,7 @@ def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
 
 
 def _in_scope(job: Job, ctx: RequestContext) -> bool:
-    """True iff ``job``'s owning project is granted to ``ctx`` (#11)."""
+    """True iff ``job``'s owning project is granted to ``ctx``."""
     return job.authorizing["project"] in ctx.projects
 
 

@@ -198,7 +198,7 @@ class FaultInjectIntrospect:
 
 
 class _SyntheticGdbController:
-    """A no-op gdb/MI controller for the synthetic attachment (issues no real commands)."""
+    """A no-op gdb/MI controller for the synthetic attachment."""
 
     def write(self, command: str, *, timeout_sec: float) -> list[dict[str, object]]:
         return []

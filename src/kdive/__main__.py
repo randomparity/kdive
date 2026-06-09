@@ -1,4 +1,4 @@
-"""Process entrypoints: `python -m kdive server|worker|reconciler` (issues #10, #12).
+"""Process entrypoints: `python -m kdive server|worker|reconciler`.
 
 `server` runs the FastMCP streamable-HTTP app; `worker` runs the job-queue worker
 loop; `reconciler` runs the drift-repair loop (ADR-0021). All three configure the

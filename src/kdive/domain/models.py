@@ -1,7 +1,7 @@
-"""Typed records for the M0 durable objects (ADR-0003, ADR-0005).
+"""Typed records for KDIVE durable objects (ADR-0003, ADR-0005).
 
-Pydantic models matching the spec's Postgres schema ("Postgres schema (M0
-subset)"). Every tenant object carries the common identity/timestamp fields
+Pydantic models matching the Postgres schema. Every tenant object carries the
+common identity/timestamp fields
 (:class:`DomainModel`) and the ``(principal, agent_session, project)`` attribution
 tuple (:class:`_Attribution`). Three objects deviate, per their schema rows:
 
@@ -16,10 +16,9 @@ authorizing tuple) remain typed as ``dict[str, Any]`` here. Profile-owned JSON
 columns use profile document aliases and are parsed by their owning profile modules.
 
 The "failure category set iff the object reached a failure state" invariant on
-:class:`Run` and :class:`Job` is not enforced at this layer. The repository
-(issue #5) sets the category atomically with the terminal transition; a
-model-level cross-field check would fire on every field assignment under
-``validate_assignment`` and break incremental updates.
+:class:`Run` and :class:`Job` is enforced by the repository transition helpers, which set the
+category atomically with the terminal transition. A model-level cross-field check would fire
+on every field assignment under ``validate_assignment`` and break incremental updates.
 """
 
 from __future__ import annotations
@@ -68,8 +67,8 @@ class JobKind(StrEnum):
     The spec's "Job queue" section names the long-running provider ops;
     ``teardown``/``force_crash``/``power`` are also job-dispatched per the tool
     surface (``systems.teardown``/``control.*`` return ``{job_id}``) and the
-    implementation plan's ``dedup_key`` set. ``reprovision`` is the M1 in-place
-    reprovision op (ADR-0038), long-running like ``provision``.
+    persisted ``dedup_key`` contract. ``reprovision`` is the in-place reprovision op
+    (ADR-0038), long-running like ``provision``.
     """
 
     PROVISION = "provision"
@@ -145,7 +144,7 @@ class DomainModel(_DomainBase):
 
 
 class _Attribution(_DomainBase):
-    """The attribution tuple; ``agent_session`` is optional in M0 (principal-only)."""
+    """The attribution tuple recorded for tenant-owned objects."""
 
     principal: str
     agent_session: str | None = None
@@ -161,7 +160,7 @@ class ExternalRef(_DomainBase):
 
 
 class Resource(DomainModel):
-    """A registered provider host (the local libvirt host in M0)."""
+    """A registered provider resource host."""
 
     kind: ResourceKind
     capabilities: dict[str, Any] = Field(default_factory=dict)
@@ -175,33 +174,24 @@ class Resource(DomainModel):
 class Allocation(DomainModel, _Attribution):
     """A capacity- and budget-checked booking of a Resource.
 
-    M1 adds the selector size persisted at grant (``requested_vcpus`` /
-    ``requested_memory_gb``, the rate inputs reconciliation recomputes from) and the
-    billing interval (``active_started_at`` stamped on ``granted → active``,
-    ``active_ended_at`` on release/expiry); ``active_hours`` is their difference, never
-    derived from ``updated_at`` (ADR-0007 §3). All four are null on an M0/just-granted
-    allocation.
+    The selector size is persisted at grant (``requested_vcpus``,
+    ``requested_memory_gb``, and ``requested_disk_gb``) so accounting, availability, and reuse
+    do not depend on mutable catalog state. The billing interval is ``active_started_at`` to
+    ``active_ended_at`` and is never derived from ``updated_at`` (ADR-0007 §3).
 
-    M1.4 adds the resolved-sizing snapshot identity (ADR-0067): ``requested_disk_gb``
-    completes the at-grant size snapshot the existing ``requested_*`` columns leave
-    short, and ``shape`` records the named preset a shape-sized request resolved from
-    (``None`` for full-custom). ``shape`` is a recorded label, not a foreign key — a
-    later ``shapes.set``/``shapes.delete`` cannot retroactively re-size a stamped row,
-    because availability and reuse read sizing from this persisted snapshot, never the
-    catalog. M1.4 also adds ``pcie_claim`` (ADR-0068): the snapshot list of
-    ``(vendor_id, device_id, bdf)`` devices this allocation holds, resolved inside the
-    per-Resource lock at admission. Empty for a non-PCIe allocation. Occupancy is derived
-    from this column on non-terminal allocations, so the claim frees on every terminal
-    transition simply by the allocation leaving the non-terminal set; the row persists as
-    a historical snapshot.
+    ``shape`` records the named preset a shape-sized request resolved from (``None`` for
+    full-custom). It is a label, not a foreign key: later shape edits cannot re-size a
+    stamped row because sizing reads from this persisted snapshot (ADR-0067).
 
-    M1.4 also makes ``requested`` a durable queue state for a capacity-denied request
-    (ADR-0069): a queued row holds only a queue position — ``resource_id`` is ``None`` (the
-    DB CHECK permits NULL only in ``requested``), no reserve, no lease, empty ``pcie_claim``
-    — and persists the *original request inputs* to re-admit at promotion (#165):
-    ``requested_pcie_specs`` (the requested match-spec **union**, distinct from the resolved
-    ``pcie_claim``) and the target descriptor (``requested_kind`` for by-kind,
-    ``requested_resource_id`` for by-id). Size is the existing ``requested_*`` snapshot.
+    ``pcie_claim`` is the resolved list of ``(vendor_id, device_id, bdf)`` devices held by
+    this allocation (ADR-0068). Occupancy is derived from this column on non-terminal
+    allocations, so the claim frees on terminal transition while the historical row keeps
+    the snapshot.
+
+    ``requested`` is the durable queue state for capacity-denied requests (ADR-0069). A
+    queued row holds only queue position: ``resource_id`` is ``None``, no reserve or lease is
+    held, ``pcie_claim`` is empty, and the original request inputs are persisted for
+    promotion re-admission.
     """
 
     resource_id: UUID | None = None
@@ -221,11 +211,11 @@ class Allocation(DomainModel, _Attribution):
 
 
 class System(DomainModel, _Attribution):
-    """A provisioned target; one per Allocation in M0.
+    """A provisioned target; one per Allocation.
 
-    M1.4 adds the nullable ``shape`` name label (``None`` for full-custom, ADR-0067); the
-    System's sizing snapshot lives in ``provisioning_profile`` (vcpu/memory_mb/disk_gb),
-    so ``shape`` is a label, not the size of record — a catalog change never re-sizes it.
+    The nullable ``shape`` label is ``None`` for full-custom allocations (ADR-0067). The
+    System's size of record lives in ``provisioning_profile`` (vcpu/memory_mb/disk_gb), so a
+    catalog change never re-sizes it.
     """
 
     allocation_id: UUID
@@ -354,11 +344,11 @@ class Quota(_DomainBase):
     quota row → the project is denied (``quota_exceeded``); a deployment seeds it
     explicitly.
 
-    M1.4 adds ``max_pending_allocations`` (ADR-0069): a **distinct** per-project cap on
-    queued ``requested`` rows, bounding how deep one project can fill the backlog with
-    ``on_capacity=queue``. It is separate from ``max_concurrent_allocations`` (which no
-    longer counts ``requested``); the migration backfills it to 0 so the queue is opt-in
-    and fail-closed until an operator raises it.
+    ``max_pending_allocations`` is a distinct per-project cap on queued ``requested`` rows
+    (ADR-0069), bounding how deep one project can fill the backlog with
+    ``on_capacity=queue``. It is separate from ``max_concurrent_allocations``, which does not
+    count queued requests; the default 0 keeps queueing opt-in and fail-closed until an
+    operator raises it.
     """
 
     project: str

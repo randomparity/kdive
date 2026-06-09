@@ -1,6 +1,6 @@
 """Faulting wrappers that thread the seeded engine into the fault-inject ports (ADR-0074).
 
-The happy-path mock ports (ADR-0072 issue 2) stay synthetic and untouched; these thin
+The happy-path mock ports stay synthetic and untouched; these thin
 decorators consult a :class:`~kdive.providers.fault_inject.faulting.engine.FaultEngine` before
 delegating, so a seeded fault actually perturbs the spine op:
 

@@ -1,4 +1,4 @@
-"""Mid-op cancel/compensation for the fault-inject mock (M1.5 #186, ADR-0072).
+"""Mid-op cancel and compensation for the fault-inject mock (ADR-0072).
 
 "Cancel is never undefined" is proven against a provider that can **pause mid-op on
 demand**. A fault-inject op runs its first observable side effect (record the synthetic

@@ -1,4 +1,4 @@
-"""The seeded decision-keyed fault engine (ADR-0072, M1.5 issue 3).
+"""The seeded decision-keyed fault engine (ADR-0072).
 
 Every fault decision is a **pure function of stable inputs**:
 
@@ -9,8 +9,8 @@ Three details are load-bearing and must not be skipped (ADR-0072):
 
 - **The hash is process-independent.** Python's builtin ``hash()`` salts ``str``/``bytes``
   per process (``PYTHONHASHSEED``), so it would yield different draws across the concurrent
-  workers M1.5 runs. The draw is computed with :func:`hashlib.blake2b` over a canonical byte
-  encoding of the key, **never** builtin ``hash()`` — a determinism guard test asserts the
+  workers. The draw is computed with :func:`hashlib.blake2b` over a canonical byte encoding
+  of the key, **never** builtin ``hash()`` — a determinism guard test asserts the
   draw is identical across two subprocesses launched with different ``PYTHONHASHSEED``.
 - **``attempt`` derives from durable state**, never a process-local counter. The engine takes
   ``attempt`` as a parameter (the caller supplies the Run boot ordinal / attach ordinal /
@@ -19,9 +19,8 @@ Three details are load-bearing and must not be skipped (ADR-0072):
   three decisions a plane makes stay independent and reproducible.
 
 The engine reads ``seed``, the per-plane ``fault_rate`` map, and the per-plane
-``max_latency_s`` bound from the resource ``capabilities`` jsonb (issue-2 keys) — never from
-wall-clock or ``os.urandom``. This module imports no nondeterministic source; a guard test
-enforces that.
+``max_latency_s`` bound from the resource ``capabilities`` jsonb — never from wall-clock or
+``os.urandom``. This module imports no nondeterministic source; a guard test enforces that.
 """
 
 from __future__ import annotations

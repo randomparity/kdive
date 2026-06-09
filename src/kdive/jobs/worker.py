@@ -1,4 +1,4 @@
-"""The worker tier: claim, heartbeat, dispatch, finalize (ADR-0018, issue #9).
+"""The worker tier: claim, heartbeat, dispatch, finalize (ADR-0018).
 
 A :class:`Worker` owns an ``AsyncConnectionPool`` and processes one job per
 :meth:`Worker.run_once`: ``dequeue`` claims and charges an attempt, a background

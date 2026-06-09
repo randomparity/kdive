@@ -1,4 +1,4 @@
-"""The fault-inject object-store quarantine loop (ADR-0075, M1.5 issue #190 follow-up).
+"""The fault-inject object-store quarantine loop (ADR-0075).
 
 A fault-inject-only seam — the generic provider ports stay unchanged. It models a write that
 lands **before** secret registration completes: it reads a high-entropy ``secret_ref`` **raw**

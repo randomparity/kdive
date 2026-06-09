@@ -1,4 +1,4 @@
-"""MCP dispatch-boundary middleware: the denial-audit retrofit (ADR-0062 §5, issue #142).
+"""MCP dispatch-boundary middleware for denial audit (ADR-0062 §5).
 
 `require_role`'s **member-over-reach** site raises :class:`~kdive.security.authz.rbac.RoleDenied`
 (the dedicated discriminator, not the base :class:`~kdive.security.authz.rbac.AuthorizationError`

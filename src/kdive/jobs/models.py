@@ -1,10 +1,10 @@
-"""Job-handler type and registry for the durable queue (ADR-0018, issue #9).
+"""Job-handler type and registry for the durable queue (ADR-0018).
 
 A :data:`JobHandler` is the async callable a worker invokes for one claimed
 :class:`~kdive.domain.models.Job`; it runs the op and returns a ``result_ref``
 (object-store key) or ``None``, or raises to fail the job. :class:`HandlerRegistry`
-binds exactly one handler per :class:`~kdive.domain.models.JobKind`; the plane issues
-(#11+) populate it at worker startup and the worker dispatches by ``Job.kind``.
+binds exactly one handler per :class:`~kdive.domain.models.JobKind`; plane registrars
+populate it at worker startup and the worker dispatches by ``Job.kind``.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class HandlerRegistry:
 
         Raises:
             DuplicateHandler: A handler is already registered for ``kind`` — two
-                issues must not silently both claim a kind.
+                registrars must not silently both claim a kind.
         """
         if kind in self._handlers:
             raise DuplicateHandler(f"a handler is already registered for {kind}")
