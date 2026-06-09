@@ -20,6 +20,14 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 
 type NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 type ComponentSourceKind = Literal["local", "artifact", "component-upload", "catalog"]
+type ComponentKind = Literal["rootfs", "kernel", "initrd", "config", "patch", "vmlinux"]
+
+ROOTFS_COMPONENT: ComponentKind = "rootfs"
+KERNEL_COMPONENT: ComponentKind = "kernel"
+INITRD_COMPONENT: ComponentKind = "initrd"
+CONFIG_COMPONENT: ComponentKind = "config"
+PATCH_COMPONENT: ComponentKind = "patch"
+VMLINUX_COMPONENT: ComponentKind = "vmlinux"
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 

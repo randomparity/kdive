@@ -12,9 +12,7 @@ import os
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
-from kdive.providers.component_validation import (
+from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
     KERNEL_COMPONENT,
@@ -22,8 +20,12 @@ from kdive.providers.component_validation import (
     ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
     ComponentKind,
-    ComponentSourceCapabilities,
     ComponentSourceKind,
+)
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.models import ResourceKind
+from kdive.providers.component_validation import (
+    ComponentSourceCapabilities,
 )
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.fault_inject.faulting.engine import FaultEngine

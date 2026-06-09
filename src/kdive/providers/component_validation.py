@@ -4,19 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
 
-from kdive.components.references import ComponentRef, ComponentSourceKind
+from kdive.components.references import ComponentKind, ComponentRef, ComponentSourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-
-type ComponentKind = Literal["rootfs", "kernel", "initrd", "config", "patch", "vmlinux"]
-
-ROOTFS_COMPONENT: ComponentKind = "rootfs"
-KERNEL_COMPONENT: ComponentKind = "kernel"
-INITRD_COMPONENT: ComponentKind = "initrd"
-CONFIG_COMPONENT: ComponentKind = "config"
-PATCH_COMPONENT: ComponentKind = "patch"
-VMLINUX_COMPONENT: ComponentKind = "vmlinux"
 
 
 @dataclass(frozen=True, slots=True)

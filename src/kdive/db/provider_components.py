@@ -16,10 +16,8 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.local_paths import validate_local_component_path
-from kdive.components.references import ComponentRef, parse_component_ref
+from kdive.components.references import ComponentKind, ComponentRef, parse_component_ref
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.component_validation import ComponentKind
-from kdive.store.objectstore import HeadResult
 
 type Visibility = Literal["public", "project", "host-policy"]
 type UploadVisibility = Literal["public", "project"]
@@ -84,8 +82,13 @@ class ProviderComponent(NamedTuple):
     sha256: str | None
 
 
+class ComponentUploadHead(Protocol):
+    size_bytes: int
+    checksum_sha256: str | None
+
+
 class UploadVerifier(Protocol):
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str) -> ComponentUploadHead | None:
         """Return uploaded object metadata, or None when the object is absent."""
 
 

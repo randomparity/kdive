@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from kdive.components.references import ROOTFS_COMPONENT
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     RootfsSource,
@@ -12,7 +13,6 @@ from kdive.profiles.provisioning import (
     validate_profile,
 )
 from kdive.providers.component_validation import (
-    ROOTFS_COMPONENT,
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )

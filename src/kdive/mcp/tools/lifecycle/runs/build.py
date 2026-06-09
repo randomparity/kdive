@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.catalog import load_fixture_catalog
-from kdive.components.references import ComponentRef
+from kdive.components.references import CONFIG_COMPONENT, ComponentRef
 from kdive.components.requirements import ConfigRequirements
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -36,7 +36,6 @@ from kdive.mcp.tools.lifecycle.runs.common import (
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.providers.build_validation import ValidatorStore, validate_external_artifacts
 from kdive.providers.component_validation import (
-    CONFIG_COMPONENT,
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
