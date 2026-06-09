@@ -195,7 +195,7 @@ class RunBuildHandlers:
                     profile = _external_build_profile(run)
                 except CategorizedError as exc:
                     return ToolResponse.failure_from_error(run_id, exc)
-                guard = _complete_build_guard(run, profile)
+                guard = _created_run_guard(run)
                 if guard is not None:
                     return guard
 
@@ -250,9 +250,8 @@ def _external_build_profile(run: Run) -> ExternalBuildProfile:
     return parsed
 
 
-def _complete_build_guard(run: Run, profile: ExternalBuildProfile) -> ToolResponse | None:
-    """Reject a non-external or non-CREATED Run; ``None`` means proceed to finalize."""
-    _ = profile
+def _created_run_guard(run: Run) -> ToolResponse | None:
+    """Reject a non-CREATED Run; ``None`` means proceed to finalize."""
     if run.state is not RunState.CREATED:
         return _config_error(str(run.id), data={"current_status": run.state.value})
     return None
