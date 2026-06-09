@@ -8,6 +8,7 @@ the per-host concurrent-Allocation cap.
 
 from __future__ import annotations
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Sequence
@@ -28,6 +29,7 @@ _KDIVE_METADATA_NS = "https://kdive.dev/libvirt/1"
 _URI_ENV = "KDIVE_LIBVIRT_URI"
 _CAP_ENV = "KDIVE_LIBVIRT_ALLOCATION_CAP"
 _DEFAULT_CAP = 1
+_log = logging.getLogger(__name__)
 
 
 class _LibvirtDomain(Protocol):
@@ -207,7 +209,12 @@ class LocalLibvirtDiscovery:
             try:
                 descriptor = _parse_pci_descriptor(device.XMLDesc())
             except ET.ParseError:
-                continue  # unparseable XML for this device → skip, keep the rest
+                _log.warning(
+                    "skipping unparseable PCI node-device XML for %s",
+                    device.name(),
+                    exc_info=True,
+                )
+                continue
             if descriptor is not None:
                 descriptors.append(descriptor)
         return descriptors

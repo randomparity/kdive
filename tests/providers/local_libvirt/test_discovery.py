@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import libvirt
 import pytest
 
@@ -98,6 +100,26 @@ def test_malformed_nodedev_is_skipped_not_fatal() -> None:
     )
     devices = _discovery(conn).list_resources()[0]["capabilities"][PCIE_DEVICES_KEY]
     assert [d["bdf"] for d in devices] == ["0000:3b:00.0"]
+
+
+def test_unparseable_nodedev_logs_device_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    conn = FakeLibvirtConn(
+        node_devices=[
+            FakeNodeDevice("bad-pci", "<device><name>bad-pci</name>"),
+            FakeNodeDevice("pci_0000_3b_00_0", pci_nodedev_xml()),
+        ]
+    )
+    caplog.set_level(logging.WARNING, logger="kdive.providers.local_libvirt.discovery")
+    devices = _discovery(conn).list_resources()[0]["capabilities"][PCIE_DEVICES_KEY]
+    assert [d["bdf"] for d in devices] == ["0000:3b:00.0"]
+    assert any(
+        record.exc_info is not None
+        and "bad-pci" in record.message
+        and "unparseable PCI node-device XML" in record.message
+        for record in caplog.records
+    )
 
 
 def test_list_owned_returns_only_tagged_domains() -> None:
