@@ -38,7 +38,10 @@ itself. Run `just` (or `just --list`) to see every task:
 | `just lint`    | `ruff check` + `ruff format --check` |
 | `just format`  | `ruff check --fix` + `ruff format` |
 | `just type`    | `ty check` (whole tree: src + tests) |
-| `just test`    | the suite, excluding the gated `live_vm` tests |
+| `just test`    | the suite, excluding the gated `live_vm` and `live_stack` tests |
+| `just test-live` | the gated `live_vm` suite |
+| `just stack-up` | Postgres + MinIO + mock OIDC, migrated for a live host run |
+| `just test-live-stack` | the gated HTTP/live-stack suite |
 | `just ci`      | the full gate PR CI runs (lint, type, shell, workflows, mermaid, test) |
 
 The underlying commands still work directly if you prefer not to use `just`:
@@ -55,8 +58,15 @@ Test environments
 -----------------
 
 - **Unit and service tests** run anywhere. They depend only on a disposable
-  Postgres + MinIO + a mock OIDC issuer (added in a later milestone issue), never on
-  a real kernel or VM.
+  Postgres, in-process fakes, and containerized test fixtures where the test needs a real
+  backing service. They do not require a real kernel or VM. Tests that need Docker-backed
+  services skip cleanly when Docker is absent, unless `KDIVE_REQUIRE_DOCKER=1` is set.
+- **`live_stack` tests** are marked with the `live_stack` pytest marker and are skipped
+  by `just test`. They drive the real MCP HTTP transport against host `server`, `worker`,
+  and `reconciler` processes plus the compose backends. Use `just stack-up` to start
+  Postgres, MinIO, and the mock OIDC issuer, then follow
+  [`docs/runbooks/live-stack.md`](docs/runbooks/live-stack.md) for VM fixtures and host
+  process startup.
 - **`live_vm` tests** are marked with the `live_vm` pytest marker and are **skipped by
   default**. They require:
   - a **KVM / nested-virtualization-capable host** with libvirt installed and running;
@@ -68,15 +78,23 @@ Test environments
 
   These do **not** run on stock GitHub-hosted runners. CI marks `live_vm` as a
   separate, manually-triggered job on a self-hosted KVM runner.
-- **Kernel builds** (a later milestone issue) need a kernel **toolchain**
-  (gcc/clang, make, bc, flex, bison, libelf-dev) and a **warm kernel source tree** in
-  the build workspace. The milestone builds incrementally from the warm tree, not
-  from scratch.
+- **Kernel builds** are implemented for the local-libvirt provider. A server-side build
+  needs a kernel **toolchain** (gcc/clang, make, bc, flex, bison, libelf-dev), `git`,
+  `rsync`, and a warm kernel source tree pointed to by `KDIVE_KERNEL_SRC`. KDIVE copies
+  that warm tree into a per-Run workspace and builds incrementally there. External build
+  ingestion is also implemented through upload manifests and `runs.complete_build`.
 
 To run the gated suite once the prerequisites are present:
 
 ```bash
 uv run python -m pytest -m live_vm
+```
+
+For the HTTP live-stack path:
+
+```bash
+just stack-up
+just test-live-stack
 ```
 
 Releasing
