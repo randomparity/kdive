@@ -178,6 +178,7 @@ def test_request_malformed_spec_is_config_error(migrated_url: str) -> None:
             resp = await _request(pool, _ctx(), pcie_devices=["NOT-A-SPEC"])
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert resp.data["spec"] == "NOT-A-SPEC"
 
     asyncio.run(_run())
 

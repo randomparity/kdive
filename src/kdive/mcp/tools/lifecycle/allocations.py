@@ -148,8 +148,8 @@ async def _prepare_admission_request(
     try:
         for spec in specs:  # grammar validation only — pre-lock, no durable write
             parse_match_spec(spec)
-    except CategorizedError:
-        return _config_error(object_id)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(object_id, exc)
     return _AdmissionPreparation(
         payload=payload,
         object_id=object_id,
