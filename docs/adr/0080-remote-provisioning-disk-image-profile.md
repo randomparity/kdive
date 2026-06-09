@@ -53,9 +53,12 @@ constraints shape the design:
 `BootMethod` gains `DISK_IMAGE = "disk-image"`. Cross-field validation is strict both ways:
 a `remote-libvirt` section requires `boot_method: disk-image`, and `disk-image` requires a
 `remote-libvirt` section — local-libvirt and fault-inject keep `direct-kernel`. The
-provider-agnostic profile helpers (`capture_method`, `destructive_opt_in`) learn the remote
-section; `rootfs_source` / `ssh_credential_ref` already return `None` for it (the remote
-provider has no worker-local rootfs and no SSH credential, ADR-0079).
+provider-agnostic profile helpers learn the remote section: `capture_method` returns
+`KDUMP` when `crashkernel` is set, else `GDBSTUB` (the gdbstub is unconditionally enabled
+for every remote System, ADR-0079 — there is no flag to consult, unlike the local debug
+options); `destructive_opt_in` reads the remote section's `destructive_ops`;
+`rootfs_source` / `ssh_credential_ref` already return `None` for it (the remote provider
+has no worker-local rootfs and no SSH credential, ADR-0079).
 
 `src/kdive/profiles/` is not a gate-protected core prefix, so this extension is legal under
 ADR-0076; the schema mechanism (one section per provider, exactly-one validator) is exactly
@@ -125,10 +128,13 @@ timeout. The System's entire purpose is to be driven through the agent seam (ins
 in-guest drgn, vmcore upload — ADR-0078/0079); a System whose agent never connects must not
 reach `ready`, or every later plane misattributes the fault. The wait is **read-only** (no
 agent command is issued — the exec seam is issue 3's; the channel state is libvirt's own
-connection tracking). Timeout maps to `PROVISIONING_FAILURE`. The started domain is **left
-defined and running** on an agent timeout — unlike a start failure, the domain is the
-diagnosable artifact (an operator can inspect its console), and a provision retry converges
-(redefine-in-place, already-running, re-poll) without it being torn down first.
+connection tracking). Each poll also checks the domain is **still running**: a domain that
+exits during boot (a panicking base image) fails **fast** with a `PROVISIONING_FAILURE`
+naming the exit, rather than burning the full timeout on a generic agent message. Timeout
+maps to `PROVISIONING_FAILURE`. The domain (running on a timeout, defined on an exit) is
+**left in place** — unlike a start failure, it is the diagnosable artifact (an operator can
+inspect its console), and a provision retry converges (redefine-in-place, already-running,
+re-poll) without it being torn down first.
 
 `teardown(domain_name)` destroys + undefines idempotently (the local-libvirt error-code
 contract, duplicated deliberately — no shared layer, ADR-0076), then deletes the overlay
