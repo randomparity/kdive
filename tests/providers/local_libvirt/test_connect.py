@@ -34,6 +34,14 @@ def test_valid_rsp_frame_ignores_leading_ack() -> None:
     assert valid_rsp_frame(b"+$?#3f") is True
 
 
+def test_valid_rsp_frame_rejects_trailing_bytes() -> None:
+    assert valid_rsp_frame(b"$?#3fJUNK") is False
+
+
+def test_valid_rsp_frame_rejects_trailing_bytes_after_leading_ack() -> None:
+    assert valid_rsp_frame(b"+$?#3fJUNK") is False
+
+
 def test_valid_rsp_frame_rejects_bare_ack() -> None:
     assert valid_rsp_frame(b"+") is False
 

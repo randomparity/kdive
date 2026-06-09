@@ -54,11 +54,11 @@ def valid_rsp_frame(buffer: bytes) -> bool:
     ``#``, a non-hex checksum, or a checksum mismatch is invalid — so a non-RSP listener that
     merely writes ``+`` or ``$hello`` is rejected.
     """
-    start = buffer.find(b"$")
-    if start == -1:
+    start = 1 if buffer.startswith((b"+", b"-")) else 0
+    if not buffer[start:].startswith(b"$"):
         return False
     hash_idx = buffer.find(b"#", start)
-    if hash_idx == -1 or hash_idx + 2 >= len(buffer):
+    if hash_idx == -1 or hash_idx + 3 != len(buffer):
         return False
     payload = buffer[start + 1 : hash_idx]
     checksum_hex = buffer[hash_idx + 1 : hash_idx + 3]
