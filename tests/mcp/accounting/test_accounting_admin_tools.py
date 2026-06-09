@@ -17,7 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import BUDGETS, QUOTAS
 from kdive.mcp.auth import AuthError, RequestContext
-from kdive.mcp.tools.accounting.admin import set_budget, set_quota
+from kdive.mcp.tools.accounting.admin import QuotaSetRequest, set_budget, set_quota
 from kdive.security.authz.rbac import AuthorizationError, Role
 
 
@@ -120,7 +120,13 @@ def test_set_quota_creates_row(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await set_quota(
-                pool, _ctx(), project="proj", max_concurrent_allocations=3, max_concurrent_systems=5
+                pool,
+                _ctx(),
+                request=QuotaSetRequest(
+                    project="proj",
+                    max_concurrent_allocations=3,
+                    max_concurrent_systems=5,
+                ),
             )
             assert resp.status == "ok"
             assert resp.suggested_next_actions == [
@@ -145,14 +151,22 @@ def test_set_quota_reset_overwrites(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await set_quota(
-                pool, _ctx(), project="proj", max_concurrent_allocations=1, max_concurrent_systems=1
+                pool,
+                _ctx(),
+                request=QuotaSetRequest(
+                    project="proj",
+                    max_concurrent_allocations=1,
+                    max_concurrent_systems=1,
+                ),
             )
             await set_quota(
                 pool,
                 _ctx(),
-                project="proj",
-                max_concurrent_allocations=9,
-                max_concurrent_systems=7,
+                request=QuotaSetRequest(
+                    project="proj",
+                    max_concurrent_allocations=9,
+                    max_concurrent_systems=7,
+                ),
             )
             async with pool.connection() as conn:
                 quota = await QUOTAS.get(conn, "proj")
@@ -170,9 +184,11 @@ def test_set_quota_requires_admin(migrated_url: str) -> None:
                 await set_quota(
                     pool,
                     _ctx(role=Role.OPERATOR),
-                    project="proj",
-                    max_concurrent_allocations=1,
-                    max_concurrent_systems=1,
+                    request=QuotaSetRequest(
+                        project="proj",
+                        max_concurrent_allocations=1,
+                        max_concurrent_systems=1,
+                    ),
                 )
 
     asyncio.run(_run())
@@ -185,9 +201,11 @@ def test_set_quota_negative_is_config_error(migrated_url: str, allocs: int, syst
             resp = await set_quota(
                 pool,
                 _ctx(),
-                project="proj",
-                max_concurrent_allocations=allocs,
-                max_concurrent_systems=systems,
+                request=QuotaSetRequest(
+                    project="proj",
+                    max_concurrent_allocations=allocs,
+                    max_concurrent_systems=systems,
+                ),
             )
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"

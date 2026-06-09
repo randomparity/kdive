@@ -50,7 +50,7 @@ from kdive.domain.state import (
 )
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.auth import AuthError
-from kdive.mcp.tools.accounting.admin import set_budget, set_quota
+from kdive.mcp.tools.accounting.admin import QuotaSetRequest, set_budget, set_quota
 from kdive.mcp.tools.accounting.estimate import estimate
 from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project
 from kdive.mcp.tools.lifecycle import allocations as alloc_tools
@@ -862,7 +862,13 @@ def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
                 await set_budget(pool, op, project="proj", limit_kcu="10")
             with pytest.raises(AuthorizationError):
                 await set_quota(
-                    pool, op, project="proj", max_concurrent_allocations=1, max_concurrent_systems=1
+                    pool,
+                    op,
+                    request=QuotaSetRequest(
+                        project="proj",
+                        max_concurrent_allocations=1,
+                        max_concurrent_systems=1,
+                    ),
                 )
             # power off / teardown bind their admin check to a real System's project.
             grant = await _request_allocation(
@@ -933,9 +939,11 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
                 await set_quota(
                     pool,
                     admin,
-                    project="proj",
-                    max_concurrent_allocations=4,
-                    max_concurrent_systems=4,
+                    request=QuotaSetRequest(
+                        project="proj",
+                        max_concurrent_allocations=4,
+                        max_concurrent_systems=4,
+                    ),
                 )
             ).status != "error"
             op = _operator_ctx()
