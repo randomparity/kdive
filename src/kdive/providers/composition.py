@@ -209,9 +209,10 @@ def _remote_component_sources() -> ComponentSourceCapabilities:
 def build_remote_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
     """Build the remote-libvirt ports; buildable without operator config (ADR-0076).
 
-    Construction wires the fail-fast stub planes and the discovery registrar; the
-    ``KDIVE_REMOTE_LIBVIRT_*`` config gates discovery/connection and is read only when
-    the registrar runs.
+    Construction wires the real provisioning plane (ADR-0080), the discovery
+    registrar, and fail-fast stubs for the planes later M2 issues supply; the
+    ``KDIVE_REMOTE_LIBVIRT_*`` config gates discovery/connection/provisioning and is
+    read only when an op runs.
     """
     installer = UnimplementedInstaller()
     retriever = UnimplementedRetriever()
@@ -250,6 +251,9 @@ def build_remote_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         supported_capture_methods=frozenset(),
         discovery_registrar=register_remote_host,
         component_sources=_remote_component_sources(),
+        # The systems registrar hard-fails on a None validator; a remote profile has
+        # no rootfs, so the no-op contract applies (the fault-inject precedent).
+        rootfs_validator=lambda _rootfs: None,
     )
 
 

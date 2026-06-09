@@ -393,3 +393,14 @@ def test_remote_runtime_has_real_provisioner(monkeypatch: pytest.MonkeyPatch) ->
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     assert isinstance(runtime.provisioner, RemoteLibvirtProvision)
+
+
+def test_remote_runtime_has_noop_rootfs_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The systems registrar hard-fails on rootfs_validator=None, so the remote runtime
+    # must supply the no-op contract (a remote profile has no rootfs; it is never
+    # invoked) - the fault-inject precedent.
+    monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
+
+    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+
+    assert runtime.rootfs_validator is not None

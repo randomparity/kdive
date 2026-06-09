@@ -487,7 +487,11 @@ class RemoteLibvirtProvision:
     def _used_gdb_ports(conn: _ProvisionConn) -> dict[str, int]:
         """Ports recorded by defined kdive domains; a domain vanishing mid-walk is skipped."""
         used: dict[str, int] = {}
-        for domain in conn.listAllDomains():
+        try:
+            domains = conn.listAllDomains()
+        except libvirt.libvirtError as exc:
+            raise _infra("listing domains for gdbstub port enumeration") from exc
+        for domain in domains:
             try:
                 name = domain.name()
                 if not name.startswith(_DOMAIN_PREFIX):
