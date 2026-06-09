@@ -134,20 +134,6 @@ def resolve_upload_store() -> UploadStore | None:
         return None
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register ``ops.reconcile_now`` on ``app``, bound to ``pool``.
-
-    The reaper and upload store are resolved once at registration — the same construction
-    the periodic reconciler uses — so the on-demand pass and the periodic loop run an
-    identical ``reconcile_once``.
-    """
-    from kdive.providers.composition import build_reconciler_reaper
-
-    reaper = build_reconciler_reaper()
-    upload_store = resolve_upload_store()
-    register_with_reaper(app, pool, reaper=reaper, upload_store=upload_store)
-
-
 def register_with_reaper(
     app: FastMCP,
     pool: AsyncConnectionPool,
