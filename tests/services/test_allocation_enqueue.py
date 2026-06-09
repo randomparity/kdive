@@ -49,7 +49,7 @@ def _request(
     *,
     on_capacity: Literal["deny", "queue"] = "queue",
     idempotency_key: str | None = None,
-    requested_kind: str | None = "local-libvirt",
+    requested_kind: ResourceKind | None = ResourceKind.LOCAL_LIBVIRT,
 ) -> AllocationRequest:
     return AllocationRequest(
         ctx=CTX,
@@ -149,7 +149,7 @@ def test_host_cap_denial_with_queue_enqueues_a_requested_row(migrated_url: str) 
             # Request inputs persisted to re-admit (#165).
             assert alloc.requested_vcpus == 1
             assert alloc.requested_disk_gb == 10
-            assert alloc.requested_kind == "local-libvirt"
+            assert alloc.requested_kind is ResourceKind.LOCAL_LIBVIRT
             # No reserve: the ledger holds nothing for a queued row (only the seeded grant
             # was inserted directly, never via accounting, so the ledger is empty).
             assert await _count_ledger(conn) == 0

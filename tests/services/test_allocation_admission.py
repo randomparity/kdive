@@ -116,7 +116,7 @@ async def _seed_queued(conn: psycopg.AsyncConnection, resource_id: UUID) -> Allo
             project="proj",
             resource_id=None,
             state=AllocationState.REQUESTED,
-            requested_kind=ResourceKind.LOCAL_LIBVIRT.value,
+            requested_kind=ResourceKind.LOCAL_LIBVIRT,
         ),
     )
 

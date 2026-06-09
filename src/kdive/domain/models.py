@@ -216,7 +216,7 @@ class Allocation(DomainModel, _Attribution):
     active_ended_at: datetime | None = None
     pcie_claim: list[PCIeClaim] = Field(default_factory=list)
     requested_pcie_specs: list[str] = Field(default_factory=list)
-    requested_kind: str | None = None
+    requested_kind: ResourceKind | None = None
     requested_resource_id: UUID | None = None
 
 

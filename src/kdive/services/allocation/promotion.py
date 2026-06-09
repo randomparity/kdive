@@ -289,7 +289,7 @@ async def _candidate_hosts(conn: AsyncConnection, alloc: Allocation) -> list[Res
         await cur.execute(
             "SELECT * FROM resources WHERE kind = %s AND status = 'available' AND NOT cordoned "
             "ORDER BY created_at, id",
-            (alloc.requested_kind,),
+            (alloc.requested_kind.value,),
         )
         rows = await cur.fetchall()
     candidates = [Resource.model_validate(row) for row in rows]

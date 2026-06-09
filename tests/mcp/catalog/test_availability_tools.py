@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEM_SHAPES
-from kdive.domain.models import Allocation, SystemShape
+from kdive.domain.models import Allocation, ResourceKind, SystemShape
 from kdive.domain.pcie import PCIeClaim
 from kdive.domain.state import AllocationState
 from kdive.mcp.auth import RequestContext
@@ -122,7 +122,7 @@ async def _alloc_on(
     state: AllocationState,
     project: str = "tenant-x",
     pcie_claim: list[PCIeClaim] | None = None,
-    requested_kind: str | None = None,
+    requested_kind: ResourceKind | None = None,
     requested_resource_id: UUID | None = None,
 ) -> UUID:
     await _ensure_budget(pool, project)
@@ -350,10 +350,16 @@ def test_queue_depth_counts_by_kind_and_by_id(migrated_url: str) -> None:
             res_id = await _register(pool)
             # Two by-kind queued rows + one by-id queued row (requested_kind null).
             await _alloc_on(
-                pool, None, state=AllocationState.REQUESTED, requested_kind="local-libvirt"
+                pool,
+                None,
+                state=AllocationState.REQUESTED,
+                requested_kind=ResourceKind.LOCAL_LIBVIRT,
             )
             await _alloc_on(
-                pool, None, state=AllocationState.REQUESTED, requested_kind="local-libvirt"
+                pool,
+                None,
+                state=AllocationState.REQUESTED,
+                requested_kind=ResourceKind.LOCAL_LIBVIRT,
             )
             await _alloc_on(
                 pool,

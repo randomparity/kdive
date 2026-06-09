@@ -47,7 +47,7 @@ from kdive.domain.cost import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lease import resolve_window_hours
-from kdive.domain.models import Allocation, Resource
+from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.pcie import MatchOutcome, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState
@@ -123,7 +123,7 @@ class AllocationRequest:
     shape: str | None = None
     pcie_specs: tuple[str, ...] = ()
     on_capacity: Literal["deny", "queue"] = "deny"
-    requested_kind: str | None = None
+    requested_kind: ResourceKind | None = None
     requested_resource_id: UUID | None = None
 
 

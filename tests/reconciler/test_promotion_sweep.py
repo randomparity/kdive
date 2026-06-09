@@ -40,7 +40,7 @@ from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, run_repair
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
-_KIND = "local-libvirt"
+_KIND = ResourceKind.LOCAL_LIBVIRT
 _NIC = {
     "bdf": "0000:01:00.0",
     "vendor_id": "8086",

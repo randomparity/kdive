@@ -83,7 +83,7 @@ class Repository[M: BaseModel]:
         return {
             name: Jsonb(dumped[name])
             if name in self._json_columns and dumped[name] is not None
-            else dumped[name]
+            else _to_db_value(dumped[name])
             for name in self._insert_columns
         }
 
@@ -237,6 +237,13 @@ class KeyedRepository[M: BaseModel](Repository[M]):
         if row is None:  # Invariant: INSERT ... RETURNING always yields one row.
             raise RuntimeError(f"UPSERT into {self._table} returned no row")
         return self._model.model_validate(row)
+
+
+def _to_db_value(value: object) -> object:
+    """Convert enum-backed domain scalars to their SQL column representation."""
+    if isinstance(value, StrEnum):
+        return value.value
+    return value
 
 
 RESOURCES = StatefulRepository(

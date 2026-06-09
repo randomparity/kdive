@@ -273,9 +273,7 @@ async def request_allocation(
                     shape=prepared.sizing.shape,
                     pcie_specs=prepared.specs,
                     on_capacity=prepared.payload.on_capacity,
-                    requested_kind=(
-                        None if prepared.resolved_id is not None else prepared.kind.value
-                    ),
+                    requested_kind=None if prepared.resolved_id is not None else prepared.kind,
                     requested_resource_id=prepared.resolved_id,
                 ),
             )
