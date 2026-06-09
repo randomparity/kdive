@@ -27,7 +27,6 @@ from kdive.domain.cost import Selector
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Resource
 from kdive.domain.pcie import MatchOutcome, parse_match_spec
-from kdive.domain.shapes import resolve_request_sizing
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -52,6 +51,7 @@ from kdive.services.allocation.release import (
     release_with_backstops,
 )
 from kdive.services.allocation.renew import RenewOutcome, renew
+from kdive.services.allocation.sizing import resolve_request_sizing
 
 _log = logging.getLogger(__name__)
 
