@@ -139,7 +139,6 @@ def build_app(
     pool: AsyncConnectionPool,
     *,
     verifier: JWTVerifier | None = None,
-    provider_resolver: ProviderResolver | None = None,
     provider_composition: ProviderComposition | None = None,
     secret_registry: SecretRegistry,
 ) -> FastMCP:
@@ -149,8 +148,6 @@ def build_app(
         pool: The shared async connection pool tools read through.
         verifier: An injected verifier (tests pass a local-keypair one); when
             ``None``, built from the OIDC env vars via :func:`build_verifier`.
-        provider_resolver: Injected per-kind provider resolver passed to provider-aware
-            tool registrars; when ``None``, built from the default provider composition.
         provider_composition: Provider assembly owner used when the app constructs its own
             resolver/reaper pair.
         secret_registry: App-owned registry shared by secret backends and logging.
@@ -158,7 +155,7 @@ def build_app(
     app: FastMCP = FastMCP(name="kdive", auth=verifier or build_verifier())
     app.add_middleware(DenialAuditMiddleware(pool))
     composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
-    resolver = provider_resolver or composition.build_provider_resolver()
+    resolver = composition.build_provider_resolver()
     reaper = composition.build_reconciler_reaper()
     for register in _PLANE_REGISTRARS:
         register(app, pool, resolver, secret_registry, reaper)

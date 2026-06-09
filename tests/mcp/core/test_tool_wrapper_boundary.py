@@ -358,12 +358,14 @@ def test_systems_provision_resolves_fault_inject_runtime(
             resource_id = await _seed_fault_inject_resource_and_limits(pool)
             monkeypatch.setattr(allocations_tools, "current_context", _ctx)
             monkeypatch.setattr(systems_tools, "current_context", _ctx)
-            resolver = composition.build_provider_resolver(enable_fault_inject=True)
+            monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
+            secret_registry = SecretRegistry()
+            provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
             app = build_app(
                 pool,
                 verifier=_verifier(),
-                provider_resolver=resolver,
-                secret_registry=SecretRegistry(),
+                provider_composition=provider_composition,
+                secret_registry=secret_registry,
             )
             async with Client(app) as client:
                 granted = await _call_tool(
@@ -399,12 +401,14 @@ def test_debug_ops_resolve_fault_inject_runtime_through_fastmcp(
             run_id = await _seed_fault_inject_run(pool)
             monkeypatch.setattr(debug_sessions_tools, "current_context", _ctx)
             monkeypatch.setattr(debug_ops_tools, "current_context", _ctx)
-            resolver = composition.build_provider_resolver(enable_fault_inject=True)
+            monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
+            secret_registry = SecretRegistry()
+            provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
             app = build_app(
                 pool,
                 verifier=_verifier(),
-                provider_resolver=resolver,
-                secret_registry=SecretRegistry(),
+                provider_composition=provider_composition,
+                secret_registry=secret_registry,
             )
             async with Client(app) as client:
                 session = await _call_tool(
