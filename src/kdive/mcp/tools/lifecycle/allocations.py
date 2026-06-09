@@ -169,17 +169,17 @@ async def _select_target(
     host (a missing/non-schedulable target is a ``configuration_error``). With specs, the
     candidate schedulable hosts are filtered to one that has a **free matching device for
     every spec** — a best-effort pre-lock filter; the in-lock claim re-resolves
-    authoritatively. The denial splits config vs. capacity: a spec **no candidate host's
-    descriptors match at all** is a ``configuration_error`` (the card is not in the fleet);
-    a spec whose matches exist but are **all currently claimed** is an ``allocation_denied``
-    (busy, queueable via #164).
+    authoritatively. If a host has matching descriptors but every match is busy, this returns
+    that host so the shared admission gate can route ``on_capacity=queue`` through the normal
+    enqueue path. Only a spec that **no candidate host's descriptors match at all** returns a
+    ``configuration_error`` here.
     """
     if not specs:
         return _Selection(await _resolve_resource(conn, resource_id, kind))
     candidates = await _schedulable_candidates(conn, resource_id, kind)
     if not candidates:
         return _Selection(None, ErrorCategory.CONFIGURATION_ERROR)
-    saw_capacity = False
+    capacity_candidate: Resource | None = None
     for candidate in candidates:
         descriptors = pcie_claim.descriptors_for(candidate)
         claims = await pcie_claim.active_claims(conn, candidate.id)
@@ -187,11 +187,10 @@ async def _select_target(
         if resolution.outcome is MatchOutcome.MATCHED:
             return _Selection(candidate)
         if resolution.outcome is MatchOutcome.CAPACITY:
-            saw_capacity = True
-    category = (
-        ErrorCategory.ALLOCATION_DENIED if saw_capacity else ErrorCategory.CONFIGURATION_ERROR
-    )
-    return _Selection(None, category)
+            capacity_candidate = candidate
+    if capacity_candidate is not None:
+        return _Selection(capacity_candidate)
+    return _Selection(None, ErrorCategory.CONFIGURATION_ERROR)
 
 
 async def _schedulable_candidates(

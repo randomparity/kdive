@@ -143,7 +143,7 @@ class AdmissionOutcome:
     ``reason="at_capacity"``) denials. A **budget** denial shares the ``allocation_denied``
     category with the host-cap denial but is NOT queueable (waiting frees no budget), so the
     enqueue decision branches on this explicit flag, never on the category. Configuration and
-    PCIe denials are likewise not queueable.
+    PCIe-busy denials are queueable; PCIe-config denials are not.
     """
 
     granted: bool
@@ -390,8 +390,14 @@ async def _resolve_pcie_claim(
         if resolution.outcome is MatchOutcome.CONFIG
         else ErrorCategory.ALLOCATION_DENIED
     )
+    queueable = resolution.outcome is MatchOutcome.CAPACITY
     return _PCIeClaimResult(
-        denial=AdmissionOutcome(granted=False, allocation=None, category=category),
+        denial=AdmissionOutcome(
+            granted=False,
+            allocation=None,
+            category=category,
+            queueable=queueable,
+        ),
         devices=[],
     )
 

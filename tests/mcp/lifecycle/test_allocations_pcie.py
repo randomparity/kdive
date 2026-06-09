@@ -78,6 +78,7 @@ async def _register(pool: AsyncConnectionPool, *, node_devices: list[FakeNodeDev
                 project="proj",
                 max_concurrent_allocations=1_000_000,
                 max_concurrent_systems=1_000_000,
+                max_pending_allocations=10,
                 updated_at=_DT,
             ),
         )
@@ -85,7 +86,11 @@ async def _register(pool: AsyncConnectionPool, *, node_devices: list[FakeNodeDev
 
 
 async def _request(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, pcie_devices: list[str]
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    pcie_devices: list[str],
+    on_capacity: str = "deny",
 ) -> ToolResponse:
     request: dict[str, Any] = {
         "vcpus": 1,
@@ -94,6 +99,7 @@ async def _request(
         "window": None,
         "resource": {"mode": "kind", "kind": "local-libvirt"},
         "pcie_devices": pcie_devices,
+        "on_capacity": on_capacity,
     }
     return await alloc_tools.request_allocation(pool, ctx, project="proj", request=request)
 
@@ -137,6 +143,25 @@ def test_request_all_busy_is_capacity_denial(migrated_url: str) -> None:
             second = await _request(pool, _ctx(), pcie_devices=["8086:1572"])
         assert second.status == "error"
         assert second.error_category == "allocation_denied"
+
+    asyncio.run(_run())
+
+
+def test_request_all_busy_with_queue_enqueues(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, node_devices=[_x710_nodedev()])
+            first = await _request(pool, _ctx(), pcie_devices=["8086:1572"])
+            assert first.status == "granted"
+            second = await _request(
+                pool,
+                _ctx(),
+                pcie_devices=["8086:1572"],
+                on_capacity="queue",
+            )
+        assert second.status == "requested"
+        assert second.data["project"] == "proj"
+        assert "resource_id" not in second.data
 
     asyncio.run(_run())
 
