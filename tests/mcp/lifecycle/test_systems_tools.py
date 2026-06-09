@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import ComponentRef
+from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -860,7 +861,7 @@ def test_provision_handler_commits_uploaded_rootfs_artifact(
                     owner_kind="systems",
                     owner_id=UUID(sys_id),
                     prefix=f"local/systems/{sys_id}/",
-                    entries=[upload_manifest.ManifestEntry("rootfs", "sha256:x", 18)],
+                    entries=[ManifestEntry("rootfs", "sha256:x", 18)],
                     ttl=timedelta(hours=1),
                 )
             job = await _enqueue_provision(pool, sys_id, alloc_id)

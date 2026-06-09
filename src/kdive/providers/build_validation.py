@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from kdive.components.requirements import ConfigRequirements, validate_config_requirements
-from kdive.db.upload_manifest import ManifestEntry
+from kdive.components.uploads import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.store.objectstore import HeadResult

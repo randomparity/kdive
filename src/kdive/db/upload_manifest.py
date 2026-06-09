@@ -18,13 +18,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-
-class ManifestEntry(NamedTuple):
-    """One declared artifact: its name, base64 SHA-256, and byte size."""
-
-    name: str
-    sha256: str
-    size_bytes: int
+from kdive.components.uploads import ManifestEntry
 
 
 class UploadManifest(NamedTuple):

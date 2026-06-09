@@ -10,9 +10,9 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.models import Allocation, Investigation, Resource, ResourceKind, Run, System
 from kdive.domain.state import (
     AllocationState,

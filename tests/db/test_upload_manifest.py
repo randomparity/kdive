@@ -8,7 +8,8 @@ from uuid import uuid4
 
 import psycopg
 
-from kdive.db.upload_manifest import ManifestEntry, delete_manifest, get_manifest, replace_manifest
+from kdive.components.uploads import ManifestEntry
+from kdive.db.upload_manifest import delete_manifest, get_manifest, replace_manifest
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:

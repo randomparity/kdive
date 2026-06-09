@@ -20,9 +20,9 @@ from uuid import UUID
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.state import RunState
 from kdive.reconciler.uploads import (
     owner_pre_finalize as _owner_pre_finalize,

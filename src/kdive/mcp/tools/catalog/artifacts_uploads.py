@@ -14,10 +14,10 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import Sensitivity
 from kdive.domain.state import RunState, SystemState

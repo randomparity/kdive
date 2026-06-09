@@ -7,7 +7,7 @@ import struct
 import pytest
 
 from kdive.components.requirements import ConfigRequirements
-from kdive.db.upload_manifest import ManifestEntry
+from kdive.components.uploads import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.build_validation import (
     extract_build_id_ranged,

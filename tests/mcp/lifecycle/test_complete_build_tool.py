@@ -6,9 +6,9 @@ import asyncio
 
 from psycopg.rows import dict_row
 
+from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
-from kdive.db.upload_manifest import ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.state import RunState
 from kdive.mcp.tools.catalog.artifacts_uploads import create_run_upload
