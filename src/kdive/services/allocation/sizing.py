@@ -7,9 +7,7 @@ from psycopg import AsyncConnection
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.shapes import ResolvedSizing, ShapeSizing
-
-# A shape's memory_mb maps to the cost Selector's memory_gb exactly (the whole-GB constraint).
-_MB_PER_GB = 1024
+from kdive.domain.sizing import MB_PER_GB
 
 
 async def resolve_shape(conn: AsyncConnection, name: str) -> ShapeSizing:
@@ -76,7 +74,7 @@ async def resolve_request_sizing(
         sizing = await resolve_shape(conn, shape)
         return ResolvedSizing(
             vcpus=sizing.vcpus,
-            memory_gb=sizing.memory_mb // _MB_PER_GB,
+            memory_gb=sizing.memory_mb // MB_PER_GB,
             disk_gb=sizing.disk_gb,
             pcie_match=sizing.pcie_match,
             shape=shape,

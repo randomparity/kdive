@@ -38,6 +38,7 @@ from kdive.domain.profile_documents import (
     SerializedExpectedBootFailure,
     SerializedProvisioningProfile,
 )
+from kdive.domain.sizing import MB_PER_GB
 from kdive.domain.state import (
     AllocationState,
     DebugSessionState,
@@ -358,11 +359,6 @@ class Quota(_DomainBase):
     updated_at: datetime
 
 
-# A shape's memory_mb maps to the cost Selector's memory_gb exactly only when it is a
-# whole-GB multiple (ADR-0067); the same factor the cost model uses (cost._MB_PER_GB).
-_MB_PER_GB = 1024
-
-
 class SystemShape(_DomainBase):
     """One named sizing preset in the shapes catalog (ADR-0067).
 
@@ -384,8 +380,8 @@ class SystemShape(_DomainBase):
     @field_validator("memory_mb")
     @classmethod
     def _whole_gb(cls, value: int) -> int:
-        if value % _MB_PER_GB != 0:
-            raise ValueError(f"memory_mb {value} must be a whole-GB multiple of {_MB_PER_GB}")
+        if value % MB_PER_GB != 0:
+            raise ValueError(f"memory_mb {value} must be a whole-GB multiple of {MB_PER_GB}")
         return value
 
 

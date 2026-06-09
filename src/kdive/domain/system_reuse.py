@@ -24,10 +24,7 @@ from dataclasses import dataclass, field
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, System
 from kdive.domain.pcie import PCIeClaim, parse_match_spec
-from kdive.domain.sizing import AllocationSizing, concrete_sizing_from_mapping
-
-_MB_PER_GB = 1024
-"""Maps the Allocation's GB memory snapshot to the profile's MB sizing (ADR-0067)."""
+from kdive.domain.sizing import MB_PER_GB, AllocationSizing, concrete_sizing_from_mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +71,7 @@ def read_system_sizing(alloc: Allocation, system: System) -> AllocationSizing:
     ):
         return AllocationSizing(
             vcpu=alloc.requested_vcpus,
-            memory_mb=alloc.requested_memory_gb * _MB_PER_GB,
+            memory_mb=alloc.requested_memory_gb * MB_PER_GB,
             disk_gb=alloc.requested_disk_gb,
         )
     return concrete_sizing_from_mapping(system.provisioning_profile)
@@ -139,7 +136,7 @@ def snapshot_satisfies(
     pcie_ok = _pcie_claims_contain_all(claims, req.pcie)
     if req.vcpus is not None and sizing.vcpu < req.vcpus:
         return False
-    if req.memory_gb is not None and sizing.memory_mb < req.memory_gb * _MB_PER_GB:
+    if req.memory_gb is not None and sizing.memory_mb < req.memory_gb * MB_PER_GB:
         return False
     if req.disk_gb is not None and sizing.disk_gb < req.disk_gb:
         return False

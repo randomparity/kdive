@@ -25,7 +25,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Job, JobKind, System
-from kdive.domain.sizing import AllocationSizing
+from kdive.domain.sizing import MB_PER_GB, AllocationSizing
 from kdive.domain.state import AllocationState, IllegalTransition, SystemState
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
@@ -101,10 +101,6 @@ class DefinedSystemAdmitted:
 type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted | DefinedSystemAdmitted
 
 
-# Maps the Allocation's GB memory snapshot to the profile's MB sizing (ADR-0067 lossless).
-_MB_PER_GB = 1024
-
-
 def _failure(
     object_id: str | UUID,
     category: ErrorCategory = ErrorCategory.CONFIGURATION_ERROR,
@@ -161,7 +157,7 @@ def _stored_profile_for(
             profile,
             AllocationSizing(
                 vcpu=alloc.requested_vcpus,
-                memory_mb=alloc.requested_memory_gb * _MB_PER_GB,
+                memory_mb=alloc.requested_memory_gb * MB_PER_GB,
                 disk_gb=alloc.requested_disk_gb,
             ),
         )

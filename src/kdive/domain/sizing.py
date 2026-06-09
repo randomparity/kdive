@@ -7,6 +7,9 @@ from dataclasses import dataclass
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
+MB_PER_GB = 1024
+"""Maps whole-GB memory snapshots to MB sizing fields (ADR-0067)."""
+
 
 @dataclass(frozen=True, slots=True)
 class AllocationSizing:
