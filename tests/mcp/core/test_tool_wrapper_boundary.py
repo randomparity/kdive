@@ -17,6 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import PresignedUpload, PresignPutRequest
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
 from kdive.domain.models import Allocation, Budget, Investigation, Quota, Run, System
 from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
@@ -38,7 +39,6 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.resources.discovery import register_discovered_resource
-from kdive.store.objectstore import PresignedUpload, PresignPutRequest
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.systems_support import fault_inject_profile, granted_allocation, upload_profile
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn

@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import StoredArtifact
 from kdive.components.references import LocalComponentRef
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import Sensitivity
@@ -26,7 +27,6 @@ from kdive.providers.ports import (
 )
 from kdive.providers.runtime import ProviderRuntime
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import StoredArtifact
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
 

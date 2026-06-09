@@ -18,14 +18,7 @@ from uuid import UUID, uuid4
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-from kdive.components.artifacts import (
-    ArtifactWriteRequest,
-    FetchedArtifact,
-    HeadResult,
-    PresignedUpload,
-    PresignPutRequest,
-    StoredArtifact,
-)
+from kdive.components import artifacts as artifact_types
 from kdive.components.artifacts import (
     artifact_key as artifact_key,
 )
@@ -77,7 +70,9 @@ class ObjectStore:
         self._client = client
         self._bucket = bucket
 
-    def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+    def put_artifact(
+        self, request: artifact_types.ArtifactWriteRequest
+    ) -> artifact_types.StoredArtifact:
         """Write ``data`` under the key scheme; return its key, etag, and class.
 
         The object carries the request's ``sensitivity`` and ``retention_class`` as user metadata.
@@ -101,14 +96,14 @@ class ObjectStore:
             )
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("put_object", key, err) from err
-        return StoredArtifact(
+        return artifact_types.StoredArtifact(
             key,
             _normalize_etag(resp["ETag"]),
             request.sensitivity,
             request.retention_class,
         )
 
-    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+    def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
         """Fetch the object at ``key``, optionally guarded by an ``If-Match`` on ``etag``.
 
         When ``etag`` is a bare value (from :class:`StoredArtifact`), the GET is
@@ -157,9 +152,9 @@ class ObjectStore:
             # The download streams here, after the headers; a mid-stream timeout or
             # dropped connection raises a BotoCoreError that must stay typed too.
             raise _infrastructure_error("get_object", key, err) from err
-        return FetchedArtifact(data, sensitivity, retention_class)
+        return artifact_types.FetchedArtifact(data, sensitivity, retention_class)
 
-    def head(self, key: str) -> HeadResult | None:
+    def head(self, key: str) -> artifact_types.HeadResult | None:
         """Return the object's size/checksum/etag, or ``None`` if it does not exist.
 
         Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned.
@@ -177,7 +172,7 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("head_object", key, err) from err
-        return HeadResult(
+        return artifact_types.HeadResult(
             size_bytes=int(resp["ContentLength"]),
             checksum_sha256=resp.get("ChecksumSHA256"),
             etag=_normalize_etag(resp["ETag"]),
@@ -199,7 +194,9 @@ class ObjectStore:
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("get_range", key, err) from err
 
-    def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
+    def presign_put(
+        self, request: artifact_types.PresignPutRequest
+    ) -> artifact_types.PresignedUpload:
         """Mint a presigned PUT that signs the checksum + object metadata into the URL.
 
         The agent must send the returned ``required_headers`` (the signed
@@ -237,7 +234,7 @@ class ObjectStore:
             "x-amz-meta-sensitivity": request.sensitivity.value,
             "x-amz-meta-retention-class": request.retention_class,
         }
-        return PresignedUpload(url=url, required_headers=headers)
+        return artifact_types.PresignedUpload(url=url, required_headers=headers)
 
     def list_prefix(self, prefix: str) -> list[str]:
         """Return every object key under ``prefix`` (paginated), or ``[]``.
@@ -269,7 +266,9 @@ class ObjectStore:
             raise _infrastructure_error("delete_object", key, err) from err
 
 
-def register_artifact_row(stored: StoredArtifact, *, owner_kind: str, owner_id: UUID) -> Artifact:
+def register_artifact_row(
+    stored: artifact_types.StoredArtifact, *, owner_kind: str, owner_id: UUID
+) -> Artifact:
     """Build the ``artifacts`` row for a stored object (no database access).
 
     The sensitivity/retention come from ``stored`` so the row matches the object by

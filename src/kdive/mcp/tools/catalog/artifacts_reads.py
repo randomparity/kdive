@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
+from kdive.components.artifacts import FetchedArtifact, HeadResult
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import Sensitivity
 from kdive.log import bind_context
@@ -27,8 +28,6 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
 from kdive.store.objectstore import (
-    FetchedArtifact,
-    HeadResult,
     object_store_from_env,
 )
 

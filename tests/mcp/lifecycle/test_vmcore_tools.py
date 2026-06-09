@@ -11,6 +11,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job, JobKind, Sensitivity
@@ -23,7 +24,6 @@ from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashPostmortem
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import StoredArtifact
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 
 _AUTH = Authorizing(principal="u", agent_session="s", project="proj")

@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import HeadResult
 from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
@@ -24,7 +25,6 @@ from kdive.domain.state import (
 from kdive.mcp.auth import RequestContext
 from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.security.authz.rbac import Role
-from kdive.store.objectstore import HeadResult
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
 

@@ -12,6 +12,7 @@ from uuid import UUID
 import libvirt
 import pytest
 
+from kdive.components.artifacts import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
@@ -24,7 +25,6 @@ from kdive.providers.local_libvirt.lifecycle.install import (
     classify_console,
 )
 from kdive.providers.ports import InstallRequest
-from kdive.store.objectstore import FetchedArtifact
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")

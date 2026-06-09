@@ -10,6 +10,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.db.idempotency import abandon_run_step, claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
@@ -38,8 +39,6 @@ from kdive.services.runs.steps import (
     installed_initrd_ref,
 )
 from kdive.store.objectstore import (
-    ArtifactWriteRequest,
-    StoredArtifact,
     object_store_from_env,
     register_artifact_row,
 )

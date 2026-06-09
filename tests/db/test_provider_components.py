@@ -13,6 +13,7 @@ from uuid import UUID
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import HeadResult
 from kdive.db.provider_components import (
     ArtifactComponentRequest,
     ComponentRegistration,
@@ -29,7 +30,6 @@ from kdive.db.provider_components import (
     list_visible_components,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.store.objectstore import HeadResult
 
 type TestVisibility = Literal["public", "project", "host-policy"]
 

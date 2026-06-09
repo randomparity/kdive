@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import HeadResult, StoredArtifact
 from kdive.components.catalog import load_fixture_catalog
 from kdive.components.references import CONFIG_COMPONENT, ComponentRef
 from kdive.components.requirements import ConfigRequirements
@@ -46,8 +47,6 @@ from kdive.security.authz.rbac import Role, require_role
 from kdive.services.runs.steps import BuildStepResult, platform_owned_cmdline_token
 from kdive.services.runs.steps import existing_build_result as _existing_build_result
 from kdive.store.objectstore import (
-    HeadResult,
-    StoredArtifact,
     object_store_from_env,
     register_artifact_row,
 )

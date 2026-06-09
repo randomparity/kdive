@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import ArtifactWriteRequest
 from kdive.components.references import ComponentRef
 from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
@@ -45,7 +46,7 @@ from kdive.providers.local_libvirt.lifecycle.materialize import (
 )
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.store.objectstore import ArtifactWriteRequest, ObjectStore, artifact_key
+from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
 )

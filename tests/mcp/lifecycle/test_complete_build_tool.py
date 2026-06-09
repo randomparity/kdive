@@ -6,6 +6,7 @@ import asyncio
 
 from psycopg.rows import dict_row
 
+from kdive.components.artifacts import HeadResult, PresignedUpload, PresignPutRequest
 from kdive.components.uploads import ManifestEntry
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db import upload_manifest
@@ -15,7 +16,6 @@ from kdive.domain.state import RunState
 from kdive.mcp.tools.catalog.artifacts_uploads import create_run_upload
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
 from kdive.providers.ports import BuildOutput
-from kdive.store.objectstore import HeadResult, PresignedUpload, PresignPutRequest
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )

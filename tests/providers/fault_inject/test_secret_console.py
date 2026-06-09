@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.models import Sensitivity
 from kdive.providers.fault_inject.artifacts.secret_console import (
     FaultInjectSecretConsole,
@@ -16,7 +17,6 @@ from kdive.providers.fault_inject.artifacts.secret_console import (
 from kdive.security.secrets.redaction import REDACTION, Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend
-from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
 
 _SENTINEL = "bmc-7f3a9c1e5d2b8a04f6e1c0937a55de28b41f9c6d0e2a7b3"  # high-entropy, unique
 

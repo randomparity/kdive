@@ -14,6 +14,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.artifacts import PresignedUpload, PresignPutRequest
 from kdive.components.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -30,8 +31,6 @@ from kdive.profiles.provisioning import ProvisioningProfile, rootfs_upload_windo
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.store.objectstore import (
-    PresignedUpload,
-    PresignPutRequest,
     artifact_key,
     object_store_from_env,
     owner_prefix,

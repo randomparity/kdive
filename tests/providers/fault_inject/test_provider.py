@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 
 import kdive.providers.fault_inject.lifecycle.provider as provider_module
+from kdive.components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import PowerAction, Sensitivity
@@ -25,7 +26,6 @@ from kdive.providers.fault_inject.lifecycle.provider import (
 )
 from kdive.providers.ports import InstallRequest, SystemHandle
 from kdive.providers.ports.lifecycle import TransportHandleData
-from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
 
 _SYSTEM = UUID("11111111-1111-1111-1111-111111111111")
 _RUN = UUID("22222222-2222-2222-2222-222222222222")

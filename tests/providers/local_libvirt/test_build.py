@@ -13,6 +13,7 @@ from uuid import UUID
 
 import pytest
 
+from kdive.components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
@@ -29,7 +30,6 @@ from kdive.providers.local_libvirt.build import (
     _sync_tree,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import ArtifactWriteRequest, StoredArtifact
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
 _TENANT = "proj"

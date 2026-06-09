@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
+from kdive.components.artifacts import HeadResult, StoredArtifact
 from kdive.domain.models import Sensitivity
 from kdive.providers.ports.build import BuildOutput, ValidatedUpload
 from kdive.providers.ports.retrieve import (
@@ -12,7 +13,6 @@ from kdive.providers.ports.retrieve import (
     CrashResult,
     IntrospectOutput,
 )
-from kdive.store.objectstore import HeadResult, StoredArtifact
 
 
 def test_build_output_and_validated_upload_are_stable_namedtuples() -> None:
