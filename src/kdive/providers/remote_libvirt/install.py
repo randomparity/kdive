@@ -17,6 +17,7 @@ curl/tar/grub/reboot mechanics run only under the ``live_vm`` gate.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +41,8 @@ from kdive.providers.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.objectstore import object_store_from_env
+
+_log = logging.getLogger(__name__)
 
 # The single allowlisted in-guest helper the base image carries (ADR-0082 §1); the only program
 # this plane lets through GuestAgentExec.
@@ -224,6 +227,9 @@ class RemoteLibvirtInstall:
         except CategorizedError as exc:
             if exc.category not in _REBOOT_EXPECTED:
                 raise
+            # Expected: the reboot tore down the guest agent. Log it so a later BOOT_TIMEOUT
+            # can be told apart from a reboot command that genuinely failed (ADR-0082 §3).
+            _log.debug("reboot command lost the guest agent as expected: %s", exc)
 
     def _await_fresh_boot(
         self, agent_exec: GuestAgentExec, domain: _Domain, baseline: str, system_id: UUID
@@ -247,6 +253,7 @@ class RemoteLibvirtInstall:
             result = agent_exec.run(domain, [_HELPER, "boot-id"])
         except CategorizedError as exc:
             if exc.category in _REBOOT_EXPECTED:
+                _log.debug("boot-id poll: agent not back yet (%s)", exc.category.value)
                 return None
             raise
         if result.exit_status != 0:
