@@ -42,11 +42,15 @@ def context_from_claims(claims: Mapping[str, object]) -> RequestContext:
         raw_projects = ()
     if not isinstance(raw_projects, (list, tuple)):
         raise AuthError("projects claim is not a list")
-    projects = tuple(str(p) for p in raw_projects)
+    projects: list[str] = []
+    for project in raw_projects:
+        if not isinstance(project, str) or not project:
+            raise AuthError("projects claim entries must be non-empty strings")
+        projects.append(project)
     return RequestContext(
         principal=subject,
         agent_session=agent_session,
-        projects=projects,
+        projects=tuple(projects),
         roles=roles_from_claims(claims),
         platform_roles=platform_roles_from_claims(claims),
     )
