@@ -396,8 +396,8 @@ def _kdump_capture_present(initrd_path: Path | None) -> bool:
 
     A ``crashkernel=`` reservation is inert without a capture initramfs (ADR-0030 §4).
     This is necessary, not sufficient — it does not prove the initrd is kdump-capable;
-    it does not prove the initrd is kdump-capable (ADR-0055 §5). An embedded-initramfs kernel
-    (``initrd_ref=None`` → ``initrd_path is None``) is rejected for kdump.
+    an embedded-initramfs kernel (``initrd_ref=None`` → ``initrd_path is None``) is rejected
+    for kdump (ADR-0055 §5).
     """
     return initrd_path is not None and initrd_path.exists()
 
