@@ -11,23 +11,29 @@ re-registration).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
+import kdive.config as config
+from kdive.config.registry import Setting
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.settings import (
+    REMOTE_LIBVIRT_ALLOCATION_CAP,
+    REMOTE_LIBVIRT_CA_CERT_REF,
+    REMOTE_LIBVIRT_CLIENT_CERT_REF,
+    REMOTE_LIBVIRT_CLIENT_KEY_REF,
+    REMOTE_LIBVIRT_GDB_ADDR,
+    REMOTE_LIBVIRT_GDB_PORT_MAX,
+    REMOTE_LIBVIRT_GDB_PORT_MIN,
+    REMOTE_LIBVIRT_MACHINE,
+    REMOTE_LIBVIRT_NETWORK,
+    REMOTE_LIBVIRT_STORAGE_POOL,
+    REMOTE_LIBVIRT_URI,
+)
 from kdive.providers.remote_libvirt.transport import validate_remote_uri
 
-_URI_ENV = "KDIVE_REMOTE_LIBVIRT_URI"
-_CLIENT_CERT_REF_ENV = "KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF"
-_CLIENT_KEY_REF_ENV = "KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF"  # pragma: allowlist secret - env name
-_CA_CERT_REF_ENV = "KDIVE_REMOTE_LIBVIRT_CA_CERT_REF"
-_CAP_ENV = "KDIVE_REMOTE_LIBVIRT_ALLOCATION_CAP"
 _DEFAULT_CAP = 1
-_STORAGE_POOL_ENV = "KDIVE_REMOTE_LIBVIRT_STORAGE_POOL"
 _DEFAULT_STORAGE_POOL = "default"
-_NETWORK_ENV = "KDIVE_REMOTE_LIBVIRT_NETWORK"
 _DEFAULT_NETWORK = "default"
-_MACHINE_ENV = "KDIVE_REMOTE_LIBVIRT_MACHINE"
 # i440fx by default: under q35, libvirt places each virtio device behind an
 # auto-added pcie-root-port, and on QEMU 10.x those devices can come up in
 # D3cold ("Unable to change power state from D3cold to D0, device inaccessible"),
@@ -36,9 +42,6 @@ _MACHINE_ENV = "KDIVE_REMOTE_LIBVIRT_MACHINE"
 # q35 can set KDIVE_REMOTE_LIBVIRT_MACHINE=q35 once their host topology powers
 # the root ports correctly.
 _DEFAULT_MACHINE = "pc"
-_GDB_ADDR_ENV = "KDIVE_REMOTE_LIBVIRT_GDB_ADDR"
-_GDB_PORT_MIN_ENV = "KDIVE_REMOTE_LIBVIRT_GDB_PORT_MIN"
-_GDB_PORT_MAX_ENV = "KDIVE_REMOTE_LIBVIRT_GDB_PORT_MAX"
 _DEFAULT_GDB_PORT_MIN = 47000
 _DEFAULT_GDB_PORT_MAX = 47099
 
@@ -75,37 +78,37 @@ class RemoteLibvirtConfig:
 
 def is_remote_libvirt_configured() -> bool:
     """True when the operator supplied a remote host URI (the composition opt-in gate)."""
-    return bool(os.environ.get(_URI_ENV))
+    return bool(config.get(REMOTE_LIBVIRT_URI))
 
 
-def _required_env(name: str) -> str:
-    value = os.environ.get(name)
+def _required_env(setting: Setting[str]) -> str:
+    value = config.get(setting)
     if not value:
         raise CategorizedError(
-            f"{name} is not set; the remote-libvirt provider needs it",
+            f"{setting.name} is not set; the remote-libvirt provider needs it",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     return value
 
 
-def _int_env(name: str, default: int) -> int:
-    raw = os.environ.get(name)
+def _int_env(setting: Setting[str], default: int) -> int:
+    raw = config.get(setting)
     if raw is None:
         return default
     try:
         return int(raw)
     except ValueError:
         raise CategorizedError(
-            f"{name}={raw!r} is not an integer",
+            f"{setting.name}={raw!r} is not an integer",
             category=ErrorCategory.CONFIGURATION_ERROR,
         ) from None
 
 
-def _gdb_port_env(name: str, default: int) -> int:
-    port = _int_env(name, default)
+def _gdb_port_env(setting: Setting[str], default: int) -> int:
+    port = _int_env(setting, default)
     if port < 1 or port > 65535:
         raise CategorizedError(
-            f"{name}={port} is outside 1..65535",
+            f"{setting.name}={port} is outside 1..65535",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     return port
@@ -120,29 +123,30 @@ def remote_config_from_env() -> RemoteLibvirtConfig:
             scheme, ``no_verify``, or an operator-set ``pkipath``), or a gdbstub
             port range that is non-integer, outside 1..65535, or inverted.
     """
-    uri = _required_env(_URI_ENV)
+    uri = _required_env(REMOTE_LIBVIRT_URI)
     validate_remote_uri(uri)
     refs = TlsCertRefs(
-        client_cert_ref=_required_env(_CLIENT_CERT_REF_ENV),
-        client_key_ref=_required_env(_CLIENT_KEY_REF_ENV),
-        ca_cert_ref=_required_env(_CA_CERT_REF_ENV),
+        client_cert_ref=_required_env(REMOTE_LIBVIRT_CLIENT_CERT_REF),
+        client_key_ref=_required_env(REMOTE_LIBVIRT_CLIENT_KEY_REF),
+        ca_cert_ref=_required_env(REMOTE_LIBVIRT_CA_CERT_REF),
     )
-    cap = _int_env(_CAP_ENV, _DEFAULT_CAP)
-    gdb_port_min = _gdb_port_env(_GDB_PORT_MIN_ENV, _DEFAULT_GDB_PORT_MIN)
-    gdb_port_max = _gdb_port_env(_GDB_PORT_MAX_ENV, _DEFAULT_GDB_PORT_MAX)
+    cap = _int_env(REMOTE_LIBVIRT_ALLOCATION_CAP, _DEFAULT_CAP)
+    gdb_port_min = _gdb_port_env(REMOTE_LIBVIRT_GDB_PORT_MIN, _DEFAULT_GDB_PORT_MIN)
+    gdb_port_max = _gdb_port_env(REMOTE_LIBVIRT_GDB_PORT_MAX, _DEFAULT_GDB_PORT_MAX)
     if gdb_port_min > gdb_port_max:
         raise CategorizedError(
-            f"{_GDB_PORT_MIN_ENV}={gdb_port_min} exceeds {_GDB_PORT_MAX_ENV}={gdb_port_max}",
+            f"{REMOTE_LIBVIRT_GDB_PORT_MIN.name}={gdb_port_min} exceeds "
+            f"{REMOTE_LIBVIRT_GDB_PORT_MAX.name}={gdb_port_max}",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     return RemoteLibvirtConfig(
         uri=uri,
         cert_refs=refs,
         concurrent_allocation_cap=cap,
-        storage_pool=os.environ.get(_STORAGE_POOL_ENV) or _DEFAULT_STORAGE_POOL,
-        network=os.environ.get(_NETWORK_ENV) or _DEFAULT_NETWORK,
-        machine=os.environ.get(_MACHINE_ENV) or _DEFAULT_MACHINE,
-        gdb_addr=os.environ.get(_GDB_ADDR_ENV) or None,
+        storage_pool=config.get(REMOTE_LIBVIRT_STORAGE_POOL) or _DEFAULT_STORAGE_POOL,
+        network=config.get(REMOTE_LIBVIRT_NETWORK) or _DEFAULT_NETWORK,
+        machine=config.get(REMOTE_LIBVIRT_MACHINE) or _DEFAULT_MACHINE,
+        gdb_addr=config.get(REMOTE_LIBVIRT_GDB_ADDR) or None,
         gdb_port_min=gdb_port_min,
         gdb_port_max=gdb_port_max,
     )

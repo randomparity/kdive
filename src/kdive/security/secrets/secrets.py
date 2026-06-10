@@ -9,15 +9,13 @@ path that yields the value without first registering it.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Protocol
 
+import kdive.config as config
+from kdive.config.core_settings import SECRETS_ROOT
 from kdive.security.secrets.paths import PathSafetyError, confine_to_root
 from kdive.security.secrets.secret_registry import SecretRegistry
-
-_SECRETS_ROOT_ENV = "KDIVE_SECRETS_ROOT"  # pragma: allowlist secret - env var name, not a value
-_DEFAULT_SECRETS_ROOT = "/var/lib/kdive/secrets"
 
 _MAX_SECRET_FILE_BYTES = 64 * 1024
 """A secret (token, password, SSH key) is small. A larger file under the secrets
@@ -51,7 +49,7 @@ def read_secret_file(root: Path, ref: str) -> str:
 
 def secrets_root_from_env() -> Path:
     """Return the allowlisted secrets root from ``KDIVE_SECRETS_ROOT`` (or the default)."""
-    return Path(os.environ.get(_SECRETS_ROOT_ENV, _DEFAULT_SECRETS_ROOT))
+    return Path(config.require(SECRETS_ROOT))
 
 
 class SecretBackend(Protocol):

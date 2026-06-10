@@ -10,9 +10,10 @@ resolution read those keys. Happy-path discovery writes an empty
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
+import kdive.config as config
+from kdive.config.registry import Setting
 from kdive.domain.discovery import ResourceRecord
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ResourceKind
@@ -24,28 +25,22 @@ from kdive.providers.fault_inject.capabilities import (
     SECRET_REF_KEY,
     SEED_KEY,
 )
-
-_URI_ENV = "KDIVE_FAULT_INJECT_URI"
-_CAP_ENV = "KDIVE_FAULT_INJECT_ALLOCATION_CAP"
-_SEED_ENV = "KDIVE_FAULT_INJECT_SEED"
-_SECRET_REF_ENV = "KDIVE_FAULT_INJECT_SECRET_REF"  # pragma: allowlist secret - env var name
-
-_DEFAULT_URI = "fault-inject://local"
-_DEFAULT_CAP = 1
-_DEFAULT_SEED = 0
-_DEFAULT_SECRET_REF = "fault-inject/console-sentinel"  # pragma: allowlist secret - ref, not a value
+from kdive.providers.fault_inject.settings import (
+    FAULT_INJECT_ALLOCATION_CAP,
+    FAULT_INJECT_SECRET_REF,
+    FAULT_INJECT_SEED,
+    FAULT_INJECT_URI,
+)
 
 
-def _int_env(name: str, default: int) -> int:
-    """Read an integer env var, raising ``CONFIGURATION_ERROR`` on a non-integer value."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
+def _int_setting(setting: Setting[str]) -> int:
+    """Resolve an integer setting, raising ``CONFIGURATION_ERROR`` on a non-integer value."""
+    raw = config.require(setting)
     try:
         return int(raw)
     except ValueError:
         raise CategorizedError(
-            f"{name}={raw!r} is not an integer",
+            f"{setting.name}={raw!r} is not an integer",
             category=ErrorCategory.CONFIGURATION_ERROR,
         ) from None
 
@@ -82,12 +77,12 @@ class FaultInjectDiscovery:
                 integer.
         """
         return cls(
-            host_uri=os.environ.get(_URI_ENV, _DEFAULT_URI),
-            concurrent_allocation_cap=_int_env(_CAP_ENV, _DEFAULT_CAP),
-            seed=_int_env(_SEED_ENV, _DEFAULT_SEED),
+            host_uri=config.require(FAULT_INJECT_URI),
+            concurrent_allocation_cap=_int_setting(FAULT_INJECT_ALLOCATION_CAP),
+            seed=_int_setting(FAULT_INJECT_SEED),
             fault_rate={},
             max_latency_s={},
-            secret_ref=os.environ.get(_SECRET_REF_ENV, _DEFAULT_SECRET_REF),
+            secret_ref=config.require(FAULT_INJECT_SECRET_REF),
         )
 
     def list_resources(self) -> list[ResourceRecord]:

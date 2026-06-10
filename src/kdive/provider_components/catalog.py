@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+import kdive.config as config
+from kdive.config.core_settings import FIXTURE_CATALOG_PATH
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.provider_components.references import ComponentRef
 from kdive.provider_components.requirements import CmdlineRequirements, ConfigRequirements
 from kdive.provider_components.visibility import Visibility
 
 DEFAULT_FIXTURE_CATALOG_PATH = Path(__file__).parents[3] / "fixtures" / "local-libvirt"
-_FIXTURE_CATALOG_ENV = "KDIVE_FIXTURE_CATALOG_PATH"
 
 
 class FixtureStorage(BaseModel):
@@ -106,7 +106,7 @@ class FixtureCatalog(BaseModel):
 
 def fixture_catalog_path_from_env() -> Path:
     """Return the operator-provided fixture catalog path, or the source-tree default."""
-    raw = os.environ.get(_FIXTURE_CATALOG_ENV)
+    raw = config.get(FIXTURE_CATALOG_PATH)
     if raw is None or raw == "":
         return DEFAULT_FIXTURE_CATALOG_PATH
     return Path(raw)

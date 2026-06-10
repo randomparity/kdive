@@ -188,10 +188,32 @@ docs-check:
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     uv run python -c "from scripts.gen_tool_reference import write_reference; from pathlib import Path; write_reference(Path('$tmp'))"
-    if ! diff -ru docs/guide/reference "$tmp"; then
+    # config.md is generated separately (just config-docs-check); exclude it from the
+    # tool-reference directory diff so the two generators can share docs/guide/reference/.
+    if ! diff -ru --exclude=config.md docs/guide/reference "$tmp"; then
         echo "tool reference is stale — run 'just docs' and commit" >&2
         exit 1
     fi
 
+# Regenerate the committed config reference from the registry (mutating).
+config-docs:
+    uv run python scripts/gen_config_reference.py
+
+# Verify the committed config reference matches a fresh generation (CI gate).
+config-docs-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    uv run python -c "from pathlib import Path; from scripts.gen_config_reference import write_reference; write_reference(Path('$tmp'))"
+    if ! diff -u docs/guide/reference/config.md "$tmp"; then
+        echo "config reference is stale — run 'just config-docs' and commit" >&2
+        exit 1
+    fi
+
+# Structural guard: no KDIVE_* env read outside kdive.config (ADR-0087). Stdlib-only.
+config-guard:
+    uv run python scripts/config_env_guard.py
+
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check m2-gate test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check config-docs-check config-guard m2-gate test

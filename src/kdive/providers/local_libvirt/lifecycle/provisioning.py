@@ -16,7 +16,6 @@ ignores `<os><cmdline>` without a `<kernel>` element, and the test kernel plus i
 from __future__ import annotations
 
 import logging
-import os
 import subprocess  # noqa: S404 - qemu-img is invoked with a fixed argv, no shell
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -27,6 +26,7 @@ from uuid import UUID
 
 import libvirt
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
@@ -38,15 +38,12 @@ from kdive.profiles.provisioning import (
     validate_profile as _validate_profile,
 )
 from kdive.providers.local_libvirt.discovery import _KDIVE_METADATA_NS
-from kdive.providers.local_libvirt.lifecycle.constants import (
-    DEFAULT_LIBVIRT_URI,
-    LIBVIRT_URI_ENV,
-)
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     RootfsMaterializationContext,
     RootfsUploadContext,
     materialize_rootfs_base,
 )
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.runtime_paths import console_log_path, domain_name_for
 
 _log = logging.getLogger(__name__)
@@ -320,7 +317,7 @@ class LocalLibvirtProvisioning:
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect."""
-        host_uri = os.environ.get(LIBVIRT_URI_ENV, DEFAULT_LIBVIRT_URI)
+        host_uri = config.require(LIBVIRT_URI)
         # `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol (only
         # `defineXML`/`lookupByName`), so no suppression is needed at this seam.
         return cls(connect=lambda: libvirt.open(host_uri))

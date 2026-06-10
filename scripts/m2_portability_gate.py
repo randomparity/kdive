@@ -49,6 +49,16 @@ ALLOWED_FILES = frozenset(
         # touch that resets a stale session's transport through the injected TransportResetter
         # port so a dead worker's single-client gdbstub stops blocking re-attach.
         "src/kdive/reconciler/loop.py",
+        # Central config-registry migration (#233, ADR-0087): a one-time, reviewed platform
+        # refactor routing the scattered KDIVE_* reads in these agnostic-core modules through
+        # kdive.config. This is shared-infra (platform) work, not provider work; kdive/config/
+        # itself is outside CORE_PREFIXES, so only these in-place reader migrations register here.
+        "src/kdive/db/pool.py",
+        "src/kdive/domain/lease.py",
+        "src/kdive/mcp/auth.py",
+        "src/kdive/mcp/tools/catalog/artifacts_uploads.py",
+        "src/kdive/mcp/tools/debug/ops.py",
+        "src/kdive/security/secrets/secrets.py",
     }
 )
 

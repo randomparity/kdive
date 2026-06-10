@@ -16,15 +16,17 @@ from typing import Any
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.admin.default_compose import LOCAL_COMPOSE
 from kdive.admin.default_fixtures import LOCAL_LIBVIRT_FIXTURES
+from kdive.config.core_settings import DATABASE_URL, HTTP_HOST, HTTP_PORT
 from kdive.db.migrate import apply_migrations
 
 
 def local_env_defaults() -> dict[str, str]:
     home = os.environ.get("HOME", "")
-    host = os.environ.get("KDIVE_HTTP_HOST", "127.0.0.1")
-    port = os.environ.get("KDIVE_HTTP_PORT", "8000")
+    host = config.require(HTTP_HOST)
+    port = str(config.require(HTTP_PORT))
     return {
         # pragma: allowlist nextline secret
         "KDIVE_DATABASE_URL": "postgresql://kdive:kdive@localhost:5432/kdive",
@@ -80,7 +82,7 @@ def install_compose(dest: Path, *, force: bool = False) -> None:
 
 
 def migrate(database_url: str | None = None) -> int:
-    url = database_url or os.environ["KDIVE_DATABASE_URL"]
+    url = database_url or config.require(DATABASE_URL)
     conn = psycopg.connect(url, autocommit=True)
     try:
         applied = apply_migrations(conn)
