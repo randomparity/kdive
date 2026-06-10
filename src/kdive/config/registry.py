@@ -18,7 +18,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 RUNNABLE: frozenset[str] = frozenset({"server", "worker", "reconciler", "migrate"})
 
 
-def _never(env: Mapping[str, str]) -> bool:
+def never_required(env: Mapping[str, str]) -> bool:
+    """The default ``required_when``: a setting is never required by default.
+
+    Exposed (not private) so the reference generator can distinguish a genuinely
+    optional setting from one with a conditional predicate that is merely false for an
+    empty environment.
+    """
     return False
 
 
@@ -49,7 +55,7 @@ class Setting:
     group: str = "core"
     help: str = ""
     suggest: str = ""
-    required_when: Callable[[Mapping[str, str]], bool] = _never
+    required_when: Callable[[Mapping[str, str]], bool] = never_required
 
     def __post_init__(self) -> None:
         if not self.name.startswith("KDIVE_"):

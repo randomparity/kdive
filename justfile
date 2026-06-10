@@ -193,5 +193,21 @@ docs-check:
         exit 1
     fi
 
+# Regenerate the committed config reference from the registry (mutating).
+config-docs:
+    uv run python scripts/gen_config_reference.py
+
+# Verify the committed config reference matches a fresh generation (CI gate).
+config-docs-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    uv run python -c "from pathlib import Path; from scripts.gen_config_reference import write_reference; write_reference(Path('$tmp'))"
+    if ! diff -u docs/guide/reference/config.md "$tmp"; then
+        echo "config reference is stale — run 'just config-docs' and commit" >&2
+        exit 1
+    fi
+
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check m2-gate test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check config-docs-check m2-gate test
