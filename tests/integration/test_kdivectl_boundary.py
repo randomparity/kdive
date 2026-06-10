@@ -121,8 +121,10 @@ async def _drive_boundary(issuer: OidcIssuer, server_url: str, db_url: str) -> N
 
     admin_code = await _run_kdivectl(argv, token=admin, server_url=server_url)
     assert admin_code == 0, "platform_admin force-release should succeed (exit 0)"
-    actors_after_admin = await _force_release_audit_actors(db_url, allocation_id)
-    assert _OPERATOR_CLI_ACTOR in actors_after_admin, (
+    admin_operator_cli_rows = (await _force_release_audit_actors(db_url, allocation_id)).count(
+        _OPERATOR_CLI_ACTOR
+    )
+    assert admin_operator_cli_rows >= 1, (
         "admin success must leave a platform_audit_log row with actor=operator-cli"
     )
 
@@ -130,10 +132,14 @@ async def _drive_boundary(issuer: OidcIssuer, server_url: str, db_url: str) -> N
     assert operator_code == _AUTHORIZATION_DENIED_EXIT, (
         "platform_operator force-release should be denied with exit 3"
     )
-    actors_after_denial = await _force_release_audit_actors(db_url, allocation_id)
-    assert actors_after_denial.count(_OPERATOR_CLI_ACTOR) >= 2, (
-        "the denial must add a second operator-cli platform_audit_log row "
-        "(an under-privileged-but-platform-role denial is audited, not silent)"
+    denial_operator_cli_rows = (await _force_release_audit_actors(db_url, allocation_id)).count(
+        _OPERATOR_CLI_ACTOR
+    )
+    # Assert the *delta*, not a fixed count: the denial itself must add exactly one
+    # operator-cli row, independent of how many the success path wrote — an
+    # under-privileged-but-platform-role denial is audited, not silent.
+    assert denial_operator_cli_rows == admin_operator_cli_rows + 1, (
+        "the denial must add exactly one operator-cli platform_audit_log row"
     )
 
 

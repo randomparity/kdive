@@ -99,6 +99,9 @@ kdivectl inventory show [--project <project>]
 
 ### Secret-presence and fixture reads
 
+> **Availability:** these two verbs land with issue #252 and may not be present on your
+> build — run `kdivectl --help` to confirm. The shapes below match the M2.2 spec.
+
 Two platform-gated reads surface catalog presence without exposing values:
 
 ```bash
@@ -106,8 +109,7 @@ kdivectl secrets list                       # secret *presence* (refs only), pla
 kdivectl fixtures list [--project <project>] # available fixtures, project-scoped
 ```
 
-`secrets list` reports presence/refs only — it never returns secret values. (These verbs
-land with issue #252; the shapes above match the M2.2 spec.)
+`secrets list` reports presence/refs only — it never returns secret values.
 
 ## Read-only passthrough (`tool call`)
 
