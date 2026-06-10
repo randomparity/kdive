@@ -10,6 +10,11 @@ The `server`, `worker`, and `reconciler` run **on the host** (not in containers)
 the `docker-compose.yml` backends, so qemu disk-image and kernel-tree paths resolve where
 `libvirtd` runs. Containerizing them is a deferred follow-on (ADR-0042 §2).
 
+For the **remote** `qemu+tls://` variant — driving the spine against a host the worker tier does
+not share a filesystem with — see [remote-live-stack.md](remote-live-stack.md); it reuses this
+bring-up and adds worker→host TLS, the gdbstub ACL, and object-store reachability for the
+two-phase vmcore upload.
+
 The `just` recipes below are source-tree conveniences. Installed-package deployments use
 `python -m kdive migrate`, `python -m kdive seed-demo`, and `python -m kdive stack`; see
 [`docs/admin/local-stack.md`](../admin/local-stack.md).
