@@ -52,11 +52,35 @@ gate-allowlisted core change with its own ADR — the follow-up ADR-0083 §Conse
 | core (gate-allowlisted) | `mcp/tools/debug/sessions.py` | `_SSH`→`_DRGN_LIVE = "drgn-live"`; `_TRANSPORTS = {gdbstub, drgn-live}`; credential resolution keyed on the profile predicate, not the transport string |
 | core (gate-allowlisted) | `mcp/tools/debug/introspect.py` | gate `transport == "drgn-live"`; `resolve_live_ssh_session` → `resolve_live_drgn_session`; tool Field descriptions `ssh`→`drgn-live` |
 | profiles (not gated) | `profiles/provisioning.py` | add `drgn_live_requires_credential(profile) -> bool` |
-| provider (not gated) | `providers/local_libvirt/lifecycle/connect.py` | `open_transport` branch matches `drgn-live`; SSH realization + `ssh://host:port` handle unchanged |
-| provider (not gated) | `providers/remote_libvirt/connect.py` | add `drgn-live` branch returning the domain-name handle; `close_transport` tolerates a bare-domain handle |
-| ports (not gated) | `providers/ports/lifecycle.py`, `providers/fault_inject/lifecycle/provider.py` | `_TRANSPORT_KINDS = {gdbstub, drgn-live}` |
-| gate | `scripts/m2_portability_gate.py` | add the two `mcp/` files to `ALLOWED_FILES` |
+| provider (not gated) | `providers/local_libvirt/lifecycle/connect.py` | accept the `drgn-live` **kind**; SSH realization + the `ssh://host:port` **handle scheme** unchanged (see "token vs scheme" below) |
+| provider (not gated) | `providers/remote_libvirt/connect.py` | add a `drgn-live` **kind** branch returning the bare domain-name handle (ADR-0083 §4); change `close_transport` to a decode-or-no-op so the bare-domain handle does not fail its current unconditional `TransportHandleData.decode` |
+| provider (not gated) | `providers/fault_inject/lifecycle/provider.py` | accept the `drgn-live` **kind** (its `_TRANSPORT_KINDS` is the connector accepted-kind set: `ssh`→`drgn-live`); it emits a `drgn-live://` handle, so that scheme must decode (below) |
+| ports (not gated) | `providers/ports/lifecycle.py` | `_TRANSPORT_KINDS` here is the **handle-scheme** decode set, NOT the agent-facing token set — it must keep every scheme a connector emits (`gdbstub`, `ssh`) and add `drgn-live` (fault-inject emits it). Do **not** drop `ssh`. |
+| gate | `scripts/m2_portability_gate.py` | add the two `mcp/` files (`sessions.py`, `introspect.py`) to `ALLOWED_FILES` |
 | docs | `docs/guide/reference/*` | regenerate via `just docs` (tool Field descriptions changed) |
+
+### Transport token vs handle scheme (two distinct vocabularies)
+
+These were conflated in an earlier draft; they are separate and must not be unified:
+
+1. **Transport token** — the agent-facing `transport=` argument, the `debug_sessions.transport`
+   column value, the `kind` passed to `Connector.open_transport`, and the per-transport
+   single-attach conflict key. This set becomes `{gdbstub, drgn-live}` (owned by
+   `sessions.py _TRANSPORTS`, the `introspect.run` gate, and each connector's accepted-kind
+   check, including `fault_inject/lifecycle/provider.py _TRANSPORT_KINDS`).
+2. **Handle scheme** — `TransportHandleData.kind`, the `<scheme>://host:port` prefix a connector
+   encodes into the opaque handle, validated on decode against
+   `providers/ports/lifecycle.py _TRANSPORT_KINDS`. Both `close_transport` implementations (local
+   and remote) and the gdb-MI `get_or_attach` call `TransportHandleData.decode`, so the decode set
+   must accept **every scheme any connector emits**: `gdbstub` (all), `ssh` (local's drgn-live
+   realization handle), and `drgn-live` (fault-inject, which passes its kind through into the
+   handle). The **remote drgn-live handle is the bare domain name** (ADR-0083 §4) — unschemed — so
+   the remote `close_transport` must decode-or-no-op rather than decode unconditionally.
+
+Concretely: `ports/lifecycle.py _TRANSPORT_KINDS = {"gdbstub", "ssh", "drgn-live"}` (the decode
+set), while `sessions.py _TRANSPORTS = {"gdbstub", "drgn-live"}` (the token set). A plan task must
+verify local and fault-inject `end_session` still round-trips (their handles decode) and remote
+`end_session` no-ops cleanly on the bare-domain handle.
 
 ## Data flow (remote happy path)
 
@@ -80,12 +104,27 @@ Local is identical except the predicate is `True` (credential resolved + registe
 `open_transport`) and the stored handle is `ssh://127.0.0.1:22`. Core treats the handle as opaque
 in both cases; each provider's connector produces what its own `live_introspector` consumes.
 
+**Remote `start_session` does no guest-agent reachability probe.** Remote `open_transport("drgn-live")`
+returns the domain handle with no IO (unlike local, which probes SSH reachability, and unlike the
+gdbstub path, which probes RSP). So a remote `drgn-live` session reaches `live` even if the guest
+agent is unreachable; that failure surfaces at `introspect.run` (`transport_failure`). `live` here
+means "session row open", not "guest reachable". The reconciler's stale-heartbeat sweep
+(`reconciler/loop.py` `_repair_dead_sessions`) is the backstop that detaches an abandoned session.
+
 ## Error contract (unchanged taxonomy)
 
 - unknown transport → `configuration_error`
 - local-section profile missing `ssh_credential_ref` → `configuration_error {reason: ssh_credential_ref_missing}` (preserved)
 - unreachable guest agent → `transport_failure`; non-zero in-guest helper → `debug_attach_failure`; off-gate → `missing_dependency`
 - `introspect.run` on a `gdbstub` session → `configuration_error`
+- **Cross-tier misuse (pre-existing, documented, not newly guarded):** a gdb-MI op
+  (`debug.set_breakpoint`/`read_memory`/…) invoked on a `drgn-live` session is agent misuse. The
+  gdb-MI op gate (`mcp/tools/debug/ops.py` `_live_session`) checks state, not transport, so the op
+  reaches `get_or_attach` → `TransportHandleData.decode`. Post-rename that decode yields a clean
+  `configuration_error` for remote (bare domain, no scheme) and fault-inject, and the same
+  pre-existing wrong-endpoint attach for local (`ssh://…`). A `transport == "gdbstub"` guard would
+  be cleaner but lives in a third core file (`ops.py`) and would expand the gated surface beyond
+  this issue's `sessions.py`+`introspect.py` scope; left as a noted follow-up, not added here.
 
 ## Testing
 
@@ -96,7 +135,13 @@ in both cases; each provider's connector produces what its own `live_introspecto
   introspector and returns the redacted section. **Add:** a local-section profile missing its
   reference still fast-fails `ssh_credential_ref_missing`.
 - **Provider unit (`tests/providers/`)** — remote `open_transport("drgn-live")` returns the
-  domain-name handle; `close_transport` no-ops on a bare-domain handle; unknown kind rejected.
+  bare domain-name handle; remote `close_transport` no-ops on that bare-domain handle (decode-or-no-op);
+  local `open_transport("drgn-live")` returns its `ssh://` handle and `close_transport` round-trips
+  it (decode succeeds); fault-inject `open_transport("drgn-live")` + `close_transport` round-trips;
+  unknown kind rejected on every connector.
+- **end_session round-trip** — `debug.end_session` on a `drgn-live` session succeeds for local
+  (handle decodes), remote (bare domain no-ops), and fault-inject (handle decodes) — the regression
+  the handle-scheme/token separation exists to prevent.
 - **Profiles unit** — `drgn_live_requires_credential` is `True` for local, `False` for
   remote/fault-inject.
 - **Gating untouched** — `live_vm` / `live_stack` stay gated; only unit coverage widens. The remote

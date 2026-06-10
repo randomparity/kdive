@@ -72,10 +72,22 @@ start a `drgn-live` session with no credential path.
 `RemoteLibvirtConnect.open_transport(system, "drgn-live")` returns
 `TransportHandle(str(system_handle))` — the bare guest domain name that core's `_open_transport`
 derives (`system.domain_name or str(system.id)`), exactly the ADR-0083 §4 input contract
-`RemoteLiveIntrospect.introspect_live` already asserts. `close_transport` tolerates the bare-domain
-handle and no-ops: the guest-agent channel is connectionless, opened per operation by the port over
-`qemu+tls://`. The local connector's `drgn-live` branch is its existing SSH realization unchanged
-(the loopback-SSH reachability probe and the `ssh://host:port` handle).
+`RemoteLiveIntrospect.introspect_live` already asserts. Because that handle is the bare domain name
+(not a `<scheme>://host:port` form), the remote `close_transport` is changed to decode-or-no-op
+rather than decode unconditionally: the guest-agent channel is connectionless, opened per operation
+by the port over `qemu+tls://`. The local connector's `drgn-live` branch is its existing SSH
+realization unchanged (the loopback-SSH reachability probe and the `ssh://host:port` handle).
+
+**Transport token is not the handle scheme.** The `drgn-live` rename is to the agent-facing
+*transport token* (the `transport=` argument, the `debug_sessions.transport` column, the `kind`
+passed to `open_transport`, the single-attach conflict key). It is distinct from the *handle scheme*
+(`TransportHandleData.kind`, validated on decode against `providers/ports/lifecycle.py`
+`_TRANSPORT_KINDS`). The handle scheme is a provider-internal realization detail core treats as
+opaque: local emits `ssh://…` (its realization), fault-inject emits `drgn-live://…`, remote emits a
+bare unschemed domain name. The decode set therefore retains `ssh` and `gdbstub` and adds
+`drgn-live` — it is not reduced to the token set — because `close_transport`/`get_or_attach` decode
+whatever scheme a connector emitted. Conflating the two would break `end_session` for the local SSH
+realization.
 
 ### 4. No new error categories, no new MCP tools
 
