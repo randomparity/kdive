@@ -22,9 +22,28 @@ from typing import Any
 
 import pytest
 
+
+def _docker_compose_available() -> bool:
+    # Gate on the compose *plugin*, not just the `docker` binary: a host with docker
+    # but no compose plugin would otherwise hard-fail instead of skipping.
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return (
+            subprocess.run(
+                ["docker", "compose", "version"],
+                capture_output=True,
+                timeout=30,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 pytestmark = pytest.mark.skipif(
-    shutil.which("docker") is None,
-    reason="docker is required to render the compose model",
+    not _docker_compose_available(),
+    reason="the docker compose plugin is required to render the compose model",
 )
 
 _COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
@@ -64,6 +83,24 @@ def test_app_service_waits_for_migrate_completion(service: str) -> None:
     # (condition "service_started") would let the app hit the DB pre-migration.
     dep = _services()[service]["depends_on"]
     assert dep["migrate"]["condition"] == "service_completed_successfully"
+
+
+@pytest.mark.parametrize("service", _APP_SERVICES)
+def test_app_service_waits_for_bucket_creation(service: str) -> None:
+    # All three app processes do object-store I/O, so they wait for the minio-init
+    # one-shot to complete — which transitively guarantees minio is healthy and the
+    # artifacts bucket exists. Without this edge a bare `up <service>` starts a
+    # process whose first S3 call fails (no bucket).
+    dep = _services()[service]["depends_on"]
+    assert dep["minio-init"]["condition"] == "service_completed_successfully"
+
+
+def test_server_waits_for_the_issuer() -> None:
+    # The server validates bearer tokens against the issuer; a bare `up server`
+    # must start oidc too. The mock issuer has no healthcheck, so this is a
+    # start-ordering edge, not a health gate.
+    dep = _services()["server"]["depends_on"]
+    assert "oidc" in dep
 
 
 @pytest.mark.parametrize("service", ("migrate", *_APP_SERVICES))

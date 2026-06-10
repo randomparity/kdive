@@ -111,13 +111,22 @@ services:
       KDIVE_HTTP_PORT: "8000"
     ports:
       - "8000:8000"
+    # Self-contained graph: a bare `docker compose up server` pulls in migrate
+    # (completed), the bucket-creation one-shot (completed → minio healthy + bucket
+    # exists), and the issuer (started; the mock has no healthcheck, and JWKS is
+    # fetched lazily on first request anyway).
     depends_on:
       migrate:
         condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      oidc:
+        condition: service_started
 
   # The worker does real build/install I/O as a non-root user, so it needs writable,
   # correctly-owned volumes for the build workspace and install staging (ADR-0088
-  # decision 3); server and reconciler need none.
+  # decision 3); server and reconciler need none. It writes vmcore/transcript
+  # artifacts to the object store, so it also waits for the bucket to exist.
   worker:
     image: kdive:dev
     command: ["worker"]
@@ -129,6 +138,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
 
   reconciler:
     image: kdive:dev
@@ -137,6 +148,8 @@ services:
       <<: *backends
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
 
 volumes:

@@ -11,18 +11,26 @@ image built by the repo [`Dockerfile`](../../Dockerfile) (`image: kdive:dev`).
 
 ## Bring-up
 
+The dependency graph is self-contained, so a single `up` brings the whole stack:
+
 ```bash
-docker build -t kdive:dev .                       # build the app image once
-docker compose up -d --wait postgres minio oidc   # backends, wait for healthy
-docker compose run --rm minio-init                # create the artifacts bucket
-docker compose up -d server worker reconciler     # runs migrate to completion first
+docker compose up -d server worker reconciler   # builds the image, runs the backends + migrate first
 ```
 
-`docker compose up server` resolves the dependency graph: it waits for a healthy Postgres,
-runs `migrate` to a **successful exit**, and only then starts the app processes. The app
-services declare `depends_on: migrate` with `condition: service_completed_successfully`, so
-they never reach the database before the schema is rolled forward (ADR-0088 decision 4). A
-non-zero `migrate` exit blocks app start.
+`docker compose up` resolves the graph rather than relying on the operator to order it:
+the app services pull in a healthy Postgres, the `minio-init` bucket-creation one-shot
+(which itself waits for a healthy MinIO), the OIDC issuer, and the `migrate` one-shot. They
+declare `depends_on: migrate` with `condition: service_completed_successfully`, so they
+never reach the database before the schema is rolled forward (ADR-0088 decision 4); a
+non-zero `migrate` exit blocks app start. The bucket-creation one-shot completes before any
+app process starts, so the worker's first artifact write never races a missing bucket.
+
+The image is built once from the repo `Dockerfile` via the `migrate` service's `build: .`
+and reused by the others. Pre-build it explicitly if you prefer:
+
+```bash
+docker build -t kdive:dev .
+```
 
 ## Verify
 
