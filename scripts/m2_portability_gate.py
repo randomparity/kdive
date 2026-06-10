@@ -45,6 +45,10 @@ ALLOWED_FILES = frozenset(
         # touch routing remote in-guest drgn off the ssh-credential + ssh-string assumption.
         "src/kdive/mcp/tools/debug/sessions.py",
         "src/kdive/mcp/tools/debug/introspect.py",
+        # Dead-worker gdbstub reconciler reset (#216, ADR-0086): the deliberate, reviewed core
+        # touch that resets a stale session's transport through the injected TransportResetter
+        # port so a dead worker's single-client gdbstub stops blocking re-attach.
+        "src/kdive/reconciler/loop.py",
     }
 )
 

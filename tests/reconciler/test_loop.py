@@ -20,6 +20,7 @@ from kdive.reconciler.loop import (
 )
 from tests.reconciler.conftest import (
     FakeReaper,
+    FakeResetter,
     _FakeDomain,
     connect,
     run_repair,
@@ -255,8 +256,11 @@ def test_live_lease_and_attempts_remaining_not_swept(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def _detach(stale_after: timedelta):
-    return lambda conn: loop._repair_dead_sessions(conn, stale_after)
+def _detach(stale_after: timedelta, resetter=None):
+    from kdive.providers.transport_reset import NullResetter
+
+    r = resetter if resetter is not None else NullResetter()
+    return lambda conn: loop._repair_dead_sessions(conn, stale_after, r)
 
 
 def test_stale_live_session_detached(migrated_url: str) -> None:
@@ -318,6 +322,110 @@ def test_null_heartbeat_session_not_touched(migrated_url: str) -> None:
             )
             row = await cur.fetchone()
             assert row is not None and row[0] == "live"  # NULL heartbeat never swept
+
+    asyncio.run(_run())
+
+
+def test_stale_gdbstub_session_triggers_a_reset(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)
+            await seed.execute(
+                "UPDATE systems SET domain_name = %s WHERE id = %s", ("kdive-sys", system_id)
+            )
+            run_id = await seed_run(seed, system_id)
+            await seed_debug_session(
+                seed,
+                run_id,
+                state=DebugSessionState.LIVE,
+                heartbeat_ago=timedelta(hours=1),
+                transport="gdbstub",
+                transport_handle="gdbstub://10.0.0.5:1234",
+            )
+        resetter = FakeResetter()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool, _detach(loop.DEFAULT_DEBUG_SESSION_STALE_AFTER, resetter)
+            )
+        assert count == 1
+        assert resetter.calls == [
+            {
+                "transport": "gdbstub",
+                "transport_handle": "gdbstub://10.0.0.5:1234",
+                "domain_name": "kdive-sys",
+            }
+        ]
+
+    asyncio.run(_run())
+
+
+def test_live_holder_guard_skips_reset(migrated_url: str) -> None:
+    """A System with a fresh live gdbstub session is not reset (no eviction)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)
+            await seed.execute(
+                "UPDATE systems SET domain_name = %s WHERE id = %s", ("kdive-sys", system_id)
+            )
+            stale_run = await seed_run(seed, system_id)
+            await seed_debug_session(
+                seed,
+                stale_run,
+                state=DebugSessionState.LIVE,
+                heartbeat_ago=timedelta(hours=1),
+                transport="gdbstub",
+                transport_handle="gdbstub://10.0.0.5:1234",
+            )
+            fresh_run = await seed_run(seed, system_id)
+            await seed_debug_session(
+                seed,
+                fresh_run,
+                state=DebugSessionState.LIVE,
+                heartbeat_ago=timedelta(seconds=1),
+                transport="gdbstub",
+                transport_handle="gdbstub://10.0.0.5:1234",
+            )
+        resetter = FakeResetter()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool, _detach(loop.DEFAULT_DEBUG_SESSION_STALE_AFTER, resetter)
+            )
+        assert count == 1  # the one stale session is still detached
+        assert resetter.calls == []  # but the fresh live gdbstub holder => reset skipped
+
+    asyncio.run(_run())
+
+
+def test_reset_failure_does_not_strand_the_detach(migrated_url: str) -> None:
+    """A raising resetter is swallowed; the session is still detached and the count stands."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)
+            await seed.execute(
+                "UPDATE systems SET domain_name = %s WHERE id = %s", ("kdive-sys", system_id)
+            )
+            run_id = await seed_run(seed, system_id)
+            session_id = await seed_debug_session(
+                seed,
+                run_id,
+                state=DebugSessionState.LIVE,
+                heartbeat_ago=timedelta(hours=1),
+                transport="gdbstub",
+                transport_handle="gdbstub://10.0.0.5:1234",
+            )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool, _detach(loop.DEFAULT_DEBUG_SESSION_STALE_AFTER, FakeResetter(fail=True))
+            )
+        assert count == 1  # the reset raised but the detach stands
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT state FROM debug_sessions WHERE id = %s", (session_id,)
+            )
+            row = await cur.fetchone()
+            assert row is not None and row[0] == "detached"
 
     asyncio.run(_run())
 

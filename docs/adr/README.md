@@ -112,3 +112,4 @@ and keep prose plain and factual (no "critical", "robust", "comprehensive").
 | [0083](0083-remote-connect-debug-plane.md) | Remote connect/debug plane: shared gdb-MI/drgn infra + ACL'd direct-TCP gdbstub (M2) | Proposed |
 | [0084](0084-remote-control-two-phase-vmcore-retrieve.md) | Remote control (power/force_crash over TLS) + two-phase vmcore retrieve (kdump→local, post-reboot presigned-PUT upload) (M2) | Proposed |
 | [0085](0085-drgn-live-transport-generalization.md) | Generalize the live-drgn transport off the ssh model (`drgn-live` capability token + profile-derived credential) (M2) | Proposed |
+| [0086](0086-dead-worker-gdbstub-reconciler-reset.md) | Dead-worker gdbstub reconciler reset — free the single-client port on stale-session detach (M2) | Proposed |
