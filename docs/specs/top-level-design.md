@@ -464,6 +464,74 @@ Milestone-based. ("Sprint" is avoided per the project doc-style guard.)
   seams while they are still cheap to change.
 - **M2 — Remote libvirt.** Second provider behind the same interfaces — proves
   remote allocation/provision/install/transport with no core change.
+
+  *M2.1–M2.4 are the **productionization & operability band**: provider-agnostic
+  platform hardening that makes kdive deployable and operable by someone other
+  than its author, gating the M3 cloud expansion (where real cost, real tenants,
+  and a real secret backend raise the stakes). Unlike the M1.x band
+  (local-libvirt feature-deepening), these target the platform itself, not a
+  provider. They land in order: M2.1 defines the deployment surface the rest run
+  in; M2.2 (the CLI) precedes M2.3/M2.4 because both the `doctor` and the
+  image-management verbs are delivered as `kdivectl` commands; M2.3 (`doctor`) is
+  pulled ahead of the image lifecycle because the reachability self-diagnosis is
+  the highest-payoff piece and depends only on the CLI. M2.2–M2.4 act on the
+  service, so M2.1 may be developed in parallel (its image is still a prerequisite
+  of the band gate). See
+  [the design](../superpowers/specs/2026-06-10-m2x-productionization-band-design.md).*
+
+- **M2.1 — Deployment & packaging.** Official container image(s) for the three
+  processes (one image, entrypoints matching `python -m kdive
+  {server|worker|reconciler}`); a reference compose + Helm deployment that brings
+  the app tier up against the existing Postgres/MinIO/OIDC backends; and one
+  documented configuration surface (the `KDIVE_*` env contract) with a generated
+  config reference. Replaces the hand-rolled bootstrap; the image is the artifact
+  M2.2–M2.4 run in.
+- **M2.2 — Admin CLI (`kdivectl`).** A supported administrative surface over
+  platform state for operators (`platform_admin` / `platform_operator`), not
+  agents, over the same service seams the MCP tools use (no second source of
+  truth). It authenticates as an **OIDC principal** under the same
+  per-project/platform-role RBAC the MCP surface enforces (not raw DB credentials)
+  and is audited. Read-only inspection lands first (resources, allocations, systems,
+  runs, jobs, the accounting ledger, object-store wiring, the rootfs/fixture
+  catalog, secret *presence* — never values); mutating/destructive administration
+  (cross-project teardown, force-release, cordon/drain) routes through the M1.3
+  platform-role break-glass path, **not** the per-allocation iteration gate.
+  Replaces ad-hoc `psql`/`mc` poking.
+- **M2.3 — Observability & doctor.** Operational visibility and self-diagnosis:
+  structured-log/metrics/trace emission across core and worker, health/readiness
+  endpoints for the M2.1 deployment, and a `doctor`/preflight (`kdivectl` verb)
+  that validates the contracts whose silent violation costs the most — provider
+  TLS chain, gdbstub-port ACL, secret-ref resolution, and guest→object-store
+  reachability — and names the exact fix instead of surfacing as a downstream job
+  failure. Pulled ahead of the image lifecycle: the reachability `doctor` is the
+  band's highest-payoff piece (the M2 faults that cost the most were undiagnosed
+  reachability) and depends only on the CLI (M2.2) that delivers it. The
+  metrics/tracing/health work targets the M2.1 deployment, settled by now.
+- **M2.4 — Image & rootfs lifecycle.** A managed subsystem for the base-OS/rootfs
+  images that are currently an unscripted "operator obligation": build (the
+  per-provider image scripts become first-class and reproducible), validate (the
+  guest carries its provider's contract — guest agent, kdump, drgn, the
+  allowlisted in-guest helpers), publish/version into the object store, and
+  register into the `FixtureCatalog`; the image-management `kdivectl` verbs are
+  added here against this subsystem. Adds **patch-applied verification** — the
+  build asserts the patch produced the expected source change (a post-apply
+  marker), which an input→output provenance hash alone would miss — so a "patched"
+  kernel is verifiably patched. (The narrower silent `git apply` patch-drop is a
+  confirmed shipped bug, fixed independently of and **before** the band's exit gate,
+  not deferred behind it.) Publish-then-register is a two-write: the catalog row is
+  visible only after the object's HEAD succeeds, and the reconciler sweeps orphaned
+  objects and dangling rows (the existing artifact drift-repair pattern).
+
+  The band is complete — and M3 may begin — only when a non-author operator stands
+  kdive up from the M2.1 image + config reference, drives `kdivectl` + a
+  patch-applied-verified build, and runs `doctor`, captured as an **independently
+  checkable** operator-run record (the raw per-probe results, patch-applied marker,
+  and a successful debug op — not "doctor says green," since doctor is built
+  in-band) and **signed off by a platform operator other than the author**. Each
+  milestone also carries its own exit check so a shortfall surfaces at the
+  milestone, not only at the band gate (see the design doc). Hard per-tenant
+  sandboxing (core decision #8) and a manager-backed secret backend are **not** in
+  this band — they fold into M3 as cloud-driven hardening.
 - **M3 — Cloud.** Cloud provider + QCOW2/cloud-image provisioning + chargeback
   against real cost.
 - **M4 — Bare metal.** PXE/SoL/IPMI/Redfish — the control plane gets real
