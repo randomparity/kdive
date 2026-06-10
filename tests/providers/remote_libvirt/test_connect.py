@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.ports import SystemHandle, TransportHandleData
+from kdive.providers.ports import SystemHandle, TransportHandle, TransportHandleData
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.connect import RemoteLibvirtConnect
 
@@ -75,8 +75,25 @@ def test_unknown_kind_is_configuration_error():
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_close_transport_validates_handle():
+def test_open_transport_drgn_live_returns_bare_domain_handle():
+    # ADR-0083 §4: in-guest drgn rides the guest agent keyed by domain; the handle IS the
+    # bare domain name core derived. No gdb_addr needed, no port resolution, no probe.
+    c = _connect(
+        resolve_port=lambda system: pytest.fail("must not resolve a port for drgn-live"),
+        probe=lambda host, port: pytest.fail("must not probe for drgn-live"),
+        config=_config(gdb_addr=None),
+    )
+    handle = c.open_transport(SystemHandle("kdive-remote-1"), "drgn-live")
+    assert str(handle) == "kdive-remote-1"
+
+
+def test_close_transport_no_ops_on_bare_domain_handle():
+    c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: True)
+    c.close_transport(TransportHandle("kdive-remote-1"))  # bare domain, connectionless: no raise
+
+
+def test_close_transport_still_validates_schemed_gdbstub_handle():
     c = _connect(resolve_port=lambda system: 47002, probe=lambda host, port: True)
     c.close_transport(TransportHandleData(kind="gdbstub", host="10.0.0.5", port=47002).encode())
     with pytest.raises(CategorizedError):
-        c.close_transport("not-a-handle")
+        c.close_transport(TransportHandle("gdbstub://"))  # schemed but malformed → rejected
