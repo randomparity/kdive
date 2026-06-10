@@ -17,18 +17,15 @@ absent-is-success, because you cannot power or crash a System whose domain is go
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 from typing import Protocol
 
 import libvirt
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import PowerAction
-from kdive.providers.local_libvirt.lifecycle.constants import (
-    DEFAULT_LIBVIRT_URI,
-    LIBVIRT_URI_ENV,
-)
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports import Controller as Controller
 
 _log = logging.getLogger(__name__)
@@ -67,7 +64,7 @@ class LocalLibvirtControl:
     @classmethod
     def from_env(cls) -> LocalLibvirtControl:
         """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect."""
-        host_uri = os.environ.get(LIBVIRT_URI_ENV, DEFAULT_LIBVIRT_URI)
+        host_uri = config.require(LIBVIRT_URI)
         # The bound `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol
         # (only `lookupByName`/`close`), so no suppression is needed at this seam (ADR-0025).
         return cls(connect=lambda: libvirt.open(host_uri))

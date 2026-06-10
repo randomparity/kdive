@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -31,6 +30,8 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+import kdive.config as config
+from kdive.config.core_settings import DEBUG_DIR
 from kdive.db.repositories import DEBUG_SESSIONS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import DebugSession, ResourceKind
@@ -51,17 +52,13 @@ from kdive.providers.resolver import ProviderBinding, ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 
-# Base dir for per-session gdb/MI transcript files. Configurable so a deployment points it at
-# the run-artifact tree and tests at a temp dir; the default mirrors the other planes'
-# ``/var/lib/kdive/*`` roots.
-_TRANSCRIPT_DIR_ENV = "KDIVE_DEBUG_DIR"
-_DEFAULT_TRANSCRIPT_DIR = "/var/lib/kdive/debug"
-
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]
 
 
 def _default_transcript_dir() -> Path:
-    return Path(os.environ.get(_TRANSCRIPT_DIR_ENV, _DEFAULT_TRANSCRIPT_DIR))
+    # Configurable (KDIVE_DEBUG_DIR) so a deployment points it at the run-artifact tree and
+    # tests at a temp dir; the registry default mirrors the other planes' /var/lib/kdive/* roots.
+    return Path(config.require(DEBUG_DIR))
 
 
 class DebugEngineRuntime:

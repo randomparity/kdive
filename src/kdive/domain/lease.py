@@ -18,16 +18,16 @@ is charged for the *added* span only.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+import kdive.config as config
+from kdive.config.core_settings import LEASE_DEFAULT, LEASE_MAX
+from kdive.config.registry import Setting
 from kdive.domain.cost import parse_window_hours, validate_window
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-_DEFAULT_ENV = "KDIVE_LEASE_DEFAULT"
-_MAX_ENV = "KDIVE_LEASE_MAX"
 # Operator-configurable bounds (ADR-0036 §1): 4h default when omitted, 24h hard cap.
 _DEFAULT_HOURS = Decimal(4)
 _MAX_HOURS = Decimal(24)
@@ -67,10 +67,10 @@ def resolve_window_hours(window: object | None) -> Decimal:
             ``> 0`` number, or if a configured bound env var is malformed.
     """
     if window is None:
-        return _bound_from_env(_DEFAULT_ENV, _DEFAULT_HOURS)
+        return _bound_from_env(LEASE_DEFAULT, _DEFAULT_HOURS)
     requested = parse_window_hours(window)
     validate_window(requested)
-    maximum = _bound_from_env(_MAX_ENV, _MAX_HOURS)
+    maximum = _bound_from_env(LEASE_MAX, _MAX_HOURS)
     return min(requested, maximum)
 
 
@@ -110,7 +110,7 @@ def clamp_extension_hours(
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if ``KDIVE_LEASE_MAX`` is malformed.
     """
-    maximum = _bound_from_env(_MAX_ENV, _MAX_HOURS)
+    maximum = _bound_from_env(LEASE_MAX, _MAX_HOURS)
     ceiling = now + timedelta(seconds=int(maximum * _SECONDS_PER_HOUR))
     target = current_expiry + timedelta(seconds=int(requested_extend_hours * _SECONDS_PER_HOUR))
     new_expiry = min(target, ceiling)
@@ -121,15 +121,15 @@ def clamp_extension_hours(
     return LeaseExtension(added_hours=added_seconds / _SECONDS_PER_HOUR, new_expiry=new_expiry)
 
 
-def _bound_from_env(name: str, fallback: Decimal) -> Decimal:
-    """Read a positive lease-bound (hours) from ``name``; fall back when unset.
+def _bound_from_env(setting: Setting[str], fallback: Decimal) -> Decimal:
+    """Read a positive lease-bound (hours) from ``setting``; fall back when unset.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if the env var is set but not a
             finite ``> 0`` number — an operator misconfiguration fails closed rather
             than silently reverting to the built-in default.
     """
-    raw = os.environ.get(name)
+    raw = config.get(setting)
     if raw is None:
         return fallback
     bound = parse_window_hours(raw)
@@ -137,8 +137,8 @@ def _bound_from_env(name: str, fallback: Decimal) -> Decimal:
         validate_window(bound)
     except CategorizedError as exc:
         raise CategorizedError(
-            f"{name}={raw!r} must be a finite number of hours > 0",
+            f"{setting.name}={raw!r} must be a finite number of hours > 0",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"env": name, "value": raw},
+            details={"env": setting.name, "value": raw},
         ) from exc
     return bound

@@ -21,6 +21,9 @@ def test_server_validates_all_required_before_any_io(monkeypatch) -> None:
         raise AssertionError("create_pool reached before config validation")
 
     monkeypatch.setattr("kdive.__main__.create_pool", _boom)
+    # Stub logging setup: this test asserts validation order, not logging, and the real
+    # configure_logging mutates the global logger hierarchy (caplog-fragile for later tests).
+    monkeypatch.setattr("kdive.__main__.configure_logging", lambda *a, **k: None)
     with pytest.raises(CategorizedError) as ei:
         main(["server"])
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR

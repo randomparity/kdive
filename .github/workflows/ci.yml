@@ -77,6 +77,11 @@ jobs:
         # recipes individually, so adding it only to `just ci` would not gate PRs.
         run: just config-docs-check
 
+      - name: Config env guard
+        # No KDIVE_* env read may live outside kdive.config (ADR-0087). Listed here
+        # because CI invokes recipes individually, so the ci recipe alone would not gate.
+        run: just config-guard
+
       - name: Test
         # KDIVE_REQUIRE_DOCKER turns the db suite's skip-when-no-Docker into a hard
         # failure, so a broken daemon on the runner can't mask the schema tests

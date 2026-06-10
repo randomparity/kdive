@@ -34,6 +34,8 @@ from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import kdive.config as config
+from kdive.config.core_settings import BUILD_COMPONENT_ROOTS, BUILD_WORKSPACE, KERNEL_SRC
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
@@ -52,10 +54,6 @@ from kdive.store.objectstore import object_store_from_env
 
 _TENANT = "remote-libvirt"
 _RETENTION_CLASS = "build"
-_WORKSPACE_ENV = "KDIVE_BUILD_WORKSPACE"
-_KERNEL_SRC_ENV = "KDIVE_KERNEL_SRC"
-_BUILD_COMPONENT_ROOTS_ENV = "KDIVE_BUILD_COMPONENT_ROOTS"
-_DEFAULT_WORKSPACE = "/var/lib/kdive/build"
 _DEFAULT_BUILD_COMPONENT_ROOT = "/var/lib/kdive/build/components"
 # Trailing chars of a redacted rsync/git-apply stderr placed in error details (bounded so a
 # large/noisy failure log cannot bloat a persisted error record).
@@ -146,8 +144,8 @@ class RemoteLibvirtBuild:
         ``KDIVE_S3_*`` env on the first ``build()``, and the seams default to the real
         subprocess/ELF implementations, which run only when ``build()`` is called.
         """
-        workspace_root = Path(os.environ.get(_WORKSPACE_ENV, _DEFAULT_WORKSPACE))
-        kernel_src = os.environ.get(_KERNEL_SRC_ENV, "")
+        workspace_root = Path(config.require(BUILD_WORKSPACE))
+        kernel_src = config.require(KERNEL_SRC)
         allowed_component_roots = _build_component_roots_from_env()
         return cls(
             workspace_root=workspace_root,
@@ -225,7 +223,7 @@ def _build_failure(message: str, run_id: UUID) -> CategorizedError:
 
 
 def _build_component_roots_from_env() -> list[Path]:
-    raw = os.environ.get(_BUILD_COMPONENT_ROOTS_ENV)
+    raw = config.get(BUILD_COMPONENT_ROOTS)
     if raw is None:
         return [Path(_DEFAULT_BUILD_COMPONENT_ROOT)]
     return [Path(part) for part in raw.split(":") if part]

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import re
 import subprocess  # noqa: S404 - virsh domstate is invoked with a fixed argv, no shell
 import time
@@ -40,21 +39,18 @@ import libvirt
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+import kdive.config as config
+from kdive.config.core_settings import INSTALL_STAGING
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.provider_components.artifacts import FetchedArtifact
-from kdive.providers.local_libvirt.lifecycle.constants import (
-    DEFAULT_LIBVIRT_URI,
-    LIBVIRT_URI_ENV,
-)
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports import InstallRequest
 from kdive.providers.runtime_paths import console_log_path, domain_name_for, read_console_log
 from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
-_STAGING_ENV = "KDIVE_INSTALL_STAGING"
-_DEFAULT_STAGING = "/var/lib/kdive/install"
 _DEFAULT_BOOT_WINDOW_POLLS = 30
 # The boot window is _DEFAULT_BOOT_WINDOW_POLLS × _POLL_INTERVAL_SECONDS = 150s (ADR-0055 §7):
 # boot()._await_ready loops the poll count; _real_readiness owns the per-poll cadence.
@@ -151,8 +147,8 @@ class LocalLibvirtInstall:
         teed console under the `live_vm` gate (it needs a running host); the kdump prerequisite
         is a host-observable initrd-presence check inside ``install`` (ADR-0055 §5), not a seam.
         """
-        host_uri = os.environ.get(LIBVIRT_URI_ENV, DEFAULT_LIBVIRT_URI)
-        staging_root = Path(os.environ.get(_STAGING_ENV, _DEFAULT_STAGING))
+        host_uri = config.require(LIBVIRT_URI)
+        staging_root = Path(config.require(INSTALL_STAGING))
         return cls(
             connect=lambda: libvirt.open(host_uri),
             fetch_kernel=_real_fetch,
@@ -415,7 +411,7 @@ def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cove
     diagnostic so a final boot timeout can distinguish a silent guest from a broken host
     probe.
     """
-    uri = os.environ.get(LIBVIRT_URI_ENV, DEFAULT_LIBVIRT_URI)
+    uri = config.require(LIBVIRT_URI)
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
             ["virsh", "-c", uri, "domstate", domain_name],

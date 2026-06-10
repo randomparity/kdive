@@ -10,18 +10,15 @@ the plane tools, not `jobs.*`).
 
 from __future__ import annotations
 
-import os
-
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.dependencies import get_access_token
 
+import kdive.config as config
+from kdive.config.core_settings import OIDC_AUDIENCE, OIDC_ISSUER, OIDC_JWKS_URI
+from kdive.config.registry import Setting
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.authz.context import RequestContext, context_from_claims, require_project
 from kdive.security.authz.errors import AuthError
-
-_JWKS_URI_ENV = "KDIVE_OIDC_JWKS_URI"
-_ISSUER_ENV = "KDIVE_OIDC_ISSUER"
-_AUDIENCE_ENV = "KDIVE_OIDC_AUDIENCE"
 
 __all__ = [
     "AuthError",
@@ -33,11 +30,11 @@ __all__ = [
 ]
 
 
-def _require_env(name: str) -> str:
-    value = os.environ.get(name)
+def _require_env(setting: Setting[str]) -> str:
+    value = config.get(setting)
     if not value:
         raise CategorizedError(
-            f"{name} is not set; cannot verify bearer tokens",
+            f"{setting.name} is not set; cannot verify bearer tokens",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     return value
@@ -46,9 +43,9 @@ def _require_env(name: str) -> str:
 def build_verifier() -> JWTVerifier:
     """Build the `JWTVerifier` from the OIDC env vars, enforcing `iss` + `aud`."""
     return JWTVerifier(
-        jwks_uri=_require_env(_JWKS_URI_ENV),
-        issuer=_require_env(_ISSUER_ENV),
-        audience=_require_env(_AUDIENCE_ENV),
+        jwks_uri=_require_env(OIDC_JWKS_URI),
+        issuer=_require_env(OIDC_ISSUER),
+        audience=_require_env(OIDC_AUDIENCE),
     )
 
 

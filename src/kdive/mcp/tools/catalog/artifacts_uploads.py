@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
@@ -14,6 +13,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
+from kdive.config.core_settings import MAX_UPLOAD_BYTES, UPLOAD_TTL_SECONDS
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
@@ -42,19 +43,15 @@ _TENANT = "local"
 _BUILD_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux"})
 _ROOTFS_NAME = "rootfs"
 _RETENTION_CLASS = "build"
-_DEFAULT_UPLOAD_TTL_SECONDS = 86400
-_DEFAULT_MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
 _EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES = 1024 * 1024
 
 
 def _upload_ttl() -> timedelta:
-    return timedelta(
-        seconds=int(os.environ.get("KDIVE_UPLOAD_TTL_SECONDS", _DEFAULT_UPLOAD_TTL_SECONDS))
-    )
+    return timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
 
 
 def _max_upload_bytes() -> int:
-    return int(os.environ.get("KDIVE_MAX_UPLOAD_BYTES", _DEFAULT_MAX_UPLOAD_BYTES))
+    return config.require(MAX_UPLOAD_BYTES)
 
 
 def _presign_ttl_seconds() -> int:

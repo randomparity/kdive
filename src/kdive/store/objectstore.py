@@ -10,7 +10,6 @@ returned sensitivity).
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -18,6 +17,8 @@ from uuid import UUID, uuid4
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+import kdive.config as config
+from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Artifact, Sensitivity
 from kdive.provider_components import artifacts as artifact_types
@@ -32,9 +33,6 @@ from kdive.provider_components.artifacts import (
 # client type to Any at this single site rather than add a stubs package.
 S3Client = Any
 
-_ENDPOINT_URL_ENV = "KDIVE_S3_ENDPOINT_URL"
-_BUCKET_ENV = "KDIVE_S3_BUCKET"
-_REGION_ENV = "KDIVE_S3_REGION"
 _DEFAULT_REGION = "us-east-1"
 
 # A missing object (404) and an etag mismatch (412) are the one stale_handle case.
@@ -330,18 +328,18 @@ def object_store_from_env() -> ObjectStore:
         CategorizedError: ``KDIVE_S3_ENDPOINT_URL`` or ``KDIVE_S3_BUCKET`` is unset
             (:attr:`ErrorCategory.CONFIGURATION_ERROR`).
     """
-    endpoint_url = os.environ.get(_ENDPOINT_URL_ENV)
+    endpoint_url = config.get(S3_ENDPOINT_URL)
     if not endpoint_url:
         raise CategorizedError(
-            f"{_ENDPOINT_URL_ENV} is not set; cannot reach the object store",
+            f"{S3_ENDPOINT_URL.name} is not set; cannot reach the object store",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    bucket = os.environ.get(_BUCKET_ENV)
+    bucket = config.get(S3_BUCKET)
     if not bucket:
         raise CategorizedError(
-            f"{_BUCKET_ENV} is not set; cannot reach the object store",
+            f"{S3_BUCKET.name} is not set; cannot reach the object store",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    region = os.environ.get(_REGION_ENV) or _DEFAULT_REGION
+    region = config.get(S3_REGION) or _DEFAULT_REGION
     client = boto3.client("s3", endpoint_url=endpoint_url, region_name=region)
     return ObjectStore(client, bucket)

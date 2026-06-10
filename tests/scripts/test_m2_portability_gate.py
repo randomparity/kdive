@@ -65,8 +65,9 @@ def test_violations_excludes_allowlisted_files() -> None:
 
 
 def test_allowlist_is_exactly_the_named_touch_points() -> None:
-    # The ADR-0076 set plus the ADR-0085 drgn-live routing touch and the ADR-0086 dead-worker
-    # gdbstub reconciler reset; extending it is a deliberate, reviewed decision.
+    # The ADR-0076 set plus the ADR-0085 drgn-live routing touch, the ADR-0086 dead-worker
+    # gdbstub reconciler reset, and the ADR-0087 config-registry migration of the agnostic-core
+    # readers; extending it is a deliberate, reviewed decision.
     assert (
         frozenset(
             {
@@ -76,6 +77,12 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
                 "src/kdive/mcp/tools/debug/sessions.py",
                 "src/kdive/mcp/tools/debug/introspect.py",
                 "src/kdive/reconciler/loop.py",
+                "src/kdive/db/pool.py",
+                "src/kdive/domain/lease.py",
+                "src/kdive/mcp/auth.py",
+                "src/kdive/mcp/tools/catalog/artifacts_uploads.py",
+                "src/kdive/mcp/tools/debug/ops.py",
+                "src/kdive/security/secrets/secrets.py",
             }
         )
         == ALLOWED_FILES

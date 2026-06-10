@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
     is_remote_libvirt_configured,
@@ -25,6 +26,9 @@ def _set_env(monkeypatch: pytest.MonkeyPatch, **overrides: str | None) -> None:
             monkeypatch.delenv(name, raising=False)
         else:
             monkeypatch.setenv(name, value)
+    # Re-snapshot so the registry reflects this env change (the config read is scoped to a
+    # snapshot, not live os.environ; production calls load() once at startup, ADR-0087).
+    config.load()
 
 
 def test_full_env_builds_config(monkeypatch: pytest.MonkeyPatch) -> None:

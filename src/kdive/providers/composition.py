@@ -8,10 +8,10 @@ superseded capability-registry prototype from production source.
 
 from __future__ import annotations
 
-import os
-
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
+from kdive.config.core_settings import FAULT_INJECT
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import ResourceKind
 from kdive.provider_components.references import (
@@ -87,7 +87,6 @@ _FAULTINJECT_POOL = "fault-inject"
 # The mock's cost is synthetic; it reuses the seeded `local` coefficient so accounting
 # resolves (cost resolution fails closed on an unseeded class) without new seed DDL.
 _FAULTINJECT_COST_CLASS = "local"
-_FAULTINJECT_ENABLE_ENV = "KDIVE_FAULT_INJECT"
 _REMOTE_POOL = "remote-libvirt"
 # Reuses the seeded `local` coefficient: a `remote` seed row would be core DDL beyond
 # migration 0020 (the ADR-0076 portability gate firing). Same precedent as fault-inject.
@@ -279,7 +278,7 @@ def _fault_inject_enabled(enable_fault_inject: bool | None) -> bool:
     """Resolve the opt-in gate: an explicit flag wins, else read the env (default off)."""
     if enable_fault_inject is not None:
         return enable_fault_inject
-    return os.environ.get(_FAULTINJECT_ENABLE_ENV, "").strip().lower() in {"1", "true", "yes"}
+    return (config.get(FAULT_INJECT) or "").strip().lower() in {"1", "true", "yes"}
 
 
 def _remote_libvirt_enabled(enable_remote_libvirt: bool | None) -> bool:

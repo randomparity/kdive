@@ -17,6 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
 from kdive.domain.models import Allocation, Budget, Investigation, Quota, Run, System
 from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
@@ -352,6 +353,7 @@ def test_systems_provision_resolves_fault_inject_runtime(
             monkeypatch.setattr(allocations_tools, "current_context", _ctx)
             monkeypatch.setattr(systems_tools, "current_context", _ctx)
             monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
+            config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()
             provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
             app = build_app(
@@ -395,6 +397,7 @@ def test_debug_ops_resolve_fault_inject_runtime_through_fastmcp(
             monkeypatch.setattr(debug_sessions_tools, "current_context", _ctx)
             monkeypatch.setattr(debug_ops_tools, "current_context", _ctx)
             monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
+            config.load()  # re-snapshot: the pool setup above already primed the snapshot
             secret_registry = SecretRegistry()
             provider_composition = composition.ProviderComposition(secret_registry=secret_registry)
             app = build_app(

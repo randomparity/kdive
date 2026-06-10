@@ -9,7 +9,6 @@ the per-host concurrent-Allocation cap.
 from __future__ import annotations
 
 import logging
-import os
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
@@ -17,18 +16,17 @@ from typing import Any, Protocol
 import libvirt
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+import kdive.config as config
 from kdive.domain.discovery import ResourceRecord
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import ResourceStatus
+from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports import OwnedInfra
 
 _KDIVE_METADATA_NS = "https://kdive.dev/libvirt/1"
-_URI_ENV = "KDIVE_LIBVIRT_URI"
-_CAP_ENV = "KDIVE_LIBVIRT_ALLOCATION_CAP"
-_DEFAULT_CAP = 1
 _log = logging.getLogger(__name__)
 
 
@@ -155,18 +153,15 @@ class LocalLibvirtDiscovery:
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the cap env var is not an int.
         """
-        host_uri = os.environ.get(_URI_ENV, "qemu:///system")
-        raw_cap = os.environ.get(_CAP_ENV)
-        if raw_cap is None:
-            cap = _DEFAULT_CAP
-        else:
-            try:
-                cap = int(raw_cap)
-            except ValueError:
-                raise CategorizedError(
-                    f"{_CAP_ENV}={raw_cap!r} is not an integer",
-                    category=ErrorCategory.CONFIGURATION_ERROR,
-                ) from None
+        host_uri = config.require(LIBVIRT_URI)
+        raw_cap = config.require(LIBVIRT_ALLOCATION_CAP)
+        try:
+            cap = int(raw_cap)
+        except ValueError:
+            raise CategorizedError(
+                f"{LIBVIRT_ALLOCATION_CAP.name}={raw_cap!r} is not an integer",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            ) from None
         # libvirt ships no type stubs; ty infers `virConnect` from its source, which does
         # not structurally match `_LibvirtConn` (invariant return types on the binding's
         # list-returning methods). The connection is duck-typed at the seam — scoped ignore.
