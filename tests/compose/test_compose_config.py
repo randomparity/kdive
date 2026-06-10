@@ -1,9 +1,10 @@
 """Structural test for the reference compose (ADR-0088 Phase 3).
 
-Gated on ``docker`` being on PATH (it is on ``ubuntu-latest``, so this runs in
-the normal ``just test`` job and gates every PR). It does not build or pull
-anything — ``docker compose config`` only parses the committed file, resolves the
-``x-backends`` anchor / merge keys, and renders the canonical service model.
+Gated on the ``docker compose`` plugin being available (it is on
+``ubuntu-latest``, so this runs in the normal ``just test`` job and gates every
+PR). It does not build or pull anything — ``docker compose config`` only parses
+the committed file, resolves the ``x-backends`` anchor / merge keys, and renders
+the canonical service model.
 
 It locks the load-bearing ADR-0088 decision-4 ordering contract: the app
 services depend on the ``migrate`` one-shot with
