@@ -27,6 +27,7 @@ from kdive.provider_components.references import (
 from kdive.provider_components.validation import (
     ComponentSourceCapabilities,
 )
+from kdive.providers.debug_common.gdbmi import GdbMiEngine as LocalGdbMiEngine
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
@@ -43,12 +44,7 @@ from kdive.providers.fault_inject.lifecycle.provider import (
     fault_inject_attach_seam,
 )
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
-from kdive.providers.local_libvirt.debug.debug_gdbmi import (
-    GdbMiEngine as LocalGdbMiEngine,
-)
-from kdive.providers.local_libvirt.debug.debug_gdbmi import (
-    default_attach_seam,
-)
+from kdive.providers.local_libvirt.debug.debug_gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect_drgn import (
     LocalLibvirtLiveIntrospect,
     LocalLibvirtVmcoreIntrospect,
