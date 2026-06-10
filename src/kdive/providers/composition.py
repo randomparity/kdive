@@ -28,6 +28,7 @@ from kdive.provider_components.validation import (
     ComponentSourceCapabilities,
 )
 from kdive.providers.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.debug_common.hostpolicy import allow_acl_remote
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
@@ -262,7 +263,12 @@ def build_remote_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         supported_capture_methods=frozenset(),
         discovery_registrar=register_remote_host,
         attach_seam=remote_attach_seam,
-        debug_engine=GdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),
+        # The MI ops never validate the host, but pin the ACL-remote policy so the engine and
+        # its attach seam agree — the remote runtime is correct-by-construction (ADR-0083 §2).
+        debug_engine=GdbMiEngine(
+            redactor_factory=lambda: Redactor(registry=secret_registry),
+            host_policy=allow_acl_remote,
+        ),
         component_sources=_remote_component_sources(),
         build_config_validator=builder.validate_config_ref,
         # The systems registrar hard-fails on a None validator; a remote profile has
