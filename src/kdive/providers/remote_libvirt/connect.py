@@ -20,6 +20,7 @@ from kdive.providers.ports import SystemHandle, TransportHandle, TransportHandle
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_env
 
 _GDBSTUB = "gdbstub"
+_DRGN_LIVE = "drgn-live"
 
 type _ResolvePort = Callable[[SystemHandle], int]
 type _Probe = Callable[[str, int], bool]
@@ -49,7 +50,11 @@ class RemoteLibvirtConnect:
         return cls()
 
     def open_transport(self, system: SystemHandle, kind: str) -> TransportHandle:
-        """Open the gdbstub transport for ``system``; raise for any other kind.
+        """Open the gdbstub or drgn-live transport for ``system``; raise for any other kind.
+
+        ``drgn-live`` reaches in-guest drgn over the qemu-guest-agent keyed by domain, so its
+        handle is the bare domain name core derived (``system``) — no gdb_addr, port, or probe
+        (ADR-0083 §4). ``gdbstub`` composes the ACL'd direct-TCP endpoint and probes RSP.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unknown kind, an unset
@@ -57,6 +62,8 @@ class RemoteLibvirtConnect:
                 not answer RSP; ``TRANSPORT_FAILURE`` on a socket fault; ``MISSING_DEPENDENCY``
                 propagated from the real domain-XML reader outside ``live_vm``.
         """
+        if kind == _DRGN_LIVE:
+            return TransportHandle(str(system))
         if kind != _GDBSTUB:
             raise _config_error(f"unsupported transport kind: {kind!r}")
         config = self._config_factory()
@@ -82,8 +89,10 @@ class RemoteLibvirtConnect:
         return TransportHandle(TransportHandleData(kind=_GDBSTUB, host=host, port=port).encode())
 
     def close_transport(self, handle: TransportHandle) -> None:
-        """Validate the handle, then no-op (connectionless RSP)."""
-        TransportHandleData.decode(handle)
+        """No-op close. A schemed gdbstub handle is validated; the bare-domain drgn-live
+        handle (ADR-0083 §4) is connectionless and needs no validation."""
+        if "://" in str(handle):
+            TransportHandleData.decode(handle)
 
 
 def _real_resolve_port(system: SystemHandle) -> int:  # pragma: no cover - live_vm
