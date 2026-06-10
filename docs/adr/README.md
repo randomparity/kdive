@@ -115,3 +115,6 @@ and keep prose plain and factual (no "critical", "robust", "comprehensive").
 | [0086](0086-dead-worker-gdbstub-reconciler-reset.md) | Dead-worker gdbstub reconciler reset — free the single-client port on stale-session detach (M2) | Proposed |
 | [0087](0087-config-registry.md) | Central typed configuration registry — single source of truth for the `KDIVE_*` contract, startup validation, generated reference (M2.1) | Proposed |
 | [0088](0088-deployment-packaging.md) | Deployment & packaging — one multi-process image (remote-libvirt target), compose + Helm reference, migrate one-shot, GHCR release publish (M2.1) | Proposed |
+| [0089](0089-operator-cli-mcp-client.md) | Operator CLI (`kdivectl`) as an authenticated MCP client — read-only-by-policy passthrough, break-glass mutations, `(principal, operator-cli)` attribution (M2.2) | Proposed |
+| [0090](0090-opentelemetry-adoption-service-health.md) | OpenTelemetry adoption — logs/metrics/traces spine, log-signal migration (amends ADR-0014) with stdout floor + opt-in OTLP, aux health endpoints (M2.3) | Proposed |
+| [0091](0091-doctor-diagnostics-model.md) | `doctor` / diagnostics model — server-side authz-gated diagnostics tool, per-check vantage, ephemeral-probe-guest egress check (M2.3) | Proposed |
