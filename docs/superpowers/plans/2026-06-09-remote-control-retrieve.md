@@ -243,7 +243,7 @@ Expected: PASS (3 tests).
 
 In `src/kdive/providers/local_libvirt/retrieve.py`:
 
-1. Replace the postmortem-specific imports. Remove `import tempfile`, the `from pathlib import Path` if unused elsewhere (it is still used by the `_RunCrash` type — keep `Path`), `from kdive.security.artifacts.crash_commands import validate_crash_commands`, and the `Redactor` import if unused elsewhere (it is used only by postmortem — remove it). Add:
+1. Replace the postmortem-specific imports. **Remove** exactly these three (now only used by the extracted helper): `import tempfile`, `from kdive.security.artifacts.crash_commands import validate_crash_commands`, and `from kdive.security.secrets.redaction import Redactor`. **Keep** `from pathlib import Path` and the `CrashResult` import and the `_RunCrash` / `_FetchObject` / `_ReadBuildId` type aliases — they still type the constructor's injected seams. `Step 6`'s `just lint`/`just type` is the backstop: if it flags any of these as unused, remove that one; if it flags `Path`/`CrashResult` as *still needed*, keep it. Add:
 
 ```python
 from kdive.providers.debug_common.crash_postmortem import (
@@ -889,6 +889,45 @@ def test_capture_rejects_non_kdump_method(tmp_path: Path) -> None:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+class _RaisingInspectAgent:
+    """Agent whose inspect raises a fixed non-rebooting CategorizedError, every call."""
+
+    def __init__(self, category: ErrorCategory) -> None:
+        self._category = category
+        self.calls = 0
+
+    def run(self, domain: object, argv: list[str]) -> AgentExecResult:
+        self.calls += 1
+        raise CategorizedError("inspect blew up", category=self._category)
+
+
+def test_capture_non_rebooting_inspect_error_propagates_immediately(tmp_path: Path) -> None:
+    # An INFRASTRUCTURE_FAILURE during readiness is NOT a still-rebooting signal: it must
+    # propagate as-is on the first call, never be swallowed as reboot-wait nor downgraded
+    # to READINESS_FAILURE after the window (the _await_inspect non-rebooting branch).
+    agent = _RaisingInspectAgent(ErrorCategory.INFRASTRUCTURE_FAILURE)
+    store = FakeStore(head=None)
+    rt = _retrieve(agent, store, tmp_path)  # type: ignore[arg-type]  # structural _AgentExec
+    with pytest.raises(CategorizedError) as exc:
+        rt.capture(_SID, CaptureMethod.KDUMP)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert agent.calls == 1  # no readiness spin on a non-rebooting error
+
+
+def test_capture_nonzero_inspect_exit_is_infrastructure_failure(tmp_path: Path) -> None:
+    # A reachable agent whose inspect command exits non-zero is an infra fault, not a
+    # readiness failure (the _parse_inspect exit-status branch).
+    class _NonZeroInspect:
+        def run(self, domain: object, argv: list[str]) -> AgentExecResult:
+            return AgentExecResult(exit_status=3, stdout=b"", stderr=b"boom")
+
+    store = FakeStore(head=None)
+    rt = _retrieve(_NonZeroInspect(), store, tmp_path)  # type: ignore[arg-type]
+    with pytest.raises(CategorizedError) as exc:
+        rt.capture(_SID, CaptureMethod.KDUMP)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 def test_run_crash_postmortem_delegates(tmp_path: Path) -> None:
     from kdive.providers.ports import CrashResult
 
@@ -988,9 +1027,16 @@ _DEFAULT_PUT_EXPIRY_S = 3600
 _MAX_CORE_BYTES = 5 * 1024**3
 _DEFAULT_READINESS_TIMEOUT_S = 300.0
 _DEFAULT_READINESS_POLL_S = 2.0
+# The inspect command hashes the whole core in-guest; 120s comfortably covers a sha256 of
+# the 5 GiB ceiling (~10s at commodity disk/CPU rates). GuestAgentExec folds a command that
+# does not exit within this bound into TRANSPORT_FAILURE, which _await_inspect treats as
+# "still rebooting" — acceptable because a working inspect finishes well inside the bound, so
+# a TRANSPORT_FAILURE in practice means an unreachable agent, not a slow hash.
 _DEFAULT_INSPECT_TIMEOUT_S = 120.0
 _DEFAULT_UPLOAD_TIMEOUT_S = 1800.0
-# An unreachable agent during readiness is "still rebooting out of the kdump kernel".
+# An unreachable agent during readiness is "still rebooting out of the kdump kernel". A
+# non-rebooting CategorizedError (a malformed reply -> INFRASTRUCTURE_FAILURE) is NOT in this
+# set, so _await_inspect re-raises it immediately instead of spinning the readiness window.
 _AGENT_REBOOTING = frozenset({ErrorCategory.TRANSPORT_FAILURE})
 
 
