@@ -451,9 +451,15 @@ async def _repair_dead_sessions(
 async def _reset_dead_transport(
     conn: AsyncConnection, resetter: TransportResetter, row: dict
 ) -> None:
-    """Reset one detached session's transport, guarded and best-effort (ADR-0086)."""
-    system_id, domain_name = await _resolve_system(conn, row["run_id"])
-    if system_id is not None and await _has_live_gdbstub_holder(conn, system_id):
+    """Reset one detached session's transport, guarded and best-effort (ADR-0086).
+
+    The System lookup and the live-holder guard run inside one short transaction that commits
+    **before** the resetter's provider network I/O, so no read snapshot is held open across it.
+    """
+    async with conn.transaction():
+        system_id, domain_name = await _resolve_system(conn, row["run_id"])
+        has_live_holder = system_id is not None and await _has_live_gdbstub_holder(conn, system_id)
+    if has_live_holder:
         _log.info(
             "reconciler: session %s detached but System %s has a live gdbstub holder; "
             "skipping transport reset",
