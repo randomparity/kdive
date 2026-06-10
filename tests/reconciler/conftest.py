@@ -81,6 +81,31 @@ class FakeReaper:
             raise RuntimeError(f"libvirt destroy of {name} failed")
 
 
+class FakeResetter:
+    """Records reset(...) calls; structurally satisfies TransportResetter (duck-typed).
+
+    ``fail`` makes ``reset`` raise after recording, to prove a reset failure does not
+    starve the rest of the dead-session sweep.
+    """
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[dict[str, str | None]] = []
+        self._fail = fail
+
+    async def reset(
+        self, *, transport: str, transport_handle: str | None, domain_name: str | None
+    ) -> None:
+        self.calls.append(
+            {
+                "transport": transport,
+                "transport_handle": transport_handle,
+                "domain_name": domain_name,
+            }
+        )
+        if self._fail:
+            raise RuntimeError("boom")
+
+
 async def connect(url: str) -> psycopg.AsyncConnection:
     """An autocommit connection for seeding and assertions."""
     return await psycopg.AsyncConnection.connect(url, autocommit=True)
@@ -181,6 +206,8 @@ async def seed_debug_session(
     *,
     state: DebugSessionState = DebugSessionState.LIVE,
     heartbeat_ago: timedelta | None = None,
+    transport: str = "gdbstub",
+    transport_handle: str | None = None,
 ) -> UUID:
     """Insert a debug session; set ``worker_heartbeat_at = now() - heartbeat_ago`` if given.
 
@@ -197,7 +224,7 @@ async def seed_debug_session(
             project="proj",
             run_id=run_id,
             state=state,
-            transport="gdbstub",
+            transport=transport,
             worker_heartbeat_at=None,
         ),
     )
@@ -205,6 +232,11 @@ async def seed_debug_session(
         await conn.execute(
             "UPDATE debug_sessions SET worker_heartbeat_at = now() - %s WHERE id = %s",
             (heartbeat_ago, session.id),
+        )
+    if transport_handle is not None:
+        await conn.execute(
+            "UPDATE debug_sessions SET transport_handle = %s WHERE id = %s",
+            (transport_handle, session.id),
         )
     return session.id
 
