@@ -42,7 +42,7 @@ from kdive.security.authz.rbac import Role, require_role
 # The fixed live-helper set (ADR-0033 §2 / ADR-0039 §3): the same three in-tree helpers as the
 # offline path. There is no caller-supplied drgn script — an unknown helper is rejected.
 _LIVE_HELPERS = frozenset({"tasks", "modules", "sysinfo"})
-_SSH = "ssh"
+_DRGN_LIVE = "drgn-live"
 
 
 async def introspect_from_vmcore(
@@ -84,21 +84,23 @@ async def introspect_from_vmcore(
         )
 
 
-class LiveSshSession(NamedTuple):
-    """The resolved inputs needed to run live ssh introspection."""
+class LiveDrgnSession(NamedTuple):
+    """The resolved inputs needed to run live drgn introspection."""
 
     project: str
     transport_handle: str
     session_id: UUID
 
 
-async def resolve_live_ssh_session(
+async def resolve_live_drgn_session(
     conn: AsyncConnection, ctx: RequestContext, session_id: str
-) -> LiveSshSession:
-    """Resolve a `live` ssh DebugSession to the domain inputs required by the port.
+) -> LiveDrgnSession:
+    """Resolve a `live` drgn-live DebugSession to the domain inputs required by the port.
 
-    Gates on UUID shape, project scope, ``operator`` role, ``live`` state, and an ``ssh``
-    transport (a live `introspect.run` requires the ssh transport, not gdbstub; ADR-0039 §4).
+    Gates on UUID shape, project scope, ``operator`` role, ``live`` state, and the
+    ``drgn-live`` transport (live introspection rides drgn-live, not gdbstub; ADR-0039 §4 /
+    ADR-0085). The provider realizes drgn-live over SSH (local) or the guest agent (remote);
+    core treats the resolved ``transport_handle`` as opaque.
     """
     uid = _as_uuid(session_id)
     if uid is None:
@@ -107,16 +109,16 @@ async def resolve_live_ssh_session(
     if session is None or session.project not in ctx.projects:
         raise _session_config_error()
     require_role(ctx, session.project, Role.OPERATOR)
-    if session.state is not DebugSessionState.LIVE or session.transport != _SSH:
+    if session.state is not DebugSessionState.LIVE or session.transport != _DRGN_LIVE:
         raise _session_config_error()
     if session.transport_handle is None:
         raise _session_config_error()
-    return LiveSshSession(session.project, session.transport_handle, uid)
+    return LiveDrgnSession(session.project, session.transport_handle, uid)
 
 
 def _session_config_error() -> CategorizedError:
     return CategorizedError(
-        "debug session does not resolve to a live ssh session",
+        "debug session does not resolve to a live drgn-live session",
         category=ErrorCategory.CONFIGURATION_ERROR,
     )
 
@@ -129,12 +131,12 @@ async def introspect_run(
     helper: str,
     introspector: LiveIntrospector,
 ) -> ToolResponse:
-    """Run live drgn introspection over a `live` ssh DebugSession; return the redacted report.
+    """Run live drgn introspection over a `live` drgn-live DebugSession; return a redacted report.
 
-    Requires a `live` ssh DebugSession (operator). The ``helper`` must be one of the fixed
+    Requires a `live` drgn-live DebugSession (operator). The ``helper`` must be one of the fixed
     in-tree helpers — there is no caller-supplied drgn script. The port is the single redaction
-    boundary, so the returned report is already masked; the raw drgn-over-ssh transcript is
-    ``sensitive`` and is never returned (the response only advertises that, ADR-0039 §2/§3).
+    boundary, so the returned report is already masked; the raw drgn transcript is ``sensitive``
+    and is never returned (the response only advertises that, ADR-0039 §2/§3).
     Off a prepared live host, the provider seam reports ``missing_dependency`` instead of
     importing drgn.
     """
@@ -143,7 +145,7 @@ async def introspect_run(
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             try:
-                resolved = await resolve_live_ssh_session(conn, ctx, session_id)
+                resolved = await resolve_live_drgn_session(conn, ctx, session_id)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(session_id, exc)
         return await _introspect_live_session(
@@ -157,7 +159,7 @@ async def introspect_run(
 async def _introspect_live_session(
     response_id: str,
     *,
-    resolved: LiveSshSession,
+    resolved: LiveDrgnSession,
     helper: str,
     introspector: LiveIntrospector,
 ) -> ToolResponse:
@@ -226,7 +228,7 @@ def register(
         meta={"maturity": "partial"},
     )
     async def introspect_run_tool(
-        session_id: Annotated[str, Field(description="A live ssh DebugSession to introspect.")],
+        session_id: Annotated[str, Field(description="A live drgn-live DebugSession.")],
         helper: Annotated[
             str,
             Field(
@@ -237,10 +239,10 @@ def register(
             ),
         ],
     ) -> ToolResponse:
-        """Run live drgn introspection over a live ssh DebugSession. Requires operator."""
+        """Run live drgn introspection over a live drgn-live DebugSession. Requires operator."""
         async with pool.connection() as conn:
             try:
-                resolved = await resolve_live_ssh_session(conn, current_context(), session_id)
+                resolved = await resolve_live_drgn_session(conn, current_context(), session_id)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(session_id, exc)
         async with pool.connection() as conn:

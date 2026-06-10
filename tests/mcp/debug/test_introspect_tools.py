@@ -302,17 +302,19 @@ class _CountingResolver(ProviderResolver):
         return self._runtime
 
 
-async def _seed_live_ssh_session(
+async def _seed_live_drgn_session(
     pool: AsyncConnectionPool,
     *,
     state: DebugSessionState = DebugSessionState.LIVE,
-    transport: str = "ssh",
+    transport: str = "drgn-live",
+    transport_handle: str | None = None,
     project: str = "proj",
 ) -> str:
     sys_id = await seed_crashed_system(pool, project=project)
     run_id = await seed_run_on_system(
         pool, sys_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef", project=project
     )
+    handle = transport_handle if transport_handle is not None else f"{transport}://127.0.0.1:22"
     async with pool.connection() as conn:
         session = await DEBUG_SESSIONS.insert(
             conn,
@@ -325,16 +327,32 @@ async def _seed_live_ssh_session(
                 run_id=UUID(run_id),
                 state=state,
                 transport=transport,
-                transport_handle=f"{transport}://127.0.0.1:22",
+                transport_handle=handle,
             ),
         )
     return str(session.id)
 
 
+def test_run_live_routes_bare_domain_handle_to_introspector(migrated_url: str) -> None:
+    # ADR-0083 §4: a remote drgn-live session's handle is the bare domain name; introspect.run
+    # must pass it through verbatim to the live introspector (#215).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool, transport_handle="kdive-remote-1")
+            port = _FakeLiveIntrospector()
+            resp = await introspect_tools.introspect_run(
+                pool, _live_ctx(), session_id=session_id, helper="tasks", introspector=port
+            )
+        assert resp.status != "error"
+        assert port.kwargs == {"transport_handle": "kdive-remote-1", "helper": "tasks"}
+
+    asyncio.run(_run())
+
+
 def test_run_live_happy_path_returns_redacted_report(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             port = _FakeLiveIntrospector()
             resp = await introspect_tools.introspect_run(
                 pool, _live_ctx(), session_id=session_id, helper="tasks", introspector=port
@@ -344,7 +362,7 @@ def test_run_live_happy_path_returns_redacted_report(migrated_url: str) -> None:
         assert isinstance(report, dict)
         assert set(report) == {"tasks"}
         assert report["tasks"]["tasks"][0]["pid"] == 1
-        assert port.kwargs == {"transport_handle": "ssh://127.0.0.1:22", "helper": "tasks"}
+        assert port.kwargs == {"transport_handle": "drgn-live://127.0.0.1:22", "helper": "tasks"}
 
     asyncio.run(_run())
 
@@ -354,7 +372,7 @@ def test_run_tool_uses_already_resolved_live_session(
 ) -> None:
     async def _run() -> tuple[ToolResponse, _CountingResolver, _FakeLiveIntrospector, int]:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             port = _FakeLiveIntrospector()
             runtime = cast(
                 ProviderRuntime,
@@ -364,7 +382,7 @@ def test_run_tool_uses_already_resolved_live_session(
                 ),
             )
             resolver = _CountingResolver(runtime)
-            original_resolve = introspect_tools.resolve_live_ssh_session
+            original_resolve = introspect_tools.resolve_live_drgn_session
             resolve_calls = 0
 
             async def counted_resolve(conn, ctx, session_id: str):
@@ -373,7 +391,7 @@ def test_run_tool_uses_already_resolved_live_session(
                 return await original_resolve(conn, ctx, session_id)
 
             monkeypatch.setattr(introspect_tools, "current_context", lambda: _live_ctx())
-            monkeypatch.setattr(introspect_tools, "resolve_live_ssh_session", counted_resolve)
+            monkeypatch.setattr(introspect_tools, "resolve_live_drgn_session", counted_resolve)
             app: FastMCP = FastMCP(name="t")
             introspect_tools.register(app, pool, resolver=resolver)
             async with Client(app) as client:
@@ -391,13 +409,13 @@ def test_run_tool_uses_already_resolved_live_session(
     assert resp.status != "error"
     assert resolve_calls == 1
     assert len(resolver.calls) == 1
-    assert port.kwargs == {"transport_handle": "ssh://127.0.0.1:22", "helper": "tasks"}
+    assert port.kwargs == {"transport_handle": "drgn-live://127.0.0.1:22", "helper": "tasks"}
 
 
 def test_run_live_masks_planted_secret_in_response(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             # The port is the single redaction boundary; it returns the already-masked shape.
             port = _FakeLiveIntrospector(output=_output(comm="[REDACTED]"))
             resp = await introspect_tools.introspect_run(
@@ -413,7 +431,7 @@ def test_run_live_masks_planted_secret_in_response(migrated_url: str) -> None:
 def test_run_live_marks_transcript_sensitive(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             resp = await introspect_tools.introspect_run(
                 pool,
                 _live_ctx(),
@@ -431,7 +449,7 @@ def test_run_live_marks_transcript_sensitive(migrated_url: str) -> None:
 def test_run_live_unknown_helper_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             resp = await introspect_tools.introspect_run(
                 pool,
                 _live_ctx(),
@@ -447,7 +465,7 @@ def test_run_live_unknown_helper_is_config_error(migrated_url: str) -> None:
 def test_run_live_non_live_session_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool, state=DebugSessionState.DETACHED)
+            session_id = await _seed_live_drgn_session(pool, state=DebugSessionState.DETACHED)
             resp = await introspect_tools.introspect_run(
                 pool,
                 _live_ctx(),
@@ -460,11 +478,11 @@ def test_run_live_non_live_session_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_run_live_non_ssh_session_is_config_error(migrated_url: str) -> None:
+def test_run_live_non_drgn_live_session_is_config_error(migrated_url: str) -> None:
     # A live introspect.run requires an ssh transport, not gdbstub (ADR-0039 §4).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool, transport="gdbstub")
+            session_id = await _seed_live_drgn_session(pool, transport="gdbstub")
             resp = await introspect_tools.introspect_run(
                 pool,
                 _live_ctx(),
@@ -480,7 +498,7 @@ def test_run_live_non_ssh_session_is_config_error(migrated_url: str) -> None:
 def test_run_live_cross_project_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             resp = await introspect_tools.introspect_run(
                 pool,
                 _live_ctx(projects=("other",)),
@@ -496,7 +514,7 @@ def test_run_live_cross_project_is_config_error(migrated_url: str) -> None:
 def test_run_live_without_operator_raises(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             with pytest.raises(AuthorizationError):
                 await introspect_tools.introspect_run(
                     pool,
@@ -512,7 +530,7 @@ def test_run_live_without_operator_raises(migrated_url: str) -> None:
 def test_run_live_port_attach_failure_is_typed(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            session_id = await _seed_live_ssh_session(pool)
+            session_id = await _seed_live_drgn_session(pool)
             err = CategorizedError("ssh dropped", category=ErrorCategory.TRANSPORT_FAILURE)
             resp = await introspect_tools.introspect_run(
                 pool,
