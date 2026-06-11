@@ -117,8 +117,10 @@ class ConsoleCollector:
         # never uploaded raw in either part (AC2). Carried across rotations, flushed at finalize.
         self._carry = b""
         # The next part index resumes past any parts a prior collector left (a restart after a
-        # dead stream must not overwrite already-uploaded parts).
-        self._next_index = self._resume_index()
+        # dead stream must not overwrite already-uploaded parts). Resolved lazily on the first
+        # rotation/finalize — never in __init__, which the hosting loop calls on the event loop,
+        # because list_part_indices is blocking store I/O.
+        self._next_index: int | None = None
         self._finalized = False
         # The pump runs on an off-loop worker thread while finalize/close are driven from the
         # reconciler event loop (reap / lock-loss). This lock makes pump_once, finalize, and
@@ -130,9 +132,19 @@ class ConsoleCollector:
     def system_id(self) -> UUID:
         return self._system_id
 
-    def _resume_index(self) -> int:
-        existing = self._store.list_part_indices(self._system_id)
-        return (max(existing) + 1) if existing else 0
+    def _take_index(self) -> int:
+        """Return the next part index, resolving the resume point lazily on first use.
+
+        Resolving here (under the pump lock, off the event loop) rather than in ``__init__``
+        keeps the blocking ``list_part_indices`` store call out of the hosting loop's attach
+        step. A restart over the same store resumes past the highest existing part.
+        """
+        if self._next_index is None:
+            existing = self._store.list_part_indices(self._system_id)
+            self._next_index = (max(existing) + 1) if existing else 0
+        index = self._next_index
+        self._next_index += 1
+        return index
 
     def _ensure_stream(self) -> ConsoleStream:
         if self._stream is None:
@@ -201,8 +213,7 @@ class ConsoleCollector:
             to_upload, self._carry = b"", data
         if not to_upload:
             return
-        self._store.put_part(self._system_id, self._next_index, self._redact(to_upload))
-        self._next_index += 1
+        self._store.put_part(self._system_id, self._take_index(), self._redact(to_upload))
 
     def _flush_tail(self) -> None:
         """Upload the held-back carry + buffer as the final part (no overlap held back)."""
@@ -211,8 +222,7 @@ class ConsoleCollector:
         self._carry = b""
         if not data:
             return
-        self._store.put_part(self._system_id, self._next_index, self._redact(data))
-        self._next_index += 1
+        self._store.put_part(self._system_id, self._take_index(), self._redact(data))
 
     def _redact(self, data: bytes) -> bytes:
         """Redact ``data`` before it leaves the worker (untrusted guest bytes, ADR-0027).
