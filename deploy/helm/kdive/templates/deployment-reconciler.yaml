@@ -20,6 +20,8 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
+        # fsGroup so the non-root UID can read a mounted file-ref Secret via its group bit.
+        fsGroup: 10001
       containers:
         - name: reconciler
           image: {{ include "kdive.image" . }}
@@ -27,6 +29,7 @@ spec:
           args: ["reconciler"]
           env:
             {{- include "kdive.auxEnv" 9466 | nindent 12 }}
+            {{- include "kdive.secretsEnv" . | nindent 12 }}
           envFrom:
             - configMapRef:
                 name: {{ include "kdive.fullname" . }}-config
@@ -37,3 +40,11 @@ spec:
           ports:
             - containerPort: 9466
           {{- include "kdive.auxProbes" 9466 | nindent 10 }}
+          {{- if .Values.secrets.secretName }}
+          volumeMounts:
+            {{- include "kdive.secretsVolumeMount" . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.secrets.secretName }}
+      volumes:
+        {{- include "kdive.secretsVolume" . | nindent 8 }}
+      {{- end }}

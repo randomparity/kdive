@@ -71,6 +71,39 @@ readinessProbe:
   periodSeconds: 10
 {{- end -}}
 
+{{/*
+Optional file-secret projection (issue #313). When .Values.secrets.secretName is set, the
+chart mounts that pre-existing Secret read-only under .Values.secrets.mountPath and points
+KDIVE_SECRETS_ROOT at it, so file-ref secrets (e.g. the remote-libvirt TLS client cert/key/CA)
+resolve under the root. Each helper renders nothing when secretName is empty, so a deployment
+that does not opt in is unchanged. Call with the root context: `include "kdive.secretsEnv" .`.
+*/}}
+{{- define "kdive.secretsEnv" -}}
+{{- if .Values.secrets.secretName -}}
+- name: KDIVE_SECRETS_ROOT
+  value: {{ .Values.secrets.mountPath | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "kdive.secretsVolumeMount" -}}
+{{- if .Values.secrets.secretName -}}
+- name: kdive-secrets
+  mountPath: {{ .Values.secrets.mountPath | quote }}
+  readOnly: true
+{{- end -}}
+{{- end -}}
+
+{{- define "kdive.secretsVolume" -}}
+{{- if .Values.secrets.secretName -}}
+- name: kdive-secrets
+  secret:
+    secretName: {{ .Values.secrets.secretName | quote }}
+    # 0440 (not 0400): k8s owns Secret files as root, so the non-root UID reads them via
+    # the pod's fsGroup group bit — owner-only 0400 would be unreadable to UID 10001.
+    defaultMode: 0440
+{{- end -}}
+{{- end -}}
+
 {{- define "kdive.scrapeAnnotations" -}}
 prometheus.io/scrape: "true"
 prometheus.io/path: /metrics
