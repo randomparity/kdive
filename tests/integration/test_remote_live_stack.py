@@ -320,8 +320,11 @@ _FOUR_METHOD_SESSION = "remote-capstone-sess"
 
 async def _assert_vmcore_captured(client: LiveStackClient, *, system_id: str, method: str) -> None:
     """List the System's vmcores; assert one exists, has a ref, and never leaks a raw core."""
-    cores = await client.call_tool("vmcore.list", system_id=system_id)
-    assert isinstance(cores, list) and cores, f"no vmcore artifact for {method} (#1)"
+    # vmcore.list returns a single summary ToolResponse whose `.items` hold the per-artifact
+    # responses (it is not a FastMCP list-wrapped tool, unlike artifacts.list) (#323).
+    result = await client.call_tool("vmcore.list", system_id=system_id)
+    cores = result if isinstance(result, list) else result.items
+    assert cores, f"no vmcore artifact for {method} (#1)"
     refs = [v for c in cores for v in c.refs.values()]
     assert refs, f"no vmcore refs for {method} (#1)"
     # A raw core is `.../vmcore-{method}` (no `-redacted` suffix); it must never surface.
