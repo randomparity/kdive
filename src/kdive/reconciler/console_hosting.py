@@ -47,6 +47,10 @@ _RUNNING_SYSTEM_STATE_VALUES = (
 )
 _REMOTE_KIND_VALUE = ResourceKind.REMOTE_LIBVIRT.value
 
+# Back-off between pump reads that return no data (idle console, EOF, or a dropped stream
+# pending reconnect) so an inactive console never busy-loops the off-loop pump task.
+_IDLE_PUMP_BACKOFF_SECONDS = 0.5
+
 
 class Collector(Protocol):
     """The structural collector contract the registry/hosting loop drive (ConsoleCollector).
@@ -139,12 +143,27 @@ class CollectorRegistry:
         """Finalize a collector's artifact, then forget it (teardown / reap path, AC7).
 
         The pump task is cancelled **before** finalize so no concurrent pump appends a new part
-        between assembly and drop; finalize then reads a settled part set.
+        between assembly and drop; finalize then reads a settled part set. ``finalize`` does
+        blocking store I/O — callers on the event loop must use :meth:`finalize_and_drop_async`
+        instead so the reconciler loop is not stalled.
         """
         collector = self._collectors.pop(system_id, None)
         if collector is not None:
             self._cancel_pump(system_id)
             collector.finalize()
+
+    async def finalize_and_drop_async(self, system_id: UUID) -> None:
+        """Event-loop-safe :meth:`finalize_and_drop`: offload the blocking finalize to a thread.
+
+        Cancels the pump task on the loop first (an asyncio cancel must run on the loop), then
+        runs the collector's blocking finalize (object-store puts + a Postgres row upsert) in a
+        worker thread so a reap pass never blocks the reconciler event loop on network I/O.
+        """
+        collector = self._collectors.pop(system_id, None)
+        if collector is None:
+            return
+        self._cancel_pump(system_id)
+        await asyncio.to_thread(collector.finalize)
 
     def _cancel_pump(self, system_id: UUID) -> None:
         if self._pump_runner is not None:
@@ -306,7 +325,7 @@ class AsyncioPumpRunner:
     async def _pump_forever(self, collector: Collector) -> None:
         while True:
             try:
-                await asyncio.to_thread(collector.pump_once)
+                got = await asyncio.to_thread(collector.pump_once)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - isolate one collector; the runner keeps the rest
@@ -316,6 +335,11 @@ class AsyncioPumpRunner:
                     exc_info=True,
                 )
                 await asyncio.sleep(1.0)
+                continue
+            if not got:
+                # No data this read (idle/EOF/dropped stream): back off briefly so an idle or
+                # powered-off console does not busy-loop the thread pool and the reconnect.
+                await asyncio.sleep(_IDLE_PUMP_BACKOFF_SECONDS)
 
     def cancel(self, system_id: UUID) -> None:
         task = self._tasks.pop(system_id, None)

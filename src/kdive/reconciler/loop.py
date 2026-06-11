@@ -606,7 +606,7 @@ async def _reap_console_collectors(conn: AsyncConnection, registry: CollectorReg
         state = states.get(system_id)
         if state is not None and state not in _GONE_SYSTEM_STATE_VALUES:
             continue  # still live: the attach-watcher keeps streaming it
-        registry.finalize_and_drop(system_id)
+        await registry.finalize_and_drop_async(system_id)
         reaped += 1
         _log.info("reconciler: console collector for gone system %s finalized + reaped", system_id)
     return reaped

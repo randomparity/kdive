@@ -235,6 +235,28 @@ def test_restart_resumes_past_existing_parts() -> None:
     assert store.parts[1] == b"old1"
 
 
+def test_pump_after_close_does_not_reopen_stream() -> None:
+    # AC6 split-brain guard: a pump already scheduled when close() ran must not re-open a stream
+    # after the collector was closed for failover. close() marks the collector finalized.
+    opener = FakeOpenConsole([FakeStream([b"data\n"]), FakeStream([b"more\n"])])
+    store = FakePartStore()
+    collector = _collector(opener, store, rotation_threshold=1024)
+    collector.pump_once()  # opens stream 1
+    collector.close()  # failover: close without finalize
+    assert collector.pump_once() is False  # must not open stream 2
+    assert opener.opens == 1
+
+
+def test_finalize_after_close_is_noop() -> None:
+    store = FakePartStore()
+    collector = _collector(FakeOpenConsole([FakeStream([b"x\n"])]), store, rotation_threshold=1024)
+    collector.pump_once()
+    collector.close()
+    collector.finalize()
+    # close did not persist; finalize after close stays a no-op (the failover collector is dropped).
+    assert store.artifact is None
+
+
 def test_empty_console_bytes_finalize_to_empty_artifact() -> None:
     store = FakePartStore()
     stream = FakeStream([])  # immediate EOF

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Protocol
 from uuid import UUID
 
@@ -119,6 +120,11 @@ class ConsoleCollector:
         # dead stream must not overwrite already-uploaded parts).
         self._next_index = self._resume_index()
         self._finalized = False
+        # The pump runs on an off-loop worker thread while finalize/close are driven from the
+        # reconciler event loop (reap / lock-loss). This lock makes pump_once, finalize, and
+        # close mutually exclusive so they never concurrently mutate the buffer/carry/stream — an
+        # in-flight pump completes before close or finalize observes the collector's state.
+        self._lock = threading.Lock()
 
     @property
     def system_id(self) -> UUID:
@@ -146,21 +152,25 @@ class ConsoleCollector:
 
         Reconnects on a stream drop (AC1) and rotates on the size threshold or a crash marker
         (AC2). A clean end-of-stream (``b""``) drops the stream so the next pump reconnects —
-        a powered-off guest reconnects when it boots again.
+        a powered-off guest reconnects when it boots again. A no-op once finalized, so a pump
+        that was already in the thread pool when finalize ran never re-opens a closed stream.
         """
-        stream = self._ensure_stream()
-        try:
-            chunk = stream.recv(self._read_chunk)
-        except Exception:  # noqa: BLE001 - any stream error is a drop; reconnect on the next pump
-            _log.info("console stream for %s dropped; will reconnect", self._system_id)
-            self._drop_stream()
-            return False
-        if not chunk:
-            self._drop_stream()
-            return False
-        self._buffer.extend(chunk)
-        self._maybe_rotate()
-        return True
+        with self._lock:
+            if self._finalized:
+                return False
+            stream = self._ensure_stream()
+            try:
+                chunk = stream.recv(self._read_chunk)
+            except Exception:  # noqa: BLE001 - any stream error is a drop; reconnect next pump
+                _log.info("console stream for %s dropped; will reconnect", self._system_id)
+                self._drop_stream()
+                return False
+            if not chunk:
+                self._drop_stream()
+                return False
+            self._buffer.extend(chunk)
+            self._maybe_rotate()
+            return True
 
     def _maybe_rotate(self) -> None:
         if _CRASH_MARKER.search(self._buffer):
@@ -218,18 +228,21 @@ class ConsoleCollector:
         """Flush the tail part and assemble the ordered parts into one console artifact.
 
         Idempotent: a second finalize (capture then teardown) is a no-op once the artifact is
-        written. Called by the hosting loop on capture or teardown; the reap supervisor waits
-        for this to complete before dropping the collector (AC7 — reap never races finalize).
+        written. Holds the per-collector lock so it never overlaps an in-flight pump — an
+        already-scheduled pump completes first, then finalize reads a settled part set (AC7 —
+        reap never races finalize). The store I/O here is blocking; callers on the event loop
+        offload it (the reap uses ``asyncio.to_thread``).
         """
-        if self._finalized:
-            return
-        self._drop_stream()
-        self._flush_tail()
-        assembled = bytearray()
-        for index in sorted(self._store.list_part_indices(self._system_id)):
-            assembled.extend(self._store.read_part(self._system_id, index))
-        self._store.write_console_artifact(self._system_id, bytes(assembled))
-        self._finalized = True
+        with self._lock:
+            if self._finalized:
+                return
+            self._drop_stream()
+            self._flush_tail()
+            assembled = bytearray()
+            for index in sorted(self._store.list_part_indices(self._system_id)):
+                assembled.extend(self._store.read_part(self._system_id, index))
+            self._store.write_console_artifact(self._system_id, bytes(assembled))
+            self._finalized = True
         _log.info("console collector for %s finalized into one artifact", self._system_id)
 
     @property
@@ -241,6 +254,10 @@ class ConsoleCollector:
 
         The artifact is intentionally not assembled — on leader failover the new leader
         cold-starts and pre-failover console history is the accepted best-effort loss
-        (ADR-0095). Use :meth:`finalize` for the capture/teardown path that must persist.
+        (ADR-0095). Holds the lock and marks the collector finalized so a pump already in the
+        thread pool cannot re-open the stream after close (the split-brain guard, AC6). Use
+        :meth:`finalize` for the capture/teardown path that must persist.
         """
-        self._drop_stream()
+        with self._lock:
+            self._drop_stream()
+            self._finalized = True
