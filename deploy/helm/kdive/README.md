@@ -55,11 +55,40 @@ source is not pod-local.
 
 `config.*` renders into a plain ConfigMap, so it is for **non-secret** configuration
 (endpoints, bucket, region, OIDC issuer). Do not put a database DSN with an embedded
-password or S3 secret keys into `config.*` in production. Supply secret-bearing
-values out of band — secret files mounted under `KDIVE_SECRETS_ROOT` (ADR-0088
-decision 3), IRSA/workload identity for S3, or a managed Secret you `envFrom` onto
-the pods. The fixed `demoCredentials` are non-secret by design: the demo data they
-guard is throwaway `emptyDir` state.
+password or S3 secret keys into `config.*` in production.
+
+### File-ref secrets (`secrets.secretName`)
+
+The file-ref secret backend (ADR-0027/ADR-0088 decision 3) resolves credentials from
+files under `KDIVE_SECRETS_ROOT` — the remote-libvirt TLS client cert/key/CA
+(`KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF` etc.) and debug-session secrets. Create a
+Secret whose keys are the credential filenames, then point `secrets.secretName` at it:
+
+```sh
+kubectl create secret generic kdive-remote-tls \
+  --from-file=clientcert.pem=client.pem \
+  --from-file=clientkey.pem=clientkey.pem \
+  --from-file=cacert.pem=ca.pem
+
+helm install kdive deploy/helm/kdive \
+  --set secrets.secretName=kdive-remote-tls \
+  --set config.KDIVE_REMOTE_LIBVIRT_URI='qemu+tls://host.example/system' \
+  --set config.KDIVE_REMOTE_LIBVIRT_CLIENT_CERT_REF=clientcert.pem \
+  --set config.KDIVE_REMOTE_LIBVIRT_CLIENT_KEY_REF=clientkey.pem \
+  --set config.KDIVE_REMOTE_LIBVIRT_CA_CERT_REF=cacert.pem \
+  --set config.KDIVE_DATABASE_URL=... --set config.KDIVE_OIDC_ISSUER=...
+```
+
+The chart mounts the Secret **read-only** (`defaultMode 0400`) at `secrets.mountPath`
+(default `/etc/kdive/secrets`) on the server, worker, and reconciler, and sets
+`KDIVE_SECRETS_ROOT` to that path. Refs are resolved **relative to the root**, so a
+bare key name like `clientcert.pem` is enough — the Kubernetes Secret volume's `..data`
+symlink indirection resolves correctly, and a ref escaping the root is rejected. Leaving
+`secrets.secretName` empty mounts nothing.
+
+For S3, prefer IRSA/workload identity, or a managed Secret you `envFrom` onto the pods.
+The fixed `demoCredentials` are non-secret by design: the demo data they guard is
+throwaway `emptyDir` state.
 
 ## Subchart distribution
 

@@ -187,6 +187,56 @@ def test_service_does_not_expose_the_aux_port() -> None:
             assert svc_ports == {8000}
 
 
+def _deployments_with(*set_args: str) -> dict[str, dict[str, Any]]:
+    """Render with extra --set args and index Deployments by process name."""
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    assert res.returncode == 0, res.stderr
+    out: dict[str, dict[str, Any]] = {}
+    for doc in yaml.safe_load_all(res.stdout):
+        if isinstance(doc, dict) and doc.get("kind") == "Deployment":
+            name = doc["metadata"]["name"]
+            for proc in _AUX_PORTS:
+                if name.endswith(f"-{proc}"):
+                    out[proc] = doc
+    return out
+
+
+def test_secrets_unset_mounts_nothing() -> None:
+    # The opt-in secret projection (#313) must be inert by default: no mount, no volume, no
+    # KDIVE_SECRETS_ROOT, so a deployment that does not need file secrets is unchanged.
+    for proc, deploy in _deployments_with().items():
+        container = _container(deploy)
+        env_names = {e["name"] for e in container["env"]}
+        assert "KDIVE_SECRETS_ROOT" not in env_names, proc
+        mounts = {m["name"] for m in container.get("volumeMounts", [])}
+        assert "kdive-secrets" not in mounts, proc
+        volumes = {v["name"] for v in deploy["spec"]["template"]["spec"].get("volumes", [])}
+        assert "kdive-secrets" not in volumes, proc
+
+
+@pytest.mark.parametrize("proc", list(_AUX_PORTS))
+def test_secrets_set_projects_readonly_on_each_component(proc: str) -> None:
+    # With secrets.secretName set, every component that resolves file-ref secrets gets the
+    # Secret mounted read-only under KDIVE_SECRETS_ROOT (#313): worker/reconciler open the
+    # remote-libvirt qemu+tls transport, the server resolves debug-session secrets.
+    deploy = _deployments_with("secrets.secretName=kdive-remote-tls")[proc]
+    container = _container(deploy)
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    assert env["KDIVE_SECRETS_ROOT"] == "/etc/kdive/secrets"
+    mount = next(m for m in container["volumeMounts"] if m["name"] == "kdive-secrets")
+    assert mount["mountPath"] == "/etc/kdive/secrets"
+    assert mount["readOnly"] is True
+    volume = next(
+        v for v in deploy["spec"]["template"]["spec"]["volumes"] if v["name"] == "kdive-secrets"
+    )
+    assert volume["secret"]["secretName"] == "kdive-remote-tls"  # pragma: allowlist secret
+    # The non-root UID (10001) reads the root-owned Secret files via the pod fsGroup's group
+    # bit, so the mode must grant group read (0440, not owner-only 0400) and fsGroup must be set
+    # — verified on a real cluster. YAML parses the octal literal 0440 to 288.
+    assert volume["secret"]["defaultMode"] == 0o440
+    assert deploy["spec"]["template"]["spec"]["securityContext"]["fsGroup"] == 10001
+
+
 def test_lint_is_clean() -> None:
     res = subprocess.run(
         ["helm", "lint", CHART],

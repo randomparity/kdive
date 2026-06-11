@@ -20,6 +20,8 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
+        # fsGroup so the non-root UID can read a mounted file-ref Secret via its group bit.
+        fsGroup: 10001
       containers:
         - name: server
           image: {{ include "kdive.image" . }}
@@ -29,6 +31,7 @@ spec:
             - name: KDIVE_HTTP_HOST
               value: "0.0.0.0"
             {{- include "kdive.auxEnv" 9464 | nindent 12 }}
+            {{- include "kdive.secretsEnv" . | nindent 12 }}
           envFrom:
             - configMapRef:
                 name: {{ include "kdive.fullname" . }}-config
@@ -36,3 +39,11 @@ spec:
             - containerPort: 8000
             - containerPort: 9464
           {{- include "kdive.auxProbes" 9464 | nindent 10 }}
+          {{- if .Values.secrets.secretName }}
+          volumeMounts:
+            {{- include "kdive.secretsVolumeMount" . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.secrets.secretName }}
+      volumes:
+        {{- include "kdive.secretsVolume" . | nindent 8 }}
+      {{- end }}
