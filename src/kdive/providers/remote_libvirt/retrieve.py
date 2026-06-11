@@ -233,6 +233,7 @@ class RemoteLibvirtRetrieve:
         core_build_id_from_file: CoreBuildIdFromFile = read_core_build_id_from_file,
         core_dmesg_from_file: CoreDmesgFromFile = read_core_dmesg_from_file,
         host_dump_format: int = libvirt.VIR_DOMAIN_CORE_DUMP_FORMAT_KDUMP_ZLIB,
+        max_core_bytes: int = _MAX_CORE_BYTES,
     ) -> None:
         self._secret_registry = secret_registry
         self._config_factory = config_factory
@@ -255,6 +256,7 @@ class RemoteLibvirtRetrieve:
         self._core_build_id_from_file = core_build_id_from_file
         self._core_dmesg_from_file = core_dmesg_from_file
         self._host_dump_format = host_dump_format
+        self._max_core_bytes = max_core_bytes
 
     @classmethod
     def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtRetrieve:
@@ -408,7 +410,7 @@ class RemoteLibvirtRetrieve:
     def _enforce_ceiling(self, volume: Any, system_id: UUID) -> None:
         """Reject an over-ceiling volume before any download; still clean the dump up."""
         capacity = int(volume.info()[1])
-        if capacity > _MAX_CORE_BYTES:
+        if capacity > self._max_core_bytes:
             self._delete_volume(volume)
             raise CategorizedError(
                 "host_dump core exceeds the single-PUT 5 GiB ceiling",
@@ -417,12 +419,37 @@ class RemoteLibvirtRetrieve:
             )
 
     def _download_to_file(self, conn: Any, volume: Any, spool: Path, system_id: UUID) -> None:
+        """Spool the volume to a 0600 temp file; abort+raise if the stream overruns the ceiling.
+
+        The pre-download ceiling check is the primary bound (against the volume's reported
+        capacity), but a host that under-reports capacity could still stream past it — so the
+        sink also counts bytes and aborts the moment the spool would exceed the ceiling,
+        capping worker disk/OOM exposure to a lying or racing host (ADR-0094 §2 sanity check).
+        """
         stream = conn.newStream(0)
+        written = 0
+
+        def _sink(_stream: Any, data: bytes, _opaque: Any) -> None:
+            nonlocal written
+            written += len(data)
+            if written > self._max_core_bytes:
+                raise CategorizedError(
+                    "host_dump stream exceeded the 5 GiB ceiling mid-download",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={"system_id": str(system_id), "streamed_bytes": written},
+                )
+            handle.write(data)
+
         try:
-            with spool.open("wb") as sink:
+            fd = os.open(spool, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as handle:
                 volume.download(stream, 0, 0, 0)
-                stream.recvAll(lambda _s, data, _o: sink.write(data), None)
+                stream.recvAll(_sink, None)
             stream.finish()
+        except CategorizedError:
+            with contextlib.suppress(Exception):
+                stream.abort()
+            raise
         except (libvirt.libvirtError, OSError, RuntimeError) as exc:
             with contextlib.suppress(Exception):
                 stream.abort()
@@ -435,12 +462,13 @@ class RemoteLibvirtRetrieve:
     def _store_core(self, system_id: UUID, spool: Path) -> CaptureOutput:
         build_id = self._core_build_id_from_file(spool)
         dmesg = self._core_dmesg_from_file(spool)
-        raw = self._stream_put(system_id, spool)
-        self._verify_stored(raw.key, _file_sha256(spool), system_id)
+        sha256_b64 = _file_sha256_b64(spool)
+        raw = self._stream_put(system_id, spool, sha256_b64)
+        self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = self._persist_redacted(system_id, CaptureMethod.HOST_DUMP, dmesg)
         return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=build_id)
 
-    def _stream_put(self, system_id: UUID, spool: Path) -> StoredArtifact:
+    def _stream_put(self, system_id: UUID, spool: Path, sha256_b64: str) -> StoredArtifact:
         return self._store_factory().put_stream(
             ArtifactStreamRequest(
                 tenant=_TENANT,
@@ -448,12 +476,13 @@ class RemoteLibvirtRetrieve:
                 owner_id=str(system_id),
                 name=f"vmcore-{CaptureMethod.HOST_DUMP.value}",
                 path=spool,
+                sha256_b64=sha256_b64,
                 sensitivity=Sensitivity.SENSITIVE,
                 retention_class=_RETENTION,
             )
         )
 
-    def _verify_stored(self, raw_key: str, sha256_hex: str, system_id: UUID) -> None:
+    def _verify_stored(self, raw_key: str, sha256_b64: str, system_id: UUID) -> None:
         head = self._store_factory().head(raw_key)
         if head is None:
             raise CategorizedError(
@@ -461,8 +490,7 @@ class RemoteLibvirtRetrieve:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id), "key": raw_key},
             )
-        expected = base64.b64encode(bytes.fromhex(sha256_hex)).decode("ascii")
-        if head.checksum_sha256 is not None and head.checksum_sha256 != expected:
+        if head.checksum_sha256 is not None and head.checksum_sha256 != sha256_b64:
             raise CategorizedError(
                 "stored host_dump core checksum does not match the streamed core",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -667,13 +695,17 @@ def _pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
     return root.get("type"), target
 
 
-def _file_sha256(path: Path) -> str:
-    """Stream a file through sha256 in fixed chunks (constant memory) and return the hex digest."""
+def _file_sha256_b64(path: Path) -> str:
+    """Stream a file through sha256 (constant memory); return the base64 digest S3 signs.
+
+    Base64 is the form ``ChecksumSHA256`` takes on the PUT and that ``head`` reads back, so
+    the value binds the upload integrity and the post-put verification without re-encoding.
+    """
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(_SPOOL_CHUNK_BYTES), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+    return base64.b64encode(digest.digest()).decode("ascii")
 
 
 __all__ = [

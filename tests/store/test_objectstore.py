@@ -96,12 +96,17 @@ def test_put_artifact_maps_transport_error_to_infrastructure_failure() -> None:
 def _stream_request(
     tenant: str, owner_kind: str, owner_id: str, name: str, path: Path
 ) -> ArtifactStreamRequest:
+    import base64
+    import hashlib
+
+    sha256_b64 = base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode("ascii")
     return ArtifactStreamRequest(
         tenant=tenant,
         owner_kind=owner_kind,
         owner_id=owner_id,
         name=name,
         path=path,
+        sha256_b64=sha256_b64,
         sensitivity=Sensitivity.SENSITIVE,
         retention_class="vmcore",
     )

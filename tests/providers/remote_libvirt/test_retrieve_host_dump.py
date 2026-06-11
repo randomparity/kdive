@@ -8,6 +8,10 @@ assertion over the orchestration; nothing touches a real host or MinIO.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -261,6 +265,7 @@ def _retrieve(
     build_id: str = "deadbeef",
     dmesg: bytes = b"kernel panic\n",
     build_id_error: CategorizedError | None = None,
+    max_core_bytes: int = 5 * 1024**3,
 ) -> RemoteLibvirtRetrieve:
     def _read_build_id(path: Path) -> str:
         if build_id_error is not None:
@@ -281,11 +286,16 @@ def _retrieve(
         pki_base_dir=tmp_path,
         core_build_id_from_file=_read_build_id,
         core_dmesg_from_file=_read_dmesg,
+        max_core_bytes=max_core_bytes,
     )
 
 
-def _head_ok(payload: bytes = b"CORE-BYTES") -> HeadResult:
-    return HeadResult(size_bytes=len(payload), checksum_sha256=None, etag="etag-raw")
+def _sha256_b64(payload: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(payload).digest()).decode("ascii")
+
+
+def _head_ok(payload: bytes = b"CORE-BYTES", *, checksum: str | None = None) -> HeadResult:
+    return HeadResult(size_bytes=len(payload), checksum_sha256=checksum, etag="etag-raw")
 
 
 def test_host_dump_volume_name_is_deterministic_per_system() -> None:
@@ -316,6 +326,8 @@ def test_host_dump_happy_path_dumps_streams_uploads(tmp_path: Path) -> None:
     assert store.stream_requests
     assert store.stream_requests[0].key().endswith("/vmcore-host_dump")
     assert store.stream_requests[0].sensitivity is Sensitivity.SENSITIVE
+    # the streamed core's sha256 is bound into the PUT (S3 enforces it), not a vacuous check.
+    assert store.stream_requests[0].sha256_b64 == _sha256_b64(b"CORE-BYTES")
     # the redacted dmesg landed too.
     assert out.redacted.key.endswith("/vmcore-host_dump-redacted")
     assert out.vmcore_build_id == "deadbeef"
@@ -433,3 +445,69 @@ def test_host_dump_missing_object_after_upload_is_infrastructure_failure(tmp_pat
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert vol.deleted
+
+
+def test_host_dump_verifies_the_readback_checksum_when_present(tmp_path: Path) -> None:
+    payload = b"CORE-BYTES"
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096, payload=payload)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    # head returns the matching checksum: the post-put verification passes.
+    store = FakeStore(head=_head_ok(payload, checksum=_sha256_b64(payload)))
+
+    out = _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+    assert out.vmcore_build_id == "deadbeef"
+
+
+def test_host_dump_readback_checksum_mismatch_is_infrastructure_failure(tmp_path: Path) -> None:
+    payload = b"CORE-BYTES"
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096, payload=payload)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    # head returns a checksum that disagrees with the streamed core.
+    store = FakeStore(head=_head_ok(payload, checksum=_sha256_b64(b"TAMPERED")))
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert vol.deleted
+
+
+def test_host_dump_stream_overrunning_the_ceiling_is_configuration_error(tmp_path: Path) -> None:
+    # The volume reports a capacity under the (here tiny) ceiling so the pre-download check
+    # passes, but the stream then delivers more than the ceiling — the sink must abort rather
+    # than spool it all (the ADR-0094 §2 mid-download sanity bound against a lying host).
+    oversize = b"x" * 100
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=8, payload=oversize)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=None)
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path, max_core_bytes=10).capture(_SID, CaptureMethod.HOST_DUMP)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert vol.deleted  # the over-streaming dump volume is still cleaned up
+    assert not store.stream_requests  # never uploaded
+
+
+def test_host_dump_spools_to_a_private_mode_file(tmp_path: Path) -> None:
+    captured_mode: dict[str, int] = {}
+
+    class _PermSnoopVolume(FakeVolume):
+        def download(self, stream: FakeStream, offset: int, length: int, flags: int) -> None:
+            super().download(stream, offset, length, flags)
+
+    payload = b"sensitive-guest-RAM"
+    vol = _PermSnoopVolume(host_dump_volume_name(_SID), capacity=4096, payload=payload)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+
+    class _PermStore(FakeStore):
+        def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
+            captured_mode["mode"] = stat.S_IMODE(os.stat(request.path).st_mode)
+            return super().put_stream(request)
+
+    store = _PermStore(head=_head_ok(payload))
+    _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+    # The spooled core (guest memory) must not be world/group readable.
+    assert captured_mode["mode"] == 0o600

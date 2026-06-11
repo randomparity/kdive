@@ -87,7 +87,10 @@ class ArtifactStreamRequest:
     The store reads ``path`` as the PUT body so a large artifact (e.g. a spooled host_dump
     core) is uploaded at constant memory rather than read whole into RAM (ADR-0094). The
     caller owns ``path``'s lifecycle (it is typically a worker temp file deleted after the
-    put).
+    put). ``sha256_b64`` is the base64-encoded SHA-256 of ``path``'s bytes (the caller already
+    streams the file once to compute it); the store signs it into the PUT so S3 **rejects** an
+    upload whose body does not hash to it — the same end-to-end integrity binding the presigned
+    kdump PUT gets, and the value ``head().checksum_sha256`` reads back for the post-put check.
     """
 
     tenant: str
@@ -95,6 +98,7 @@ class ArtifactStreamRequest:
     owner_id: str
     name: str
     path: Path
+    sha256_b64: str
     sensitivity: Sensitivity
     retention_class: str
 
