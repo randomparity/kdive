@@ -21,6 +21,7 @@ import binascii
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -74,10 +75,21 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.objectstore import object_store_from_env
 
+_log = logging.getLogger(__name__)
+
 _HELPER = "/usr/local/sbin/kdive-capture-vmcore"
 _TENANT = "remote-libvirt"
 _RETENTION = "vmcore"
 _OWNER_KIND = "systems"
+# Persisted as the redacted-dmesg artifact when a host_dump core's dmesg cannot be extracted
+# (#320): drgn's get_dmesg needs the guest kernel's debuginfo to read a modern printk
+# ringbuffer, which the capture path does not load. The core + mandatory build-id still capture;
+# this honest marker replaces a misleadingly-empty artifact. Full dmesg is available later from
+# the debuginfo-backed crash postmortem.
+_DMESG_UNAVAILABLE = (
+    b"[kdive] dmesg could not be extracted from this host_dump core "
+    b"(kernel debuginfo required); see the crash postmortem for the kernel log\n"
+)
 # One object + one checksum; lifetime must cover the in-guest upload of a multi-hundred-MB core.
 _DEFAULT_PUT_EXPIRY_S = 3600
 # S3 single-PUT ceiling (ADR-0048); larger cores are a multipart follow-up.
@@ -193,17 +205,30 @@ def read_core_build_id_from_file(core: Path) -> str:  # pragma: no cover - live_
 
 
 def read_core_dmesg_from_file(core: Path) -> bytes:  # pragma: no cover - live_vm (drgn)
-    """The kernel log buffer from a compressed-kdump core (drgn ``get_dmesg``).
+    """The kernel log buffer from an ELF/kdump core (drgn ``get_dmesg``).
+
+    ``get_dmesg`` resolves the printk ring buffer's types, which on a modern kernel are not in
+    VMCOREINFO and need the guest kernel's debuginfo (which the capture path does not load, #320).
+    A read failure is therefore wrapped as an ``INFRASTRUCTURE_FAILURE`` the caller treats as
+    best-effort, rather than a raw exception that aborts an otherwise-complete capture.
 
     Raises:
-        CategorizedError: ``MISSING_DEPENDENCY`` when drgn is absent.
+        CategorizedError: ``MISSING_DEPENDENCY`` when drgn is absent; ``INFRASTRUCTURE_FAILURE``
+            when the core's dmesg cannot be read.
     """
     from drgn.helpers.linux.printk import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
         get_dmesg,
     )
 
     prog = _open_core_program(core)
-    return get_dmesg(prog)
+    try:
+        return get_dmesg(prog)
+    except Exception as exc:
+        raise CategorizedError(
+            "could not extract dmesg from the host_dump core; the printk ring buffer needs the "
+            "guest kernel's debuginfo, which is not loaded at capture time",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from exc
 
 
 class RemoteLibvirtRetrieve:
@@ -442,12 +467,35 @@ class RemoteLibvirtRetrieve:
 
     def _store_core(self, system_id: UUID, spool: Path) -> CaptureOutput:
         build_id = self._core_build_id_from_file(spool)
-        dmesg = self._core_dmesg_from_file(spool)
+        dmesg = self._dmesg_best_effort(spool, system_id)
         sha256_b64 = _file_sha256_b64(spool)
         raw = self._stream_put(system_id, spool, sha256_b64)
         self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = self._persist_redacted(system_id, CaptureMethod.HOST_DUMP, dmesg)
         return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=build_id)
+
+    def _dmesg_best_effort(self, spool: Path, system_id: UUID) -> bytes:
+        """The core's dmesg, or an honest placeholder if it cannot be read (#320).
+
+        The core and its mandatory build-id are the load-bearing artifacts; the redacted dmesg is
+        a convenience the debuginfo-backed crash postmortem reproduces in full. A capture must not
+        abort because the printk ring buffer needs debuginfo the capture path does not have, so an
+        extraction failure degrades to ``_DMESG_UNAVAILABLE`` (logged, not silently empty). A
+        genuine ``MISSING_DEPENDENCY`` (drgn absent) is *not* degraded — it is a real environment
+        fault the build-id pass above would already have surfaced.
+        """
+        try:
+            return self._core_dmesg_from_file(spool)
+        except CategorizedError as exc:
+            if exc.category is ErrorCategory.MISSING_DEPENDENCY:
+                raise
+            _log.warning(
+                "host_dump dmesg extraction failed for system %s; persisting a placeholder "
+                "(core + build-id captured): %s",
+                system_id,
+                exc,
+            )
+            return _DMESG_UNAVAILABLE
 
     def _stream_put(self, system_id: UUID, spool: Path, sha256_b64: str) -> StoredArtifact:
         return self._store_factory().put_stream(

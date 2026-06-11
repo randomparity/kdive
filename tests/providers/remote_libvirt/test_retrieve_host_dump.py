@@ -31,6 +31,7 @@ from kdive.provider_components.artifacts import (
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.retrieve import (
+    _DMESG_UNAVAILABLE,
     RemoteLibvirtRetrieve,
     host_dump_volume_name,
 )
@@ -235,6 +236,7 @@ def _retrieve(
     build_id: str = "deadbeef",
     dmesg: bytes = b"kernel panic\n",
     build_id_error: CategorizedError | None = None,
+    dmesg_error: CategorizedError | None = None,
     max_core_bytes: int = 5 * 1024**3,
 ) -> RemoteLibvirtRetrieve:
     def _read_build_id(path: Path) -> str:
@@ -244,6 +246,8 @@ def _retrieve(
         return build_id
 
     def _read_dmesg(path: Path) -> bytes:
+        if dmesg_error is not None:
+            raise dmesg_error
         assert path.exists()
         return dmesg
 
@@ -304,6 +308,40 @@ def test_host_dump_happy_path_dumps_streams_uploads(tmp_path: Path) -> None:
     assert out.vmcore_build_id == "deadbeef"
     # AC7: temp file + host volume both gone.
     assert vol.deleted
+
+
+def test_host_dump_dmesg_extraction_failure_degrades_to_placeholder(tmp_path: Path) -> None:
+    # dmesg needs the guest kernel's debuginfo (#320); a failure must not abort an otherwise
+    # complete capture — the core + mandatory build-id still land, with an honest placeholder.
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+    err = CategorizedError("printk needs debuginfo", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    out = _retrieve(conn, store, tmp_path, dmesg_error=err).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert out.vmcore_build_id == "deadbeef"  # the mandatory provenance still captured
+    assert store.stream_requests  # the core still uploaded
+    assert vol.deleted
+    # the redacted artifact carries the honest placeholder, not a misleading empty log.
+    assert store.put_requests
+    assert store.put_requests[0].data == _DMESG_UNAVAILABLE
+
+
+def test_host_dump_missing_drgn_dependency_is_not_degraded(tmp_path: Path) -> None:
+    # A genuine MISSING_DEPENDENCY (drgn absent) is an environment fault, not a best-effort
+    # degrade — it must surface, not be masked behind the placeholder (#320).
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+    err = CategorizedError("drgn absent", category=ErrorCategory.MISSING_DEPENDENCY)
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path, dmesg_error=err).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
 
 def test_host_dump_deletes_a_stale_volume_before_dumping(tmp_path: Path) -> None:
