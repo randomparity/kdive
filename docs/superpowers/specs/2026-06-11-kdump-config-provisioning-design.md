@@ -109,24 +109,28 @@ re-seeding unchanged bytes is a no-op (the `sha256` gate skips the write).
   ```
   rsync warm tree
   make defconfig                          # base from the kernel tree
-  merge_config.sh .config <fragment>      # overlay kdump fragment (resolved bytes)
-  make olddefconfig                       # resolve against this tree
-  fragment-survival check                 # every requested fragment symbol present in final .config
+  merge_config.sh -m .config <fragment>   # MERGE ONLY — no internal olddefconfig
+  make olddefconfig                       # the single resolution pass against this tree
+  fragment-survival check                 # every requested fragment symbol present in FINAL .config
   _missing_config_groups(.config)         # existing preflight (CRASH_DUMP + debuginfo) on the merge
   make
   ```
 
   `_stage_config` is replaced by a `_merge_config` step that writes the fragment to a temp file and
-  runs `defconfig` + `merge_config.sh`. The fragment bytes come from the resolved ref (catalog or
+  runs `defconfig` + `merge_config.sh -m`. The fragment bytes come from the resolved ref (catalog or
   local), not a fixed path.
 - **Fragment-survival check.** `make olddefconfig` silently drops any fragment option whose
   dependency the base `defconfig` does not satisfy. The two-group preflight (`CONFIG_CRASH_DUMP` +
   debuginfo) does not cover the rest of the fragment, so a dropped `CONFIG_PROC_VMCORE` (etc.)
-  would build a kernel that passes the build but cannot kdump. After the merge the build asserts
-  every requested fragment symbol appears in the final `.config` — `merge_config.sh` emits a
-  `Value requested for X not in final .config` line on a drop; the build fails on it. The preflight
-  is a coarse gate; this check is what makes the *fragment* meaningful. Full kdump-correctness
-  beyond symbol presence stays the live run's responsibility.
+  would build a kernel that passes the build but cannot kdump. The check is therefore a **diff of
+  the requested fragment symbols against the FINAL `.config`** (read after the single
+  `olddefconfig`), not a parse of `merge_config.sh` output — `merge_config.sh` runs *before*
+  `olddefconfig` here and **exits 0 even when a symbol is later dropped**, so its stdout warning is
+  not authoritative and its exit code catches nothing. `merge_config.sh -m` skips its own internal
+  `olddefconfig` so there is exactly one resolution pass and one authoritative final `.config`. Any
+  requested symbol absent from that final `.config` fails the build. The preflight is a coarse gate;
+  this check is what makes the *fragment* meaningful. Full kdump-correctness beyond symbol presence
+  stays the live run's responsibility.
 
 ### 4. Agent retrieval
 
@@ -134,10 +138,21 @@ re-seeding unchanged bytes is a no-op (the `sha256` gate skips the write).
 
 - `content`: the fragment bytes inline (≈500 B)
 - `sha256`: the published hash
-- `merge_recipe`: `make defconfig && scripts/kconfig/merge_config.sh .config kdump.config && make olddefconfig`
+- `merge_recipe`: the same sequence the build uses, including the survival check, so an agent
+  building on its own base gets the same protection against a silently dropped symbol:
+  `make defconfig && scripts/kconfig/merge_config.sh -m .config kdump.config && make olddefconfig`,
+  then **verify every `CONFIG_*` line in `kdump.config` is present in the final `.config`** (a
+  dropped symbol means a dependency the agent's base does not satisfy — the kernel will not kdump).
 
 Backed by the same object-store artifact as the build resolver, so a downloaded fragment and a
-built-with fragment share a sha256.
+built-with fragment share a sha256. The recipe deliberately mirrors the build's `-m` + single
+`olddefconfig` + survival-check sequence rather than the naive `merge_config.sh` that exits 0 on a
+drop.
+
+`buildconfig.get` is a **read-only** tool — `annotations=_docmeta.read_only()`, matching the other
+catalog reads (`mcp/tools/catalog/artifacts.py`, `images.py`) — gated by the standard catalog-read
+authorization. The fragment is non-sensitive (public `CONFIG_*` options), so no redaction applies
+to its inline `content`.
 
 ## Components & seams
 
@@ -146,22 +161,25 @@ built-with fragment share a sha256.
 | `provisioning/configs/kdump.config` | Source-of-truth fragment | — |
 | `build_config_catalog` table + migration | Durable name → object_key/sha256 | object store |
 | `_seed_build_configs` (bootstrap) | Publish + upsert, idempotent | repo file, object store, DB |
-| build-config catalog repository/resolver | `name` → bytes (sha256-verified) | DB, object store |
-| `_resolve_config_ref` (both providers) | Admit `catalog` refs + implicit default | resolver |
-| `_merge_config` (both providers) | `defconfig` + `merge_config.sh` + `olddefconfig` + fragment-survival check | kernel tree |
-| `buildconfig.get` MCP tool | Inline agent download | resolver |
+| build-config catalog repository | `name` → bytes (sha256-verified) | DB, object store |
+| `_resolve_config_ref` catalog branch (both providers) | Admit `catalog` refs + implicit default | catalog repository |
+| `_merge_config` (both providers) | `defconfig` + `merge_config.sh -m` + single `olddefconfig` + fragment-survival check | kernel tree |
+| `buildconfig.get` MCP tool | Inline agent download (recipe with survival check) | catalog repository |
 
-Each unit has one purpose and a narrow interface; the resolver is the single seam shared by the
-two build providers and the read tool, which is what keeps "same bytes everywhere" true.
+Each unit has one purpose and a narrow interface; the **catalog repository** is the single seam
+shared by the two build providers' `_resolve_config_ref` branches and the read tool, which is what
+keeps "same bytes everywhere" true.
 
 ## Error handling
 
 - Resolver: unknown `name` → `CONFIGURATION_ERROR` (`details` names the missing entry, never its
   bytes). sha256 mismatch on fetch → `INFRASTRUCTURE_FAILURE` (object store drifted from the row).
-- Build: `make defconfig` or `merge_config.sh` non-zero → `BUILD_FAILURE`. A fragment symbol
-  dropped by `make olddefconfig` (fragment-survival check fails) → `CONFIGURATION_ERROR` whose
-  `details` names the dropped symbol(s), never the fragment bytes. Merged result still missing a
-  required preflight group → existing `CONFIGURATION_ERROR` with `missing_any_of`.
+- Build: a non-zero `make defconfig` / `merge_config.sh -m` / `make olddefconfig` → `BUILD_FAILURE`.
+  Note `merge_config.sh` exits 0 even when it drops a symbol, so a drop is **not** a non-zero exit —
+  it is caught only by the fragment-survival check, which compares the requested symbols to the
+  final `.config` and raises `CONFIGURATION_ERROR` whose `details` names the dropped symbol(s),
+  never the fragment bytes. Merged result still missing a required preflight group → existing
+  `CONFIGURATION_ERROR` with `missing_any_of`.
 - Seed: object-store put failure → fail bootstrap loudly (a half-seeded catalog is worse than an
   absent one); the content-hash check makes a retried bootstrap safe.
 
@@ -182,7 +200,7 @@ Unit:
 
 Integration (gated `live_vm`):
 - The existing build fixtures switch from `/configs/kdump.config` to the catalog ref (or omission)
-  and exercise `defconfig` + `merge_config.sh` against a real tree.
+  and exercise `defconfig` + `merge_config.sh -m` against a real tree.
 
 Acceptance gate (operator runbook, not CI): the four-method live run on the from-source System B —
 `kdump`, `gdbstub`, `console`, plus `host_dump` — consistent with prior milestones whose real
@@ -192,20 +210,27 @@ hardware run is a runbook step.
 
 Suggested issue split (each independently shippable, guardrails green per commit):
 
-1. **Fragment + seed + table.** `provisioning/configs/kdump.config`, migration for
-   `build_config_catalog`, `_seed_build_configs`, repository/resolver, unit tests. No build change
-   yet (resolver usable, default not wired).
-2. **Build-flow change, both providers.** `_merge_config` (`defconfig`+`merge_config.sh`+
-   `olddefconfig`+fragment-survival check), catalog branch in `_resolve_config_ref`,
-   `composition.py` source sets, the implicit-default schema change (`ServerBuildProfile.config`
-   → optional + default resolution; updates the MCP build-tool input schema), preflight-on-merged
-   tests. Replaces `_stage_config`.
-3. **Agent download.** `buildconfig.get` MCP tool + tool-doc/generated-doc regen.
-4. **Fixture/seed cleanup + runbook.** Replace dead `/configs/kdump.config` references; document
-   the four-method live run on System B.
+1. **Fragment + seed + table + catalog repository.** `provisioning/configs/kdump.config`, migration
+   for `build_config_catalog`, `_seed_build_configs`, the **build-config catalog repository**
+   (`name` → sha256-verified bytes), unit tests. No build change yet; the repository is exercised by
+   its own tests and the `buildconfig.get` tool (issue 3) until issue 2 wires it into the providers.
+2. **Build-flow change, both providers.** `_merge_config` (`defconfig` + `merge_config.sh -m` +
+   single `olddefconfig` + fragment-survival check), the **`_resolve_config_ref` catalog branch**
+   (ref-kind dispatch calling the issue-1 repository), `composition.py` source sets, the
+   implicit-default schema change (`ServerBuildProfile.config` → optional + default resolution;
+   updates the MCP build-tool input schema), **and the integration-seed/unit-fixture config-ref
+   update** (`tests/integration/_seed.py:71` and the build fixtures currently name
+   `{kind: local, path: "/configs/kdump.config"}` — an explicit dead path that would override the
+   new default and fail issue 2's own integration tests, so the switch to the catalog ref belongs
+   here, not in issue 4). Replaces `_stage_config`. Preflight-on-merged tests.
+3. **Agent download.** `buildconfig.get` MCP tool (recipe carries the survival check) +
+   tool-doc/generated-doc regen.
+4. **Runbook + residual cleanup.** Document the four-method live run on System B; remove any
+   remaining `/configs/kdump.config` references outside the issue-2 build/seed paths (docs, plans).
 
-Order: 1 → 2 (needs the resolver) → 3 (needs the seeded artifact) ‖ 4 (after 2). 3 and 4 are
-independent once 2 lands.
+Order: 1 → 2 (needs the issue-1 repository) → 3 (needs the seeded artifact) ‖ 4 (after 2). 3 and 4
+are independent once 2 lands. The seed/fixture update lives in issue 2, so no window exists where
+the integration build resolves a dead path.
 
 ## Open questions / follow-ups
 
