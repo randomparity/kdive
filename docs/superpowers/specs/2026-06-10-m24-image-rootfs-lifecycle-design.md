@@ -25,8 +25,9 @@ reconcile object-store state against a YAML file on an operator's disk, so there
 detect a half-published image or storage leak.
 
 M2.4 turns image build, validation, publish/version, and registration into a managed
-subsystem, and adds a second lifecycle the current catalog cannot express: a user uploading a
-**private** image for targeted testing, scoped to that user and pruned on a lifetime.
+subsystem, and adds a second lifecycle the current catalog cannot express: a project member
+uploading a **private** image for targeted testing, scoped to the owning project and pruned on
+a lifetime.
 
 ## Decision
 
@@ -40,17 +41,22 @@ surface (and a private-upload surface for authors), built on the same service la
 ```
 OPERATOR path (public base images)          USER path (private targeted images)
   kdivectl images build/publish               kdivectl images upload
-        | enqueues IMAGE_BUILD job                  | presigned PUT (reuses ADR-0048 ingest)
+        | enqueues IMAGE_BUILD job                  | presigned PUT to quarantine (ADR-0048)
         v                                           v
-  worker -> RootfsBuildPlane (Python)         validate provider-contract + size cap + quarantine
-        |  reproducible, provenance-recorded         |
+  worker -> RootfsBuildPlane (Python)         size cap + quarantine, then NEW guest-contract
+        |  provenance-recorded                       |  validation (libguestfs inspect)
         v                                           v
-  validate provider-contract --------------> publish object --HEAD ok--> register image_catalog row
-        v                                                                  (owner, visibility, expires_at)
-  reconciler sweeps every pass:
-     leaked_images          (object, no row)               -> delete object
-     dangling_images        (row, no object)               -> remove row
-     expired_private_images (private, expires_at < now())  -> delete object + row  [system:reconciler]
+  guest-contract validation ----------------> register image_catalog row (state=pending)
+                                                     |  (owner=project iff private, expires_at)
+                                                     v
+                                              write/promote object --HEAD ok--> flip row to registered
+                                                  (row-first; a swept-prefix object always has a row)
+
+  reconciler sweeps every pass (deadline-guarded, not eager):
+     leaked_images          (object, no row, past publish grace)    -> delete object
+     dangling_images        (row, object missing past deadline)     -> remove row
+     expired_private_images (private, expires_at < now())           -> delete object + row
+                              ...skipped if a non-terminal System still references it  [system:reconciler]
 ```
 
 ### Build planes (Python rewrite)
@@ -72,8 +78,10 @@ that produced its image. **Bit-reproducible rebuilds are an explicit non-goal** 
 `virt-builder` image is not bit-stable: mirror drift, embedded timestamps, filesystem
 ordering), so an image's identity is a **content digest of the qcow2**, distinct from a kernel
 `build_id` (a vmlinux ELF-note that does not exist for a rootfs image). The local plane is
-exercised on the **live-stack path**, not stubbed to pass CI — the functional capability the
-live-stack runbook and integration tests depend on must survive the rewrite.
+exercised on the **operator-run live-stack path** (env-gated on `KDIVE_LIVE_SSH_TARGET`, like
+the band gate — not normal CI, which skips it); a CI smoke may cover plane wiring, but the
+capability proof is operator-run. The functional capability the live-stack runbook and
+integration tests depend on must survive the rewrite — the plane is not stubbed to a no-op.
 
 ### Catalog as single source of truth
 
@@ -83,7 +91,7 @@ Migration `0023_image_catalog.sql` creates `image_catalog`:
 |--------|-------|
 | `provider, name, arch, format, root_device` | identity + boot layout |
 | `object_key` | object-store key of the qcow2 |
-| `build_id` / `digest` | provenance identity |
+| `digest` | content digest of the qcow2 — the image identity (a rootfs image has no kernel `build_id`) |
 | `capabilities` | guest contract tags (agent, kdump, drgn, helpers) |
 | `provenance` (jsonb) | pinned inputs + build args |
 | `visibility` (`public` \| `private`) | resolution scope |
@@ -170,59 +178,83 @@ source of truth), authenticated as an OIDC principal, audited under `(principal,
 
 | Verb | Actor | Authz | Action |
 |------|-------|-------|--------|
-| `images list` | user / operator | RBAC-filtered | public rows + caller's own private rows |
-| `images upload` | user (project member) | per-project | presigned PUT, validate, register private row with `expires_at` |
-| `images delete <id>` | owner / operator | owner or platform-role | delete own private image (operator: any) |
+| `images list` | project member / operator | RBAC-filtered | public rows + the caller's **project's** private rows |
+| `images upload` | project member | per-project | presigned PUT, validate, register a project-private row with `expires_at` |
+| `images delete <id>` | project member / operator | project-scoped; operator cross-project via break-glass | delete the project's (unreferenced) private image (operator: any, via break-glass) |
 | `images build` | operator | `platform_operator` | enqueue `IMAGE_BUILD` job for a public base image |
 | `images publish` | operator | `platform_operator` | promote a built image to a public catalog row |
 | `images prune --expired` / `images extend <id>` | operator | `platform_admin` break-glass | force-prune now / extend a private lifetime |
 
-Mutating/operator verbs route through the M1.3 platform-role **break-glass path**
-(`mcp/tools/ops/breakglass.py`), not the per-allocation iteration gate (`security/authz/
-gate.py`) — the same boundary M2.2's destructive verbs use. An unprivileged or cross-owner
-invocation is **denied and audited** (the authz boundary is proven, mirroring the M2.2 CLI
-exit criterion).
+Routine `build`/`publish` authorize as `platform_operator`; only the destructive verbs
+(`prune`, `extend`, cross-project force-`delete`) route through the M1.3 platform-role
+**break-glass path** (`mcp/tools/ops/breakglass.py`), not the per-allocation iteration gate
+(`security/authz/gate.py`) — the same boundary M2.2's destructive verbs use. An unprivileged or
+cross-project invocation is **denied and audited** (the authz boundary is proven, mirroring the
+M2.2 CLI exit criterion).
 
-### Patch-applied verification
+### Patch-applied verification (kernel build planes — not the rootfs plane above)
+
+This concerns the **kernel** build planes (`providers/{local,remote}_libvirt/build.py`,
+`_apply_patch`), a separate subsystem from the rootfs `RootfsBuildPlane` introduced above — a
+rootfs image applies no kernel patch. M2.4 does not rewrite the kernel build planes; it carries
+this exit criterion only because the band gate requires it.
 
 The #227 class (a silent `git apply` no-op shipping an unpatched kernel) is already closed in
-**both** build planes via `providers/build_validation.py` (`patch_target_paths` +
+**both kernel build planes** via `providers/build_validation.py` (`patch_target_paths` +
 `snapshot_file_bytes`, the before/after snapshot plus the `Skipped patch` stderr guard).
 M2.4's contribution is the **exit-criterion regression test** that asserts a no-op patch
-fails, for both planes — closing the class with a test, not re-implementing the fix. #227's
-fix is a merged prerequisite, not band scope.
+fails, for both kernel planes — closing the class with a test, not re-implementing the fix.
+#227's fix is a merged prerequisite, not band scope.
 
 ## Exit criteria
 
-1. A build whose patch is a no-op **fails** patch-applied verification — a regression test
-   asserts the failure for both build planes (closes the #227 class).
+1. A kernel build whose patch is a no-op **fails** patch-applied verification — a regression
+   test asserts the failure for both kernel build planes (closes the #227 class).
 2. A half-published image (object without row, or row without object) is reconciled rather
    than leaving a dangling/leaked artifact — tested by injecting each half-state.
 3. A private upload is visible only within its owning project, and an expired private image is
    auto-pruned by the reconciler — but an expired image a non-terminal System still references
    is **not** pruned (reference guard) — tested with a seeded `expires_at < now()` in both the
    referenced and unreferenced cases.
-4. The local-libvirt rootfs build runs through the new Python plane on the live-stack path —
-   capability preserved, not stubbed.
+4. A private upload that lacks the guest contract (no agent/kdump/drgn) is **rejected** with a
+   named reason, and an upload over the per-project count/bytes cap is **denied** — both audited;
+   tested by uploading a non-conforming image and by exceeding the cap.
+5. The local-libvirt rootfs build runs through the new Python plane on the **operator-run**
+   live-stack path (env-gated, not normal CI) — capability preserved, not stubbed.
 
 ## Decomposition
 
-`M2.4/N` issues under an epic, two parallelizable tracks (catalog/data and build/plane):
+`M2.4/N` issues under an epic. Two tracks run in parallel up front — **catalog/data** (/1)
+and **build/plane** (/2, /3, which need no DB table) — then the service/wiring issues chain.
 
 - **M2.4/1** — `image_catalog` migration `0023` + `IMAGE_CATALOG` repository + seed-and-delete
-  YAML + async resolver cutover. *Track head; the catalog table is a dependency of /4–/8.*
-- **M2.4/2** — `RootfsBuildPlane` port + local-libvirt Python plane (delete the bash scripts),
-  live-stack-exercised.
+  YAML + async resolver cutover. *Catalog-track head.* **Migration `0023` is authored whole
+  here with the full public + private schema** (owner, expires_at, pending_since, state, both
+  partial unique indexes) so no later issue adds a second migration — the single migration owner,
+  to avoid the parallel registry conflict the M2.2/M2.3 waves hit.
+- **M2.4/2** — `RootfsBuildPlane` port + local-libvirt Python plane, exercised on the
+  operator-run live-stack path. *Build-track head; independent of /1.* Removing the bash
+  builders is a **migration, not a delete**: rewire the production consumer
+  (`providers/local_libvirt/lifecycle/provisioning.py`), the live-stack integration tests
+  (`test_live_stack.py`, `conftest.py`) and `tests/scripts/test_live_vm_fixtures.py`, and the
+  `docs/runbooks/live-stack.md` operator runbook onto the plane / `kdivectl images build`; the
+  scripts are deleted only after every consumer moves.
 - **M2.4/3** — remote-libvirt plane: a real built image replacing the placeholder digest
-  (ADR-0080).
+  (ADR-0080). *Independent of /1.*
 - **M2.4/4** — publish/register two-write service + `IMAGE_BUILD` job kind + worker handler.
-- **M2.4/5** — private upload path (owner-scoped, TTL, provider-contract validation; reuses
-  the ADR-0048 ingest seam).
+  *After /1.*
+- **M2.4/5** — private upload path: per-project quota (count+bytes under the project lock) and a
+  **new** guest-contract validator (libguestfs inspection); ADR-0048 supplies transport/cap/
+  quarantine only. *After /1 and /4 (reuses the publish/register service).*
 - **M2.4/6** — three reconciler sweeps (`leaked_images` / `dangling_images` /
-  `expired_private_images`) + `ReconcileReport` counts.
+  `expired_private_images`, the last reference-guarded + extend-fenced) + `ReconcileReport`
+  counts. *After /1 and /4 (needs the `state`/`pending_since`/`expires_at` columns and the
+  publish ordering).*
 - **M2.4/7** — `kdivectl images` verbs + RBAC / break-glass wiring + audit attribution.
+  *After /4, /5, /6 (wraps their services).*
 - **M2.4/8** — exit-criterion proof tests (patch no-op fails; half-publish reconciled; private
-  isolation + auto-prune) + operator runbook.
+  isolation + reference-guarded auto-prune; guest-contract rejection + over-quota denial) +
+  operator runbook. *Last.*
 
 ## Non-goals
 
@@ -231,13 +263,17 @@ fix is a merged prerequisite, not band scope.
 - No dual catalog backing: the YAML files are removed, not kept as a fallback. The DB table is
   the single source of truth.
 - Tier-3 in-guest kdump image work (#115) and >5 GiB uploads (#112) remain their own issues.
+  A private rootfs upload is bounded by the ADR-0048 object-size cap; a qcow2 is normally sparse
+  enough to fit, but an image above the cap (e.g. a debug-heavy rootfs with a staged vmlinux)
+  needs #112.
 
 ## Consequences
 
 - Resolution in the provisioning/`materialize` path becomes an async DB read; the synchronous
   YAML loader is removed along with the `fixtures/` source-tree catalog.
 - The reconciler gains three sweeps and three report counts; its pass cost grows by the
-  object-prefix and per-row HEAD checks those sweeps require.
+  object-prefix listing, the per-row HEAD checks, and the per-pass JSONB scan over non-terminal
+  Systems the `expired_private_images` reference guard runs.
 - The provider build seam gains a `RootfsBuildPlane`; every new provider that ships a base
   image implements it (as the systems registrar already requires a `rootfs_validator`).
 - The M2.4 band gate consumes the published public base image (operator-run, signed by a
