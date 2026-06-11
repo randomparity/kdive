@@ -401,14 +401,14 @@ def test_remote_runtime_buildable_without_operator_config(
     assert runtime.discovery_registrar is not None
 
 
-def test_remote_runtime_advertises_kdump_and_gdbstub_capture() -> None:
+def test_remote_runtime_advertises_kdump_gdbstub_and_console_capture() -> None:
     # The retrieve issue widened the set to the two-phase kdump path (ADR-0084); M2.5
-    # advertises the already-wired gdbstub transport (ADR-0083/0085). host-dump is added
-    # by issue #301; console by #303.
+    # advertises the already-wired gdbstub transport (ADR-0083/0085) and the reconciler-owned
+    # console collector (#303, ADR-0095). host-dump is added by issue #301.
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     assert runtime.supported_capture_methods == frozenset(
-        {CaptureMethod.KDUMP, CaptureMethod.GDBSTUB}
+        {CaptureMethod.KDUMP, CaptureMethod.GDBSTUB, CaptureMethod.CONSOLE}
     )
 
 
@@ -419,6 +419,15 @@ def test_remote_runtime_advertises_gdbstub_as_a_capture_method() -> None:
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     assert CaptureMethod.GDBSTUB in runtime.supported_capture_methods
+
+
+def test_remote_runtime_advertises_console_as_a_capture_method() -> None:
+    # #303 (ADR-0095): CONSOLE is in the advertised set so the reconciler-owned collector's
+    # artifact is selectable. Like gdbstub, console is consumed off the boot/diagnostic plane,
+    # not through vmcore.fetch, so the assertion is membership in the advertised set.
+    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+
+    assert CaptureMethod.CONSOLE in runtime.supported_capture_methods
 
 
 def test_remote_runtime_gdbstub_debug_path_is_unchanged(
