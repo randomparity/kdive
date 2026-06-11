@@ -26,6 +26,15 @@
 # (postgres:5432, oidc:8080, minio:9000) — not the host-published ports above, which
 # are for a server run on the host. See deploy/compose/README.md for the bring-up.
 
+# Shared aux readiness-probe cadence (ADR-0090 §5), merged into each app service's
+# healthcheck via `<<: *readyz_cadence`. Each service supplies its own `test` because
+# the /readyz URL port differs per process (server 9464, worker 9465, reconciler 9466).
+x-readyz-cadence: &readyz_cadence
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
 # Shared backend wiring, declared once and merged into every app service via
 # `<<: *backends`. The server adds its own HTTP bind vars on top.
 x-backends: &backends
@@ -109,6 +118,18 @@ services:
       <<: *backends
       KDIVE_HTTP_HOST: 0.0.0.0
       KDIVE_HTTP_PORT: "8000"
+      # Bind the aux health/metrics listener to all interfaces INSIDE the container so
+      # the in-container healthcheck (and an in-network scrape) reaches it. The port is
+      # never published (no host mapping below), so the container network namespace is
+      # its access boundary — the unauthenticated /readyz/metrics stay non-public.
+      KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9464
+    healthcheck:
+      <<: *readyz_cadence
+      test:
+        - CMD
+        - python
+        - -c
+        - import sys,urllib.request;sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:9464/readyz",timeout=3).status==200 else 1)
     ports:
       - "8000:8000"
     # Self-contained graph: a bare `docker compose up server` pulls in migrate
@@ -132,6 +153,14 @@ services:
     command: ["worker"]
     environment:
       <<: *backends
+      KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
+    healthcheck:
+      <<: *readyz_cadence
+      test:
+        - CMD
+        - python
+        - -c
+        - import sys,urllib.request;sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:9465/readyz",timeout=3).status==200 else 1)
     volumes:
       - kdive-build:/var/lib/kdive/build
       - kdive-install:/var/lib/kdive/install
@@ -146,6 +175,14 @@ services:
     command: ["reconciler"]
     environment:
       <<: *backends
+      KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9466
+    healthcheck:
+      <<: *readyz_cadence
+      test:
+        - CMD
+        - python
+        - -c
+        - import sys,urllib.request;sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:9466/readyz",timeout=3).status==200 else 1)
     depends_on:
       migrate:
         condition: service_completed_successfully
