@@ -258,9 +258,13 @@ def build_remote_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         # The two-phase kdump capture lands here (ADR-0084); vmcore.get admits a kdump
         # capture against this set. GDBSTUB is the already-wired live-debug transport
         # (ADR-0083/0085), advertised here as a capture method — it is not consumed
-        # through vmcore.fetch, so it has no selection path to gate. Host-dump (#301) and
-        # console (#303) join this set as their planes land.
-        supported_capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.GDBSTUB}),
+        # through vmcore.fetch, so it has no selection path to gate. M2.5 adds CONSOLE: a
+        # reconciler-owned virDomainOpenConsole collector assembles the single console artifact
+        # off the boot/diagnostic plane (ADR-0095), the same artifact shape local advertises.
+        # Host-dump (#301) joins this set as its plane lands.
+        supported_capture_methods=frozenset(
+            {CaptureMethod.KDUMP, CaptureMethod.GDBSTUB, CaptureMethod.CONSOLE}
+        ),
         discovery_registrar=register_remote_host,
         attach_seam=remote_attach_seam,
         # The MI ops never validate the host, but pin the ACL-remote policy so the engine and
