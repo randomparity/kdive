@@ -42,9 +42,23 @@ curl -i http://localhost:8000/mcp                                               
 ```
 
 `migrate` exits 0, the three processes stay up, and the server accepts connections. An
-unauthenticated probe returns `401` — that is the server's auth layer responding, which is
-the M2.1 liveness bar (ADR-0088 decision 5). A live DB round-trip and dependency-readiness
-check are M2.3's readiness probe, not an M2.1 claim.
+unauthenticated probe returns `401` — that is the server's auth layer responding.
+
+### Health probes (ADR-0090 §5)
+
+Each app process runs the aux health/metrics listener and compose health-checks it on its
+own `/readyz`. The listener binds `0.0.0.0:<port>` *inside* the container (`server` 9464,
+`worker` 9465, `reconciler` 9466) via `KDIVE_HEALTH_BIND_ADDR`, set per service. The port
+is **never published to the host** — the container network namespace is its only access
+boundary, so the unauthenticated `/readyz`/`/metrics` stay non-public. A backend going down
+flips the container to `unhealthy`:
+
+```bash
+docker compose ps                          # STATUS shows (healthy)/(unhealthy) per process
+# Inspect the aux endpoints from inside a container (the port is not on the host):
+docker compose exec server python -c \
+  'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:9464/readyz").read())'
+```
 
 ## Driving an authenticated request
 
