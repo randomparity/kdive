@@ -86,18 +86,25 @@ existing tool. `console` and `gdbstub` are advertised but consumed off the boot/
 
 A new Retrieve-plane path in `remote_libvirt/retrieve.py`, parallel to the kdump `capture()`:
 
-1. `virDomainCoreDumpWithFormat(volume_path, format, flags)` dumps the live (or NMI-crashed)
-   guest's memory into a **fresh storage-pool volume** named deterministically per System.
-2. `virStorageVolDownload` streams that volume back to the worker over the TLS connection.
-3. The worker computes sha256/size, enforces the 5 GiB ceiling, extracts + redacts dmesg
-   (reusing the shared redaction path), and uploads the core to the object store directly
-   (the worker holds the bytes, so no presigned-PUT round trip — unlike kdump).
-4. The host volume is deleted (`vol.delete()`) in a `finally`, so a failed download never
-   leaks a multi-GB volume in the operator's pool.
+1. `virDomainCoreDumpWithFormat(path, format, flags)` with `flags = VIR_DUMP_MEMORY_ONLY`
+   dumps the live (or NMI-crashed) guest's memory to a path **inside the `storage_pool`
+   directory**, named deterministically per System. A stale same-named volume is deleted first.
+2. `pool.refresh()` so libvirt discovers the file as a managed volume, then
+   `storageVolLookupByName` + `virStorageVolDownload` streams it back over the TLS connection.
+3. The worker computes sha256/size, enforces the 5 GiB ceiling, extracts the kernel build-id
+   from the core's VMCOREINFO note (`CaptureOutput.vmcore_build_id` is mandatory), extracts +
+   redacts dmesg (reusing the shared redaction path), and uploads the core to the object store
+   directly (the worker holds the bytes, so no presigned-PUT round trip — unlike kdump).
+4. The host volume is deleted in a `finally` (graceful path); volumes orphaned by a
+   non-graceful worker/host crash that bypasses `finally` are reaped by a reconciler sweep.
 
-**Dump format:** ELF (`VIR_DOMAIN_CORE_DUMP_FORMAT_RAW`) — the format drgn/crash read without a
-makedumpfile pass. Compressed kdump formats are a follow-up if core size becomes a problem
-under the 5 GiB ceiling.
+**Dump format:** compressed kdump (`VIR_DUMP_MEMORY_ONLY` +
+`VIR_DOMAIN_CORE_DUMP_FORMAT_KDUMP_ZLIB`) is the default — drgn reads makedumpfile-compressed
+kdumps natively, and compression keeps cores comparable to the in-guest kdump path. The
+memory-only flag is mandatory: without it `format` is ignored and libvirt emits an unreadable
+QEMU save image. Uncompressed `RAW` ELF stays available behind a config knob but is **not** the
+default — its size ≈ full guest RAM would breach the 5 GiB ceiling on every ordinarily-sized
+guest (see ADR-0094).
 
 This **supersedes ADR-0084's** assertion that host_dump is host-coupled and excluded from
 remote: a storage-pool volume + stream download is the host-side channel ADR-0084 lacked.
