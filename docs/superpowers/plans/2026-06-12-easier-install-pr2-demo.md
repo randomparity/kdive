@@ -134,7 +134,9 @@ Spec B3 (helpers) + the demo access-boundary gate. The render tests in Task 10 v
 {{- define "kdive.databaseUrl" -}}
 {{- if .Values.bundledBackends -}}
 {{- $c := .Values.demoCredentials.postgresql -}}
-{{- printf "postgresql://%s:%s@%s-postgres:5432/%s" $c.username $c.password (include "kdive.fullname" .) $c.database -}}
+{{- $userinfo := printf "%s:%s" $c.username $c.password -}}
+{{- $host := printf "%s-postgres:5432" (include "kdive.fullname" .) -}}
+{{- printf "postgresql://%s@%s/%s" $userinfo $host $c.database -}}
 {{- else -}}
 {{- .Values.config.KDIVE_DATABASE_URL -}}
 {{- end -}}
