@@ -1677,13 +1677,13 @@ def test_reprovision_handler_superseded_midflight_tears_down_domain(
 
 def test_register_handlers_binds_provision_teardown_and_reprovision() -> None:
     registry = HandlerRegistry()
-    systems_handlers.register_handlers(registry, provisioning=_FakeProvisioning())
+    systems_handlers.register_handlers(registry, provisioner=_FakeProvisioning())
     assert registry.get(JobKind.PROVISION) is not None
     assert registry.get(JobKind.TEARDOWN) is not None
     assert registry.get(JobKind.REPROVISION) is not None
 
 
-def test_register_handlers_requires_resolver_or_provisioning() -> None:
+def test_register_handlers_requires_resolver_or_provisioner() -> None:
     registry = HandlerRegistry()
     with pytest.raises(RuntimeError, match="resolver or an explicit provisioner"):
         systems_handlers.register_handlers(registry)

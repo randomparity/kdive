@@ -178,7 +178,7 @@ async def _provisioner(
 async def provision_handler(
     conn: AsyncConnection,
     job: Job,
-    provisioning: Provisioner | None = None,
+    provisioner: Provisioner | None = None,
     *,
     resolver: ProviderResolver | None = None,
 ) -> str | None:
@@ -191,16 +191,16 @@ async def provision_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    provisioning = await _provisioner(conn, system_id, provisioning, resolver)
+    provisioner = await _provisioner(conn, system_id, provisioner, resolver)
     if system.state is not SystemState.PROVISIONING:
         if system.state in TERMINAL_SYSTEM_STATES:
             await asyncio.to_thread(
-                provisioning.teardown, system.domain_name or domain_name_for(system_id)
+                provisioner.teardown, system.domain_name or domain_name_for(system_id)
             )
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     try:
-        domain_name = await asyncio.to_thread(provisioning.provision, system_id, profile)
+        domain_name = await asyncio.to_thread(provisioner.provision, system_id, profile)
     except CategorizedError:
         await _record_system_failure(
             conn,
@@ -214,7 +214,7 @@ async def provision_handler(
         raise
     current = await _commit_provision_result(conn, job, system, profile, domain_name)
     if current in TERMINAL_SYSTEM_STATES:
-        await asyncio.to_thread(provisioning.teardown, domain_name)
+        await asyncio.to_thread(provisioner.teardown, domain_name)
         _log.info("provision of system %s superseded by teardown; domain reaped", system_id)
     return str(system_id)
 
@@ -222,7 +222,7 @@ async def provision_handler(
 async def reprovision_handler(
     conn: AsyncConnection,
     job: Job,
-    provisioning: Provisioner | None = None,
+    provisioner: Provisioner | None = None,
     *,
     resolver: ProviderResolver | None = None,
 ) -> str | None:
@@ -235,12 +235,12 @@ async def reprovision_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    provisioning = await _provisioner(conn, system_id, provisioning, resolver)
+    provisioner = await _provisioner(conn, system_id, provisioner, resolver)
     if system.state is not SystemState.REPROVISIONING:
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     try:
-        domain_name = await asyncio.to_thread(provisioning.reprovision, system_id, profile)
+        domain_name = await asyncio.to_thread(provisioner.reprovision, system_id, profile)
     except CategorizedError:
         await _record_system_failure(
             conn,
@@ -275,7 +275,7 @@ async def reprovision_handler(
                 tool="systems.reprovision",
             )
     if current in TERMINAL_SYSTEM_STATES:
-        await asyncio.to_thread(provisioning.teardown, domain_name)
+        await asyncio.to_thread(provisioner.teardown, domain_name)
         _log.info("reprovision of system %s superseded by teardown; domain reaped", system_id)
     return str(system_id)
 
@@ -283,7 +283,7 @@ async def reprovision_handler(
 async def teardown_handler(
     conn: AsyncConnection,
     job: Job,
-    provisioning: Provisioner | None = None,
+    provisioner: Provisioner | None = None,
     *,
     resolver: ProviderResolver | None = None,
 ) -> str | None:
@@ -305,30 +305,30 @@ async def teardown_handler(
                 transition=f"{old.value}->torn_down",
                 tool="systems.teardown",
             )
-    provisioning = await _provisioner(conn, system_id, provisioning, resolver)
-    await asyncio.to_thread(provisioning.teardown, domain_name)
+    provisioner = await _provisioner(conn, system_id, provisioner, resolver)
+    await asyncio.to_thread(provisioner.teardown, domain_name)
     return str(system_id)
 
 
 def register_handlers(
     registry: HandlerRegistry,
     *,
-    provisioning: Provisioner | None = None,
+    provisioner: Provisioner | None = None,
     resolver: ProviderResolver | None = None,
 ) -> None:
     """Bind the `provision`/`teardown`/`reprovision` job handlers."""
-    if provisioning is None and resolver is None:
+    if provisioner is None and resolver is None:
         raise RuntimeError("systems handlers require a resolver or an explicit provisioner")
 
     registry.register(
         JobKind.PROVISION,
-        lambda conn, job: provision_handler(conn, job, provisioning, resolver=resolver),
+        lambda conn, job: provision_handler(conn, job, provisioner, resolver=resolver),
     )
     registry.register(
         JobKind.TEARDOWN,
-        lambda conn, job: teardown_handler(conn, job, provisioning, resolver=resolver),
+        lambda conn, job: teardown_handler(conn, job, provisioner, resolver=resolver),
     )
     registry.register(
         JobKind.REPROVISION,
-        lambda conn, job: reprovision_handler(conn, job, provisioning, resolver=resolver),
+        lambda conn, job: reprovision_handler(conn, job, provisioner, resolver=resolver),
     )
