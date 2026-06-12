@@ -7,10 +7,13 @@ from typing import cast
 
 import pytest
 
+import kdive.config as config
 from kdive.__main__ import build_parser
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.observability import Telemetry
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import ObjectStore
 
 
 def test_reconciler_subcommand_parses() -> None:
@@ -24,6 +27,37 @@ def test_reconciler_subcommand_with_log_level() -> None:
     args = build_parser().parse_args(["--log-level", "DEBUG", "reconciler"])
     assert args.command == "reconciler"
     assert args.log_level == "DEBUG"
+
+
+def test_optional_reconciler_object_store_disables_when_s3_env_absent() -> None:
+    from kdive import __main__
+
+    try:
+        config.load({})
+
+        def _missing_store() -> ObjectStore:
+            raise CategorizedError("missing S3", category=ErrorCategory.CONFIGURATION_ERROR)
+
+        assert __main__._optional_reconciler_object_store(_missing_store) is None
+    finally:
+        config.reset()
+
+
+def test_optional_reconciler_object_store_reraises_when_s3_env_partial() -> None:
+    from kdive import __main__
+
+    try:
+        config.load({"KDIVE_S3_ENDPOINT_URL": "http://localhost:9000"})
+        error = CategorizedError("missing bucket", category=ErrorCategory.CONFIGURATION_ERROR)
+
+        def _invalid_store() -> ObjectStore:
+            raise error
+
+        with pytest.raises(CategorizedError) as exc:
+            __main__._optional_reconciler_object_store(_invalid_store)
+        assert exc.value is error
+    finally:
+        config.reset()
 
 
 def _fake_telemetry() -> Telemetry:

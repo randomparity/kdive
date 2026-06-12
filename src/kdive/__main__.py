@@ -20,8 +20,16 @@ from typing import TYPE_CHECKING
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.config.core_settings import HTTP_HOST, HTTP_PORT, LOG_LEVEL
+from kdive.config.core_settings import (
+    HTTP_HOST,
+    HTTP_PORT,
+    LOG_LEVEL,
+    S3_BUCKET,
+    S3_ENDPOINT_URL,
+    S3_REGION,
+)
 from kdive.db.pool import create_pool
+from kdive.domain.errors import CategorizedError
 from kdive.images.rootfs_command import add_build_rootfs_parser, run_build_rootfs
 from kdive.reconciler.console_assembly import build_console_hosting, start_console_hosting
 from kdive.version import full_version
@@ -31,6 +39,7 @@ if TYPE_CHECKING:
     from kdive.observability import Telemetry
     from kdive.providers.resolver import ProviderResolver
     from kdive.security.secrets.secret_registry import SecretRegistry
+    from kdive.store.objectstore import ObjectStore
 
 _RUNNABLE = frozenset({"server", "worker", "reconciler", "migrate"})
 
@@ -46,6 +55,7 @@ _HEARTBEAT_STALE_SECONDS = 10.0
 _RECONCILER_HEARTBEAT_STALE_SECONDS = 90.0
 
 _log = logging.getLogger(__name__)
+_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
 
 class _VersionAction(argparse.Action):
@@ -212,7 +222,6 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
 
 
 async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
-    from kdive.domain.errors import CategorizedError
     from kdive.health import Heartbeat, build_aux_app, serve_aux
     from kdive.health.aux_bind import resolve_health_bind
     from kdive.process_health.server import build_postgres_ping
@@ -225,10 +234,7 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
     pool = create_pool(min_size=1)
     await pool.open()
     stop = _install_stop()
-    try:
-        upload_store = object_store_from_env()
-    except CategorizedError:
-        upload_store = None  # no S3 env: the upload reaper stays off, like NullReaper
+    upload_store = _optional_reconciler_object_store(object_store_from_env)
     heartbeat = Heartbeat(stale_after=_RECONCILER_HEARTBEAT_STALE_SECONDS)
     probe = _reconciler_probe(pool, build_postgres_ping, build_worker_probe, object_store_from_env)
     aux_host, aux_port = resolve_health_bind("reconciler")
@@ -265,6 +271,23 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
         await _cancel(aux_task)
         secret_registry.clear()
         await pool.close()
+
+
+def _optional_reconciler_object_store(
+    store_factory: Callable[[], ObjectStore],
+) -> ObjectStore | None:
+    """Return the object store, or ``None`` only when S3 is wholly unconfigured."""
+    try:
+        return store_factory()
+    except CategorizedError:
+        if _s3_env_is_absent():
+            return None
+        raise
+
+
+def _s3_env_is_absent() -> bool:
+    env = config.env_snapshot()
+    return _S3_OPTIONAL_ENV_NAMES.isdisjoint(env)
 
 
 def _reconciler_probe(
