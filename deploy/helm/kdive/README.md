@@ -17,7 +17,6 @@ follow [`docs/runbooks/kubernetes-deploy.md`](../../../docs/runbooks/kubernetes-
 > when you install a cut release / published chart.
 
 ```sh
-helm dependency build deploy/helm/kdive   # populate charts/ from Chart.lock
 helm install kdive deploy/helm/kdive \
   --set config.KDIVE_DATABASE_URL='postgresql://<user>:<password>@<host>:5432/kdive' \
   --set config.KDIVE_OIDC_ISSUER=https://idp.example/realms/kdive \
@@ -32,18 +31,20 @@ rollback is image-only and the prior image must tolerate the newer schema.
 
 ## Bundled backends (demo only)
 
-`bundledBackends=true` pulls the Postgres and MinIO subcharts and runs them on
-`emptyDir`: **a pod restart drops all state by design**. It is ephemeral and not a
-production path. The toggle must be co-set with `demoAcknowledged=true` or the
-chart refuses to render. On this path the chart derives `KDIVE_DATABASE_URL`,
-`KDIVE_S3_ENDPOINT_URL`, and the demo MinIO `AWS_*` credentials from the in-release
-service names and `demoCredentials`, and the migrate Job runs `post-install` (after
-the bundled DB exists) behind a DB-readiness init container.
+`bundledBackends=true` (co-set with `demoAcknowledged=true`) stands up first-party Postgres,
+MinIO, and a mock-OIDC issuer as in-chart Deployments on `emptyDir`: **a pod restart drops all
+state by design.** The issuer mints valid `aud=kdive` tokens for any caller, so the chart
+forces `service.type=ClusterIP` on this path — reach MCP with `kubectl port-forward`, never
+expose it.
 
 ```sh
-helm dependency build deploy/helm/kdive
-helm install kdive deploy/helm/kdive --set bundledBackends=true --set demoAcknowledged=true
+helm install kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml
+helm test kdive    # mints a token, asserts tools/list returns tools
 ```
+
+`values-demo.yaml` pins `image.tag=edge` (the rolling published image); without a published
+image the demo cannot pull. The demo migrate Job runs `post-install` behind a DB-readiness
+init container.
 
 ## Health probes & scrape (ADR-0090 §5)
 
@@ -103,10 +104,3 @@ symlink indirection resolves correctly, and a ref escaping the root is rejected.
 For S3, prefer IRSA/workload identity, or a managed Secret you `envFrom` onto the pods.
 The fixed `demoCredentials` are non-secret by design: the demo data they guard is
 throwaway `emptyDir` state.
-
-## Subchart distribution
-
-The `postgresql`/`minio` dependencies pin to `oci://registry-1.docker.io/bitnamicharts`.
-Bitnami retired the `charts.bitnami.com` HTTP index in 2025 and now publishes only
-OCI artifacts. `charts/` is gitignored and rebuilt from the committed `Chart.lock`
-with `helm dependency build`.
