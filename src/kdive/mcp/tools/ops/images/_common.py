@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from psycopg_pool import AsyncConnectionPool
+
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -29,7 +31,7 @@ def blank(reason: str) -> bool:
 
 
 async def audit_project_denial(
-    pool,
+    pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     tool: str,
@@ -52,7 +54,7 @@ async def audit_project_denial(
 
 
 async def record_admin_breakglass(
-    pool,
+    pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     tool: str,
