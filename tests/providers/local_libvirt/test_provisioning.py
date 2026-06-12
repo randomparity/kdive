@@ -20,8 +20,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, validate_profile
 from kdive.providers import libvirt_xml as libvirt_xml_contract
 from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, parse_metadata_system_id
-from kdive.providers.local_libvirt import provisioning as provisioning_module
-from kdive.providers.local_libvirt.provisioning import (
+from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
+from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     ProvisioningFiles,
     console_log_path,
