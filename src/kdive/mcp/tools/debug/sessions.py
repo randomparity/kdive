@@ -528,19 +528,6 @@ async def _insert_session_locked(
     )
 
 
-async def _resolve_session_system(
-    conn: AsyncConnection, session_id: UUID
-) -> tuple[DebugSession, UUID] | None:
-    """Resolve a session and its System id via the `debug_sessions -> runs` join."""
-    session = await DEBUG_SESSIONS.get(conn, session_id)
-    if session is None:
-        return None
-    run = await RUNS.get(conn, session.run_id)
-    if run is None:
-        return None
-    return session, run.system_id
-
-
 async def _detach_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
