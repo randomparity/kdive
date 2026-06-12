@@ -279,3 +279,20 @@ def test_debug_engine_set_and_list_breakpoints_round_trip(tmp_path: Path) -> Non
     listed = engine.list_breakpoints(attachment)
 
     assert ref.number in {b.number for b in listed}
+
+
+def test_debug_engine_breakpoints_are_isolated_per_attachment(tmp_path: Path) -> None:
+    engine = FaultInjectDebugEngine()
+    first = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "first.log"
+    )
+    second = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id=str(_RUN), transcript_path=tmp_path / "second.log"
+    )
+
+    first_ref = engine.set_breakpoint(first, "vfs_read")
+    second_ref = engine.set_breakpoint(second, "do_exit")
+    engine.clear_breakpoint(first, first_ref.number)
+
+    assert [ref.number for ref in engine.list_breakpoints(first)] == []
+    assert [ref.number for ref in engine.list_breakpoints(second)] == [second_ref.number]
