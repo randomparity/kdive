@@ -7,3 +7,22 @@ Migrations run as a one-shot Job ({{ if .Values.bundledBackends }}post-install{{
 WARNING: bundledBackends is on — Postgres/MinIO run on emptyDir. Data is NOT durable;
 a pod restart drops all state. Use external backends for anything but a throwaway demo.
 {{- end }}
+{{- if .Values.bundledBackends }}
+
+DEMO MODE (ephemeral — a pod restart drops all state).
+
+Verify the whole stack (helm test waits for readiness itself; add --wait to the
+install above if you prefer the release to block until pods are Ready):
+  helm test {{ .Release.Name }}
+
+Reach MCP (keep it cluster-internal — the demo issuer mints valid kdive tokens for
+any caller; never expose it via NodePort/LoadBalancer/Ingress):
+  kubectl port-forward svc/{{ include "kdive.fullname" . }}-server 8000:8000
+
+Mint a demo token for your own client (expires per the issuer's tokenExpiry):
+  TOKEN=$(kubectl run mint --rm -i --restart=Never --image=curlimages/curl -q -- \
+    -s -d 'grant_type=client_credentials&client_id=kdive-demo&client_secret=x' \
+    http://{{ include "kdive.fullname" . }}-oidc:8080/default/token | sed -e 's/.*"access_token":"//' -e 's/".*//')
+Then drive http://127.0.0.1:8000/mcp with an MCP client and `Authorization: Bearer $TOKEN`
+(the streamable-HTTP transport needs the MCP initialize handshake — a raw tools/list POST 307s).
+{{- end }}
