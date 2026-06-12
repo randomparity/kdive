@@ -30,9 +30,9 @@ from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
 from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect
 from kdive.providers.fault_inject.lifecycle.control import FaultInjectControl
-from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvision
+from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvisioning
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
-from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvision
+from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
 from kdive.providers.reaping import InfraReaper
@@ -85,14 +85,14 @@ def build_runtime(
 ) -> ProviderRuntime:
     """Build fault-inject mock provider ports (ADR-0072 happy path; ADR-0074 faults)."""
     inventory = inventory if inventory is not None else FaultInjectInventory()
-    provisioner = FaultInjectProvision(inventory)
+    provisioner = FaultInjectProvisioning(inventory)
     install = FaultInjectInstall()
     retrieve = FaultInjectRetrieve(store_factory=object_store_from_env)
     introspect = FaultInjectIntrospect()
     faulted_install = FaultedInstall(install, engine) if engine is not None else install
     return ProviderRuntime(
         profile_policy=FaultInjectProfilePolicy(),
-        provisioner=FaultedProvision(provisioner, engine) if engine is not None else provisioner,
+        provisioner=FaultedProvisioning(provisioner, engine) if engine is not None else provisioner,
         builder=FaultInjectBuild(store_factory=object_store_from_env),
         installer=faulted_install,
         booter=faulted_install,

@@ -27,7 +27,7 @@ from kdive.domain.errors import CategorizedError
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject.faulting.engine import FaultDecision, FaultEngine, FaultPlane
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
-from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvision
+from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.ports import InstallRequest
 
 _FIRST_ATTEMPT: Callable[[UUID], int] = lambda _system_id: 1  # noqa: E731 - a tiny default port
@@ -53,12 +53,12 @@ def _apply(decision: FaultDecision, sleep_s: _SyncSleep) -> None:
         )
 
 
-class FaultedProvision:
-    """A :class:`FaultInjectProvision` that draws provision-plane faults before delegating."""
+class FaultedProvisioning:
+    """A :class:`FaultInjectProvisioning` that draws provision-plane faults before delegating."""
 
     def __init__(
         self,
-        inner: FaultInjectProvision,
+        inner: FaultInjectProvisioning,
         engine: FaultEngine,
         *,
         attempt_for: _AttemptFor = _FIRST_ATTEMPT,

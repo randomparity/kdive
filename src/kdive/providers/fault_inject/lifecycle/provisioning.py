@@ -12,7 +12,7 @@ def domain_name(system_id: UUID) -> str:
     return f"fault-inject-{system_id}"
 
 
-class FaultInjectProvision:
+class FaultInjectProvisioning:
     """Provisioner port: mint a synthetic domain and track it in the mock inventory."""
 
     def __init__(self, inventory: FaultInjectInventory) -> None:

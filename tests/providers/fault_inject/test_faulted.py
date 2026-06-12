@@ -1,6 +1,6 @@
 """Tests for the faulting wrapper that threads the seeded engine into the mock ports.
 
-ADR-0074: a thin `FaultedProvision` / `FaultedInstall` consults a `FaultEngine` before
+ADR-0074: a thin `FaultedProvisioning` / `FaultedInstall` consults a `FaultEngine` before
 delegating to the happy-path port — a drawn `fail` raises `CategorizedError(category)`, a
 drawn `latency` blocks the (sync) port via an injected `sleep_s` seam, and `attempt` is a
 caller-supplied durable input (default 1), never a port-held counter.
@@ -20,11 +20,11 @@ from kdive.providers.fault_inject.faulting.engine import FaultDecision, FaultEng
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.lifecycle.faulted import (
     FaultedInstall,
-    FaultedProvision,
+    FaultedProvisioning,
     _apply,
 )
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
-from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvision
+from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.ports import InstallRequest
 
 _SYSTEM = UUID("00000000-0000-0000-0000-0000000000aa")
@@ -47,10 +47,10 @@ def _provision(
     *,
     attempt_for: Callable[[UUID], int] = lambda _sid: 1,
     sleep_s: Callable[[float], None] = _noop_sleep,
-) -> FaultedProvision:
+) -> FaultedProvisioning:
     inventory = FaultInjectInventory()
-    return FaultedProvision(
-        FaultInjectProvision(inventory), engine, attempt_for=attempt_for, sleep_s=sleep_s
+    return FaultedProvisioning(
+        FaultInjectProvisioning(inventory), engine, attempt_for=attempt_for, sleep_s=sleep_s
     )
 
 
@@ -144,8 +144,8 @@ def test_zero_latency_does_not_call_sleep() -> None:
 def test_teardown_and_reprovision_delegate_unchanged() -> None:
     engine = _seed_that_fails(FaultPlane.PROVISION)
     inventory = FaultInjectInventory()
-    inner = FaultInjectProvision(inventory)
-    wrapper = FaultedProvision(inner, engine, sleep_s=lambda _s: None)
+    inner = FaultInjectProvisioning(inventory)
+    wrapper = FaultedProvisioning(inner, engine, sleep_s=lambda _s: None)
     # teardown never draws a fault (it is a compensation, not a perturbed op).
     wrapper.teardown("fault-inject-x")
     # reprovision draws on the provision plane; a fail-certain engine raises.

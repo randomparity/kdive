@@ -25,7 +25,7 @@ from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect
 from kdive.providers.fault_inject.lifecycle.control import FaultInjectControl
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
-from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvision
+from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
 from kdive.providers.ports import InstallRequest, SystemHandle
 from kdive.providers.ports.lifecycle import TransportHandleData
@@ -50,7 +50,7 @@ class _FakeStore:
 
 def test_provision_returns_a_synthetic_domain_and_records_it_as_owned() -> None:
     inventory = FaultInjectInventory()
-    provision = FaultInjectProvision(inventory)
+    provision = FaultInjectProvisioning(inventory)
 
     domain = provision.provision(_SYSTEM, profile=_PROVISIONING_PROFILE)
 
@@ -61,7 +61,7 @@ def test_provision_returns_a_synthetic_domain_and_records_it_as_owned() -> None:
 
 def test_teardown_forgets_the_domain_so_it_is_no_longer_owned() -> None:
     inventory = FaultInjectInventory()
-    provision = FaultInjectProvision(inventory)
+    provision = FaultInjectProvisioning(inventory)
     domain = provision.provision(_SYSTEM, profile=_PROVISIONING_PROFILE)
 
     provision.teardown(domain)
@@ -71,7 +71,7 @@ def test_teardown_forgets_the_domain_so_it_is_no_longer_owned() -> None:
 
 def test_reprovision_leaves_the_system_owning_exactly_one_domain() -> None:
     inventory = FaultInjectInventory()
-    provision = FaultInjectProvision(inventory)
+    provision = FaultInjectProvisioning(inventory)
     provision.provision(_SYSTEM, profile=_PROVISIONING_PROFILE)
 
     second = provision.reprovision(_SYSTEM, profile=_PROVISIONING_PROFILE)
