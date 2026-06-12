@@ -92,7 +92,6 @@ def _capabilities(args: argparse.Namespace) -> list[str]:
 
 
 async def images_list(args: argparse.Namespace) -> int:
-    """List catalog images visible to the caller (public + own-project private)."""
     envelope = await _fetch("images.list", {})
     render(
         _rows(envelope),
@@ -117,12 +116,10 @@ async def images_upload(args: argparse.Namespace) -> int:
 
 
 async def images_delete(args: argparse.Namespace) -> int:
-    """Delete a project-private image (operator on the image's project)."""
     return await _run("images.delete", {"image_id": args.image_id}, as_json=args.json)
 
 
 async def images_build(args: argparse.Namespace) -> int:
-    """Enqueue an IMAGE_BUILD job for a public base image (platform_operator)."""
     return await _run(
         "images.build",
         {
@@ -138,7 +135,6 @@ async def images_build(args: argparse.Namespace) -> int:
 
 
 async def images_publish(args: argparse.Namespace) -> int:
-    """Promote a built image to a public catalog row (platform_operator)."""
     return await _run(
         "images.publish",
         {
@@ -166,7 +162,6 @@ async def images_prune(args: argparse.Namespace) -> int:
 
 
 async def images_extend(args: argparse.Namespace) -> int:
-    """Re-arm a private image's lifetime (platform_admin break-glass)."""
     return await _run(
         "images.extend",
         {"image_id": args.image_id, "seconds": int(args.seconds), "reason": args.reason},

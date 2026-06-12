@@ -145,13 +145,11 @@ async def teardown(args: argparse.Namespace) -> int:
 
 
 async def allocations_force_release(args: argparse.Namespace) -> int:
-    """Break-glass release of a stuck cross-project Allocation by id."""
     arguments = {"allocation_id": args.allocation_id, "reason": args.reason}
     return await _run("ops.force_release", arguments, as_json=args.json)
 
 
 async def resources_cordon(args: argparse.Namespace) -> int:
-    """Mark a host unschedulable (re-cordoning a cordoned host is a no-op)."""
     return await _run("resources.cordon", {"resource_id": args.resource_id}, as_json=args.json)
 
 
