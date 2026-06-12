@@ -1,8 +1,10 @@
-"""Process entrypoints: `python -m kdive server|worker|reconciler`.
+"""CLI entrypoints for KDIVE processes and operator commands.
 
-`server` runs the FastMCP streamable-HTTP app; `worker` runs the job-queue worker
-loop; `reconciler` runs the drift-repair loop (ADR-0021). All three configure the
-structured logger first (ADR-0014).
+The long-running processes are `python -m kdive {server|worker|reconciler}`:
+`server` runs the FastMCP streamable-HTTP app, `worker` runs the job-queue worker
+loop, and `reconciler` runs the drift-repair loop (ADR-0021). One-shot operator
+commands share the same parser: `migrate`, `install-fixtures`, `seed-demo`, and
+`build-rootfs`. Every command configures the structured logger first (ADR-0014).
 """
 
 from __future__ import annotations
@@ -77,7 +79,7 @@ class _VersionAction(argparse.Action):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level argument parser with the `server`/`worker`/`reconciler` subcommands."""
+    """Build the top-level argument parser for process and operator subcommands."""
     parser = argparse.ArgumentParser(prog="kdive")
     parser.add_argument(
         "--log-level",
