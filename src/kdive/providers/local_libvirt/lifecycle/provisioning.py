@@ -38,9 +38,14 @@ from kdive.profiles.provisioning import (
 from kdive.profiles.provisioning import (
     validate_profile as _validate_profile,
 )
-from kdive.provider_components.references import CatalogComponentRef
+from kdive.provider_components.references import (
+    ArtifactComponentRef,
+    CatalogComponentRef,
+    LocalComponentRef,
+)
 from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
 from kdive.providers.local_libvirt.lifecycle.materialize import (
+    MaterializableRootfsRef,
     RootfsMaterializationContext,
     RootfsUploadContext,
     materialize_rootfs_base,
@@ -293,6 +298,20 @@ class ProvisioningFiles:
         self.remove_overlay(overlay_path(domain_name.removeprefix("kdive-")))
 
 
+def _materializable_rootfs(rootfs: RootfsSource) -> MaterializableRootfsRef:
+    if isinstance(rootfs, LocalComponentRef | CatalogComponentRef | _UploadRootfs):
+        return rootfs
+    if isinstance(rootfs, ArtifactComponentRef):
+        raise CategorizedError(
+            "artifact-backed rootfs materialization is not wired yet",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+        )
+    raise CategorizedError(
+        "unsupported rootfs component reference",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+    )
+
+
 class LocalLibvirtProvisioning:
     """The realized provisioning port for the local libvirt host."""
 
@@ -425,6 +444,7 @@ class LocalLibvirtProvisioning:
         self._files.remove_overlay_for_domain(domain_name)
 
     def _materialize_rootfs_base(self, rootfs: RootfsSource, system_id: UUID) -> str:
+        rootfs = _materializable_rootfs(rootfs)
         return str(
             materialize_rootfs_base(
                 rootfs,

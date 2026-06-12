@@ -38,9 +38,15 @@ from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.profiles.provisioning import RootfsSource
 from kdive.provider_components.artifacts import ArtifactWriteRequest
-from kdive.provider_components.references import ComponentRef
+from kdive.provider_components.references import (
+    ArtifactComponentRef,
+    CatalogComponentRef,
+    ComponentRef,
+    LocalComponentRef,
+)
 from kdive.provider_components.uploads import ManifestEntry
 from kdive.providers.local_libvirt.lifecycle.materialize import (
+    MaterializableRootfsRef,
     RootfsMaterializationContext,
     materialize_rootfs_base,
 )
@@ -227,8 +233,18 @@ def _local_rootfs_profile(path: Path) -> dict[str, Any]:
 
 def _rootfs_validator(allowed_root: Path) -> Callable[[RootfsSource], None]:
     def _validate(rootfs: RootfsSource) -> None:
+        if isinstance(rootfs, ArtifactComponentRef):
+            raise CategorizedError(
+                "artifact-backed rootfs materialization is not wired yet",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+            )
+        if not isinstance(rootfs, LocalComponentRef | CatalogComponentRef):
+            raise CategorizedError(
+                "unsupported rootfs component reference",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         materialize_rootfs_base(
-            cast(ComponentRef, rootfs),
+            cast(MaterializableRootfsRef, rootfs),
             context=RootfsMaterializationContext(allowed_roots=[allowed_root]),
         )
 
