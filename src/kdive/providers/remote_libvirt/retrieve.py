@@ -577,20 +577,21 @@ class _HostDumpCapturer:
         stream = conn.newStream(0)
         written = 0
 
-        def _sink(_stream: Any, data: bytes, _opaque: Any) -> None:
-            nonlocal written
-            written += len(data)
-            if written > self._options.max_core_bytes:
-                raise CategorizedError(
-                    "host_dump stream exceeded the 5 GiB ceiling mid-download",
-                    category=ErrorCategory.CONFIGURATION_ERROR,
-                    details={"system_id": str(system_id), "streamed_bytes": written},
-                )
-            handle.write(data)
-
         try:
             fd = os.open(spool, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as handle:
+
+                def _sink(_stream: Any, data: bytes, _opaque: Any) -> None:
+                    nonlocal written
+                    written += len(data)
+                    if written > self._options.max_core_bytes:
+                        raise CategorizedError(
+                            "host_dump stream exceeded the 5 GiB ceiling mid-download",
+                            category=ErrorCategory.CONFIGURATION_ERROR,
+                            details={"system_id": str(system_id), "streamed_bytes": written},
+                        )
+                    handle.write(data)
+
                 volume.download(stream, 0, 0, 0)
                 stream.recvAll(_sink, None)
             stream.finish()
