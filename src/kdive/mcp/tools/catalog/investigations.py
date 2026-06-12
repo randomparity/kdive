@@ -48,7 +48,7 @@ class ExternalRefInput(TypedDict):
     url: str
 
 
-class ExternalRefKey(TypedDict):
+class ExternalRefKey(TypedDict, total=False):
     """Raw MCP input identifying an external reference by natural key."""
 
     tracker: str
