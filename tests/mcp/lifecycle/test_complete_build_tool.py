@@ -13,9 +13,9 @@ from kdive.domain.state import RunState
 from kdive.mcp.tools.catalog.artifacts_uploads import create_run_upload
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
 from kdive.provider_components.artifacts import HeadResult, PresignedUpload, PresignPutRequest
+from kdive.provider_components.build_results import BuildOutput
 from kdive.provider_components.uploads import ManifestEntry
 from kdive.provider_components.validation import ComponentSourceCapabilities
-from kdive.providers.ports import BuildOutput
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )

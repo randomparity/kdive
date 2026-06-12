@@ -32,6 +32,7 @@ from kdive.mcp.tools.lifecycle.runs.common import (
 )
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.provider_components.artifacts import HeadResult, StoredArtifact
+from kdive.provider_components.build_results import BuildOutput, ValidatedUpload
 from kdive.provider_components.build_validation import ValidatorStore, validate_external_artifacts
 from kdive.provider_components.catalog import load_fixture_catalog
 from kdive.provider_components.references import CONFIG_COMPONENT, ComponentRef
@@ -41,7 +42,6 @@ from kdive.provider_components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
-from kdive.providers.ports import BuildOutput, ValidatedUpload
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

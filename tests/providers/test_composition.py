@@ -16,6 +16,7 @@ from kdive.images.planes.remote_libvirt import RemoteLibvirtRootfsBuildPlane
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.provider_components.artifacts import StoredArtifact
+from kdive.provider_components.build_results import BuildOutput
 from kdive.provider_components.references import (
     CONFIG_COMPONENT,
     PATCH_COMPONENT,
@@ -23,7 +24,6 @@ from kdive.provider_components.references import (
 )
 from kdive.providers import composition
 from kdive.providers.ports import (
-    BuildOutput,
     CaptureOutput,
     CrashOutput,
     InstallRequest,

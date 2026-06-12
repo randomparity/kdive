@@ -1426,7 +1426,7 @@ def test_build_concurrent_flips_once(migrated_url: str) -> None:
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
 from kdive.jobs.payloads import BuildPayload, RunPayload  # noqa: E402
-from kdive.providers.ports import BuildOutput  # noqa: E402
+from kdive.provider_components.build_results import BuildOutput  # noqa: E402
 
 
 class _FakeBuilder:

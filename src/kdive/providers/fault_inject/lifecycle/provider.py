@@ -24,9 +24,9 @@ from kdive.domain.models import PowerAction, Sensitivity
 from kdive.profiles.build import ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
+from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
 from kdive.providers.ports import (
-    BuildOutput,
     CaptureOutput,
     CrashOutput,
     GdbBreakpointRef,

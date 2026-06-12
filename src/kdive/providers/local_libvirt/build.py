@@ -82,12 +82,12 @@ from kdive.provider_components.build_host import (
 from kdive.provider_components.build_host import (
     resolve_config_bytes as _resolve_config_bytes,
 )
+from kdive.provider_components.build_results import BuildOutput
 from kdive.provider_components.references import (
     ComponentRef,
 )
 from kdive.provider_components.requirements import validate_config_requirements
 from kdive.providers.build_common import _dropped_fragment_symbols
-from kdive.providers.ports import BuildOutput
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 

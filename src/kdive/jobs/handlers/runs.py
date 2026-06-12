@@ -22,7 +22,8 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import BuildPayload, RunPayload, load_payload
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
-from kdive.providers.ports import Booter, Builder, BuildOutput, Installer, InstallRequest
+from kdive.provider_components.build_results import BuildOutput
+from kdive.providers.ports import Booter, Builder, Installer, InstallRequest
 from kdive.providers.resolver import ProviderResolver
 from kdive.providers.runtime import ProviderRuntime
 from kdive.providers.runtime_paths import console_log_path, read_console_log
