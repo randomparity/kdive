@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, cast
 
+import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.mcp.app as app_module
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.app import build_app, build_handler_registry
@@ -112,3 +116,30 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
     assert registry.get(JobKind.CAPTURE_VMCORE) is not None
+
+
+def test_image_build_handler_preserves_store_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = HandlerRegistry()
+    error = CategorizedError(
+        "missing image store",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"setting": "KDIVE_S3_ENDPOINT"},
+    )
+
+    def _raise_store() -> object:
+        raise error
+
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _raise_store)
+    app_module._register_image_build_handler(registry, cast(Any, None), SecretRegistry())
+    handler = registry.get(JobKind.IMAGE_BUILD)
+    assert handler is not None
+
+    async def _run() -> None:
+        with pytest.raises(CategorizedError) as caught:
+            await handler(cast(Any, None), cast(Any, None))
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert caught.value.details == {"setting": "KDIVE_S3_ENDPOINT"}
+
+    asyncio.run(_run())

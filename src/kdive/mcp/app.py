@@ -14,12 +14,14 @@ from collections.abc import Callable
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from opentelemetry import metrics, trace
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.service import default_service_factory
 from kdive.domain.errors import CategorizedError
+from kdive.domain.models import Job, JobKind
 from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
-from kdive.jobs.models import HandlerRegistry
+from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.middleware import DenialAuditMiddleware, TelemetryMiddleware
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
@@ -136,23 +138,32 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
 def _register_image_build_handler(
     registry: HandlerRegistry, _resolver: ProviderResolver, _secret_registry: SecretRegistry
 ) -> None:
-    """Bind the IMAGE_BUILD handler when an image object store is configured.
+    """Bind the IMAGE_BUILD handler, preserving setup errors as job failures.
 
     The handler's build plane is the local-libvirt rootfs plane and the store is the S3 image
-    store. A worker with no ``KDIVE_S3_*`` env cannot publish an image, so it does not bind the
-    handler — exactly as the abandoned-upload reaper stays off without S3 (see
-    ``ops.reconcile.resolve_upload_store``).
+    store. A worker with no ``KDIVE_S3_*`` env still binds IMAGE_BUILD so queued jobs fail with
+    the original configuration category instead of falling through to ``not_implemented``.
     """
     from kdive.images.planes.local_libvirt import LocalLibvirtRootfsBuildPlane
     from kdive.store.objectstore import object_store_from_env
 
     try:
         store = object_store_from_env()
-    except CategorizedError:
+    except CategorizedError as exc:
+        registry.register(JobKind.IMAGE_BUILD, _unconfigured_image_build_handler(exc))
         return
     image_build.register_handlers(
         registry, build_plane=LocalLibvirtRootfsBuildPlane.from_env(), store=store
     )
+
+
+def _unconfigured_image_build_handler(
+    error: CategorizedError,
+) -> JobHandler:
+    async def _handler(_conn: AsyncConnection, _job: Job) -> str | None:
+        raise CategorizedError(str(error), category=error.category, details=error.details)
+
+    return _handler
 
 
 # Handler seam: worker modules expose register_handlers(registry). Long-running lifecycle,
