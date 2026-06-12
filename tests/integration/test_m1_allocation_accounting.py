@@ -527,7 +527,9 @@ def test_c3_reconciliation_nets_to_actual_and_usage_matches(migrated_url: str) -
             assert prov.status == "queued"
             job = await _provision_job_for_system(pool, data_str(prov, "system_id"))
             async with pool.connection() as conn:
-                await systems_handlers.provision_handler(conn, job, _FakeProvisioner())
+                await systems_handlers.provision_handler(
+                    conn, job, _FakeProvisioner(), profile_policy=_TEST_PROFILE_POLICY
+                )
             # The handler stamped active_started_at on ready; back-date it 2h to simulate
             # the lease running before release (no explicit seed of the interval).
             assert (await _alloc(pool, alloc_id)).active_started_at is not None

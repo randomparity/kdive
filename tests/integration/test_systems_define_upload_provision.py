@@ -22,6 +22,9 @@ from tests.mcp.systems_support import (
     SYSTEM_PROVISION_HANDLERS as _SYSTEM_PROVISION_HANDLERS,
 )
 from tests.mcp.systems_support import (
+    TEST_PROFILE_POLICY as _TEST_PROFILE_POLICY,
+)
+from tests.mcp.systems_support import (
     FakeProvisioning as _FakeProvisioning,
 )
 from tests.mcp.systems_support import (
@@ -90,7 +93,9 @@ def test_define_upload_provision_reaches_ready_with_committed_rootfs(
             # 5. the provision handler drives provisioning -> ready and commits the rootfs
             job = await _enqueue_provision(pool, sys_id, alloc_id)
             async with pool.connection() as conn:
-                await systems_handlers.provision_handler(conn, job, _FakeProvisioning())
+                await systems_handlers.provision_handler(
+                    conn, job, _FakeProvisioning(), profile_policy=_TEST_PROFILE_POLICY
+                )
 
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))

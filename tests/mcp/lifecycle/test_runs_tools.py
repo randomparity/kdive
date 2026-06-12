@@ -1735,8 +1735,6 @@ def test_register_handlers_binds_build() -> None:
     runs_handlers.register_handlers(
         registry,
         builder=_FakeBuilder(),
-        installer=_FakeInstaller(),
-        booter=_FakeBooter(),
         secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.BUILD) is not None
@@ -2162,7 +2160,9 @@ def test_install_handler_records_step_run_stays_succeeded(migrated_url: str) -> 
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                result = await runs_handlers.install_handler(conn, job, installer)
+                result = await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
             assert result == run_id
             assert len(installer.calls) == 1
             nsteps = await _count(
@@ -2179,6 +2179,20 @@ def test_install_handler_records_step_run_stays_succeeded(migrated_url: str) -> 
     asyncio.run(_run())
 
 
+def test_install_handler_requires_policy_with_explicit_installer(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                with pytest.raises(RuntimeError, match="explicit installer requires"):
+                    await runs_handlers.install_handler(conn, job, installer)
+            assert installer.calls == []
+
+    asyncio.run(_run())
+
+
 def test_install_handler_replay_does_not_restage(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -2186,9 +2200,13 @@ def test_install_handler_replay_does_not_restage(migrated_url: str) -> None:
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
         assert len(installer.calls) == 1  # built once
 
     asyncio.run(_run())
@@ -2220,7 +2238,9 @@ def test_install_handler_concurrent_dispatch_invokes_once(migrated_url: str) -> 
 
             async def _dispatch() -> None:
                 async with pool.connection() as conn:
-                    await runs_handlers.install_handler(conn, job, installer)
+                    await runs_handlers.install_handler(
+                        conn, job, installer, profile_policy=_LOCAL_POLICY
+                    )
 
             first = asyncio.create_task(_dispatch())
             assert await asyncio.to_thread(installer.entered.wait, 5)
@@ -2246,7 +2266,9 @@ def test_install_handler_failure_records_no_step(migrated_url: str) -> None:
             installer = _FakeInstaller(error=ErrorCategory.INSTALL_FAILURE)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.install_handler(conn, job, installer)
+                    await runs_handlers.install_handler(
+                        conn, job, installer, profile_policy=_LOCAL_POLICY
+                    )
             assert caught.value.category is ErrorCategory.INSTALL_FAILURE
             nsteps = await _count(
                 pool,
@@ -2276,7 +2298,9 @@ def test_install_handler_cleanup_failure_preserves_provider_category(
             monkeypatch.setattr(runs_handlers, "abandon_run_step", _fail_cleanup)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
-                    await runs_handlers.install_handler(conn, job, installer)
+                    await runs_handlers.install_handler(
+                        conn, job, installer, profile_policy=_LOCAL_POLICY
+                    )
 
         assert caught.value.category is ErrorCategory.INSTALL_FAILURE
 
@@ -2293,7 +2317,9 @@ def test_install_handler_missing_kernel_ref_is_config_error(migrated_url: str) -
             installer = _FakeInstaller()
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError):
-                    await runs_handlers.install_handler(conn, job, installer)
+                    await runs_handlers.install_handler(
+                        conn, job, installer, profile_policy=_LOCAL_POLICY
+                    )
             assert installer.calls == []  # never reached the installer
             nsteps = await _count(
                 pool, "SELECT count(*) AS n FROM run_steps WHERE run_id=%s", (run_id,)
@@ -2401,10 +2427,23 @@ def test_register_handlers_binds_install_and_boot() -> None:
         builder=_FakeBuilder(),
         installer=_FakeInstaller(),
         booter=_FakeBooter(),
+        profile_policy=_LOCAL_POLICY,
         secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
+
+
+def test_register_handlers_requires_policy_with_explicit_installer() -> None:
+    registry = HandlerRegistry()
+    with pytest.raises(RuntimeError, match="explicit installer require profile_policy"):
+        runs_handlers.register_handlers(
+            registry,
+            builder=_FakeBuilder(),
+            installer=_FakeInstaller(),
+            booter=_FakeBooter(),
+            secret_registry=SecretRegistry(),
+        )
 
 
 def test_boot_handler_registers_console_on_success(
@@ -2907,7 +2946,9 @@ def test_install_handler_forwards_console_method_for_bare_system(migrated_url: s
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
         assert installer.calls[0].method is CaptureMethod.CONSOLE
         assert installer.calls[0].initrd_ref is None  # no initrd
 
@@ -2923,7 +2964,9 @@ def test_install_handler_forwards_host_dump_for_preserve_on_crash(migrated_url: 
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
         assert installer.calls[0].method is CaptureMethod.HOST_DUMP
 
     asyncio.run(_run())
@@ -2939,7 +2982,9 @@ def test_install_handler_forwards_initrd_ref_from_build_ledger(migrated_url: str
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
         assert installer.calls[0].initrd_ref == "local/runs/x/initrd"
 
     asyncio.run(_run())
@@ -2953,7 +2998,9 @@ def test_install_handler_no_initrd_when_ledger_initrd_blank(migrated_url: str) -
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
         assert installer.calls[0].initrd_ref is None
 
     asyncio.run(_run())
@@ -2970,7 +3017,9 @@ def test_install_handler_forwards_ledger_cmdline_to_installer(migrated_url: str)
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
         assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda dhash_entries=1"
 
     asyncio.run(_run())
@@ -2988,7 +3037,9 @@ def test_install_handler_forwards_default_cmdline_when_ledger_has_none(migrated_
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller()
             async with pool.connection() as conn:
-                await runs_handlers.install_handler(conn, job, installer)
+                await runs_handlers.install_handler(
+                    conn, job, installer, profile_policy=_LOCAL_POLICY
+                )
         assert installer.calls[0].cmdline == "console=ttyS0 root=/dev/vda"  # required base only
 
     asyncio.run(_run())

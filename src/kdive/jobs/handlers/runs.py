@@ -23,7 +23,6 @@ from kdive.jobs.payloads import BuildPayload, RunPayload, load_payload
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.provider_components.build_results import BuildOutput
-from kdive.providers.composition import build_provider_resolver
 from kdive.providers.ports import Booter, Builder, Installer, InstallRequest
 from kdive.providers.resolver import ProviderResolver
 from kdive.providers.runtime import ProfilePolicy, ProviderRuntime
@@ -175,10 +174,8 @@ async def install_handler(
         runtime = await resolver.runtime_for_system(conn, run.system_id)
         installer = runtime.installer
         profile_policy = runtime.profile_policy
-    else:
-        if profile_policy is None:
-            resolver = resolver or build_provider_resolver()
-            profile_policy = (await resolver.runtime_for_system(conn, run.system_id)).profile_policy
+    elif profile_policy is None:
+        raise RuntimeError("install handler with explicit installer requires profile_policy")
     method = install_method_for(system, profile_policy)
     kernel_ref = run.kernel_ref
     cmdline = await cmdline_for(conn, run, method)
@@ -450,17 +447,23 @@ def register_handlers(
     installer: Installer | None = None,
     booter: Booter | None = None,
     resolver: ProviderResolver | None = None,
+    profile_policy: ProfilePolicy | None = None,
     secret_registry: SecretRegistry,
 ) -> None:
     """Bind the `build`/`install`/`boot` job handlers."""
     if builder is None and installer is None and booter is None and resolver is None:
         raise RuntimeError("runs handlers require a resolver or explicit run ports")
+    if installer is not None and profile_policy is None:
+        raise RuntimeError("runs handlers with explicit installer require profile_policy")
 
     registry.register(
         JobKind.BUILD, lambda conn, job: build_handler(conn, job, builder, resolver=resolver)
     )
     registry.register(
-        JobKind.INSTALL, lambda conn, job: install_handler(conn, job, installer, resolver=resolver)
+        JobKind.INSTALL,
+        lambda conn, job: install_handler(
+            conn, job, installer, resolver=resolver, profile_policy=profile_policy
+        ),
     )
     registry.register(
         JobKind.BOOT,

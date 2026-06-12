@@ -22,7 +22,6 @@ from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
 from kdive.profiles.provider_policy import rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.provider_components.artifacts import StoredArtifact
-from kdive.providers.composition import build_provider_resolver
 from kdive.providers.ports import Provisioner
 from kdive.providers.resolver import ProviderResolver
 from kdive.providers.runtime import ProfilePolicy
@@ -187,10 +186,15 @@ async def _profile_policy(
     system_id: UUID,
     explicit: ProfilePolicy | None,
     resolver: ProviderResolver | None,
+    *,
+    explicit_provisioner: bool,
 ) -> ProfilePolicy:
     if explicit is not None:
         return explicit
-    resolver = resolver or build_provider_resolver()
+    if explicit_provisioner:
+        raise RuntimeError("provision handler with explicit provisioner requires profile_policy")
+    if resolver is None:
+        raise RuntimeError("provision handlers require a resolver or explicit profile_policy")
     return (await resolver.runtime_for_system(conn, system_id)).profile_policy
 
 
@@ -211,6 +215,7 @@ async def provision_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
+    explicit_provisioner = provisioner is not None
     provisioner = await _provisioner(conn, system_id, provisioner, resolver)
     if system.state is not SystemState.PROVISIONING:
         if system.state in TERMINAL_SYSTEM_STATES:
@@ -219,7 +224,9 @@ async def provision_handler(
             )
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
-    profile_policy = await _profile_policy(conn, system_id, profile_policy, resolver)
+    profile_policy = await _profile_policy(
+        conn, system_id, profile_policy, resolver, explicit_provisioner=explicit_provisioner
+    )
     try:
         domain_name = await asyncio.to_thread(provisioner.provision, system_id, profile)
     except CategorizedError:
@@ -338,14 +345,19 @@ def register_handlers(
     *,
     provisioner: Provisioner | None = None,
     resolver: ProviderResolver | None = None,
+    profile_policy: ProfilePolicy | None = None,
 ) -> None:
     """Bind the `provision`/`teardown`/`reprovision` job handlers."""
     if provisioner is None and resolver is None:
         raise RuntimeError("systems handlers require a resolver or an explicit provisioner")
+    if provisioner is not None and profile_policy is None:
+        raise RuntimeError("systems handlers with explicit provisioner require profile_policy")
 
     registry.register(
         JobKind.PROVISION,
-        lambda conn, job: provision_handler(conn, job, provisioner, resolver=resolver),
+        lambda conn, job: provision_handler(
+            conn, job, provisioner, resolver=resolver, profile_policy=profile_policy
+        ),
     )
     registry.register(
         JobKind.TEARDOWN,
