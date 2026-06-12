@@ -18,7 +18,7 @@ insert, and a lost race closes the just-opened transport (ADR-0032 §6a). The
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -63,6 +63,7 @@ from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_en
 _GDBSTUB = "gdbstub"
 _DRGN_LIVE = "drgn-live"
 _TRANSPORTS = frozenset({_GDBSTUB, _DRGN_LIVE})
+_log = logging.getLogger(__name__)
 # An attach failure maps these provider categories onto the response envelope. A
 # MISSING_DEPENDENCY (no live_vm host / unresolvable endpoint) surfaces as an attach failure:
 # the agent cannot attach either way.
@@ -580,8 +581,10 @@ async def _close(connector: Connector, handle: str | None) -> None:
     """Close the transport best-effort; a missing/failing close never blocks the detach."""
     if handle is None:
         return
-    with contextlib.suppress(CategorizedError):
+    try:
         await asyncio.to_thread(connector.close_transport, TransportHandle(handle))
+    except Exception:
+        _log.warning("debug transport close failed; continuing detach", extra={"handle": handle})
 
 
 def _detached_envelope(session_id: UUID, project: str) -> ToolResponse:

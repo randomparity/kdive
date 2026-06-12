@@ -105,6 +105,14 @@ class _RaisingCloseConnector(_FakeConnector):
         raise CategorizedError("close blew up", category=ErrorCategory.TRANSPORT_FAILURE)
 
 
+class _UnexpectedRaisingCloseConnector(_FakeConnector):
+    """A connector whose close_transport raises an unexpected provider exception."""
+
+    def close_transport(self, handle: TransportHandle) -> None:
+        super().close_transport(handle)
+        raise RuntimeError("close blew up unexpectedly")
+
+
 def _ctx(
     role: Role | None = Role.OPERATOR, *, projects: tuple[str, ...] = ("proj",)
 ) -> RequestContext:
@@ -1215,6 +1223,25 @@ def test_end_session_close_failure_still_detaches(migrated_url: str) -> None:
             run_id = await _seed_run(pool, sys_id)
             session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
             resp = await _end_session(pool, _ctx(), session_id, connector=_RaisingCloseConnector())
+            assert resp.status == "detached"
+            async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM debug_sessions WHERE id = %s", (session_id,))
+                row = await cur.fetchone()
+        assert row is not None and row["state"] == "detached"
+
+    asyncio.run(_run())
+
+
+def test_end_session_unexpected_close_failure_still_detaches(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, sys_id)
+            session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
+            resp = await _end_session(
+                pool, _ctx(), session_id, connector=_UnexpectedRaisingCloseConnector()
+            )
             assert resp.status == "detached"
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM debug_sessions WHERE id = %s", (session_id,))
