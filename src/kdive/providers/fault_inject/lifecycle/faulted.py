@@ -44,7 +44,8 @@ def _apply(decision: FaultDecision, sleep_s: _SyncSleep) -> None:
     if decision.latency_s > 0.0:
         sleep_s(decision.latency_s)
     if decision.fail:
-        assert decision.category is not None  # noqa: S101 - engine invariant: fail => category
+        if decision.category is None:
+            raise RuntimeError("fault engine returned a failing decision without a category")
         raise CategorizedError(
             f"fault-inject drew a {decision.category.value} failure",
             category=decision.category,

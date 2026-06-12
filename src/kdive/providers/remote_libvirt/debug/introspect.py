@@ -142,9 +142,14 @@ class RemoteVmcoreIntrospect:
         )
 
     def _open(self, core: Path, vmlinux: Path) -> _Program:
-        assert self._open_program is not None
+        open_program = self._open_program
+        if open_program is None:
+            raise CategorizedError(
+                "offline drgn introspection runs only under the live_vm gate",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+            )
         try:
-            return self._open_program(core, vmlinux)
+            return open_program(core, vmlinux)
         except CategorizedError:
             raise
         except Exception as exc:  # noqa: BLE001 - any drgn open fault becomes a typed attach failure

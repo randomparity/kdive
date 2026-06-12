@@ -85,7 +85,8 @@ async def build_console_hosting(secret_registry: SecretRegistry) -> ConsoleHosti
     def factory(system_id: object) -> ConsoleCollector:
         from uuid import UUID
 
-        assert isinstance(system_id, UUID)
+        if not isinstance(system_id, UUID):
+            raise TypeError("console collector factory expected a UUID system_id")
         return ConsoleCollector(
             system_id,
             open_console=lambda sid: open_remote_console(remote_config, secret_backend, sid),

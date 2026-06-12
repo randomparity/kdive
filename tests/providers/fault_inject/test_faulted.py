@@ -16,9 +16,13 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.fault_inject.faulting.engine import FaultEngine, FaultPlane
+from kdive.providers.fault_inject.faulting.engine import FaultDecision, FaultEngine, FaultPlane
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
-from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvision
+from kdive.providers.fault_inject.lifecycle.faulted import (
+    FaultedInstall,
+    FaultedProvision,
+    _apply,
+)
 from kdive.providers.fault_inject.lifecycle.provider import FaultInjectInstall, FaultInjectProvision
 from kdive.providers.ports import InstallRequest
 
@@ -66,6 +70,13 @@ def test_provision_fail_draw_raises_categorized_error_with_catalog_category() ->
     with pytest.raises(CategorizedError) as exc:
         wrapper.provision(_SYSTEM, _PROFILE)
     assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
+
+
+def test_fail_decision_without_category_is_an_invariant_error() -> None:
+    decision = FaultDecision(fail=True, category=None, latency_s=0.0)
+
+    with pytest.raises(RuntimeError, match="without a category"):
+        _apply(decision, _noop_sleep)
 
 
 def test_provision_no_fail_draw_delegates_and_returns_synthetic_domain() -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,15 @@ def test_from_vmcore_off_gate_is_missing_dependency():
     introspect = _vmcore_introspect()  # no drgn seams
     with pytest.raises(CategorizedError) as exc:
         introspect.from_vmcore(vmcore_ref="core", debuginfo_ref="vmlinux", expected_build_id="BID")
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_open_without_drgn_opener_is_missing_dependency():
+    introspect = _vmcore_introspect(run_helper=lambda prog, name: {})
+
+    with pytest.raises(CategorizedError) as exc:
+        introspect._open(Path("core"), Path("vmlinux"))
+
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
 
