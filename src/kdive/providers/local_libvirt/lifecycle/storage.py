@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess  # noqa: S404 - qemu-img is invoked with a fixed argv, no shell
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ _log = logging.getLogger(__name__)
 
 ROOTFS_DIR = "/var/lib/kdive/rootfs"
 _QEMU_IMG_TIMEOUT_S = 5 * 60
+_QEMU_IMG = "qemu-img"
 
 
 def overlay_path(system_id: UUID | str) -> str:
@@ -25,9 +27,16 @@ def overlay_path(system_id: UUID | str) -> str:
 
 def _real_make_overlay(base: str, overlay: str) -> None:
     """Create the per-System qcow2 overlay backed by ``base`` with ``qemu-img``."""
+    qemu_img = shutil.which(_QEMU_IMG)
+    if qemu_img is None:
+        raise CategorizedError(
+            "qemu-img is not installed; cannot create the per-System rootfs overlay",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details=_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
+        )
     try:
         result = subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted paths
-            ["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", base, overlay],
+            [qemu_img, "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", base, overlay],
             capture_output=True,
             text=True,
             timeout=_QEMU_IMG_TIMEOUT_S,
@@ -37,10 +46,10 @@ def _real_make_overlay(base: str, overlay: str) -> None:
         raise CategorizedError(
             "qemu-img is not installed; cannot create the per-System rootfs overlay",
             category=ErrorCategory.MISSING_DEPENDENCY,
-            details=_overlay_error_details("create_overlay", overlay, tool="qemu-img"),
+            details=_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
         ) from exc
     except OSError as exc:
-        details = _overlay_error_details("create_overlay", overlay, tool="qemu-img")
+        details = _overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG)
         details["error"] = type(exc).__name__
         raise CategorizedError(
             "failed to launch qemu-img to create the per-System rootfs overlay",
@@ -52,7 +61,7 @@ def _real_make_overlay(base: str, overlay: str) -> None:
             "qemu-img exceeded the overlay creation timeout",
             category=ErrorCategory.PROVISIONING_FAILURE,
             details={
-                **_overlay_error_details("create_overlay", overlay, tool="qemu-img"),
+                **_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
                 "timeout_s": _QEMU_IMG_TIMEOUT_S,
             },
         ) from exc
@@ -61,7 +70,7 @@ def _real_make_overlay(base: str, overlay: str) -> None:
             "qemu-img failed to create the per-System rootfs overlay",
             category=ErrorCategory.PROVISIONING_FAILURE,
             details={
-                **_overlay_error_details("create_overlay", overlay, tool="qemu-img"),
+                **_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
                 "stderr": result.stderr[-2000:],
             },
         )

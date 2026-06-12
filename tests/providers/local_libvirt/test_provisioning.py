@@ -22,6 +22,7 @@ from kdive.providers import libvirt_xml as libvirt_xml_contract
 from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, parse_metadata_system_id
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
+from kdive.providers.local_libvirt.lifecycle import xml as xml_module
 from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     ProvisioningFiles,
@@ -151,6 +152,14 @@ def test_render_has_no_kernel_or_cmdline() -> None:
     root = _safe_fromstring(_render())
     assert root.find("os/kernel") is None
     assert root.find("os/cmdline") is None
+
+
+def test_xml_module_render_domain_xml_exposes_kdive_metadata() -> None:
+    root = _safe_fromstring(xml_module.render_domain_xml(_SYS, _profile(), disk_path=_DISK))
+    tag = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}system")
+
+    assert tag is not None
+    assert tag.text == str(_SYS)
 
 
 def test_render_metadata_tag_round_trips_through_discovery() -> None:
@@ -377,6 +386,43 @@ def test_provision_prepares_console_log_before_define() -> None:
     assert calls == [("prepare", f"{_SYS}.log"), ("define", "xml")]
 
 
+def test_prepare_overlay_reuses_existing_overlay_without_creation() -> None:
+    made: list[tuple[str, str]] = []
+    files = ProvisioningFiles(
+        make_overlay=lambda base, overlay: made.append((base, overlay)),
+        overlay_exists=lambda overlay: overlay == overlay_path(_SYS),
+    )
+
+    overlay = files.prepare_overlay(_SYS, base="/base.qcow2")
+
+    assert overlay.path == overlay_path(_SYS)
+    assert overlay.created is False
+    assert made == []
+
+
+def test_prepare_overlay_creates_missing_overlay() -> None:
+    made: list[tuple[str, str]] = []
+    files = ProvisioningFiles(
+        make_overlay=lambda base, overlay: made.append((base, overlay)),
+        overlay_exists=lambda _overlay: False,
+    )
+
+    overlay = files.prepare_overlay(_SYS, base="/base.qcow2")
+
+    assert overlay.created is True
+    assert made == [("/base.qcow2", overlay_path(_SYS))]
+
+
+def test_cleanup_overlay_if_created_removes_only_created_overlay() -> None:
+    removed: list[str] = []
+    files = ProvisioningFiles(remove_overlay=removed.append)
+
+    files.cleanup_overlay_if_created(storage_module.PreparedOverlay(overlay_path(_SYS), True))
+    files.cleanup_overlay_if_created(storage_module.PreparedOverlay("/existing.qcow2", False))
+
+    assert removed == [overlay_path(_SYS)]
+
+
 def test_real_make_overlay_timeout_is_provisioning_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,6 +455,23 @@ def test_real_make_overlay_missing_qemu_img_is_missing_dependency(
         "overlay": "overlay.qcow2",
         "tool": "qemu-img",
     }
+
+
+def test_real_make_overlay_uses_resolved_qemu_img_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
+    def _record(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _record)
+
+    storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
+
+    assert calls[0][0] == "/usr/bin/qemu-img"
 
 
 def test_real_make_overlay_launch_oserror_is_infrastructure_failure(
