@@ -1,0 +1,8 @@
+# Turnkey demo. Pulls the published rolling image and stands up in-chart
+# Postgres/MinIO/mock-OIDC. Ephemeral (emptyDir) — a pod restart drops all state.
+# Reach MCP with `kubectl port-forward`; never expose it (the bundled issuer mints
+# valid kdive tokens for any caller). See deploy/helm/kdive/README.md.
+image:
+  tag: edge
+bundledBackends: true
+demoAcknowledged: true
