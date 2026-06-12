@@ -231,32 +231,87 @@ def read_core_dmesg_from_file(core: Path) -> bytes:  # pragma: no cover - live_v
         ) from exc
 
 
-class RemoteLibvirtRetrieve:
-    """The realized remote `Retriever` + `CrashPostmortem` (ADR-0084)."""
+class _HostDumpOptions(NamedTuple):
+    core_build_id_from_file: CoreBuildIdFromFile
+    core_dmesg_from_file: CoreDmesgFromFile
+    dump_format: int
+    max_core_bytes: int
+
+
+def _connection(
+    config: RemoteLibvirtConfig,
+    secret_backend_factory: Callable[[], SecretBackend],
+    open_connection: OpenRetrieveConnection,
+    pki_base_dir: Path | None,
+) -> AbstractContextManager[_RetrieveConn]:
+    return remote_connection(
+        config,
+        secret_backend_factory(),
+        open_connection=open_connection,
+        pki_base_dir=pki_base_dir,
+    )
+
+
+def _lookup(conn: _RetrieveConn, domain_name: str) -> _Domain:
+    try:
+        return conn.lookupByName(domain_name)
+    except libvirt.libvirtError as exc:
+        raise CategorizedError(
+            "remote domain lookup failed for capture",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"domain": domain_name},
+        ) from exc
+
+
+def _readiness_failure(system_id: UUID, reason: str) -> CategorizedError:
+    return CategorizedError(
+        reason,
+        category=ErrorCategory.READINESS_FAILURE,
+        details={"system_id": str(system_id)},
+    )
+
+
+def _persist_redacted(
+    store_factory: Callable[[], _StorePort],
+    secret_registry: SecretRegistry,
+    system_id: UUID,
+    method: CaptureMethod,
+    dmesg: bytes,
+) -> StoredArtifact:
+    text = dmesg.decode("utf-8", "replace")
+    redacted = Redactor(registry=secret_registry).redact_text(text)
+    return store_factory().put_artifact(
+        ArtifactWriteRequest(
+            tenant=_TENANT,
+            owner_kind=_OWNER_KIND,
+            owner_id=str(system_id),
+            name=f"vmcore-{method.value}-redacted",
+            data=redacted.encode("utf-8"),
+            sensitivity=Sensitivity.REDACTED,
+            retention_class=_RETENTION,
+        )
+    )
+
+
+class _KdumpCapturer:
+    """In-guest two-phase kdump capture over the guest-agent artifact channel."""
 
     def __init__(
         self,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_env,
-        open_connection: OpenRetrieveConnection = open_libvirt_capture,
-        store_factory: Callable[[], _StorePort] = object_store_from_env,
-        agent_command: AgentCommand = qemu_agent_command,
-        agent_exec_factory: AgentExecFactory | None = None,
-        secret_backend_factory: Callable[[], SecretBackend] | None = None,
-        pki_base_dir: Path | None = None,
-        put_expiry_s: int = _DEFAULT_PUT_EXPIRY_S,
-        readiness_timeout_s: float = _DEFAULT_READINESS_TIMEOUT_S,
-        readiness_poll_s: float = _DEFAULT_READINESS_POLL_S,
-        sleep: Sleep = time.sleep,
-        monotonic: Monotonic = time.monotonic,
-        fetch_object: FetchObject = default_fetch_object,
-        read_build_id: ReadBuildId = default_read_vmcore_build_id,
-        run_crash: RunCrash = default_run_crash,
-        core_build_id_from_file: CoreBuildIdFromFile = read_core_build_id_from_file,
-        core_dmesg_from_file: CoreDmesgFromFile = read_core_dmesg_from_file,
-        host_dump_format: int = libvirt.VIR_DOMAIN_CORE_DUMP_FORMAT_RAW,
-        max_core_bytes: int = _MAX_CORE_BYTES,
+        config_factory: Callable[[], RemoteLibvirtConfig],
+        open_connection: OpenRetrieveConnection,
+        store_factory: Callable[[], _StorePort],
+        agent_command: AgentCommand,
+        agent_exec_factory: AgentExecFactory | None,
+        secret_backend_factory: Callable[[], SecretBackend],
+        pki_base_dir: Path | None,
+        put_expiry_s: int,
+        readiness_timeout_s: float,
+        readiness_poll_s: float,
+        sleep: Sleep,
+        monotonic: Monotonic,
     ) -> None:
         self._secret_registry = secret_registry
         self._config_factory = config_factory
@@ -264,52 +319,22 @@ class RemoteLibvirtRetrieve:
         self._store_factory = store_factory
         self._agent_command = agent_command
         self._agent_exec_factory = agent_exec_factory or self._default_agent_exec
-        self._secret_backend_factory = secret_backend_factory or (
-            lambda: secret_backend_from_env(registry=secret_registry)
-        )
+        self._secret_backend_factory = secret_backend_factory
         self._pki_base_dir = pki_base_dir
         self._put_expiry_s = put_expiry_s
         self._readiness_timeout_s = readiness_timeout_s
         self._readiness_poll_s = readiness_poll_s
         self._sleep = sleep
         self._monotonic = monotonic
-        self._fetch_object = fetch_object
-        self._read_build_id = read_build_id
-        self._run_crash = run_crash
-        self._core_build_id_from_file = core_build_id_from_file
-        self._core_dmesg_from_file = core_dmesg_from_file
-        self._host_dump_format = host_dump_format
-        self._max_core_bytes = max_core_bytes
 
-    @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtRetrieve:
-        """Build from the shared worker env; opens no connection and mints no URL here."""
-        return cls(secret_registry=secret_registry)
-
-    def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        """Capture a vmcore: kdump (in-guest, two-phase) or host_dump (host-side, ADR-0094).
-
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for an unsupported method, an
-                over-ceiling core, a host lacking kdump-zlib, a non-dir pool, or a core
-                with no VMCOREINFO build-id; ``READINESS_FAILURE`` when the guest never
-                becomes reachable or carries no core; ``TRANSPORT_FAILURE`` for an agent
-                fault outside the readiness window; ``INFRASTRUCTURE_FAILURE`` for an upload
-                or download failure, a malformed reply, or an object absent after a
-                success-reporting upload.
-        """
-        if method is CaptureMethod.HOST_DUMP:
-            return self._capture_host_dump(system_id)
-        if method is not CaptureMethod.KDUMP:
-            raise CategorizedError(
-                "remote-libvirt capture supports only the kdump and host_dump methods",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"method": method.value},
-            )
+    def capture(self, system_id: UUID) -> CaptureOutput:
         config = self._config_factory()
+        method = CaptureMethod.KDUMP
         raw_key = artifact_key(_TENANT, _OWNER_KIND, str(system_id), f"vmcore-{method.value}")
-        with self._connection(config) as conn:
-            domain = self._lookup(conn, domain_name_for(system_id))
+        with _connection(
+            config, self._secret_backend_factory, self._open_connection, self._pki_base_dir
+        ) as conn:
+            domain = _lookup(conn, domain_name_for(system_id))
             info = self._await_inspect(domain, system_id)
             upload = self._store_factory().presign_put(
                 PresignPutRequest(
@@ -323,20 +348,138 @@ class RemoteLibvirtRetrieve:
             )
             self._upload(domain, system_id, upload)
         raw = self._reference(raw_key, info.sha256, system_id)
-        redacted = self._persist_redacted(system_id, method, info.dmesg)
+        redacted = _persist_redacted(
+            self._store_factory, self._secret_registry, system_id, method, info.dmesg
+        )
         return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=info.build_id)
 
-    def _capture_host_dump(self, system_id: UUID) -> CaptureOutput:
-        """Host-side core-dump → storage-pool volume → stream download → upload (ADR-0094).
+    def _await_inspect(self, domain: _Domain, system_id: UUID) -> _CoreInfo:
+        agent_exec = self._agent_exec_factory(_DEFAULT_INSPECT_TIMEOUT_S)
+        deadline = self._monotonic() + self._readiness_timeout_s
+        while True:
+            try:
+                result = agent_exec.run(domain, [_HELPER, "inspect"])
+            except CategorizedError as exc:
+                if exc.category not in _AGENT_REBOOTING:
+                    raise
+                if self._monotonic() >= deadline:
+                    raise _readiness_failure(
+                        system_id, "guest agent never came back within the capture window"
+                    ) from exc
+                self._sleep(self._readiness_poll_s)
+                continue
+            return self._parse_inspect(result, system_id)
 
-        Preflights (dir pool, 5 GiB ceiling) fire before paying a dump/stream; the spooled temp
-        file and the host volume are both removed in a ``finally`` on every exit path. The dump
-        is an ELF memory-only core (``VIR_DOMAIN_CORE_DUMP_FORMAT_RAW``): a universally-supported
-        libvirt format, so there is no host dump-format capability to preflight (#319).
-        """
+    @staticmethod
+    def _parse_inspect(result: AgentExecResult, system_id: UUID) -> _CoreInfo:
+        if result.exit_status != 0:
+            raise CategorizedError(
+                "in-guest vmcore inspect exited non-zero",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id), "exit_status": result.exit_status},
+            )
+        try:
+            payload = json.loads(result.stdout.decode("utf-8", "replace"))
+            present = bool(payload["present"])
+            sha256 = str(payload["sha256"])
+            size_bytes = int(payload["size_bytes"])
+            build_id = str(payload["build_id"])
+            dmesg = base64.b64decode(payload["dmesg_b64"])
+        except (KeyError, TypeError, ValueError, binascii.Error) as exc:
+            raise CategorizedError(
+                "guest vmcore inspect returned a malformed reply",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id)},
+            ) from exc
+        if not present:
+            raise _readiness_failure(system_id, "no kdump core in the guest's dump storage")
+        if size_bytes > _MAX_CORE_BYTES:
+            raise CategorizedError(
+                "captured core exceeds the single-PUT 5 GiB ceiling",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"system_id": str(system_id), "size_bytes": size_bytes},
+            )
+        return _CoreInfo(sha256=sha256, size_bytes=size_bytes, build_id=build_id, dmesg=dmesg)
+
+    def _upload(self, domain: _Domain, system_id: UUID, upload: PresignedUpload) -> None:
+        argv = [_HELPER, "upload", "--url", upload.url]
+        for key, value in upload.required_headers.items():
+            argv += ["--header", f"{key}:{value}"]
+        channel = InTargetArtifactChannel(
+            registry=self._secret_registry,
+            agent_exec=self._agent_exec_factory(_DEFAULT_UPLOAD_TIMEOUT_S),
+            store_factory=self._store_factory,
+            scope=object(),
+        )
+        output = channel.exec_with_capability(
+            domain,
+            capability_url=upload.url,
+            argv=argv,
+            owner_kind=_OWNER_KIND,
+            owner_id=str(system_id),
+        )
+        if output.result.exit_status != 0:
+            raise CategorizedError(
+                "in-guest vmcore upload exited non-zero",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id), "exit_status": output.result.exit_status},
+            )
+
+    def _reference(self, raw_key: str, sha256: str, system_id: UUID) -> StoredArtifact:
+        head = self._store_factory().head(raw_key)
+        if head is None:
+            raise CategorizedError(
+                "uploaded vmcore is absent after a success-reporting upload",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id), "key": raw_key},
+            )
+        if head.checksum_sha256 is not None and head.checksum_sha256 != sha256:
+            raise CategorizedError(
+                "uploaded vmcore checksum does not match the inspected core",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id), "key": raw_key},
+            )
+        return StoredArtifact(raw_key, head.etag, Sensitivity.SENSITIVE, _RETENTION)
+
+    def _default_agent_exec(self, timeout_s: float) -> GuestAgentExec:
+        return GuestAgentExec(
+            agent_command=self._agent_command,
+            allowed_programs=frozenset({_HELPER}),
+            timeout_s=timeout_s,
+            sleep=self._sleep,
+            monotonic=self._monotonic,
+        )
+
+
+class _HostDumpCapturer:
+    """Host-side libvirt core dump, stream download, and object-store upload."""
+
+    def __init__(
+        self,
+        *,
+        secret_registry: SecretRegistry,
+        config_factory: Callable[[], RemoteLibvirtConfig],
+        open_connection: OpenRetrieveConnection,
+        store_factory: Callable[[], _StorePort],
+        secret_backend_factory: Callable[[], SecretBackend],
+        pki_base_dir: Path | None,
+        options: _HostDumpOptions,
+    ) -> None:
+        self._secret_registry = secret_registry
+        self._config_factory = config_factory
+        self._open_connection = open_connection
+        self._store_factory = store_factory
+        self._secret_backend_factory = secret_backend_factory
+        self._pki_base_dir = pki_base_dir
+        self._options = options
+
+    def capture(self, system_id: UUID) -> CaptureOutput:
+        """Host-side core-dump -> storage-pool volume -> stream download -> upload."""
         config = self._config_factory()
-        with self._connection(config) as conn:
-            domain = self._lookup(conn, domain_name_for(system_id))
+        with _connection(
+            config, self._secret_backend_factory, self._open_connection, self._pki_base_dir
+        ) as conn:
+            domain = _lookup(conn, domain_name_for(system_id))
             pool = self._lookup_pool(conn, config.storage_pool)
             pool_dir = self._preflight_pool_dir(pool, config.storage_pool)
             vol_name = host_dump_volume_name(system_id)
@@ -394,7 +537,7 @@ class RemoteLibvirtRetrieve:
     def _core_dump(self, domain: Any, path: str, system_id: UUID) -> None:
         flags = libvirt.VIR_DUMP_MEMORY_ONLY
         try:
-            domain.coreDumpWithFormat(path, self._host_dump_format, flags)
+            domain.coreDumpWithFormat(path, self._options.dump_format, flags)
         except libvirt.libvirtError as exc:
             raise CategorizedError(
                 "remote host_dump core-dump failed",
@@ -416,7 +559,7 @@ class RemoteLibvirtRetrieve:
     def _enforce_ceiling(self, volume: Any, system_id: UUID) -> None:
         """Reject an over-ceiling volume before any download; still clean the dump up."""
         capacity = int(volume.info()[1])
-        if capacity > self._max_core_bytes:
+        if capacity > self._options.max_core_bytes:
             self._delete_volume(volume)
             raise CategorizedError(
                 "host_dump core exceeds the single-PUT 5 GiB ceiling",
@@ -438,7 +581,7 @@ class RemoteLibvirtRetrieve:
         def _sink(_stream: Any, data: bytes, _opaque: Any) -> None:
             nonlocal written
             written += len(data)
-            if written > self._max_core_bytes:
+            if written > self._options.max_core_bytes:
                 raise CategorizedError(
                     "host_dump stream exceeded the 5 GiB ceiling mid-download",
                     category=ErrorCategory.CONFIGURATION_ERROR,
@@ -466,12 +609,18 @@ class RemoteLibvirtRetrieve:
             ) from exc
 
     def _store_core(self, system_id: UUID, spool: Path) -> CaptureOutput:
-        build_id = self._core_build_id_from_file(spool)
+        build_id = self._options.core_build_id_from_file(spool)
         dmesg = self._dmesg_best_effort(spool, system_id)
         sha256_b64 = _file_sha256_b64(spool)
         raw = self._stream_put(system_id, spool, sha256_b64)
         self._verify_stored(raw.key, sha256_b64, system_id)
-        redacted = self._persist_redacted(system_id, CaptureMethod.HOST_DUMP, dmesg)
+        redacted = _persist_redacted(
+            self._store_factory,
+            self._secret_registry,
+            system_id,
+            CaptureMethod.HOST_DUMP,
+            dmesg,
+        )
         return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=build_id)
 
     def _dmesg_best_effort(self, spool: Path, system_id: UUID) -> bytes:
@@ -485,7 +634,7 @@ class RemoteLibvirtRetrieve:
         fault the build-id pass above would already have surfaced.
         """
         try:
-            return self._core_dmesg_from_file(spool)
+            return self._options.core_dmesg_from_file(spool)
         except CategorizedError as exc:
             if exc.category is ErrorCategory.MISSING_DEPENDENCY:
                 raise
@@ -531,7 +680,24 @@ class RemoteLibvirtRetrieve:
         with contextlib.suppress(Exception):
             volume.delete(0)
 
-    def run_crash_postmortem(
+
+class _CrashPostmortemAdapter:
+    """Provider-neutral crash postmortem wiring for remote-libvirt vmcore refs."""
+
+    def __init__(
+        self,
+        *,
+        secret_registry: SecretRegistry,
+        fetch_object: FetchObject,
+        read_build_id: ReadBuildId,
+        run_crash: RunCrash,
+    ) -> None:
+        self._secret_registry = secret_registry
+        self._fetch_object = fetch_object
+        self._read_build_id = read_build_id
+        self._run_crash = run_crash
+
+    def run(
         self,
         *,
         vmcore_ref: str,
@@ -539,7 +705,6 @@ class RemoteLibvirtRetrieve:
         expected_build_id: str,
         commands: list[str],
     ) -> CrashOutput:
-        """Delegate to the provider-neutral worker-side crash postmortem (ADR-0084)."""
         return _run_crash_postmortem(
             vmcore_ref=vmcore_ref,
             debuginfo_ref=debuginfo_ref,
@@ -551,144 +716,104 @@ class RemoteLibvirtRetrieve:
             secret_registry=self._secret_registry,
         )
 
-    def _await_inspect(self, domain: _Domain, system_id: UUID) -> _CoreInfo:
-        agent_exec = self._agent_exec_factory(_DEFAULT_INSPECT_TIMEOUT_S)
-        deadline = self._monotonic() + self._readiness_timeout_s
-        while True:
-            try:
-                result = agent_exec.run(domain, [_HELPER, "inspect"])
-            except CategorizedError as exc:
-                if exc.category not in _AGENT_REBOOTING:
-                    raise
-                if self._monotonic() >= deadline:
-                    raise self._readiness_failure(
-                        system_id, "guest agent never came back within the capture window"
-                    ) from exc
-                self._sleep(self._readiness_poll_s)
-                continue
-            return self._parse_inspect(result, system_id)
 
-    def _parse_inspect(self, result: AgentExecResult, system_id: UUID) -> _CoreInfo:
-        if result.exit_status != 0:
-            raise CategorizedError(
-                "in-guest vmcore inspect exited non-zero",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id), "exit_status": result.exit_status},
-            )
-        try:
-            payload = json.loads(result.stdout.decode("utf-8", "replace"))
-            present = bool(payload["present"])
-            sha256 = str(payload["sha256"])
-            size_bytes = int(payload["size_bytes"])
-            build_id = str(payload["build_id"])
-            dmesg = base64.b64decode(payload["dmesg_b64"])
-        except (KeyError, TypeError, ValueError, binascii.Error) as exc:
-            raise CategorizedError(
-                "guest vmcore inspect returned a malformed reply",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id)},
-            ) from exc
-        if not present:
-            raise self._readiness_failure(system_id, "no kdump core in the guest's dump storage")
-        if size_bytes > _MAX_CORE_BYTES:
-            raise CategorizedError(
-                "captured core exceeds the single-PUT 5 GiB ceiling",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"system_id": str(system_id), "size_bytes": size_bytes},
-            )
-        return _CoreInfo(sha256=sha256, size_bytes=size_bytes, build_id=build_id, dmesg=dmesg)
+class RemoteLibvirtRetrieve:
+    """The realized remote `Retriever` + `CrashPostmortem` facade (ADR-0084)."""
 
-    def _upload(self, domain: _Domain, system_id: UUID, upload: PresignedUpload) -> None:
-        argv = [_HELPER, "upload", "--url", upload.url]
-        for key, value in upload.required_headers.items():
-            argv += ["--header", f"{key}:{value}"]
-        channel = InTargetArtifactChannel(
-            registry=self._secret_registry,
-            agent_exec=self._agent_exec_factory(_DEFAULT_UPLOAD_TIMEOUT_S),
-            store_factory=self._store_factory,
-            scope=object(),
+    def __init__(
+        self,
+        *,
+        secret_registry: SecretRegistry,
+        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_env,
+        open_connection: OpenRetrieveConnection = open_libvirt_capture,
+        store_factory: Callable[[], _StorePort] = object_store_from_env,
+        agent_command: AgentCommand = qemu_agent_command,
+        agent_exec_factory: AgentExecFactory | None = None,
+        secret_backend_factory: Callable[[], SecretBackend] | None = None,
+        pki_base_dir: Path | None = None,
+        put_expiry_s: int = _DEFAULT_PUT_EXPIRY_S,
+        readiness_timeout_s: float = _DEFAULT_READINESS_TIMEOUT_S,
+        readiness_poll_s: float = _DEFAULT_READINESS_POLL_S,
+        sleep: Sleep = time.sleep,
+        monotonic: Monotonic = time.monotonic,
+        fetch_object: FetchObject = default_fetch_object,
+        read_build_id: ReadBuildId = default_read_vmcore_build_id,
+        run_crash: RunCrash = default_run_crash,
+        core_build_id_from_file: CoreBuildIdFromFile = read_core_build_id_from_file,
+        core_dmesg_from_file: CoreDmesgFromFile = read_core_dmesg_from_file,
+        host_dump_format: int = libvirt.VIR_DOMAIN_CORE_DUMP_FORMAT_RAW,
+        max_core_bytes: int = _MAX_CORE_BYTES,
+    ) -> None:
+        secret_backend_factory = secret_backend_factory or (
+            lambda: secret_backend_from_env(registry=secret_registry)
         )
-        output = channel.exec_with_capability(
-            domain,
-            capability_url=upload.url,
-            argv=argv,
-            owner_kind=_OWNER_KIND,
-            owner_id=str(system_id),
+        self._kdump = _KdumpCapturer(
+            secret_registry=secret_registry,
+            config_factory=config_factory,
+            open_connection=open_connection,
+            store_factory=store_factory,
+            agent_command=agent_command,
+            agent_exec_factory=agent_exec_factory,
+            secret_backend_factory=secret_backend_factory,
+            pki_base_dir=pki_base_dir,
+            put_expiry_s=put_expiry_s,
+            readiness_timeout_s=readiness_timeout_s,
+            readiness_poll_s=readiness_poll_s,
+            sleep=sleep,
+            monotonic=monotonic,
         )
-        if output.result.exit_status != 0:
-            raise CategorizedError(
-                "in-guest vmcore upload exited non-zero",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id), "exit_status": output.result.exit_status},
-            )
-
-    def _reference(self, raw_key: str, sha256: str, system_id: UUID) -> StoredArtifact:
-        head = self._store_factory().head(raw_key)
-        if head is None:
-            raise CategorizedError(
-                "uploaded vmcore is absent after a success-reporting upload",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id), "key": raw_key},
-            )
-        if head.checksum_sha256 is not None and head.checksum_sha256 != sha256:
-            raise CategorizedError(
-                "uploaded vmcore checksum does not match the inspected core",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id), "key": raw_key},
-            )
-        return StoredArtifact(raw_key, head.etag, Sensitivity.SENSITIVE, _RETENTION)
-
-    def _persist_redacted(
-        self, system_id: UUID, method: CaptureMethod, dmesg: bytes
-    ) -> StoredArtifact:
-        text = dmesg.decode("utf-8", "replace")
-        redacted = Redactor(registry=self._secret_registry).redact_text(text)
-        return self._store_factory().put_artifact(
-            ArtifactWriteRequest(
-                tenant=_TENANT,
-                owner_kind=_OWNER_KIND,
-                owner_id=str(system_id),
-                name=f"vmcore-{method.value}-redacted",
-                data=redacted.encode("utf-8"),
-                sensitivity=Sensitivity.REDACTED,
-                retention_class=_RETENTION,
-            )
+        self._host_dump = _HostDumpCapturer(
+            secret_registry=secret_registry,
+            config_factory=config_factory,
+            open_connection=open_connection,
+            store_factory=store_factory,
+            secret_backend_factory=secret_backend_factory,
+            pki_base_dir=pki_base_dir,
+            options=_HostDumpOptions(
+                core_build_id_from_file=core_build_id_from_file,
+                core_dmesg_from_file=core_dmesg_from_file,
+                dump_format=host_dump_format,
+                max_core_bytes=max_core_bytes,
+            ),
+        )
+        self._postmortem = _CrashPostmortemAdapter(
+            secret_registry=secret_registry,
+            fetch_object=fetch_object,
+            read_build_id=read_build_id,
+            run_crash=run_crash,
         )
 
-    def _default_agent_exec(self, timeout_s: float) -> GuestAgentExec:
-        return GuestAgentExec(
-            agent_command=self._agent_command,
-            allowed_programs=frozenset({_HELPER}),
-            timeout_s=timeout_s,
-            sleep=self._sleep,
-            monotonic=self._monotonic,
+    @classmethod
+    def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtRetrieve:
+        """Build from the shared worker env; opens no connection and mints no URL here."""
+        return cls(secret_registry=secret_registry)
+
+    def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
+        """Capture a vmcore by dispatching to the selected remote-libvirt capture workflow."""
+        if method is CaptureMethod.HOST_DUMP:
+            return self._host_dump.capture(system_id)
+        if method is CaptureMethod.KDUMP:
+            return self._kdump.capture(system_id)
+        raise CategorizedError(
+            "remote-libvirt capture supports only the kdump and host_dump methods",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"method": method.value},
         )
 
-    def _connection(self, config: RemoteLibvirtConfig) -> AbstractContextManager[_RetrieveConn]:
-        return remote_connection(
-            config,
-            self._secret_backend_factory(),
-            open_connection=self._open_connection,
-            pki_base_dir=self._pki_base_dir,
-        )
-
-    @staticmethod
-    def _lookup(conn: _RetrieveConn, domain_name: str) -> _Domain:
-        try:
-            return conn.lookupByName(domain_name)
-        except libvirt.libvirtError as exc:
-            raise CategorizedError(
-                "remote domain lookup failed for capture",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"domain": domain_name},
-            ) from exc
-
-    @staticmethod
-    def _readiness_failure(system_id: UUID, reason: str) -> CategorizedError:
-        return CategorizedError(
-            reason,
-            category=ErrorCategory.READINESS_FAILURE,
-            details={"system_id": str(system_id)},
+    def run_crash_postmortem(
+        self,
+        *,
+        vmcore_ref: str,
+        debuginfo_ref: str,
+        expected_build_id: str,
+        commands: list[str],
+    ) -> CrashOutput:
+        """Delegate to the provider-neutral worker-side crash postmortem (ADR-0084)."""
+        return self._postmortem.run(
+            vmcore_ref=vmcore_ref,
+            debuginfo_ref=debuginfo_ref,
+            expected_build_id=expected_build_id,
+            commands=commands,
         )
 
 
