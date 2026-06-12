@@ -134,8 +134,10 @@ class FakePool:
         self._volume = volume
         self.refreshed = False
         self.looked_up: list[str] = []
+        self.xml_desc_calls = 0
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - binding name
+        self.xml_desc_calls += 1
         return self._xml
 
     def refresh(self, flags: int = 0) -> int:
@@ -386,6 +388,7 @@ def test_host_dump_non_dir_pool_is_configuration_error_before_dump(tmp_path: Pat
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert not conn.domain.core_dumps  # AC3: no dump into a void
+    assert pool.xml_desc_calls == 1
 
 
 def test_host_dump_over_ceiling_volume_is_configuration_error_before_download(

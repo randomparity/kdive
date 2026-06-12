@@ -517,7 +517,8 @@ class _HostDumpCapturer:
     @staticmethod
     def _preflight_pool_dir(pool: Any, pool_name: str) -> Path:
         """Return the pool's target directory, or fail on a non-dir/filesystem pool."""
-        pool_type, target = _pool_type_and_target(pool.XMLDesc(0))
+        pool_xml = pool.XMLDesc(0)
+        pool_type, target = _pool_type_and_target(pool_xml)
         if pool_type not in _DIR_POOL_TYPES or target is None:
             raise CategorizedError(
                 "remote storage_pool is not a filesystem/dir pool; host_dump requires one",
