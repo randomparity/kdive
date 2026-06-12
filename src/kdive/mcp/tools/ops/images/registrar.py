@@ -32,7 +32,7 @@ from kdive.mcp.tools.ops.images._common import (
 from kdive.mcp.tools.ops.images.build_publish import BUILD_TOOL, PUBLISH_TOOL, build, publish
 from kdive.mcp.tools.ops.images.delete import delete
 from kdive.mcp.tools.ops.images.retention import extend, prune_expired
-from kdive.mcp.tools.ops.images.upload import upload
+from kdive.mcp.tools.ops.images.upload import ImageUploadRequest, upload
 from kdive.reconciler.images import ImageSweepStore
 from kdive.services.images.upload import UploadObjectStore
 
@@ -117,27 +117,13 @@ def register(
 
     @app.tool(name=UPLOAD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_upload(
-        project: Annotated[str, Field(description="The owning project for the private image.")],
-        name: Annotated[str, Field(description="The catalog image name.")],
-        arch: Annotated[str, Field(description="The target architecture.")],
-        quarantine_key: Annotated[
-            str, Field(description="The object-store key of the quarantined upload.")
+        request: Annotated[
+            ImageUploadRequest,
+            Field(description="Private image upload registration request."),
         ],
-        lifetime_seconds: Annotated[
-            int | None, Field(description="TTL seconds (clamped to the ceiling); default applies.")
-        ] = None,
     ) -> ToolResponse:
         """Register a quarantined upload as a project-private image. Requires operator."""
-        return await upload(
-            pool,
-            current_context(),
-            upload_store,
-            project=project,
-            name=name,
-            arch=arch,
-            quarantine_key=quarantine_key,
-            lifetime_seconds=lifetime_seconds,
-        )
+        return await upload(pool, current_context(), upload_store, request)
 
     @app.tool(
         name=DELETE_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"}

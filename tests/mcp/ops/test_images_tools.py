@@ -383,11 +383,12 @@ def test_upload_unprivileged_denied_audited_even_without_store(migrated_url: str
                 pool,
                 _member_ctx(role=Role.VIEWER),
                 None,
-                project=_TARGET_PROJECT,
-                name="custom",
-                arch="x86_64",
-                quarantine_key="quarantine/abc",
-                lifetime_seconds=None,
+                ops_images.ImageUploadRequest(
+                    project=_TARGET_PROJECT,
+                    name="custom",
+                    arch="x86_64",
+                    quarantine_key="quarantine/abc",
+                ),
             )
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         audit = await _audit_log_rows(migrated_url)
@@ -405,11 +406,12 @@ def test_upload_rejects_quarantine_key_in_published_prefix(migrated_url: str) ->
                 pool,
                 _member_ctx(role=Role.OPERATOR),
                 cast(UploadObjectStore, _UnusedUploadStore()),
-                project=_TARGET_PROJECT,
-                name="evil",
-                arch="x86_64",
-                quarantine_key="images/local-libvirt__tenant-y/secret/x86_64.qcow2",
-                lifetime_seconds=None,
+                ops_images.ImageUploadRequest(
+                    project=_TARGET_PROJECT,
+                    name="evil",
+                    arch="x86_64",
+                    quarantine_key="images/local-libvirt__tenant-y/secret/x86_64.qcow2",
+                ),
             )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 

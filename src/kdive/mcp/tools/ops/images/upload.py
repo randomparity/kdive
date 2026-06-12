@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, ConfigDict, Field
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PRIVATE_LIFETIME_DEFAULT
@@ -29,6 +30,21 @@ DEFAULT_REQUIRED_CONTRACT = ("agent", "kdump", "drgn")
 PUBLISHED_IMAGE_PREFIX = "images/"
 
 
+class ImageUploadRequest(BaseModel):
+    """MCP-facing private image upload registration request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project: str = Field(description="The owning project for the private image.")
+    name: str = Field(description="The catalog image name.")
+    arch: str = Field(description="The target architecture.")
+    quarantine_key: str = Field(description="The object-store key of the quarantined upload.")
+    lifetime_seconds: int | None = Field(
+        default=None,
+        description="TTL seconds (clamped to the ceiling); default applies.",
+    )
+
+
 def _default_expiry(now: datetime) -> datetime:
     """The default private-image TTL deadline (clamped later by the upload service ceiling)."""
     return now + timedelta(seconds=config.require(IMAGE_PRIVATE_LIFETIME_DEFAULT))
@@ -38,12 +54,7 @@ async def upload(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     store: UploadObjectStore | None,
-    *,
-    project: str,
-    name: str,
-    arch: str,
-    quarantine_key: str,
-    lifetime_seconds: int | None,
+    request: ImageUploadRequest,
 ) -> ToolResponse:
     """Register a quarantined upload as a project-private image. Requires ``operator`` on it.
 
@@ -56,30 +67,29 @@ async def upload(
     """
     with bind_context(principal=ctx.principal):
         try:
-            require_role(ctx, project, Role.OPERATOR)
+            require_role(ctx, request.project, Role.OPERATOR)
         except AuthorizationError:
             await audit_project_denial(
-                pool, ctx, tool=UPLOAD_TOOL, project=project, args={"name": name}
+                pool, ctx, tool=UPLOAD_TOOL, project=request.project, args={"name": request.name}
             )
-            return denied(name, UPLOAD_TOOL)
+            return denied(request.name, UPLOAD_TOOL)
         if store is None:
-            return _config_error(name)
-        if quarantine_key.startswith(PUBLISHED_IMAGE_PREFIX):
-            return _config_error(name, data={"reason": "quarantine_key in published prefix"})
+            return _config_error(request.name)
+        if request.quarantine_key.startswith(PUBLISHED_IMAGE_PREFIX):
+            return _config_error(
+                request.name, data={"reason": "quarantine_key in published prefix"}
+            )
         now = datetime.now(UTC)
         expires_at = (
-            now + timedelta(seconds=lifetime_seconds)
-            if lifetime_seconds is not None
+            now + timedelta(seconds=request.lifetime_seconds)
+            if request.lifetime_seconds is not None
             else _default_expiry(now)
         )
         return await _register_upload(
             pool,
             ctx,
             store,
-            project=project,
-            name=name,
-            arch=arch,
-            quarantine_key=quarantine_key,
+            request=request,
             expires_at=expires_at,
         )
 
@@ -89,10 +99,7 @@ async def _register_upload(
     ctx: RequestContext,
     store: UploadObjectStore,
     *,
-    project: str,
-    name: str,
-    arch: str,
-    quarantine_key: str,
+    request: ImageUploadRequest,
     expires_at: datetime,
 ) -> ToolResponse:
     """Delegate to the shared upload service; map its typed errors to an envelope."""
@@ -102,20 +109,24 @@ async def _register_upload(
                 conn,
                 store,
                 request=PrivateUploadRequest(
-                    project=project,
+                    project=request.project,
                     principal=ctx.principal,
-                    name=name,
+                    name=request.name,
                     provider="local-libvirt",
-                    arch=arch,
-                    quarantine_key=quarantine_key,
+                    arch=request.arch,
+                    quarantine_key=request.quarantine_key,
                     expires_at=expires_at,
                     required=DEFAULT_REQUIRED_CONTRACT,
                 ),
             )
         except CategorizedError as exc:
-            return ToolResponse.failure_from_error(name, exc)
+            return ToolResponse.failure_from_error(request.name, exc)
     return ToolResponse.success(
         str(entry.id),
         entry.state.value,
-        data={"name": entry.name, "visibility": entry.visibility.value, "owner": project},
+        data={
+            "name": entry.name,
+            "visibility": entry.visibility.value,
+            "owner": request.project,
+        },
     )
