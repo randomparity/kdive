@@ -5,8 +5,8 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from uuid import UUID
 
+from kdive.profiles.provider_policy import validate_profile as _validate_profile
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
-from kdive.profiles.provisioning import validate_profile as _validate_profile
 from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
 from kdive.providers.runtime_paths import console_log_path, domain_name_for
 

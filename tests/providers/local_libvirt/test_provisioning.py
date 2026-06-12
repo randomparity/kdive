@@ -17,7 +17,8 @@ import pytest
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import ProvisioningProfile, validate_profile
+from kdive.profiles.provider_policy import validate_profile
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers import libvirt_xml as libvirt_xml_contract
 from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, parse_metadata_system_id
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module

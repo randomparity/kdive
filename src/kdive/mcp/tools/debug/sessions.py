@@ -48,11 +48,8 @@ from kdive.mcp.tools.debug.ops import (
     _register_debug_ops,
 )
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
-from kdive.profiles.provisioning import (
-    ProvisioningProfile,
-    drgn_live_requires_credential,
-    ssh_credential_ref,
-)
+from kdive.profiles.provider_policy import drgn_live_requires_credential, ssh_credential_ref
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports import Connector, SystemHandle, TransportHandle
 from kdive.providers.resolver import ProviderResolver
 from kdive.security import audit

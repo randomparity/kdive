@@ -26,7 +26,8 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
-from kdive.profiles.provisioning import ProvisioningProfile, rootfs_upload_window_allowed
+from kdive.profiles.provider_policy import rootfs_upload_window_allowed
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.provider_components.artifacts import PresignedUpload, PresignPutRequest
 from kdive.provider_components.uploads import ManifestEntry
 from kdive.security.authz.context import RequestContext

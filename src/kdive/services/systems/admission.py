@@ -30,11 +30,11 @@ from kdive.domain.state import AllocationState, IllegalTransition, SystemState
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
 from kdive.jobs.payloads import SystemPayload
+from kdive.profiles.provider_policy import reject_rootfs_upload_without_window
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     dump_profile,
     reconcile_profile_sizing,
-    reject_rootfs_upload_without_window,
     require_concrete_sizing,
 )
 from kdive.profiles.types import ProvisioningProfileInput

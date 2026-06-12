@@ -43,7 +43,8 @@ from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
 from kdive.mcp.tools._common import job_envelope
-from kdive.profiles.provisioning import ProvisioningProfile, destructive_opt_in
+from kdive.profiles.provider_policy import destructive_opt_in
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed

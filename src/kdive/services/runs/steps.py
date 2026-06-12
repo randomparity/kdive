@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import Run, System
-from kdive.profiles.provisioning import capture_method
+from kdive.profiles.provider_policy import capture_method
 
 _REQUIRED_BASE_CMDLINE = "console=ttyS0 root=/dev/vda"
 _KDUMP_CRASHKERNEL = "crashkernel=256M"

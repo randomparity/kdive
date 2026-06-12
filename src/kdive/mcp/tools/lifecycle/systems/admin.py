@@ -24,13 +24,8 @@ from kdive.mcp.tools._common import authorizing as job_authorizing
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
-from kdive.profiles.provisioning import (
-    ProvisioningProfile,
-    destructive_opt_in,
-    dump_profile,
-    profile_digest,
-    reject_rootfs_upload_without_window,
-)
+from kdive.profiles.provider_policy import destructive_opt_in, reject_rootfs_upload_without_window
+from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.security import audit
