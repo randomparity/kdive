@@ -584,7 +584,11 @@ async def _close(connector: Connector, handle: str | None) -> None:
     try:
         await asyncio.to_thread(connector.close_transport, TransportHandle(handle))
     except Exception:
-        _log.warning("debug transport close failed; continuing detach", extra={"handle": handle})
+        _log.warning(
+            "debug transport close failed; continuing detach",
+            extra={"handle": handle},
+            exc_info=True,
+        )
 
 
 def _detached_envelope(session_id: UUID, project: str) -> ToolResponse:

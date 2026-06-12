@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -1224,19 +1225,30 @@ def test_end_session_detaches_attach(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_end_session_close_failure_still_detaches(migrated_url: str) -> None:
+def test_end_session_close_failure_still_detaches(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             run_id = await _seed_run(pool, sys_id)
             session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
-            resp = await _end_session(pool, _ctx(), session_id, connector=_RaisingCloseConnector())
+            with caplog.at_level(logging.WARNING, logger="kdive.mcp.tools.debug.sessions"):
+                resp = await _end_session(
+                    pool, _ctx(), session_id, connector=_RaisingCloseConnector()
+                )
             assert resp.status == "detached"
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM debug_sessions WHERE id = %s", (session_id,))
                 row = await cur.fetchone()
         assert row is not None and row["state"] == "detached"
+        [record] = [
+            record
+            for record in caplog.records
+            if record.message == "debug transport close failed; continuing detach"
+        ]
+        assert record.exc_info is not None
 
     asyncio.run(_run())
 
