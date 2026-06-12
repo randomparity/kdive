@@ -218,7 +218,7 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
     from kdive.process_health.server import build_postgres_ping
     from kdive.process_health.worker import build_worker_probe
     from kdive.providers.composition import ProviderComposition
-    from kdive.reconciler.loop import Reconciler
+    from kdive.reconciler.loop import ReconcileConfig, Reconciler
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
     from kdive.store.objectstore import object_store_from_env
 
@@ -241,15 +241,17 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
         reconciler = Reconciler(
             pool,
             provider_composition.build_reconciler_reaper(),
-            upload_store=upload_store,
-            image_store=upload_store,
-            console_registry=console_hosting.registry if console_hosting else None,
-            resetter=provider_composition.build_reconciler_transport_resetter(),
-            dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
-            heartbeat=heartbeat,
-            telemetry=ReconcilerTelemetry(
-                tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
-                meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
+            config=ReconcileConfig(
+                upload_store=upload_store,
+                image_store=upload_store,
+                console_registry=console_hosting.registry if console_hosting else None,
+                resetter=provider_composition.build_reconciler_transport_resetter(),
+                dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),
+                heartbeat=heartbeat,
+                telemetry=ReconcilerTelemetry(
+                    tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
+                    meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
+                ),
             ),
         )
         hosting_task = start_console_hosting(console_hosting, stop)

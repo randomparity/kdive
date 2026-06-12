@@ -175,56 +175,77 @@ class ReconcileReport:
     reaped_dump_volumes: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ReconcileConfig:
+    """Optional reconciler ports and timing values."""
+
+    resetter: TransportResetter = _NULL_RESETTER
+    dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
+    upload_store: UploadStore | None = None
+    image_store: ImageSweepStore | None = None
+    console_registry: CollectorRegistry | None = None
+    interval: timedelta = DEFAULT_INTERVAL
+    debug_session_stale_after: timedelta = DEFAULT_DEBUG_SESSION_STALE_AFTER
+    idempotency_retention: timedelta = DEFAULT_IDEMPOTENCY_RETENTION
+    queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
+    dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
+    heartbeat: Heartbeat | None = None
+    heartbeat_tick: timedelta = timedelta(seconds=1)
+    telemetry: ReconcilerTelemetry | None = None
+
+
+_DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
+
+
 def _repair_plan(
     *,
     reaper: InfraReaper,
-    resetter: TransportResetter,
-    dump_volume_reaper: DumpVolumeReaper,
-    upload_store: UploadStore | None,
-    image_store: ImageSweepStore | None,
-    console_registry: CollectorRegistry | None,
-    debug_session_stale_after: timedelta,
-    idempotency_retention: timedelta,
-    queue_max_wait: timedelta,
+    config: ReconcileConfig,
     image_publish_grace: timedelta,
-    dump_volume_grace: timedelta,
 ) -> tuple[_RepairSpec, ...]:
     repairs = [
         _RepairSpec("expired_allocations", _sweep_expired_allocations),
         _RepairSpec("promoted_allocations", _promote_pending),
-        _RepairSpec("queue_timeouts", _reap_queue_timeouts_for(queue_max_wait)),
+        _RepairSpec("queue_timeouts", _reap_queue_timeouts_for(config.queue_max_wait)),
         _RepairSpec("orphaned_systems", _repair_orphaned_systems),
         _RepairSpec("abandoned_jobs", _repair_abandoned_jobs),
         _RepairSpec(
             "dead_sessions",
-            lambda conn: _repair_dead_sessions(conn, debug_session_stale_after, resetter),
+            lambda conn: _repair_dead_sessions(
+                conn, config.debug_session_stale_after, config.resetter
+            ),
         ),
         _RepairSpec("leaked_domains", lambda conn: _repair_leaked_domains(conn, reaper)),
         _RepairSpec("leaked_probe_guests", lambda conn: _repair_leaked_probe_guests(conn, reaper)),
         _RepairSpec(
             "idempotency_keys_gc_count",
-            lambda conn: _gc_idempotency_keys(conn, idempotency_retention),
+            lambda conn: _gc_idempotency_keys(conn, config.idempotency_retention),
         ),
         _RepairSpec(
             "reaped_dump_volumes",
-            lambda conn: _reap_orphaned_dump_volumes(conn, dump_volume_reaper, dump_volume_grace),
+            lambda conn: _reap_orphaned_dump_volumes(
+                conn, config.dump_volume_reaper, config.dump_volume_grace
+            ),
         ),
     ]
-    if upload_store is not None:
+    if config.upload_store is not None:
+        upload_store = config.upload_store
         repairs.append(
             _RepairSpec(
                 "abandoned_uploads",
                 lambda conn: _repair_abandoned_uploads(conn, upload_store),
             )
         )
-    if console_registry is not None:
+    if config.console_registry is not None:
+        console_registry = config.console_registry
         repairs.append(
             _RepairSpec(
                 "console_collectors_reaped",
                 lambda conn: _reap_console_collectors(conn, console_registry),
             )
         )
-    if image_store is not None:
+    if config.image_store is not None:
+        image_store = config.image_store
         repairs.extend(
             (
                 _RepairSpec(
@@ -704,15 +725,7 @@ async def reconcile_once(
     pool: AsyncConnectionPool,
     reaper: InfraReaper,
     *,
-    resetter: TransportResetter = _NULL_RESETTER,
-    dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER,
-    upload_store: UploadStore | None = None,
-    image_store: ImageSweepStore | None = None,
-    console_registry: CollectorRegistry | None = None,
-    debug_session_stale_after: timedelta = DEFAULT_DEBUG_SESSION_STALE_AFTER,
-    idempotency_retention: timedelta = DEFAULT_IDEMPOTENCY_RETENTION,
-    queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT,
-    dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE,
+    config: ReconcileConfig = _DEFAULT_RECONCILE_CONFIG,
 ) -> ReconcileReport:
     """Run the repairs once, each isolated, each on a fresh pooled connection.
 
@@ -736,16 +749,8 @@ async def reconcile_once(
         pool,
         _repair_plan(
             reaper=reaper,
-            resetter=resetter,
-            dump_volume_reaper=dump_volume_reaper,
-            upload_store=upload_store,
-            image_store=image_store,
-            console_registry=console_registry,
-            debug_session_stale_after=debug_session_stale_after,
-            idempotency_retention=idempotency_retention,
-            queue_max_wait=queue_max_wait,
+            config=config,
             image_publish_grace=_image_publish_grace(),
-            dump_volume_grace=dump_volume_grace,
         ),
     )
 
@@ -801,50 +806,20 @@ class Reconciler:
         pool: AsyncConnectionPool,
         reaper: InfraReaper,
         *,
-        resetter: TransportResetter = _NULL_RESETTER,
-        dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER,
-        upload_store: UploadStore | None = None,
-        image_store: ImageSweepStore | None = None,
-        console_registry: CollectorRegistry | None = None,
-        interval: timedelta = DEFAULT_INTERVAL,
-        debug_session_stale_after: timedelta = DEFAULT_DEBUG_SESSION_STALE_AFTER,
-        idempotency_retention: timedelta = DEFAULT_IDEMPOTENCY_RETENTION,
-        queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT,
-        dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE,
-        heartbeat: Heartbeat | None = None,
-        heartbeat_tick: timedelta = timedelta(seconds=1),
-        telemetry: ReconcilerTelemetry | None = None,
+        config: ReconcileConfig = _DEFAULT_RECONCILE_CONFIG,
     ) -> None:
         self._pool = pool
         self._reaper = reaper
-        self._resetter = resetter
-        self._dump_volume_reaper = dump_volume_reaper
-        self._upload_store = upload_store
-        self._image_store = image_store
-        self._console_registry = console_registry
-        self._interval = interval
-        self._debug_session_stale_after = debug_session_stale_after
-        self._idempotency_retention = idempotency_retention
-        self._queue_max_wait = queue_max_wait
-        self._dump_volume_grace = dump_volume_grace
-        self._heartbeat = heartbeat
-        self._heartbeat_tick = heartbeat_tick.total_seconds()
-        self._telemetry = telemetry or ReconcilerTelemetry.disabled()
+        self._config = config
+        self._heartbeat_tick = config.heartbeat_tick.total_seconds()
+        self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
 
     async def run_once(self) -> ReconcileReport:
         """Run one reconciliation pass."""
         return await reconcile_once(
             self._pool,
             self._reaper,
-            resetter=self._resetter,
-            dump_volume_reaper=self._dump_volume_reaper,
-            upload_store=self._upload_store,
-            image_store=self._image_store,
-            console_registry=self._console_registry,
-            debug_session_stale_after=self._debug_session_stale_after,
-            idempotency_retention=self._idempotency_retention,
-            queue_max_wait=self._queue_max_wait,
-            dump_volume_grace=self._dump_volume_grace,
+            config=self._config,
         )
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -872,12 +847,14 @@ class Reconciler:
                     await ticker
 
     def _start_heartbeat_ticker(self, stop: asyncio.Event) -> asyncio.Task[None] | None:
-        if self._heartbeat is None:
+        if self._config.heartbeat is None:
             return None
-        return asyncio.create_task(_tick_until_stop(self._heartbeat, stop, self._heartbeat_tick))
+        return asyncio.create_task(
+            _tick_until_stop(self._config.heartbeat, stop, self._heartbeat_tick)
+        )
 
     async def _pass_loop(self, stop: asyncio.Event) -> None:
-        interval = self._interval.total_seconds()
+        interval = self._config.interval.total_seconds()
         next_due = time.monotonic()
         while not stop.is_set():
             self._telemetry.observe_lag(time.monotonic() - next_due)

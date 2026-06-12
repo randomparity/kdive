@@ -25,7 +25,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.state import AllocationState, SystemState
 from kdive.mcp.tools.ops import reconcile as ops_reconcile
 from kdive.providers.reaping import NullReaper
-from kdive.reconciler.loop import reconcile_once
+from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 from tests.db_waits import wait_until_any_backend_waiting
@@ -263,7 +263,7 @@ def test_concurrent_on_demand_and_periodic_pass_enqueue_one_teardown(migrated_ur
             on_demand = ops_reconcile.reconcile_now(
                 pool, _ctx(platform_roles=_OPERATOR), reaper=NullReaper(), upload_store=None
             )
-            periodic = reconcile_once(pool, NullReaper(), upload_store=None)
+            periodic = reconcile_once(pool, NullReaper(), config=ReconcileConfig())
             results = await asyncio.gather(on_demand, periodic)
         assert results[0].status == "ok"
         assert await _teardown_job_count(migrated_url) == 1

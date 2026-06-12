@@ -15,6 +15,7 @@ from kdive.domain.state import AllocationState, DebugSessionState, RunState, Sys
 from kdive.providers.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.loop import (
+    ReconcileConfig,
     Reconciler,
     ReconcileReport,
     reconcile_once,
@@ -606,7 +607,11 @@ def test_reconciler_run_survives_a_failing_pass(monkeypatch: pytest.MonkeyPatch)
         monkeypatch.setattr(Reconciler, "run_once", _run_once)
         # run_once is monkeypatched, so the pool is never used; a cast keeps ty happy.
         pool = cast(AsyncConnectionPool, object())
-        reconciler = Reconciler(pool, NullReaper(), interval=timedelta(milliseconds=5))
+        reconciler = Reconciler(
+            pool,
+            NullReaper(),
+            config=ReconcileConfig(interval=timedelta(milliseconds=5)),
+        )
         await asyncio.wait_for(reconciler.run(stop), timeout=2.0)
         assert calls == 2  # raised once, retried, then stopped
 
@@ -626,7 +631,11 @@ def test_reconciler_run_wakes_promptly_when_stopped_during_interval(
 
         monkeypatch.setattr(Reconciler, "run_once", _run_once)
         pool = cast(AsyncConnectionPool, object())
-        reconciler = Reconciler(pool, NullReaper(), interval=timedelta(seconds=30))
+        reconciler = Reconciler(
+            pool,
+            NullReaper(),
+            config=ReconcileConfig(interval=timedelta(seconds=30)),
+        )
         task = asyncio.create_task(reconciler.run(stop))
         await asyncio.wait_for(first_pass_done.wait(), timeout=1.0)
 

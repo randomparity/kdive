@@ -18,7 +18,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from kdive.health import Heartbeat
 from kdive.providers.reaping import NullReaper
-from kdive.reconciler.loop import Reconciler, ReconcileReport
+from kdive.reconciler.loop import ReconcileConfig, Reconciler, ReconcileReport
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
 
 
@@ -79,9 +79,11 @@ def test_background_ticker_keeps_livez_live_across_a_long_pass(
         reconciler = Reconciler(
             pool=_FakePool(),  # ty: ignore[invalid-argument-type]
             reaper=NullReaper(),
-            interval=timedelta(milliseconds=1),
-            heartbeat=hb,
-            heartbeat_tick=timedelta(milliseconds=5),
+            config=ReconcileConfig(
+                interval=timedelta(milliseconds=1),
+                heartbeat=hb,
+                heartbeat_tick=timedelta(milliseconds=5),
+            ),
         )
         stop = asyncio.Event()
         live_during_pass: list[bool] = []

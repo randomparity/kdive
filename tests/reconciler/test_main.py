@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
 
 from kdive.__main__ import build_parser
 from kdive.observability import Telemetry
+from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -98,8 +100,9 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
 
     def _fake_init(self: object, pool: object, reaper: object, **kw: object) -> None:
         constructed["reaper"] = reaper
-        constructed["resetter"] = kw.get("resetter")
-        constructed["dump_volume_reaper"] = kw.get("dump_volume_reaper")
+        config = cast(ReconcileConfig, kw["config"])
+        constructed["resetter"] = config.resetter
+        constructed["dump_volume_reaper"] = config.dump_volume_reaper
 
     async def _fake_run(self: object, stop: object) -> None:
         events.append("run")
