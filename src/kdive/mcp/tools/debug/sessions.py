@@ -157,25 +157,6 @@ def _resolved_detach_resources(
     return detach_resources
 
 
-def _debug_session_bindings(
-    connector_source: ProviderResolver | Connector,
-    runtime: DebugEngineRuntime | DebugRuntimeResolver | None,
-) -> tuple[_ConnectorForRun, _DetachResourcesForSession]:
-    if isinstance(connector_source, ProviderResolver):
-        if runtime is not None and not isinstance(runtime, DebugRuntimeResolver):
-            raise RuntimeError("provider-resolved debug sessions require DebugRuntimeResolver")
-        return (
-            _resolved_connector_for_run(connector_source),
-            _resolved_detach_resources(connector_source, runtime),
-        )
-    if isinstance(runtime, DebugRuntimeResolver):
-        raise RuntimeError("fixed-connector debug sessions require DebugEngineRuntime")
-    return (
-        _fixed_connector_for_run(connector_source),
-        _fixed_detach_resources(connector_source, runtime),
-    )
-
-
 def _secret_scope(session_id: UUID) -> str:
     return f"debug-session:{session_id}"
 
@@ -245,17 +226,48 @@ class DebugSessionHandlers:
 
     def __init__(
         self,
-        connector_source: ProviderResolver | Connector,
         *,
-        runtime: DebugEngineRuntime | DebugRuntimeResolver | None = None,
+        connector_for_run: _ConnectorForRun,
+        detach_resources: _DetachResourcesForSession,
         secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
         secret_registry: SecretRegistry,
     ) -> None:
-        self._connector_for_run, self._detach_resources = _debug_session_bindings(
-            connector_source, runtime
-        )
+        self._connector_for_run = connector_for_run
+        self._detach_resources = detach_resources
         self._secret_backend_factory = secret_backend_factory
         self._secret_registry = secret_registry
+
+    @classmethod
+    def from_resolver(
+        cls,
+        resolver: ProviderResolver,
+        *,
+        runtime_resolver: DebugRuntimeResolver | None,
+        secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
+        secret_registry: SecretRegistry,
+    ) -> DebugSessionHandlers:
+        return cls(
+            connector_for_run=_resolved_connector_for_run(resolver),
+            detach_resources=_resolved_detach_resources(resolver, runtime_resolver),
+            secret_backend_factory=secret_backend_factory,
+            secret_registry=secret_registry,
+        )
+
+    @classmethod
+    def from_fixed_connector(
+        cls,
+        connector: Connector,
+        *,
+        runtime: DebugEngineRuntime | None = None,
+        secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
+        secret_registry: SecretRegistry,
+    ) -> DebugSessionHandlers:
+        return cls(
+            connector_for_run=_fixed_connector_for_run(connector),
+            detach_resources=_fixed_detach_resources(connector, runtime),
+            secret_backend_factory=secret_backend_factory,
+            secret_registry=secret_registry,
+        )
 
     async def start_session(
         self,
@@ -599,9 +611,9 @@ def register(
     if resolver is None:
         raise RuntimeError("debug registrar requires an injected provider resolver")
     runtime = DebugRuntimeResolver(resolver)
-    handlers = DebugSessionHandlers(
+    handlers = DebugSessionHandlers.from_resolver(
         resolver,
-        runtime=runtime,
+        runtime_resolver=runtime,
         secret_backend_factory=lambda session_id: secret_backend_from_env(
             registry=secret_registry, scope=_secret_scope(session_id)
         ),

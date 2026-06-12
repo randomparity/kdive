@@ -120,7 +120,7 @@ def _handlers(
 
         secret_backend_factory = _backend_factory
     registry = secret_registry if secret_registry is not None else SecretRegistry()
-    return debug_tools.DebugSessionHandlers(
+    return debug_tools.DebugSessionHandlers.from_fixed_connector(
         connector,
         runtime=runtime,
         secret_backend_factory=secret_backend_factory,
@@ -781,8 +781,9 @@ def test_start_session_ssh_resolves_connector_before_credential(migrated_url: st
             log: list[str] = []
             registry = SecretRegistry()
             backend = _OrderRecordingBackend(log, registry=registry)
-            handlers = debug_tools.DebugSessionHandlers(
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
                 _FailingConnectorResolver(),
+                runtime_resolver=None,
                 secret_backend_factory=lambda _session_id: backend,
                 secret_registry=registry,
             )

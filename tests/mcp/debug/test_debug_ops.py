@@ -574,7 +574,7 @@ def test_end_session_reaps_engine(migrated_url: str) -> None:
                 pool, _ctx(), session_id, runtime, _op_for("list_breakpoints", runtime, session_id)
             )
             # The engine is registered; end_session must exit + drop it.
-            handlers = debug_tools.DebugSessionHandlers(
+            handlers = debug_tools.DebugSessionHandlers.from_fixed_connector(
                 _FakeConnector(), runtime=runtime, secret_registry=SecretRegistry()
             )
             resp = await handlers.end_session(pool, _ctx(), session_id)
@@ -594,7 +594,7 @@ def test_end_session_reap_is_noop_without_engine(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             runtime = _runtime(_CountingAttach())
-            handlers = debug_tools.DebugSessionHandlers(
+            handlers = debug_tools.DebugSessionHandlers.from_fixed_connector(
                 _FakeConnector(), runtime=runtime, secret_registry=SecretRegistry()
             )
             resp = await handlers.end_session(pool, _ctx(), session_id)
