@@ -14,7 +14,7 @@ import json
 import pytest
 
 import kdive.cli.commands.reads as reads
-from kdive.cli.commands import REGISTRY
+from kdive.cli.commands.registry import REGISTRY
 
 
 class _FakeResult:
