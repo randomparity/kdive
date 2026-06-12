@@ -20,9 +20,11 @@ and the generic-cluster equivalent is given alongside.
   `appVersion` tag is unpublished until that version is cut). Only a fully offline cluster
   needs the build-and-load path in step 1.
 - **External backends** the cluster can reach: Postgres, an S3-compatible object store
-  (MinIO/AWS S3), and an OIDC issuer. The bundled-backend demo path (`bundledBackends=true`) is
-  `emptyDir`-only and **not** for anything you want to keep (and its Bitnami subchart images were
-  retired in 2025 — see the [chart README](../../deploy/helm/kdive/README.md#subchart-distribution)).
+  (MinIO/AWS S3), and an OIDC issuer. For a throwaway demo instead, the first-party bundled-backend
+  path (`-f deploy/helm/kdive/values-demo.yaml`, verified with `helm test`) stands up in-chart
+  Postgres/MinIO/mock-OIDC on `emptyDir` — see the
+  [chart README](../../deploy/helm/kdive/README.md#bundled-backends-demo-only). It is `emptyDir`-only
+  and **not** for anything you want to keep.
 - A `StorageClass` for the worker's build/install PVCs (microk8s: `microk8s enable
   hostpath-storage`).
 
@@ -87,8 +89,6 @@ remote-libvirt.
 ## 4. Install the chart
 
 ```bash
-helm dependency build deploy/helm/kdive    # populate charts/ from Chart.lock
-
 helm install kdive deploy/helm/kdive \
   --set image.repository=localhost:32000/kdive --set image.tag=$SHA \
   --set config.KDIVE_DATABASE_URL='postgresql://kdive:<pw>@<pg-host>:5432/kdive' \
