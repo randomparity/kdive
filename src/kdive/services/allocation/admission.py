@@ -60,6 +60,7 @@ from kdive.services.allocation.idempotency import (
     resolve_replay,
     within_budget,
 )
+from kdive.services.allocation.lease_bounds import configured_lease_bounds
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext
@@ -220,7 +221,7 @@ async def price_window_and_estimate(
         CategorizedError: ``CONFIGURATION_ERROR`` for a bad window/size/over-caps request,
             or a value-too-large estimate.
     """
-    window_hours = resolve_window_hours(request.window)
+    window_hours = resolve_window_hours(request.window, bounds=configured_lease_bounds())
     validate_size(request.selector)
     validate_against_resource(request.selector, request.resource)
     coeff = await resolve_coeff(conn, request.resource.cost_class)
