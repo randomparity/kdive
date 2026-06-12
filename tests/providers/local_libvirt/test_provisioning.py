@@ -18,7 +18,8 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, validate_profile
-from kdive.providers.local_libvirt import discovery
+from kdive.providers import libvirt_xml as libvirt_xml_contract
+from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, parse_metadata_system_id
 from kdive.providers.local_libvirt import provisioning as provisioning_module
 from kdive.providers.local_libvirt.provisioning import (
     LocalLibvirtProvisioning,
@@ -77,6 +78,7 @@ def test_import_does_not_register_elementtree_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(libvirt_xml_contract, "_kdive_namespace_registered", False)
 
     def fake_register_namespace(prefix: str, uri: str) -> None:
         calls.append((prefix, uri))
@@ -89,8 +91,7 @@ def test_import_does_not_register_elementtree_namespace(
     reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK)
     reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK)
 
-    assert calls == [("kdive", discovery._KDIVE_METADATA_NS)]
-    reloaded.__dict__["_kdive_namespace_registered"] = False
+    assert calls == [("kdive", KDIVE_METADATA_NS)]
 
 
 def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
@@ -152,9 +153,9 @@ def test_render_has_no_kernel_or_cmdline() -> None:
 
 def test_render_metadata_tag_round_trips_through_discovery() -> None:
     root = _safe_fromstring(_render())
-    tag = root.find(f"metadata/{{{discovery._KDIVE_METADATA_NS}}}system")
+    tag = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}system")
     assert tag is not None
-    assert discovery._parse_system_id(ET.tostring(tag, encoding="unicode")) == str(_SYS)
+    assert parse_metadata_system_id(ET.tostring(tag, encoding="unicode")) == str(_SYS)
 
 
 def test_render_defaults_machine_when_absent() -> None:

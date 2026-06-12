@@ -35,6 +35,12 @@ from kdive.profiles.provisioning import (
     RemoteLibvirtProfile,
     require_concrete_sizing,
 )
+from kdive.providers.libvirt_xml import (
+    KDIVE_METADATA_NS,
+    QEMU_NS,
+    register_kdive_namespace,
+    register_qemu_namespace,
+)
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_env
 from kdive.providers.remote_libvirt.transport import remote_connection
 from kdive.providers.runtime_paths import domain_name_for
@@ -42,10 +48,6 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 _log = logging.getLogger(__name__)
-
-# Duplicated from local-libvirt deliberately: no shared libvirt_common layer (ADR-0076).
-KDIVE_METADATA_NS = "https://kdive.dev/libvirt/1"
-QEMU_NS = "http://libvirt.org/schemas/domain/qemu/1.0"
 
 _DEFAULT_NETWORK = "default"
 _DOMAIN_PREFIX = "kdive-"
@@ -57,17 +59,11 @@ _START_ATTEMPTS = 3
 _AGENT_TIMEOUT_S = 180.0
 _AGENT_POLL_S = 2.0
 
-_namespaces_registered = False
-
 
 def _ensure_namespaces_registered() -> None:
     """Register XML prefixes at the rendering boundary (process-global ET state)."""
-    global _namespaces_registered
-    if _namespaces_registered:
-        return
-    ET.register_namespace("kdive", KDIVE_METADATA_NS)
-    ET.register_namespace("qemu", QEMU_NS)
-    _namespaces_registered = True
+    register_kdive_namespace()
+    register_qemu_namespace()
 
 
 def overlay_volume_name(system_id: UUID | str) -> str:

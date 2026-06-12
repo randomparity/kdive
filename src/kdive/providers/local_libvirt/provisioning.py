@@ -39,7 +39,7 @@ from kdive.profiles.provisioning import (
     validate_profile as _validate_profile,
 )
 from kdive.provider_components.references import CatalogComponentRef
-from kdive.providers.local_libvirt.discovery import _KDIVE_METADATA_NS
+from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
 from kdive.providers.local_libvirt.materialize import (
     RootfsMaterializationContext,
     RootfsUploadContext,
@@ -65,18 +65,11 @@ def overlay_path(system_id: UUID | str) -> str:
     return f"{_ROOTFS_DIR}/{system_id}-overlay.qcow2"
 
 
-_kdive_namespace_registered = False
-
-
 def _ensure_kdive_namespace_registered() -> None:
     """Register the kdive XML prefix when rendering domain XML."""
-    global _kdive_namespace_registered
-    if _kdive_namespace_registered:
-        return
     # ElementTree keeps namespace prefixes in process-global state. Keep that mutation out of
     # import time and perform it at the rendering boundary that needs deterministic prefixes.
-    ET.register_namespace("kdive", _KDIVE_METADATA_NS)
-    _kdive_namespace_registered = True
+    register_kdive_namespace()
 
 
 class _LibvirtDomain(Protocol):
@@ -166,7 +159,7 @@ def render_domain_xml(system_id: UUID, profile: ProvisioningProfile, *, disk_pat
     console = ET.SubElement(devices, "console", type="pty")
     ET.SubElement(console, "target", type="serial", port="0")
     metadata = ET.SubElement(domain, "metadata")
-    ET.SubElement(metadata, f"{{{_KDIVE_METADATA_NS}}}system").text = str(system_id)
+    ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
 
     return ET.tostring(domain, encoding="unicode")
 
