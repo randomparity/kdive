@@ -77,12 +77,22 @@ documented as a setup step in `docs/RELEASING.md`. The chart and docs assume no 
 
 **A3. An `appVersion` invariant guard.** A new step in the ci.yml `lint-type-test` job
 asserts `Chart.yaml appVersion == uv version --short`. This fails a PR that drifts the chart
-version from `pyproject`, so every cut release has a matching published image and the chart's
-default tag always resolves to a real image.
+version from `pyproject`, so at release time the cut tag, the `pyproject` version, and the
+chart's default tag are the same string — a **released chart** never points at a missing
+image. (Between releases, on a `-dev` checkout, that tag is the next-unreleased version and is
+unpublished; the demo and from-checkout docs pin `:edge` instead — see A4.)
 
-**A4. The chart default is unchanged.** Default install pulls the signed release tag
-(`appVersion`). `:edge` is opt-in via `--set image.tag=edge`, documented in the chart README
-and the kubernetes-deploy runbook.
+**A4. The chart default, and the source-checkout caveat.** The image helper defaults the tag
+to `.Chart.AppVersion`, which is correct for a consumer installing a **cut release / published
+chart** — that tag is the just-published signed image. But `appVersion` tracks `pyproject` =
+the *next unreleased* version (the Problem note), so on a `main` checkout the default tag is
+always a version with **no published image** — a bare `helm install deploy/helm/kdive` from
+the checkout `ImagePullBackOff`s. Because kdive ships no published chart yet, every documented
+install is a source-checkout install. So the from-checkout docs and the demo command pin a
+pullable tag: `--set image.tag=edge` (the rolling main image from A1), shipped as a
+`values-demo.yaml` so the demo stays one `-f` flag. The bare `appVersion` default is reserved
+for the eventual published-chart consumer. Document `:edge` opt-in in the chart README and the
+kubernetes-deploy runbook.
 
 **Activation (operational):** merge PR1 → first push to main publishes `:edge` → flip the
 package to public → cut `v0.3.0` (`just release`) → first signed release image at the chart
@@ -119,7 +129,11 @@ data durability.
 
 **B1. Drop the subcharts.** Remove the `postgresql` and `minio` dependencies from
 `Chart.yaml`, delete `Chart.lock`, drop the `helm dependency build` step from ci.yml, and
-remove the chart README "Subchart distribution" section. The chart becomes self-contained.
+remove the chart README "Subchart distribution" section. Also remove the now-dead
+`postgresql:`/`minio:` subchart-override blocks from `values.yaml` (they only configured the
+Bitnami subcharts; left in place they are dead config users would set with no effect) — fold
+any still-needed knob, e.g. a demo image tag, into the demo templates' own values. The chart
+becomes self-contained.
 Bump `Chart.yaml version` (chart semver, `0.1.0` → `0.2.0`) since the chart's templates and
 dependencies change — registry consumers pin by chart version, so a no-bump would hide the
 change. Policy: bump the chart `version` on any template or dependency change (distinct from
@@ -157,8 +171,9 @@ change. Policy: bump the chart `version` on any template or dependency change (d
 `config.*` passes through. The migrate Job keeps its existing bundled-path `post-install` +
 wait-for-db behavior; only the waited host name changes to `<fullname>-postgres`.
 
-**B4. Verification and token.** `templates/tests/smoke.yaml` (`helm.sh/hook: test`) runs a
-pod that (1) runs the node-CPU preflight, (2) **polls the MCP `8000` Service with a bounded
+**B4. Verification and token.** `templates/tests/smoke.yaml` (`helm.sh/hook: test`, with
+`hook-delete-policy: before-hook-creation` so repeated `helm test` runs don't collide on the
+pod name) runs a pod that (1) runs the node-CPU preflight, (2) **polls the MCP `8000` Service with a bounded
 retry until the server answers** — necessary because `helm install` does not `--wait` and
 `migrate` is a `post-install` hook, so the server is briefly `0/1` (readiness gated on the
 not-yet-migrated DB) when the test fires. The poll targets the MCP Service, not the aux
@@ -179,9 +194,14 @@ path keeps today's reach-MCP guidance.
 **B5. Install becomes:**
 
 ```sh
-helm install kdive deploy/helm/kdive --set bundledBackends=true --set demoAcknowledged=true
+# values-demo.yaml pins image.tag=edge + bundledBackends/demoAcknowledged so the
+# demo pulls the published rolling image, not the unpublished appVersion default (A4).
+helm install kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml
 helm test kdive          # mints a token, asserts tools/list == 200
 ```
+
+Prerequisite: the demo is runnable once A has published `:edge` (or a release image
+exists). Before that, there is no pullable app image and the demo cannot come up.
 
 ## Data flow (demo path)
 
@@ -239,7 +259,8 @@ helm test
 `.github/workflows/release-image.yml` (add `main` trigger; not renamed), `.github/workflows/ci.yml`,
 `docs/RELEASING.md`, `docs/adr/0097-in-chart-demo-backends.md`,
 `deploy/helm/kdive/Chart.yaml` (version + appVersion), `deploy/helm/kdive/Chart.lock` (deleted),
-`deploy/helm/kdive/values.yaml`, `deploy/helm/kdive/templates/demo/{postgres,minio,oidc}.yaml`,
+`deploy/helm/kdive/values.yaml` (drop dead subchart blocks), `deploy/helm/kdive/values-demo.yaml` (new),
+`deploy/helm/kdive/templates/demo/{postgres,minio,oidc}.yaml`,
 `deploy/helm/kdive/templates/demo/networkpolicy.yaml`,
 `deploy/helm/kdive/templates/tests/smoke.yaml`, `deploy/helm/kdive/templates/_helpers.tpl`,
 `deploy/helm/kdive/templates/configmap.yaml`, `deploy/helm/kdive/templates/NOTES.txt`,
