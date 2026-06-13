@@ -211,9 +211,23 @@ artifact:
 3. For each chunk in order, `upload_part_copy(final_key, upload_id, part_number=i+1,
    source_key=chunk_key(...))` → part ETag (a server-side copy; no bytes transit the server).
 4. `complete_multipart_upload(final_key, upload_id, parts)`.
-5. On **any** caught failure in 2–4, `abort_multipart_upload(final_key, upload_id)` and
-   return the typed error; the Run stays `CREATED`, so the abandoned-upload reaper backstops
-   the chunk objects (and any half-written final object) under the prefix.
+5. On **any** caught failure in 2–4, `abort_multipart_upload(final_key, upload_id)`, then —
+   **before returning the error** — re-check the Run state under the per-Run lock (or
+   `_existing_build_result`): if it is now `SUCCEEDED`, a **concurrent** `complete_build`
+   already finalized and its post-commit cleanup deleted the chunks out from under this
+   in-flight copy, so return that recorded **success** envelope, not the reassembly error.
+   Only if the Run is still `CREATED` is the typed failure returned; then the Run stays
+   `CREATED` and the abandoned-upload reaper backstops the chunk objects (and any half-written
+   final object) under the prefix.
+
+This restores the single-PUT lane's concurrent-finalize idempotency, which reassembly would
+otherwise regress: step A releases the lock before this unlocked reassembly, so two
+overlapping calls can both reassemble; the first to reach step C commits and deletes the
+chunks, which would make the second's `UploadPartCopy` fail on a now-absent source — a
+spurious error for an already-succeeded Run without this re-check. (Reassembly is
+deterministic — identical ordered chunks yield byte-identical objects with identical multipart
+ETags — so the winning finalize's recorded `artifacts`-row etag matches the object regardless
+of which concurrent reassembly last wrote it.)
 
 **Step C — validate + finalize.** The existing validation runs on the now-single final keys
 (magic + ranged `build_id`; chunked entries skip the whole-object checksum), and the existing
@@ -306,6 +320,11 @@ Unit / service (run in normal CI against MinIO + Postgres):
   writes one `artifacts` row at the final key, flips the Run `succeeded`.
 - **Reassembly failure** — a chunk HEAD mismatch fails before any MPU call; an
   `upload_part_copy` error triggers `abort_multipart_upload` and leaves the Run `CREATED`.
+- **Concurrent finalize idempotency** (adversarial, `tests/adversarial/`) — two overlapping
+  `complete_build` calls for one chunked Run: both return a **success** envelope. The loser,
+  whose `upload_part_copy` fails on chunks the winner's cleanup deleted, re-checks the Run
+  state and returns the recorded success rather than a spurious error; exactly one `artifacts`
+  row exists and the Run is `SUCCEEDED` once.
 - **Reaper backstop** — a succeeded Run with a lingering past-deadline manifest and leftover
   chunk objects: the reaper deletes the chunks (no row) but **not** the reassembled final
   object (has a row), then deletes the manifest. A pre-finalize Run abandon still reaps

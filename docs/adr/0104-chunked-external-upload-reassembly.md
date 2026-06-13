@@ -74,8 +74,14 @@ upload (`upload_window_expired`, retryable) or refreshes `deadline = now() + UPL
 reaper re-reads `deadline < now()` under the same lock, so an in-window finalize gets a full,
 configurable `UPLOAD_TTL` to reassemble. It then HEAD-verifies all chunks and
 `Create`/`UploadPartCopy×N`/`Complete`s the final object; any **caught** failure triggers
-`AbortMultipartUpload` and returns a typed error with the Run left `CREATED`, so the reaper
-backstops the chunks and any half-written final object. Object metadata (sensitivity,
+`AbortMultipartUpload` and then re-checks the Run state under the per-Run lock: if a
+**concurrent** `complete_build` already finalized the Run (`SUCCEEDED`) — its post-commit
+cleanup having deleted the chunks this copy was reading — the recorded **success** envelope is
+returned, preserving the single-PUT lane's concurrent-finalize idempotency; only a still-
+`CREATED` Run returns the typed error, leaving the reaper to backstop the chunks and any half-
+written final object. (Reassembly is deterministic — identical ordered chunks yield identical
+multipart ETags — so the winning finalize's recorded etag matches the object whichever copy
+last wrote it.) Object metadata (sensitivity,
 retention-class) is set at `CreateMultipartUpload` (it cannot be set at completion) so the
 reassembled object's later install fetch reads the same sensitivity a single upload would.
 
