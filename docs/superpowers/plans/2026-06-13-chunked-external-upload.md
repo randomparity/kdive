@@ -981,12 +981,14 @@ git commit -m "feat(reassembly): server-side chunk reassembly with abort-on-fail
 
 ---
 
-## Task 10: Wire reassembly + window guard + idempotent failure re-check into `complete_build`
+## Task 10a: Window guard + reassembly in `complete_build`
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/lifecycle/runs/build.py` — `complete_build` (~line 210) and `_finalize_external_build` (~line 327, defer manifest delete + post-commit cleanup)
-- Modify: `src/kdive/db/upload_manifest.py` — add `refresh_deadline(conn, owner_kind, owner_id, ttl) -> bool` (returns False if absent/expired)
+- Modify: `src/kdive/db/upload_manifest.py` — add `refresh_deadline(...)`.
+- Modify: `src/kdive/mcp/tools/lifecycle/runs/build.py` — `complete_build` (~line 210): add the window guard + reassembly before validation; add imports.
 - Test: `tests/mcp/lifecycle/test_complete_build_tool.py` (extend)
+
+**Prereq context:** the existing `complete_build` body runs, in order: `require_role` → `_existing_build_result` (idempotent replay: an already-`SUCCEEDED` Run returns the recorded envelope and never reaches the guard) → `_external_build_profile` → `_created_run_guard` → `get_manifest` → `_validate_complete_build` (to_thread) → `_finalize_external_build`. The window guard + reassembly insert **between `get_manifest` and `_validate_complete_build`**, only when the manifest has a chunked entry. The single-PUT path is byte-identical to today.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -996,20 +998,21 @@ git commit -m "feat(reassembly): server-side chunk reassembly with abort-on-fail
 async def test_chunked_complete_build_reassembles_and_succeeds(...):
     # CREATED external Run with a chunked vmlinux manifest; fake store HEADs chunks, records
     # create/copy/complete, HEADs final keys, ranged magic ok. Assert: Run SUCCEEDED, one
-    # artifacts row at the final vmlinux key, chunk objects deleted post-commit.
+    # artifacts row at the final vmlinux key (Task 10b asserts chunk deletion).
     ...
 
 
 @pytest.mark.asyncio
 async def test_complete_build_rejects_expired_window(...):
-    # manifest deadline in the past -> upload_window_expired, no reassembly calls, Run CREATED.
+    # chunked manifest with deadline in the past -> upload_window_expired, no reassembly
+    # calls (the fake store records zero create_multipart_upload), Run stays CREATED.
     ...
 
 
 @pytest.mark.asyncio
 async def test_reassembly_failure_after_concurrent_success_returns_recorded(...):
-    # Simulate: run already SUCCEEDED + chunks gone -> upload_part_copy raises; complete_build
-    # re-checks run state and returns the recorded success envelope, not an error.
+    # Run already SUCCEEDED + chunks gone -> upload_part_copy raises; complete_build re-checks
+    # run state via _existing_build_result and returns the recorded success envelope, not error.
     ...
 ```
 
@@ -1018,18 +1021,18 @@ async def test_reassembly_failure_after_concurrent_success_returns_recorded(...)
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_complete_build_tool.py -k "chunked or expired or concurrent" -q`
 Expected: FAIL.
 
-- [ ] **Step 3: Write minimal implementation**
-
-Add to `upload_manifest.py`:
+- [ ] **Step 3a: Add `refresh_deadline` to `upload_manifest.py`**
 
 ```python
+# src/kdive/db/upload_manifest.py
 async def refresh_deadline(
     conn: AsyncConnection, owner_kind: str, owner_id: UUID, ttl: timedelta
 ) -> bool:
     """Set ``deadline = now() + ttl`` if a non-expired manifest exists; return whether it did.
 
-    Returns False when no row exists OR the current deadline is already past (caller treats
-    the latter as an expired upload window, ADR-0104 §6 step A).
+    Returns False when no row exists OR the current deadline is already past (the caller
+    treats the latter as an expired upload window, ADR-0104 §6 step A). ``timedelta`` is
+    already imported by this module.
     """
     async with conn.cursor() as cur:
         await cur.execute(
@@ -1040,19 +1043,65 @@ async def refresh_deadline(
         return cur.rowcount == 1
 ```
 
-In `complete_build`, after `_created_run_guard` and before/replacing the `get_manifest` read, when the manifest has any chunked entry, run the window guard under the per-Run lock:
+- [ ] **Step 3b: Add imports to `build.py`**
 
 ```python
-manifest_row = await upload_manifest.get_manifest(conn, "runs", uid)
-if manifest_row is None:
-    return _config_error(run_id, data={"reason": "no_upload_manifest"})
-has_chunks = any(e.chunks is not None for e in manifest_row.entries)
-if has_chunks:
+# src/kdive/mcp/tools/lifecycle/runs/build.py  (top-of-file imports)
+from datetime import timedelta
+
+import kdive.config as config
+from kdive.config.core_settings import UPLOAD_TTL_SECONDS
+from kdive.provider_components.reassembly import reassemble_chunked
+```
+
+(`asyncio`, `advisory_xact_lock`, `LockScope`, `upload_manifest`, `_existing_build_result`, `_complete_envelope` are already imported.)
+
+- [ ] **Step 3c: Insert the guard + reassembly in `complete_build`, replacing the current `get_manifest` block**
+
+The current block is:
+
+```python
+                manifest_row = await upload_manifest.get_manifest(conn, "runs", uid)
+                if manifest_row is None:
+                    return _config_error(run_id, data={"reason": "no_upload_manifest"})
+                keys = {e.name: f"{manifest_row.prefix}{e.name}" for e in manifest_row.entries}
+```
+
+Replace it with:
+
+```python
+                manifest_row = await upload_manifest.get_manifest(conn, "runs", uid)
+                if manifest_row is None:
+                    return _config_error(run_id, data={"reason": "no_upload_manifest"})
+                has_chunks = any(e.chunks is not None for e in manifest_row.entries)
+                keys = {e.name: f"{manifest_row.prefix}{e.name}" for e in manifest_row.entries}
+                if has_chunks:
+                    guard = await _reassemble_chunked_artifacts(
+                        conn, uid, run_id, manifest_row, self.object_store_factory()
+                    )
+                    if guard is not None:
+                        return guard
+```
+
+Then add the helper to the module:
+
+```python
+async def _reassemble_chunked_artifacts(
+    conn: AsyncConnection,
+    uid: UUID,
+    run_id: str,
+    manifest_row: upload_manifest.UploadManifest,
+    store: object,
+) -> ToolResponse | None:
+    """Refresh the upload window under the per-Run lock, then reassemble each chunked artifact.
+
+    Returns a failure/recorded-success ``ToolResponse`` to short-circuit ``complete_build``, or
+    ``None`` to proceed to validation+finalize on the now-single final keys (ADR-0104 §6).
+    """
+    ttl = timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, uid):
-        # re-read state under the lock; absent/non-CREATED handled by existing guards
-        refreshed = await upload_manifest.refresh_deadline(conn, "runs", uid, _upload_ttl())
+        refreshed = await upload_manifest.refresh_deadline(conn, "runs", uid, ttl)
     if not refreshed:
-        # distinguish expired window from a vanished manifest
         if await upload_manifest.get_manifest(conn, "runs", uid) is None:
             return _config_error(run_id, data={"reason": "no_upload_manifest"})
         return _config_error(run_id, data={"reason": "upload_window_expired"})
@@ -1060,35 +1109,204 @@ if has_chunks:
     try:
         for entry in manifest_row.entries:
             if entry.chunks is not None:
-                final_key = f"{prefix}{entry.name}"
                 await asyncio.to_thread(
                     reassemble_chunked,
-                    self.object_store_factory(),
-                    prefix=prefix, final_key=final_key, entry=entry,
+                    store,
+                    prefix=prefix,
+                    final_key=f"{prefix}{entry.name}",
+                    entry=entry,
                 )
     except CategorizedError as exc:
-        recorded = await _existing_build_result(conn, uid)  # concurrent winner?
+        recorded = await _existing_build_result(conn, uid)  # a concurrent finalize won?
         if recorded is not None:
             return _complete_envelope(uid, recorded)
         return ToolResponse.failure_from_error(run_id, exc)
+    return None
 ```
 
-`keys` stays `{e.name: f"{prefix}{e.name}"}` (final keys). Validation (Task 8 path) then runs on final keys. In `_finalize_external_build`: do **not** call `delete_manifest` inside the transaction when `any chunk entry`; instead, after the committed transaction, best-effort delete each chunk object (`chunk_key(prefix, name, i)` for every chunk) and then `delete_manifest` — wrap each in try/except logging at WARNING (never fail finalize on a cleanup error). Thread `manifest_row.entries` + `prefix` into `_finalize_external_build` for the cleanup loop.
-
-(For a single-PUT-only manifest, keep today's in-transaction `delete_manifest` and no chunk cleanup — behavior unchanged.)
-
-Imports: `from kdive.provider_components.reassembly import reassemble_chunked`; `import asyncio` already present.
+`keys` already holds final keys, so the existing `_validate_complete_build` call (Task 8 path) runs unchanged on the reassembled objects.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_complete_build_tool.py -q`
-Expected: PASS.
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_complete_build_tool.py -k "chunked or expired or concurrent" -q`
+Expected: PASS (chunk-deletion assertion arrives in Task 10b).
 
 - [ ] **Step 5: Lint, type, commit**
 
 ```bash
 just lint && just type && git add src/kdive/mcp/tools/lifecycle/runs/build.py src/kdive/db/upload_manifest.py tests/mcp/lifecycle/test_complete_build_tool.py
-git commit -m "feat(complete-build): reassemble chunked uploads under a deadline window guard"
+git commit -m "feat(complete-build): window guard + reassembly for chunked uploads"
+```
+
+---
+
+## Task 10b: Deferred manifest delete + post-commit chunk cleanup in `_finalize_external_build`
+
+**Files:**
+- Modify: `src/kdive/mcp/tools/lifecycle/runs/build.py` — `_finalize_external_build` (~line 327): take `entries`/`prefix`/`chunked`, skip in-txn manifest delete when chunked, add post-commit cleanup; update the `complete_build` call site.
+- Test: `tests/mcp/lifecycle/test_complete_build_tool.py` (extend)
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# tests/mcp/lifecycle/test_complete_build_tool.py  (add)
+@pytest.mark.asyncio
+async def test_chunked_finalize_deletes_chunks_and_manifest(...):
+    # After a successful chunked complete_build: the fake store recorded delete() for
+    # vmlinux.part0001 and .part0002, and the upload_manifests row is gone.
+    ...
+
+
+@pytest.mark.asyncio
+async def test_chunked_finalize_chunk_delete_failure_keeps_manifest(...):
+    # store.delete raises on .part0001 -> the Run still SUCCEEDED with its artifacts row, and
+    # the manifest row REMAINS (so the reaper reclaims the leftover chunk later).
+    ...
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_complete_build_tool.py -k "finalize_deletes or delete_failure" -q`
+Expected: FAIL (chunks not deleted; manifest deleted in-txn regardless).
+
+- [ ] **Step 3: Rewrite `_finalize_external_build` and its call site**
+
+Current signature: `async def _finalize_external_build(conn, ctx, run, output, cmdline, keys, heads) -> ToolResponse`, and its transaction body ends with `await upload_manifest.delete_manifest(conn, "runs", run.id)`. Replace with:
+
+```python
+async def _finalize_external_build(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    run: Run,
+    output: BuildOutput,
+    cmdline: str,
+    keys: dict[str, str],
+    heads: dict[str, HeadResult],
+    *,
+    store: object,
+    entries: Sequence[ManifestEntry],
+    prefix: str,
+    chunked: bool,
+) -> ToolResponse:
+    """Write artifact rows, ledger result, and created -> succeeded under the per-Run lock.
+
+    For a single-PUT manifest the upload manifest is deleted in the finalize transaction (as
+    before). For a chunked manifest the manifest is kept until the post-commit best-effort
+    chunk cleanup finishes, so a failed cleanup leaves the manifest for the reaper to reclaim
+    the leftover chunks (ADR-0104 §6).
+    """
+    result = BuildStepResult(
+        kernel_ref=output.kernel_ref,
+        debuginfo_ref=output.debuginfo_ref,
+        initrd_ref=keys.get("initrd"),
+        build_id=output.build_id,
+        cmdline=cmdline,
+    )
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT state FROM runs WHERE id = %s FOR UPDATE", (run.id,))
+            row = await cur.fetchone()
+        if row is None:
+            return _config_error(str(run.id))
+        state = RunState(row["state"])
+        if state is RunState.SUCCEEDED:
+            recorded = await _existing_build_result(conn, run.id)
+            return _complete_envelope(run.id, recorded or result)
+        if state is not RunState.CREATED:
+            return _config_error(str(run.id), data={"current_status": state.value})
+        for name, head in heads.items():
+            stored = StoredArtifact(keys[name], head.etag, Sensitivity.SENSITIVE, "build")
+            await ARTIFACTS.insert(
+                conn, register_artifact_row(stored, owner_kind="runs", owner_id=run.id)
+            )
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state, result) "
+            "VALUES (%s, 'build', 'succeeded', %s) ON CONFLICT (run_id, step) DO NOTHING",
+            (run.id, Jsonb(result.dump())),
+        )
+        await conn.execute(
+            "UPDATE runs SET kernel_ref = %s, debuginfo_ref = %s, state = %s "
+            "WHERE id = %s AND state = %s",
+            (
+                output.kernel_ref,
+                output.debuginfo_ref or None,
+                RunState.SUCCEEDED.value,
+                run.id,
+                RunState.CREATED.value,
+            ),
+        )
+        await audit.record(
+            conn,
+            ctx,
+            audit.AuditEvent(
+                tool="runs.complete_build",
+                object_kind="runs",
+                object_id=run.id,
+                transition="created->succeeded",
+                args={"run_id": str(run.id)},
+                project=run.project,
+            ),
+        )
+        if not chunked:
+            await upload_manifest.delete_manifest(conn, "runs", run.id)
+    if chunked:
+        await _cleanup_chunks_and_manifest(conn, store, run.id, entries, prefix)
+    return _complete_envelope(run.id, result)
+
+
+async def _cleanup_chunks_and_manifest(
+    conn: AsyncConnection,
+    store: object,
+    run_id: UUID,
+    entries: Sequence[ManifestEntry],
+    prefix: str,
+) -> None:
+    """Best-effort post-commit reclamation of the reassembled chunks, then the manifest.
+
+    A failure here never fails the already-finalized build. The manifest is deleted LAST and
+    only when every chunk delete succeeded, so a failed chunk delete leaves the manifest for
+    the reaper to reclaim the leftover chunks (ADR-0104 §5/§6).
+    """
+    for entry in entries:
+        if entry.chunks is None:
+            continue
+        for i in range(1, len(entry.chunks) + 1):
+            key = chunk_key(prefix, entry.name, i)
+            try:
+                await asyncio.to_thread(store.delete, key)
+            except CategorizedError as exc:
+                _log.warning("chunk cleanup failed for %s: %s", key, exc)
+                return
+    try:
+        await upload_manifest.delete_manifest(conn, "runs", run_id)
+    except CategorizedError as exc:
+        _log.warning("manifest cleanup failed for run %s: %s", run_id, exc)
+```
+
+Add imports to `build.py`: `from collections.abc import Sequence` (extend the existing import), `from kdive.provider_components.artifacts import chunk_key`, `from kdive.provider_components.uploads import ManifestEntry`, and a module `_log = logging.getLogger(__name__)` plus `import logging` if absent.
+
+Update the call site in `complete_build` (the final `return`):
+
+```python
+                return await _finalize_external_build(
+                    conn, ctx, run, validated.output, cmdline, keys, validated.heads,
+                    store=self.object_store_factory(),
+                    entries=manifest_row.entries,
+                    prefix=manifest_row.prefix,
+                    chunked=has_chunks,
+                )
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_complete_build_tool.py -q`
+Expected: PASS (all, including the pre-existing single-PUT finalize tests — they pass `chunked=False` and keep in-txn manifest delete).
+
+- [ ] **Step 5: Lint, type, commit**
+
+```bash
+just lint && just type && git add src/kdive/mcp/tools/lifecycle/runs/build.py tests/mcp/lifecycle/test_complete_build_tool.py
+git commit -m "feat(complete-build): defer manifest delete + post-commit chunk cleanup"
 ```
 
 ---
@@ -1236,8 +1454,8 @@ git commit -m "docs(runbook): require AbortIncompleteMultipartUpload bucket life
 
 ## Self-Review (completed by plan author)
 
-**Spec coverage:** §2 cap → Task 5; ChunkEntry/ManifestEntry → Task 1; chunk_key → Task 2; JSONB → Task 3; store primitives → Task 4; declaration validation → Task 6; per-chunk presign → Task 7; head-verify/skip-checksum → Task 8; reassembly + abort → Task 9; window guard + idempotent re-check + cleanup + deferred manifest delete → Task 10; reaper runs-only → Task 11; concurrent idempotency test → Task 12; lifecycle-rule runbook → Task 13. §9 verification bullets map to Tasks 6/8/9/10/11/12. No spec requirement is left without a task.
+**Spec coverage:** §2 cap → Task 5; ChunkEntry/ManifestEntry → Task 1; chunk_key → Task 2; JSONB → Task 3; store primitives → Task 4; declaration validation → Task 6; per-chunk presign → Task 7; head-verify/skip-checksum → Task 8; reassembly + abort → Task 9; window guard + idempotent re-check → Task 10a; deferred manifest delete + post-commit cleanup → Task 10b; reaper runs-only → Task 11; concurrent idempotency test → Task 12; lifecycle-rule runbook → Task 13. §9 verification bullets map to Tasks 6/8/9/10a/10b/11/12. No spec requirement is left without a task.
 
-**Type consistency:** `ManifestEntry(name, sha256, size_bytes, chunks=None)` and `ChunkEntry(sha256, size_bytes)` are used identically in Tasks 1, 3, 6, 8, 9, 10. `chunk_key(prefix, name, part_number)` signature is identical in Tasks 2, 7, 8, 9. `reassemble_chunked(store, *, prefix, final_key, entry)` is identical in Tasks 9 and 10. `refresh_deadline(conn, owner_kind, owner_id, ttl) -> bool` is consistent in Task 10. The store-method names match Task 4's definitions everywhere.
+**Type consistency:** `ManifestEntry(name, sha256, size_bytes, chunks=None)` and `ChunkEntry(sha256, size_bytes)` are used identically in Tasks 1, 3, 6, 8, 9, 10a, 10b. `chunk_key(prefix, name, part_number)` signature is identical in Tasks 2, 7, 8, 9, 10b. `reassemble_chunked(store, *, prefix, final_key, entry)` is identical in Tasks 9 and 10a. `refresh_deadline(conn, owner_kind, owner_id, ttl) -> bool` is consistent in Task 10a. The TTL in build.py is `timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))` (Task 10a Step 3b), not a cross-module `_upload_ttl` import. The store-method names match Task 4's definitions everywhere.
 
-**Open implementation note for the executor:** Task 10's window-guard transaction and the existing `_finalize_external_build` both take `LockScope.RUN`; keep them as separate short transactions (do not nest), and confirm the single-PUT lane skips both the deadline refresh and chunk cleanup so its behavior is byte-identical to today.
+**Open implementation note for the executor:** Task 10a's window-guard transaction (`_reassemble_chunked_artifacts`) and Task 10b's `_finalize_external_build` both take `LockScope.RUN`; keep them as separate short transactions (do not nest), and confirm the single-PUT lane skips the deadline refresh (no chunked entry ⇒ `_reassemble_chunked_artifacts` not called) and passes `chunked=False` so its in-transaction manifest delete and overall behavior are byte-identical to today.
