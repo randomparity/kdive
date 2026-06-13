@@ -259,12 +259,14 @@ def test_renew_clamps_added_window_to_cap(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_renew_unknown_allocation_is_config_error(migrated_url: str) -> None:
+def test_renew_unknown_allocation_is_not_found(migrated_url: str) -> None:
+    # A syntactically valid but absent (or ungranted) allocation id is not_found, not a parse
+    # failure (ADR-0097); the malformed-id case below stays configuration_error.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await alloc_tools.renew_allocation(pool, _ctx(), str(uuid4()), extend=2)
             assert resp.status == "error"
-            assert resp.error_category == "configuration_error"
+            assert resp.error_category == "not_found"
 
     asyncio.run(_run())
 

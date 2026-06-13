@@ -7,6 +7,8 @@ backstop; `get`/`list` render an allocation through `_envelope_for_allocation`, 
 the terminal `failed` state to a `failure` envelope (its value collides with the response
 envelope's failure-status set). RBAC: `request`/`release` require `operator`; reads require
 `viewer` on the owning project. Authz denials raise (ADR-0020: no authz `ErrorCategory`).
+A syntactically valid but absent (or ungranted, no-leak) allocation id is `not_found`; a
+malformed id stays `configuration_error` (ADR-0097).
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, Reso
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.allocation.admission import AdmissionOutcome
@@ -181,7 +184,7 @@ def _denial_response(resource_id: UUID, project: str, outcome: AdmissionOutcome)
 async def get_allocation(
     pool: AsyncConnectionPool, ctx: RequestContext, allocation_id: str
 ) -> ToolResponse:
-    """Return an allocation the caller's project owns, or a not-found-shaped error."""
+    """Return an allocation the caller's project owns, or a `not_found` error (no-leak)."""
     uid = _as_uuid(allocation_id)
     if uid is None:
         return _config_error(allocation_id)
@@ -190,7 +193,7 @@ async def get_allocation(
             alloc = await ALLOCATIONS.get(conn, uid)
         # A row in an ungranted project is indistinguishable from not-found (no leak).
         if alloc is None or alloc.project not in ctx.projects:
-            return _config_error(allocation_id)
+            return _not_found(allocation_id)
         require_role(ctx, alloc.project, Role.VIEWER)
         return _envelope_for_allocation(alloc)
 
@@ -206,7 +209,7 @@ async def release_allocation(
         async with pool.connection() as conn:
             alloc = await ALLOCATIONS.get(conn, uid)
             if alloc is None or alloc.project not in ctx.projects:
-                return _config_error(allocation_id)
+                return _not_found(allocation_id)
             require_role(ctx, alloc.project, Role.OPERATOR)
         outcome = await release_with_backstops(
             pool, uid, project=alloc.project, audit_writer=ctx_audit_writer(ctx)
@@ -257,7 +260,7 @@ async def renew_allocation(
         async with pool.connection() as conn:
             alloc = await ALLOCATIONS.get(conn, uid)
             if alloc is None or alloc.project not in ctx.projects:
-                return _config_error(allocation_id)
+                return _not_found(allocation_id)
             require_role(ctx, alloc.project, Role.OPERATOR)
             outcome = await renew(
                 conn, ctx, allocation_id=uid, extend=extend, idempotency_key=idempotency_key
