@@ -57,14 +57,22 @@ class ShellBuildTransport:  # providers/build_host/shell_transport.py
     def run(self, argv, *, cwd, timeout_s) -> CommandResult        # delegates to _run_remote
     def read_text(self, path) -> str                                # base64 -w0, utf-8 decode
     def read_bytes(self, path) -> bytes                             # base64 -w0, size-capped
-    def write_bytes(self, path, data) -> None                       # default: embed base64 in argv (small files)
     def clone(self, remote, ref, dest) -> None                      # git init + fetch --depth 1 + checkout FETCH_HEAD
     def upload_file(self, path, presigned) -> str                   # curl -fsS -X PUT --upload-file, parse ETag
     def cleanup(self, path) -> None                                 # rm -rf
+
+    def write_bytes(self, path, data) -> None: ...                  # ABSTRACT — see note below
 ```
 
+`write_bytes` is **not** a generic-argv operation and is left abstract on the base: each
+subclass implements it with the framing its primitive supports (the generic `_run_remote`
+runs one argv and cannot express a stdin stream or a shell pipeline/redirection). `run`,
+`read_text`, `read_bytes`, `clone`, `upload_file`, and `cleanup` are the only methods the base
+implements in terms of `_run_remote`.
+
 - `SshBuildTransport` subclasses it, providing `_run_remote` (the `ssh -i … host "cd … && …"`
-  primitive) and **overriding `write_bytes`** to keep its stdin-streamed base64 (any size).
+  primitive) and implementing `write_bytes` via its stdin-streamed base64 (`base64 -d > path`
+  with `input=encoded`, any size — its current behavior, preserved).
   Its `materialized_ssh_identity` lifecycle and `from_host` are unchanged. The shared pure
   helpers (`_validate_git_arg`, `_validate_ssh_destination` stays ssh-local, `_extract_etag_from_headers`,
   the read-size cap, `redacted_tail` usage) move to the base or a shared module. **The existing
@@ -87,9 +95,12 @@ constructs a `GuestAgentExec` per `_run_remote` with that call's `timeout_s`. `G
 is reused **unchanged** (it already enforces the `argv[0]` allowlist, the two-phase
 exec/status protocol, and signal→`128+sig` exit mapping); the allowlist is `{'/bin/sh'}`.
 
-`write_bytes` uses the base default (embed base64 in the argv: `printf %s '<b64>' | base64 -d
-> '<path>'`); the only writes are the config fragment and the patch bytes, both small (KB),
-well under `ARG_MAX`.
+`GuestExecBuildTransport.write_bytes` composes its **own** in-guest command —
+`/bin/sh -c "printf %s '<b64>' | base64 -d > '<quoted path>'"` — run directly through the
+agent (not via `_run_remote`'s `exec <join(argv)>` form, which cannot express the pipe).
+`<b64>` is base64 (alphanumeric + `+/=`, no shell metacharacters) and the path is `shlex`-
+quoted. The only writes are the config fragment and the patch bytes, both small (KB), well
+under `ARG_MAX`.
 
 `AgentExecResult.stdout/stderr` are bytes; decode UTF-8 with `errors="replace"` into
 `CommandResult` (the build reads return codes and small text configs; non-UTF-8 stderr is
@@ -116,6 +127,23 @@ The domain name `kdive-build-<run_id>` (a fixed prefix + the run UUID) is the re
 Provisioning idempotency follows ADR-0080: a deterministic name+overlay redefines/reuses on
 retry. The blocking libvirt calls are offloaded (`asyncio.to_thread`) in the handler;
 `session` itself is synchronous like the SSH `from_host`.
+
+**Shared-namespace invariants (build VM coexists with System guests on the same host/pool).**
+The build domain MUST record **no gdbstub** `<qemu:commandline>` port: `used_gdb_ports`
+enumerates every `kdive-`-prefixed domain but skips those whose `recorded_gdb_port` is `None`
+(gdb.py), so a gdbstub-less build domain is inert for System port allocation — a regression
+test pins this (a `kdive-build-*` domain does not appear in `used_gdb_ports`). The build
+overlay name MUST be disjoint from a System overlay name (a distinct `kdive-build-<run_id>`
+volume name, not the `overlay_volume_name(system_id)` scheme), so neither System teardown nor
+the host_dump volume reaper (which matches `kdive-host-dump-<uuid>.kdump`) can match it and the
+build-VM reaper cannot match a System overlay. Per-run-id UUIDs are unique, but the *name
+formats* must not collide.
+
+**Retry workspace.** The build runs in the orchestrator's per-run subdir
+(`workspace_root/<run_id>`, orchestration.py); on the happy path the VM is fresh, so the
+workspace is clean. A BUILD-job retry on the idempotently-reused VM inherits the orchestrator's
+existing per-run-dir reuse semantics — identical to the SSH target, no new behavior introduced
+here.
 
 ### 4.4 BUILD-handler branch
 
@@ -156,12 +184,21 @@ undefine + delete overlay; absent = achieved post-state). The reconciler step
 ```
 for vm in await reaper.list_build_vms():
     if not await build_job_is_live(conn, vm.run_id):   # queued/running BUILD job for run_id?
-        await reaper.delete_build_vm(vm.domain_name)
+        await reaper.delete_build_vm(vm.domain_name)    # reap the VM ...
+await reclaim_orphan_build_host_leases(conn)            # ... BEFORE freeing the slot
 ```
 
 The job-liveness guard is the **same** predicate the lease reclaim uses (a build can run up to
 `MAKE_TIMEOUT_S`, so age-based reaping would tear down a live build). The reaper is the narrow
 libvirt seam; the DB guard lives in the reconciler (consistent with the dump-volume reaper).
+
+**Ordering: reap the VM before reclaiming its lease.** The two cleanups are otherwise
+independent sweeps, so the reconciler runs the VM reap **before** `reclaim_orphan_build_host_leases`
+in the same tick. Freeing the lease slot first would let a new build admit and provision an
+additional VM while the leaked one is still running, briefly oversubscribing the host past
+`max_concurrent` (a crash-leak-only window; the success path already deletes the VM in the
+handler's `finally` before releasing the lease). With VM-reap-first, a freed slot never
+coexists with a live leaked VM.
 
 ## 5. Schema (migration 0029)
 
@@ -182,7 +219,11 @@ ALTER TABLE build_hosts ADD CONSTRAINT build_hosts_fields_check CHECK (
 
 `BuildHost` (dataclass) gains `base_image_volume: str | None`; `_row_to_host` maps it; the
 `SELECT *` paths already return it. `workspace_root` for an `ephemeral_libvirt` row is the
-**in-guest** build path; `max_concurrent` caps concurrent build VMs.
+**in-guest** build path; `max_concurrent` caps in-flight **leases** (≈ live builds), enforced
+by the existing lease seam. It bounds concurrent *VMs* exactly on the success path (handler
+tears the VM down before releasing the lease) and on the reconciler path (VM reaped before the
+slot is freed, §4.6); a crash-leaked VM can transiently exceed it until the next reaper sweep,
+so operators should size host headroom above `max_concurrent`.
 
 ## 6. Registration
 
@@ -210,18 +251,29 @@ has none). `worker-local` seed protection, `list`, `disable`, `remove` unchanged
   bounding controls are admin-only host registration, an ephemeral single-build VM, the
   component-root allowlist gating config/patch, worker-composed shell-quoted fixed argv, and
   the `make` timeout.
+- **Egress dependency.** The build VM publishes artifacts via in-guest presigned PUT — the
+  same guest→object-store hop the doctor egress probe exists to diagnose (a host `FORWARD DROP`
+  silently breaks it, ADR-0091). A blocked path surfaces as a publish failure
+  (`INFRASTRUCTURE_FAILURE`); its error detail should name the guest→object-store egress
+  dependency (and the redacted object URL) so the operator is pointed at the `FORWARD`/network
+  policy rather than misreading it as a build bug.
 
 ## 8. Testing (boundaries; no real libvirt in unit tests)
 
 - **`GuestExecBuildTransport`:** a fake `agent_command` records the JSON guest-exec/-status
   round-trips and returns canned replies. Assert: `run` composes `/bin/sh -c "cd <q> && exec
   <join>"` with `{'/bin/sh'}` allowlisted and the call's `timeout_s`; `read_bytes`/`read_text`
-  base64 round-trip + size cap; `write_bytes` embeds base64; `clone` issues init+fetch+checkout
-  argv with arg validation; `upload_file` curl argv + ETag parse; a non-zero exit and a timeout
-  map to the same categories as ssh.
+  base64 round-trip + size cap; `write_bytes` composes the `printf … | base64 -d > path`
+  pipeline directly (not via `_run_remote`'s `exec`-join form) and round-trips the bytes;
+  `clone` issues init+fetch+checkout argv with arg validation; `upload_file` curl argv + ETag
+  parse and registers the presigned URL in the redaction registry before the exec; a non-zero
+  exit and a timeout map to the same categories as ssh.
 - **`ShellBuildTransport` refactor:** the existing `SshBuildTransport` tests stay green
   (behavior-preserving); a parity test asserts both subclasses produce the same orchestrator
   argv for `read_bytes`/`clone`/`upload_file` given the same `_run_remote`.
+- **Shared-namespace invariant:** a `kdive-build-<run_id>` domain does not appear in
+  `used_gdb_ports` (no recorded gdbstub port) and its overlay name does not match the System
+  overlay scheme or the host_dump volume reaper regex.
 - **`EphemeralBuildVm`:** a fake provision-connection (like the provisioning tests) — assert
   overlay-over-`base_image_volume`, define+start of `kdive-build-<run_id>`, `wait_for_agent`,
   teardown destroys+undefines+deletes the overlay, idempotent provision, and teardown runs in

@@ -73,9 +73,11 @@ to a general in-guest shell.
    provisioned on the deployment's single `KDIVE_REMOTE_LIBVIRT_*`-configured host (the same
    one the remote-libvirt provider uses), so the row carries no per-row host address — "it
    lives on an already-registered remote-libvirt host." `workspace_root` is the **in-guest**
-   path the build runs under; `max_concurrent` caps concurrent build VMs and is enforced by
+   path the build runs under; `max_concurrent` caps in-flight **leases** (≈ live builds) via
    the **existing** lease seam (`kind != 'local'` already acquires a `build_host_leases` row
-   under the `BUILD_HOST` advisory lock). No new capacity machinery, no new `ErrorCategory`.
+   under the `BUILD_HOST` advisory lock). It bounds concurrent VMs exactly on the success path
+   and the reconciler path (decision 6); a crash-leaked VM can transiently exceed it until
+   reaped. No new capacity machinery, no new `ErrorCategory`.
 
 2. **`build_hosts.register` admits both remote kinds via a `kind` argument; per-kind required
    fields are validated.** `register` gains an optional `kind` (default `'ssh'`,
@@ -115,11 +117,14 @@ to a general in-guest shell.
 5. **Extract a shared `ShellBuildTransport` base; both SSH and guest-exec subclass it.** The
    two remote transports share their entire `BuildTransport` surface and differ only in the
    primitive that runs one argv on the host (`_run_remote`). A `ShellBuildTransport` base
-   implements `run`/`read_text`/`read_bytes`/`write_bytes`/`clone`/`upload_file`/`cleanup` in
-   terms of an abstract `_run_remote(argv, cwd, timeout_s) -> CommandResult`; `SshBuildTransport`
-   provides the ssh primitive (keeping its stdin-streamed `write_bytes` and materialized
-   identity), and `GuestExecBuildTransport` provides the guest-agent primitive. The existing
-   SSH unit tests pin the refactor as behavior-preserving.
+   implements `run`/`read_text`/`read_bytes`/`clone`/`upload_file`/`cleanup` in terms of an
+   abstract `_run_remote(argv, cwd, timeout_s) -> CommandResult`. `write_bytes` is **not** a
+   generic-argv operation (a stdin stream or a shell pipeline, which `_run_remote`'s
+   `exec <join(argv)>` form cannot express) and is left abstract: `SshBuildTransport` streams
+   base64 on stdin (its current behavior); `GuestExecBuildTransport` composes a
+   `printf … | base64 -d > path` pipeline directly. `SshBuildTransport` provides the ssh
+   primitive and keeps its materialized identity; `GuestExecBuildTransport` provides the
+   guest-agent primitive. The existing SSH unit tests pin the refactor as behavior-preserving.
 
 6. **The reconciler reaps a leaked build VM by domain marker + owning-BUILD-job liveness,
    never by age.** A new provider port `BuildVmReaper` lists `kdive-build-*` domains (and
@@ -129,6 +134,10 @@ to a general in-guest shell.
    job-liveness guard `reclaim_orphan_build_host_leases` uses, so a build running up to
    `MAKE_TIMEOUT_S` (2h) is never torn down mid-build. The two reapers are complementary: lease
    reclaim frees the capacity *slot*, VM reaping frees the *domain*; both are job-liveness keyed.
+   The reconciler runs the VM reap **before** the lease reclaim in a tick, so a freed slot never
+   coexists with a still-running leaked VM (which would let a new build over-admit the host past
+   `max_concurrent`). The build domain records **no gdbstub port** (so it is inert for System
+   gdbstub-port enumeration) and uses an overlay name disjoint from a System overlay's.
 
 7. **Secrets and redaction follow the established remote contract.** A private git remote's
    credential resolves at the worker boundary, registers into the redaction registry, and only
