@@ -554,3 +554,50 @@ def test_probe_empty_set_is_noop(migrated_url: str) -> None:
         assert prober.probed == []
 
     asyncio.run(_run())
+
+
+def test_probe_spec_registered_in_loop() -> None:
+    """The _probe_build_host_reachability alias is exported from the loop module."""
+    assert "_probe_build_host_reachability" in loop.__all__
+    assert callable(loop._probe_build_host_reachability)
+
+
+def test_probe_repair_absent_without_prober_present_with_one() -> None:
+    """The probe repair is in the plan only when a build_host_prober is configured."""
+    without = [
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(),
+            config=loop.ReconcileConfig(),
+            image_publish_grace=timedelta(minutes=5),
+        )
+    ]
+    assert "build_host_states_changed" not in without
+
+    with_prober = [
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(),
+            config=loop.ReconcileConfig(build_host_prober=_FakeProber({})),
+            image_publish_grace=timedelta(minutes=5),
+        )
+    ]
+    assert "build_host_states_changed" in with_prober
+
+
+def test_reconcile_once_reports_build_host_states_changed(migrated_url: str) -> None:
+    """reconcile_once surfaces the probe's transition count when a prober is configured."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "b1", state="ready")
+        prober = _FakeProber({"b1": False})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            report = await reconcile_once(
+                pool, NullReaper(), config=loop.ReconcileConfig(build_host_prober=prober)
+            )
+
+        assert report.build_host_states_changed == 1
+
+    asyncio.run(_run())
