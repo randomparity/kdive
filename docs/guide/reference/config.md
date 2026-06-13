@@ -153,5 +153,5 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_MAX_UPLOAD_BYTES` | server | `5368709120` | no | Maximum accepted upload size in bytes. |
+| `KDIVE_MAX_UPLOAD_BYTES` | server | `53687091200` | no | Maximum accepted per-artifact upload size in bytes. A single-PUT artifact still binds at the 5 GiB S3 single-PUT ceiling; this cap governs a chunked artifact's total (ADR-0104). |
 | `KDIVE_UPLOAD_TTL_SECONDS` | server | `86400` | no | Presigned upload-URL TTL in seconds. |
