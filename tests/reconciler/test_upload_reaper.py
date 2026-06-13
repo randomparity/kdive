@@ -1,9 +1,10 @@
-"""Tests for the reconciler upload reaper (ADR-0048 §6, issue #11).
+"""Tests for the reconciler upload reaper (ADR-0048 §6, ADR-0104 §7, issue #11).
 
-The reaper prefix-reaps uncommitted objects of pre-finalize owners (a CREATED Run or a
-DEFINED System) whose upload manifest is past its deadline, then deletes the manifest
-row. It exempts any object with a committed ``artifacts`` row, and the per-owner locked
-re-read declines a manifest whose deadline was renewed since the candidate select.
+The reaper prefix-reaps uncommitted objects of a past-deadline manifest, then deletes the
+manifest row. For ``runs`` it sweeps whether the Run is pre-finalize (a true abandon) or
+finalized with leftover chunks (ADR-0104 §7); for ``systems`` it keeps the DEFINED gate. It
+exempts any object with a committed ``artifacts`` row, and the per-owner locked re-read
+declines a manifest whose deadline was renewed since the candidate select.
 
 The ``_repair_abandoned_uploads`` tests run the repair through a real non-autocommit
 ``AsyncConnectionPool`` via ``run_repair`` (mirroring ``test_loop.py``), so the
@@ -215,12 +216,19 @@ def test_skips_owner_not_past_deadline(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_skips_finalized_owner(migrated_url: str) -> None:
+def test_succeeded_run_with_lingering_manifest_reaps_chunks_not_final(migrated_url: str) -> None:
+    """A SUCCEEDED Run whose post-commit chunk cleanup failed: its leftover chunks (no row) are
+    reaped but the reassembled final object (committed row) is exempt, then the manifest goes
+    (ADR-0104 §7, runs-branch generalization)."""
+
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
             system_id = await seed_system(seed)
             run_id = await seed_run(seed, system_id, run_state=RunState.SUCCEEDED)
             prefix = f"local/runs/{run_id}/"
+            await _insert_artifact_row(
+                seed, owner_kind="runs", owner_id=run_id, object_key=f"{prefix}kernel"
+            )
             await upload_manifest.replace_manifest(
                 seed,
                 _manifest_request(
@@ -231,13 +239,42 @@ def test_skips_finalized_owner(migrated_url: str) -> None:
                     ttl=timedelta(seconds=-1),
                 ),
             )
-        store = _FakeStore({prefix: [f"{prefix}kernel"]})
+        store = _FakeStore({prefix: [f"{prefix}kernel", f"{prefix}kernel.part0001"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert store.deleted == [f"{prefix}kernel.part0001"]  # final object exempt (has a row)
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())
+
+
+def test_finalized_system_with_lingering_manifest_is_not_reaped(migrated_url: str) -> None:
+    """A System advanced past DEFINED keeps its gate: a lingering manifest is not swept, so the
+    out-of-scope provisioning path is unchanged (ADR-0104 §7)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)  # seed_system inserts a READY (finalized) System
+            prefix = f"local/systems/{system_id}/"
+            await upload_manifest.replace_manifest(
+                seed,
+                _manifest_request(
+                    owner_kind="systems",
+                    owner_id=system_id,
+                    prefix=prefix,
+                    entries=[ManifestEntry("rootfs", "a", 1)],
+                    ttl=timedelta(seconds=-1),
+                ),
+            )
+        store = _FakeStore({prefix: [f"{prefix}rootfs"]})
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(pool, _reap(store))
         assert count == 0
-        assert store.deleted == []  # finalized owner's objects untouched
+        assert store.deleted == []  # finalized System's objects untouched
         async with await connect(migrated_url) as check:
-            assert await upload_manifest.get_manifest(check, "runs", run_id) is not None
+            assert await upload_manifest.get_manifest(check, "systems", system_id) is not None
 
     asyncio.run(_run())
 

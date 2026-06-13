@@ -157,11 +157,15 @@ UPLOAD_TTL_SECONDS = Setting(
 MAX_UPLOAD_BYTES = Setting(
     name="KDIVE_MAX_UPLOAD_BYTES",
     parse=_int,
-    default=str(5 * 1024 * 1024 * 1024),
+    default=str(50 * 1024 * 1024 * 1024),
     group="upload",
     processes=_SERVER,
-    help="Maximum accepted upload size in bytes.",
-    suggest="an integer number of bytes",
+    help=(
+        "Maximum accepted per-artifact upload size in bytes. A single-PUT artifact still binds "
+        "at the 5 GiB S3 single-PUT ceiling; this cap governs a chunked artifact's total "
+        "(ADR-0104)."
+    ),
+    suggest="an integer number of bytes, e.g. 53687091200 (50 GiB)",
 )
 
 DEBUG_DIR = Setting(
