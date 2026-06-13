@@ -32,18 +32,22 @@ class UploadStore(Protocol):
 
 
 async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) -> int:
-    """Prefix-reap uncommitted objects of pre-finalize owners past their upload deadline."""
+    """Reap a past-deadline manifest's uncommitted prefix objects, then the manifest.
+
+    For ``runs`` the obligation is "a Run manifest past its deadline", swept whether the Run is
+    pre-finalize (a true abandon) or finalized with incomplete chunk cleanup (the backstop for a
+    failed post-commit delete, ADR-0104 §7). The ``systems`` branch keeps its ``DEFINED`` gate
+    so the out-of-scope rootfs path is unchanged.
+    """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT m.owner_kind, m.owner_id FROM upload_manifests m "
             "WHERE m.deadline < now() AND ("
-            "  (m.owner_kind = %s AND EXISTS ("
-            "     SELECT 1 FROM runs r WHERE r.id = m.owner_id AND r.state = %s)) "
+            "  m.owner_kind = %s "
             "  OR (m.owner_kind = %s AND EXISTS ("
             "     SELECT 1 FROM systems s WHERE s.id = m.owner_id AND s.state = %s)))",
             (
                 _UPLOAD_RUN_OWNER_KIND,
-                _UPLOAD_PRE_FINALIZE_VALUES[_UPLOAD_RUN_OWNER_KIND],
                 _UPLOAD_SYSTEM_OWNER_KIND,
                 _UPLOAD_PRE_FINALIZE_VALUES[_UPLOAD_SYSTEM_OWNER_KIND],
             ),
@@ -71,7 +75,11 @@ async def reap_one_owner(
             row = await cur.fetchone()
         if row is None:
             return False
-        if not await owner_pre_finalize(conn, owner_kind, owner_id):
+        # The runs branch reaps a finalized Run's leftover chunks too (ADR-0104 §7); only the
+        # systems branch retains the pre-finalize (DEFINED) gate.
+        if owner_kind == _UPLOAD_SYSTEM_OWNER_KIND and not await owner_pre_finalize(
+            conn, owner_kind, owner_id
+        ):
             return False
         for key in await asyncio.to_thread(store.list_prefix, row["prefix"]):
             async with conn.cursor(row_factory=dict_row) as cur:
