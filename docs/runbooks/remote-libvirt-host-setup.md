@@ -96,6 +96,15 @@ sudo ss -ltn | grep :16514                          # expect a LISTEN
 (`no_verify` is forbidden by the provider's URI validation). Keep the **client** materials
 (`cacert.pem`, `clientcert.pem`, `clientkey.pem`) for [step 7](#7-register-remote-libvirt-on-the-deployment).
 
+On a host whose only role is throwaway debug guests, disable the libvirt AppArmor security
+driver so qemu can read the pool's base image (its per-VM profile otherwise denies the overlay's
+backing file, surfacing at provision as `Could not open '…/<base>.qcow2': Permission denied`):
+
+```bash
+sudo sed -i 's/^#*security_driver = .*/security_driver = "none"/' /etc/libvirt/qemu.conf
+sudo systemctl restart libvirtd
+```
+
 Verify a mutual-TLS connection (client materials in `/etc/pki/libvirt` for this local check):
 
 ```bash
@@ -248,6 +257,14 @@ print("base volume present:", "fedora-kdive-remote-base-43.qcow2" in
 A successful connect plus a visible base volume means registration, mutual TLS, the gdbstub ACL,
 and image staging are all in place. Drive the end-to-end spine per
 [remote-live-stack.md](remote-live-stack.md).
+
+The `host_dump` capture method needs only a provisioned-to-`ready` System: `control.force_crash`
+then `vmcore.fetch method=host_dump` dumps host-side and the **worker** uploads the core, so it
+exercises the control and retrieve planes without an in-guest kdump kernel and without the guest
+reaching the object store. The from-source kernel build (`runs.build` → `install` → `boot`, and
+the `gdbstub`/`kdump`/`introspect.from_vmcore` legs that depend on a Run) needs a worker that is a
+kernel-build host — a toolchain (`git`, `flex`, `bison`, `bc`, libelf/openssl headers) and a
+`KDIVE_KERNEL_SRC` tree — which a lightweight app-pod worker is not.
 
 ## Appendix: kdivectl operator commands
 
