@@ -7,6 +7,8 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.db.build_hosts import list_probeable_ssh_hosts, mark_state
+from kdive.providers.build_host.reachability import BuildHostProber
 from kdive.providers.reaping import BuildVmReaper
 
 _log = logging.getLogger(__name__)
@@ -47,6 +49,41 @@ async def _build_job_is_live(conn: AsyncConnection, run_id: UUID) -> bool:
         (run_id,),
     )
     return (await cur.fetchone()) is not None
+
+
+async def probe_build_host_reachability(conn: AsyncConnection, prober: BuildHostProber) -> int:
+    """Probe each enabled SSH build host and CAS-flip its state ready↔unreachable (ADR-0103).
+
+    The probe set (``kind='ssh' AND enabled=true``) is read in a committed transaction
+    first, so no transaction is held open across the per-host network probe. Each host is
+    probed via ``prober`` (a bare ``ssh … true``); the result is written with a
+    compare-and-swap on the observed state, each in its own committed transaction, so a
+    concurrent operator change is never clobbered and a no-op probe writes nothing. One
+    host's unexpected failure is logged and skipped — it never aborts the pass.
+
+    Returns the number of state **transitions** written (``0`` in a healthy steady state).
+    A non-empty pass also logs the probed-vs-flipped counts at ``info`` so "the probe ran"
+    is observable independent of whether any host flipped.
+    """
+    async with conn.transaction():
+        hosts = await list_probeable_ssh_hosts(conn)
+    if not hosts:
+        return 0
+
+    changed = 0
+    for host in hosts:
+        try:
+            reachable = await prober.probe(host)
+            new_state = "ready" if reachable else "unreachable"
+            if new_state != host.state:
+                async with conn.transaction():
+                    changed += await mark_state(
+                        conn, host.id, new_state=new_state, expected_state=host.state
+                    )
+        except Exception:  # noqa: BLE001 - isolate one host; a bad probe must not starve the rest
+            _log.warning("reconciler: probing build host %r failed this pass; skipping", host.name)
+    _log.info("reconciler: probed %d ssh build host(s); %d state change(s)", len(hosts), changed)
+    return changed
 
 
 async def reap_orphan_build_vms(conn: AsyncConnection, reaper: BuildVmReaper) -> int:
