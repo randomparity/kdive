@@ -35,7 +35,7 @@ class BuildHostProber(Protocol):
     async def probe(self, host: BuildHost) -> bool: ...   # True == reachable
 ```
 
-`SshBuildHostProber(secret_registry, *, connect_timeout_s=10)` implements it. `probe`
+`SshBuildHostProber(secret_registry, *, probe_timeout_s=15)` implements it. `probe`
 offloads the blocking ssh to a thread (`asyncio.to_thread`) so it never stalls the
 reconciler event loop, mirroring `console_hosting.AsyncioPumpRunner`. The synchronous body:
 
@@ -44,7 +44,7 @@ reconciler event loop, mirroring `console_hosting.AsyncioPumpRunner`. The synchr
 2. Create a fresh per-probe `scope = object()`.
 3. `with materialized_ssh_identity(host.ssh_credential_ref, registry, scope=scope) as
    identity:` build `SshBuildTransport(address=host.address, identity_path=identity,
-   secret_registry=registry)` and call `transport.check_reachable(timeout_s=…)`.
+   secret_registry=registry)` and call `transport.check_reachable(timeout_s=probe_timeout_s)`.
 4. Catch `CategorizedError` (credential resolve / identity materialization failure) →
    return `False`.
 5. `finally: registry.release(scope)` — evict the per-probe credential so the long-lived
@@ -65,6 +65,20 @@ It builds `self._ssh_argv("true")` (so it reuses `-i <identity>`, `BatchMode=yes
 (launch failure) both return `False`; otherwise return `proc.returncode == 0`. It does
 **not** prefix `cd <cwd>` the way `_run_remote` does — a reachability check tests the SSH
 hop only, not workspace existence.
+
+`probe_timeout_s` (the `subprocess.run` timeout) is deliberately **larger than ssh's own
+`ConnectTimeout=10`** (default 15s) so ssh's connect timeout is the binding failure signal
+and the Python timeout is only a backstop against a wedged ssh process; an equal-or-smaller
+subprocess timeout would race ssh's still-dialing connect and report a reachable-but-slow
+host as down.
+
+On a **non-zero exit** (and on `TimeoutExpired`), `check_reachable` logs the redacted
+`stderr` tail (`redacted_tail(proc.stderr, self._secret_registry)`, the helper
+`_run_remote` already uses) at `warning` before returning `False`. This is the only
+diagnostic a stuck-`unreachable` host gets — in particular a rebuilt builder whose host key
+changed fails `accept-new` with `REMOTE HOST IDENTIFICATION HAS CHANGED`, which would
+otherwise be silently swallowed (the method returns only a bool). See §4.6 for the
+known_hosts ownership assumption.
 
 ### 3.3 The repair
 
@@ -128,7 +142,24 @@ between, touching no DB connection. No idle-in-transaction across the ssh round 
 
 ### 4.5 Disabled / non-ssh hosts untouched
 Only `kind='ssh' AND enabled=true` rows are probed. `enabled` is operator-owned and
-orthogonal; the probe never writes it.
+orthogonal; the probe never writes it. A host re-enabled after repair keeps its stale
+`state` until the next probe (≤ one interval), during which selection may still reject it;
+this self-corrects and is acceptable for a low-priority health signal.
+
+### 4.6 Busy-host false-negative and known_hosts ownership
+The probe is binary and ADR-0103 deferred hysteresis, so a **healthy but saturated** host
+(an in-flight `make` starving CPU/IO) whose `ssh … true` exceeds `probe_timeout_s` flips to
+`unreachable` for one interval. Only **new** admissions are affected — an in-flight build
+keeps running, and the host returns to `ready` the pass after load drops. If this window
+ever proves unacceptable in practice it is the trigger for the deferred
+consecutive-failure threshold, not a redesign of the port.
+
+The probe runs as the **reconciler process user**, so `accept-new` writes/reads that user's
+`known_hosts`. A reimaged builder (changed host key) therefore stays `unreachable` until
+that `known_hosts` entry is cleared; the redacted-stderr `warning` (§3.2) is what makes
+this diagnosable rather than an opaque dead host. Managing/rotating the reconciler's
+`known_hosts` is an operator/deployment concern, out of scope here, but explicitly named so
+it is not assumed away.
 
 ## 5. Tests (behavior, at the seam)
 
@@ -146,12 +177,18 @@ Reconciler repair (real pool, fake prober), in `tests/reconciler/test_build_host
 
 Prober + primitive (no real network), in `tests/providers/build_host/`:
 
-- `SshBuildHostProber.probe` returns `True`/`False` from a stubbed `check_reachable`;
-  releases the per-probe scope (assert registry steady across repeated probes via
-  `version()`/`snapshot()` not growing the global scope).
+- `SshBuildHostProber.probe` returns `True`/`False` from a stubbed `check_reachable`.
+- No registry growth: after N probes against a real `SecretRegistry`,
+  `registry.snapshot()` equals the pre-probe baseline (the refcount keyset returns to
+  empty/baseline once each per-probe `scope` is released). **Do not assert on
+  `version()`** — it increments on every `register` *and* `release`, so it grows by design
+  and is not a leak signal; `snapshot()`/refcount is the measurable steady-state. The
+  per-probe scope must be non-`None` (a `None` scope is never evicted by `release`).
 - credential-resolution `CategorizedError` → `probe` returns `False` (not raised).
 - `SshBuildTransport.check_reachable`: argv contains `true` and no `cd`; `returncode==0` →
-  `True`; non-zero / `TimeoutExpired` / `OSError` → `False` (stub `subprocess.run`).
+  `True`; non-zero / `TimeoutExpired` / `OSError` → `False` (stub `subprocess.run`). On a
+  non-zero exit the redacted `stderr` tail is logged at `warning` (assert via `caplog`),
+  and a registered secret value in that stderr does not appear in the log record.
 
 DB helpers, in `tests/db/test_build_hosts_repo.py`:
 
