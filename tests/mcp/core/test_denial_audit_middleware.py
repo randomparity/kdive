@@ -21,6 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.middleware import DenialAuditMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.security.audit import args_digest
+from kdive.security.authz.errors import ProjectMembershipDenied
 from kdive.security.authz.gate import DestructiveOpDenied
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied
 
@@ -241,6 +242,27 @@ def test_successful_call_writes_no_denial_row(migrated_url: str) -> None:
 
             result = await mw.on_call_tool(_FakeContext("allocations.release"), _call_next)
             assert result is sentinel
+            async with pool.connection() as conn:
+                assert await _count_audit(conn) == 0
+
+    asyncio.run(_run())
+
+
+def test_project_membership_denied_envelopes_without_audit(migrated_url: str) -> None:
+    # A non-member naming a project: require_project raises ProjectMembershipDenied, which the
+    # boundary envelopes as authorization_denied (exit 3) WITHOUT auditing — the non-member case
+    # stays non-amplifying (ADR-0043 §4 / ADR-0098). Distinct from RoleDenied, which IS audited.
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            mw = DenialAuditMiddleware(pool, agent_session=lambda: "sess-1")
+
+            async def _call_next(_ctx: Any) -> None:
+                raise ProjectMembershipDenied("project 'other' is not granted to 'alice'")
+
+            result = await mw.on_call_tool(_FakeContext("allocations.list"), _call_next)
+            assert isinstance(result, ToolResponse)
+            assert result.error_category == "authorization_denied"
             async with pool.connection() as conn:
                 assert await _count_audit(conn) == 0
 
