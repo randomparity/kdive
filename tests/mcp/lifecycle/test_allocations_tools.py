@@ -242,7 +242,46 @@ def test_get_other_project_allocation_is_not_found(migrated_url: str) -> None:
             other = _ctx(projects=("elsewhere",), role=Role.OPERATOR)
             resp = await alloc_tools.get_allocation(pool, other, req.object_id)
         assert resp.status == "error"
+        assert resp.error_category == "not_found"
+
+    asyncio.run(_run())
+
+
+def test_get_absent_allocation_is_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await alloc_tools.get_allocation(pool, _ctx(), str(uuid4()))
+        assert resp.status == "error"
+        assert resp.error_category == "not_found"
+
+    asyncio.run(_run())
+
+
+def test_get_malformed_allocation_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await alloc_tools.get_allocation(pool, _ctx(), "nope")
+        assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_get_ungranted_envelope_matches_absent(migrated_url: str) -> None:
+    # The no-leak invariant (ADR-0020/0097): an allocation in a project the caller cannot see
+    # must be indistinguishable from a genuinely-absent one. Same category, same data — only
+    # the echoed object_id (the input id) differs, which carries no membership signal.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            req = await _request(pool, _ctx())
+            other = _ctx(projects=("elsewhere",), role=Role.OPERATOR)
+            ungranted = await alloc_tools.get_allocation(pool, other, req.object_id)
+            absent = await alloc_tools.get_allocation(pool, other, str(uuid4()))
+        assert ungranted.status == absent.status == "error"
+        assert ungranted.error_category == absent.error_category == "not_found"
+        assert ungranted.data == absent.data
+        assert ungranted.suggested_next_actions == absent.suggested_next_actions
 
     asyncio.run(_run())
 
@@ -285,6 +324,40 @@ def test_release_active_allocation(migrated_url: str) -> None:
             alloc_id = await _seed_alloc(pool, res_id, AllocationState.ACTIVE)
             resp = await alloc_tools.release_allocation(pool, _ctx(), alloc_id)
         assert resp.status == "released"
+
+    asyncio.run(_run())
+
+
+def test_release_absent_allocation_is_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await alloc_tools.release_allocation(pool, _ctx(), str(uuid4()))
+        assert resp.status == "error"
+        assert resp.error_category == "not_found"
+
+    asyncio.run(_run())
+
+
+def test_release_ungranted_allocation_is_not_found(migrated_url: str) -> None:
+    # No-leak: releasing another project's allocation is indistinguishable from absent.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            req = await _request(pool, _ctx())
+            other = _ctx(projects=("elsewhere",), role=Role.OPERATOR)
+            resp = await alloc_tools.release_allocation(pool, other, req.object_id)
+        assert resp.status == "error"
+        assert resp.error_category == "not_found"
+
+    asyncio.run(_run())
+
+
+def test_release_malformed_allocation_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await alloc_tools.release_allocation(pool, _ctx(), "nope")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
 
