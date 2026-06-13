@@ -28,6 +28,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
+from kdive.providers.build_host.reachability import BuildHostProber
 from kdive.providers.reaping import (
     BuildVmReaper,
     DumpVolumeReaper,
@@ -85,6 +86,7 @@ _reap_queue_timeouts = allocation_repairs.reap_queue_timeouts
 _reap_queue_timeouts_for = allocation_repairs.reap_queue_timeouts_for
 _reclaim_build_host_leases = build_host_repairs.reclaim_orphan_build_host_leases
 _reap_orphan_build_vms = build_host_repairs.reap_orphan_build_vms
+_probe_build_host_reachability = build_host_repairs.probe_build_host_reachability
 _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
@@ -96,6 +98,7 @@ __all__ = [
     "Reconciler",
     "_expire_one",
     "_gc_idempotency_keys",
+    "_probe_build_host_reachability",
     "_promote_pending",
     "_reap_console_collectors",
     "_reap_orphaned_dump_volumes",
@@ -157,6 +160,7 @@ class ReconcileReport:
     reaped_dump_volumes: int = 0
     reaped_build_vms: int = 0
     reclaimed_build_host_leases: int = 0
+    build_host_states_changed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +170,7 @@ class ReconcileConfig:
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
     build_vm_reaper: BuildVmReaper = _NULL_BUILD_VM_REAPER
+    build_host_prober: BuildHostProber | None = None
     upload_store: UploadStore | None = None
     image_store: ImageSweepStore | None = None
     console_registry: CollectorRegistry | None = None
@@ -220,6 +225,14 @@ def _repair_plan(
             ),
         ),
     ]
+    if config.build_host_prober is not None:
+        build_host_prober = config.build_host_prober
+        repairs.append(
+            _RepairSpec(
+                "build_host_states_changed",
+                lambda conn: _probe_build_host_reachability(conn, build_host_prober),
+            )
+        )
     if config.upload_store is not None:
         upload_store = config.upload_store
         repairs.append(
@@ -309,6 +322,7 @@ async def reconcile_once(
         reaped_dump_volumes=counts.get("reaped_dump_volumes", 0),
         reaped_build_vms=counts.get("reaped_build_vms", 0),
         reclaimed_build_host_leases=counts["reclaimed_build_host_leases"],
+        build_host_states_changed=counts.get("build_host_states_changed", 0),
     )
 
 

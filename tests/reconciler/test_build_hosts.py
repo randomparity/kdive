@@ -345,3 +345,259 @@ def test_build_vm_reap_runs_before_lease_reclaim_in_repair_plan() -> None:
     assert "reclaimed_build_host_leases" in names
     assert names.index("reaped_build_vms") < names.index("reclaimed_build_host_leases")
     assert callable(loop._reclaim_build_host_leases)
+
+
+# ---------------------------------------------------------------------------
+# Reachability probe (ADR-0103)
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+from kdive.db.build_hosts import BuildHost  # noqa: E402
+from kdive.reconciler.build_hosts import probe_build_host_reachability  # noqa: E402
+
+
+class _FakeProber:
+    """A BuildHostProber stand-in: maps host name -> reachable bool; can raise per host.
+
+    Records every probed host name so a test can prove a disabled/local host is never
+    probed and that one host's failure does not stop the others.
+    """
+
+    def __init__(
+        self, results: dict[str, bool], *, raise_for: frozenset[str] = frozenset()
+    ) -> None:
+        self._results = results
+        self._raise_for = raise_for
+        self.probed: list[str] = []
+
+    async def probe(self, host: BuildHost) -> bool:
+        self.probed.append(host.name)
+        if host.name in self._raise_for:
+            raise RuntimeError("probe boom")
+        return self._results[host.name]
+
+
+async def _seed_named_host(
+    conn: psycopg.AsyncConnection,
+    name: str,
+    *,
+    kind: str = "ssh",
+    state: str = "ready",
+    enabled: bool = True,
+) -> None:
+    """Insert a build host with explicit name/kind/state/enabled."""
+    address = "10.0.0.1" if kind == "ssh" else None
+    cred = "cred-ref" if kind == "ssh" else None
+    await conn.execute(
+        "INSERT INTO build_hosts (id, name, kind, address, ssh_credential_ref, "
+        "    workspace_root, max_concurrent, enabled, state) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (uuid4(), name, kind, address, cred, "/build", 2, enabled, state),
+    )
+
+
+async def _state_of(conn: psycopg.AsyncConnection, name: str) -> str:
+    cur = await conn.execute("SELECT state FROM build_hosts WHERE name = %s", (name,))
+    row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_probe_ready_reachable_is_noop(migrated_url: str) -> None:
+    """A ready host that probes reachable → no transition, count 0."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "b1", state="ready")
+        prober = _FakeProber({"b1": True})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert count == 0
+        async with await connect(migrated_url) as check:
+            assert await _state_of(check, "b1") == "ready"
+
+    asyncio.run(_run())
+
+
+def test_probe_ready_unreachable_flips(migrated_url: str) -> None:
+    """A ready host that probes unreachable → flips to unreachable, count 1."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "b1", state="ready")
+        prober = _FakeProber({"b1": False})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert count == 1
+        async with await connect(migrated_url) as check:
+            assert await _state_of(check, "b1") == "unreachable"
+
+    asyncio.run(_run())
+
+
+def test_probe_unreachable_reachable_flips(migrated_url: str) -> None:
+    """An unreachable host that probes reachable → flips back to ready, count 1."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "b1", state="unreachable")
+        prober = _FakeProber({"b1": True})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert count == 1
+        async with await connect(migrated_url) as check:
+            assert await _state_of(check, "b1") == "ready"
+
+    asyncio.run(_run())
+
+
+def test_probe_skips_disabled_ssh_host(migrated_url: str) -> None:
+    """A disabled ssh host is never probed and its state is untouched."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "enabled-1", state="ready", enabled=True)
+            await _seed_named_host(seed, "disabled-1", state="ready", enabled=False)
+        prober = _FakeProber({"enabled-1": True})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert prober.probed == ["enabled-1"]
+        assert "disabled-1" not in prober.probed
+        async with await connect(migrated_url) as check:
+            assert await _state_of(check, "disabled-1") == "ready"
+
+    asyncio.run(_run())
+
+
+def test_probe_skips_local_host(migrated_url: str) -> None:
+    """The seeded local worker-local host is never probed."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "ssh-1", state="ready")
+        prober = _FakeProber({"ssh-1": True})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert "worker-local" not in prober.probed
+        assert prober.probed == ["ssh-1"]
+
+    asyncio.run(_run())
+
+
+def test_probe_one_host_failure_does_not_stop_others(migrated_url: str) -> None:
+    """A prober raising for one host must not stop a second host from flipping."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "a-boom", state="ready")
+            await _seed_named_host(seed, "b-flip", state="ready")
+        # a-boom raises; b-flip probes unreachable and must still flip.
+        prober = _FakeProber({"b-flip": False}, raise_for=frozenset({"a-boom"}))
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert count == 1
+        assert set(prober.probed) == {"a-boom", "b-flip"}
+        async with await connect(migrated_url) as check:
+            assert await _state_of(check, "a-boom") == "ready"  # untouched (probe raised)
+            assert await _state_of(check, "b-flip") == "unreachable"
+
+    asyncio.run(_run())
+
+
+def test_probe_logs_probed_and_changed_counts(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-empty pass logs the probed count and the changed count at INFO (ADR-0103 §3.3)."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "ok-host", state="ready")
+            await _seed_named_host(seed, "down-host", state="ready")
+        prober = _FakeProber({"ok-host": True, "down-host": False})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with caplog.at_level("INFO", logger="kdive.reconciler.build_hosts"):
+                count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert count == 1
+        summary = [r for r in caplog.records if "probed" in r.getMessage()]
+        assert summary, "a non-empty probe pass must log a probed/changed summary"
+        # probed=2, changed=1 — assert on the structured args, not the message string.
+        assert summary[-1].args == (2, 1)
+
+    asyncio.run(_run())
+
+
+def test_probe_empty_set_is_noop(migrated_url: str) -> None:
+    """With no probeable ssh hosts the repair returns 0 and probes nothing."""
+
+    async def _run() -> None:
+        prober = _FakeProber({})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
+
+        assert count == 0
+        assert prober.probed == []
+
+    asyncio.run(_run())
+
+
+def test_probe_spec_registered_in_loop() -> None:
+    """The _probe_build_host_reachability alias is exported from the loop module."""
+    assert "_probe_build_host_reachability" in loop.__all__
+    assert callable(loop._probe_build_host_reachability)
+
+
+def test_probe_repair_absent_without_prober_present_with_one() -> None:
+    """The probe repair is in the plan only when a build_host_prober is configured."""
+    without = [
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(),
+            config=loop.ReconcileConfig(),
+            image_publish_grace=timedelta(minutes=5),
+        )
+    ]
+    assert "build_host_states_changed" not in without
+
+    with_prober = [
+        spec.name
+        for spec in loop._repair_plan(
+            reaper=NullReaper(),
+            config=loop.ReconcileConfig(build_host_prober=_FakeProber({})),
+            image_publish_grace=timedelta(minutes=5),
+        )
+    ]
+    assert "build_host_states_changed" in with_prober
+
+
+def test_reconcile_once_reports_build_host_states_changed(migrated_url: str) -> None:
+    """reconcile_once surfaces the probe's transition count when a prober is configured."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_named_host(seed, "b1", state="ready")
+        prober = _FakeProber({"b1": False})
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            report = await reconcile_once(
+                pool, NullReaper(), config=loop.ReconcileConfig(build_host_prober=prober)
+            )
+
+        assert report.build_host_states_changed == 1
+
+    asyncio.run(_run())
