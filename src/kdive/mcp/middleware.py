@@ -11,6 +11,14 @@ exception), and returns the uniform authorization-denied envelope. Catching the
 (both already handled elsewhere); the non-member denial is also deliberately excluded to
 avoid write-amplification (ADR-0043 §4 / ADR-0062 §5).
 
+The same boundary also catches :class:`~kdive.security.authz.errors.ProjectMembershipDenied`
+(raised by ``require_project`` when the caller **names** a project they are not a member of) and
+returns the **same** authorization-denied envelope **without** auditing — unifying the named-scope
+membership denial onto exit 3 (ADR-0098), superseding ADR-0020 §4's "raise" for that surface. It
+is the non-member case, so it inherits the same no-write-amplification exclusion; only the
+*subclass* is caught, so a bare :class:`~kdive.security.authz.errors.AuthError` authentication
+failure still propagates unchanged.
+
 :class:`TelemetryMiddleware` is the per-request instrumentation seam (ADR-0090 §5): a span
 per MCP tool call plus per-tool RED metrics (request rate, error count, duration
 histogram). Labels are restricted to the allowlist (``tool``/``outcome``) so no
@@ -33,6 +41,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
+from kdive.security.authz.errors import ProjectMembershipDenied
 from kdive.security.authz.rbac import RoleDenied
 
 if TYPE_CHECKING:
@@ -119,9 +128,18 @@ class DenialAuditMiddleware(Middleware):
         context: Any,
         call_next: Callable[[Any], Any],
     ) -> Any:
-        """Dispatch one tool call; audit and map a member-over-reach denial.
+        """Dispatch one tool call; map (and, for member-over-reach, audit) a denial.
 
-        Only :class:`RoleDenied` is caught — every other exception (including the base
+        Two denial types are caught and enveloped as ``authorization_denied`` (ADR-0098):
+
+        * :class:`RoleDenied` (member-over-reach) — enveloped **and** audited (one denial row).
+        * :class:`~kdive.security.authz.errors.ProjectMembershipDenied` (the caller named a
+          project they are not a member of) — enveloped but **not** audited. The non-member
+          case is deliberately excluded to avoid write-amplification on openly-callable reads
+          (ADR-0043 §4); only the *subclass* is caught, so a bare :class:`AuthError`
+          authentication failure still propagates.
+
+        Every other exception (the base
         :class:`~kdive.security.authz.rbac.AuthorizationError` non-member denial,
         :class:`~kdive.security.authz.gate.DestructiveOpDenied`, and unrelated errors) propagates
         unaudited.
@@ -136,6 +154,9 @@ class DenialAuditMiddleware(Middleware):
             except Exception:
                 _log.warning("failed to audit RoleDenied for tool %s", tool, exc_info=True)
             return ToolResponse.failure(tool, ErrorCategory.AUTHORIZATION_DENIED)
+        except ProjectMembershipDenied:
+            # Non-member naming a project: envelope only, never audit (no write-amplification).
+            return ToolResponse.failure(context.message.name, ErrorCategory.AUTHORIZATION_DENIED)
 
     async def _record(
         self, tool: str, denial: RoleDenied, *, args: dict[str, object] | None = None
