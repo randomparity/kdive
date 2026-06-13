@@ -97,6 +97,12 @@ known_hosts ownership assumption.
 4. Wrap each host iteration in `try/except` so one host's unexpected failure is logged and
    skipped, never aborting the pass. Return the transition count.
 
+The repair returns the count of state **transitions**, not the number of hosts probed —
+so a healthy steady state returns `0`. On a non-empty pass it also logs at `info` the
+probed-vs-flipped counts (e.g. ``"probed %d ssh build host(s); %d state change(s)"``) so
+"the probe ran" is observable independently of whether any host flipped (the transition
+count alone reads `0` exactly when everything is healthy).
+
 ### 3.4 DB helpers (`db/build_hosts.py`)
 
 - `list_probeable_ssh_hosts(conn) -> list[BuildHost]`
@@ -105,12 +111,14 @@ known_hosts ownership assumption.
 ### 3.5 Wiring
 
 - `ReconcileConfig` gains `build_host_prober: BuildHostProber | None = None`.
-- `_repair_plan` appends `_RepairSpec("build_hosts_probed", lambda conn:
+- `_repair_plan` appends `_RepairSpec("build_host_states_changed", lambda conn:
   probe_build_host_reachability(conn, config.build_host_prober))` **iff**
   `config.build_host_prober is not None`. Placed after `reclaimed_build_host_leases`
   (independent of the reap/reclaim ordering; it neither frees nor consumes capacity).
-- `ReconcileReport` gains `build_hosts_probed: int = 0`; `reconcile_once` reports
-  `counts.get("build_hosts_probed", 0)`.
+- `ReconcileReport` gains `build_host_states_changed: int = 0`; `reconcile_once` reports
+  `counts.get("build_host_states_changed", 0)`. The name states the count semantics
+  (transitions written), matching the `reclaimed_*`/`reaped_*` "count of changes"
+  convention — not a probe count, which would read `0` in healthy steady state.
 - `loop.__all__` gains `_probe_build_host_reachability` alias (loop-module export
   convention; covered by a registration test like `test_reclaim_spec_registered_in_loop`).
 - `ProviderComposition.build_reconciler_build_host_prober() -> BuildHostProber` returns
@@ -171,9 +179,9 @@ Reconciler repair (real pool, fake prober), in `tests/reconciler/test_build_host
 - disabled ssh host is not probed (fake prober records no call; state unchanged).
 - `local` host is not probed.
 - one host raising in the fake prober does not stop a second host from flipping.
-- `reconcile_once` reports `build_hosts_probed`; the repair is absent from the plan when
-  `build_host_prober is None` and present when set; `_probe_build_host_reachability` is in
-  `loop.__all__`.
+- `reconcile_once` reports `build_host_states_changed` (count of transitions, `0` when no
+  host flips); the repair is absent from the plan when `build_host_prober is None` and
+  present when set; `_probe_build_host_reachability` is in `loop.__all__`.
 
 Prober + primitive (no real network), in `tests/providers/build_host/`:
 

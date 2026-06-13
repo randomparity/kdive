@@ -54,8 +54,9 @@ credential we cannot resolve cannot build).
 writes the resulting state with a compare-and-swap
 (`UPDATE … SET state=:new WHERE id=:id AND state=:old`), so the repair only writes (and
 only counts) genuine transitions and never clobbers a concurrent operator change. The
-count of transitions is reported on `ReconcileReport.build_hosts_probed` for
-observability.
+count of transitions is reported on `ReconcileReport.build_host_states_changed` for
+observability (named for the transition semantics — it reads `0` in a healthy steady
+state; a non-empty pass also logs probed-vs-flipped counts at `info`).
 
 **Secret-registry scope.** The reconciler's `SecretRegistry` lives for the process; its
 global scope is never evicted (ADR-0012). Registering the SSH key value under the global
