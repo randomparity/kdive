@@ -50,6 +50,8 @@ from kdive.store.objectstore import (
 _log = logging.getLogger(__name__)
 
 _TENANT = "local"
+_CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
+_CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
 _BUILD_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux"})
 _ROOTFS_NAME = "rootfs"
 _RETENTION_CLASS = "build"
@@ -267,10 +269,15 @@ async def _create_upload(
     resolver: ProviderResolver,
     store: _PresignStore | None = None,
 ) -> ToolResponse:
-    store = store or object_store_from_env()
     uid = _as_uuid(owner_id)
     if uid is None:
         return _config_error(owner_id)
+    try:
+        store = store or object_store_from_env()
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(
+            owner_id, exc, suggested_next_actions=[_upload_tool_name(spec)]
+        )
 
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
@@ -337,6 +344,12 @@ def _upload_response(upload: _MaterializedUpload, *, next_action: str) -> ToolRe
             **upload.presigned.required_headers,
         },
     )
+
+
+def _upload_tool_name(spec: _UploadOwnerSpec) -> str:
+    if spec.owner_kind == "runs":
+        return _CREATE_RUN_UPLOAD_TOOL
+    return _CREATE_SYSTEM_UPLOAD_TOOL
 
 
 async def create_run_upload(
