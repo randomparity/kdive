@@ -336,7 +336,10 @@ class RunBuildHandlers:
             return _config_error(run_id, data={"reason": "no_upload_manifest"})
         has_chunks = any(entry.chunks is not None for entry in manifest_row.entries)
         keys = {entry.name: f"{manifest_row.prefix}{entry.name}" for entry in manifest_row.entries}
-        store = self.object_store_factory() if has_chunks else None
+        try:
+            store = self.object_store_factory() if has_chunks else None
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(run_id, exc)
         return _ExternalBuildCompletion(
             run=run,
             manifest_row=manifest_row,
