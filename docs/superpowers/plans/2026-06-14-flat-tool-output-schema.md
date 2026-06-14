@@ -158,9 +158,12 @@ do not exist in `kdive.mcp.app`.
 
 In `src/kdive/mcp/app.py`:
 
-Add the import near the other fastmcp imports:
+Add the imports (a JSON schema value is `dict[str, Any]`, so `Any` is needed; `Tool` for the
+`isinstance` filter):
 
 ```python
+from typing import Any
+
 from fastmcp.tools import Tool
 ```
 
@@ -171,8 +174,10 @@ Add the constant and helper above `build_app` (module level):
 # the self-referential ``ToolResponse``; FastMCP would auto-derive a recursive ``$ref`` schema
 # that the FastMCP 3.4.0 client cannot build a validator for (it logs a per-call parse error and
 # nulls ``CallToolResult.data``). Advertising a flat object removes the recursion while keeping
-# the ``structured_content`` wire payload unchanged (no ``x-fastmcp-wrap-result`` key).
-ENVELOPE_OUTPUT_SCHEMA: dict[str, str] = {"type": "object"}
+# the ``structured_content`` wire payload unchanged (no ``x-fastmcp-wrap-result`` key). Typed
+# dict[str, Any] to match FastMCP's ``Tool.output_schema`` and because a JSON schema nests
+# non-str values.
+ENVELOPE_OUTPUT_SCHEMA: dict[str, Any] = {"type": "object"}
 
 
 def _advertise_flat_output_schema(app: FastMCP) -> int:
@@ -237,28 +242,32 @@ fixture/helpers — inspect the top of the file for how it constructs the app an
 new test asserts a representative real tool advertises the flat schema and a call logs no parse
 error). Skeleton (adapt to the file's existing app-construction helper, named `<existing>` below):
 
-Preferred form — assert the advertised-schema half against the **real** `build_app` app (no DB
-needed; the sweep runs inside `build_app`, so just build and introspect). Use the file's existing
-`build_app(...)` construction helper:
+Assert the advertised-schema half against the **real** `build_app` app. No DB is needed: the
+sweep runs inside `build_app` and `list_tools()` does not touch the pool, so the app can be built
+on an unopened pool (the `gen_tool_reference` pattern). The file already imports `build_app`,
+`AsyncConnectionPool`, `Client`, `SecretRegistry`, and a local `_verifier()` helper (it builds
+the app as `build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())`). Add:
 
 ```python
 def test_real_build_app_tools_advertise_flat_output_schema() -> None:
     """Every build_app tool advertises the flat envelope schema (#404, end-to-end enumeration)."""
-    app = _build_real_app()  # the file's existing build_app(...) helper/fixture
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
 
-    async def _schemas() -> list[dict[str, object] | None]:
-        async with Client(app) as c:
-            return [t.outputSchema for t in await c.list_tools()]
+    async def _schemas() -> list[dict[str, Any] | None]:
+        async with Client(app) as client:
+            return [t.outputSchema for t in await client.list_tools()]
 
     schemas = asyncio.run(_schemas())
     assert schemas, "build_app registered no tools"
     assert all(s == {"type": "object"} for s in schemas)
 ```
 
-This exercises `build_app`'s real enumeration (a renamed registry accessor → `build_app` raises
-via the zero-count guard, or the schemas are non-flat → this assertion fails). The call-time
-log-silence path is already covered by the probe suite in Task 1, so a DB-backed authed
-`call_tool` here is not required.
+(`Client` is imported in the file; if `Any`/`asyncio` are not, add them.) This exercises
+`build_app`'s real enumeration — a renamed registry accessor makes `build_app` raise via the
+zero-count guard, and a non-flat schema fails this assertion. The call-time log-silence path is
+already covered by the probe suite in Task 1, so a DB-backed authed `call_tool` here is not
+required.
 
 - [ ] **Step 2: Run it, verify it fails (or passes) for the right reason**
 
