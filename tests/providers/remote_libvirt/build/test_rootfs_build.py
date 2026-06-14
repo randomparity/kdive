@@ -45,7 +45,7 @@ def _spec(**overrides: object) -> RootfsBuildSpec:
         "capabilities": ("agent", "kdump", "drgn"),
     }
     base.update(overrides)
-    return RootfsBuildSpec(**base)  # type: ignore[arg-type]
+    return RootfsBuildSpec(**base)  # ty: ignore[invalid-argument-type]
 
 
 @dataclass

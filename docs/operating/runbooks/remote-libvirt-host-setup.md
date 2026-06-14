@@ -161,7 +161,7 @@ by removing passt so libguestfs falls back to qemu slirp, but `(c)` is required 
 ## 5. Build the operator-staged base image
 
 The remote provider reaches the guest over **qemu-guest-agent** and boots a **bootable disk
-image** (ADR-0078/0079/0080) — this is **not** the `python -m kdive build-rootfs` local-libvirt
+image** (ADR-0078/0079/0080) — this is **not** the `python -m kdive build-fs` local-libvirt
 artifact (which is a serial-readiness, whole-disk-ext4 image for direct-kernel boot). Build the
 remote base image with the `RemoteLibvirtRootfsBuildPlane` recipe; the volume name must be
 `fedora-kdive-remote-base-43.qcow2` (the provisioning profile derives it from
