@@ -61,13 +61,23 @@ jobs:
       - name: Lint
         run: just lint
 
-      - name: Install shfmt
-        # shellcheck is preinstalled on ubuntu-latest; shfmt is not. Pin via `go install`
-        # (Go is preinstalled) so the module checksum database verifies integrity — no
-        # manual sha256 to maintain. lint-shell needs both tools.
+      - name: Install shell linters (pinned)
+        # lint-shell needs shfmt + shellcheck. shfmt is not on the runner; install a
+        # pinned build via `go install` (Go is preinstalled; the module checksum DB
+        # verifies integrity). The runner's system shellcheck is older than the version
+        # the pre-commit hook and local dev use (0.11.0) and emits info-level findings
+        # 0.11.0 dropped, so pin shellcheck too — the gate must enforce one standard.
         run: |
           go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          sc_ver=v0.11.0
+          sc_sha=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${sc_ver}/shellcheck-${sc_ver}.linux.x86_64.tar.xz"
+          echo "${sc_sha}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install "/tmp/shellcheck-${sc_ver}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
 
       - name: Lint shell scripts
         run: just lint-shell
