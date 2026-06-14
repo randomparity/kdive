@@ -8,8 +8,10 @@ token-``exp`` preflight (:func:`ensure_token_valid`) so a near-expired token is 
 front rather than risking a mid-operation 401; a refused token costs nothing to re-acquire
 and re-run (ADR-0089).
 
-These tools are ``destructive()``-annotated server-side, so the read-only ``tool call``
-passthrough cannot reach them — the curated verb is the only client path.
+These tools are ``destructive()``-annotated server-side. The curated verb is the ergonomic,
+argument-validated path; the generic ``tool call`` passthrough can also reach a destructive tool,
+but only with an explicit ``--allow-destructive`` opt-in plus confirmation (ADR-0105), so neither
+path is silent.
 
 ``_session_factory`` is the seam the tests replace with a fake session.
 """
