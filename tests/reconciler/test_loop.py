@@ -479,6 +479,79 @@ def test_untagged_domain_not_reaped(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_name_orphaned_domain_with_no_row_is_reaped(migrated_url: str) -> None:
+    # #372: a kdive-<uuid> domain with no metadata tag (system_id=None) and no DB row is a
+    # genuine orphan; the name resolves the owning System so the sweep reaps it.
+    async def _run() -> None:
+        sid = uuid4()
+        reaper = FakeReaper(_FakeDomain(name=f"kdive-{sid}", system_id=None))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        assert count == 1
+        assert reaper.destroyed == [f"kdive-{sid}"]
+
+    asyncio.run(_run())
+
+
+def test_foreign_domain_with_no_row_not_reaped(migrated_url: str) -> None:
+    # #372 safety: a name that does not match kdive-<uuid> is foreign/unmanaged and untouched,
+    # even with no DB row backing it.
+    async def _run() -> None:
+        reaper = FakeReaper(_FakeDomain(name="someone-elses-vm", system_id=None))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        assert count == 0
+        assert reaper.destroyed == []
+
+    asyncio.run(_run())
+
+
+def test_name_orphan_with_live_provisioning_row_is_preserved(migrated_url: str) -> None:
+    # #372 mid-creation guard: a live (state <> torn_down) systems row for the name-resolved
+    # id protects the domain — a System mid-creation is never reaped.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            sid = await seed_system(seed, system_state=SystemState.PROVISIONING)
+        reaper = FakeReaper(_FakeDomain(name=f"kdive-{sid}", system_id=None))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        assert count == 0
+        assert reaper.destroyed == []
+
+    asyncio.run(_run())
+
+
+def test_metadata_tag_wins_over_domain_name_for_resolution(migrated_url: str) -> None:
+    # #372: when a domain carries a metadata tag, it stays authoritative — the guards apply to
+    # the tagged System (B), not the System encoded in the name (A).
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            sid_b = await seed_system(seed, system_state=SystemState.READY)
+        sid_a = uuid4()
+        reaper = FakeReaper(_FakeDomain(name=f"kdive-{sid_a}", system_id=sid_b))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        # B has a live ready row → protected; A's name is ignored because the tag wins.
+        assert count == 0
+        assert reaper.destroyed == []
+
+    asyncio.run(_run())
+
+
+def test_name_orphan_reaping_is_idempotent(migrated_url: str) -> None:
+    # #372: a second pass with the domain gone reaps nothing.
+    async def _run() -> None:
+        sid = uuid4()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            first = FakeReaper(_FakeDomain(name=f"kdive-{sid}", system_id=None))
+            assert await run_repair(pool, _reap(first)) == 1
+            second = FakeReaper()  # domain gone → provider lists nothing
+            assert await run_repair(pool, _reap(second)) == 0
+            assert second.destroyed == []
+
+    asyncio.run(_run())
+
+
 def test_torn_down_row_without_teardown_job_is_reaped(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
