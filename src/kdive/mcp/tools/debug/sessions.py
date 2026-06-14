@@ -105,16 +105,6 @@ type _DetachResourcesForSession = Callable[
 ]
 
 
-def _fixed_connector_for_run(
-    connector: Connector, profile_policy: ProfilePolicy
-) -> _ConnectorForRun:
-    async def connector_for_run(conn: AsyncConnection, run: Run) -> _AttachResources | ToolResponse:
-        del conn, run
-        return _AttachResources(connector=connector, profile_policy=profile_policy)
-
-    return connector_for_run
-
-
 def _resolved_connector_for_run(resolver: ProviderResolver) -> _ConnectorForRun:
     async def connector_for_run(conn: AsyncConnection, run: Run) -> _AttachResources | ToolResponse:
         try:
@@ -124,18 +114,6 @@ def _resolved_connector_for_run(resolver: ProviderResolver) -> _ConnectorForRun:
         return _AttachResources(connector=runtime.connector, profile_policy=runtime.profile_policy)
 
     return connector_for_run
-
-
-def _fixed_detach_resources(
-    connector: Connector, runtime: DebugEngineRuntime | None
-) -> _DetachResourcesForSession:
-    async def detach_resources(
-        conn: AsyncConnection, session_id: UUID
-    ) -> _DetachResources | ToolResponse:
-        del conn, session_id
-        return _DetachResources(connector=connector, runtime=runtime)
-
-    return detach_resources
 
 
 def _resolved_detach_resources(
@@ -255,23 +233,6 @@ class DebugSessionHandlers:
         return cls(
             connector_for_run=_resolved_connector_for_run(resolver),
             detach_resources=_resolved_detach_resources(resolver, runtime_resolver),
-            secret_backend_factory=secret_backend_factory,
-            secret_registry=secret_registry,
-        )
-
-    @classmethod
-    def from_fixed_connector(
-        cls,
-        connector: Connector,
-        *,
-        profile_policy: ProfilePolicy,
-        runtime: DebugEngineRuntime | None = None,
-        secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
-        secret_registry: SecretRegistry,
-    ) -> DebugSessionHandlers:
-        return cls(
-            connector_for_run=_fixed_connector_for_run(connector, profile_policy),
-            detach_resources=_fixed_detach_resources(connector, runtime),
             secret_backend_factory=secret_backend_factory,
             secret_registry=secret_registry,
         )
