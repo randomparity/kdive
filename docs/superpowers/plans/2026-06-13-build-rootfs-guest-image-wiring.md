@@ -9,7 +9,7 @@
 **Tech Stack:** Python 3.13, argparse CLI (`src/kdive/__main__.py`), `shlex`, `pathlib`, pytest, `uv`/`ruff`/`ty`/`just`.
 
 **Spec:** `docs/superpowers/specs/2026-06-13-build-rootfs-guest-image-wiring.md`
-**ADR:** `docs/adr/0105-build-rootfs-guest-image-wiring.md`
+**ADR:** `docs/adr/0106-build-rootfs-guest-image-wiring.md`
 
 ---
 
