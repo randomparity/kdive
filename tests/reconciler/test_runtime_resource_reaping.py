@@ -133,6 +133,32 @@ def test_lapsed_lease_live_runtime_resource_is_cordoned_not_destroyed(migrated_u
     asyncio.run(_run())
 
 
+def test_cordon_is_change_detecting_no_steady_state_drift(migrated_url: str) -> None:
+    """A still-cordoned live lapsed resource is a no-op on the next pass (count 0, no drift).
+
+    The candidate (lease lapsed + live allocation) persists every pass, but only the pass that
+    actually flips ``cordoned`` should count — else the reap count never returns to steady-state
+    zero (the ReconcileDiff change-detecting convention).
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            res = await _seed_resource(seed, managed_by="runtime", lease_seconds=-60)
+            await _seed_live_allocation(seed, res)
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            first = await run_repair(pool, reap_expired_runtime_resources)
+            second = await run_repair(pool, reap_expired_runtime_resources)
+
+        assert first == 1  # the cordoning pass
+        assert second == 0  # already cordoned; no phantom drift
+        async with await connect(migrated_url) as check:
+            assert await _exists(check, res)
+            assert await _cordoned(check, res)
+
+    asyncio.run(_run())
+
+
 def test_unexpired_lease_runtime_resource_is_left_alone(migrated_url: str) -> None:
     """A runtime resource whose lease is still in the future is never a candidate."""
 
