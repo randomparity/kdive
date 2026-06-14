@@ -29,7 +29,8 @@ toggle); changing the release/versioning process (ADR-0041 stands); any provider
 
 - Tier `docs/` by reader; rename `specs/`→`design/`; archive working artifacts; preserve
   `adr/` and `guide/reference/` (generator + CI-gate dependencies).
-- Link-check is a CI gate (`just docs-links` → `just ci` + `ci.yml`).
+- Two CI guards (markdown link-check `just docs-links` + `docs/…` path-existence
+  `just docs-paths`) → `just ci` + `ci.yml`.
 - Host preflight = standalone zero-state shell scripts (not a `doctor` subcommand).
 - systemd: system-level units (dedicated user) default + `--user` variant.
 - License Apache-2.0; full public-OSS file set.
@@ -64,14 +65,25 @@ docs/
     superpowers/{specs,plans}
 ```
 
-### Rename blast radius (verified)
+### Move blast radius (verified)
 
-`docs/specs/` is referenced outside `docs/` by exactly three files —
-`AGENTS.md`, `README.md`, `scripts/m2_portability_gate.py` (the error string at
-`m2_portability_gate.py:382`). **Zero** ADRs reference `docs/specs/`. The generators
-(`gen_tool_reference.py` `_REF_DIR`, `gen_config_reference.py` `_OUT`) and the
-`docs-check`/`config-docs-check` recipes reference `docs/guide/reference/`, which is **not**
-moving. Intra-`docs/` cross-links are verified by the new link-checker.
+The restructure relocates several directories, not just `specs/`; each relocation has its own
+reference blast radius, and the markdown link-checker catches only the markdown-link column.
+The non-markdown / code-span column is an explicit implementation checklist (also guarded by
+the `docs-paths` check, below).
+
+| Move | Non-markdown / code-span refs to fix | Markdown-link refs |
+|------|--------------------------------------|--------------------|
+| `specs/` → `design/` | `scripts/m2_portability_gate.py:382`; `AGENTS.md:14,137` (code spans) | `README.md` |
+| `runbooks/` → `operating/runbooks/` | — | `AGENTS.md:151`, `README.md:68` |
+| `RELEASING.md` → `development/releasing.md` | — | `AGENTS.md:138`, `README.md:106`; its own `../adr/…` links gain a level |
+| `plans/` → `archive/plans/` | `AGENTS.md:15-16,137` (code spans) | `README.md:7` |
+| `reports/` → `archive/reports/` | **`justfile:140` `m2-report` output path** — retarget the recipe | — |
+| `superpowers/`, `test-cases/`, `solutions/`, `admin/` → new homes | — | intra-`docs/` links |
+
+**Zero** ADRs reference `docs/specs/`. The generators (`gen_tool_reference.py` `_REF_DIR`,
+`gen_config_reference.py` `_OUT`) and the `docs-check`/`config-docs-check` recipes reference
+`docs/guide/reference/`, which is **not** moving.
 
 ## Components
 
@@ -79,10 +91,15 @@ moving. Intra-`docs/` cross-links are verified by the new link-checker.
 
 - `git mv` files into the target tree above; create `docs/README.md`, `docs/guide/index.md`
   updates, `docs/operating/index.md`.
-- Update the three hardcoded `docs/specs/` refs to `docs/design/`.
-- Add `scripts/check-doc-links.sh` (or a vendored checker) + `just docs-links`; wire into the
-  `ci` recipe and `ci.yml`. The checker validates relative links in tracked `*.md` resolve to
-  existing files/anchors.
+- Work the full move map above as a checklist — every relocated directory, not just `specs/`.
+  Retarget `justfile:140` (`m2-report`) to the new reports location.
+- Add **two** CI guards (the failure modes split across two surfaces):
+  - `just docs-links` — markdown link-checker over tracked `*.md` (markdown cross-links only).
+  - `just docs-paths` — path-existence check that greps `justfile`, `scripts/`, `*.yml`, and
+    `*.md` code-span paths for `docs/…` references and fails when a target no longer exists.
+    This is the guard for the non-markdown column (generators, `m2-report`, `AGENTS.md` code
+    spans) that a link-checker cannot see.
+  Wire both into the `ci` recipe and `ci.yml`.
 - Verify `just docs-check`, `config-docs-check`, `check-mermaid` still pass (paths unchanged).
 
 ### Phase 1 — Host preflight scripts
@@ -109,14 +126,23 @@ Cross-referenced from the service `doctor` docs (preflight = pre-deploy, doctor 
 - `docs/operating/kubernetes.md` — Helm install; links `deploy/helm/kdive/README.md` and the
   moved k8s runbook.
 - `deploy/systemd/system/kdive-{server,worker,reconciler}.service` — dedicated `kdive` system
-  user, `EnvironmentFile=/etc/kdive/kdive.env`, ordering/after on network + backends.
+  user, `EnvironmentFile=/etc/kdive/kdive.env`. The units **assume external, already-reachable
+  backends** (Postgres, MinIO/S3, OIDC) via the env file; KDIVE does not manage them and they
+  are commonly compose/k8s/managed, so the units cannot `Requires=` them. Contract instead:
+  `After=network-online.target`, `Restart=on-failure` with a bounded `RestartSec`, so a process
+  that starts before its backend is reachable retries rather than failing terminally.
 - `deploy/systemd/user/` — `--user` variant.
-- `docs/operating/systemd.md` — install/enable/start, env file, logs (`journalctl`),
-  validated with `systemd-analyze verify`.
+- `docs/operating/systemd.md` — install/enable/start, the env file and **backend prerequisite**,
+  that ordering against co-located backends is the operator's responsibility, logs
+  (`journalctl`); units validated with `systemd-analyze verify`.
 
 ### Phase 3 — Governance & metadata
 
-- `LICENSE` (Apache-2.0, current text, correct copyright line).
+- `LICENSE` (Apache-2.0, current text, correct copyright line). Before it lands, confirm
+  outbound Apache-2.0 is compatible with the resolved dependency tree and invoked tooling
+  (`uv export` + a license scan): LGPL deps (`libvirt-python`, `psycopg`) are dynamically
+  linked and GPL tools (`crash`, `gdb`, `drgn`) are invoked as separate processes — neither
+  imposes copyleft on KDIVE's own source.
 - `pyproject.toml`: `license = "Apache-2.0"`, `authors`, `[project.urls]`
   (Homepage/Repository/Issues/Changelog).
 - Root `CONTRIBUTING.md` (dev loop via `just`, branch/commit conventions, PR + CI gate,
@@ -151,7 +177,8 @@ runtime cruft into `.gitignore`; add a CHANGELOG `[Unreleased]` entry; confirm `
   `KDIVE_OS_RELEASE` / faked command probes, mirroring the existing `check-setup-deps`
   test approach.
 - systemd units: `systemd-analyze verify`.
-- Docs: `just docs-links`, `just docs-check`, `just config-docs-check`, `check-mermaid`.
+- Docs: `just docs-links`, `just docs-paths`, `just docs-check`, `just config-docs-check`,
+  `check-mermaid`.
 - Whole effort: `just ci` green before any commit to the branch.
 
 ## Sequencing
@@ -162,8 +189,9 @@ closes out after 1–4 land. Each phase is a small, logically-scoped commit set 
 
 ## Risks
 
-- A path move missed in a generator/recipe → CI breaks. Mitigated: `guide/reference/` is not
-  moved; the link-checker + `just ci` run after Phase 0.
+- A path move missed in a generator/recipe/code-span → silent rot. Mitigated: `guide/reference/`
+  is not moved; the move map above is worked as a checklist; `just docs-paths` (non-markdown +
+  code-span paths) and `just docs-links` (markdown links) both run in `just ci` after Phase 0.
 - License copyright line / SPDX correctness → reviewed in Phase 3.
 - systemd unit assumptions about user/paths → validated with `systemd-analyze verify` and the
   install doc states prerequisites explicitly.

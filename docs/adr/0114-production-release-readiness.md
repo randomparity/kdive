@@ -56,16 +56,40 @@ docs/
                        #   solutions, superpowers)
 ```
 
-All moves use `git mv` to preserve history. The `specs/`→`design/` rename updates exactly
-three non-doc files (`AGENTS.md`, `README.md`, `scripts/m2_portability_gate.py`) plus
-intra-doc links, which the link-checker (decision 2) verifies.
+All moves use `git mv` to preserve history. The restructure relocates more than `specs/`,
+and each relocation has its own reference blast radius — the implementation must treat every
+relocated directory as a checklist item, not just the rename. The complete map:
+
+| Move | Non-doc / non-markdown refs that must change | Markdown-link refs |
+|------|----------------------------------------------|--------------------|
+| `specs/` → `design/` | `scripts/m2_portability_gate.py:382` (error string); `AGENTS.md:14,137` (bare code-span paths) | `README.md` |
+| `runbooks/` → `operating/runbooks/` | — | `AGENTS.md:151`, `README.md:68` (`live-stack.md`) |
+| `RELEASING.md` → `development/releasing.md` | — | `AGENTS.md:138`, `README.md:106`; **the file's own relative `../adr/…` links gain a directory level** |
+| `plans/` → `archive/plans/` | `AGENTS.md:15-16,137` (bare code-span paths) | `README.md:7` (`m0/m1-implementation.md`) |
+| `reports/` → `archive/reports/` | **`justfile:140` `m2-report` writes `docs/reports/m2-portability.md`** — retarget the recipe or the archive is silently re-created outside the tier | — |
+| `superpowers/`, `test-cases/`, `solutions/`, `admin/` → new homes | — | intra-`docs/` links only |
+
+Markdown-link refs are caught by the link-checker (decision 2); the non-markdown and
+bare code-span refs are **not** — they are an explicit implementation checklist, also guarded
+by the path-existence check in decision 2.
 
 ### 2. Markdown link-check is a CI gate
 
-Add `just docs-links` (a link-checker over tracked `*.md`) and wire it into `just ci` and
-`ci.yml`. Rationale: a one-time restructure without an enforcement guardrail begins rotting
-immediately. The checker is the durable mechanism that keeps the new structure honest and
-makes future moves safe.
+Add **two** guards, wired into `just ci` and `ci.yml`, because the failure modes split across
+two surfaces:
+
+1. `just docs-links` — a markdown link-checker over tracked `*.md`. Covers markdown
+   cross-links **only**; it does not resolve bare code-span paths (`` `docs/...` ``) or paths
+   embedded in non-markdown files.
+2. `just docs-paths` — a path-existence check that greps `justfile`, `scripts/`, `*.yml`,
+   and code-span paths in `*.md` for `docs/…` references and fails if the target no longer
+   exists. This is the guard that catches the rot vectors the Context section names
+   (`gen_*` `_REF_DIR`/`_OUT`, `m2-report` output, `m2_portability_gate.py`, `AGENTS.md`
+   code spans) — none of which a markdown link-checker can see.
+
+Rationale: a one-time restructure without enforcement begins rotting immediately, and a
+markdown-only checker would leave the dominant coupling (decision-1 table, non-markdown
+column) unguarded.
 
 ### 3. Host provider readiness is delivered as standalone zero-state shell scripts
 
@@ -84,10 +108,24 @@ Ship `deploy/systemd/system/kdive-{server,worker,reconciler}.service` running as
 single-host operator. Also ship a `systemctl --user` variant for a developer/single-user
 host. Both are validated with `systemd-analyze verify`.
 
+The units **assume external, already-reachable backends** (Postgres, MinIO/S3, OIDC) supplied
+through the env file — KDIVE does not manage those, and they are commonly compose/k8s/managed
+rather than peer systemd units, so `After=`/`Requires=` cannot order them. The units therefore
+carry a startup/retry contract instead of a hard ordering dependency: `After=network-online.target`,
+`Restart=on-failure` with a bounded `RestartSec`, so a process that starts before its backend
+is reachable retries rather than failing terminally. `operating/systemd.md` states the backend
+prerequisite explicitly and notes that ordering against co-located backends is the operator's
+responsibility.
+
 ### 5. License and public-OSS governance
 
 License under **Apache-2.0** (permissive with an explicit patent grant — appropriate for an
-infrastructure/MCP tool others embed). Add `LICENSE`, populate `pyproject.toml`
+infrastructure/MCP tool others embed). Outbound Apache-2.0 is compatible with the dependency
+set and invoked tooling: KDIVE dynamically links LGPL libraries (`libvirt-python`, `psycopg`)
+and invokes GPL tools (`crash`, `gdb`, `drgn`) as separate processes — neither imposes a
+copyleft obligation on KDIVE's own source. Phase 3 confirms this against the resolved
+dependency tree (`uv export` + license scan) before the `LICENSE` lands. Add `LICENSE`, populate
+`pyproject.toml`
 `license`/`authors`/`[project.urls]`, and add the public-OSS governance set: `CONTRIBUTING.md`,
 `SECURITY.md` (coordinated-disclosure policy), `CODE_OF_CONDUCT.md` (Contributor Covenant),
 `ARCHITECTURE.md` (concise, links `docs/design/top-level-design.md`), and
@@ -99,7 +137,10 @@ infrastructure/MCP tool others embed). Add `LICENSE`, populate `pyproject.toml`
 - The restructure is a partly-code change (generators, recipes, three hardcoded refs); it
   must land as one foundational phase before new docs are authored, or new content is written
   into a tree that then moves.
-- CI gains a link-check gate; the new structure cannot silently rot.
+- CI gains two gates — a markdown link-check and a `docs/…` path-existence check — so both
+  markdown cross-links and non-markdown/code-span path references fail loudly when a target
+  moves. (Anchor fragments and externally-hardcoded paths outside the checked set remain a
+  manual concern.)
 - Host preflight closes the gap between "packages installed" (`check-setup-deps.sh`) and
   "provider can actually run," reducing first-run failures.
 - The project carries the standard public-OSS file set and a clear license.
