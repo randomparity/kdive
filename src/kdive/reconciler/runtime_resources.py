@@ -122,6 +122,11 @@ async def _prune_or_cordon_runtime_resource(conn: AsyncConnection, row_id: UUID)
     ``resources.renew`` that lands between the candidate read and this transaction wins (the
     re-check sees the extended lease and the row is left alone). Runs in its own transaction so
     the liveness/lease re-check and the delete/cordon are atomic per row.
+
+    The cordon is **change-detecting**: a lapsed-lease + live resource stays a candidate every
+    pass, so ``cordoned`` is reported ``True`` only on the pass that actually flips the flag
+    (``cur.rowcount == 1``). An already-cordoned row is a no-op (``pruned=cordoned=False``) so
+    the steady-state reap count returns to ``0`` instead of reporting perpetual phantom drift.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -137,7 +142,7 @@ async def _prune_or_cordon_runtime_resource(conn: AsyncConnection, row_id: UUID)
             await cur.execute(
                 "UPDATE resources SET cordoned = true WHERE id = %s AND NOT cordoned", (row_id,)
             )
-            return PruneOutcome(pruned=False, cordoned=True)
+            return PruneOutcome(pruned=False, cordoned=cur.rowcount == 1)
         await cur.execute("DELETE FROM resources WHERE id = %s", (row_id,))
     return PruneOutcome(pruned=True, cordoned=False)
 
