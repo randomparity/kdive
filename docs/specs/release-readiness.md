@@ -89,8 +89,12 @@ the `docs-paths` check, below).
 
 ### Phase 0 — Restructure + link-check guardrail (lands first)
 
-- `git mv` files into the target tree above; create `docs/README.md`, `docs/guide/index.md`
-  updates, `docs/operating/index.md`.
+- `git mv` files into the target tree above and create the **directory skeleton** only.
+  Index pages that route to later-phase content (`docs/README.md` master index,
+  `docs/operating/index.md`) are **not** authored here — they would forward-reference pages
+  authored in Phases 2–4 and dangle under the Phase-0 link-checker. They are written in
+  Phase 5 once their targets exist; Phase 0 may leave a one-line placeholder that links to
+  nothing. `docs/guide/index.md` (its targets already exist) is updated here.
 - Work the full move map above as a checklist — every relocated directory, not just `specs/`.
   Retarget `justfile:140` (`m2-report`) to the new reports location.
 - Add **two** CI guards (the failure modes split across two surfaces):
@@ -108,9 +112,13 @@ the `docs-paths` check, below).
 
 ### Phase 1 — Host preflight scripts
 
-Both report-only, never install/escalate; same style and `KDIVE_OS_RELEASE`-style test
-harness as `scripts/check-setup-deps.sh`; surfaced as `just check-local-libvirt` /
-`just check-remote-libvirt`.
+Both report-only, never install/escalate; same style as `scripts/check-setup-deps.sh`;
+surfaced as `just check-local-libvirt` / `just check-remote-libvirt`. Unlike `check-setup-deps`
+(which only probes command *presence*), these assert *runtime state* (`/dev/kvm` access, whether
+`virsh` connects, group membership, network-active), which a PATH probe cannot fake. So each
+runtime check is a small overridable probe function (e.g. `_has_kvm`, `_virsh_connects`,
+`_in_group`) that tests stub via env/function override — this testability seam is a Phase 1
+design constraint, not an afterthought.
 
 - `scripts/check-local-libvirt.sh`: `/dev/kvm` present and accessible; `virtqemud` (or
   `libvirtd`) reachable; invoking user in the `libvirt` group; `virsh -c qemu:///system list`
@@ -118,13 +126,18 @@ harness as `scripts/check-setup-deps.sh`; surfaced as `just check-local-libvirt`
   per-distro remediation hint per failure.
 - `scripts/check-remote-libvirt.sh`: generalizes `scripts/check-ssh-reachable.sh` — SSH
   reachability to the build/target host; remote `virsh -c <uri> list` over TLS; TLS PKI
-  material present; guest-helper allowlist install state; port reachability. Inputs via flags
-  or `KDIVE_*` env.
+  material present; port reachability; and that the guest-helper files
+  (`deploy/remote-libvirt-guest-helpers/*`) are **staged on the host for injection**. It does
+  **not** inspect a provisioned guest — at host-preflight time (pre-deploy) no System exists,
+  so in-guest helper verification belongs to runtime/`doctor`, not here. Inputs via flags or
+  `KDIVE_*` env.
 
 Cross-referenced from the service `doctor` docs (preflight = pre-deploy, doctor = post-deploy).
 
 ### Phase 2 — Deployment & systemd
 
+- `docs/operating/install.md` — install paths (PyPI-future/source/container), host
+  prerequisites (links the Phase 1 preflight scripts), and the three run modes below.
 - `docs/operating/docker-compose.md` — run via root `docker-compose.yml`; links existing
   `deploy/compose/README.md`.
 - `docs/operating/kubernetes.md` — Helm install; links `deploy/helm/kdive/README.md` and the
@@ -164,9 +177,10 @@ auth/OIDC token notes and a first-call smoke sequence (`investigations.create` �
 
 ### Phase 5 — Fit & finish
 
-Rewrite root `README.md` as a concise front door routing to the three tiers; sweep `.live-*`
-runtime cruft into `.gitignore`; add a CHANGELOG `[Unreleased]` entry; confirm `just ci`
-(with the new link-check) is green.
+Author the index pages deferred from Phase 0 now that every target exists: `docs/README.md`
+(master index, audience-tiered) and `docs/operating/index.md`. Rewrite root `README.md` as a
+concise front door routing to the three tiers; sweep `.live-*` runtime cruft into `.gitignore`;
+add a CHANGELOG `[Unreleased]` entry; confirm `just ci` (with both new doc gates) is green.
 
 ## Error handling
 
@@ -177,13 +191,14 @@ runtime cruft into `.gitignore`; add a CHANGELOG `[Unreleased]` entry; confirm `
 
 ## Testing
 
-- New shell scripts: `shellcheck` + `shfmt -d`; behavior tests with synthetic
-  `KDIVE_OS_RELEASE` / faked command probes, mirroring the existing `check-setup-deps`
-  test approach.
+- New shell scripts: `shellcheck` + `shfmt -d`; behavior tests that stub the per-check probe
+  functions (and `KDIVE_OS_RELEASE` for distro hints) to exercise pass/fail/degraded paths
+  without a real libvirt host — extending, not just mirroring, the `check-setup-deps` approach.
 - systemd units: `systemd-analyze verify`.
 - Docs: `just docs-links`, `just docs-paths`, `just docs-check`, `just config-docs-check`,
   `check-mermaid`.
-- Whole effort: `just ci` green before any commit to the branch.
+- Whole effort: `just ci` green before each push / PR (not necessarily every intermediate
+  commit, since a phase's first commit may precede its tests).
 
 ## Sequencing
 
