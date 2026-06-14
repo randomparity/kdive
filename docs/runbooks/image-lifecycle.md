@@ -46,8 +46,10 @@ author builds a kdive-ready rootfs through the in-process plane and records that
 `build-rootfs` drives `LocalLibvirtRootfsBuildPlane` directly (the Python successor to the deleted
 bash rootfs builder): it customizes a Fedora base (sshd + the kdive-managed authorized key + the
 `kdive-ready` serial-readiness unit + the guest packages), repacks to a no-partition-table
-whole-disk ext4 qcow2, normalizes fstab/crypttab/guest-SELinux, records the pinned inputs as
-provenance, and prints the qcow2 content digest.
+whole-disk ext4 qcow2, normalizes fstab/crypttab/guest-SELinux, and records the pinned inputs as
+provenance. On success it prints exactly one line to **stdout** — the `KDIVE_GUEST_IMAGE` wiring
+for the live spine — while the human summary (the destination path and the `sha256:` content
+digest) goes to **stderr** (the logger). That split makes the command's stdout `eval`-safe.
 
 ```bash
 python -m kdive build-rootfs \
@@ -55,6 +57,16 @@ python -m kdive build-rootfs \
   --name fedora-kdive-ready-43 \
   --releasever 43 \
   --package drgn --package kexec-tools --package makedumpfile
+```
+
+To build and export `KDIVE_GUEST_IMAGE` in one step, capture stdout with `eval` (the stderr
+summary still prints to your terminal):
+
+```bash
+eval "$(python -m kdive build-rootfs \
+  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2 \
+  --name fedora-kdive-ready-43 --releasever 43)"
+# KDIVE_GUEST_IMAGE is now exported, pointing at the --dest path above
 ```
 
 Record the printed `sha256:` digest — it is the image identity (a rootfs image has no kernel
@@ -68,7 +80,9 @@ SELinux the plane disables).
 
 Point the live-stack suite's fixtures at the built image and the kernel tree, then run the spine —
 the booting `live_stack` tests provision a System on `local-libvirt` from this rootfs, so a
-successful spine run is the evidence the plane-built image boots and is debuggable:
+successful spine run is the evidence the plane-built image boots and is debuggable. If you used
+the `eval` form above, `KDIVE_GUEST_IMAGE` is already exported; otherwise set it by hand — this is
+exactly the line `build-rootfs` prints on stdout:
 
 ```bash
 export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
