@@ -244,4 +244,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check config-docs-check config-guard chart-version-check test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-links docs-paths docs-check config-docs-check config-guard chart-version-check test

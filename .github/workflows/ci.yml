@@ -64,6 +64,13 @@ jobs:
       - name: Type check
         run: just type
 
+      - name: Doc links resolve
+        # CI invokes recipes individually, so list this explicitly to gate PRs.
+        run: just docs-links
+
+      - name: Doc paths resolve
+        run: just docs-paths
+
       - name: Docs reference up to date
         # The generated tool reference (docs/guide/reference/) must match a fresh
         # generation from the registry (ADR-0047). `just docs-check` diffs the committed
