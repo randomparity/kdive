@@ -88,7 +88,11 @@ async def reap_expired_runtime_resources(
                 await _log_reachability(probe, row_id, host_uri)
             outcome = await _prune_or_cordon_runtime_resource(conn, row_id)
         except Exception:  # noqa: BLE001 - isolate one candidate; one failure must not starve the rest
-            _log.warning("reconciler: reaping runtime resource %s failed this pass", row_id)
+            _log.warning(
+                "reconciler: reaping runtime resource %s failed this pass",
+                row_id,
+                exc_info=True,
+            )
             continue
         if outcome.pruned:
             acted += 1
