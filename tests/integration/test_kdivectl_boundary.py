@@ -22,7 +22,7 @@ audited — failing the denial-row assertion and silently hollowing out the exit
 Gated ``live_stack`` (the repo's spine-test marker, ADR-0035 §4): it needs a running kdive
 stack (server/worker/reconciler + Postgres/MinIO/OIDC) plus a reachable OIDC issuer, so it
 skips cleanly in normal CI and runs only against a brought-up stack (``just stack-up`` +
-``just test-live-stack``). See ``docs/runbooks/kdivectl.md``.
+``just test-live-stack``). See ``docs/operating/runbooks/kdivectl.md``.
 """
 
 from __future__ import annotations
@@ -50,7 +50,9 @@ def _require_db_url() -> str:
     """Resolve the stack's Postgres URL, or skip with the exact fix (ADR-0035 §4)."""
     db_url = os.environ.get(_DATABASE_URL_ENV)
     if not db_url:
-        pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (docs/runbooks/kdivectl.md)")
+        pytest.skip(
+            f"{_DATABASE_URL_ENV} unset; bring up the stack (docs/operating/runbooks/kdivectl.md)"
+        )
     return db_url
 
 

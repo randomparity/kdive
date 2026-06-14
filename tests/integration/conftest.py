@@ -59,7 +59,7 @@ def live_vm_preflight(*, require_ssh: bool = False) -> tuple[Path, Path]:
         pytest.skip(
             f"{_GUEST_IMAGE_ENV} unset or points at a missing file; build the local-libvirt "
             f"rootfs with `python -m kdive build-rootfs` and set {_GUEST_IMAGE_ENV} to its "
-            "--dest path (see docs/runbooks/image-lifecycle.md)"
+            "--dest path (see docs/operating/runbooks/image-lifecycle.md)"
         )
     tree = os.environ.get(_KERNEL_TREE_ENV)
     if not tree or not Path(tree).exists():

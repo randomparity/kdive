@@ -24,7 +24,7 @@ The criterion→test mapping:
 * **Criterion 5** — the local-libvirt rootfs build through the Python plane on the operator-run
   live-stack path is env-gated (``KDIVE_LIVE_SSH_TARGET``), so it is a runbook step, not a CI
   check. :func:`test_exit_criterion_proof_is_ci_tier` pins that this file carries no live marker,
-  and ``docs/runbooks/image-lifecycle.md`` records the operator-run criterion-5 evidence.
+  and ``docs/operating/runbooks/image-lifecycle.md`` records the operator-run criterion-5 evidence.
 
 Why this is not tautological: every criterion runs its production path over a broken/edge input
 (a half-published state injected straight into the catalog + object store; an expired row; a
@@ -471,7 +471,7 @@ def test_exit_criterion_proof_is_ci_tier() -> None:
     # This proof is CI-tier: it carries no live_stack/live_vm marker, so it runs in normal CI
     # against the disposable-Postgres fixture (the store + libguestfs inspect are faked). The
     # criterion-5 operator-run rootfs build through the Python plane on the live stack is
-    # env-gated (KDIVE_LIVE_SSH_TARGET) and recorded in docs/runbooks/image-lifecycle.md.
+    # env-gated (KDIVE_LIVE_SSH_TARGET) and recorded in docs/operating/runbooks/image-lifecycle.md.
     lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()
     decorators = [line.strip() for line in lines if line.lstrip().startswith("@")]
     assert not any("live_stack" in d or "live_vm" in d for d in decorators)

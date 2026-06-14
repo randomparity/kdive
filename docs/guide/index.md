@@ -48,5 +48,6 @@ given tool.
 | [Safety and RBAC](safety-and-rbac.md) | Roles, the destructive-op gate, secrets, and redaction |
 | [Errors](errors.md) | The `ErrorCategory` taxonomy and how to recover |
 | [Tool reference](reference/index.md) | Generated per-namespace parameter reference |
+| [Agent onboarding](agents/index.md) | Wiring an MCP client to KDIVE (config examples, first-call smoke sequence) |
 
 For the full design rationale see [`docs/design/top-level-design.md`](../design/top-level-design.md).
