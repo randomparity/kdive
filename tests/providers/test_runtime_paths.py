@@ -8,13 +8,47 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.runtime_paths import console_log_path, domain_name_for, read_console_log
+from kdive.providers.runtime_paths import (
+    console_log_path,
+    domain_name_for,
+    read_console_log,
+    system_id_from_domain_name,
+)
 
 _SYSTEM_ID = UUID("11111111-1111-1111-1111-111111111111")
 
 
 def test_domain_name_for_uses_kdive_prefix() -> None:
     assert domain_name_for(_SYSTEM_ID) == "kdive-11111111-1111-1111-1111-111111111111"
+
+
+def test_system_id_from_domain_name_parses_convention() -> None:
+    assert system_id_from_domain_name("kdive-11111111-1111-1111-1111-111111111111") == _SYSTEM_ID
+
+
+def test_system_id_from_domain_name_round_trips_domain_name_for() -> None:
+    assert system_id_from_domain_name(domain_name_for(_SYSTEM_ID)) == _SYSTEM_ID
+
+
+def test_system_id_from_domain_name_excludes_build_vm_form() -> None:
+    # kdive-build-<uuid> belongs to the ephemeral build-VM reaper, not the System sweep.
+    assert system_id_from_domain_name("kdive-build-11111111-1111-1111-1111-111111111111") is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "kdive-foo",
+        "vm-leak",
+        "11111111-1111-1111-1111-111111111111",  # no kdive- prefix
+        "kdive-",
+        "kdive-11111111-1111-1111-1111-111111111111-extra",  # trailing junk
+        "prefix-kdive-11111111-1111-1111-1111-111111111111",  # not anchored at start
+        "",
+    ],
+)
+def test_system_id_from_domain_name_rejects_non_convention(name: str) -> None:
+    assert system_id_from_domain_name(name) is None
 
 
 def test_console_log_path_uses_provider_console_directory() -> None:

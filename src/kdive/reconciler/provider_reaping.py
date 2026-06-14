@@ -15,6 +15,7 @@ from kdive.diagnostics.egress_probe import DEFAULT_PROBE_HEARTBEAT_STALE_AFTER
 from kdive.domain.models import JobKind
 from kdive.domain.state import JobState, SystemState
 from kdive.providers.reaping import InfraReaper
+from kdive.providers.runtime_paths import system_id_from_domain_name
 
 _log = logging.getLogger(__name__)
 
@@ -24,20 +25,28 @@ _TORN_DOWN_SYSTEM_STATE_VALUE = SystemState.TORN_DOWN.value
 
 
 async def repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> int:
-    """Destroy provider domains whose tagged System is gone and no teardown is in flight."""
+    """Destroy provider domains whose owning System is gone and no teardown is in flight.
+
+    The owning System is the domain's metadata tag when present, else the System encoded in
+    its ``kdive-<uuid>`` name (ADR-0105): a genuinely orphaned domain that lost its tag but
+    matches the naming convention is still ours, and is reaped once no live ``systems`` row
+    backs it. A name that does not match the convention is foreign/unmanaged and never
+    reaped. The metadata tag stays authoritative when present; the name is a fallback only.
+    """
     domains = await reaper.list_owned()
     reaped = 0
     for domain in domains:
-        if domain.system_id is None:
-            continue
+        system_id = domain.system_id or system_id_from_domain_name(domain.name)
+        if system_id is None:
+            continue  # not a kdive System domain → foreign/unmanaged → never reaped
         async with (
             conn.transaction(),
-            advisory_xact_lock(conn, LockScope.SYSTEM, domain.system_id),
+            advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
                 "SELECT 1 FROM systems WHERE id = %s AND state <> %s",
-                (domain.system_id, _TORN_DOWN_SYSTEM_STATE_VALUE),
+                (system_id, _TORN_DOWN_SYSTEM_STATE_VALUE),
             )
             has_live_row = await cur.fetchone() is not None
             await cur.execute(
@@ -46,7 +55,7 @@ async def repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> i
                 (
                     list(_TEARDOWN_JOB_IN_FLIGHT_STATE_VALUES),
                     _TEARDOWN_JOB_KIND_VALUE,
-                    str(domain.system_id),
+                    str(system_id),
                 ),
             )
             teardown_in_flight = await cur.fetchone() is not None
@@ -62,7 +71,7 @@ async def repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> i
             )
             continue
         reaped += 1
-        _log.info("reconciler: leaked domain %s (system %s) reaped", domain.name, domain.system_id)
+        _log.info("reconciler: leaked domain %s (system %s) reaped", domain.name, system_id)
     return reaped
 
 
