@@ -78,21 +78,46 @@ def test_default_fixture_files_include_catalog() -> None:
     assert "profiles/console-ready_x86_64.yaml" in fixture_files
 
 
-def test_migrate_seeds_baseline_rootfs_idempotently(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str
+_BASELINE_SYSTEMS_TOML = """schema_version = 2
+
+[[image]]
+provider = "local-libvirt"
+name = "fedora-kdive-ready-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
+"""
+
+
+def _write_baseline_systems_toml(tmp_path: Path) -> Path:
+    path = tmp_path / "systems.toml"
+    path.write_text(_BASELINE_SYSTEMS_TOML, encoding="utf-8")
+    return path
+
+
+def test_migrate_reconciles_inventory_images_idempotently(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path
 ) -> None:
-    # migrate applies the schema then seeds the packaged baseline as `defined` rows
-    # (deploy ordering migrate → seed); a re-run adds no rows.
+    # migrate applies the schema then reconciles systems.toml image entries (deploy ordering
+    # migrate → reconcile); an s3 image without a reachable object/digest lands `defined`. A
+    # re-run is a change-detecting no-op (no new rows).
     with psycopg.connect(postgres_url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(_write_baseline_systems_toml(tmp_path)))
+    for var in ("KDIVE_S3_ENDPOINT_URL", "KDIVE_S3_BUCKET", "KDIVE_S3_REGION"):
+        monkeypatch.delenv(var, raising=False)
 
-    monkeypatch.delenv("KDIVE_FIXTURE_CATALOG_PATH", raising=False)
     migrate(postgres_url)
     with psycopg.connect(postgres_url, autocommit=True) as conn:
         first = conn.execute(
-            "SELECT count(*) FROM image_catalog WHERE state = 'defined'"
+            "SELECT count(*) FROM image_catalog WHERE managed_by = 'config'"
         ).fetchone()
-    assert first is not None and first[0] >= 1
+    assert first is not None and first[0] == 1
 
     migrate(postgres_url)
     with psycopg.connect(postgres_url, autocommit=True) as conn:
@@ -100,13 +125,31 @@ def test_migrate_seeds_baseline_rootfs_idempotently(
     assert second is not None and second[0] == first[0]
 
 
-def test_migrate_without_s3_skips_build_config_seed(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str
+def test_migrate_without_systems_toml_seeds_no_images(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path
 ) -> None:
-    # No KDIVE_S3_* configured: migrate still applies the schema and seeds the baseline
-    # rootfs, but the object-store-backed build-config seed is skipped cleanly (ADR-0096).
+    # An absent systems.toml is the normal pre-config state (the file is gitignored): migrate
+    # still applies the schema, but the inventory reconcile is a quiet no-op (no rows).
     with psycopg.connect(postgres_url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
+
+    migrate(postgres_url)
+
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        images = conn.execute("SELECT count(*) FROM image_catalog").fetchone()
+    assert images is not None and images[0] == 0
+
+
+def test_migrate_without_s3_skips_build_config_seed(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path
+) -> None:
+    # No KDIVE_S3_* configured: migrate still applies the schema and reconciles the inventory
+    # (s3 images stay `defined`), but the object-store-backed build-config seed is skipped
+    # cleanly (ADR-0096).
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(_write_baseline_systems_toml(tmp_path)))
     for var in ("KDIVE_S3_ENDPOINT_URL", "KDIVE_S3_BUCKET", "KDIVE_S3_REGION"):
         monkeypatch.delenv(var, raising=False)
 
@@ -117,7 +160,7 @@ def test_migrate_without_s3_skips_build_config_seed(
             "SELECT count(*) FROM image_catalog WHERE state = 'defined'"
         ).fetchone()
         configs = conn.execute("SELECT count(*) FROM build_config_catalog").fetchone()
-    assert rootfs is not None and rootfs[0] >= 1
+    assert rootfs is not None and rootfs[0] == 1
     assert configs is not None and configs[0] == 0
 
 
@@ -134,11 +177,14 @@ class _FakeStore:
 
 
 def test_migrate_with_s3_seeds_build_config(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str, tmp_path: Path
 ) -> None:
-    # With an object store available, migrate seeds the packaged kdump fragment row.
+    # With an object store available, migrate seeds the packaged kdump fragment row. Pin an
+    # absent systems.toml so the inventory reconcile is an isolated no-op (the _FakeStore double
+    # only implements put_artifact, not the s3 HEAD the image reconcile would call).
     with psycopg.connect(postgres_url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: _FakeStore())
 
     migrate(postgres_url)

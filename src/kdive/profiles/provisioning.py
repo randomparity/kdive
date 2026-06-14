@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Literal, cast
 
 from pydantic import (
@@ -38,7 +39,6 @@ from kdive.domain.profile_documents import SerializedProvisioningProfile
 from kdive.domain.sizing import AllocationSizing
 from kdive.profiles._schema import schema_version_validator
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.provider_components.catalog import load_fixture_catalog
 from kdive.provider_components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
@@ -378,19 +378,40 @@ def profile_digest(profile: ProvisioningProfile) -> str:
 def validate_rootfs_reference(rootfs: RootfsSource) -> None:
     """Validate a rootfs reference's static resolvability.
 
-    A ``catalog`` reference is checked against the baseline rootfs inventory (the packaged
-    ``seed_data/`` catalog the rootfs entries moved to, ADR-0092). A name absent from the baseline
-    but present in the DB catalog (a built/published or private image) is resolved later by the
-    DB-backed ``materialize`` fetch; this is the static, connectionless tool-boundary check.
-    """
-    from kdive.images.seed import PACKAGED_SEED_DATA_PATH
+    A ``catalog`` reference is checked against the declared ``systems.toml`` inventory — the
+    single source of truth for image definitions (ADR-0112), replacing the former packaged
+    ``seed_data/`` baseline. A name not declared there but present in the DB catalog (a
+    built/published or project-private image) is resolved later by the DB-backed ``materialize``
+    fetch, which raises ``CONFIGURATION_ERROR`` for an unknown name; this remains the static,
+    connectionless tool-boundary check.
 
-    if isinstance(rootfs, CatalogComponentRef) and (
-        load_fixture_catalog(PACKAGED_SEED_DATA_PATH).rootfs_entry(rootfs.provider, rootfs.name)
-        is None
-    ):
-        raise CategorizedError(
-            f"unknown rootfs catalog name: {rootfs.name}",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"provider": rootfs.provider, "name": rootfs.name},
-        )
+    When no ``systems.toml`` is present (the file is gitignored, so an absent file is the normal
+    pre-config state — e.g. a fresh deploy or CI), the static check has no declared baseline to
+    consult and accepts the reference, deferring resolution entirely to the DB fetch.
+    """
+    if not isinstance(rootfs, CatalogComponentRef):
+        return
+    if _catalog_name_declared(rootfs.provider, rootfs.name):
+        return
+    raise CategorizedError(
+        f"unknown rootfs catalog name: {rootfs.name}",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"provider": rootfs.provider, "name": rootfs.name},
+    )
+
+
+def _catalog_name_declared(provider: str, name: str) -> bool:
+    """Whether ``(provider, name)`` is a declared ``systems.toml`` image (or no file is present).
+
+    Returns ``True`` when the inventory file is absent (nothing to check against — defer to the
+    DB fetch) or when a declared ``[[image]]`` matches ``(provider, name)``.
+    """
+    import kdive.config as config
+    from kdive.config.core_settings import SYSTEMS_TOML
+    from kdive.inventory import load_inventory_optional
+
+    raw = config.get(SYSTEMS_TOML) or "./systems.toml"
+    doc = load_inventory_optional(Path(raw))
+    if doc is None:
+        return True
+    return any(img.provider == provider and img.name == name for img in doc.image)

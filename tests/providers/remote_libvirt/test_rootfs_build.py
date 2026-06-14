@@ -24,16 +24,20 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
 from kdive.providers.remote_libvirt.rootfs_build import (
-    REMOTE_BASE_IMAGE_NAME,
     RemoteLibvirtRootfsBuildPlane,
     RemoteRootfsBuildTools,
 )
+
+# The remote base-image name is operator inventory (a `staged` [[image]] in systems.toml,
+# ADR-0112), no longer a code constant. The build plane is name-agnostic — it builds whatever
+# name the spec carries — so this test fixes a representative name locally.
+_REMOTE_BASE_IMAGE_NAME = "fedora-kdive-remote-base-43"
 
 
 def _spec(**overrides: object) -> RootfsBuildSpec:
     base: dict[str, object] = {
         "provider": "remote-libvirt",
-        "name": REMOTE_BASE_IMAGE_NAME,
+        "name": _REMOTE_BASE_IMAGE_NAME,
         "arch": "x86_64",
         "releasever": "43",
         "packages": ("qemu-guest-agent", "drgn", "kexec-tools"),

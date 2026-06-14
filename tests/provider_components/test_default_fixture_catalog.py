@@ -1,33 +1,19 @@
+"""The source-tree fixture catalog holds only profiles; rootfs moved to the DB (ADR-0112).
+
+Image definitions left code entirely (the packaged ``seed_data`` YAML is gone): they now load
+from ``systems.toml`` into ``image_catalog``. The file-based fixture catalog keeps only the
+profiles half, which ``load_fixture_catalog`` still resolves.
+"""
+
 from pathlib import Path
 
 import pytest
 
-from kdive.images.seed import PACKAGED_SEED_DATA_PATH
 from kdive.provider_components.catalog import DEFAULT_FIXTURE_CATALOG_PATH, load_fixture_catalog
 
 
-def test_packaged_baseline_exposes_expected_rootfs_entries() -> None:
-    # The rootfs catalog moved to the packaged seed_data baseline (ADR-0092); the source-tree
-    # fixtures hold only profiles now.
-    catalog = load_fixture_catalog(PACKAGED_SEED_DATA_PATH)
-    names = {entry.name for entry in catalog.rootfs_for_provider("local-libvirt")}
-    assert "fedora-kdive-ready-43" in names
-    assert "fedora-cloud-43" in names
-    assert "busybox-bare" in names
-
-
-def test_packaged_baseline_rootfs_entries_are_qcow2_vda() -> None:
-    catalog = load_fixture_catalog(PACKAGED_SEED_DATA_PATH)
-    for name in ("fedora-kdive-ready-43", "fedora-cloud-43", "busybox-bare"):
-        entry = catalog.rootfs_entry("local-libvirt", name)
-        assert entry is not None
-        assert entry.format == "qcow2"
-        assert entry.root_device == "/dev/vda"
-        assert entry.source.kind == "local"
-
-
 def test_default_fixture_catalog_has_no_rootfs_entries() -> None:
-    # The default fixture catalog keeps only profiles; rootfs moved to seed_data.
+    # The default fixture catalog keeps only profiles; rootfs definitions left code (ADR-0112).
     catalog = load_fixture_catalog(DEFAULT_FIXTURE_CATALOG_PATH)
     assert catalog.rootfs == []
     assert catalog.profiles != []

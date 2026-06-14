@@ -1,63 +1,26 @@
-"""Default fixture catalog files installed by ``python -m kdive install-fixtures``."""
+"""Default fixture files installed by ``python -m kdive install-fixtures``.
+
+Image/rootfs definitions are no longer embedded here (ADR-0112): they live only in
+``systems.toml`` and load into ``image_catalog`` via the inventory reconcile. The installed
+fixture bundle now carries only the **profiles** half — the kernel-config/cmdline policy the
+local-libvirt provider checks a built kernel against — plus a manifest that declares an empty
+rootfs list (the rootfs catalog is the DB now).
+
+The manifest is built from the :class:`~kdive.provider_components.catalog.FixtureManifest` model
+rather than an embedded YAML literal, so this module holds no inline inventory YAML.
+"""
 
 from __future__ import annotations
 
-LOCAL_LIBVIRT_FIXTURES: dict[str, str] = {
-    "manifest.yaml": """schema_version: 1
-provider: local-libvirt
-storage:
-  allowed_component_roots:
-    - /var/lib/kdive/rootfs
-  cache_dir: /var/lib/kdive/rootfs/cache
-  overlay_dir: /var/lib/kdive/rootfs/overlays
-rootfs:
-  - rootfs/fedora-kdive-ready-43.yaml
-  - rootfs/fedora-cloud-43.yaml
-  - rootfs/busybox-bare.yaml
-profiles:
-  - profiles/console-ready_x86_64.yaml
-""",
-    "rootfs/fedora-kdive-ready-43.yaml": """provider: local-libvirt
-name: fedora-kdive-ready-43
-arch: x86_64
-format: qcow2
-root_device: /dev/vda
-source:
-  kind: local
-  path: /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
-visibility: public
-capabilities:
-  - kdive-ready-console
-  - ssh
-  - drgn
-""",
-    "rootfs/fedora-cloud-43.yaml": """provider: local-libvirt
-name: fedora-cloud-43
-arch: x86_64
-format: qcow2
-root_device: /dev/vda
-source:
-  kind: local
-  path: /var/lib/kdive/rootfs/local/fedora-cloud-43.qcow2
-visibility: public
-capabilities:
-  - cloud-init
-  - ssh
-""",
-    "rootfs/busybox-bare.yaml": """provider: local-libvirt
-name: busybox-bare
-arch: x86_64
-format: qcow2
-root_device: /dev/vda
-source:
-  kind: local
-  path: /var/lib/kdive/rootfs/local/busybox-bare.qcow2
-visibility: public
-capabilities:
-  - console
-  - busybox
-""",
-    "profiles/console-ready_x86_64.yaml": """provider: local-libvirt
+from pathlib import Path
+
+import yaml
+
+from kdive.provider_components.catalog import FixtureManifest, FixtureStorage
+
+_PROFILE_RELATIVE = "profiles/console-ready_x86_64.yaml"
+
+_PROFILE_YAML = """provider: local-libvirt
 name: console-ready_x86_64
 arch: x86_64
 requires:
@@ -79,5 +42,30 @@ requires:
     root_device: /dev/vda
     capabilities:
       - kdive-ready-console
-""",
-}
+"""
+
+
+def _manifest_yaml() -> str:
+    """Serialize the local-libvirt fixture manifest (empty rootfs list; profiles only)."""
+    manifest = FixtureManifest(
+        schema_version=1,
+        provider="local-libvirt",
+        storage=FixtureStorage(
+            allowed_component_roots=[Path("/var/lib/kdive/rootfs")],
+            cache_dir=Path("/var/lib/kdive/rootfs/cache"),
+            overlay_dir=Path("/var/lib/kdive/rootfs/overlays"),
+        ),
+        rootfs=[],
+        profiles=[_PROFILE_RELATIVE],
+    )
+    return yaml.safe_dump(manifest.model_dump(mode="json"), sort_keys=False)
+
+
+def _build_fixture_files() -> dict[str, str]:
+    return {
+        "manifest.yaml": _manifest_yaml(),
+        _PROFILE_RELATIVE: _PROFILE_YAML,
+    }
+
+
+LOCAL_LIBVIRT_FIXTURES: dict[str, str] = _build_fixture_files()
