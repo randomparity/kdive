@@ -24,7 +24,8 @@
 | [`audit.query`](audit.md#auditquery) | `implemented` |
 | [`build_hosts.disable`](build_hosts.md#build_hostsdisable) | `implemented` |
 | [`build_hosts.list`](build_hosts.md#build_hostslist) | `implemented` |
-| [`build_hosts.register`](build_hosts.md#build_hostsregister) | `implemented` |
+| [`build_hosts.register_ephemeral_libvirt`](build_hosts.md#build_hostsregister_ephemeral_libvirt) | `implemented` |
+| [`build_hosts.register_ssh`](build_hosts.md#build_hostsregister_ssh) | `implemented` |
 | [`build_hosts.remove`](build_hosts.md#build_hostsremove) | `implemented` |
 | [`buildconfig.get`](buildconfig.md#buildconfigget) | `implemented` |
 | [`control.force_crash`](control.md#controlforce_crash) | `partial` |

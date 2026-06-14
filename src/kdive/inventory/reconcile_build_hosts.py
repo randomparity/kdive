@@ -9,14 +9,14 @@ Identity is the build-host **``name``** (already ``text UNIQUE NOT NULL`` in ``0
 upsert keys on it directly — no migration change. Adopt-on-collision: a config-declared host
 whose ``name`` matches an existing ``managed_by='runtime'`` row is **adopted** (flipped to
 ``config``), never duplicated; the seeded ``worker-local`` baseline from ``0027`` is
-``runtime``, so declaring it in config adopts it. (A runtime ``build_hosts.register`` of a name
-that already exists is rejected by the ``name`` UNIQUE constraint, regardless of ownership.)
+``runtime``, so declaring it in config adopts it. (A runtime ``build_hosts.register_ssh`` of a
+name that already exists is rejected by the ``name`` UNIQUE constraint, regardless of ownership.)
 
 Kind coverage: the v2 ``[[build_host]]`` model carries no ``address`` / ``ssh_credential_ref``,
 so only ``local`` and ``ephemeral_libvirt`` hosts (which need neither) are fully expressible in
 config. A config-declared ``ssh`` host cannot satisfy the ``build_hosts_fields_check`` CHECK, so
 it is **warned and skipped** rather than aborting the pass — ssh hosts are registered
-imperatively via ``build_hosts.register``, which carries those fields.
+imperatively via ``build_hosts.register_ssh``, which carries those fields.
 
 Prune is DB-guarded: ``build_host_leases`` FKs ``build_hosts(id) ON DELETE RESTRICT``, so a host
 with an in-flight build lease cannot be deleted. Prune therefore **cordons** a busy host

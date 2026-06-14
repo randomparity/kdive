@@ -49,7 +49,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "audit.query": ("tests/mcp/ops/test_audit_query.py",),
     "build_hosts.disable": ("tests/mcp/ops/test_build_hosts.py",),
     "build_hosts.list": ("tests/mcp/ops/test_build_hosts.py",),
-    "build_hosts.register": ("tests/mcp/ops/test_build_hosts.py",),
+    "build_hosts.register_ephemeral_libvirt": ("tests/mcp/ops/test_build_hosts.py",),
+    "build_hosts.register_ssh": ("tests/mcp/ops/test_build_hosts.py",),
     "build_hosts.remove": ("tests/mcp/ops/test_build_hosts.py",),
     "buildconfig.get": ("tests/mcp/catalog/test_build_configs_tool.py",),
     "control.force_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
@@ -258,6 +259,29 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "dhash_entries=1" in description
         assert "console=ttyS0" not in description
         assert "root=/dev/vda" not in description
+
+
+def test_build_host_register_tools_are_variant_specific() -> None:
+    tools = {t.name: t for t in TOOLS}
+
+    assert "build_hosts.register" not in tools
+
+    ssh_params = set(tools["build_hosts.register_ssh"].parameters["properties"])
+    assert ssh_params == {
+        "address",
+        "max_concurrent",
+        "name",
+        "ssh_credential_ref",
+        "workspace_root",
+    }
+
+    ephemeral_params = set(tools["build_hosts.register_ephemeral_libvirt"].parameters["properties"])
+    assert ephemeral_params == {
+        "base_image_volume",
+        "max_concurrent",
+        "name",
+        "workspace_root",
+    }
 
 
 def test_every_tool_has_a_valid_maturity() -> None:

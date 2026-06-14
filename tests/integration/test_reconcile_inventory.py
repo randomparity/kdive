@@ -1424,7 +1424,7 @@ def test_build_host_ssh_kind_warns_and_skips(migrated_url: str, tmp_path: Path) 
     # The v2 [[build_host]] model carries no address/ssh_credential_ref, so a config-declared
     # 'ssh' host cannot satisfy the build_hosts_fields_check (ssh requires both). Rather than
     # abort the pass on a CHECK violation, reconcile WARNS and skips it (ssh hosts are
-    # registered imperatively via build_hosts.register, which carries those fields).
+    # registered imperatively via build_hosts.register_ssh, which carries those fields).
     from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
 
     async def _run() -> None:

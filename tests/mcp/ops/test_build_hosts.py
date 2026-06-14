@@ -31,7 +31,10 @@ from kdive.mcp.tools.ops.build_hosts.manage import (
     list_build_hosts,
     remove_build_host,
 )
-from kdive.mcp.tools.ops.build_hosts.register import register_build_host
+from kdive.mcp.tools.ops.build_hosts.register import (
+    register_ephemeral_libvirt_build_host,
+    register_ssh_build_host,
+)
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 
@@ -131,7 +134,7 @@ async def _insert_lease(pool: AsyncConnectionPool, host_id: UUID) -> UUID:
 def test_non_admin_register_denied(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
+            resp = await register_ssh_build_host(
                 pool,
                 _non_admin_ctx(),
                 name="build-worker-1",
@@ -172,7 +175,7 @@ def test_platform_auditor_overreach_denied_and_audited(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _insert_host(pool, name="build-worker-1")
-            reg = await register_build_host(
+            reg = await register_ssh_build_host(
                 pool,
                 _auditor_ctx(),
                 name="new-host",
@@ -189,7 +192,7 @@ def test_platform_auditor_overreach_denied_and_audited(migrated_url: str) -> Non
         tools = sorted(str(r[2]) for r in rows)
         assert tools == [
             "build_hosts.disable",
-            "build_hosts.register",
+            "build_hosts.register_ssh",
             "build_hosts.remove",
         ]
         for principal, platform_role, _tool, scope, _digest in rows:
@@ -208,7 +211,7 @@ def test_platform_auditor_overreach_denied_and_audited(migrated_url: str) -> Non
 def test_register_creates_ssh_row_list_shows_ref_only(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
+            resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
                 name="build-worker-1",
@@ -244,7 +247,7 @@ def test_register_creates_ssh_row_list_shows_ref_only(migrated_url: str) -> None
 def test_register_audit_row_written_no_secret_bytes(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            await register_build_host(
+            await register_ssh_build_host(
                 pool,
                 _admin_ctx(principal="ops-admin"),
                 name="build-worker-2",
@@ -258,7 +261,7 @@ def test_register_audit_row_written_no_secret_bytes(migrated_url: str) -> None:
         principal, platform_role, tool, scope, digest = rows[0]
         assert principal == "ops-admin"
         assert platform_role == "platform_admin"
-        assert tool == "build_hosts.register"
+        assert tool == "build_hosts.register_ssh"
         # scope carries the host id
         assert "build_host:" in str(scope)
         # args are digested at the DB column level: a 64-char lowercase hex SHA-256,
@@ -280,7 +283,7 @@ def test_register_audit_row_written_no_secret_bytes(migrated_url: str) -> None:
 def test_register_duplicate_name_conflict(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            await register_build_host(
+            await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
                 name="dup-host",
@@ -289,7 +292,7 @@ def test_register_duplicate_name_conflict(migrated_url: str) -> None:
                 workspace_root="/build",
                 max_concurrent=1,
             )
-            resp = await register_build_host(
+            resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
                 name="dup-host",
@@ -307,7 +310,7 @@ def test_register_duplicate_name_conflict(migrated_url: str) -> None:
 def test_register_max_concurrent_zero_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
+            resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
                 name="bad-host",
@@ -325,7 +328,7 @@ def test_register_max_concurrent_zero_config_error(migrated_url: str) -> None:
 def test_register_max_concurrent_negative_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
+            resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
                 name="neg-host",
@@ -345,11 +348,10 @@ def test_register_max_concurrent_negative_config_error(migrated_url: str) -> Non
 def test_register_ephemeral_creates_row(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
+            resp = await register_ephemeral_libvirt_build_host(
                 pool,
                 _admin_ctx(),
                 name="builders",
-                kind="ephemeral_libvirt",
                 base_image_volume="kdive-build-base.qcow2",
                 workspace_root="/build",
                 max_concurrent=2,
@@ -367,51 +369,16 @@ def test_register_ephemeral_creates_row(migrated_url: str) -> None:
 def test_register_ephemeral_without_base_image_volume_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
+            resp = await register_ephemeral_libvirt_build_host(
                 pool,
                 _admin_ctx(),
                 name="bad-eph",
-                kind="ephemeral_libvirt",
+                base_image_volume="",
                 workspace_root="/build",
                 max_concurrent=2,
             )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert await _host_exists(migrated_url, "bad-eph") is False
-
-    asyncio.run(_run())
-
-
-def test_register_ephemeral_with_ssh_fields_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
-                pool,
-                _admin_ctx(),
-                name="bad-eph2",
-                kind="ephemeral_libvirt",
-                address="10.0.0.9",
-                base_image_volume="base.qcow2",
-                workspace_root="/build",
-                max_concurrent=2,
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-        assert await _host_exists(migrated_url, "bad-eph2") is False
-
-    asyncio.run(_run())
-
-
-def test_register_unknown_kind_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await register_build_host(
-                pool,
-                _admin_ctx(),
-                name="weird",
-                kind="cloud",
-                workspace_root="/build",
-                max_concurrent=2,
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
     asyncio.run(_run())
 
