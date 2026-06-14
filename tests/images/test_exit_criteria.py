@@ -1,7 +1,8 @@
 """The M2.4 milestone exit-criterion proof (issue #289; mirrors the M2.3 doctor proof).
 
-One focused test per spec exit criterion (``docs/superpowers/specs/2026-06-10-m24-image-rootfs-
-lifecycle-design.md`` §"Exit criteria"), each driven through the **real merged** code — the
+One focused test per spec exit criterion (the archived design spec
+``docs/archive/superpowers/specs/2026-06-10-m24-image-rootfs-lifecycle-design.md`` §"Exit
+criteria"), each driven through the **real merged** code — the
 real publish/upload services, the real reconciler sweeps, the real async catalog resolver — over
 the disposable-Postgres fixture. Only the leaf seams a CI host cannot run carry a fake: the
 object store (no MinIO) and the libguestfs guest-contract ``inspect`` probe (no guestfish),

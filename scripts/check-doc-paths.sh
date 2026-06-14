@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Fail when a concrete docs/<path> reference in justfile / scripts / *.yml / operational
+# Fail when a concrete docs/<path> reference in justfile / scripts / *.yml / *.py / operational
 # *.md points at a target that does not exist. Illustrative ellipses (docs/... and the
 # unicode docs/…) and angle-bracket placeholders (docs/<seg>) are excluded. Catches
-# non-markdown rot (e.g. justfile m2-report output, AGENTS.md code spans). NOT scanned:
+# non-markdown rot (e.g. justfile m2-report output, AGENTS.md code spans, a docstring that
+# cites a moved spec). NOT scanned:
 #   - docs/design/** — design specs narrate path moves (e.g. specs/ -> design/), so their
 #     docs/... mentions are intentional and must not be policed here;
 #   - docs/archive/** — frozen history references paths as they were when written;
@@ -12,6 +13,8 @@
 #     authored operational doc.
 #   - .claude/**, .agents/**, .codex/** — vendored agent-tooling config, not project docs;
 #     their example strings (e.g. docs/<overlay>.md) are illustrative, not real references.
+#   - the guard/gate machinery tests (test_check_doc_paths.py, test_m2_portability_gate.py) —
+#     they construct synthetic, intentionally-missing docs/ paths to exercise the checks.
 # The docs/ token is anchored on a left word boundary so substrings like mkdocs/ or
 # subdocs/ are not mistaken for a docs/ reference.
 # Generator constants built from slash-joined string literals are also out of scope
@@ -22,17 +25,21 @@ set -euo pipefail
 readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
+readonly EXCLUDE='^docs/(design|archive)/|^CHANGELOG\.md$|^\.(claude|agents|codex)/|^tests/scripts/test_check_doc_paths\.py$|^tests/scripts/test_m2_portability_gate\.py$'
+
 mapfile -t files < <(
-  { git ls-files 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' 2>/dev/null || true; } |
-    grep -vE '^docs/(design|archive)/|^CHANGELOG\.md$|^\.(claude|agents|codex)/'
+  { git ls-files 'justfile' 'scripts/*' '*.yml' '*.yaml' '*.md' '*.py' 2>/dev/null || true; } |
+    grep -vE "${EXCLUDE}"
 )
 if ((${#files[@]} == 0)); then
   mapfile -t files < <(
     find . -type f \( -name justfile -o -path './scripts/*' -o -name '*.yml' \
-      -o -name '*.yaml' -o -name '*.md' \) \
+      -o -name '*.yaml' -o -name '*.md' -o -name '*.py' \) \
       -not -path './docs/design/*' -not -path './docs/archive/*' \
       -not -path './CHANGELOG.md' \
       -not -path './.claude/*' -not -path './.agents/*' -not -path './.codex/*' \
+      -not -path './tests/scripts/test_check_doc_paths.py' \
+      -not -path './tests/scripts/test_m2_portability_gate.py' \
       -printf '%P\n'
   )
 fi
