@@ -115,6 +115,17 @@ def test_links_inside_code_fences_ignored(tmp_path: Path) -> None:
     (tmp_path / "a.md").write_text(f"{fence}\nsee [gone](does-not-exist.md)\n{fence}\n")
     result = _run(tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+def test_design_and_archive_not_link_checked(tmp_path: Path) -> None:
+    # Archived history is frozen (its links pointed at the old tree) and design specs are
+    # narrative; neither must fail the link gate.
+    (tmp_path / "docs" / "archive").mkdir(parents=True)
+    (tmp_path / "docs" / "design").mkdir(parents=True)
+    (tmp_path / "docs" / "archive" / "old.md").write_text("[x](../../adr/gone.md)\n")
+    (tmp_path / "docs" / "design" / "spec.md").write_text("[y](does-not-exist.md)\n")
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stderr
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -130,6 +141,9 @@ Expected: FAIL (script does not exist / non-zero from missing file).
 # Resolve relative markdown links in tracked *.md files against the filesystem.
 # Reports only; exits 1 if any relative link target is missing. External (scheme://,
 # mailto:) and pure-anchor (#...) links are ignored — only on-disk targets are checked.
+# NOT scanned: docs/archive/** (frozen history) and docs/design/** (narrative specs) —
+# same exemption as check-doc-paths.sh, so a restructure that re-nests archived docs does
+# not turn their now-stale links into gate failures we'd have to "fix" by editing history.
 # Usage: check-doc-links.sh [ROOT]   (ROOT defaults to the repo root / cwd)
 set -euo pipefail
 
@@ -137,10 +151,17 @@ readonly ROOT="${1:-.}"
 cd "${ROOT}"
 
 # Collect markdown files: tracked files when in a git tree, else every *.md under ROOT
-# (the test harness passes a non-git tmp dir).
-mapfile -t files < <(git ls-files '*.md' 2>/dev/null || true)
+# (the test harness passes a non-git tmp dir). NOT scanned: docs/archive/** (frozen
+# history — its links pointed at the tree as it was and must not be rewritten) and
+# docs/design/** (design specs narrate moves and may show illustrative links).
+mapfile -t files < <(
+  { git ls-files '*.md' 2>/dev/null || true; } | grep -vE '^docs/(design|archive)/'
+)
 if ((${#files[@]} == 0)); then
-  mapfile -t files < <(find . -type f -name '*.md' -printf '%P\n')
+  mapfile -t files < <(
+    find . -type f -name '*.md' \
+      -not -path './docs/design/*' -not -path './docs/archive/*' -printf '%P\n'
+  )
 fi
 
 broken=0
@@ -386,6 +407,12 @@ git mv docs/superpowers docs/archive/superpowers
 Run: `sed -i 's#(adr/#(../adr/#g' docs/development/releasing.md`
 Then verify no double-prefix: `grep -n 'adr/' docs/development/releasing.md` — every link should be `../adr/...` exactly once.
 
+- [ ] **Step 2b: Fix the moved runbooks' relative links (same depth shift + specs rename)**
+
+`docs/runbooks/` → `docs/operating/runbooks/` is one level deeper, so every up-link gains a `../`, and any `specs/` target is now `design/`. Inspect and rewrite:
+Run: `grep -rnE '\]\((\.\./)+(adr|specs|guide|plans|reports)/' docs/operating/runbooks/`
+For each hit, add one `../` (e.g. `../adr/` → `../../adr/`, `../specs/` → `../../design/`; `../guide/` → `../../guide/`). The `specs`→`design` rename applies on top of the depth shift. This pre-empts the breaks Step 6 would otherwise surface; treat Step 6 as verification, not discovery. (Archived docs are intentionally **not** fixed — `docs-links`/`docs-paths` exempt `docs/archive/**`.)
+
 - [ ] **Step 3: Update the three non-markdown / code-span references**
 
 - `scripts/m2_portability_gate.py:382`: change `docs/specs/m2-remote-libvirt.md` → `docs/design/m2-remote-libvirt.md`.
@@ -404,7 +431,8 @@ Expected: PASS (the generators write to `docs/guide/reference/`, which did not m
 - [ ] **Step 6: Run both new guards over the real tree**
 
 Run: `just docs-links && just docs-paths`
-Expected: PASS. If `docs-links` flags a moved intra-doc link, fix the link at the named source. If `docs-paths` flags a missed code-span/recipe ref, fix it. Re-run until both pass.
+Expected: PASS. Both guards exempt `docs/archive/**` and `docs/design/**`, so only **operational** docs and code/recipes are checked. If `docs-links` flags a link in an operational doc (e.g. a runbook missed by Step 2b), fix it at the named source — never edit `docs/archive/**`. If `docs-paths` flags a missed code-span/recipe ref, fix it. Re-run until both pass.
+Sanity-check the guards actually scanned something (a too-broad exemption could make "0 scanned" look green): `git ls-files '*.md' | grep -vE '^docs/(design|archive)/' | wc -l` should be well above zero.
 
 - [ ] **Step 7: Commit**
 

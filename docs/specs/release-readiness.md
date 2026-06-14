@@ -103,7 +103,10 @@ the `docs-paths` check, below).
 - Work the full move map above as a checklist — every relocated directory, not just `specs/`.
   Retarget `justfile:140` (`m2-report`) to the new reports location.
 - Add **two** CI guards (the failure modes split across two surfaces):
-  - `just docs-links` — markdown link-checker over tracked `*.md` (markdown cross-links only).
+  - `just docs-links` — markdown link-checker over tracked operational `*.md` (markdown
+    cross-links only), exempting `docs/design/**` and `docs/archive/**` like `docs-paths`
+    (so re-nesting archived docs in Phase 0 does not turn their stale links into gate
+    failures we'd have to fix by editing frozen history).
   - `just docs-paths` — path-existence check over **concrete** `docs/<path>` references in
     `justfile`, `scripts/`, `*.yml`, and operational `*.md` (anchored `docs/<segment>/…`
     patterns, excluding the illustrative `docs/…`/`docs/...`/`docs/<seg>` placeholders);

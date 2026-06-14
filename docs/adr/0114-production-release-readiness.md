@@ -78,9 +78,12 @@ by the path-existence check in decision 2.
 Add **two** guards, wired into `just ci` and `ci.yml`, because the failure modes split across
 two surfaces:
 
-1. `just docs-links` — a markdown link-checker over tracked `*.md`. Covers markdown
-   cross-links **only**; it does not resolve bare code-span paths (`` `docs/...` ``) or paths
-   embedded in non-markdown files.
+1. `just docs-links` — a markdown link-checker over tracked operational `*.md`. Covers
+   markdown cross-links **only**; it does not resolve bare code-span paths (`` `docs/...` ``)
+   or paths embedded in non-markdown files. Exempts `docs/design/**` and `docs/archive/**`
+   (same as `docs-paths`, below): archived history is frozen and its links pointed at the
+   tree as it was, so re-nesting it during the restructure must not turn stale archive links
+   into gate failures.
 2. `just docs-paths` — a path-existence check over **concrete** `docs/<path>` references in
    `justfile`, `scripts/`, `*.yml`, and operational `*.md`. It matches anchored
    `docs/<segment>/…` patterns and excludes the illustrative placeholders design docs use
