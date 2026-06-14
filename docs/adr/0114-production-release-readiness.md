@@ -81,15 +81,24 @@ two surfaces:
 1. `just docs-links` — a markdown link-checker over tracked `*.md`. Covers markdown
    cross-links **only**; it does not resolve bare code-span paths (`` `docs/...` ``) or paths
    embedded in non-markdown files.
-2. `just docs-paths` — a path-existence check that greps `justfile`, `scripts/`, `*.yml`,
-   and code-span paths in `*.md` for `docs/…` references and fails if the target no longer
-   exists. This is the guard that catches the rot vectors the Context section names
-   (`gen_*` `_REF_DIR`/`_OUT`, `m2-report` output, `m2_portability_gate.py`, `AGENTS.md`
-   code spans) — none of which a markdown link-checker can see.
+2. `just docs-paths` — a path-existence check over **concrete** `docs/<path>` references in
+   `justfile`, `scripts/`, `*.yml`, and `*.md` code spans. It matches anchored
+   `docs/<segment>/…` patterns and explicitly excludes the illustrative ellipses this doc
+   itself uses (`docs/…`, `docs/...`), then fails when a referenced target no longer exists.
+   It catches the **greppable** non-markdown rot vectors — `m2-report`'s output path
+   (`justfile:140`), `m2_portability_gate.py`'s `docs/specs/…` string, and `AGENTS.md` code
+   spans — which a markdown link-checker cannot see.
+
+The generators' own path constants are **not** greppable and are deliberately out of
+`docs-paths` scope: `gen_tool_reference.py` `_REF_DIR` and `gen_config_reference.py` `_OUT`
+assemble the path from slash-joined string literals (`… / "docs" / "guide" / "reference"`),
+so there is no `docs/…` substring to match. They are covered instead by the existing
+`just docs-check` / `config-docs-check` gates, which *run* the generators and diff their
+output — a moved or wrong constant fails those gates directly.
 
 Rationale: a one-time restructure without enforcement begins rotting immediately, and a
-markdown-only checker would leave the dominant coupling (decision-1 table, non-markdown
-column) unguarded.
+markdown-only checker would leave the greppable non-markdown coupling (decision-1 table,
+non-markdown column) unguarded.
 
 ### 3. Host provider readiness is delivered as standalone zero-state shell scripts
 
@@ -134,9 +143,10 @@ dependency tree (`uv export` + license scan) before the `LICENSE` lands. Add `LI
 ## Consequences
 
 - A newcomer can find the right doc by role; authoritative vs historical is unambiguous.
-- The restructure is a partly-code change (generators, recipes, three hardcoded refs); it
-  must land as one foundational phase before new docs are authored, or new content is written
-  into a tree that then moves.
+- The restructure is a partly-code change (the non-markdown refs enumerated in the decision-1
+  move map, including `justfile:140`'s `m2-report` output and the generator gates); it must
+  land as one foundational phase before new docs are authored, or new content is written into
+  a tree that then moves.
 - CI gains two gates — a markdown link-check and a `docs/…` path-existence check — so both
   markdown cross-links and non-markdown/code-span path references fail loudly when a target
   moves. (Anchor fragments and externally-hardcoded paths outside the checked set remain a
