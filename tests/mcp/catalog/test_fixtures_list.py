@@ -1,77 +1,97 @@
-"""``fixtures.list`` — provider-organized rootfs catalog read (#252, ADR-0089 §6).
+"""``fixtures.list`` — provider-organized rootfs catalog read (#252, ADR-0089 §6, ADR-0112).
 
-A plain authenticated read (no platform gate, no per-tool audit): the fixture catalog is
-the provider-organized rootfs inventory, not secret content. Coverage:
+A plain authenticated read (no platform gate, no per-tool audit): the fixture catalog is the
+provider-organized rootfs inventory, not secret content. The catalog now lives in the DB-backed
+``image_catalog`` (ADR-0112 removed the packaged ``seed_data`` YAML); this read reports the
+public catalog rows. Coverage:
 
-* it flattens each provider's rootfs entries into ``{provider, name, arch}`` rows;
+* it flattens each public catalog row into ``{provider, name, arch}``;
 * an empty catalog yields an empty list (no crash);
-* the real source-tree default catalog loads and surfaces its ``local-libvirt`` rootfs.
+* a private (owner-scoped) image is NOT surfaced — only the public baseline is.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.tools.catalog import fixtures
-from kdive.provider_components.catalog import (
-    FixtureCatalog,
-    FixtureManifest,
-    FixtureStorage,
-    RootfsCatalogEntry,
-)
-from kdive.provider_components.references import LocalComponentRef
 from tests.mcp.json_data import data_sequence, json_mapping
 
 
-def _entry(provider: str, name: str) -> RootfsCatalogEntry:
-    return RootfsCatalogEntry(
-        provider=provider,
-        name=name,
-        arch="x86_64",
-        format="qcow2",
-        root_device="/dev/vda",
-        source=LocalComponentRef(kind="local", path=f"/var/lib/kdive/rootfs/{name}.qcow2"),
-        visibility="public",
-        capabilities=["console"],
+@asynccontextmanager
+async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+    pool = AsyncConnectionPool(url, min_size=1, max_size=5, open=False)
+    await pool.open()
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
+async def _insert_image(
+    conn: AsyncConnection, *, provider: str, name: str, visibility: str, owner: str | None
+) -> None:
+    # A private image carries an expires_at (DB CHECK image_private_expiry); a public one does not.
+    expires_at = None if owner is None else "now() + interval '1 day'"
+    await conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, capabilities, provenance, "
+        " visibility, owner, expires_at, state, managed_by) "
+        f"VALUES (%s, %s, 'x86_64', 'qcow2', '/dev/vda', '{{}}', '{{}}', %s, %s, "
+        f"{'NULL' if expires_at is None else expires_at}, 'defined', %s)",
+        (provider, name, visibility, owner, "config" if owner is None else "runtime"),
     )
 
 
-def _catalog(*entries: RootfsCatalogEntry) -> FixtureCatalog:
-    manifest = FixtureManifest(
-        schema_version=1,
-        provider="local-libvirt",
-        storage=FixtureStorage(
-            allowed_component_roots=[],
-            cache_dir=Path("/tmp/cache"),
-            overlay_dir=Path("/tmp/overlays"),
-        ),
-    )
-    return FixtureCatalog(manifest=manifest, rootfs=list(entries), profiles=[])
+def test_lists_public_catalog_entries(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _insert_image(
+                    conn, provider="local-libvirt", name="base", visibility="public", owner=None
+                )
+                await _insert_image(
+                    conn, provider="local-libvirt", name="cloud", visibility="public", owner=None
+                )
+            resp = await fixtures.list_fixtures_tool(pool)
+        assert resp.status == "ok"
+        rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
+        names = {row["name"] for row in rows}
+        assert {"base", "cloud"} <= names
+        assert all(row["provider"] == "local-libvirt" for row in rows)
+
+    asyncio.run(_run())
 
 
-def test_lists_rootfs_catalog_entries(monkeypatch) -> None:
-    catalog = _catalog(_entry("local-libvirt", "base"), _entry("local-libvirt", "cloud"))
-    monkeypatch.setattr(fixtures, "load_fixture_catalog", lambda path=None: catalog)
-    resp = fixtures.list_fixtures_tool()
-    assert resp.status == "ok"
-    rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
-    names = {row["name"] for row in rows}
-    assert {"base", "cloud"} <= names
-    assert all(row["provider"] == "local-libvirt" for row in rows)
+def test_empty_catalog_yields_empty_list(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await fixtures.list_fixtures_tool(pool)
+        assert resp.status == "ok"
+        assert data_sequence(resp, "fixtures") == []
+
+    asyncio.run(_run())
 
 
-def test_empty_catalog_yields_empty_list(monkeypatch) -> None:
-    monkeypatch.setattr(fixtures, "load_fixture_catalog", lambda path=None: _catalog())
-    resp = fixtures.list_fixtures_tool()
-    assert resp.status == "ok"
-    assert data_sequence(resp, "fixtures") == []
+def test_private_image_is_not_surfaced(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _insert_image(
+                    conn, provider="local-libvirt", name="pub", visibility="public", owner=None
+                )
+                await _insert_image(
+                    conn, provider="local-libvirt", name="priv", visibility="private", owner="p1"
+                )
+            resp = await fixtures.list_fixtures_tool(pool)
+        rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
+        names = {row["name"] for row in rows}
+        assert "pub" in names
+        assert "priv" not in names, "a private image is never a baseline fixture"
 
-
-def test_real_baseline_catalog_loads_local_libvirt_rootfs() -> None:
-    # The tool reads the packaged seed_data baseline (ADR-0092 relocation); it still surfaces
-    # the local-libvirt baseline rootfs inventory.
-    resp = fixtures.list_fixtures_tool()
-    assert resp.status == "ok"
-    rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
-    local = [row for row in rows if row["provider"] == "local-libvirt"]
-    assert local, "packaged baseline catalog should expose local-libvirt rootfs entries"
+    asyncio.run(_run())

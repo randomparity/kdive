@@ -1,51 +1,120 @@
-# kdive live-test systems descriptor (EXAMPLE).
+# kdive systems inventory descriptor (EXAMPLE) — schema v2 (ADR-0112).
 #
-# Copy to `systems.toml` (repo root, GITIGNORED) and fill in the values for your environment.
-# One source of truth for the per-deployment facts the live MCP coverage-campaign rerun
-# otherwise re-derives by hand each run (remote host FQDN/IP, k8s namespace + forward ports,
-# the workstation LAN IP remote guests must reach, TLS secret refs).
+# Copy to `systems.toml` (repo root, GITIGNORED) and fill in your environment. This is the single
+# declarative source of truth for the inventory the app loads into the database:
 #
-# Consumed by scripts/coverage_campaign/systems.py:
-#   uv run python -m scripts.coverage_campaign.systems render-env      -> the d1.env workstation env
-#   uv run python -m scripts.coverage_campaign.systems setup-commands  -> remote iptables ACL + k8s port-forwards
+#   * `[[image]]`           -> reconciled into `image_catalog` (replaces the former in-code
+#                             `images/seed_data/*.yaml` + `admin/default_fixtures.py` rootfs YAML
+#                             and the `REMOTE_BASE_IMAGE_NAME` literal — all removed in Phase 1).
+#   * `[[remote_libvirt]]` / `[[local_libvirt]]` / `[[fault_inject]]` / `[[build_host]]`
+#                           -> reconciled into `resources` / `build_hosts` (Phases 2-3).
 #
-# See docs/runbooks/mcp-coverage-campaign-rerun.md and
-# docs/reports/provider-configuration-requirements.md.
+# Load it with `kdive reconcile-systems` (or the deploy `migrate` step, or the reconciler loop).
+# Path is `KDIVE_SYSTEMS_TOML` (default `./systems.toml`; in k8s a mounted ConfigMap).
+# Operational/secret config stays in the `KDIVE_*` env registry (ADR-0087) — this file holds
+# secret *refs* (filenames the SecretRegistry resolves), never secret material.
+#
+# NOTE: the coverage-campaign tooling (`scripts/coverage_campaign/systems.py`,
+# `render-env`/`setup-commands`) reads the pre-v2 descriptor format. Its migration to this v2
+# schema is Phase 3 (#394); until then run the campaign against its own pre-v2 descriptor.
 
-schema_version = 1
+schema_version = 2
 
-[workstation]              # D1 — control plane: Docker app-tier + local-libvirt provider
-lan_ip = "<workstation-lan-ip>"                  # reachable FROM remote guests (F8)
-s3_endpoint_url = "http://<workstation-lan-ip>:9000"
-secrets_root = "$HOME/.kdive-secrets"            # use $HOME, not ~ (tilde does not expand in quotes)
-fault_inject = true
-mcp_base_url = "http://127.0.0.1:8000/mcp"
-build_workspace = "<repo>/.live-build"           # absolute (zsh-source guard)
-build_component_roots = "<repo>/fixtures/local-libvirt:<repo>/.live-components"
+# ---------------------------------------------------------------------------------------------
+# IMAGES — reconciled into image_catalog. `source` is exactly one of s3 | build | staged.
+# ---------------------------------------------------------------------------------------------
 
-[remote_libvirt]           # ub24-big — qemu+tls libvirt host
-host_fqdn = "<remote-host-fqdn>"
-host_ip = "<remote-host-ip>"
-ssh_target = "<user>@<remote-host-fqdn>"          # the login user + FQDN, e.g. dave@host.example
-libvirt_uri = "qemu+tls://<remote-host-fqdn>/system"
-tls_port = 16514
-gdbstub_range = "47000:47099"
-gdb_addr = "<remote-host-ip>"
-base_image_volume = "fedora-kdive-remote-base-43.qcow2"
-client_cert_ref = "remote-clientcert.pem"
-client_key_ref = "remote-clientkey.pem"           # pragma: allowlist secret - filename ref
-ca_cert_ref = "remote-ca.pem"
-acl_source_ip = "<workstation-lan-ip>"            # host ACL for off-design workstation drive
+# The kdive-ready local baseline rootfs (the former seed_data baseline). Declared `s3`; it
+# reaches `registered` once its object is published and a `digest` is supplied — until then it
+# stays `defined` (the same pre-build state the old YAML seed produced).
+[[image]]
+provider = "local-libvirt"
+name = "fedora-kdive-ready-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
+# digest = "sha256:…"   # uncomment once published to mark the row `registered`
 
-[k8s]                      # D2 — kdive deployed via the chart
-context = "<kube-context>"
-namespace = "<namespace>"
-helm_release = "kdive"
-fault_inject = true
-oidc_forward = "svc/kdive-kdive-oidc"
-oidc_service_port = 8080
-oidc_local_port = 8080
-server_forward = "svc/kdive-kdive-server"
-server_service_port = 8000
-server_local_port = 18000
-in_cluster_issuer = "http://kdive-kdive-oidc:8080/default"
+[[image]]
+provider = "local-libvirt"
+name = "fedora-cloud-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["cloud-init", "ssh"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/fedora-cloud-43.qcow2"
+
+[[image]]
+provider = "local-libvirt"
+name = "busybox-bare"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["console", "busybox"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/busybox-bare.qcow2"
+
+# The remote-libvirt provisioning base image (the former REMOTE_BASE_IMAGE_NAME literal). It is
+# an operator-staged libvirt volume, so it is `staged` (no S3 object) and registers immediately.
+[[image]]
+provider = "remote-libvirt"
+name = "fedora-kdive-remote-base-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "fedora-kdive-remote-base-43.qcow2"
+
+# ---------------------------------------------------------------------------------------------
+# PROVIDER INSTANCES — reconciled into resources (Phase 2-3; shown here for reference).
+# ---------------------------------------------------------------------------------------------
+
+# [[remote_libvirt]]
+# name = "ub24-big"
+# uri = "qemu+tls://ub24-big.example/system"
+# gdb_addr = "192.168.10.20"
+# gdbstub_range = "47000:47099"
+# client_cert_ref = "remote-clientcert.pem"
+# client_key_ref = "remote-clientkey.pem"   # pragma: allowlist secret - filename ref
+# ca_cert_ref = "remote-ca.pem"
+# base_image = "fedora-kdive-remote-base-43"   # -> an [[image]] name
+# cost_class = "remote"
+# concurrent_allocation_cap = 1
+# shapes = ["small", "medium", "large", "max"]
+
+# [[local_libvirt]]
+# name = "workstation"
+# host_uri = "qemu:///system"
+# cost_class = "local"
+# concurrent_allocation_cap = 1
+
+# [[fault_inject]]
+# name = "synthetic-1"
+# cost_class = "local"
+# concurrent_allocation_cap = 1
+# vcpus = 8
+# memory_mb = 8192
+# seed = 1337
+
+# ---------------------------------------------------------------------------------------------
+# BUILD HOSTS — reconciled into build_hosts (Phase 3; shown here for reference).
+# ---------------------------------------------------------------------------------------------
+
+# [[build_host]]
+# name = "ub24-big-ephemeral"
+# kind = "ephemeral-libvirt"
+# base_image_volume = "fedora-kdive-remote-base-43.qcow2"
+# workspace_root = "/var/lib/kdive/build"
+# max_concurrent = 2

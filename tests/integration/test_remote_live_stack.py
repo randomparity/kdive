@@ -32,7 +32,6 @@ import time
 import pytest
 
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.remote_libvirt.rootfs_build import REMOTE_BASE_IMAGE_NAME
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import LiveStackClient, OidcIssuer
 from tests.integration.live_stack.spine import (
@@ -58,6 +57,10 @@ from tests.mcp.json_data import data_mapping, data_str
 _REMOTE_URI_ENV = "KDIVE_REMOTE_LIBVIRT_URI"
 # Test/runbook input feeding the provision profile's base_image_volume — NOT provider config.
 _BASE_IMAGE_ENV = "KDIVE_REMOTE_BASE_IMAGE_VOLUME"
+# The remote base-image name is operator inventory (a `staged` [[image]] in systems.toml,
+# ADR-0112), no longer a code constant. The spine default falls back to this representative name
+# when the operator has not staged an explicit volume via _BASE_IMAGE_ENV.
+_REMOTE_BASE_IMAGE_NAME = "fedora-kdive-remote-base-43"
 _KERNEL_TREE_ENV = "KDIVE_KERNEL_SRC"
 _DATABASE_URL_ENV = "KDIVE_DATABASE_URL"
 _PROJECT = "remote-spine-proj"
@@ -97,7 +100,7 @@ def _remote_provision_profile() -> dict[str, object]:
         "provider": {
             "remote-libvirt": {
                 "base_image_volume": os.environ.get(
-                    _BASE_IMAGE_ENV, f"{REMOTE_BASE_IMAGE_NAME}.qcow2"
+                    _BASE_IMAGE_ENV, f"{_REMOTE_BASE_IMAGE_NAME}.qcow2"
                 ),
                 "crashkernel": "256M",
                 "destructive_ops": ["force_crash"],
@@ -175,7 +178,7 @@ def test_remote_provision_default_references_the_built_image_not_a_placeholder(
     profile = ProvisioningProfile.parse(_remote_provision_profile())
     default_volume = profile.provider.remote_libvirt.base_image_volume
     assert default_volume != "kdive-base.qcow2", "the placeholder volume literal is removed"
-    assert REMOTE_BASE_IMAGE_NAME in default_volume
+    assert _REMOTE_BASE_IMAGE_NAME in default_volume
 
 
 def test_remote_preflight_skips_without_config(monkeypatch: pytest.MonkeyPatch) -> None:

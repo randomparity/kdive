@@ -42,11 +42,11 @@ from kdive.images.planes._build_common import (
 )
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 
-# The kdive-published remote provisioning base image's catalog name (ADR-0092). The remote
-# provisioning profile's `base_image_volume` derives the operator-staged volume name from it
-# (e.g. `<name>.qcow2`), replacing the ad-hoc placeholder literal the ADR-0080 plane shipped.
-# The image's verifiable identity is its qcow2 content digest, not this name.
-REMOTE_BASE_IMAGE_NAME = "fedora-kdive-remote-base-43"
+# The remote provisioning base image's catalog name is no longer a code literal (ADR-0112): it is
+# a `staged` `[[image]]` entry in `systems.toml`, reconciled into `image_catalog`. The provider
+# resolves the operator-staged volume from the provisioning profile's `base_image_volume`, which
+# the operator derives from the configured image name (e.g. `<name>.qcow2`). The image's
+# verifiable identity is its qcow2 content digest, not this name.
 
 # The guest-agent package is the remote access seam (ADR-0078/0079); the plane always installs
 # and enables it regardless of the spec's package set, so the built image satisfies the contract.
@@ -177,7 +177,6 @@ def _provenance(spec: RootfsBuildSpec, *, size: str) -> dict[str, object]:
 
 
 __all__ = [
-    "REMOTE_BASE_IMAGE_NAME",
     "RemoteLibvirtRootfsBuildPlane",
     "RemoteRootfsBuildTools",
 ]

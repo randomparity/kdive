@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.admin.default_fixtures import LOCAL_LIBVIRT_FIXTURES
-from kdive.config.core_settings import DATABASE_URL
+from kdive.config.core_settings import DATABASE_URL, SYSTEMS_TOML
 from kdive.db.migrate import apply_migrations
 
 
@@ -47,8 +47,8 @@ def migrate(database_url: str | None = None) -> int:
     finally:
         conn.close()
     print(f"applied {len(applied)} migration(s)")
-    seeded = _seed_baseline_rootfs(url)
-    print(f"seeded {seeded} baseline rootfs image(s)")
+    reconciled = _reconcile_inventory_images(url)
+    print(f"reconciled {reconciled} inventory image(s) from systems.toml")
     seeded_configs = _seed_build_configs_step(url)
     print(f"seeded {seeded_configs} build-config fragment(s)")
     return len(applied)
@@ -90,21 +90,77 @@ def _seed_build_configs_step(database_url: str) -> int:
     return asyncio.run(_run())
 
 
-def _seed_baseline_rootfs(database_url: str) -> int:
-    """Register the baseline rootfs as `defined` catalog rows after migrating (ADR-0092).
+def _reconcile_inventory_images(database_url: str) -> int:
+    """Reconcile ``systems.toml`` ``[[image]]`` entries into ``image_catalog`` (ADR-0112).
 
-    Runs as the deploy ``migrate → seed`` step so a fresh install lists the baseline before any
-    image is built. Idempotent and read-only against operator data.
+    Replaces the former packaged-YAML baseline seed: image definitions now live only in
+    ``systems.toml`` (loaded into ``image_catalog`` by :func:`reconcile_images`), not in code.
+    Runs as the deploy ``migrate → reconcile`` step so a fresh install lists the declared
+    baseline before any image is built. Idempotent (change-detecting upserts).
+
+    The path is ``KDIVE_SYSTEMS_TOML`` (default ``./systems.toml``). An **absent** file is the
+    normal pre-config state (the file is gitignored) and is a quiet no-op — feeding an empty
+    document to ``reconcile_images`` would prune every config row, so the load uses
+    :func:`load_inventory_optional` and short-circuits on ``None``. A present-but-malformed file
+    raises :class:`~kdive.inventory.InventoryError` (a real operator error the deploy surfaces).
+
+    The object store is used only to HEAD ``s3`` image objects for existence. When S3 is wholly
+    unconfigured (e.g. a schema-only test or a partial bring-up), a no-op store is used so every
+    ``s3`` image stays ``defined`` and the reconcile still succeeds — mirroring the no-S3
+    tolerance of :func:`_seed_build_configs_step` and :func:`reconcile_images`'s own degradation.
+
+    Args:
+        database_url: A psycopg-compatible connection string for the application database.
+
+    Returns:
+        The number of catalog rows created/updated/pruned/cordoned (0 when no file is present).
     """
     import asyncio
+    from pathlib import Path
 
-    from kdive.images.seed import seed_defined_rootfs
+    from kdive.inventory import load_inventory_optional
+    from kdive.inventory.reconcile_images import reconcile_images
+
+    raw_path = config.get(SYSTEMS_TOML) or "./systems.toml"
+    doc = load_inventory_optional(Path(raw_path))
+    if doc is None:
+        print("skipped inventory reconcile: no systems.toml present")
+        return 0
+    store = _reconcile_image_store()
 
     async def _run() -> int:
         async with await psycopg.AsyncConnection.connect(database_url, autocommit=True) as conn:
-            return await seed_defined_rootfs(conn)
+            diff = await reconcile_images(conn, doc, store)
+            return len(diff.created) + len(diff.updated) + len(diff.pruned) + len(diff.cordoned)
 
     return asyncio.run(_run())
+
+
+def _reconcile_image_store() -> Any:
+    """The object store for the migrate-time image reconcile, degrading when S3 is unconfigured.
+
+    Returns the real :class:`~kdive.store.objectstore.ObjectStore` when ``KDIVE_S3_*`` is set,
+    else a no-op store whose ``head_present`` always reports absent so every ``s3`` image stays
+    ``defined`` (matching the former no-S3 seed behaviour). Only a configured-but-erroring store
+    is a hard failure (``reconcile_images`` raises it).
+    """
+    from kdive.domain.errors import CategorizedError, ErrorCategory
+    from kdive.store.objectstore import object_store_from_env
+
+    try:
+        return object_store_from_env()
+    except CategorizedError as exc:
+        if exc.category is not ErrorCategory.CONFIGURATION_ERROR:
+            raise
+        return _NoS3HeadStore()
+
+
+class _NoS3HeadStore:
+    """A store stub that reports every object absent (used when S3 is unconfigured)."""
+
+    def head_present(self, key: str) -> bool:
+        del key
+        return False
 
 
 def seed_project_statements(
