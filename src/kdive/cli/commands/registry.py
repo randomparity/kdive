@@ -30,8 +30,9 @@ class Verb:
     ``read_only`` distinguishes the curated read verbs (default ``True``) from the
     break-glass mutating verbs (``False``), whose ``tool`` is intentionally a
     ``destructive()``-annotated server tool. The gate test only holds read-only verbs to
-    the read-only hint; the mutating verbs are reachable only through their curated handler,
-    never the read-only passthrough.
+    the read-only hint; the mutating verbs are never reachable through the *read-only* default
+    of the ``tool call`` passthrough (a destructive tool needs an explicit ``--allow-destructive``
+    opt-in there — ADR-0105).
 
     ``required_options`` are ``--`` options the underlying tool declares as required
     arguments (no server-side default); the CLI marks them ``required=True`` so an omission
