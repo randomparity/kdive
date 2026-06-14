@@ -5,11 +5,11 @@ project-private uploads, the half-published-state reconciliation the platform ru
 and the one capability CI cannot prove — a local-libvirt rootfs built through the in-process
 Python build plane on a real host.
 
-See [ADR-0092](../adr/0092-image-rootfs-lifecycle.md) (the `image_catalog` table, row-first
+See [ADR-0092](../../adr/0092-image-rootfs-lifecycle.md) (the `image_catalog` table, row-first
 publish, the `RootfsBuildPlane` port) and
-[ADR-0093](../adr/0093-private-image-uploads.md) (project-private uploads, quota, reference-guard,
+[ADR-0093](../../adr/0093-private-image-uploads.md) (project-private uploads, quota, reference-guard,
 extend-fence). The design spec is
-`docs/superpowers/specs/2026-06-10-m24-image-rootfs-lifecycle-design.md`; its "Exit criteria"
+`docs/archive/superpowers/specs/2026-06-10-m24-image-rootfs-lifecycle-design.md`; its "Exit criteria"
 section is the source of truth this runbook tracks.
 
 ## What CI already proves (and what it cannot)
@@ -43,35 +43,64 @@ author builds a kdive-ready rootfs through the in-process plane and records that
 
 ### 1. Build the image
 
-`build-rootfs` drives `LocalLibvirtRootfsBuildPlane` directly (the Python successor to the deleted
-bash rootfs builder): it customizes a Fedora base (sshd + the kdive-managed authorized key + the
+`build-fs` drives `LocalLibvirtRootfsBuildPlane` directly (the Python successor to the deleted
+bash rootfs builder): it customizes a base image (sshd + the kdive-managed authorized key + the
 `kdive-ready` serial-readiness unit + the guest packages), repacks to a no-partition-table
 whole-disk ext4 qcow2, normalizes fstab/crypttab/guest-SELinux, and records the pinned inputs as
 provenance. On success it prints exactly one line to **stdout** — the `KDIVE_GUEST_IMAGE` wiring
 for the live spine — while the human summary (the destination path and the `sha256:` content
 digest) goes to **stderr** (the logger). That split makes the command's stdout `eval`-safe.
 
+Flags that shape the build:
+
+- `--kind {debug,build}` (default `debug`) selects the image's role:
+  - `debug` — the guest crash/introspection rootfs (`drgn`, `kexec-tools`, `makedumpfile`;
+    capabilities `agent,kdump,drgn`). This is the `KDIVE_GUEST_IMAGE` the live spine boots.
+  - `build` — a kernel-build-host toolchain image (`gcc`, `make`, `bc`, `bison`, `flex`,
+    `openssl-devel`, `elfutils-libelf-devel`, `ncurses-devel`, `dwarves`, `rsync`, `git`;
+    capabilities `agent,build`). Use it as the base for an ssh/ephemeral-libvirt build target.
+- `--distro fedora` (default `fedora`) is the extensibility seam for the base OS; only `fedora`
+  is implemented today (it resolves to the `virt-builder` `fedora-<releasever>` template). Any
+  other value fails with a clear not-implemented message.
+- `--workspace DIR` (default `/var/lib/kdive/build/images`) is where the build stages and
+  publishes the qcow2. Point it at a **user-writable** path to build first-run without a
+  privileged `mkdir` of the root-owned default. A missing/un-writable workspace fails with an
+  actionable message (the directory and a suggested `install -d` command), not a traceback.
+
 ```bash
-python -m kdive build-rootfs \
+python -m kdive build-fs \
+  --kind debug \
+  --workspace ~/.local/share/kdive/build/images \
   --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2 \
   --name fedora-kdive-ready-43 \
   --releasever 43 \
   --package drgn --package kexec-tools --package makedumpfile
 ```
 
+Build a build-host toolchain image instead:
+
+```bash
+python -m kdive build-fs \
+  --kind build \
+  --workspace ~/.local/share/kdive/build/images \
+  --dest /var/lib/kdive/rootfs/local/fedora-build-host-43.qcow2 \
+  --name fedora-build-host-43 --releasever 43
+```
+
 To build and export `KDIVE_GUEST_IMAGE` in one step, capture stdout with `eval` (the stderr
 summary still prints to your terminal):
 
 ```bash
-eval "$(python -m kdive build-rootfs \
+eval "$(python -m kdive build-fs \
+  --workspace ~/.local/share/kdive/build/images \
   --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2 \
   --name fedora-kdive-ready-43 --releasever 43)"
 # KDIVE_GUEST_IMAGE is now exported, pointing at the --dest path above
 ```
 
 Record the printed `sha256:` digest — it is the image identity (a rootfs image has no kernel
-`build_id`). For the default root-owned destination an OS admin pre-creates the output directory
-once and makes it writable by the build user; the per-build write and the final `chmod 0644` are
+`build_id`). For the default root-owned `--dest` an OS admin pre-creates the output directory once
+and makes it writable by the build user; the per-build write and the final `chmod 0644` are
 unprivileged. Under SELinux the output file also needs the `virt_image_t` label so the `qemu` user
 can read it under `qemu:///system` (a host-side file label, independent of the guest-internal
 SELinux the plane disables).
@@ -82,7 +111,7 @@ Point the live-stack suite's fixtures at the built image and the kernel tree, th
 the booting `live_stack` tests provision a System on `local-libvirt` from this rootfs, so a
 successful spine run is the evidence the plane-built image boots and is debuggable. If you used
 the `eval` form above, `KDIVE_GUEST_IMAGE` is already exported; otherwise set it by hand — this is
-exactly the line `build-rootfs` prints on stdout:
+exactly the line `build-fs` prints on stdout:
 
 ```bash
 export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2

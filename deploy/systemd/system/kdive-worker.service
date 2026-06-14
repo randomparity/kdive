@@ -1,0 +1,24 @@
+[Unit]
+Description=KDIVE worker
+Documentation=https://github.com/randomparity/kdive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kdive
+Group=kdive
+EnvironmentFile=/etc/kdive/kdive.env
+ExecStart=/opt/kdive/.venv/bin/python -m kdive worker
+Restart=on-failure
+RestartSec=5
+# Backends (Postgres/MinIO/OIDC) are external and not systemd-ordered here; the unit
+# retries until they are reachable rather than failing terminally (ADR-0114 §4).
+# Sandboxing exemption: unlike the server/reconciler, the worker is intentionally NOT
+# sandboxed. It runs the build/install/capture planes — libguestfs + qemu (needs /dev/kvm
+# and a writable /tmp), make/rsync over the kernel source tree, and kexec/kdump tooling —
+# which the ProtectSystem/PrivateTmp/NoNewPrivileges directives would break. Harden the
+# host it runs on instead.
+
+[Install]
+WantedBy=multi-user.target

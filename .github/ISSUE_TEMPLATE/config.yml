@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/randomparity/kdive/security/policy
+    about: >
+      Do not file security issues publicly. Report them privately through the
+      Security tab (see the security policy).
+  - name: Questions and discussion
+    url: https://github.com/randomparity/kdive/discussions
+    about: Ask usage questions or discuss ideas before opening an issue.

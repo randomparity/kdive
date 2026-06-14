@@ -161,7 +161,7 @@ by removing passt so libguestfs falls back to qemu slirp, but `(c)` is required 
 ## 5. Build the operator-staged base image
 
 The remote provider reaches the guest over **qemu-guest-agent** and boots a **bootable disk
-image** (ADR-0078/0079/0080) — this is **not** the `python -m kdive build-rootfs` local-libvirt
+image** (ADR-0078/0079/0080) — this is **not** the `python -m kdive build-fs` local-libvirt
 artifact (which is a serial-readiness, whole-disk-ext4 image for direct-kernel boot). Build the
 remote base image with the `RemoteLibvirtRootfsBuildPlane` recipe; the volume name must be
 `fedora-kdive-remote-base-43.qcow2` (the provisioning profile derives it from
@@ -206,7 +206,7 @@ into the base image. **For each helper you must `chown root:root` + `restorecon`
 `chmod`** — `--copy-in` preserves the workstation uid/gid and a generic SELinux type, so on an
 SELinux-enforcing guest `guest-exec` later fails with a misleading `No such file or directory`
 (ENOENT, not EACCES). See
-[`docs/solutions/2026-06-13-virt-customize-copyin-selinux-guest-exec-enoent.md`](../solutions/2026-06-13-virt-customize-copyin-selinux-guest-exec-enoent.md).
+[`docs/archive/solutions/2026-06-13-virt-customize-copyin-selinux-guest-exec-enoent.md`](../../archive/solutions/2026-06-13-virt-customize-copyin-selinux-guest-exec-enoent.md).
 
 ```bash
 HELPERS="kdive-install-kernel kdive-capture-vmcore kdive-drgn"
@@ -222,7 +222,7 @@ virt-customize -a /var/lib/libvirt/images/fedora-kdive-remote-base-43.qcow2 "${a
 
 The canonical install recipe, the exact argv/JSON contract each helper satisfies, and the
 package prerequisites live in
-[`deploy/remote-libvirt-guest-helpers/README.md`](../../deploy/remote-libvirt-guest-helpers/README.md).
+[`deploy/remote-libvirt-guest-helpers/README.md`](../../../deploy/remote-libvirt-guest-helpers/README.md).
 
 ## 6. gdbstub-port ACL
 

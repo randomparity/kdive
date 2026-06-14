@@ -15,6 +15,14 @@ setup: check-deps sync install-hooks
 check-deps:
     ./scripts/check-setup-deps.sh
 
+# Preflight: can this host run the local-libvirt provider? (report-only)
+check-local-libvirt:
+    ./scripts/check-local-libvirt.sh
+
+# Preflight: can the remote-libvirt provider reach a target host? (report-only)
+check-remote-libvirt host user="root" uri="":
+    ./scripts/check-remote-libvirt.sh {{host}} {{user}} {{uri}}
+
 # Create the venv and install pinned dependencies from the lockfile.
 sync:
     uv sync --locked
@@ -68,7 +76,7 @@ stack-up:
     @echo "Start the app tier with: docker compose up -d migrate server worker reconciler"
     @echo "(or, for a source checkout of the local-libvirt host path: just stack-start)"
     @echo "MCP URL: http://127.0.0.1:8000/mcp"
-    @echo "Full runbook: docs/runbooks/live-stack.md"
+    @echo "Full runbook: docs/operating/runbooks/live-stack.md"
 
 stack-start:
     ./scripts/live-stack/start.sh
@@ -130,6 +138,14 @@ lint-workflows:
 check-mermaid:
     git ls-files -z '*.md' | xargs -0 -r node .github/scripts/mermaid-check/mermaid-check.mjs
 
+# Resolve relative markdown links in tracked *.md against the filesystem.
+docs-links:
+    ./scripts/check-doc-links.sh
+
+# Fail when a concrete docs/<path> reference in code/recipes/markdown is missing.
+docs-paths:
+    ./scripts/check-doc-paths.sh
+
 # M2 portability gate: cumulative core-touch measurement vs the pre-M2 tag (ADR-0076).
 # Stdlib-only (plain python3, no uv sync); needs the pre-M2 tag fetched.
 m2-gate:
@@ -137,7 +153,7 @@ m2-gate:
 
 # Regenerate the committed milestone-end M2 portability report (ADR-0076).
 m2-report:
-    python3 scripts/m2_portability_gate.py --report > docs/reports/m2-portability.md
+    python3 scripts/m2_portability_gate.py --report > docs/archive/reports/m2-portability.md
 
 # Audit runtime dependencies for known vulnerabilities.
 audit:
@@ -180,7 +196,7 @@ release VERSION:
     git tag -a "v{{VERSION}}" -m "Release v{{VERSION}}"
     git push origin "v{{VERSION}}"
     echo "Pushed tag v{{VERSION}}. NEXT: open a 'chore(release): begin <next>-dev' PR"
-    echo "(just set-version <next>; just changelog) — see docs/RELEASING.md."
+    echo "(just set-version <next>; just changelog) — see docs/development/releasing.md."
 
 # Regenerate the agent-facing tool reference from the live registry (mutating).
 docs:
@@ -220,6 +236,10 @@ config-docs-check:
 config-guard:
     uv run python scripts/config_env_guard.py
 
+# Coverage guard: every KDIVE_* token is documented (registry or external_env.py). Stdlib-only.
+env-docs-check:
+    uv run python scripts/check_env_documented.py
+
 # Assert the Helm chart's appVersion tracks the pyproject version (spec A3). A drift
 # would let a cut release point the chart's default image tag at a tag that was never
 # published. Run in CI and `just ci`.
@@ -236,4 +256,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-check config-docs-check config-guard chart-version-check test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-links docs-paths docs-check config-docs-check config-guard env-docs-check chart-version-check test

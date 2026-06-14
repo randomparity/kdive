@@ -35,6 +35,9 @@ class RootfsBuildSpec:
         source_image_digest: A digest pinning the base/template image the build customizes.
         capabilities: The guest-contract tags the image is expected to satisfy (agent, kdump,
             drgn, allowlisted helpers).
+        distro: The base-OS family the image is built from (the extensibility seam; only
+            ``"fedora"`` is implemented). Resolved to a ``virt-builder`` template by
+            :func:`kdive.images.distros.resolve_base_template`.
     """
 
     provider: str
@@ -44,6 +47,7 @@ class RootfsBuildSpec:
     packages: tuple[str, ...]
     source_image_digest: str
     capabilities: tuple[str, ...]
+    distro: str = "fedora"
 
 
 @dataclass(frozen=True, slots=True)

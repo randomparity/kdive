@@ -22,8 +22,9 @@ is the real ``doctor`` mapping (``fail``→1, ``error``-with-no-``fail``→6, al
 CI tier (this file): the three read checks plus the egress check are seeded with fakes through
 the real chain — runnable in normal CI against the disposable-Postgres fixture (the egress
 marker registry is DB-backed). The real-guest egress proof against a remote stack is the
-operator-run band-gate evidence recorded in ``docs/runbooks/doctor-exit-criterion.md``; it is
-deliberately NOT a CI check (no managed remote probe image exists until M2.4).
+operator-run band-gate evidence recorded in
+``docs/operating/runbooks/doctor-exit-criterion.md``; it is deliberately NOT a CI check
+(no managed remote probe image exists until M2.4).
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 - **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-05
 - **Deciders:** David Christensen
-- **Spec:** [`../superpowers/specs/2026-06-05-agent-facing-tool-guide-design.md`](../superpowers/specs/2026-06-05-agent-facing-tool-guide-design.md)
+- **Spec:** [`../superpowers/specs/2026-06-05-agent-facing-tool-guide-design.md`](../archive/superpowers/specs/2026-06-05-agent-facing-tool-guide-design.md)
 - **Builds on:** [ADR-0010](0010-fastmcp-framework-auth.md) (FastMCP is the tool framework),
   [ADR-0019](0019-tool-response-envelope.md) (the `ToolResponse` envelope the reference
   documents), [ADR-0020](0020-rbac-audit-gate-implementation.md)/[ADR-0028](0028-control-plane-power-force-crash.md)

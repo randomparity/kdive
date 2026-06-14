@@ -35,7 +35,7 @@ def _spec(**overrides: object) -> RootfsBuildSpec:
         "capabilities": ("agent", "kdump", "drgn"),
     }
     base.update(overrides)
-    return RootfsBuildSpec(**base)  # type: ignore[arg-type]
+    return RootfsBuildSpec(**base)  # ty: ignore[invalid-argument-type]
 
 
 @dataclass
@@ -54,6 +54,7 @@ class _RecordingTools:
     def virt_builder(
         self,
         *,
+        distro: str,
         releasever: str,
         packages: tuple[str, ...],
         authorized_key: Path,
@@ -63,6 +64,7 @@ class _RecordingTools:
         scratch.write_bytes(b"scratch")
         self.builder_calls.append(
             {
+                "distro": distro,
                 "releasever": releasever,
                 "packages": packages,
                 "authorized_key": authorized_key,
@@ -110,6 +112,7 @@ def test_build_records_pinned_provenance(tmp_path: Path) -> None:
     out = _plane(tmp_path, tools).build(_spec(releasever="42", packages=("openssh-server",)))
 
     prov = out.provenance
+    assert prov["distro"] == "fedora"
     assert prov["releasever"] == "42"
     assert prov["packages"] == ["openssh-server"]
     assert prov["source_image_digest"] == "sha256:fedora-43-template"
@@ -122,6 +125,7 @@ def test_build_drives_the_layout_stages_in_order(tmp_path: Path) -> None:
     out = _plane(tmp_path, tools).build(_spec())
 
     assert len(tools.builder_calls) == 1, "virt-builder customizes the scratch image once"
+    assert tools.builder_calls[0]["distro"] == "fedora"
     assert tools.builder_calls[0]["packages"] == ("openssh-server", "drgn")
     assert tools.builder_calls[0]["authorized_key"] == key
     assert len(tools.repack_calls) == 1, "repacked to a whole-disk ext4 qcow2 once"

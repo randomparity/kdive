@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.distros import resolve_base_template
 from kdive.images.planes._build_common import (
     build_workspace,
     digest_file,
@@ -92,16 +93,23 @@ def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
 
 
 def _real_virt_builder(
-    *, releasever: str, packages: tuple[str, ...], authorized_key: Path, scratch: Path, size: str
+    *,
+    distro: str,
+    releasever: str,
+    packages: tuple[str, ...],
+    authorized_key: Path,
+    scratch: Path,
+    size: str,
 ) -> None:
     """Customize a base scratch image: sshd + key + the kdive-ready marker unit + packages."""
+    template = resolve_base_template(distro, releasever)
     with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as unit:
         unit.write(_READINESS_UNIT)
         unit_path = Path(unit.name)
     try:
         argv = [
             "virt-builder",
-            f"fedora-{releasever}",
+            template,
             "--format",
             "qcow2",
             "--size",
@@ -216,9 +224,15 @@ class LocalLibvirtRootfsBuildPlane:
         self._tools = tools or RootfsBuildTools()
 
     @classmethod
-    def from_env(cls) -> LocalLibvirtRootfsBuildPlane:
-        """Build with the real libguestfs seams; does not run any tool or touch the network."""
-        return cls()
+    def from_env(cls, *, workspace: Path | None = None) -> LocalLibvirtRootfsBuildPlane:
+        """Build with the real libguestfs seams; does not run any tool or touch the network.
+
+        Args:
+            workspace: Override the default build/publish workspace (``build-fs --workspace``)
+                so an operator can build under a user-writable path without a privileged
+                ``mkdir`` of the root-owned default.
+        """
+        return cls(workspace=workspace)
 
     def build(self, spec: RootfsBuildSpec) -> RootfsBuildOutput:
         """Build the kdive-ready rootfs qcow2 for ``spec``; record pinned-input provenance.
@@ -239,6 +253,7 @@ class LocalLibvirtRootfsBuildPlane:
         with build_workspace(self._workspace, prefix="rootfs-build-") as work_dir:
             scratch = work_dir / "scratch.qcow2"
             self._tools.virt_builder(
+                distro=spec.distro,
                 releasever=spec.releasever,
                 packages=spec.packages,
                 authorized_key=authorized_key,
@@ -267,6 +282,7 @@ def _provenance(spec: RootfsBuildSpec, *, size: str, authorized_key: Path) -> di
     """
     return {
         "plane": "local-libvirt",
+        "distro": spec.distro,
         "releasever": spec.releasever,
         "packages": list(spec.packages),
         "source_image_digest": spec.source_image_digest,

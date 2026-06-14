@@ -3,8 +3,8 @@
 Operator guide for standing up the M1.2 live stack and running the `live_stack` suite.
 The suite drives the full kdive spine over the real MCP HTTP transport against a running
 `server`/`worker`/`reconciler` and the containerized backing services. See
-[ADR-0042](../adr/0042-live-stack-e2e-mcp-http.md) for the decision and
-[`docs/plans/m1.2-implementation.md`](../plans/m1.2-implementation.md) for the epic.
+[ADR-0042](../../adr/0042-live-stack-e2e-mcp-http.md) for the decision and
+[`docs/archive/plans/m1.2-implementation.md`](../../archive/plans/m1.2-implementation.md) for the epic.
 
 The `server`, `worker`, and `reconciler` run **on the host** (not in containers) against
 the `docker-compose.yml` backends, so qemu disk-image and kernel-tree paths resolve where
@@ -22,8 +22,8 @@ kdump catalog default, the kernel-build-config provisioning milestone's acceptan
 The `just` recipes below are source-tree conveniences. Installed-package deployments use
 `python -m kdive migrate` and `python -m kdive seed-demo`, then run the app tier from the
 compose reference (`docker compose up -d migrate server worker reconciler`); see
-[`docs/admin/local-stack.md`](../admin/local-stack.md) and
-[`deploy/compose/README.md`](../../deploy/compose/README.md). For a **Kubernetes / Helm**
+[`docs/operating/local-stack.md`](../local-stack.md) and
+[`deploy/compose/README.md`](../../../deploy/compose/README.md). For a **Kubernetes / Helm**
 deployment (the production-shaped path), see
 [`kubernetes-deploy.md`](kubernetes-deploy.md).
 
@@ -39,7 +39,7 @@ deployment (the production-shaped path), see
   locally built one, verify its signature first. The release workflow cosign-signs each
   released digest keyless/OIDC and attaches an SBOM (ADR-0088 decision 8); the consumer
   `cosign verify` check is in
-  [`deploy/compose/README.md`](../../deploy/compose/README.md#image-provenance--verify-before-you-run-a-published-image).
+  [`deploy/compose/README.md`](../../../deploy/compose/README.md#image-provenance--verify-before-you-run-a-published-image).
 
 ## 1. Bring up the backends
 
@@ -81,7 +81,7 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$KDIVE_S3_BUCKET" \
 
 The source-tree wrappers source `scripts/live-stack/env.sh`, which exports the local
 defaults before starting KDIVE. The full set of `KDIVE_*` variables is in
-[the config reference](../guide/reference/config.md); the live-run subset is below.
+[the config reference](../../guide/reference/config.md); the live-run subset is below.
 
 **The most error-prone step:** the object store reads S3 **credentials from boto3's
 default chain** (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), **not** from `KDIVE_S3_*`.
@@ -118,7 +118,8 @@ The spine boots a real guest and builds a real kernel, so the suite needs an
 operator-provided guest image and kernel tree:
 
 ```bash
-python -m kdive build-rootfs --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
+python -m kdive build-fs --workspace ~/.local/share/kdive/build/images \
+  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
 bash scripts/fetch-kernel-tree.sh        # checks out the pinned kernel source tree
 export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
 export KDIVE_KERNEL_SRC=/path/to/kernel-tree
@@ -127,22 +128,25 @@ export KDIVE_KERNEL_SRC=/path/to/kernel-tree
 The kernel-tree fetch helper lives under `scripts` (the `fetch-kernel-tree.sh` fixture script);
 clone the pinned source there and point `KDIVE_KERNEL_SRC` at it.
 
-`build-rootfs` drives the in-process `RootfsBuildPlane` (the Python successor to the removed
+`build-fs` drives the in-process `RootfsBuildPlane` (the Python successor to the removed
 bash rootfs builder): it runs the unprivileged libguestfs stages (`virt-builder` customize →
 `virt-make-fs` whole-disk ext4 qcow2 → fstab/crypttab/SELinux normalize), records the pinned
-inputs (releasever, packages, source-image digest) as provenance, prints the qcow2 content
+inputs (distro, releasever, packages, source-image digest) as provenance, prints the qcow2 content
 digest, and moves the image to `--dest` (default
-`/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2`). Pass `--releasever`/`--package` to
-change the base release or guest package set. For the default root-owned path, an OS admin
-pre-prepares the output directory once and makes it writable by the build user; the per-build
-write and the final `chmod 0644` are unprivileged. The image is left `0644` so the separate
-`qemu` user can read it under `qemu:///system`. Under SELinux the file also needs the
+`/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2`). The default `--kind debug` builds the
+guest crash/introspection rootfs the spine boots; pass `--releasever`/`--package` to change the
+base release or guest package set, or `--workspace` to stage under a user-writable path (no
+privileged `mkdir`). See [the image-lifecycle runbook](image-lifecycle.md) for the full flag set,
+including `--kind build` (a kernel-build-host toolchain image). For the default root-owned `--dest`
+an OS admin pre-prepares the output directory once and makes it writable by the build user; the
+per-build write and the final `chmod 0644` are unprivileged. The image is left `0644` so the
+separate `qemu` user can read it under `qemu:///system`. Under SELinux the file also needs the
 `virt_image_t` label (the standard label for libvirt-managed images); this is the host-side file
 label and is independent of the guest-internal SELinux the plane disables.
 
 The RBAC-gated, publish-backed `kdivectl images build` operator verb (M2.4/7) enqueues an
 `IMAGE_BUILD` job that runs the same plane and publishes the result to the catalog; this inline
-`build-rootfs` is the local-disk fixture path for the live-stack suite.
+`build-fs` is the local-disk fixture path for the live-stack suite.
 
 Point `KDIVE_GUEST_IMAGE` and `KDIVE_KERNEL_SRC` at the build output and the kernel checkout.
 The `live_stack` preflight skips with an actionable reason when either is missing.
@@ -163,7 +167,7 @@ just stack-stop
 ```
 
 Installed package — migrate and seed on the host, then run the app tier from the compose
-reference ([`deploy/compose/README.md`](../../deploy/compose/README.md)):
+reference ([`deploy/compose/README.md`](../../../deploy/compose/README.md)):
 
 ```bash
 python -m kdive migrate

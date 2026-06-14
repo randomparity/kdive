@@ -29,6 +29,7 @@ def test_spec_fields_and_types() -> None:
         "packages",
         "source_image_digest",
         "capabilities",
+        "distro",
     }
     spec = RootfsBuildSpec(
         provider="p",
@@ -40,6 +41,7 @@ def test_spec_fields_and_types() -> None:
         capabilities=("agent",),
     )
     assert dataclasses.is_dataclass(spec)
+    assert spec.distro == "fedora", "distro defaults to the only implemented base OS"
 
 
 def _set_attr(target: object, attr: str, value: object) -> None:

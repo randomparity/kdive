@@ -4,41 +4,21 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
 from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ResourceKind
 from kdive.images.planes.base import RootfsBuildOutput
-from kdive.images.rootfs_command import run_build_rootfs
-from kdive.providers.runtime import ProviderRuntime
+from kdive.images.rootfs_command import run_build_fs
 
 
-def _resolver_with_plane(plane: object) -> object:
-    """A fake resolver whose resolve() returns a ProviderRuntime carrying only ``plane``."""
-
-    class _FakeResolver:
-        def resolve(self, kind: ResourceKind) -> ProviderRuntime:
-            assert kind is ResourceKind.LOCAL_LIBVIRT
-            unused = cast(Any, object())
-            return ProviderRuntime(
-                profile_policy=unused,
-                provisioner=unused,
-                builder=unused,
-                installer=unused,
-                booter=unused,
-                connector=unused,
-                controller=unused,
-                retriever=unused,
-                crash_postmortem=unused,
-                vmcore_introspector=unused,
-                live_introspector=unused,
-                rootfs_build_plane=cast(Any, plane),
-            )
-
-    return _FakeResolver()
+def _patch_plane(monkeypatch: pytest.MonkeyPatch, plane: object) -> None:
+    """Replace the local rootfs build-plane factory with one returning ``plane``."""
+    monkeypatch.setattr(
+        "kdive.images.rootfs_command._build_local_rootfs_plane",
+        lambda _workspace: plane,
+    )
 
 
 def test_server_subcommand_parses() -> None:
@@ -59,26 +39,29 @@ def test_no_subcommand_errors() -> None:
         build_parser().parse_args([])
 
 
-def test_build_rootfs_subcommand_parses_with_defaults() -> None:
-    args = build_parser().parse_args(["build-rootfs"])
-    assert args.command == "build-rootfs"
+def test_build_fs_subcommand_parses_with_defaults() -> None:
+    args = build_parser().parse_args(["build-fs"])
+    assert args.command == "build-fs"
+    assert args.kind == "debug"
+    assert args.distro == "fedora"
+    assert args.workspace == "/var/lib/kdive/build/images"
     assert args.name == "fedora-kdive-ready-43"
     assert args.releasever == "43"
-    assert args.packages is None  # falls back to the kdump/drgn default set in the handler
+    assert args.packages is None  # falls back to the --kind's package set in the handler
 
 
-def test_build_rootfs_subcommand_collects_repeated_packages() -> None:
+def test_build_fs_subcommand_collects_repeated_packages() -> None:
     args = build_parser().parse_args(
-        ["build-rootfs", "--dest", "/tmp/out.qcow2", "--package", "drgn", "--package", "perf"]
+        ["build-fs", "--dest", "/tmp/out.qcow2", "--package", "drgn", "--package", "perf"]
     )
     assert args.dest == "/tmp/out.qcow2"
     assert args.packages == ["drgn", "perf"]
 
 
-def test_run_build_rootfs_moves_plane_output_to_dest(
+def test_run_build_fs_moves_plane_output_to_dest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`build-rootfs` builds via the local plane and moves the qcow2 to ``--dest``."""
+    """`build-fs` builds via the local plane and moves the qcow2 to ``--dest``."""
     produced = tmp_path / "plane-workspace" / "fedora-kdive-ready-43.qcow2"
     produced.parent.mkdir(parents=True)
     produced.write_bytes(b"image-bytes")
@@ -89,16 +72,23 @@ def test_run_build_rootfs_moves_plane_output_to_dest(
             seen_specs.append(spec)
             return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
 
-    monkeypatch.setattr(
-        "kdive.images.rootfs_command.build_provider_resolver",
-        lambda: _resolver_with_plane(_FakePlane()),
-    )
+    _patch_plane(monkeypatch, _FakePlane())
 
     dest = tmp_path / "rootfs" / "out.qcow2"
     args = build_parser().parse_args(
-        ["build-rootfs", "--dest", str(dest), "--releasever", "42", "--package", "drgn"]
+        [
+            "build-fs",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(dest),
+            "--releasever",
+            "42",
+            "--package",
+            "drgn",
+        ]
     )
-    run_build_rootfs(args)
+    run_build_fs(args)
 
     assert dest.read_bytes() == b"image-bytes"
     assert not produced.exists(), "the plane output is moved, not copied"
@@ -106,10 +96,126 @@ def test_run_build_rootfs_moves_plane_output_to_dest(
     assert seen_specs[0].packages == ("drgn",)
 
 
-def test_run_build_rootfs_prints_eval_safe_export_line(
+def test_run_build_fs_debug_kind_sets_debug_packages_and_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--kind debug` selects the crash/introspection package set and capabilities."""
+    produced = tmp_path / "plane-workspace" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    seen_specs = []
+
+    class _FakePlane:
+        def build(self, spec: object) -> RootfsBuildOutput:
+            seen_specs.append(spec)
+            return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
+
+    _patch_plane(monkeypatch, _FakePlane())
+    args = build_parser().parse_args(
+        [
+            "build-fs",
+            "--kind",
+            "debug",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(tmp_path / "out.qcow2"),
+        ]
+    )
+    run_build_fs(args)
+
+    assert seen_specs[0].packages == ("drgn", "kexec-tools", "makedumpfile")
+    assert seen_specs[0].capabilities == ("agent", "kdump", "drgn")
+    assert seen_specs[0].distro == "fedora"
+    assert seen_specs[0].source_image_digest == "virt-builder:fedora-43"
+
+
+def test_run_build_fs_build_kind_sets_build_packages_and_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--kind build` selects the kernel-build-host toolchain and the ``build`` capability."""
+    produced = tmp_path / "plane-workspace" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+    seen_specs = []
+
+    class _FakePlane:
+        def build(self, spec: object) -> RootfsBuildOutput:
+            seen_specs.append(spec)
+            return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
+
+    _patch_plane(monkeypatch, _FakePlane())
+    args = build_parser().parse_args(
+        [
+            "build-fs",
+            "--kind",
+            "build",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(tmp_path / "out.qcow2"),
+        ]
+    )
+    run_build_fs(args)
+
+    assert "gcc" in seen_specs[0].packages and "make" in seen_specs[0].packages
+    assert seen_specs[0].capabilities == ("agent", "build")
+
+
+def test_run_build_fs_unsupported_distro_fails_not_implemented(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unimplemented --distro fails with a clear not-implemented message before building."""
+
+    class _UnusedPlane:
+        def build(self, spec: object) -> RootfsBuildOutput:  # pragma: no cover - never reached
+            raise AssertionError("build must not run for an unsupported distro")
+
+    _patch_plane(monkeypatch, _UnusedPlane())
+    args = build_parser().parse_args(
+        [
+            "build-fs",
+            "--distro",
+            "rocky",
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--dest",
+            str(tmp_path / "out.qcow2"),
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="rocky"):
+        run_build_fs(args)
+
+
+def test_run_build_fs_unwritable_workspace_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-writable workspace fails with an actionable message, not a bare PermissionError."""
+
+    class _UnusedPlane:
+        def build(self, spec: object) -> RootfsBuildOutput:  # pragma: no cover - never reached
+            raise AssertionError("build must not run when the workspace is unwritable")
+
+    _patch_plane(monkeypatch, _UnusedPlane())
+    readonly = tmp_path / "readonly"
+    readonly.mkdir()
+    readonly.chmod(0o500)
+    try:
+        args = build_parser().parse_args(
+            ["build-fs", "--workspace", str(readonly / "ws"), "--dest", str(tmp_path / "out.qcow2")]
+        )
+        with pytest.raises(CategorizedError) as caught:
+            run_build_fs(args)
+    finally:
+        readonly.chmod(0o700)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "writable" in str(caught.value)
+
+
+def test_run_build_fs_prints_eval_safe_export_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`build-rootfs` prints exactly one eval-safe export line to stdout on success."""
+    """`build-fs` prints exactly one eval-safe export line to stdout on success."""
     produced = tmp_path / "plane-workspace" / "fedora-kdive-ready-43.qcow2"
     produced.parent.mkdir(parents=True)
     produced.write_bytes(b"image-bytes")
@@ -119,13 +225,12 @@ def test_run_build_rootfs_prints_eval_safe_export_line(
             del spec
             return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
 
-    monkeypatch.setattr(
-        "kdive.images.rootfs_command.build_provider_resolver",
-        lambda: _resolver_with_plane(_FakePlane()),
-    )
+    _patch_plane(monkeypatch, _FakePlane())
     dest = tmp_path / "rootfs" / "out.qcow2"
-    args = build_parser().parse_args(["build-rootfs", "--dest", str(dest)])
-    run_build_rootfs(args)
+    args = build_parser().parse_args(
+        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+    )
+    run_build_fs(args)
 
     out = capsys.readouterr().out
     assert out == f"export KDIVE_GUEST_IMAGE={shlex.quote(str(dest.resolve()))}\n", (
@@ -134,7 +239,7 @@ def test_run_build_rootfs_prints_eval_safe_export_line(
     assert "sha256:abc" not in out, "the digest summary stays on stderr, never on stdout"
 
 
-def test_run_build_rootfs_export_line_round_trips_a_path_with_spaces(
+def test_run_build_fs_export_line_round_trips_a_path_with_spaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A --dest with a space is a single shlex-quoted token that round-trips to the path."""
@@ -147,13 +252,12 @@ def test_run_build_rootfs_export_line_round_trips_a_path_with_spaces(
             del spec
             return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
 
-    monkeypatch.setattr(
-        "kdive.images.rootfs_command.build_provider_resolver",
-        lambda: _resolver_with_plane(_FakePlane()),
-    )
+    _patch_plane(monkeypatch, _FakePlane())
     dest = tmp_path / "with space" / "out.qcow2"
-    args = build_parser().parse_args(["build-rootfs", "--dest", str(dest)])
-    run_build_rootfs(args)
+    args = build_parser().parse_args(
+        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+    )
+    run_build_fs(args)
 
     out = capsys.readouterr().out.strip()
     assert out.startswith("export KDIVE_GUEST_IMAGE=")
@@ -161,7 +265,7 @@ def test_run_build_rootfs_export_line_round_trips_a_path_with_spaces(
     assert shlex.split(value) == [str(dest.resolve())], "one token, round-trips to the path"
 
 
-def test_run_build_rootfs_writes_nothing_to_stdout_on_build_failure(
+def test_run_build_fs_writes_nothing_to_stdout_on_build_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A failing build raises and prints no export line, so eval exports nothing."""
@@ -171,12 +275,11 @@ def test_run_build_rootfs_writes_nothing_to_stdout_on_build_failure(
             del spec
             raise CategorizedError("build blew up", category=ErrorCategory.PROVISIONING_FAILURE)
 
-    monkeypatch.setattr(
-        "kdive.images.rootfs_command.build_provider_resolver",
-        lambda: _resolver_with_plane(_FailingPlane()),
-    )
+    _patch_plane(monkeypatch, _FailingPlane())
     dest = tmp_path / "rootfs" / "out.qcow2"
-    args = build_parser().parse_args(["build-rootfs", "--dest", str(dest)])
+    args = build_parser().parse_args(
+        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+    )
     with pytest.raises(CategorizedError):
-        run_build_rootfs(args)
+        run_build_fs(args)
     assert capsys.readouterr().out == "", "no export line is printed when the build fails"

@@ -1,7 +1,7 @@
 """Hygiene tests for the surviving live-VM fixture scripts (#26).
 
 The rootfs/guest-image builder moved to the in-process `RootfsBuildPlane` (M2.4/2,
-`python -m kdive build-rootfs`); the remaining fixture script checks out the pinned kernel
+`python -m kdive build-fs`); the remaining fixture script checks out the pinned kernel
 source tree the gated walking-skeleton test consumes. This test asserts it parses (`bash -n`),
 declares strict mode (`set -euo pipefail`), and is idempotent on a pre-existing destination (a
 second invocation against an existing checkout is a no-op exit 0) — the contract the test's

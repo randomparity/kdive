@@ -4,7 +4,7 @@ The long-running processes are `python -m kdive {server|worker|reconciler}`:
 `server` runs the FastMCP streamable-HTTP app, `worker` runs the job-queue worker
 loop, and `reconciler` runs the drift-repair loop (ADR-0021). One-shot operator
 commands share the same parser: `migrate`, `install-fixtures`, `seed-demo`, and
-`build-rootfs`. Every command configures the structured logger first (ADR-0014).
+`build-fs`. Every command configures the structured logger first (ADR-0014).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from kdive.config.core_settings import (
 )
 from kdive.db.pool import create_pool
 from kdive.domain.errors import CategorizedError
-from kdive.images.rootfs_command import add_build_rootfs_parser, run_build_rootfs
+from kdive.images.rootfs_command import add_build_fs_parser, run_build_fs
 from kdive.providers.console_hosting import start_console_hosting
 from kdive.version import full_version
 
@@ -182,11 +182,11 @@ def _handle_seed_demo(
     )
 
 
-def _handle_build_rootfs(
+def _handle_build_fs(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del secret_registry, telemetry
-    run_build_rootfs(args)
+    run_build_fs(args)
 
 
 def _add_reconcile_systems_arguments(parser: argparse.ArgumentParser) -> None:
@@ -245,10 +245,10 @@ _COMMANDS: tuple[_Command, ...] = (
         add_arguments=_add_seed_demo_arguments,
     ),
     _Command(
-        "build-rootfs",
-        "build the default local-libvirt rootfs image",
-        _handle_build_rootfs,
-        custom_register=add_build_rootfs_parser,
+        "build-fs",
+        "build a local-libvirt filesystem image (debug guest or build host)",
+        _handle_build_fs,
+        custom_register=add_build_fs_parser,
     ),
     _Command(
         "reconcile-systems",

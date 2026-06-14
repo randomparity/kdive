@@ -1,0 +1,30 @@
+[Unit]
+Description=KDIVE reconciler
+Documentation=https://github.com/randomparity/kdive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kdive
+Group=kdive
+EnvironmentFile=/etc/kdive/kdive.env
+ExecStart=/opt/kdive/.venv/bin/python -m kdive reconciler
+Restart=on-failure
+RestartSec=5
+# Backends (Postgres/MinIO/OIDC) are external and not systemd-ordered here; the unit
+# retries until they are reachable rather than failing terminally (ADR-0114 §4).
+# Sandboxing: the reconciler is a network service that also reaches the libvirt socket
+# under /run (which ProtectSystem=full leaves reachable) and writes nothing under /usr,
+# /etc, or /boot, so these directives are safe (the worker is intentionally exempt — it
+# runs libguestfs/qemu, make/rsync, and kexec/kdump tooling that needs broader access).
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

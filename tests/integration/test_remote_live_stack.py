@@ -122,7 +122,7 @@ def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
     if not os.environ.get(_REMOTE_URI_ENV):
         pytest.skip(
             f"{_REMOTE_URI_ENV} unset; configure the remote-libvirt host "
-            "(see docs/runbooks/remote-live-stack.md)"
+            "(see docs/operating/runbooks/remote-live-stack.md)"
         )
     for ref_env in _REQUIRED_REFS:
         if not os.environ.get(ref_env):
