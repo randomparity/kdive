@@ -61,6 +61,9 @@ jobs:
       - name: Lint
         run: just lint
 
+      - name: Lint shell scripts
+        run: just lint-shell
+
       - name: Type check
         run: just type
 
