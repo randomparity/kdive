@@ -10,6 +10,7 @@ split by provider plane in sibling modules.
 from __future__ import annotations
 
 from kdive.providers.ports.build import Builder, TransportCapableBuilder
+from kdive.providers.ports.build_transport import BuildTransport, CommandResult
 from kdive.providers.ports.debug import (
     AttachSeam,
     GdbBreakpointRef,
@@ -45,7 +46,9 @@ __all__ = [
     "AttachSeam",
     "Booter",
     "Builder",
+    "BuildTransport",
     "CaptureOutput",
+    "CommandResult",
     "Connector",
     "Controller",
     "CrashOutput",

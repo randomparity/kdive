@@ -12,8 +12,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitKernelSource, ServerBuildProfile
 from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.build_host.ssh_transport import SshBuildTransport
-from kdive.providers.build_host.transport import BuildTransport
 from kdive.providers.ports import Builder, TransportCapableBuilder
+from kdive.providers.ports.build_transport import BuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 # Patchable seam: tests substitute this to avoid real SSH.

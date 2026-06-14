@@ -23,7 +23,6 @@ from kdive.provider_components.references import (
 )
 from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.build_host.dispatch import BuildHostTransportFactory
-from kdive.providers.build_host.transport import BuildTransport
 from kdive.providers.console_hosting import (
     AsyncioPumpRunner,
     CollectorRegistry,
@@ -37,6 +36,7 @@ from kdive.providers.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
 )
+from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.reaping import BuildVmReaper, DumpVolumeReaper
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.remote_libvirt.build_vm_reaper import RemoteLibvirtBuildVmReaper
