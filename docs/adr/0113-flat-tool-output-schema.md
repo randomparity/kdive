@@ -32,9 +32,10 @@ recursion from the *advertised* schema.
 
 We will override the advertised `outputSchema` of every registered tool to the flat constant
 `{"type": "object"}`, applied centrally in `build_app` after the plane registrars run, by setting
-each live tool instance's `output_schema` attribute. The `ToolResponse` model, the
-`structured_content` wire payload, and the runtime `validate_json_value` JSON-safety check are
-unchanged.
+the `output_schema` attribute on each **live** tool instance in the local registry
+(`app.local_provider`'s `Tool` components — not the copies `app.list_tools()` returns). The
+`ToolResponse` model, the `structured_content` wire payload, and the runtime
+`validate_json_value` JSON-safety check are unchanged.
 
 ## Consequences
 
@@ -45,6 +46,12 @@ unchanged.
   `structured_content`-shape pin test are unaffected.
 - Every current and future tool is covered by the single `build_app` chokepoint; a newly added
   tool cannot regress to the recursive schema.
+- The sweep depends on the FastMCP-internal registry layout (`app.local_provider`'s `Tool`
+  components). Because the bug is non-fatal (the client falls back to `structured_content`), a
+  sweep that enumerated the wrong collection, or one a future FastMCP rename emptied, would
+  silently regress. The helper therefore raises if it sweeps zero tools, and a `build_app`-backed
+  end-to-end test drives the real app through a `Client` so a broken accessor fails a test rather
+  than shipping.
 - The advertised `outputSchema` is now uninformative about envelope fields (it says only "an
   object"). This is acceptable: the prior schema was unusable (it broke the client), runtime
   JSON-safety is still enforced by `validate_json_value`, and the input parameter schemas (the

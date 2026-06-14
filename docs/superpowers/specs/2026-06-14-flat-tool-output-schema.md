@@ -44,9 +44,11 @@ Stop advertising a recursive `outputSchema` for kdive tools, while keeping the r
 
 ### Success criteria (falsifiable)
 
-- S1. After the fix, a FastMCP 3.4.0 `Client` calling any kdive tool over the in-memory
-  transport logs **no** "Error parsing structured content" message, and `CallToolResult.data`
-  is the populated envelope dict (not `None`).
+- S1a. After the fix, a FastMCP 3.4.0 `Client` calling a kdive tool over the in-memory transport
+  emits **no** ERROR record on the `fastmcp.client` logger (the user-visible symptom in #404 —
+  the per-call "Error parsing structured content" log). Asserted directly by capturing the
+  client logger, not inferred from `.data`.
+- S1b. `CallToolResult.data` is the populated envelope dict (not `None`) for the same call.
 - S2. Every tool registered by `build_app` advertises `outputSchema == {"type": "object"}`
   (no `$ref`, no `$defs`).
 - S3. The `structured_content` wire payload is unchanged: a scalar tool's structured content is
@@ -73,6 +75,26 @@ A flat object schema is accurate (the envelope *is* a JSON object), non-recursiv
 builds a trivial `dict` validator that accepts any object), and carries no
 `x-fastmcp-wrap-result` key, so `convert_result` keeps emitting the unwrapped envelope dict as
 `structured_content` (wire shape unchanged).
+
+### Enumerating the live tool instances (and why it is fragile)
+
+The sweep must mutate the **live registered** tool instances, not copies. In FastMCP 3.4.0:
+
+- `app.list_tools()` returns **copies** — verified: mutating their `output_schema` does not change
+  what the server advertises. Using it would make the sweep a silent no-op.
+- The live instances are the `Tool`-typed values in `app._local_provider._components` (a plain
+  `dict[str, FastMCPComponent]`, populated synchronously by each `@app.tool` registration).
+  `Tool.to_mcp_tool()` reads `output_schema` off these instances. (`app.local_provider` is the
+  supported accessor for the local registry — FastMCP's own deprecation guidance points power
+  users at `mcp.local_provider`; `_components` is its backing store.)
+
+Because the bug is non-fatal (the client falls back to `structured_content`), a sweep that
+enumerates the wrong collection, or that a future FastMCP rename empties, would **silently**
+regress to the recursive schema with no crash and no missing data at the `LiveStackClient`
+boundary. The sweep helper therefore **fails loud if it sweeps zero tools** — a zero count means
+the enumeration accessor broke, and the app must not start advertising recursive schemas
+unnoticed. (`build_app` always registers a non-empty tool surface, so zero is unambiguously a
+defect.)
 
 ### Why flat object, not `None`
 
@@ -101,10 +123,18 @@ future tool through the one entrypoint that the architecture already designates 
 
 - Unit (no DB): a probe `FastMCP` app with a scalar and a collection tool, swept by the helper,
   asserts (a) advertised `outputSchema == {"type": "object"}`, (b) a `Client` call returns
-  `data is not None` with the envelope keys, (c) no recursion error. A regression test asserts
-  the pre-fix recursive auto-schema actually fails to parse (so the guard cannot go vacuous).
-- Boundary: an assertion in the existing `build_app`-backed wrapper-boundary test that a
-  representative real tool advertises the flat schema.
+  `data is not None` with the envelope keys (S1b), (c) **no ERROR on the `fastmcp.client`
+  logger**, captured with `caplog` (S1a). A regression test asserts the pre-fix recursive
+  auto-schema actually fails to parse (so the guard cannot go vacuous). *That regression test is
+  pinned to fastmcp 3.4.0 client behavior — a major FastMCP upgrade that handles recursive `$ref`
+  would make the auto-schema parse cleanly and is the expected reason to revisit it.*
+- Zero-count guard: a test asserts the sweep helper **raises** when handed an app with no tools,
+  so a future FastMCP rename of the registry accessor fails a test instead of silently shipping
+  the recursive schema.
+- Boundary (end-to-end against the real surface): a `build_app`-backed test (the existing
+  wrapper-boundary suite) drives the **real** app through a `Client` and asserts a representative
+  real tool advertises `outputSchema == {"type": "object"}` and its call logs no parse error —
+  exercising `build_app`'s actual enumeration, not only the probe helper.
 - `just lint type test docs-check` green locally.
 - `live_stack` parse-clean verification is the operator runbook step (needs the running stack);
   noted in the PR body as the manual confirmation, per the issue.
