@@ -245,17 +245,27 @@ async def _run_build(
                 secret_registry=secret_registry,
             )
             return await asyncio.to_thread(bound.build, run_id, parsed)
-    base_image = _require_base_image(host, run_id)
-    with ephemeral_build_session(base_image, secret_registry, run_id=run_id) as transport:
-        bound = _bind_transport(
-            capable,
-            transport,
-            host=host,
-            parsed=parsed,
-            run_id=run_id,
-            secret_registry=secret_registry,
-        )
-        return await asyncio.to_thread(bound.build, run_id, parsed)
+    if host.kind == "ephemeral_libvirt":
+        base_image = _require_base_image(host, run_id)
+        with ephemeral_build_session(base_image, secret_registry, run_id=run_id) as transport:
+            bound = _bind_transport(
+                capable,
+                transport,
+                host=host,
+                parsed=parsed,
+                run_id=run_id,
+                secret_registry=secret_registry,
+            )
+            return await asyncio.to_thread(bound.build, run_id, parsed)
+    raise CategorizedError(
+        "unsupported build host kind",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "run_id": str(run_id),
+            "build_host": host.name,
+            "build_host_kind": host.kind,
+        },
+    )
 
 
 async def _resolve_build_host(

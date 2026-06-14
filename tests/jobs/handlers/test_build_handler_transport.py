@@ -26,6 +26,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import BuildHost, get_by_name, try_acquire_lease
+from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import JobKind
 from kdive.domain.state import SystemState
@@ -526,5 +527,51 @@ def test_ephemeral_host_non_remote_builder_not_implemented(
             assert exc.value.category is ErrorCategory.NOT_IMPLEMENTED
             assert await _run_state(pool, run_id) == "failed"
             assert await _lease_count(pool, run_id) == 1
+
+    asyncio.run(_run())
+
+
+def test_unsupported_build_host_kind_fails_before_ephemeral_session(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown host kind is rejected instead of falling into the ephemeral build path."""
+
+    def _unexpected_ephemeral_session(*args: object, **kwargs: object):
+        raise AssertionError("unsupported host kind must not start an ephemeral build session")
+
+    monkeypatch.setattr(runs_handlers, "ephemeral_build_session", _unexpected_ephemeral_session)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, _GIT_PROFILE)
+            host = BuildHost(
+                id=uuid4(),
+                name="future-kind",
+                kind="future_transport",
+                address=None,
+                ssh_credential_ref=None,
+                base_image_volume="base.qcow2",
+                workspace_root="/build",
+                max_concurrent=1,
+                enabled=True,
+                state="ready",
+            )
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                parsed = runs_handlers.BuildProfile.parse(run.build_profile)
+                assert isinstance(parsed, runs_handlers.ServerBuildProfile)
+                with pytest.raises(CategorizedError) as exc:
+                    await runs_handlers._run_build(
+                        conn,
+                        run,
+                        parsed,
+                        host=host,
+                        resolver=_ssh_resolver(
+                            RemoteLibvirtBuild.from_env(secret_registry=SecretRegistry())
+                        ),
+                        secret_registry=SecretRegistry(),
+                    )
+            assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
     asyncio.run(_run())
