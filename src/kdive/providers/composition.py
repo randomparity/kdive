@@ -16,6 +16,7 @@ import kdive.config as config
 from kdive.config.core_settings import FAULT_INJECT
 from kdive.domain.models import ResourceKind
 from kdive.providers.build_host.reachability import BuildHostProber, SshBuildHostProber
+from kdive.providers.console_hosting import DbRunningRemoteSystems
 from kdive.providers.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.fault_inject import composition as fault_inject_composition
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
@@ -34,7 +35,6 @@ from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.providers.resolver import ProviderResolver
 from kdive.providers.runtime import DiscoveryRegistrar, ProviderRuntime
 from kdive.providers.transport_reset import NullResetter, TransportResetter
-from kdive.reconciler.console_hosting import DbRunningRemoteSystems
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.resources.discovery import ensure_discovered_resource_registered
 
