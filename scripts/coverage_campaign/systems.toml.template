@@ -1,0 +1,48 @@
+# MCP coverage-campaign systems descriptor (TEMPLATE).
+#
+# Copy to artifacts/coverage-campaign/systems.toml (GITIGNORED) and fill in the values for
+# your environment. One source of truth for the per-deployment facts the runbook otherwise
+# re-derives each run. Consumed by scripts/coverage_campaign/systems.py:
+#   render-env       -> the d1.env workstation provider env
+#   setup-commands   -> the remote-host iptables ACL + k8s port-forward commands
+#
+# See docs/runbooks/mcp-coverage-campaign-rerun.md and
+# docs/reports/provider-configuration-requirements.md.
+
+schema_version = 1
+
+[workstation]              # D1 — control plane: Docker app-tier + local-libvirt provider
+lan_ip = "<workstation-lan-ip>"                  # reachable FROM remote guests (F8)
+s3_endpoint_url = "http://<workstation-lan-ip>:9000"
+secrets_root = "$HOME/.kdive-secrets"
+fault_inject = true
+mcp_base_url = "http://127.0.0.1:8000/mcp"
+build_workspace = "<repo>/.live-build"           # absolute (zsh-source guard)
+build_component_roots = "<repo>/fixtures/local-libvirt:<repo>/.live-components"
+
+[remote_libvirt]           # ub24-big — qemu+tls libvirt host
+host_fqdn = "<remote-host-fqdn>"
+host_ip = "<remote-host-ip>"
+ssh_target = "<user>@<remote-host-ip>"
+libvirt_uri = "qemu+tls://<remote-host-fqdn>/system"
+tls_port = 16514
+gdbstub_range = "47000:47099"
+gdb_addr = "<remote-host-ip>"
+base_image_volume = "fedora-kdive-remote-base-43.qcow2"
+client_cert_ref = "remote-clientcert.pem"
+client_key_ref = "remote-clientkey.pem"           # pragma: allowlist secret - filename ref
+ca_cert_ref = "remote-ca.pem"
+acl_source_ip = "<workstation-lan-ip>"            # host ACL for off-design workstation drive
+
+[k8s]                      # D2 — kdive deployed via the chart
+context = "<kube-context>"
+namespace = "<namespace>"
+helm_release = "kdive"
+fault_inject = true
+oidc_forward = "svc/kdive-kdive-oidc"
+oidc_service_port = 8080
+oidc_local_port = 8080
+server_forward = "svc/kdive-kdive-server"
+server_service_port = 8000
+server_local_port = 18000
+in_cluster_issuer = "http://kdive-kdive-oidc:8080/default"
