@@ -61,6 +61,14 @@ jobs:
       - name: Lint
         run: just lint
 
+      - name: Install shfmt
+        # shellcheck is preinstalled on ubuntu-latest; shfmt is not. Pin via `go install`
+        # (Go is preinstalled) so the module checksum database verifies integrity — no
+        # manual sha256 to maintain. lint-shell needs both tools.
+        run: |
+          go install mvdan.cc/sh/v3/cmd/shfmt@v3.13.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: Lint shell scripts
         run: just lint-shell
 
