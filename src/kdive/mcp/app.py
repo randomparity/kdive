@@ -56,11 +56,12 @@ from kdive.mcp.tools.ops import inventory as inventory_tools
 from kdive.mcp.tools.ops import queue as ops_queue_tools
 from kdive.mcp.tools.ops import reconcile as ops_reconcile_tools
 from kdive.mcp.tools.ops import reconcile_systems as ops_reconcile_systems_tools
-from kdive.mcp.tools.ops import resources as ops_resources_tools
 from kdive.mcp.tools.ops import secrets as ops_secrets_tools
 from kdive.mcp.tools.ops import tuning as ops_tuning_tools
 from kdive.mcp.tools.ops.build_hosts import registrar as ops_build_hosts_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
+from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
+from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
 from kdive.providers.composition import ProviderComposition, build_provider_resolver
 from kdive.providers.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.resolver import ProviderResolver
@@ -115,6 +116,18 @@ def _register_reconcile_systems_tools(
     ops_reconcile_systems_tools.register(
         app, pool, image_store=ops_reconcile_tools.resolve_image_store()
     )
+
+
+def _register_ops_resource_host_tools(
+    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
+) -> None:
+    ops_resource_host_tools.register(app, pool)
+
+
+def _register_ops_resource_mutation_tools(
+    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
+) -> None:
+    ops_resource_mutation_tools.register_mutation_tools(app, pool)
 
 
 def _register_systems_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
@@ -216,7 +229,8 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(register_accounting_admin),
     _register_reconcile_tools,
     _register_reconcile_systems_tools,
-    _pool_only_plane_registrar(ops_resources_tools.register),
+    _register_ops_resource_host_tools,
+    _register_ops_resource_mutation_tools,
     _pool_only_plane_registrar(allocations.register),
     _pool_only_plane_registrar(ops_breakglass_tools.register),
     _register_systems_tools,
