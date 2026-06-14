@@ -787,8 +787,9 @@ main() {
       note_fail "ssh to ${user}@${host}:${PORT} failed" "ensure the host is up and your key is authorized"
   fi
 
-  [[ -d "${PKI_DIR}" ]] && compgen -G "${PKI_DIR}/*.pem" >/dev/null 2>&1 ||
+  if ! { [[ -d "${PKI_DIR}" ]] && compgen -G "${PKI_DIR}/*.pem" >/dev/null 2>&1; }; then
     note_fail "no TLS PKI material in ${PKI_DIR}" "provision client cert/key — see the remote-libvirt provider guide"
+  fi
 
   if command -v virsh >/dev/null 2>&1; then
     virsh -c "${uri}" list >/dev/null 2>&1 ||
