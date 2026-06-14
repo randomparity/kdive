@@ -1,0 +1,16 @@
+[Unit]
+Description=KDIVE reconciler (user)
+Documentation=https://github.com/randomparity/kdive
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/kdive/kdive.env
+ExecStart=%h/.local/share/kdive/.venv/bin/python -m kdive reconciler
+Restart=on-failure
+RestartSec=5
+# Backends (Postgres/MinIO/OIDC) are external and not systemd-ordered here; the unit
+# retries until they are reachable rather than failing terminally (ADR-0114 §4).
+
+[Install]
+WantedBy=default.target

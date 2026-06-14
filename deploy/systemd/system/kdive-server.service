@@ -1,0 +1,19 @@
+[Unit]
+Description=KDIVE server
+Documentation=https://github.com/randomparity/kdive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kdive
+Group=kdive
+EnvironmentFile=/etc/kdive/kdive.env
+ExecStart=/opt/kdive/.venv/bin/python -m kdive server
+Restart=on-failure
+RestartSec=5
+# Backends (Postgres/MinIO/OIDC) are external and not systemd-ordered here; the unit
+# retries until they are reachable rather than failing terminally (ADR-0114 §4).
+
+[Install]
+WantedBy=multi-user.target
