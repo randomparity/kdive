@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, cast
 
 import pytest
+from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg_pool import AsyncConnectionPool
 
@@ -110,11 +111,17 @@ def test_build_app_uses_injected_composition_secret_registry(
     captured: list[app_module.AppAssembly] = []
 
     def _capture_assembly(
-        _app: object,
+        app: FastMCP,
         _pool: AsyncConnectionPool,
         assembly: app_module.AppAssembly,
     ) -> None:
         captured.append(assembly)
+
+        # Register one tool so build_app produces a non-empty surface — a real registrar always
+        # registers tools, and build_app's flat-schema sweep raises on a zero-tool count (ADR-0113).
+        @app.tool(name="_probe")
+        def _probe() -> str:
+            return "ok"
 
     monkeypatch.setattr(app_module, "_PLANE_REGISTRARS", (_capture_assembly,))
     pool = AsyncConnectionPool("postgresql://unused", open=False)
