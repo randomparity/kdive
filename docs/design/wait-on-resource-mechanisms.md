@@ -157,6 +157,15 @@ failure" (`responses.py:80`).
   agent learns one envelope"; a per-op `data` key would force the agent to look in a
   different place per tool. ADR-0113's advertised `{"type":"object"}` schema is
   unaffected by adding a model field.
+- **Wire shape (deliberate):** `retryable` is **present-but-null** on every success
+  envelope, not omitted — the field is always serialized (no `exclude_none`), so a client
+  reads one stable key shape: `null` means success, `true`/`false` means a classified
+  failure. This is a change to the *serialized payload of every tool response* across all
+  planes, even though no construction site changes: the model gains a field that
+  `model_dump` emits everywhere. So the implementation must audit whole-response
+  equality assertions in the suite (the envelope is exercised by ~35 `model_dump` sites
+  and the `tests/cli/test_structured_content_envelope.py` wire test) and regenerate any
+  affected fixtures in the same change — a mechanical but non-zero surface the plan owns.
 
 #### Classification table
 
