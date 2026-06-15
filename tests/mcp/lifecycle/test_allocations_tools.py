@@ -836,6 +836,21 @@ def test_wait_not_found_for_absent_and_malformed(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("timeout_s", [float("nan"), float("inf"), float("-inf")])
+def test_wait_non_finite_timeout_is_configuration_error(
+    migrated_url: str, timeout_s: float
+) -> None:
+    # Mirrors jobs.wait's guard: a non-finite timeout never becomes a deadline.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), queued, timeout_s=timeout_s)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
 def test_shapes_set_after_stamping_does_not_resize_allocation(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
