@@ -60,6 +60,33 @@ def test_parse_build_config_row_round_trips_fields() -> None:
     )
 
 
+def test_parse_build_config_row_rejects_missing_required_column() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        parse_build_config_row(
+            {
+                "name": "kdump",
+                "object_key": "system/build-configs/kdump/kdump.config",
+                "sha256": "abc",
+            }
+        )
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"column": "description"}
+
+
+def test_parse_build_config_row_rejects_non_string_required_value() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        parse_build_config_row(
+            {
+                "name": "kdump",
+                "object_key": "system/build-configs/kdump/kdump.config",
+                "sha256": "abc",
+                "description": None,
+            }
+        )
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"column": "description"}
+
+
 def test_verify_sha256_rejects_mismatch() -> None:
     entry = BuildConfigEntry("kdump", "k", sha256="deadbeef", description="")
     with pytest.raises(CategorizedError) as exc:

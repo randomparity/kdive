@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from kdive.providers.reaping import DumpVolumeReaper
+from kdive.providers.infra.reaping import DumpVolumeReaper
 from kdive.providers.remote_libvirt.dump_volume_reaper import (
     RemoteLibvirtDumpVolumeReaper,
     system_id_from_dump_volume_name,

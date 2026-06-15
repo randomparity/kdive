@@ -8,8 +8,8 @@ Two `platform_operator` knobs, both audited to ``platform_audit_log``:
   DB-backed and fail-closed on a missing row, so this is a direct upsert.
 * **``ops.set_host_capacity(resource_id, concurrent_allocation_cap)``** updates the host's
   ``concurrent_allocation_cap`` inside its ``capabilities`` jsonb — the value admission's
-  per-host cap reads (``services/allocation_admission.py``). Lowering the cap below the live
-  non-terminal count does **not** evict anyone; it blocks *new* placement until the count
+  per-host cap reads (``services/allocation/admission/core.py``). Lowering the cap below the live
+  occupying count does **not** evict anyone; it blocks *new* placement until the count
   falls (admission only ever compares the live count against the cap at request time).
 
 Both gate on :func:`require_platform_role` (``PLATFORM_OPERATOR``); a caller lacking the

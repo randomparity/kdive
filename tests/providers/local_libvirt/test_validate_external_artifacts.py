@@ -6,14 +6,14 @@ import struct
 
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import HeadResult
-from kdive.provider_components.build_validation import (
+from kdive.artifacts.storage import HeadResult
+from kdive.artifacts.uploads import ManifestEntry
+from kdive.build_artifacts.validation import (
     extract_build_id_ranged,
     validate_external_artifacts,
 )
-from kdive.provider_components.requirements import ConfigRequirements
-from kdive.provider_components.uploads import ManifestEntry
+from kdive.components.requirements import ConfigRequirements
+from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _BZIMAGE_HEAD = b"\x00" * 0x202 + b"HdrS"  # bzImage magic at offset 0x202
 
@@ -420,8 +420,8 @@ def test_oversized_section_size_is_build_failure() -> None:
 
 # --- Chunked artifacts (ADR-0104 §4) ----------------------------------------------------
 
-from kdive.provider_components.build_validation import verify_chunks  # noqa: E402
-from kdive.provider_components.uploads import ChunkEntry  # noqa: E402
+from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
+from kdive.build_artifacts.validation import verify_chunks  # noqa: E402
 
 _PREFIX = "local/runs/rid/"
 

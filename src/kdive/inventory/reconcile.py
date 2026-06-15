@@ -31,11 +31,13 @@ from kdive.db.locks import (
     advisory_xact_lock,
     session_advisory_lock,
 )
+from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.models import ManagedBy, ResourceKind
-from kdive.services.allocation.pcie_claim import NON_TERMINAL_STATES_VALUES
 from kdive.services.images.retention import image_referenced_by_live_system
 
 __all__ = [
+    "CONFIG_MANAGED_BY",
+    "DISCOVERY_MANAGED_BY",
     "ManagedBy",
     "ReconcileDiff",
     "ReconcileRecord",
@@ -47,6 +49,9 @@ __all__ = [
     "prune_or_cordon_resource",
     "prune_or_cordon_build_host",
 ]
+
+CONFIG_MANAGED_BY = ManagedBy.CONFIG.value
+DISCOVERY_MANAGED_BY = ManagedBy.DISCOVERY.value
 
 
 def resource_identity_lock_key(kind: ResourceKind, name: str) -> str:
@@ -128,7 +133,7 @@ async def inventory_pass_lock(conn: AsyncConnection) -> AsyncIterator[None]:
         yield
 
 
-async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID, name: str) -> PruneOutcome:
+async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID) -> PruneOutcome:
     """Apply the non-destructive prune contract to one config image row (ADR-0112).
 
     Runs in its own transaction (so the liveness re-check and the row delete are atomic, and
@@ -141,7 +146,6 @@ async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID, name: str) 
     Args:
         conn: The reconcile pass connection (a fresh transaction is opened here).
         row_id: The config image row's id.
-        name: The image name (for the returned record).
 
     Returns:
         A :class:`PruneOutcome` recording whether the row was pruned or cordoned.
@@ -149,7 +153,7 @@ async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID, name: str) 
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id FROM image_catalog WHERE id = %s AND managed_by = %s FOR UPDATE",
-            (row_id, ManagedBy.CONFIG.value),
+            (row_id, CONFIG_MANAGED_BY),
         )
         if await cur.fetchone() is None:
             return PruneOutcome(pruned=False, cordoned=False)
@@ -190,7 +194,7 @@ async def prune_or_cordon_resource(
     ):
         await cur.execute(
             "SELECT id FROM resources WHERE id = %s AND managed_by = %s FOR UPDATE",
-            (row_id, ManagedBy.CONFIG.value),
+            (row_id, CONFIG_MANAGED_BY),
         )
         if await cur.fetchone() is None:
             return PruneOutcome(pruned=False, cordoned=False)
@@ -207,14 +211,12 @@ async def _resource_has_live_allocation(cur: AsyncCursor[dict[str, Any]], row_id
     """True when the resource backs a non-terminal allocation (the refuse-if-live predicate)."""
     await cur.execute(
         "SELECT 1 FROM allocations WHERE resource_id = %s AND state = ANY(%s) LIMIT 1",
-        (row_id, list(NON_TERMINAL_STATES_VALUES)),
+        (row_id, list(NON_TERMINAL_ALLOCATION_STATE_VALUES)),
     )
     return await cur.fetchone() is not None
 
 
-async def prune_or_cordon_build_host(
-    conn: AsyncConnection, row_id: UUID, name: str
-) -> PruneOutcome:
+async def prune_or_cordon_build_host(conn: AsyncConnection, row_id: UUID) -> PruneOutcome:
     """Apply the non-destructive prune contract to one config build-host row (ADR-0112).
 
     Mirrors :func:`prune_or_cordon_resource`, but the build-host "live" predicate is an
@@ -228,7 +230,6 @@ async def prune_or_cordon_build_host(
     Args:
         conn: The reconcile pass connection (a fresh transaction is opened here).
         row_id: The config build-host row's id.
-        name: The build-host name (for the returned record).
 
     Returns:
         A :class:`PruneOutcome` recording whether the row was pruned or cordoned.
@@ -236,7 +237,7 @@ async def prune_or_cordon_build_host(
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id FROM build_hosts WHERE id = %s AND managed_by = %s FOR UPDATE",
-            (row_id, ManagedBy.CONFIG.value),
+            (row_id, CONFIG_MANAGED_BY),
         )
         if await cur.fetchone() is None:
             return PruneOutcome(pruned=False, cordoned=False)

@@ -22,13 +22,13 @@ import ipaddress
 from collections.abc import Callable
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.rsp import rsp_reachable
 from kdive.providers.ports import (
     DebugTransportKind,
     SystemHandle,
     TransportHandle,
     TransportHandleData,
 )
+from kdive.providers.shared.debug_common.rsp import rsp_reachable
 
 _GDBSTUB: DebugTransportKind = "gdbstub"
 _DRGN_LIVE: DebugTransportKind = "drgn-live"  # the agent-facing transport kind (ADR-0085)

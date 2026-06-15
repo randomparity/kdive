@@ -15,7 +15,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.app import build_app, build_handler_registry
-from kdive.providers import composition
+from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
@@ -95,30 +95,25 @@ def test_build_app_registers_jobs_tools() -> None:
     asyncio.run(_run())
 
 
-def test_resource_host_and_mutation_tools_have_separate_plane_registrars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    def _register_host(_app: FastMCP, _pool: AsyncConnectionPool) -> None:
-        calls.append("host")
-
-    def _register_mutation(_app: FastMCP, _pool: AsyncConnectionPool) -> None:
-        calls.append("mutation")
-
-    monkeypatch.setattr(app_module.ops_resource_host_tools, "register", _register_host)
-    monkeypatch.setattr(
-        app_module.ops_resource_mutation_tools, "register_mutation_tools", _register_mutation
-    )
+def test_resource_host_and_mutation_tools_are_registered() -> None:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    assembly = cast(app_module.AppAssembly, object())
 
-    assert app_module._register_ops_resource_host_tools in app_module._PLANE_REGISTRARS
-    assert app_module._register_ops_resource_mutation_tools in app_module._PLANE_REGISTRARS
-    app_module._register_ops_resource_host_tools(FastMCP(name="host"), pool, assembly)
-    app_module._register_ops_resource_mutation_tools(FastMCP(name="mutation"), pool, assembly)
+    async def _run() -> None:
+        app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+        names = {tool.name for tool in await app.list_tools()}
+        assert {
+            "resources.set_status",
+            "resources.cordon",
+            "resources.uncordon",
+            "resources.drain",
+            "resources.register_remote_libvirt",
+            "resources.register_local_libvirt",
+            "resources.register_fault_inject",
+            "resources.deregister",
+            "resources.renew",
+        } <= names
 
-    assert calls == ["host", "mutation"]
+    asyncio.run(_run())
 
 
 def test_build_app_produces_a_streamable_http_asgi_app() -> None:
@@ -165,6 +160,64 @@ def test_build_app_uses_injected_composition_secret_registry(
     assert captured[0].secret_registry is composition_registry
 
 
+def test_ops_images_registration_uses_standard_register_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("probe")
+    store = object()
+    captured: dict[str, object] = {}
+
+    def _store_from_env() -> object:
+        return store
+
+    def _register(
+        registered_app: FastMCP,
+        registered_pool: AsyncConnectionPool,
+        *,
+        image_store: object | None,
+        upload_store: object | None = None,
+    ) -> None:
+        captured["app"] = registered_app
+        captured["pool"] = registered_pool
+        captured["image_store"] = image_store
+        captured["upload_store"] = upload_store
+
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _store_from_env)
+    monkeypatch.setattr(app_module.ops_images_tools, "register", _register)
+
+    app_module._register_ops_images_tools(app, pool, cast(Any, None))
+
+    assert not hasattr(app_module.ops_images_tools, "register_from_env")
+    assert captured == {
+        "app": app,
+        "pool": pool,
+        "image_store": store,
+        "upload_store": store,
+    }
+
+
+def test_ops_images_store_resolver_preserves_configured_store_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = CategorizedError(
+        "invalid S3 endpoint",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"setting": "KDIVE_S3_ENDPOINT_URL"},
+    )
+
+    def _raise_store() -> object:
+        raise error
+
+    monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "not-a-url")
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _raise_store)
+
+    with pytest.raises(CategorizedError) as caught:
+        app_module._resolve_ops_images_store()
+
+    assert caught.value is error
+
+
 def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the build plane (#18)
     # registers build, the install + boot plane (#19) registers install/boot, and the
@@ -178,6 +231,45 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
     assert registry.get(JobKind.CAPTURE_VMCORE) is not None
+
+
+def test_build_handler_registry_derives_worker_ports_from_one_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = object()
+    transports = object()
+    caller_registry = SecretRegistry()
+    captured: dict[str, object | None] = {}
+
+    class _FakeComposition:
+        def build_provider_resolver(self) -> object:
+            return resolver
+
+        def build_build_host_transport_factories(self) -> object:
+            return transports
+
+    def _capture(
+        _registry: HandlerRegistry,
+        provider_resolver: object,
+        secret_registry: SecretRegistry,
+        build_host_transport_factories: object | None,
+    ) -> None:
+        captured["resolver"] = provider_resolver
+        captured["secret_registry"] = secret_registry
+        captured["transports"] = build_host_transport_factories
+
+    monkeypatch.setattr(app_module, "_HANDLER_REGISTRARS", (_capture,))
+
+    build_handler_registry(
+        secret_registry=caller_registry,
+        provider_composition=cast(Any, _FakeComposition()),
+    )
+
+    assert captured == {
+        "resolver": resolver,
+        "secret_registry": caller_registry,
+        "transports": transports,
+    }
 
 
 def test_image_build_handler_preserves_store_config_error(

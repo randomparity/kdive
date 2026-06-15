@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID
 
-from kdive.providers.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
+from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
 
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
 

@@ -19,7 +19,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.provider_components.uploads import ChunkEntry, ManifestEntry
+from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 
 UploadOwnerKind = Literal["runs", "systems"]
 RUN_UPLOAD_OWNER: UploadOwnerKind = "runs"

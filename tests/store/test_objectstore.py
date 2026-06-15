@@ -15,13 +15,13 @@ from uuid import uuid4
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactStreamRequest,
     ArtifactWriteRequest,
     StoredArtifact,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
 from kdive.store.objectstore import (
     ObjectStore,
     _normalize_etag,

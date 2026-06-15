@@ -12,20 +12,22 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts.storage import StoredArtifact
+from kdive.build_artifacts.results import BuildOutput
+from kdive.components.references import (
+    CONFIG_COMPONENT,
+    PATCH_COMPONENT,
+    LocalComponentRef,
+)
 from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import ResourceKind, Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.provider_components.artifacts import StoredArtifact
-from kdive.provider_components.build_results import BuildOutput
-from kdive.provider_components.references import (
-    CONFIG_COMPONENT,
-    PATCH_COMPONENT,
-    LocalComponentRef,
-)
-from kdive.providers import composition
+from kdive.providers.assembly import composition
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
+from kdive.providers.infra.reaping import OwnedDomain
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.ports import (
@@ -36,7 +38,6 @@ from kdive.providers.ports import (
     SystemHandle,
     TransportHandle,
 )
-from kdive.providers.reaping import OwnedDomain
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
@@ -44,7 +45,6 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtP
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
-from kdive.providers.runtime import ProviderRuntime
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -79,6 +79,10 @@ def _declare_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path.write_text(_REMOTE_INVENTORY)
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
     config.load()
+
+
+def _declare_no_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
 
 
 def _build_profile() -> ServerBuildProfile:
@@ -289,18 +293,23 @@ def test_provider_runtime_discovery_hook_noops_when_absent() -> None:
     asyncio.run(runtime.register_discovery(cast(AsyncConnectionPool, object())))
 
 
-def test_default_resolver_registers_only_local_libvirt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_resolver_registers_only_local_libvirt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("KDIVE_FAULT_INJECT", raising=False)  # default = opt-in OFF
-    monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)  # same for remote
+    _declare_no_remote(tmp_path, monkeypatch)
     resolver = composition.build_provider_resolver()
     assert resolver.registered_kinds() == frozenset({ResourceKind.LOCAL_LIBVIRT})
     local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
     assert local.component_sources.provider == "local-libvirt"
 
 
-def test_enabling_fault_inject_registers_both_kinds() -> None:
+def test_enabling_fault_inject_registers_both_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from kdive.domain.models import ResourceKind
 
+    _declare_no_remote(tmp_path, monkeypatch)
     resolver = composition.build_provider_resolver(enable_fault_inject=True)
 
     assert resolver.registered_kinds() == frozenset(
@@ -400,7 +409,7 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
 
 
 def test_transport_resetter_is_null_without_remote() -> None:
-    from kdive.providers.transport_reset import NullResetter
+    from kdive.providers.core.transport_reset import NullResetter
 
     comp = composition.ProviderComposition()
     resetter = comp.build_reconciler_transport_resetter(enable_remote_libvirt=False)
@@ -416,7 +425,7 @@ def test_transport_resetter_is_remote_when_enabled() -> None:
 
 
 def test_dump_volume_reaper_is_null_without_remote() -> None:
-    from kdive.providers.reaping import NullDumpVolumeReaper
+    from kdive.providers.infra.reaping import NullDumpVolumeReaper
 
     comp = composition.ProviderComposition()
     reaper = comp.build_reconciler_dump_volume_reaper(enable_remote_libvirt=False)
@@ -431,6 +440,22 @@ def test_dump_volume_reaper_is_remote_when_enabled() -> None:
     assert isinstance(reaper, RemoteLibvirtDumpVolumeReaper)
 
 
+def test_build_vm_reaper_is_null_without_remote() -> None:
+    from kdive.providers.infra.reaping import NullBuildVmReaper
+
+    comp = composition.ProviderComposition()
+    reaper = comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=False)
+    assert isinstance(reaper, NullBuildVmReaper)
+
+
+def test_build_vm_reaper_is_remote_when_enabled() -> None:
+    from kdive.providers.remote_libvirt.build_vm_reaper import RemoteLibvirtBuildVmReaper
+
+    comp = composition.ProviderComposition()
+    reaper = comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=True)
+    assert isinstance(reaper, RemoteLibvirtBuildVmReaper)
+
+
 def test_console_hosting_is_none_without_remote() -> None:
     import asyncio
 
@@ -441,8 +466,8 @@ def test_console_hosting_is_none_without_remote() -> None:
 
 def test_build_host_prober_is_wired_independent_of_remote(monkeypatch: pytest.MonkeyPatch) -> None:
     """The SSH build-host prober is built unconditionally — not gated on remote-libvirt."""
-    from kdive.providers.build_host.reachability import BuildHostProber, SshBuildHostProber
     from kdive.providers.remote_libvirt import config as remote_config
+    from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
 
     # Force remote-libvirt to read as unconfigured; the prober must still be returned.
     monkeypatch.setattr(remote_config, "is_remote_libvirt_configured", lambda: False)
@@ -537,8 +562,8 @@ def test_remote_libvirt_explicit_flag_wins_over_inventory(
     assert ResourceKind.REMOTE_LIBVIRT not in resolver.registered_kinds()
 
 
-def test_remote_libvirt_absent_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
+def test_remote_libvirt_absent_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _declare_no_remote(tmp_path, monkeypatch)
 
     resolver = composition.build_provider_resolver()
 
@@ -554,6 +579,15 @@ def test_remote_runtime_buildable_without_operator_config(
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     assert runtime.discovery_registrar is not None
+
+
+def test_remote_discovery_registration_is_bind_only() -> None:
+    registration = composition.remote_composition.discovery_registration(
+        secret_registry=SecretRegistry()
+    )
+
+    assert registration.kind is ResourceKind.REMOTE_LIBVIRT
+    assert registration.creates is False
 
 
 def test_build_host_transport_factories_follow_remote_libvirt_opt_in() -> None:

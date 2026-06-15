@@ -1,0 +1,149 @@
+"""Per-kind provider runtime registry (ADR-0071).
+
+The resolver maps a ``ResourceKind`` to the ``ProviderRuntime`` that serves it.
+Post-System worker ops resolve their runtime from the System's Resource kind
+(``job -> system -> allocation -> resource.kind``); an unregistered kind fails
+closed with ``configuration_error`` rather than falling through to a default.
+Concrete runtimes are still constructed only in :mod:`kdive.providers.assembly.composition`.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import LiteralString
+from uuid import UUID
+
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
+
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import ResourceKind
+from kdive.providers.core.runtime import ProviderRuntime
+
+_log = logging.getLogger(__name__)
+
+_KIND_FOR_SYSTEM: LiteralString = (
+    "SELECT r.kind AS kind FROM systems s "
+    "JOIN allocations a ON a.id = s.allocation_id "
+    "JOIN resources r ON r.id = a.resource_id "
+    "WHERE s.id = %s"
+)
+_KIND_FOR_RUN: LiteralString = (
+    "SELECT r.kind AS kind FROM runs rn "
+    "JOIN systems s ON s.id = rn.system_id "
+    "JOIN allocations a ON a.id = s.allocation_id "
+    "JOIN resources r ON r.id = a.resource_id "
+    "WHERE rn.id = %s"
+)
+_KIND_FOR_ALLOCATION: LiteralString = (
+    "SELECT r.kind AS kind FROM allocations a "
+    "JOIN resources r ON r.id = a.resource_id "
+    "WHERE a.id = %s"
+)
+_KIND_FOR_SESSION: LiteralString = (
+    "SELECT res.kind AS kind FROM debug_sessions ds "
+    "JOIN runs rn ON rn.id = ds.run_id "
+    "JOIN systems s ON s.id = rn.system_id "
+    "JOIN allocations a ON a.id = s.allocation_id "
+    "JOIN resources res ON res.id = a.resource_id "
+    "WHERE ds.id = %s"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderBinding:
+    """A resolved provider runtime paired with the Resource kind that selected it."""
+
+    kind: ResourceKind
+    runtime: ProviderRuntime
+
+
+class ProviderResolver:
+    """A static ``ResourceKind -> ProviderRuntime`` registry.
+
+    Built per deployment by :func:`kdive.providers.assembly.composition.build_provider_resolver`.
+    Selection is exhaustive and fail-closed: an unregistered kind raises
+    ``configuration_error`` at resolution.
+    """
+
+    def __init__(self, runtimes: Mapping[ResourceKind, ProviderRuntime]) -> None:
+        if not runtimes:
+            raise ValueError("ProviderResolver requires at least one registered runtime")
+        self._runtimes: dict[ResourceKind, ProviderRuntime] = dict(runtimes)
+
+    def resolve(self, kind: ResourceKind) -> ProviderRuntime:
+        """Return the runtime registered for ``kind`` or fail closed."""
+        runtime = self._runtimes.get(kind)
+        if runtime is None:
+            raise CategorizedError(
+                f"no provider runtime is registered for resource kind {kind.value!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "kind": kind.value,
+                    "registered": sorted(k.value for k in self._runtimes),
+                },
+            )
+        return runtime
+
+    def registered_kinds(self) -> frozenset[ResourceKind]:
+        return frozenset(self._runtimes)
+
+    def runtimes(self) -> tuple[ProviderRuntime, ...]:
+        return tuple(self._runtimes.values())
+
+    async def register_all_discovery(self, pool: AsyncConnectionPool) -> None:
+        """Run every composed runtime's discovery registrar.
+
+        Discovery keys on the map entry's own kind, not on a Resource that does
+        not yet exist (ADR-0071), so it fans out over the composed runtimes.
+        One runtime's registration failure must not starve the others (a
+        worker-only host has no local libvirtd, but its remote-libvirt resource
+        still has to register), so each registrar is isolated: the first
+        failure is re-raised only after every runtime has been attempted.
+        """
+        first_failure: Exception | None = None
+        for kind, runtime in self._runtimes.items():
+            try:
+                await runtime.register_discovery(pool)
+            except Exception as exc:  # noqa: BLE001 - isolate per-runtime registration faults
+                _log.warning("discovery registration failed for kind %r: %s", kind.value, exc)
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            raise first_failure
+
+    async def runtime_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderRuntime:
+        return self.resolve(await self._kind(conn, _KIND_FOR_SYSTEM, system_id, "system"))
+
+    async def runtime_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderRuntime:
+        return self.resolve(await self._kind(conn, _KIND_FOR_RUN, run_id, "run"))
+
+    async def runtime_for_allocation(
+        self, conn: AsyncConnection, allocation_id: UUID
+    ) -> ProviderRuntime:
+        kind = await self._kind(conn, _KIND_FOR_ALLOCATION, allocation_id, "allocation")
+        return self.resolve(kind)
+
+    async def runtime_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderRuntime:
+        return (await self.binding_for_session(conn, session_id)).runtime
+
+    async def binding_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderBinding:
+        kind = await self._kind(conn, _KIND_FOR_SESSION, session_id, "session")
+        return ProviderBinding(kind=kind, runtime=self.resolve(kind))
+
+    async def _kind(
+        self, conn: AsyncConnection, sql: LiteralString, object_id: UUID, object_kind: str
+    ) -> ResourceKind:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(sql, (object_id,))
+            row = await cur.fetchone()
+        if row is None:
+            raise CategorizedError(
+                f"{object_kind} {object_id} was not found",
+                category=ErrorCategory.NOT_FOUND,
+                details={"object_kind": object_kind, "object_id": str(object_id)},
+            )
+        return ResourceKind(row["kind"])

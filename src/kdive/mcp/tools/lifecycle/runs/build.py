@@ -16,7 +16,19 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts.reassembly import reassemble_chunked
+from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
+from kdive.artifacts.uploads import ManifestEntry
+from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
+from kdive.build_artifacts.validation import validate_external_artifacts
 from kdive.build_configs.defaults import DEFAULT_CONFIG_REF
+from kdive.components.catalog import load_fixture_catalog
+from kdive.components.references import CONFIG_COMPONENT, ComponentRef
+from kdive.components.requirements import ConfigRequirements
+from kdive.components.validation import (
+    ComponentSourceCapabilities,
+    reject_unsupported_component_source,
+)
 from kdive.config.core_settings import UPLOAD_TTL_SECONDS
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -36,18 +48,6 @@ from kdive.mcp.tools.lifecycle.runs.common import (
     run_job_envelope,
 )
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import HeadResult, StoredArtifact, chunk_key
-from kdive.provider_components.build_results import BuildOutput, ValidatedUpload
-from kdive.provider_components.build_validation import validate_external_artifacts
-from kdive.provider_components.catalog import load_fixture_catalog
-from kdive.provider_components.reassembly import reassemble_chunked
-from kdive.provider_components.references import CONFIG_COMPONENT, ComponentRef
-from kdive.provider_components.requirements import ConfigRequirements
-from kdive.provider_components.uploads import ManifestEntry
-from kdive.provider_components.validation import (
-    ComponentSourceCapabilities,
-    reject_unsupported_component_source,
-)
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -103,6 +103,21 @@ class _ExternalBuildCompletion:
     requirements: ConfigRequirements | None
     has_chunks: bool
     store: ExternalBuildStore | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ExternalBuildFinalization:
+    """Validated external-build finalization inputs."""
+
+    run: Run
+    output: BuildOutput
+    cmdline: str
+    keys: dict[str, str]
+    heads: dict[str, HeadResult]
+    store: ExternalBuildStore | None
+    entries: Sequence[ManifestEntry]
+    prefix: str
+    chunked: bool
 
 
 async def _build_locked(
@@ -292,19 +307,18 @@ class RunBuildHandlers:
                 except CategorizedError as exc:
                     return ToolResponse.failure_from_error(run_id, exc)
 
-                return await _finalize_external_build(
-                    conn,
-                    ctx,
+                finalization = _ExternalBuildFinalization(
                     prepared.run,
-                    validated.output,
-                    cmdline,
-                    prepared.keys,
-                    validated.heads,
+                    output=validated.output,
+                    cmdline=cmdline,
+                    keys=prepared.keys,
+                    heads=validated.heads,
                     store=prepared.store,
                     entries=prepared.manifest_row.entries,
                     prefix=prepared.manifest_row.prefix,
                     chunked=prepared.has_chunks,
                 )
+                return await _finalize_external_build(conn, ctx, finalization)
 
     async def _prepare_external_build_completion(
         self,
@@ -450,16 +464,7 @@ def _complete_envelope(run_id: UUID, result: BuildStepResult) -> ToolResponse:
 async def _finalize_external_build(
     conn: AsyncConnection,
     ctx: RequestContext,
-    run: Run,
-    output: BuildOutput,
-    cmdline: str,
-    keys: dict[str, str],
-    heads: dict[str, HeadResult],
-    *,
-    store: ExternalBuildStore | None,
-    entries: Sequence[ManifestEntry],
-    prefix: str,
-    chunked: bool,
+    finalization: _ExternalBuildFinalization,
 ) -> ToolResponse:
     """Write artifact rows, ledger result, and created -> succeeded under the per-Run lock.
 
@@ -470,12 +475,13 @@ async def _finalize_external_build(
     chunks (ADR-0104 §6).
     """
     result = BuildStepResult(
-        kernel_ref=output.kernel_ref,
-        debuginfo_ref=output.debuginfo_ref,
-        initrd_ref=keys.get("initrd"),
-        build_id=output.build_id,
-        cmdline=cmdline,
+        kernel_ref=finalization.output.kernel_ref,
+        debuginfo_ref=finalization.output.debuginfo_ref,
+        initrd_ref=finalization.keys.get("initrd"),
+        build_id=finalization.output.build_id,
+        cmdline=finalization.cmdline,
     )
+    run = finalization.run
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT state FROM runs WHERE id = %s FOR UPDATE", (run.id,))
@@ -488,8 +494,10 @@ async def _finalize_external_build(
             return _complete_envelope(run.id, recorded or result)
         if state is not RunState.CREATED:
             return _config_error(str(run.id), data={"current_status": state.value})
-        for name, head in heads.items():
-            stored = StoredArtifact(keys[name], head.etag, Sensitivity.SENSITIVE, "build")
+        for name, head in finalization.heads.items():
+            stored = StoredArtifact(
+                finalization.keys[name], head.etag, Sensitivity.SENSITIVE, "build"
+            )
             await ARTIFACTS.insert(
                 conn, register_artifact_row(stored, owner_kind="runs", owner_id=run.id)
             )
@@ -502,8 +510,8 @@ async def _finalize_external_build(
             "UPDATE runs SET kernel_ref = %s, debuginfo_ref = %s, state = %s "
             "WHERE id = %s AND state = %s",
             (
-                output.kernel_ref,
-                output.debuginfo_ref or None,
+                finalization.output.kernel_ref,
+                finalization.output.debuginfo_ref or None,
                 RunState.SUCCEEDED.value,
                 run.id,
                 RunState.CREATED.value,
@@ -521,10 +529,16 @@ async def _finalize_external_build(
                 project=run.project,
             ),
         )
-        if not chunked:
+        if not finalization.chunked:
             await upload_manifest.delete_manifest(conn, "runs", run.id)
-    if chunked and store is not None:
-        await _cleanup_chunks_and_manifest(conn, store, run.id, entries, prefix)
+    if finalization.chunked and finalization.store is not None:
+        await _cleanup_chunks_and_manifest(
+            conn,
+            finalization.store,
+            run.id,
+            finalization.entries,
+            finalization.prefix,
+        )
     return _complete_envelope(run.id, result)
 
 

@@ -30,8 +30,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, NamedTuple, Protocol
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -49,7 +49,7 @@ class _AgentExec(Protocol):
     def run(self, domain: Any, argv: list[str]) -> AgentExecResult: ...
 
 
-class SeamOutput(NamedTuple):
+class ArtifactChannelResult(NamedTuple):
     """The raw exec result, the persisted redacted transcript, and a masked snippet.
 
     ``result`` carries the in-guest command's exit status and raw output for the worker's
@@ -107,7 +107,7 @@ class InTargetArtifactChannel:
         argv: list[str],
         owner_kind: str,
         owner_id: str,
-    ) -> SeamOutput:
+    ) -> ArtifactChannelResult:
         """Register ``capability_url``, run ``argv`` in-guest, redact-and-persist, release.
 
         ``argv`` is the worker-composed constrained command carrying ``capability_url``;
@@ -147,6 +147,8 @@ class InTargetArtifactChannel:
                     retention_class=_RETENTION_CLASS,
                 )
             )
-            return SeamOutput(result=result, artifact=artifact, transcript_snippet=redacted)
+            return ArtifactChannelResult(
+                result=result, artifact=artifact, transcript_snippet=redacted
+            )
         finally:
             self._registry.release(self._scope)

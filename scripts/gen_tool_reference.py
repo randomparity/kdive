@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -132,6 +133,23 @@ def _registry_tools() -> list[Any]:
     return cast(list[Any], asyncio.run(app.list_tools()))
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as handle:
+        handle.write(text)
+        tmp_path = Path(handle.name)
+    try:
+        tmp_path.replace(path)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def write_reference(out_dir: Path) -> None:
     docs = tool_docs(_registry_tools())
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -139,8 +157,8 @@ def write_reference(out_dir: Path) -> None:
     for d in docs:
         by_ns.setdefault(d.namespace, []).append(d)
     for ns, ns_docs in by_ns.items():
-        (out_dir / f"{ns}.md").write_text(render_namespace(ns, ns_docs), encoding="utf-8")
-    (out_dir / "index.md").write_text(render_index(docs), encoding="utf-8")
+        _atomic_write_text(out_dir / f"{ns}.md", render_namespace(ns, ns_docs))
+    _atomic_write_text(out_dir / "index.md", render_index(docs))
 
 
 if __name__ == "__main__":

@@ -6,10 +6,7 @@ import asyncio
 from typing import cast
 from uuid import uuid4
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
-from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.provider_components.references import (
+from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
     KERNEL_COMPONENT,
@@ -17,6 +14,9 @@ from kdive.provider_components.references import (
     ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
 )
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.models import ResourceKind
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject import composition
 from kdive.providers.fault_inject.build import FaultInjectBuild
 from kdive.providers.fault_inject.debug.gdb import FaultInjectDebugEngine

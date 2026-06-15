@@ -1,6 +1,6 @@
 """Local-libvirt gdb-MI wiring: the provider attach seam over the shared engine (ADR-0034/0083).
 
-The gdb-MI engine itself is provider-neutral (``kdive.providers.debug_common.gdbmi``); this
+The gdb-MI engine itself is provider-neutral (``kdive.providers.shared.debug_common.gdbmi``); this
 module keeps only local-libvirt's ``default_attach_seam`` (loopback-only via the engine's default
 host policy) and its ``live_vm``-gated debuginfo resolver.
 """
@@ -11,8 +11,8 @@ import tempfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 
 
 def _resolve_debuginfo_ref(run_id: str) -> str:  # pragma: no cover - live_vm

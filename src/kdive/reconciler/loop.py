@@ -8,7 +8,7 @@ leaked image objects, dangling image rows, and expired private images — each o
 pooled connection, each fencing its writes, each isolated so one failing repair does not
 starve the others. The expiry sweep runs first so an allocation it reclaims orphans its
 System in the same pass. Time predicates use Postgres ``now()`` (never a Python clock).
-Provider reaper contracts live in :mod:`kdive.providers.reaping`; the Postgres-only repair
+Provider reaper contracts live in :mod:`kdive.providers.infra.reaping`; the Postgres-only repair
 path can use ``NullReaper`` there when no provider contributes leaked-infra repair.
 """
 
@@ -28,44 +28,46 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
-from kdive.providers.build_host.reachability import BuildHostProber
-from kdive.providers.console_hosting import CollectorRegistry
-from kdive.providers.reaping import (
+from kdive.providers.core.transport_reset import NullResetter, TransportResetter
+from kdive.providers.infra.console_hosting import CollectorRegistry
+from kdive.providers.infra.reaping import (
     BuildVmReaper,
     DumpVolumeReaper,
     InfraReaper,
     NullBuildVmReaper,
     NullDumpVolumeReaper,
 )
-from kdive.providers.transport_reset import NullResetter, TransportResetter
-from kdive.reconciler import allocations as allocation_repairs
-from kdive.reconciler import build_hosts as build_host_repairs
-from kdive.reconciler import debug_sessions as debug_session_repairs
-from kdive.reconciler import gc as gc_repairs
-from kdive.reconciler import jobs as job_repairs
-from kdive.reconciler import systems as system_repairs
-from kdive.reconciler.images import (
+from kdive.providers.shared.build_host.reachability import BuildHostProber
+from kdive.reconciler.cleanup import gc as gc_repairs
+from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
 )
-from kdive.reconciler.images import (
+from kdive.reconciler.cleanup.images import (
     repair_leaked_images as _repair_leaked_images,
+)
+from kdive.reconciler.cleanup.provider_reaping import (
+    repair_leaked_domains as _repair_leaked_domains,
+)
+from kdive.reconciler.cleanup.provider_reaping import (
+    repair_leaked_probe_guests as _repair_leaked_probe_guests,
+)
+from kdive.reconciler.cleanup.runtime_resources import ResourceProbe
+from kdive.reconciler.cleanup.runtime_resources import (
+    reap_expired_runtime_resources as _reap_expired_runtime_resources,
+)
+from kdive.reconciler.cleanup.uploads import (
+    UploadStore,
+)
+from kdive.reconciler.cleanup.uploads import (
+    repair_abandoned_uploads as _repair_abandoned_uploads,
 )
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
-from kdive.reconciler.provider_reaping import repair_leaked_domains as _repair_leaked_domains
-from kdive.reconciler.provider_reaping import (
-    repair_leaked_probe_guests as _repair_leaked_probe_guests,
-)
-from kdive.reconciler.runtime_resources import ResourceProbe
-from kdive.reconciler.runtime_resources import (
-    reap_expired_runtime_resources as _reap_expired_runtime_resources,
-)
-from kdive.reconciler.uploads import (
-    UploadStore,
-)
-from kdive.reconciler.uploads import (
-    repair_abandoned_uploads as _repair_abandoned_uploads,
-)
+from kdive.reconciler.repairs import allocations as allocation_repairs
+from kdive.reconciler.repairs import build_hosts as build_host_repairs
+from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
+from kdive.reconciler.repairs import jobs as job_repairs
+from kdive.reconciler.repairs import systems as system_repairs
 from kdive.services.images.retention import (
     ImageSweepStore,
 )

@@ -6,7 +6,7 @@
 
 `implemented`
 
-Close an Investigation (idempotent on closed; errors on abandoned). Requires operator.
+Close an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -16,7 +16,7 @@ Close an Investigation (idempotent on closed; errors on abandoned). Requires ope
 
 `implemented` · `read-only`
 
-Render an Investigation by ID. Requires viewer.
+Return one investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -26,7 +26,7 @@ Render an Investigation by ID. Requires viewer.
 
 `implemented`
 
-Upsert an external ref onto an Investigation by (tracker, id) key. Requires operator.
+Link a run to an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -37,7 +37,7 @@ Upsert an external ref onto an Investigation by (tracker, id) key. Requires oper
 
 `implemented`
 
-Mint an Investigation in the open state for the caller's project. Requires operator.
+Open an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -49,7 +49,7 @@ Mint an Investigation in the open state for the caller's project. Requires opera
 
 `implemented`
 
-Remove an external ref from an Investigation by (tracker, id) key. Requires operator.
+Unlink a run from an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

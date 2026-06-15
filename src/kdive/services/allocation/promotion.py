@@ -5,7 +5,7 @@ selection for each queued ``requested`` allocation from its persisted inputs (PC
 cordon-skipping — the host is chosen *at promotion*, never frozen at enqueue) and promotes
 the **oldest *placeable*** request per resource to ``granted``: under
 ``PROJECT → RESOURCE → ALLOCATION`` it replays the **shared** admission gate
-(:func:`kdive.services.allocation.admission.admission_gate` — no forked grant path), stamps
+(:func:`kdive.services.allocation.admission.core.admission_gate` — no forked grant path), stamps
 ``resource_id``, transitions ``requested → granted``, writes the ``reserved`` debit, and
 sets the lease window. Each candidate runs in its own committed transaction so a sibling's
 grant is observed by the next candidate's capacity replay — the per-host cap and the
@@ -45,12 +45,16 @@ from kdive.domain.state import AllocationState, ensure_transition
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.services.accounting import ledger as accounting
-from kdive.services.allocation.admission import (
+from kdive.services.allocation.admission.core import (
+    BUDGET_DENIAL_REASON,
     AllocationRequest,
     admission_gate,
     price_window_and_estimate,
 )
-from kdive.services.allocation.placement import PlacementRequest, resolve_placement_candidates
+from kdive.services.allocation.admission.placement import (
+    PlacementRequest,
+    resolve_placement_candidates,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -166,16 +170,21 @@ async def _try_one_host(
 
 
 def _is_budget_terminate(denial: object) -> bool:
-    """A budget recheck denial: the unique non-queueable ``ALLOCATION_DENIED`` with no reason.
+    """A budget recheck denial: ``ALLOCATION_DENIED`` with the explicit budget reason.
 
     The host-cap denial shares ``ALLOCATION_DENIED`` but is ``queueable`` and carries
-    ``reason="at_capacity"``; the budget denial is ``queueable=False`` with no reason
-    (ADR-0069). Routing on ``queueable`` (not the shared category) is the load-bearing
-    distinction between terminate (budget) and wait (capacity).
+    ``reason="at_capacity"``; the affinity denial is non-queueable but carries
+    ``reason="affinity_denied"``. Routing on the explicit reason is the load-bearing
+    distinction between terminate (budget) and wait (other denials).
     """
     category = getattr(denial, "category", None)
     queueable = getattr(denial, "queueable", False)
-    return category is ErrorCategory.ALLOCATION_DENIED and not queueable
+    reason = getattr(denial, "reason", None)
+    return (
+        category is ErrorCategory.ALLOCATION_DENIED
+        and reason == BUDGET_DENIAL_REASON
+        and not queueable
+    )
 
 
 async def _grant_queued(

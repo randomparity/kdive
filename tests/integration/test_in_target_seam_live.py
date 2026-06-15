@@ -25,8 +25,8 @@ from uuid import uuid4
 import libvirt
 import pytest
 
+from kdive.artifacts.storage import ArtifactWriteRequest
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactWriteRequest
 from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.security.secrets.redaction import REDACTION

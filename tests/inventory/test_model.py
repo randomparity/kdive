@@ -8,6 +8,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from kdive.domain.models import ImageVisibility
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
     BuildSource,
@@ -56,6 +57,7 @@ def test_wellformed_parses() -> None:
     src = doc.image[0].source
     assert isinstance(src, StagedSource)
     assert src.volume == "base.qcow2"
+    assert doc.image[0].visibility is ImageVisibility.PUBLIC
     assert doc.remote_libvirt[0].base_image == "base"
 
 
@@ -188,6 +190,13 @@ def test_base_image_cross_ref_must_name_declared_image() -> None:
 def test_unknown_source_kind_rejected() -> None:
     d = _doc()
     d["image"][0]["source"] = {"kind": "ftp", "url": "x"}
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
+def test_unsupported_image_format_rejected() -> None:
+    d = _doc()
+    d["image"][0]["format"] = "raw"
     with pytest.raises(InventoryError):
         InventoryDoc.parse(d)
 

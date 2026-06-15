@@ -18,10 +18,7 @@ from uuid import UUID
 
 import pytest
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactStreamRequest,
     ArtifactWriteRequest,
     HeadResult,
@@ -29,15 +26,19 @@ from kdive.provider_components.artifacts import (
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     DMESG_UNAVAILABLE,
     HostDumpCapturer,
     HostDumpOptions,
+    _SpoolSink,
     host_dump_volume_name,
 )
-from kdive.providers.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 
@@ -249,8 +250,8 @@ def _retrieve(
     *,
     build_id: str = "deadbeef",
     dmesg: bytes = b"kernel panic\n",
-    build_id_error: CategorizedError | None = None,
-    dmesg_error: CategorizedError | None = None,
+    build_id_error: Exception | None = None,
+    dmesg_error: Exception | None = None,
     max_core_bytes: int = 5 * 1024**3,
 ) -> RemoteLibvirtRetrieve:
     def _read_build_id(path: Path) -> str:
@@ -354,6 +355,21 @@ def test_host_dump_dmesg_extraction_failure_degrades_to_placeholder(tmp_path: Pa
     assert store.put_requests[0].data == DMESG_UNAVAILABLE
 
 
+def test_host_dump_raw_dmesg_failure_degrades_to_placeholder(tmp_path: Path) -> None:
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    out = _retrieve(conn, store, tmp_path, dmesg_error=RuntimeError("drgn helper blew up")).capture(
+        _SID, CaptureMethod.HOST_DUMP
+    )
+
+    assert out.vmcore_build_id == "deadbeef"
+    assert store.put_requests
+    assert store.put_requests[0].data == DMESG_UNAVAILABLE
+
+
 def test_host_dump_missing_drgn_dependency_is_not_degraded(tmp_path: Path) -> None:
     # A genuine MISSING_DEPENDENCY (drgn absent) is an environment fault, not a best-effort
     # degrade — it must surface, not be masked behind the placeholder (#320).
@@ -367,6 +383,24 @@ def test_host_dump_missing_drgn_dependency_is_not_degraded(tmp_path: Path) -> No
         _retrieve(conn, store, tmp_path, dmesg_error=err).capture(_SID, CaptureMethod.HOST_DUMP)
 
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_host_dump_raw_build_id_failure_is_infrastructure_failure(tmp_path: Path) -> None:
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path, build_id_error=RuntimeError("drgn blew up")).capture(
+            _SID, CaptureMethod.HOST_DUMP
+        )
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "system_id": str(_SID),
+        "capture_method": CaptureMethod.HOST_DUMP.value,
+    }
 
 
 def test_host_dump_deletes_a_stale_volume_before_dumping(tmp_path: Path) -> None:
@@ -412,7 +446,7 @@ def test_host_dump_non_dir_pool_is_configuration_error_before_dump(tmp_path: Pat
     assert pool.xml_desc_calls == 1
 
 
-def test_host_dump_forbidden_pool_xml_is_configuration_error_before_dump(
+def test_host_dump_forbidden_pool_xml_is_infrastructure_failure_before_dump(
     tmp_path: Path,
 ) -> None:
     vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
@@ -423,7 +457,11 @@ def test_host_dump_forbidden_pool_xml_is_configuration_error_before_dump(
     with pytest.raises(CategorizedError) as exc:
         _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
 
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "operation": "preflighting host_dump storage pool",
+        "storage_pool": _POOL,
+    }
     assert not conn.domain.core_dumps
     assert pool.xml_desc_calls == 1
 
@@ -526,6 +564,21 @@ def test_host_dump_stream_overrunning_the_ceiling_is_configuration_error(tmp_pat
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert vol.deleted  # the over-streaming dump volume is still cleaned up
     assert not store.stream_requests  # never uploaded
+
+
+def test_spool_sink_tracks_written_bytes_and_rejects_overrun(tmp_path: Path) -> None:
+    spool = tmp_path / "vmcore"
+    with spool.open("wb") as handle:
+        sink = _SpoolSink(handle=handle, system_id=_SID, max_bytes=5)
+        sink.write_chunk(b"abc")
+        assert sink.written == 3
+
+        with pytest.raises(CategorizedError) as exc:
+            sink.write_chunk(b"def")
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["streamed_bytes"] == 6
+    assert spool.read_bytes() == b"abc"
 
 
 def test_host_dump_spools_to_a_private_mode_file(tmp_path: Path) -> None:

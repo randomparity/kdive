@@ -11,14 +11,6 @@ import libvirt
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.crash_postmortem import (
-    FetchObject,
-    ReadBuildId,
-    RunCrash,
-    default_fetch_object,
-    default_read_vmcore_build_id,
-    default_run_crash,
-)
 from kdive.providers.ports import CaptureOutput, CrashOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.guest.agent import (
@@ -43,6 +35,14 @@ from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     KdumpCapturer,
 )
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
+from kdive.providers.shared.debug_common.crash_postmortem import (
+    FetchObject,
+    ReadBuildId,
+    RunCrash,
+    default_fetch_object,
+    default_read_vmcore_build_id,
+    default_run_crash,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.objectstore import object_store_from_env

@@ -6,7 +6,7 @@
 
 `implemented`
 
-Disable a build host so the scheduler will not select it. Requires platform_admin.
+Disable a registered build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -16,40 +16,33 @@ Disable a build host so the scheduler will not select it. Requires platform_admi
 
 `implemented` · `read-only`
 
-List all registered build hosts (id, name, kind, address, credential ref, state).
+List registered build hosts.
 
 ## `build_hosts.register_ephemeral_libvirt`
 
 `implemented`
 
-Register a new ephemeral-libvirt build host. Requires platform_admin.
+Register an ephemeral-libvirt build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `base_image_volume` | `string` | yes | Base build-image volume name in the remote storage pool. |
-| `max_concurrent` | `integer` | yes | Maximum simultaneous build leases this host may hold (> 0). |
-| `name` | `string` | yes | Unique human-readable identifier for the new host. |
-| `workspace_root` | `string` | yes | Absolute path where builds are staged inside the build VM. |
+| `request` | `object` | yes | Ephemeral-libvirt build-host registration request. |
 
 ## `build_hosts.register_ssh`
 
 `implemented`
 
-Register a new SSH build host. Requires platform_admin.
+Register an SSH build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `address` | `string` | yes | SSH hostname or IP address. |
-| `max_concurrent` | `integer` | yes | Maximum simultaneous build leases this host may hold (> 0). |
-| `name` | `string` | yes | Unique human-readable identifier for the new host. |
-| `ssh_credential_ref` | `string` | yes | Credential secret reference, e.g. 'ssh://build-host-key'. Only the reference string is stored — secret bytes are never fetched. |
-| `workspace_root` | `string` | yes | Absolute path where builds are staged on the SSH host. |
+| `request` | `object` | yes | SSH build-host registration request. |
 
 ## `build_hosts.remove`
 
 `implemented`
 
-Delete a build host from the inventory. Requires platform_admin.
+Remove a registered build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

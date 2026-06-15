@@ -17,11 +17,6 @@ from kdive.services.runs import build_host_selection
 _RUN_ID = UUID("00000000-0000-0000-0000-00000000b017")
 
 
-class _Profile:
-    def __init__(self, build_host: str | None = None) -> None:
-        self.build_host = build_host
-
-
 def _host(
     *,
     name: str = "worker-local",
@@ -43,14 +38,30 @@ def _host(
     )
 
 
+def _profile(*, build_host: str | None = None, git: bool = False) -> ServerBuildProfile:
+    source_ref: object = (
+        {"git": {"remote": "https://example.invalid/linux.git", "ref": "v6.9"}}
+        if git
+        else "/src/linux"
+    )
+    return ServerBuildProfile.model_validate(
+        {"schema_version": 1, "kernel_source_ref": source_ref, "build_host": build_host}
+    )
+
+
 def test_local_host_default_does_not_acquire_capacity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _run() -> None:
         host = _host()
         acquired: list[BuildHost] = []
-        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
-        monkeypatch.setattr(build_host_selection, "is_git_source", lambda _profile: False)
+        lookups: list[str] = []
+
+        async def get_by_name(_conn: AsyncConnection, name: str) -> BuildHost:
+            lookups.append(name)
+            return host
+
+        monkeypatch.setattr(build_host_selection, "get_by_name", get_by_name)
         monkeypatch.setattr(
             build_host_selection,
             "try_acquire_lease",
@@ -58,10 +69,11 @@ def test_local_host_default_does_not_acquire_capacity(
         )
 
         selected = await build_host_selection.resolve_and_admit(
-            cast(AsyncConnection, object()), cast(ServerBuildProfile, _Profile()), _RUN_ID
+            cast(AsyncConnection, object()), _profile(), _RUN_ID
         )
 
         assert selected is host
+        assert lookups == ["worker-local"]
         assert acquired == []
 
     asyncio.run(_run())
@@ -72,23 +84,31 @@ def test_remote_host_requires_git_source_and_acquires_lease(
 ) -> None:
     async def _run() -> None:
         host = _host(name="builder", kind=BuildHostKind.SSH)
-        acquired: list[BuildHost] = []
-        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
-        monkeypatch.setattr(build_host_selection, "is_git_source", lambda _profile: True)
+        acquired: list[tuple[BuildHost, UUID]] = []
+
+        async def get_by_name(_conn: AsyncConnection, name: str) -> BuildHost:
+            assert name == "builder"
+            return host
+
+        async def acquire(_conn: AsyncConnection, lease_host: BuildHost, run_id: UUID) -> bool:
+            acquired.append((lease_host, run_id))
+            return True
+
+        monkeypatch.setattr(build_host_selection, "get_by_name", get_by_name)
         monkeypatch.setattr(
             build_host_selection,
             "try_acquire_lease",
-            lambda _conn, lease_host, _run_id: _record_async(acquired, lease_host, True),
+            acquire,
         )
 
         selected = await build_host_selection.resolve_and_admit(
             cast(AsyncConnection, object()),
-            cast(ServerBuildProfile, _Profile("builder")),
+            _profile(build_host="builder", git=True),
             _RUN_ID,
         )
 
         assert selected is host
-        assert acquired == [host]
+        assert acquired == [(host, _RUN_ID)]
 
     asyncio.run(_run())
 
@@ -100,7 +120,7 @@ def test_missing_host_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(CategorizedError) as exc:
             await build_host_selection.resolve_and_admit(
                 cast(AsyncConnection, object()),
-                cast(ServerBuildProfile, _Profile("missing")),
+                _profile(build_host="missing"),
                 _RUN_ID,
             )
 
@@ -116,7 +136,6 @@ def test_remote_host_at_capacity_is_capacity_exhausted(
     async def _run() -> None:
         host = _host(name="builder", kind=BuildHostKind.SSH)
         monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
-        monkeypatch.setattr(build_host_selection, "is_git_source", lambda _profile: True)
         monkeypatch.setattr(
             build_host_selection,
             "try_acquire_lease",
@@ -126,7 +145,7 @@ def test_remote_host_at_capacity_is_capacity_exhausted(
         with pytest.raises(CategorizedError) as exc:
             await build_host_selection.resolve_and_admit(
                 cast(AsyncConnection, object()),
-                cast(ServerBuildProfile, _Profile("builder")),
+                _profile(build_host="builder", git=True),
                 _RUN_ID,
             )
 

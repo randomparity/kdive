@@ -17,8 +17,8 @@ from pathlib import Path
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.storage import ArtifactWriteRequest
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactWriteRequest
 from kdive.store.objectstore import ObjectStore
 
 KDUMP_FRAGMENT_PATH = Path(__file__).parent / "data" / "kdump.config"

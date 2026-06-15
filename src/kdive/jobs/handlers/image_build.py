@@ -21,7 +21,7 @@ from kdive.images.planes.base import RootfsBuildPlane, RootfsBuildSpec
 from kdive.images.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ImageBuildPayload, load_payload
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.images.publish import (
     ImageObjectStore,
     PublishRequest,

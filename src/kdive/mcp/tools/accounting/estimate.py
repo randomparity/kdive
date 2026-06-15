@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
@@ -114,22 +114,14 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def accounting_estimate(
         project: Annotated[str, Field(description="Project to price the estimate for.")],
         request: Annotated[
-            dict[str, Any],
+            EstimateRequestPayload,
             Field(description="Estimate request payload: size, lease window, cost class."),
         ],
     ) -> ToolResponse:
         """Price a hypothetical selector over a window without writing anything. Requires viewer."""
-        try:
-            payload = EstimateRequestPayload.model_validate(request)
-        except ValueError:
-            return ToolResponse.failure(
-                _ESTIMATE_OBJECT_ID,
-                ErrorCategory.CONFIGURATION_ERROR,
-                suggested_next_actions=["accounting.estimate"],
-            )
         return await estimate(
             pool,
             current_context(),
             project=project,
-            request=payload,
+            request=request,
         )

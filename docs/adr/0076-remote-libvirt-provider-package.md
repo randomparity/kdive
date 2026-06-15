@@ -57,7 +57,7 @@ line added or removed by the M2 commit set since a `pre-M2` tag cut at milestone
 identified by milestone/label since sub-issues merge to `main` individually with no long-lived
 epic branch — not a net that a later revert can zero out) against an explicit allowlist of
 **named, provider-agnostic**
-touch-points: the `ResourceKind` enum value, the `providers/composition.py` registration, the
+touch-points: the `ResourceKind` enum value, the `providers/assembly/composition.py` registration, the
 one migration, regenerated docs, **and additive object-store primitives any provider reuses**.
 The last entry is load-bearing: ADR-0078's in-target seam needs a **presigned GET**, and the
 object store today exposes only `presign_put` (`store/objectstore.py`), so M2 adds a

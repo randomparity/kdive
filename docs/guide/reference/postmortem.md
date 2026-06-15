@@ -6,7 +6,7 @@
 
 `partial` · `read-only`
 
-Run a crash command batch over a Run's captured core; returns redacted output.
+Run crash postmortem commands for a captured vmcore.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -17,7 +17,7 @@ Run a crash command batch over a Run's captured core; returns redacted output.
 
 `partial` · `read-only`
 
-Run the fixed triage commands (log+bt) over a Run's captured core; redacted report.
+Run the default crash triage for a captured vmcore.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

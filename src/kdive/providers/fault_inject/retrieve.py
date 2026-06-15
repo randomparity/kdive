@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from uuid import UUID
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT, StorePort
 from kdive.providers.ports import CaptureOutput, CrashOutput
 from kdive.security.artifacts.crash_commands import validate_crash_commands

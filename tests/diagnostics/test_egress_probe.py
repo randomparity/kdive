@@ -15,12 +15,15 @@ fence) runs against the disposable Postgres fixture; the check logic runs over a
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
+from typing import cast
+from uuid import UUID
 
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.diagnostics.checks import CheckStatus
+from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.egress_probe import (
     EGRESS_FIX,
     EGRESS_ID,
@@ -142,30 +145,90 @@ def test_unreachable_guest_is_error_not_fail(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_provision_failure_is_error_and_guest_torn_down(migrated_url: str) -> None:
+def test_marker_registration_failure_logs_context(caplog) -> None:  # noqa: ANN001
+    class BrokenRegistry:
+        async def register(self, _provider: str, _domain_name: str):  # noqa: ANN202
+            raise RuntimeError("marker db down")
+
+        async def heartbeat(self, _probe_id):  # noqa: ANN001, ANN202
+            raise AssertionError("heartbeat should not run")
+
+        async def release(self, _probe_id):  # noqa: ANN001, ANN202
+            raise AssertionError("release should not run")
+
+    async def _run() -> None:
+        check = GuestEgressCheck(
+            provider="p",
+            guest=_FakeGuest(),
+            presigned_url=_presigned,
+            registry=cast(EgressProbeRegistry, BrokenRegistry()),
+            single_flight=SingleFlight(),
+        )
+        with caplog.at_level(logging.ERROR, logger="kdive.diagnostics.egress_probe"):
+            result = await check.run()
+        assert result.status is CheckStatus.ERROR
+        assert result.detail == "could not register the probe marker; cannot provision a guest"
+
+    asyncio.run(_run())
+    record = next(
+        record for record in caplog.records if "marker registration failed" in record.message
+    )
+    assert "provider='p'" in record.message
+    assert record.exc_info is not None
+
+
+def test_provision_failure_is_error_and_guest_torn_down(migrated_url: str, caplog) -> None:  # noqa: ANN001
     async def _run() -> None:
         guest = _FakeGuest(provision_error=RuntimeError("no image staged on provider"))
         async with _pool(migrated_url) as pool:
-            result = await _check("p", guest, EgressProbeRegistry(pool)).run()
+            with caplog.at_level(logging.ERROR, logger="kdive.diagnostics.egress_probe"):
+                result = await _check("p", guest, EgressProbeRegistry(pool)).run()
         assert result.status is CheckStatus.ERROR
         assert result.fix is None
         # teardown is still attempted on the (failed) provision path — best-effort cleanup.
         assert len(guest.torn_down) == 1
 
     asyncio.run(_run())
+    record = next(record for record in caplog.records if "provision/exec failed" in record.message)
+    assert "provider='p'" in record.message
+    assert record.exc_info is not None
 
 
-def test_teardown_failure_does_not_change_verdict(migrated_url: str) -> None:
+def test_teardown_failure_does_not_change_verdict(migrated_url: str, caplog) -> None:  # noqa: ANN001
     async def _run() -> None:
         guest = _FakeGuest(
             outcome=EgressOutcome.REACHABLE, teardown_error=RuntimeError("destroy timed out")
         )
         async with _pool(migrated_url) as pool:
-            result = await _check("p", guest, EgressProbeRegistry(pool)).run()
+            with caplog.at_level(logging.WARNING, logger="kdive.diagnostics.egress_probe"):
+                result = await _check("p", guest, EgressProbeRegistry(pool)).run()
         # teardown raised but the verdict stands (the reaper is the backstop).
         assert result.status is CheckStatus.PASS
 
     asyncio.run(_run())
+    record = next(record for record in caplog.records if "teardown failed" in record.message)
+    assert "provider='p'" in record.message
+    assert record.exc_info is not None
+
+
+def test_release_failure_does_not_change_verdict(migrated_url: str, caplog) -> None:  # noqa: ANN001
+    class BrokenReleaseRegistry(EgressProbeRegistry):
+        async def release(self, probe_id: UUID) -> None:
+            await super().release(probe_id)
+            raise RuntimeError("release write timed out")
+
+    async def _run() -> None:
+        guest = _FakeGuest(outcome=EgressOutcome.REACHABLE)
+        async with _pool(migrated_url) as pool:
+            registry = BrokenReleaseRegistry(pool)
+            with caplog.at_level(logging.WARNING, logger="kdive.diagnostics.egress_probe"):
+                result = await _check("p", guest, registry).run()
+        assert result.status is CheckStatus.PASS
+
+    asyncio.run(_run())
+    record = next(record for record in caplog.records if "marker release failed" in record.message)
+    assert "provider='p'" in record.message
+    assert record.exc_info is not None
 
 
 def test_heartbeat_keeps_beating_for_a_slow_probe(migrated_url: str) -> None:
@@ -230,6 +293,35 @@ def test_concurrent_callers_spin_exactly_one_guest(migrated_url: str) -> None:
         assert all(r.status is CheckStatus.PASS for r in results)
         # Exactly one guest spun despite three concurrent callers.
         assert len(guest.provisioned) == 1
+
+    asyncio.run(_run())
+
+
+def test_singleflight_cleans_up_after_cancelled_waiter() -> None:
+    async def _run() -> None:
+        single_flight = SingleFlight()
+        release = asyncio.Event()
+        calls = 0
+
+        async def factory() -> CheckResult:
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return CheckResult(EGRESS_ID, CheckStatus.PASS, "ok")
+
+        waiter = asyncio.create_task(single_flight.run("p", factory))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        release.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        result = await single_flight.run("p", factory)
+        assert result.status is CheckStatus.PASS
+        assert calls == 2
 
     asyncio.run(_run())
 

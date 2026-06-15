@@ -19,8 +19,8 @@ from kdive.mcp.tools._runtime_resolution import (
     with_runtime_for_run,
     with_runtime_for_system,
 )
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 
 type _RuntimeWrapper = Callable[
     [AsyncConnectionPool, ProviderResolver, str, RuntimeHandler],
@@ -135,6 +135,27 @@ def test_runtime_wrapper_maps_categorized_error_to_failure_response(
     assert result.status == "error"
     assert result.error_category == "missing_dependency"
     assert result.data == {"resource_kind": "local_libvirt", "retryable": False}
+    assert pool.connections == 1
+
+
+@pytest.mark.parametrize(("kind", "wrapper"), _WRAPPERS)
+def test_runtime_wrapper_preserves_absent_object_not_found_response(
+    kind: str, wrapper: _RuntimeWrapper
+) -> None:
+    error = CategorizedError(
+        f"{kind} was not found",
+        category=ErrorCategory.NOT_FOUND,
+        details={"object_kind": kind, "object_id": _OBJECT_ID},
+    )
+    pool = _FakePool()
+    resolver = _FakeResolver(error=error)
+
+    result = asyncio.run(wrapper(_pool(pool), _resolver(resolver), _OBJECT_ID, _success_response))
+
+    assert result.object_id == _OBJECT_ID
+    assert result.status == "error"
+    assert result.error_category == "not_found"
+    assert result.data == {"object_kind": kind, "object_id": _OBJECT_ID}
     assert pool.connections == 1
 
 

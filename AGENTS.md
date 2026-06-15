@@ -78,7 +78,7 @@ its Allocation. See the design doc's "Domain model" section for the precise life
 ### The provider runtime seam
 
 The active M0/M1 provider seam is `ProviderRuntime` typed ports (ADR-0063). Production
-assembly happens in `providers/composition.py`, which builds a `ProviderResolver` over the
+assembly happens in `providers/assembly/composition.py`, which builds a `ProviderResolver` over the
 registered runtimes. The default production resolver registers local-libvirt; fault-inject is
 a concrete test/failure-path opt-in provider; remote-libvirt is an operator-configured
 opt-in provider wired through the same resolver/runtime seam. A provider still implements

@@ -15,14 +15,18 @@ from kdive.process_health import server
 
 
 def test_oidc_ping_requires_jwks_uri() -> None:
-    try:
-        config.load({})
-        with pytest.raises(CategorizedError) as exc:
-            server.build_oidc_ping()
-        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-        assert exc.value.details["variable"] == "KDIVE_OIDC_JWKS_URI"
-    finally:
-        config.reset()
+    async def _run() -> None:
+        try:
+            config.load({})
+            ping = server.build_oidc_ping()
+            with pytest.raises(CategorizedError) as exc:
+                await ping()
+            assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert exc.value.details["variable"] == "KDIVE_OIDC_JWKS_URI"
+        finally:
+            config.reset()
+
+    asyncio.run(_run())
 
 
 def test_oidc_ping_uses_bounded_client_and_raises_for_status(

@@ -18,7 +18,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from kdive.health.heartbeat import Heartbeat
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop as reconciler_loop
 from kdive.reconciler.loop import ReconcileConfig, Reconciler, ReconcileReport
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry

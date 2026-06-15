@@ -6,7 +6,7 @@
 
 `implemented`
 
-Delete a system-shape preset. Label-only, never FK-blocks live rows. Operator.
+Delete a system shape.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -16,13 +16,13 @@ Delete a system-shape preset. Label-only, never FK-blocks live rows. Operator.
 
 `implemented` · `read-only`
 
-List the named system-shape presets. Viewer.
+List system shapes.
 
 ## `shapes.set`
 
 `implemented`
 
-Upsert a system-shape preset. Never re-sizes existing rows. Operator.
+Create or update a system shape.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

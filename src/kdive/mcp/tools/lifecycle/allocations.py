@@ -31,29 +31,28 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByKind
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.allocation.admission import AdmissionOutcome
+from kdive.services.allocation.admission.core import AdmissionOutcome
+from kdive.services.allocation.admission.request import (
+    AdmissionRequestSpec,
+    RequestAdmissionResult,
+    denial_details,
+    request_admission,
+)
 from kdive.services.allocation.release import (
     ReleaseOutcome,
     ctx_audit_writer,
     release_with_backstops,
 )
 from kdive.services.allocation.renew import RenewOutcome, renew
-from kdive.services.allocation.request import (
-    AdmissionRequestSpec,
-    RequestAdmissionResult,
-    denial_details,
-    request_admission,
-)
 
 _log = logging.getLogger(__name__)
-
-DEFAULT_LIST_LIMIT = 50
-MAX_LIST_LIMIT = 200
 
 
 def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:
@@ -295,7 +294,7 @@ async def list_allocations(
     """Return the newest allocations for ``project`` in one collection envelope."""
     require_project(ctx, project)
     require_role(ctx, project, Role.VIEWER)
-    capped = max(1, min(limit, MAX_LIST_LIMIT))
+    capped = _clamp_list_limit(limit)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
@@ -335,7 +334,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_request(
         project: Annotated[str, Field(description="Project to admit the allocation for.")],
         request: Annotated[
-            dict[str, Any],
+            AllocationRequestPayload,
             Field(description="Allocation request payload: size, lease window, resource selector."),
         ],
         idempotency_key: Annotated[
@@ -343,16 +342,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior grant."),
         ] = None,
     ) -> ToolResponse:
-        """Admit an allocation against project budget, quota, and host cap. Requires operator."""
-        try:
-            payload = AllocationRequestPayload.model_validate(request)
-        except ValueError:
-            return _config_error(project)
         return await request_allocation(
             pool,
             current_context(),
             project=project,
-            request=payload,
+            request=request,
             idempotency_key=idempotency_key,
         )
 
@@ -364,7 +358,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_get(
         allocation_id: Annotated[str, Field(description="The Allocation to render.")],
     ) -> ToolResponse:
-        """Render an Allocation; failed maps to a failure envelope. Requires viewer."""
         return await get_allocation(pool, current_context(), allocation_id)
 
     @app.tool(
@@ -375,7 +368,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_release(
         allocation_id: Annotated[str, Field(description="The Allocation to release.")],
     ) -> ToolResponse:
-        """Drive an Allocation to released and reconcile its spend. Requires operator."""
         return await release_allocation(pool, current_context(), allocation_id)
 
     @app.tool(
@@ -394,7 +386,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior renewal."),
         ] = None,
     ) -> ToolResponse:
-        """Extend an Allocation's lease window, re-charged and re-checked. Requires operator."""
         return await renew_allocation(
             pool,
             current_context(),
@@ -414,5 +405,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
-        """List the newest Allocations for a project. Requires viewer."""
         return await list_allocations(pool, current_context(), project=project, limit=limit)

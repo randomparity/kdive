@@ -8,8 +8,11 @@ from typing import Any, LiteralString, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.build_artifacts.results import BuildOutput
 from kdive.db import build_hosts
 from kdive.db.build_hosts import BuildHost
 from kdive.db.idempotency import abandon_run_step, claim_run_step, complete_run_step
@@ -23,13 +26,14 @@ from kdive.jobs.handlers.runs_shared import finalize_build
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import BuildPayload, RunPayload, load_payload
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
-from kdive.provider_components.build_results import BuildOutput
-from kdive.providers.build_host.dispatch import BuildHostTransportFactories, run_build_on_host
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports import Booter, InstallRequest
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
-from kdive.providers.runtime_paths import console_log_path, read_console_log
+from kdive.providers.shared.build_host.dispatch import (
+    BuildHostTransportFactories,
+    run_build_on_host,
+)
+from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
 from kdive.security.authz.context import RequestContext
@@ -109,13 +113,6 @@ async def _release_build_lease(conn: AsyncConnection, run_id: UUID) -> None:
     a retry (BUILD jobs retry up to ``max_attempts``) cannot over-admit the host; the reconciler
     reclaims it when the job is terminal (see ``_build_and_record``).
 
-    The ``conn.transaction()`` here is NOT an independent commit: the handler's earlier bare
-    ``RUNS.get`` opened a long-lived implicit transaction on this non-autocommit pool connection,
-    so this (and every other ``conn.transaction()`` in the handler) is a SAVEPOINT nested in that
-    parent — RELEASE on exit leaves the parent open and uncommitted. The DELETE becomes durable on
-    the handler's clean exit, when the pool-connection context manager commits the parent. See the
-    rollback hazard documented on :func:`kdive.db.build_hosts.release_lease`.
-
     Errors are logged and swallowed — the reconciler is the backstop. A worker-local run holds no
     lease, so this is an idempotent no-op DELETE.
     """
@@ -182,9 +179,38 @@ async def build_handler(
     The build host is read from the BUILD payload (admitted under capacity at the ``runs.build``
     boundary): a worker-local host runs the resolved runtime builder directly; an ssh host runs a
     transport-bound remote-libvirt builder inside the materialized-identity context manager. The
-    capacity lease is released on a committed path on both success and failure so a failure frees
-    the slot (a worker-local run holds no lease, so the release is a harmless no-op).
+    capacity lease is released only after ``finalize_build`` succeeds. Categorized build failures
+    retain the lease across retries; once the job reaches a terminal state, the reconciler reclaims
+    the orphaned build-host lease. A worker-local run holds no lease, so success-path release is a
+    harmless no-op there.
     """
+    restore_autocommit = False
+    if not conn.autocommit:
+        if conn.pgconn.transaction_status != TransactionStatus.IDLE:
+            await conn.rollback()
+        await conn.set_autocommit(True)
+        restore_autocommit = True
+    try:
+        return await _build_handler_autocommit(
+            conn,
+            job,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            transport_factories=transport_factories,
+        )
+    finally:
+        if restore_autocommit:
+            await conn.set_autocommit(False)
+
+
+async def _build_handler_autocommit(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+    transport_factories: BuildHostTransportFactories | None = None,
+) -> str | None:
     payload = load_payload(job, BuildPayload)
     run_id = UUID(payload.run_id)
     run = await RUNS.get(conn, run_id)
@@ -253,12 +279,6 @@ async def _build_and_record(
         )
     except CategorizedError as exc:
         await _fail_build(conn, job, run, exc.category)
-        # LOAD-BEARING — do not remove. The handler's bare RUNS.get opened an implicit transaction
-        # on this non-autocommit pool connection, so _fail_build's FAILED transition is a SAVEPOINT
-        # nested in that still-open parent; the pool-connection context manager would roll the
-        # parent back on the re-raise below, reverting the FAILED state. This commit makes the
-        # FAILED transition durable. (The lease is intentionally NOT released here — see above.)
-        await conn.commit()
         raise
     return BuildStepResult(
         kernel_ref=output.kernel_ref,

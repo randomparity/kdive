@@ -19,12 +19,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.introspect import (
+from kdive.providers.ports import IntrospectOutput, LiveIntrospector, VmcoreIntrospector
+from kdive.providers.shared.debug_common.introspect import (
     _REPORT_BYTE_CAP,
     _Program,
     assemble_report,
 )
-from kdive.providers.ports import IntrospectOutput, LiveIntrospector, VmcoreIntrospector
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 # --- LocalLibvirtVmcoreIntrospect (the realized port) --------------------------------------

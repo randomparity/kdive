@@ -79,17 +79,29 @@ def _os_aliases(tree: ast.Module) -> _OsAliases:
     environ_names: set[str] = set()
     getenv_names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "os":
-                    modules.add(alias.asname or "os")
-        elif isinstance(node, ast.ImportFrom) and node.module == "os":
-            for alias in node.names:
-                if alias.name == "environ":
-                    environ_names.add(alias.asname or "environ")
-                elif alias.name == "getenv":
-                    getenv_names.add(alias.asname or "getenv")
+        _collect_os_module_aliases(node, modules)
+        _collect_os_member_aliases(node, environ_names, getenv_names)
     return _OsAliases(frozenset(modules), frozenset(environ_names), frozenset(getenv_names))
+
+
+def _collect_os_module_aliases(node: ast.AST, modules: set[str]) -> None:
+    if not isinstance(node, ast.Import):
+        return
+    for alias in node.names:
+        if alias.name == "os":
+            modules.add(alias.asname or "os")
+
+
+def _collect_os_member_aliases(
+    node: ast.AST, environ_names: set[str], getenv_names: set[str]
+) -> None:
+    if not isinstance(node, ast.ImportFrom) or node.module != "os":
+        return
+    for alias in node.names:
+        if alias.name == "environ":
+            environ_names.add(alias.asname or "environ")
+        elif alias.name == "getenv":
+            getenv_names.add(alias.asname or "getenv")
 
 
 def _is_environ(node: ast.AST, aliases: _OsAliases) -> bool:
@@ -105,31 +117,39 @@ def _is_environ(node: ast.AST, aliases: _OsAliases) -> bool:
 
 def _access_key(node: ast.AST, aliases: _OsAliases) -> ast.AST | None:
     """Return the key-argument node of an ``environ``/``getenv`` read, else None."""
-    if isinstance(node, ast.Call) and node.args:
-        func = node.func
-        # os.environ.get(...) / environ.get(...)
-        is_environ_get = (
-            isinstance(func, ast.Attribute)
-            and func.attr == "get"
-            and _is_environ(func.value, aliases)
-        )
-        if is_environ_get:
-            return node.args[0]
-        # os.getenv(...)
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr == "getenv"
-            and isinstance(func.value, ast.Name)
-            and func.value.id in aliases.modules
-        ):
-            return node.args[0]
-        # getenv(...) bound via `from os import getenv`
-        if isinstance(func, ast.Name) and func.id in aliases.getenv_names:
-            return node.args[0]
+    if isinstance(node, ast.Call) and node.args and _is_env_call(node.func, aliases):
+        return node.args[0]
     # os.environ[...] / environ[...]
     if isinstance(node, ast.Subscript) and _is_environ(node.value, aliases):
         return node.slice
     return None
+
+
+def _is_env_call(func: ast.AST, aliases: _OsAliases) -> bool:
+    return (
+        _is_environ_get(func, aliases)
+        or _is_module_getenv(func, aliases)
+        or _is_imported_getenv(func, aliases)
+    )
+
+
+def _is_environ_get(func: ast.AST, aliases: _OsAliases) -> bool:
+    return (
+        isinstance(func, ast.Attribute) and func.attr == "get" and _is_environ(func.value, aliases)
+    )
+
+
+def _is_module_getenv(func: ast.AST, aliases: _OsAliases) -> bool:
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "getenv"
+        and isinstance(func.value, ast.Name)
+        and func.value.id in aliases.modules
+    )
+
+
+def _is_imported_getenv(func: ast.AST, aliases: _OsAliases) -> bool:
+    return isinstance(func, ast.Name) and func.id in aliases.getenv_names
 
 
 def _check_file(path: Path) -> list[Violation]:

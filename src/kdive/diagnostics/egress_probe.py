@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import timedelta
@@ -44,6 +45,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
 
 EGRESS_ID = "guest_egress"
+_log = logging.getLogger(__name__)
 
 EGRESS_FIX = (
     "guest bridge -> object-store blocked (likely host FORWARD DROP); "
@@ -202,12 +204,13 @@ class SingleFlight:
             if task is None:
                 task = asyncio.create_task(factory())
                 self._inflight[key] = task
-        try:
-            return await asyncio.shield(task)
-        finally:
-            async with self._lock:
-                if self._inflight.get(key) is task and task.done():
-                    del self._inflight[key]
+                task.add_done_callback(lambda done: asyncio.create_task(self._cleanup(key, done)))
+        return await asyncio.shield(task)
+
+    async def _cleanup(self, key: str, task: asyncio.Task[CheckResult]) -> None:
+        async with self._lock:
+            if self._inflight.get(key) is task:
+                del self._inflight[key]
 
 
 class GuestEgressCheck(Check):
@@ -257,7 +260,14 @@ class GuestEgressCheck(Check):
             # live probe for this provider. Report it as error (the check could not be run to a
             # verdict here), never a contract fail — the egress path itself is unjudged.
             return self._error("a probe is already in flight for this provider; retry shortly")
-        except Exception:  # noqa: BLE001 - the secret/marker backend is down
+        except Exception as exc:  # noqa: BLE001 - the secret/marker backend is down
+            _log.error(
+                "guest egress probe marker registration failed for provider=%r domain=%s: %s",
+                self._provider,
+                domain_name,
+                exc,
+                exc_info=True,
+            )
             return self._error("could not register the probe marker; cannot provision a guest")
         beat = asyncio.create_task(self._beat_until_cancelled(probe_id))
         try:
@@ -265,7 +275,7 @@ class GuestEgressCheck(Check):
         finally:
             await _cancel(beat)
             await self._teardown(domain_name)
-            await self._registry.release(probe_id)
+            await self._release_marker(probe_id, domain_name)
 
     async def _beat_until_cancelled(self, probe_id: UUID) -> None:
         """Advance the heartbeat every interval so the reaper never reaps a live (slow) probe.
@@ -286,14 +296,41 @@ class GuestEgressCheck(Check):
             await self._guest.provision(domain_name)
             url = await self._presigned_url()
             outcome = await self._guest.exec_egress(domain_name, url)
-        except Exception:  # noqa: BLE001 - provision/exec failure is an indeterminate run -> error
+        except Exception as exc:  # noqa: BLE001 - provision/exec failure is indeterminate
+            _log.error(
+                "guest egress probe provision/exec failed for provider=%r domain=%s: %s",
+                self._provider,
+                domain_name,
+                exc,
+                exc_info=True,
+            )
             return self._error("probe guest could not be provisioned or reached; egress unverified")
         return self._verdict(outcome)
 
     async def _teardown(self, domain_name: str) -> None:
         try:
             await self._guest.teardown(domain_name)
-        except Exception:  # noqa: BLE001 - teardown is best-effort; the reaper is the backstop
+        except Exception as exc:  # noqa: BLE001 - teardown is best-effort; reaper is backstop
+            _log.warning(
+                "guest egress probe teardown failed for provider=%r domain=%s: %s",
+                self._provider,
+                domain_name,
+                exc,
+                exc_info=True,
+            )
+            return
+
+    async def _release_marker(self, probe_id: UUID, domain_name: str) -> None:
+        try:
+            await self._registry.release(probe_id)
+        except Exception as exc:  # noqa: BLE001 - marker release is best-effort; TTL is backstop
+            _log.warning(
+                "guest egress probe marker release failed for provider=%r domain=%s: %s",
+                self._provider,
+                domain_name,
+                exc,
+                exc_info=True,
+            )
             return
 
     def _verdict(self, outcome: EgressOutcome) -> CheckResult:

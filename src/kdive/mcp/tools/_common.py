@@ -9,12 +9,19 @@ from kdive.domain.models import Job
 from kdive.jobs.context import authorizing, context_from_job
 from kdive.mcp.responses import ResponseDataInput, ToolResponse, current_status_data
 
+DEFAULT_LIST_LIMIT = 50
+MAX_LIST_LIMIT = 200
+
 
 def as_uuid(value: str) -> UUID | None:
     try:
         return UUID(value)
     except ValueError:
         return None
+
+
+def clamp_list_limit(limit: int) -> int:
+    return max(1, min(limit, MAX_LIST_LIMIT))
 
 
 def config_error(object_id: str, *, data: ResponseDataInput | None = None) -> ToolResponse:
@@ -44,8 +51,11 @@ def job_envelope(job: Job, object_key: str, object_id: UUID) -> ToolResponse:
 
 
 __all__ = [
+    "DEFAULT_LIST_LIMIT",
+    "MAX_LIST_LIMIT",
     "as_uuid",
     "authorizing",
+    "clamp_list_limit",
     "config_error",
     "context_from_job",
     "job_envelope",

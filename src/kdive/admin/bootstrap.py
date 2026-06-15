@@ -8,7 +8,7 @@ image still invokes remain here.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -54,6 +54,18 @@ def migrate(database_url: str | None = None) -> int:
     return len(applied)
 
 
+def _run_async_db_step(
+    database_url: str, step: Callable[[psycopg.AsyncConnection], Awaitable[int]]
+) -> int:
+    import asyncio
+
+    async def _run() -> int:
+        async with await psycopg.AsyncConnection.connect(database_url, autocommit=True) as conn:
+            return await step(conn)
+
+    return asyncio.run(_run())
+
+
 def _seed_build_configs_step(database_url: str) -> int:
     """Publish the packaged build-config fragments after migrating (ADR-0096).
 
@@ -61,7 +73,7 @@ def _seed_build_configs_step(database_url: str) -> int:
     live in the object store, so the seed is skipped when ``KDIVE_S3_*`` is unconfigured —
     a no-S3 migrate (e.g. a schema-only test or a partial bring-up) degrades cleanly and the
     fragment is seeded on a later migrate once the object store is available. Mirrors the
-    images-tool tolerance in :func:`kdive.mcp.tools.ops.images.registrar._resolve_object_store`.
+    images-tool tolerance in :func:`kdive.mcp.app._resolve_ops_images_store`.
 
     Args:
         database_url: A psycopg-compatible connection string for the application database.
@@ -69,8 +81,6 @@ def _seed_build_configs_step(database_url: str) -> int:
     Returns:
         The number of build-config fragments published (0 if already current or skipped).
     """
-    import asyncio
-
     from kdive.build_configs.seed import seed_build_configs
     from kdive.domain.errors import CategorizedError, ErrorCategory
     from kdive.store.objectstore import object_store_from_env
@@ -83,28 +93,18 @@ def _seed_build_configs_step(database_url: str) -> int:
         print("skipped build-config seed: object store not configured")
         return 0
 
-    async def _run() -> int:
-        async with await psycopg.AsyncConnection.connect(database_url, autocommit=True) as conn:
-            return await seed_build_configs(conn, store)
+    async def _seed(conn: psycopg.AsyncConnection) -> int:
+        return await seed_build_configs(conn, store)
 
-    return asyncio.run(_run())
+    return _run_async_db_step(database_url, _seed)
 
 
 def _reconcile_inventory_images(database_url: str) -> int:
     """Reconcile ``systems.toml`` ``[[image]]`` entries into ``image_catalog`` (ADR-0112).
 
-    Replaces the former packaged-YAML baseline seed: image definitions now live only in
-    ``systems.toml`` (loaded into ``image_catalog`` by :func:`reconcile_images`), not in code.
-    Runs as the deploy ``migrate → reconcile`` step so a fresh install lists the declared
-    baseline before any image is built. Idempotent (change-detecting upserts).
-
-    **Behavior change from the former seed (deploy note):** the old seed was additive-only
-    (``ON CONFLICT DO NOTHING``); reconcile **prunes** any ``managed_by='config'`` row whose
-    identity is absent from ``systems.toml``. On the first upgrade to this code, declare every
-    baseline image you want kept in ``systems.toml`` before running ``migrate``, or its config
-    row is pruned. Prune is row-delete-only and cordons (never deletes) an in-use image, and the
-    S3 object is reclaimed by the existing leaked-image GC (ADR-0112) — so no image bytes or
-    running systems are irreversibly destroyed by a deploy.
+    Image definitions live in ``systems.toml`` and are loaded into ``image_catalog`` by
+    :func:`reconcile_images`. The deploy ``migrate → reconcile`` step is idempotent and makes a
+    fresh install list declared baseline images before any image is built.
 
     The path is ``KDIVE_SYSTEMS_TOML`` (default ``./systems.toml``). An **absent** file is the
     normal pre-config state (the file is gitignored) and is a quiet no-op — feeding an empty
@@ -123,7 +123,6 @@ def _reconcile_inventory_images(database_url: str) -> int:
     Returns:
         The number of catalog rows created/updated/pruned/cordoned (0 when no file is present).
     """
-    import asyncio
     from pathlib import Path
 
     from kdive.inventory.loader import load_inventory_optional
@@ -136,12 +135,11 @@ def _reconcile_inventory_images(database_url: str) -> int:
         return 0
     store = _reconcile_image_store()
 
-    async def _run() -> int:
-        async with await psycopg.AsyncConnection.connect(database_url, autocommit=True) as conn:
-            diff = await reconcile_images(conn, doc, store)
-            return len(diff.created) + len(diff.updated) + len(diff.pruned) + len(diff.cordoned)
+    async def _reconcile(conn: psycopg.AsyncConnection) -> int:
+        diff = await reconcile_images(conn, doc, store)
+        return len(diff.created) + len(diff.updated) + len(diff.pruned) + len(diff.cordoned)
 
-    return asyncio.run(_run())
+    return _run_async_db_step(database_url, _reconcile)
 
 
 def _reconcile_image_store() -> Any:
@@ -223,6 +221,6 @@ async def seed_demo(
 
 
 async def register_local_resource(pool: AsyncConnectionPool) -> None:
-    from kdive.providers.composition import build_provider_resolver
+    from kdive.providers.assembly.composition import build_provider_resolver
 
     await build_provider_resolver().register_all_discovery(pool)

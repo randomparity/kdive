@@ -14,6 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Allocation
 from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -36,6 +37,16 @@ class ReleaseOutcome:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class BreakglassReleaseAudit:
+    """Audit metadata for a platform-admin release that bypasses project membership."""
+
+    tool: str
+    reason: str
+    platform_role: str | None
+    actor: str
+
+
 def ctx_audit_writer(ctx: RequestContext) -> AuditWriter:
     """The membership-guarded audit writer used by normal project release."""
 
@@ -43,6 +54,61 @@ def ctx_audit_writer(ctx: RequestContext) -> AuditWriter:
         await audit.record(conn, ctx, event)
 
     return _write
+
+
+def system_audit_writer(principal: str) -> AuditWriter:
+    """Guard-exempt writer used when a platform principal acts across projects."""
+
+    async def _write(conn: AsyncConnection, event: audit.AuditEvent) -> None:
+        await audit.record_system(conn, principal=principal, event=event)
+
+    return _write
+
+
+async def breakglass_release_allocation(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    alloc: Allocation,
+    release_audit: BreakglassReleaseAudit,
+) -> ReleaseOutcome:
+    """Audit then release one allocation through the platform break-glass path.
+
+    The platform accountability row commits before the release mechanic runs, so a failed or
+    stale release remains auditable. Per-allocation transition rows are written through a
+    guard-exempt system audit writer because the platform principal need not belong to the
+    target project.
+    """
+    await _record_breakglass_release(pool, ctx, alloc=alloc, release_audit=release_audit)
+    return await release_with_backstops(
+        pool,
+        alloc.id,
+        project=alloc.project,
+        audit_writer=system_audit_writer(ctx.principal),
+    )
+
+
+async def _record_breakglass_release(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    alloc: Allocation,
+    release_audit: BreakglassReleaseAudit,
+) -> None:
+    scope = f"{alloc.project}:{alloc.id}"
+    async with pool.connection() as conn, conn.transaction():
+        await audit.record_platform(
+            conn,
+            principal=ctx.principal,
+            agent_session=ctx.agent_session,
+            event=audit.PlatformAuditEvent(
+                tool=release_audit.tool,
+                scope=scope,
+                args={"object_id": str(alloc.id), "reason": release_audit.reason},
+                platform_role=release_audit.platform_role,
+                actor=release_audit.actor,
+            ),
+        )
 
 
 async def release_with_backstops(

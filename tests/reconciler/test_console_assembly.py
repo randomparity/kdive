@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers import console_hosting
+from kdive.providers.infra import console_hosting
 from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -57,6 +57,33 @@ def test_build_console_hosting_returns_none_when_remote_config_missing(
             running_systems_factory=lambda _pool: _FakeRunningSystems(),
         )
         assert hosting is None
+
+    asyncio.run(_run())
+
+
+def test_build_console_hosting_preserves_object_store_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        error = CategorizedError(
+            "object store endpoint missing",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+        def _raise_store() -> object:
+            raise error
+
+        monkeypatch.setattr(remote_composition, "remote_config_from_inventory", lambda: object())
+        monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
+        monkeypatch.setattr(remote_composition, "object_store_from_env", _raise_store)
+
+        with pytest.raises(CategorizedError) as caught:
+            await remote_composition.build_console_hosting(
+                secret_registry=SecretRegistry(),
+                running_systems_factory=lambda _pool: _FakeRunningSystems(),
+            )
+
+        assert caught.value is error
 
     asyncio.run(_run())
 

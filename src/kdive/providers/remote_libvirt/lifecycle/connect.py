@@ -14,8 +14,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.hostpolicy import allow_acl_remote
-from kdive.providers.debug_common.rsp import rsp_reachable
 from kdive.providers.ports import (
     DebugTransportKind,
     SystemHandle,
@@ -23,6 +21,8 @@ from kdive.providers.ports import (
     TransportHandleData,
 )
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
+from kdive.providers.shared.debug_common.rsp import rsp_reachable
 
 _GDBSTUB: DebugTransportKind = "gdbstub"
 _DRGN_LIVE: DebugTransportKind = "drgn-live"

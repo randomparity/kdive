@@ -26,8 +26,8 @@ from uuid import UUID
 
 import libvirt
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.ports import InstallRequest
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.endpoint_preflight import validate_guest_routable_endpoint
@@ -38,7 +38,7 @@ from kdive.providers.remote_libvirt.guest.agent import (
 )
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
-from kdive.providers.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.objectstore import object_store_from_env

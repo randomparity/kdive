@@ -79,6 +79,32 @@ def test_handle_host_not_gdb_addr_is_a_noop(tmp_path: Path) -> None:
     assert domain.calls == []
 
 
+def test_decoded_non_gdbstub_handle_does_not_load_remote_config(tmp_path: Path) -> None:
+    domain = FakeDomain(_DOMAIN)
+    conn = FakeControlConn({_DOMAIN: domain})
+
+    def unavailable_config() -> RemoteLibvirtConfig:
+        raise AssertionError("config should not load for non-gdbstub handle kinds")
+
+    resetter = RemoteLibvirtTransportResetter(
+        secret_registry=SecretRegistry(),
+        config_factory=unavailable_config,
+        open_connection=lambda uri: conn,
+        secret_backend_factory=RecordingBackend,
+        pki_base_dir=tmp_path,
+    )
+
+    async def scenario() -> None:
+        await resetter.reset(
+            transport="gdbstub",
+            transport_handle="ssh://remote.example:22",
+            domain_name=_DOMAIN,
+        )
+
+    asyncio.run(scenario())
+    assert domain.calls == []
+
+
 def test_missing_domain_name_is_a_noop(tmp_path: Path) -> None:
     domain = FakeDomain(_DOMAIN)
 

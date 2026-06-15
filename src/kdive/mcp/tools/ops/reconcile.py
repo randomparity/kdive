@@ -25,7 +25,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
-from kdive.providers.reaping import (
+from kdive.providers.infra.reaping import (
     BuildVmReaper,
     DumpVolumeReaper,
     InfraReaper,
@@ -188,7 +188,7 @@ def _s3_env_is_absent() -> bool:
     return _S3_OPTIONAL_ENV_NAMES.isdisjoint(config.env_snapshot())
 
 
-def register_with_reaper(
+def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
     *,
@@ -206,7 +206,6 @@ def register_with_reaper(
         meta={"maturity": "implemented"},
     )
     async def ops_reconcile_now() -> ToolResponse:
-        """Run one reconcile pass on demand; return the repair summary. Platform operator."""
         return await reconcile_now(
             pool,
             current_context(),

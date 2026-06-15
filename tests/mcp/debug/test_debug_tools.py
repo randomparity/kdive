@@ -40,6 +40,8 @@ from kdive.domain.state import (
 )
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
@@ -50,8 +52,6 @@ from kdive.providers.ports import (
     TransportHandleKind,
 )
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProfilePolicy
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secret_registry import SecretRegistry

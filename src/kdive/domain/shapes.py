@@ -8,7 +8,7 @@ so the cost Selector's ``memory_mb → memory_gb`` is lossless.
 
 A shape fixes **size only**: ``cost_class`` (and therefore price) is resolved admission-side
 from the chosen Resource, never from the shape, so the same shape on a costlier host costs
-more. DB-backed catalog resolution lives in :mod:`kdive.services.allocation.sizing`.
+more. DB-backed catalog resolution lives in :mod:`kdive.services.allocation.admission.sizing`.
 """
 
 from __future__ import annotations

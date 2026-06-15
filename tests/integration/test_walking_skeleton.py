@@ -23,6 +23,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
@@ -36,7 +37,6 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import artifacts_get, artifacts_list
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
-from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.ports import CaptureOutput, CrashOutput
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -83,8 +83,8 @@ class _SecretBearingRetriever:
         self.calls = 0
 
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
+        from kdive.artifacts.storage import StoredArtifact
         from kdive.domain.models import Sensitivity
-        from kdive.provider_components.artifacts import StoredArtifact
 
         self.calls += 1
         raw = StoredArtifact(

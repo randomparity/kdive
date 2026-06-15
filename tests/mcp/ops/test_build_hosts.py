@@ -42,6 +42,8 @@ from kdive.mcp.tools.ops.build_hosts.lifecycle import (
 from kdive.mcp.tools.ops.build_hosts.register import (
     REGISTER_EPHEMERAL_LIBVIRT_TOOL,
     REGISTER_SSH_TOOL,
+    EphemeralLibvirtBuildHostRegistration,
+    SshBuildHostRegistration,
     register_ephemeral_libvirt_build_host,
     register_ssh_build_host,
 )
@@ -50,6 +52,38 @@ from kdive.security.authz.rbac import PlatformRole
 
 _SECRET_VALUE = "-----BEGIN OPENSSH PRIVATE KEY-----FAKE"  # pragma: allowlist secret
 _CRED_REF = "ssh://build/worker-key"
+
+
+def _ssh_request(
+    *,
+    name: str = "build-worker-1",
+    address: str = "10.0.0.1",
+    ssh_credential_ref: str = _CRED_REF,
+    workspace_root: str = "/build",
+    max_concurrent: int = 2,
+) -> SshBuildHostRegistration:
+    return SshBuildHostRegistration(
+        name=name,
+        address=address,
+        ssh_credential_ref=ssh_credential_ref,
+        workspace_root=workspace_root,
+        max_concurrent=max_concurrent,
+    )
+
+
+def _ephemeral_request(
+    *,
+    name: str = "builders",
+    base_image_volume: str = "kdive-build-base.qcow2",
+    workspace_root: str = "/build",
+    max_concurrent: int = 2,
+) -> EphemeralLibvirtBuildHostRegistration:
+    return EphemeralLibvirtBuildHostRegistration(
+        name=name,
+        base_image_volume=base_image_volume,
+        workspace_root=workspace_root,
+        max_concurrent=max_concurrent,
+    )
 
 
 @asynccontextmanager
@@ -170,9 +204,9 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
     async def fake_register_ssh(
         bound_pool: AsyncConnectionPool,
         bound_ctx: RequestContext,
-        **kwargs: object,
+        request: SshBuildHostRegistration,
     ) -> ToolResponse:
-        calls.append((bound_pool, bound_ctx, kwargs))
+        calls.append((bound_pool, bound_ctx, {"request": request}))
         return ToolResponse.success("build-host:registrar-worker", "registered")
 
     async def _run() -> None:
@@ -193,27 +227,21 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
         assert _read_only_hint(tools[LIST_TOOL]) is True
         assert _destructive_hint(tools[REMOVE_TOOL]) is False
 
-        resp = await _call_registered_tool(
-            tools[REGISTER_SSH_TOOL],
-            "registrar-worker",
-            "10.0.0.10",
-            "ssh://build/registrar-key",
-            "/srv/build",
-            3,
+        request = _ssh_request(
+            name="registrar-worker",
+            address="10.0.0.10",
+            ssh_credential_ref="ssh://build/registrar-key",
+            workspace_root="/srv/build",
+            max_concurrent=3,
         )
+        resp = await _call_registered_tool(tools[REGISTER_SSH_TOOL], request)
 
         assert resp.status == "registered"
         assert calls == [
             (
                 pool,
                 ctx,
-                {
-                    "name": "registrar-worker",
-                    "address": "10.0.0.10",
-                    "ssh_credential_ref": "ssh://build/registrar-key",
-                    "workspace_root": "/srv/build",
-                    "max_concurrent": 3,
-                },
+                {"request": request},
             )
         ]
 
@@ -229,11 +257,7 @@ def test_non_admin_register_denied(migrated_url: str) -> None:
             resp = await register_ssh_build_host(
                 pool,
                 _non_admin_ctx(),
-                name="build-worker-1",
-                address="10.0.0.1",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build",
-                max_concurrent=2,
+                _ssh_request(),
             )
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert _SECRET_VALUE not in str(resp.model_dump())
@@ -302,11 +326,7 @@ def test_platform_auditor_overreach_denied_and_audited(migrated_url: str) -> Non
             reg = await register_ssh_build_host(
                 pool,
                 _auditor_ctx(),
-                name="new-host",
-                address="10.0.0.9",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build",
-                max_concurrent=1,
+                _ssh_request(name="new-host", address="10.0.0.9", max_concurrent=1),
             )
             dis = await disable_build_host(pool, _auditor_ctx(), name="build-worker-1")
             rem = await remove_build_host(pool, _auditor_ctx(), name="build-worker-1")
@@ -338,11 +358,7 @@ def test_register_creates_ssh_row_list_shows_ref_only(migrated_url: str) -> None
             resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
-                name="build-worker-1",
-                address="10.0.0.1",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build",
-                max_concurrent=4,
+                _ssh_request(max_concurrent=4),
             )
             assert resp.status == "registered"
             assert "id" in resp.data
@@ -374,11 +390,7 @@ def test_register_audit_row_written_no_secret_bytes(migrated_url: str) -> None:
             await register_ssh_build_host(
                 pool,
                 _admin_ctx(principal="ops-admin"),
-                name="build-worker-2",
-                address="10.0.0.2",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build2",
-                max_concurrent=2,
+                _ssh_request(name="build-worker-2", address="10.0.0.2", workspace_root="/build2"),
             )
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
@@ -410,20 +422,17 @@ def test_register_duplicate_name_conflict(migrated_url: str) -> None:
             await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
-                name="dup-host",
-                address="10.0.0.1",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build",
-                max_concurrent=1,
+                _ssh_request(name="dup-host", max_concurrent=1),
             )
             resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
-                name="dup-host",
-                address="10.0.0.2",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build2",
-                max_concurrent=1,
+                _ssh_request(
+                    name="dup-host",
+                    address="10.0.0.2",
+                    workspace_root="/build2",
+                    max_concurrent=1,
+                ),
             )
         assert resp.error_category == ErrorCategory.CONFLICT.value
         assert _SECRET_VALUE not in str(resp.model_dump())
@@ -437,11 +446,7 @@ def test_register_max_concurrent_zero_config_error(migrated_url: str) -> None:
             resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
-                name="bad-host",
-                address="10.0.0.1",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build",
-                max_concurrent=0,
+                _ssh_request(name="bad-host", max_concurrent=0),
             )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert await _host_exists(migrated_url, "bad-host") is False
@@ -455,11 +460,7 @@ def test_register_max_concurrent_negative_config_error(migrated_url: str) -> Non
             resp = await register_ssh_build_host(
                 pool,
                 _admin_ctx(),
-                name="neg-host",
-                address="10.0.0.1",
-                ssh_credential_ref=_CRED_REF,
-                workspace_root="/build",
-                max_concurrent=-5,
+                _ssh_request(name="neg-host", max_concurrent=-5),
             )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
@@ -475,10 +476,7 @@ def test_register_ephemeral_creates_row(migrated_url: str) -> None:
             resp = await register_ephemeral_libvirt_build_host(
                 pool,
                 _admin_ctx(),
-                name="builders",
-                base_image_volume="kdive-build-base.qcow2",
-                workspace_root="/build",
-                max_concurrent=2,
+                _ephemeral_request(),
             )
             assert resp.status == "registered"
             list_resp = await list_build_hosts(pool, _auditor_ctx())
@@ -496,10 +494,7 @@ def test_register_ephemeral_without_base_image_volume_config_error(migrated_url:
             resp = await register_ephemeral_libvirt_build_host(
                 pool,
                 _admin_ctx(),
-                name="bad-eph",
-                base_image_volume="",
-                workspace_root="/build",
-                max_concurrent=2,
+                _ephemeral_request(name="bad-eph", base_image_volume=""),
             )
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert await _host_exists(migrated_url, "bad-eph") is False

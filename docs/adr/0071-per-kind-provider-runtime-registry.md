@@ -18,7 +18,7 @@
 
 The active provider seam is `providers.runtime.ProviderRuntime` (ADR-0063): startup builds
 **one** local-libvirt implementation per typed port in
-`providers.composition.build_default_provider_runtime()` and passes that single runtime to
+`providers.assembly.composition.build_default_provider_runtime()` and passes that single runtime to
 MCP registrars and worker handlers. There is exactly one runtime in the process and it is a
 constant — no code path selects a provider, because there is only one provider.
 
@@ -48,7 +48,7 @@ ProviderRuntime` registry**, resolved for **post-System ops** at the worker and 
 boundaries from the **System's Resource `kind`** (the pre-grant allocation plane and
 discovery do not key on a Resource — see below).
 
-- `providers.composition` becomes the assembly point for a **map** of runtimes
+- `providers.assembly.composition` becomes the assembly point for a **map** of runtimes
   (`{local-libvirt: build_local_runtime(), fault-inject: build_faultinject_runtime()}`),
   not a single `build_default_provider_runtime()`. It stays the **only** production place
   concrete providers are constructed.
@@ -92,7 +92,7 @@ discovery do not key on a Resource — see below).
   "add a `remote-libvirt` entry to the composition map plus a provider package" — and the
   top-level design's falsifiable hypothesis ("adding a provider touches zero `core/*` and
   zero MCP-tool-surface lines") is now *testable against a real second provider* for the
-  first time. The registry itself lives in `providers/composition.py` (the provider seam,
+  first time. The registry itself lives in `providers/assembly/composition.py` (the provider seam,
   the expected change-surface), so building it does **not** falsify that hypothesis: M1.5 is
   where the selection seam is built and proven, precisely so M2 does not have to invent it
   under remote-provider pressure.

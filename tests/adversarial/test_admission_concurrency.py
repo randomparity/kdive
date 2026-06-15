@@ -1,9 +1,9 @@
 """Adversarial: concurrent allocation admission must never overshoot the cap.
 
-Invariant (ADR-0023, `services/allocation_admission.py`): the per-resource advisory
+Invariant (ADR-0023, `services/allocation/admission/core.py`): the per-resource advisory
 lock serializes count-then-insert, so for a host with cap K, no number of
 *genuinely concurrent* admit() calls on *distinct* connections can leave more than
-K non-terminal allocations. The existing suite only proves this sequentially on a
+K occupying allocations. The existing suite only proves this sequentially on a
 single connection; these tests race separate connections to attack the real lock.
 """
 
@@ -17,7 +17,7 @@ import pytest
 from kdive.domain.models import Resource
 from kdive.domain.state import AllocationState
 from kdive.mcp.auth import RequestContext
-from kdive.services.allocation.admission import AllocationRequest, admit
+from kdive.services.allocation.admission.core import AllocationRequest, admit
 from tests.adversarial.conftest import (
     SMALL_SELECTOR,
     count_rows,

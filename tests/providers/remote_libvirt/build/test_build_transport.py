@@ -1,4 +1,4 @@
-"""Tests for the transport-backed post-make pipeline of RemoteLibvirtBuild (Task 7.5, ADR-0342).
+"""Tests for the transport-backed post-make pipeline of RemoteLibvirtBuild (ADR-0099).
 
 The default (worker-local) path publishes from in-memory bytes via ``put_artifact`` and is
 covered in ``test_build.py``. Here we drive the SSH path: the modules_install / objcopy / tar
@@ -18,19 +18,15 @@ from uuid import UUID
 
 import pytest
 
-from kdive.domain.models import Sensitivity
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     PresignedUpload,
     PresignPutRequest,
     StoredArtifact,
 )
-from kdive.provider_components.build_validation import parse_gnu_build_id
-from kdive.providers.build_host.transport_seams import (
-    transport_read_build_id,
-    transport_run_modules_install,
-)
+from kdive.build_artifacts.validation import parse_gnu_build_id
+from kdive.domain.models import Sensitivity
+from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import (
@@ -39,6 +35,10 @@ from kdive.providers.remote_libvirt.build import (
     RemoteLibvirtBuild,
     transport_make_bundle,
     transport_vmlinux_source,
+)
+from kdive.providers.shared.build_host.transport_seams import (
+    transport_read_build_id,
+    transport_run_modules_install,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 

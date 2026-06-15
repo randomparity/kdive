@@ -10,13 +10,13 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
-from kdive.providers.libvirt_xml import (
+from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
     register_kdive_namespace,
     register_qemu_namespace,
 )
-from kdive.providers.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for
 
 _DEFAULT_NETWORK = "default"
 _GUEST_AGENT_CHANNEL = "org.qemu.guest_agent.0"
@@ -99,12 +99,18 @@ def render_domain_xml(
     return ET.tostring(domain, encoding="unicode")
 
 
-def recorded_gdb_port(domain_xml: str) -> int | None:
-    """The gdbstub port a domain's XML records, or ``None`` if absent/malformed."""
+def _parse_domain_xml_strict(domain_xml: str, *, operation: str, domain: str) -> ET.Element:
     try:
-        root: ET.Element = _safe_fromstring(domain_xml)
+        return _safe_fromstring(domain_xml)
     except (ET.ParseError, DefusedXmlException):
-        return None
+        raise CategorizedError(
+            "malformed remote-libvirt domain XML",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"domain": domain, "operation": operation},
+        ) from None
+
+
+def _recorded_gdb_port(root: ET.Element) -> int | None:
     args = [
         arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
     ]
@@ -119,14 +125,39 @@ def recorded_gdb_port(domain_xml: str) -> int | None:
     return None
 
 
+def recorded_gdb_port(domain_xml: str) -> int | None:
+    """The gdbstub port a domain's XML records, or ``None`` if absent/malformed."""
+    try:
+        root: ET.Element = _safe_fromstring(domain_xml)
+    except (ET.ParseError, DefusedXmlException):
+        return None
+    return _recorded_gdb_port(root)
+
+
+def recorded_gdb_port_strict(domain_xml: str, *, operation: str, domain: str) -> int | None:
+    """The gdbstub port a domain's XML records; malformed XML is an infrastructure fault."""
+    root = _parse_domain_xml_strict(domain_xml, operation=operation, domain=domain)
+    return _recorded_gdb_port(root)
+
+
+def _agent_channel_connected(root: ET.Element) -> bool:
+    target = root.find(f"./devices/channel/target[@name='{_GUEST_AGENT_CHANNEL}']")
+    return target is not None and target.get("state") == "connected"
+
+
 def agent_channel_connected(domain_xml: str) -> bool:
     """Whether the live XML reports the guest-agent channel ``state='connected'``."""
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
     except (ET.ParseError, DefusedXmlException):
         return False
-    target = root.find(f"./devices/channel/target[@name='{_GUEST_AGENT_CHANNEL}']")
-    return target is not None and target.get("state") == "connected"
+    return _agent_channel_connected(root)
+
+
+def agent_channel_connected_strict(domain_xml: str, *, operation: str, domain: str) -> bool:
+    """Whether the guest-agent channel is connected; malformed XML is infrastructure failure."""
+    root = _parse_domain_xml_strict(domain_xml, operation=operation, domain=domain)
+    return _agent_channel_connected(root)
 
 
 def disk_pool(domain_xml: str) -> str | None:

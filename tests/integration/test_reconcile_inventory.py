@@ -37,13 +37,13 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import ObjectListing
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile_images import reconcile_images
 from kdive.inventory.reconcile_resources import reconcile_resources
-from kdive.provider_components.artifacts import ObjectListing
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 
@@ -963,7 +963,7 @@ def test_fault_inject_resource_is_admitted_not_configuration_error(
     # ADMITTED, not configuration_error (the vcpus=None denial the issue reports).
     from kdive.domain.models import ResourceKind
     from kdive.security.authz.context import RequestContext
-    from kdive.services.allocation.request import AdmissionRequestSpec, request_admission
+    from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(vcpus=8, memory_mb=16384)))
@@ -1298,7 +1298,7 @@ def test_two_fault_inject_instances_are_each_independently_allocatable(
     # admits an allocation on it — no allocation-API change, selection by resource_id.
     from kdive.domain.models import ResourceKind
     from kdive.security.authz.context import RequestContext
-    from kdive.services.allocation.request import AdmissionRequestSpec, request_admission
+    from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _two_fault_inject_toml()))
@@ -1648,7 +1648,7 @@ def test_build_host_prune_cordons_when_lease_wins_lock_first(
             AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
             pool.connection() as conn,
         ):
-            outcome = await prune_or_cordon_build_host(conn, hid, "race-bh2")  # must not raise
+            outcome = await prune_or_cordon_build_host(conn, hid)  # must not raise
         assert outcome.cordoned is True
         assert outcome.pruned is False
         async with await _connect(migrated_url) as check:

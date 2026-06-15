@@ -49,6 +49,8 @@ from kdive.mcp.tools.debug.ops import (
 )
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.ports import (
     DEBUG_TRANSPORT_KINDS,
     Connector,
@@ -56,8 +58,6 @@ from kdive.providers.ports import (
     SystemHandle,
     TransportHandle,
 )
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProfilePolicy
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

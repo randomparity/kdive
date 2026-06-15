@@ -123,6 +123,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0028",
         "0029",
         "0030",
+        "0031",
     ]
     assert second == []
 
@@ -557,6 +558,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0028",
         "0029",
         "0030",
+        "0031",
     ]
 
 
@@ -895,6 +897,17 @@ def test_migration_0030_defined_row_with_neither_is_admitted(
     _insert_public_image(pg_conn, name="seed", state="defined", object_key=None, volume=None)
     row = pg_conn.execute("SELECT state FROM image_catalog WHERE name = 'seed'").fetchone()
     assert row is not None and row[0] == "defined"
+
+
+def test_migration_0031_rejects_unsupported_image_format(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute(
+            "INSERT INTO image_catalog (provider, name, arch, format, root_device, "
+            "visibility, state, object_key) "
+            "VALUES ('local-libvirt', 'raw', 'x86_64', 'raw', '/dev/vda', "
+            "'public', 'registered', 'rootfs/raw.img')"
+        )
 
 
 def test_migration_0030_adds_resource_inventory_columns(pg_conn: psycopg.Connection) -> None:

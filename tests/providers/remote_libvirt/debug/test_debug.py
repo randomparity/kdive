@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.hostpolicy import allow_acl_remote, require_loopback
 from kdive.providers.remote_libvirt.debug.gdbmi import remote_attach_seam
+from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote, require_loopback
 
 
 def test_remote_attach_seam_off_gate_reports_missing_dependency():

@@ -28,8 +28,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from enum import Enum, auto
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -37,7 +36,7 @@ from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import ImageState, ManagedBy
+from kdive.domain.models import ImageState
 from kdive.inventory.model import (
     BuildSource,
     ImageEntry,
@@ -46,6 +45,7 @@ from kdive.inventory.model import (
     StagedSource,
 )
 from kdive.inventory.reconcile import (
+    CONFIG_MANAGED_BY,
     ReconcileDiff,
     ReconcileRecord,
     inventory_pass_lock,
@@ -54,7 +54,6 @@ from kdive.inventory.reconcile import (
 
 _log = logging.getLogger(__name__)
 
-_CONFIG = ManagedBy.CONFIG.value
 _DEFINED = ImageState.DEFINED.value
 _REGISTERED = ImageState.REGISTERED.value
 
@@ -66,14 +65,7 @@ class ImageHeadStore(Protocol):
     def head_present(self, key: str) -> bool: ...
 
 
-class _S3Head(Enum):
-    """The resolved outcome of an ``s3`` object HEAD (or why it was not performed)."""
-
-    NOT_S3 = auto()  # not an s3 source — no HEAD attempted
-    NO_DIGEST = auto()  # s3 source without a digest — cannot register, no HEAD attempted
-    PRESENT = auto()  # object confirmed present
-    ABSENT = auto()  # object HEAD returned 404
-    UNREACHABLE = auto()  # store unconfigured/unreachable (a connection error, not a 404)
+type _S3Head = Literal["not_s3", "no_digest", "present", "absent", "unreachable"]
 
 
 async def _resolve_s3_head(
@@ -87,16 +79,16 @@ async def _resolve_s3_head(
     """
     source = entry.source
     if not isinstance(source, S3Source):
-        return _S3Head.NOT_S3
+        return "not_s3"
     if row is not None and row.get("state") == _REGISTERED:
-        return _S3Head.NOT_S3  # realized row is preserved; no HEAD needed
+        return "not_s3"  # realized row is preserved; no HEAD needed
     if source.digest is None:
-        return _S3Head.NO_DIGEST
+        return "no_digest"
     try:
         present = await asyncio.to_thread(store.head_present, source.object_key)
     except CategorizedError:
-        return _S3Head.UNREACHABLE
-    return _S3Head.PRESENT if present else _S3Head.ABSENT
+        return "unreachable"
+    return "present" if present else "absent"
 
 
 def _opt_str(row: dict[str, object], key: str) -> str | None:
@@ -178,7 +170,7 @@ async def _load_config_rows(
             "SELECT id, provider, name, arch, format, root_device, visibility, capabilities, "
             "       object_key, digest, volume, state "
             "FROM image_catalog WHERE managed_by = %s",
-            (_CONFIG,),
+            (CONFIG_MANAGED_BY,),
         )
         rows = await cur.fetchall()
     return {(r["provider"], r["name"], r["arch"]): r for r in rows}
@@ -218,13 +210,13 @@ async def _create_entry(
             entry.arch,
             entry.format,
             entry.root_device,
-            entry.visibility,
+            entry.visibility.value,
             entry.capabilities,
             object_key,
             volume,
             digest,
             state,
-            _CONFIG,
+            CONFIG_MANAGED_BY,
         ),
     )
     diff.created.append(_record(entry))
@@ -243,7 +235,7 @@ async def _update_entry(
     desired = {
         "format": entry.format,
         "root_device": entry.root_device,
-        "visibility": entry.visibility,
+        "visibility": entry.visibility.value,
         "capabilities": list(entry.capabilities),
     }
     head = await _resolve_s3_head(entry, row, store)
@@ -333,7 +325,7 @@ def _realize_s3(
             _opt_str(row, "digest"),
             None,
         )
-    if head is _S3Head.NO_DIGEST:
+    if head == "no_digest":
         return (
             _DEFINED,
             None,
@@ -341,7 +333,7 @@ def _realize_s3(
             None,
             f"{entry.name}: s3 source has no digest; row stays defined (cannot register)",
         )
-    if head is _S3Head.UNREACHABLE:
+    if head == "unreachable":
         return (
             _DEFINED,
             None,
@@ -349,7 +341,7 @@ def _realize_s3(
             None,
             f"{entry.name}: object store unreachable; row stays defined until s3 is up",
         )
-    if head is _S3Head.ABSENT:
+    if head == "absent":
         return (
             _DEFINED,
             None,
@@ -372,7 +364,7 @@ async def _prune_departed(
         if identity in declared:
             continue
         name = str(row["name"])
-        outcome = await prune_or_cordon_image(conn, _row_id(row), name)
+        outcome = await prune_or_cordon_image(conn, _row_id(row))
         entry = ReconcileRecord(
             name=name, entry=f"image[{identity[0]}/{identity[1]}/{identity[2]}]"
         )

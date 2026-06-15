@@ -32,6 +32,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kdive.domain.errors import ErrorCategory
+from kdive.domain.image_format import ImageFormat
 from kdive.domain.pcie import PCIeClaim
 from kdive.domain.profile_documents import (
     SerializedBuildProfile,
@@ -377,7 +378,7 @@ class ImageCatalogEntry(DomainModel):
     provider: str
     name: str
     arch: str
-    format: str
+    format: ImageFormat
     root_device: str
     object_key: str | None = None
     digest: str | None = None

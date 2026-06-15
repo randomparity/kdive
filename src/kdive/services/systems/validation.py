@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource, _UploadRootfs
-from kdive.provider_components.references import ROOTFS_COMPONENT
-from kdive.provider_components.validation import (
+from kdive.components.references import ROOTFS_COMPONENT
+from kdive.components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
-from kdive.providers.runtime import ProfilePolicy
+from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource, _UploadRootfs
+from kdive.providers.core.runtime import ProfilePolicy
 
 type RootfsValidator = Callable[[RootfsSource], None]
 

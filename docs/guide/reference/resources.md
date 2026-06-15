@@ -29,7 +29,7 @@ Mark a host unschedulable; placement skips/rejects it. Requires platform operato
 
 `implemented` · `destructive`
 
-Deregister a runtime resource (force required if live). Requires platform_admin.
+Deregister a runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -40,7 +40,7 @@ Deregister a runtime resource (force required if live). Requires platform_admin.
 
 `implemented` · `read-only`
 
-Describe a Resource. Requires a valid token; no project membership needed.
+Return one runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -62,7 +62,7 @@ Cordon a host, then report or force-release its allocations.
 
 `implemented` · `read-only`
 
-List Resources, optional kind. Requires a valid token; no project membership needed.
+List runtime resources.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -72,52 +72,37 @@ List Resources, optional kind. Requires a valid token; no project membership nee
 
 `implemented`
 
-Register a runtime fault-inject resource. Requires platform_admin.
+Register a fault-inject runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `concurrent_allocation_cap` | `integer` | no | Per-host concurrent-allocation cap (> 0). |
-| `cost_class` | `string` | yes | The cost class for pricing. |
-| `name` | `string` | yes | The (kind, name) identity for the new resource. |
-| `owner_project` | `any` | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
-| `secret_refs` | `any` | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored — secret bytes are never fetched or logged. |
+| `request` | `object` | yes | Fault-inject runtime resource registration request. |
 
 ## `resources.register_local_libvirt`
 
 `implemented`
 
-Register a runtime local-libvirt resource. Requires platform_admin.
+Register a local-libvirt runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `concurrent_allocation_cap` | `integer` | no | Per-host concurrent-allocation cap (> 0). |
-| `cost_class` | `string` | yes | The cost class for pricing. |
-| `host_uri` | `string` | yes | Local-libvirt provider host URI. |
-| `name` | `string` | yes | The (kind, name) identity for the new resource. |
-| `owner_project` | `any` | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
-| `secret_refs` | `any` | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored — secret bytes are never fetched or logged. |
+| `request` | `object` | yes | Local-libvirt runtime resource registration request. |
 
 ## `resources.register_remote_libvirt`
 
 `implemented`
 
-Register a runtime remote-libvirt resource. Requires platform_admin.
+Register a remote-libvirt runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `base_image` | `string` | yes | Registered remote-libvirt base image name. |
-| `concurrent_allocation_cap` | `integer` | no | Per-host concurrent-allocation cap (> 0). |
-| `cost_class` | `string` | yes | The cost class for pricing. |
-| `host_uri` | `string` | yes | Remote-libvirt provider host URI. |
-| `name` | `string` | yes | The (kind, name) identity for the new resource. |
-| `owner_project` | `any` | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
-| `secret_refs` | `any` | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored — secret bytes are never fetched or logged. |
+| `request` | `object` | yes | Remote-libvirt runtime resource registration request. |
 
 ## `resources.renew`
 
 `implemented`
 
-Extend a runtime resource's lease (keyed to the id). Requires platform_admin.
+Renew a runtime resource lease.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

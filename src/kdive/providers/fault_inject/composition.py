@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
-from kdive.provider_components.references import (
+from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
     KERNEL_COMPONENT,
@@ -14,11 +12,14 @@ from kdive.provider_components.references import (
     ComponentKind,
     ComponentSourceKind,
 )
-from kdive.provider_components.validation import ComponentSourceCapabilities
-from kdive.providers.discovery_registration import (
+from kdive.components.validation import ComponentSourceCapabilities
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.models import ResourceKind
+from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
 )
+from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.fault_inject.build import FaultInjectBuild
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,
@@ -35,8 +36,7 @@ from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
-from kdive.providers.reaping import InfraReaper
-from kdive.providers.runtime import DebugCapabilities, ProviderRuntime
+from kdive.providers.infra.reaping import InfraReaper
 from kdive.store.objectstore import object_store_from_env
 
 _POOL = "fault-inject"

@@ -41,12 +41,12 @@ from kdive.mcp.tools.debug.ops import (
     DebugEngineRuntime,
     run_engine_op,
 )
-from kdive.providers.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
+from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.ports import GdbMiAttachment, TransportHandleData
-from kdive.providers.resolver import ProviderBinding, ProviderResolver
-from kdive.providers.runtime import DebugCapabilities, ProviderRuntime
+from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.resources.discovery import register_discovered_resource

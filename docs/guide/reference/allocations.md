@@ -6,7 +6,7 @@
 
 `implemented` · `read-only`
 
-Render an Allocation; failed maps to a failure envelope. Requires viewer.
+Return one allocation visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -16,7 +16,7 @@ Render an Allocation; failed maps to a failure envelope. Requires viewer.
 
 `implemented` · `read-only`
 
-List the newest Allocations for a project. Requires viewer.
+List allocations visible in a project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -27,7 +27,7 @@ List the newest Allocations for a project. Requires viewer.
 
 `implemented`
 
-Drive an Allocation to released and reconcile its spend. Requires operator.
+Release an active allocation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -37,7 +37,7 @@ Drive an Allocation to released and reconcile its spend. Requires operator.
 
 `implemented`
 
-Extend an Allocation's lease window, re-charged and re-checked. Requires operator.
+Extend an allocation lease window.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -49,7 +49,7 @@ Extend an Allocation's lease window, re-charged and re-checked. Requires operato
 
 `implemented`
 
-Admit an allocation against project budget, quota, and host cap. Requires operator.
+Request capacity and create an allocation grant.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

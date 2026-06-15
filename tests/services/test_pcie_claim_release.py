@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.cost import Selector
 from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
@@ -28,11 +29,10 @@ from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.security import audit
-from kdive.services.allocation import pcie_claim
-from kdive.services.allocation.admission import AllocationRequest, admit
+from kdive.services.allocation.admission.core import AllocationRequest, admit
 from kdive.services.allocation.release import release_with_backstops
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

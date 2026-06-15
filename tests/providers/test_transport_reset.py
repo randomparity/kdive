@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from kdive.providers.transport_reset import NullResetter, TransportResetter
+from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 
 
 def test_null_resetter_satisfies_the_port() -> None:

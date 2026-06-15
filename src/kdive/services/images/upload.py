@@ -26,12 +26,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 import kdive.config as config
+from kdive.artifacts import storage as artifact_types
+from kdive.artifacts.storage import validate_key_component
 from kdive.config.core_settings import (
     IMAGE_PRIVATE_LIFETIME_MAX,
     IMAGE_PRIVATE_MAX_BYTES,
@@ -39,10 +41,9 @@ from kdive.config.core_settings import (
 )
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.image_format import ImageFormat
 from kdive.domain.models import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.images.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
-from kdive.provider_components import artifacts as artifact_types
-from kdive.provider_components.artifacts import validate_key_component
 from kdive.security import audit
 from kdive.services.images.publish import (
     ImageObjectStore,
@@ -52,7 +53,7 @@ from kdive.services.images.publish import (
 
 _UPLOAD_TOOL = "images.upload"
 _OBJECT_KIND = "image_catalog"
-_QCOW2_FORMAT: Literal["qcow2"] = "qcow2"
+_QCOW2_FORMAT: ImageFormat = "qcow2"
 _ROOT_DEVICE = "/dev/vda"
 
 # A project's live private images are the ones that occupy quota: a registered row, or a publish

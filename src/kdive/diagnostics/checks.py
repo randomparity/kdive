@@ -16,6 +16,8 @@ exception into `error` — so a check can never wedge or crash the aggregating s
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -24,6 +26,8 @@ from enum import StrEnum
 SECRET_REF_ID = "secret_ref"
 PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
+
+_log = logging.getLogger(__name__)
 
 
 class CheckStatus(StrEnum):
@@ -117,7 +121,8 @@ async def run_check(check: Check, *, timeout: float) -> CheckResult:
             status=CheckStatus.ERROR,
             detail=f"check did not respond within {timeout:g}s",
         )
-    except Exception:  # noqa: BLE001 - backstop: a leaked error must not wedge the service
+    except Exception as exc:  # noqa: BLE001 - backstop: a leaked error must not wedge the service
+        _log.error("diagnostic check %s raised unexpectedly: %s", check.id, exc, exc_info=True)
         return CheckResult(
             check_id=check.id,
             status=CheckStatus.ERROR,
@@ -128,6 +133,12 @@ async def run_check(check: Check, *, timeout: float) -> CheckResult:
 # A resolver raises on an unresolved ref; the secret backend's own unreachable-exception
 # type (passed separately) is the error-vs-fail discriminator.
 SecretResolve = Callable[[str], object]
+
+
+def _redact_exception_args(exc: Exception) -> None:
+    """Remove ref-bearing exception args before traceback logging formats the exception."""
+    with contextlib.suppress(Exception):
+        exc.args = (f"{type(exc).__name__} while resolving configured secret ref",)
 
 
 class SecretRefCheck(Check):
@@ -177,7 +188,7 @@ class SecretRefCheck(Check):
         unresolved_count = 0
         try:
             for ref, is_platform in self._refs:
-                if not await self._resolves(ref):
+                if not await self._resolves(ref, is_platform=is_platform):
                     unresolved_count += 1
                     if is_platform:
                         unresolved_platform.append(ref)
@@ -189,12 +200,19 @@ class SecretRefCheck(Check):
             )
         return self._verdict(unresolved_count, unresolved_platform)
 
-    async def _resolves(self, ref: str) -> bool:
+    async def _resolves(self, ref: str, *, is_platform: bool) -> bool:
         try:
             await asyncio.to_thread(self._resolve, ref)
         except self._unreachable_types():
             raise
-        except Exception:  # noqa: BLE001 - any per-ref resolution failure is an unresolved ref
+        except Exception as exc:  # noqa: BLE001 - any per-ref resolution failure is unresolved
+            _redact_exception_args(exc)
+            _log.warning(
+                "secret_ref resolver failed for %s ref: %s",
+                "platform" if is_platform else "non-platform",
+                type(exc).__name__,
+                exc_info=True,
+            )
             return False
         return True
 

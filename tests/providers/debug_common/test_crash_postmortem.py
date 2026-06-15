@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.crash_postmortem import run_crash_postmortem
 from kdive.providers.ports import CrashResult
+from kdive.providers.shared.debug_common.crash_postmortem import run_crash_postmortem
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 

@@ -10,19 +10,19 @@ from uuid import UUID
 
 import pytest
 
+from kdive.artifacts.storage import FetchedArtifact
 from kdive.build_configs import defaults as build_defaults
 from kdive.build_configs.catalog import BuildConfigEntry
 from kdive.build_configs.defaults import DEFAULT_CONFIG_REF, build_config_fetch_from_env
+from kdive.components.references import CatalogComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import FetchedArtifact
-from kdive.provider_components.references import CatalogComponentRef
-from kdive.providers.build_host.common import (
+from kdive.providers.shared.build_host.common import (
     _dropped_fragment_symbols,
     _fragment_symbols,
 )
-from kdive.providers.build_host.orchestration import BuildHostOrchestrator
+from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator
 
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
 

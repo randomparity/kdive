@@ -24,8 +24,8 @@ from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 
 
 def register(
@@ -59,7 +59,6 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
     async def runs_get(
         run_id: Annotated[str, Field(description="The Run to render.")],
     ) -> ToolResponse:
-        """Render a Run; a failed Run maps to a failure envelope. Requires viewer."""
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 
 
@@ -94,7 +93,6 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
-        """Bind a Run to a ready System and Investigation in one transaction. Requires operator."""
         request = _RunCreateRequest(
             investigation_id=investigation_id,
             system_id=system_id,
@@ -124,7 +122,6 @@ def _register_runs_build(
             ),
         ] = None,
     ) -> ToolResponse:
-        """Enqueue the kernel build job for a Run; poll jobs.* for completion. Requires operator."""
         return await with_runtime_for_run(
             pool,
             resolver,
@@ -164,7 +161,6 @@ def _register_runs_complete_build(
             ),
         ] = None,
     ) -> ToolResponse:
-        """Validate an external Run's uploads and finalize it to succeeded. Operator only."""
         return await with_runtime_for_run(
             pool,
             resolver,
@@ -184,7 +180,6 @@ def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def runs_install(
         run_id: Annotated[str, Field(description="The Run whose built kernel to install.")],
     ) -> ToolResponse:
-        """Enqueue the install job for a built Run; poll jobs.* for completion. Operator only."""
         return await _install_run(pool, current_context(), run_id)
 
 
@@ -197,5 +192,4 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def runs_boot(
         run_id: Annotated[str, Field(description="The Run whose installed kernel to boot.")],
     ) -> ToolResponse:
-        """Enqueue the boot job for an installed Run; poll jobs.* for completion. Operator only."""
         return await _boot_run(pool, current_context(), run_id)

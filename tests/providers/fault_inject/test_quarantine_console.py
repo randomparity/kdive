@@ -7,12 +7,12 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     FetchedArtifact,
     StoredArtifact,
 )
+from kdive.domain.models import Sensitivity
 from kdive.providers.fault_inject.artifacts.quarantine_console import (
     FaultInjectQuarantineConsole,
     QuarantineHealOutput,

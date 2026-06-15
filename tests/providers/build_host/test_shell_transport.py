@@ -11,13 +11,13 @@ import base64
 
 import pytest
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
-from kdive.providers.build_host.shell_transport import (
+from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.shell_transport import (
     _MAX_REMOTE_READ_B64_BYTES,
     ShellBuildTransport,
 )
-from kdive.providers.ports.build_transport import CommandResult
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -77,6 +77,14 @@ def test_read_bytes_non_zero_is_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.read_bytes("/missing")
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_read_bytes_malformed_base64_is_infrastructure_failure() -> None:
+    t = _RecordingTransport([_ok(stdout="not-base64!")])
+    with pytest.raises(CategorizedError) as exc:
+        t.read_bytes("/corrupt")
+    assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"path": "/corrupt"}
 
 
 def test_clone_issues_init_fetch_checkout_in_order() -> None:

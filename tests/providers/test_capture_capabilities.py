@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kdive.domain.capture import CaptureMethod
-from kdive.providers.composition import build_local_runtime
+from kdive.providers.assembly.composition import build_local_runtime
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 

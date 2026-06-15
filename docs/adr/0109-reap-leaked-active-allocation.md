@@ -16,7 +16,7 @@ The System teardown job drives a System to `torn_down` but never releases its al
 (`jobs/handlers/systems.py:teardown_handler`). A failed or interrupted lifecycle run therefore
 leaves an allocation in `active` whose single System is terminal (`torn_down` / `failed`) — or,
 defensively, has no System row at all. `active` is in admission's `OCCUPYING` set
-(`services/allocation/admission.py`), so the leaked allocation permanently holds its host-cap
+(`services/allocation/admission/core.py`), so the leaked allocation permanently holds its host-cap
 slot; on a `cap=1` remote host this blocks every future allocation.
 
 The existing `→expired` sweep (ADR-0036) reclaims only allocations whose **lease window has

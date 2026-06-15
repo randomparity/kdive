@@ -11,18 +11,19 @@ import re
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, BinaryIO, NamedTuple
 from uuid import UUID
 
 import libvirt
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+from kdive.artifacts.storage import ArtifactStreamRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactStreamRequest, StoredArtifact
 from kdive.providers.ports import CaptureOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.retrieve.common import (
@@ -37,7 +38,7 @@ from kdive.providers.remote_libvirt.retrieve.common import (
     lookup,
     persist_redacted,
 )
-from kdive.providers.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend
 
@@ -104,6 +105,27 @@ class HostDumpOptions(NamedTuple):
     core_dmesg_from_file: CoreDmesgFromFile
     dump_format: int
     max_core_bytes: int
+
+
+@dataclass(slots=True)
+class _SpoolSink:
+    handle: BinaryIO
+    system_id: UUID
+    max_bytes: int
+    written: int = 0
+
+    def write_chunk(self, data: bytes) -> None:
+        self.written += len(data)
+        if self.written > self.max_bytes:
+            raise CategorizedError(
+                "host_dump stream exceeded the 5 GiB ceiling mid-download",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"system_id": str(self.system_id), "streamed_bytes": self.written},
+            )
+        self.handle.write(data)
+
+    def recv_all_callback(self, _stream: Any, data: bytes, _opaque: Any) -> None:
+        self.write_chunk(data)
 
 
 class HostDumpCapturer:
@@ -173,7 +195,11 @@ class HostDumpCapturer:
     def _preflight_pool_dir(pool: Any, pool_name: str) -> Path:
         """Return the pool's target directory, or fail on a non-dir/filesystem pool."""
         pool_xml = pool.XMLDesc(0)
-        pool_type, target = pool_type_and_target(pool_xml)
+        pool_type, target = pool_type_and_target_strict(
+            pool_xml,
+            operation="preflighting host_dump storage pool",
+            storage_pool=pool_name,
+        )
         if pool_type not in DIR_POOL_TYPES or target is None:
             raise CategorizedError(
                 "remote storage_pool is not a filesystem/dir pool; host_dump requires one",
@@ -225,24 +251,12 @@ class HostDumpCapturer:
     def _download_to_file(self, conn: Any, volume: Any, spool: Path, system_id: UUID) -> None:
         """Spool the volume to a 0600 temp file; abort+raise if the stream overruns."""
         stream = conn.newStream(0)
-        written = 0
         try:
             fd = os.open(spool, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as handle:
-
-                def _sink(_stream: Any, data: bytes, _opaque: Any) -> None:
-                    nonlocal written
-                    written += len(data)
-                    if written > self._options.max_core_bytes:
-                        raise CategorizedError(
-                            "host_dump stream exceeded the 5 GiB ceiling mid-download",
-                            category=ErrorCategory.CONFIGURATION_ERROR,
-                            details={"system_id": str(system_id), "streamed_bytes": written},
-                        )
-                    handle.write(data)
-
+                sink = _SpoolSink(handle, system_id, self._options.max_core_bytes)
                 volume.download(stream, 0, 0, 0)
-                stream.recvAll(_sink, None)
+                stream.recvAll(sink.recv_all_callback, None)
             stream.finish()
         except CategorizedError:
             with contextlib.suppress(Exception):
@@ -258,7 +272,19 @@ class HostDumpCapturer:
             ) from exc
 
     def _store_core(self, system_id: UUID, spool: Path) -> CaptureOutput:
-        build_id = self._options.core_build_id_from_file(spool)
+        try:
+            build_id = self._options.core_build_id_from_file(spool)
+        except CategorizedError:
+            raise
+        except Exception as exc:
+            raise CategorizedError(
+                "host_dump build-id extraction failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "system_id": str(system_id),
+                    "capture_method": CaptureMethod.HOST_DUMP.value,
+                },
+            ) from exc
         dmesg = self._dmesg_best_effort(spool, system_id)
         sha256_b64 = file_sha256_b64(spool)
         raw = self._stream_put(system_id, spool, sha256_b64)
@@ -283,6 +309,14 @@ class HostDumpCapturer:
                 "(core + build-id captured): %s",
                 system_id,
                 exc,
+            )
+            return DMESG_UNAVAILABLE
+        except Exception:
+            _log.warning(
+                "host_dump dmesg extraction failed for system %s; persisting a placeholder "
+                "(core + build-id captured)",
+                system_id,
+                exc_info=True,
             )
             return DMESG_UNAVAILABLE
 
@@ -327,6 +361,22 @@ def pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
         root: ET.Element = _safe_fromstring(pool_xml)
     except (ET.ParseError, DefusedXmlException):
         return None, None
+    target = root.findtext("./target/path")
+    return root.get("type"), target
+
+
+def pool_type_and_target_strict(
+    pool_xml: str, *, operation: str, storage_pool: str
+) -> tuple[str | None, str | None]:
+    """Return storage-pool type and target; malformed XML is an infrastructure fault."""
+    try:
+        root: ET.Element = _safe_fromstring(pool_xml)
+    except (ET.ParseError, DefusedXmlException):
+        raise CategorizedError(
+            "malformed remote-libvirt storage-pool XML",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": operation, "storage_pool": storage_pool},
+        ) from None
     target = root.findtext("./target/path")
     return root.get("type"), target
 

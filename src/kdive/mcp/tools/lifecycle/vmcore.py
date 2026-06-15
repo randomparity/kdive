@@ -46,8 +46,8 @@ from kdive.mcp.tools._common import (
 )
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run, with_runtime_for_system
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import CrashPostmortem
-from kdive.providers.resolver import ProviderResolver
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -312,7 +312,6 @@ def register(
             Field(description="Capture method; must be supported by the local-libvirt provider."),
         ] = "host_dump",
     ) -> ToolResponse:
-        """Enqueue a capture_vmcore job on a crashed System. Requires operator."""
         return await handlers.fetch_vmcore(
             pool,
             current_context(),
@@ -331,7 +330,6 @@ def register(
             Field(description="The System whose redacted vmcore artifacts to list."),
         ],
     ) -> ToolResponse:
-        """List the redacted vmcore artifacts for a System. Requires viewer."""
         return await list_vmcores(pool, current_context(), system_id=system_id)
 
     @app.tool(
@@ -346,7 +344,6 @@ def register(
             Field(description="Crash commands to run (allowlisted read-only verbs)."),
         ],
     ) -> ToolResponse:
-        """Run a crash command batch over a Run's captured core; returns redacted output."""
         return await handlers.postmortem_crash(
             pool, current_context(), run_id=run_id, commands=commands
         )
@@ -359,5 +356,4 @@ def register(
     async def postmortem_triage_tool(
         run_id: Annotated[str, Field(description="The Run whose captured core to triage.")],
     ) -> ToolResponse:
-        """Run the fixed triage commands (log+bt) over a Run's captured core; redacted report."""
         return await handlers.postmortem_triage(pool, current_context(), run_id=run_id)

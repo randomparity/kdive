@@ -21,7 +21,7 @@ not a cost to accept:
    touched lines** (every added/removed line of the M2 commit set since a `pre-M2` tag cut at
    milestone start — not a net a later revert can zero out) against a small explicit allowlist
    of **named, provider-agnostic** touch-points: the `ResourceKind` enum value,
-   `providers/composition.py` registration, the one migration, regenerated docs, **and the one
+   `providers/assembly/composition.py` registration, the one migration, regenerated docs, **and the one
    additive object-store primitive `presign_get`** the in-target seam requires (ADR-0076 —
    `store/` exposes only `presign_put` today). This is the top-level design's falsifiable
    hypothesis (`top-level-design.md` §Roadmap), measured against a real second provider for the
@@ -156,7 +156,7 @@ baseline and the M1.2 / M1.5 scaffolding standing on local-libvirt is undisturbe
 
 ## Provider model (M2 delta)
 
-`providers/composition.py` stays the **only** production provider-assembly point and gains a
+`providers/assembly/composition.py` stays the **only** production provider-assembly point and gains a
 third map entry behind the `ProviderResolver` (ADR-0071):
 
 ```
@@ -275,7 +275,7 @@ here:
   the transport, the kind, discovery). The artifact/guest-agent seam (issue **3**) and
   provisioning (issue **2**) parallel after it; build/install (4→5) and debug/control-retrieve
   (6/7) consume those.
-- **Expected rebase zones** (recurring in M1.x parallel work): `providers/composition.py`
+- **Expected rebase zones** (recurring in M1.x parallel work): `providers/assembly/composition.py`
   (issue 1 adds the registration; issues 2–7 wire ports into the remote runtime),
   `tests/db/test_migrate.py` (issue 1's migration), `domain/models.py`'s `ResourceKind` (issue
   1, one enum value — an allowlisted falsifiability touch-point), and the generated

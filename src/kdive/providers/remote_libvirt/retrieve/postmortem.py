@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from kdive.providers.debug_common.crash_postmortem import (
+from kdive.providers.ports import CrashOutput
+from kdive.providers.shared.debug_common.crash_postmortem import (
     FetchObject,
     ReadBuildId,
     RunCrash,
 )
-from kdive.providers.debug_common.crash_postmortem import (
+from kdive.providers.shared.debug_common.crash_postmortem import (
     run_crash_postmortem as _run_crash_postmortem,
 )
-from kdive.providers.ports import CrashOutput
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 

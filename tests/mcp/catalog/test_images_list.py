@@ -28,6 +28,16 @@ def _ctx(*projects: str) -> RequestContext:
     )
 
 
+def _member_ctx(*projects: str) -> RequestContext:
+    return RequestContext(
+        principal="dev-1",
+        agent_session="sess-1",
+        projects=tuple(projects),
+        roles={},
+        platform_roles=frozenset(),
+    )
+
+
 @asynccontextmanager
 async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=4, open=False)
@@ -84,6 +94,16 @@ def test_list_returns_public_and_own_private_only(migrated_url: str) -> None:
             resp = await catalog_images.list_images(pool, _ctx("proj-a"))
         assert resp.status == "ok"
         assert _names(resp) == {"fedora", "mine"}
+
+    asyncio.run(_run())
+
+
+def test_list_hides_private_images_without_viewer_role(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert(pool, name="mine", visibility="private", owner="proj-a")
+            resp = await catalog_images.list_images(pool, _member_ctx("proj-a"))
+        assert _names(resp) == set()
 
     asyncio.run(_run())
 

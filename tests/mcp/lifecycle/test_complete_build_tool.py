@@ -8,6 +8,10 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
+from kdive.artifacts.uploads import ManifestEntry
+from kdive.build_artifacts.results import BuildOutput
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -21,10 +25,6 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
     create_run_upload as _create_run_upload,
 )
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
-from kdive.provider_components.artifacts import HeadResult, PresignedUpload, PresignPutRequest
-from kdive.provider_components.build_results import BuildOutput
-from kdive.provider_components.uploads import ManifestEntry
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )
@@ -384,8 +384,8 @@ def test_complete_build_rejects_missing_effective_config_without_artifacts(
 from collections.abc import Sequence  # noqa: E402
 from datetime import timedelta  # noqa: E402
 
+from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
 from kdive.domain.models import Sensitivity  # noqa: E402
-from kdive.provider_components.uploads import ChunkEntry  # noqa: E402
 
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))

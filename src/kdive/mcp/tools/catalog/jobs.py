@@ -34,7 +34,9 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
@@ -43,8 +45,6 @@ _log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 0.5
 MAX_WAIT_S = 300.0
-DEFAULT_LIST_LIMIT = 50
-MAX_LIST_LIMIT = 200
 
 _TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
 
@@ -202,7 +202,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
 
 async def list_jobs(pool: AsyncConnectionPool, ctx: RequestContext, *, limit: int) -> ToolResponse:
     """Return the newest jobs (capped) in one collection envelope."""
-    capped = max(1, min(limit, MAX_LIST_LIMIT))
+    capped = _clamp_list_limit(limit)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             jobs = await queue.recent_jobs(conn, capped, _readable_projects(ctx))
@@ -230,7 +230,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_get(
         job_id: Annotated[str, Field(description="The Job to render.")],
     ) -> ToolResponse:
-        """Render a Job by ID. Requires viewer."""
         return await get_job(pool, current_context(), job_id)
 
     @app.tool(
@@ -244,7 +243,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             float, Field(description="Maximum seconds to wait (capped at 300).")
         ] = 30.0,
     ) -> ToolResponse:
-        """Poll a Job until terminal or the timeout elapses. Requires viewer."""
         return await wait_job(pool, current_context(), job_id, timeout_s)
 
     @app.tool(
@@ -255,7 +253,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_cancel(
         job_id: Annotated[str, Field(description="The Job to cancel.")],
     ) -> ToolResponse:
-        """Cancel a Job cooperatively; error envelope if already terminal. Requires operator."""
         return await cancel_job(pool, current_context(), job_id)
 
     @app.tool(
@@ -268,5 +265,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
-        """List the newest Jobs visible to the caller's readable projects. Requires viewer."""
         return await list_jobs(pool, current_context(), limit=limit)

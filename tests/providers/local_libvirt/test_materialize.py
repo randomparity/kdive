@@ -5,13 +5,13 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import _UploadRootfs
-from kdive.provider_components.references import (
+from kdive.components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.profiles.provisioning import _UploadRootfs
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     RootfsMaterializationContext,
     RootfsUploadContext,

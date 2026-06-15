@@ -19,15 +19,22 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Allocation, System
 from kdive.domain.state import AllocationState, SystemState
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
-from kdive.security.authz.rbac import PlatformRole
+from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
 from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
+VIEWER_CTX = RequestContext(
+    principal="viewer-1",
+    agent_session="s",
+    projects=("proj",),
+    roles={"proj": Role.VIEWER},
+)
 
 
 @asynccontextmanager
@@ -40,20 +47,31 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-def _discovery(cap: int = 2) -> LocalLibvirtDiscovery:
+def _discovery(cap: int = 2, *, host_uri: str = "qemu:///system") -> LocalLibvirtDiscovery:
     return LocalLibvirtDiscovery(
-        host_uri="qemu:///system",
+        host_uri=host_uri,
         connect=lambda: FakeLibvirtConn(),
         concurrent_allocation_cap=cap,
     )
 
 
-async def _register(pool: AsyncConnectionPool) -> str:
+async def _register(pool: AsyncConnectionPool, *, host_uri: str = "qemu:///system") -> str:
     async with pool.connection() as conn:
         res = await register_discovered_resource(
-            conn, _discovery().list_resources()[0], pool="local-libvirt", cost_class="local"
+            conn,
+            _discovery(host_uri=host_uri).list_resources()[0],
+            pool="local-libvirt",
+            cost_class="local",
         )
     return str(res.id)
+
+
+async def _set_affinity(pool: AsyncConnectionPool, res_id: str, *, owner_project: str) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE resources SET owner_project = %s WHERE id = %s",
+            (owner_project, UUID(res_id)),
+        )
 
 
 def test_list_returns_host_with_flat_capability_projection(migrated_url: str) -> None:
@@ -76,6 +94,39 @@ def test_list_returns_host_with_flat_capability_projection(migrated_url: str) ->
         assert resp.data["concurrent_allocation_cap"] == "2"
 
     asyncio.run(_run())
+
+
+def test_list_hides_resources_outside_project_affinity(migrated_url: str) -> None:
+    async def _run() -> tuple[str, list[str]]:
+        async with _pool(migrated_url) as pool:
+            visible = await _register(pool, host_uri="qemu:///visible")
+            hidden = await _register(pool, host_uri="qemu:///hidden")
+            await _set_affinity(pool, hidden, owner_project="other")
+            responses = await catalog_resources_tools.list_resources_tool(pool, CTX, kind=None)
+        return visible, [item.object_id for item in responses.items]
+
+    visible, item_ids = asyncio.run(_run())
+    assert item_ids == [visible]
+
+
+def test_list_hides_scoped_resources_without_viewer_role(migrated_url: str) -> None:
+    async def _run() -> tuple[str, list[str], list[str]]:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await _set_affinity(pool, res_id, owner_project="proj")
+            member_resp = await catalog_resources_tools.list_resources_tool(pool, CTX, kind=None)
+            viewer_resp = await catalog_resources_tools.list_resources_tool(
+                pool, VIEWER_CTX, kind=None
+            )
+        return (
+            res_id,
+            [item.object_id for item in member_resp.items],
+            [item.object_id for item in viewer_resp.items],
+        )
+
+    res_id, member_ids, viewer_ids = asyncio.run(_run())
+    assert member_ids == []
+    assert viewer_ids == [res_id]
 
 
 def test_list_kind_filter_miss_is_configuration_error(migrated_url: str) -> None:
@@ -126,6 +177,18 @@ def test_describe_adds_pool_cost_host(migrated_url: str) -> None:
         assert resp.data["host_uri"] == "qemu:///system"
 
     asyncio.run(_run())
+
+
+def test_describe_hides_resource_outside_project_affinity(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await _set_affinity(pool, res_id, owner_project="other")
+            return await catalog_resources_tools.describe_resource(pool, CTX, res_id)
+
+    resp = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
 
 
 def test_describe_unknown_is_error(migrated_url: str) -> None:

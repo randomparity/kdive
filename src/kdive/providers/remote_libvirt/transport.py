@@ -14,9 +14,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -24,12 +26,14 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.uri_validation import validate_remote_uri
 from kdive.security.secrets.paths import PathSafetyError
-from kdive.security.secrets.secrets import SecretBackend
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 if TYPE_CHECKING:
-    from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+    from kdive.providers.remote_libvirt.config import TlsCertRefs
 
 # libvirt resolves exactly these names inside a pkipath.
 _CLIENT_CERT_NAME = "clientcert.pem"
@@ -171,7 +175,60 @@ def remote_connection[C: ClosableConn](
         try:
             yield conn
         finally:
-            conn.close()
+            if sys.exc_info()[0] is None:
+                conn.close()
+            else:
+                _close_best_effort(conn)
+
+
+def _close_best_effort(conn: ClosableConn) -> None:
+    try:
+        conn.close()
+    except libvirt.libvirtError:
+        _log.warning("remote-libvirt connection close failed during cleanup", exc_info=True)
+
+
+@dataclass(frozen=True)
+class RemoteLibvirtConnections[C: ClosableConn]:
+    """Shared dependency bundle for remote-libvirt provider libvirt connections."""
+
+    config_factory: Callable[[], RemoteLibvirtConfig]
+    open_connection: Callable[[str], C]
+    secret_backend_factory: Callable[[], SecretBackend]
+    pki_base_dir: Path | None = None
+
+    def config(self) -> RemoteLibvirtConfig:
+        """Return the current remote-libvirt operator configuration."""
+        return self.config_factory()
+
+    def connection(self, config: RemoteLibvirtConfig) -> AbstractContextManager[C]:
+        """Open one connection with the shared TLS materialization lifecycle."""
+        return remote_connection(
+            config,
+            self.secret_backend_factory(),
+            open_connection=self.open_connection,
+            pki_base_dir=self.pki_base_dir,
+        )
+
+
+def remote_libvirt_connections[C: ClosableConn](
+    *,
+    secret_registry: SecretRegistry,
+    config_factory: Callable[[], RemoteLibvirtConfig],
+    open_connection: Callable[[str], C],
+    secret_backend_factory: Callable[[], SecretBackend] | None = None,
+    pki_base_dir: Path | None = None,
+) -> RemoteLibvirtConnections[C]:
+    """Build the shared remote-libvirt connection dependency bundle."""
+    secret_backend_factory = secret_backend_factory or (
+        lambda: secret_backend_from_env(registry=secret_registry)
+    )
+    return RemoteLibvirtConnections(
+        config_factory=config_factory,
+        open_connection=open_connection,
+        secret_backend_factory=secret_backend_factory,
+        pki_base_dir=pki_base_dir,
+    )
 
 
 def open_libvirt(uri: str) -> _LibvirtConn:

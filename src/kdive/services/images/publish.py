@@ -25,7 +25,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
@@ -33,14 +33,15 @@ from psycopg.cursor_async import AsyncCursor
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.artifacts import storage as artifact_types
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.image_format import ImageFormat
 from kdive.domain.models import (
     ImageCatalogEntry,
     ImageState,
     ImageVisibility,
     Sensitivity,
 )
-from kdive.provider_components import artifacts as artifact_types
 
 _RETENTION_CLASS = "image"
 
@@ -80,7 +81,7 @@ class PublishRequest:
     provider: str
     name: str
     arch: str
-    format: Literal["qcow2"]
+    format: ImageFormat
     root_device: str
     digest: str
     capabilities: tuple[str, ...]

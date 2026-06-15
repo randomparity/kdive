@@ -34,6 +34,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.config.core_settings import IMAGE_PRIVATE_LIFETIME_MAX
 from kdive.domain.errors import ErrorCategory
+from kdive.domain.models import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.state import SystemState
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.responses import ToolResponse
@@ -41,6 +42,7 @@ from kdive.mcp.tools.ops.images import build_publish as image_build_publish
 from kdive.mcp.tools.ops.images import delete as image_delete
 from kdive.mcp.tools.ops.images import registrar as images_registrar
 from kdive.mcp.tools.ops.images import retention as image_retention
+from kdive.mcp.tools.ops.images import upload as image_upload
 from kdive.mcp.tools.ops.images._common import (
     DELETE_TOOL,
     EXTEND_TOOL,
@@ -48,10 +50,10 @@ from kdive.mcp.tools.ops.images._common import (
     UPLOAD_TOOL,
 )
 from kdive.mcp.tools.ops.images.build_publish import BUILD_TOOL, PUBLISH_TOOL
-from kdive.reconciler.images import ImageMtime
+from kdive.reconciler.cleanup.images import ImageMtime
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
-from kdive.services.images.upload import UploadObjectStore
+from kdive.services.images.upload import PrivateUploadRequest, UploadObjectStore
 from tests.reconciler.conftest import connect, seed_system
 
 _TARGET_PROJECT = "tenant-x"
@@ -548,6 +550,89 @@ def test_upload_cross_project_denied_without_project_audit(migrated_url: str) ->
             )
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert await _audit_log_rows(migrated_url) == []
+
+    asyncio.run(_run())
+
+
+def test_upload_operator_without_store_is_configuration_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await image_upload.upload(
+                pool,
+                _member_ctx(role=Role.OPERATOR),
+                None,
+                image_upload.ImageUploadRequest(
+                    project=_TARGET_PROJECT,
+                    name="custom",
+                    arch="x86_64",
+                    quarantine_key="quarantine/abc",
+                ),
+            )
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert await _audit_log_rows(migrated_url) == []
+
+    asyncio.run(_run())
+
+
+def test_upload_operator_registers_private_upload(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[object] = []
+    entry_id = UUID("11111111-2222-3333-4444-555555555555")
+
+    async def fake_register_private_upload(conn: object, store: object, *, request: object):
+        captured.extend([conn, store, request])
+        return ImageCatalogEntry(
+            id=entry_id,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            provider="local-libvirt",
+            name="custom",
+            arch="x86_64",
+            format="qcow2",
+            root_device="/dev/vda",
+            object_key="images/local-libvirt__tenant-x/custom/x86_64.qcow2",
+            digest="sha256:abc",
+            visibility=ImageVisibility.PRIVATE,
+            owner=_TARGET_PROJECT,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+            state=ImageState.PENDING,
+            pending_since=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(image_upload, "register_private_upload", fake_register_private_upload)
+
+    async def _run() -> None:
+        store = cast(UploadObjectStore, _UnusedUploadStore())
+        async with _pool(migrated_url) as pool:
+            resp = await image_upload.upload(
+                pool,
+                _member_ctx(role=Role.OPERATOR),
+                store,
+                image_upload.ImageUploadRequest(
+                    project=_TARGET_PROJECT,
+                    name="custom",
+                    arch="x86_64",
+                    quarantine_key="quarantine/custom.qcow2",
+                    lifetime_seconds=60,
+                ),
+            )
+        assert resp.object_id == str(entry_id)
+        assert resp.status == ImageState.PENDING.value
+        assert resp.data == {
+            "name": "custom",
+            "visibility": ImageVisibility.PRIVATE.value,
+            "owner": _TARGET_PROJECT,
+        }
+        assert captured[1] is store
+        request = cast(PrivateUploadRequest, captured[2])
+        assert request.project == _TARGET_PROJECT
+        assert request.principal == "dev-1"
+        assert request.name == "custom"
+        assert request.provider == "local-libvirt"
+        assert request.arch == "x86_64"
+        assert request.quarantine_key == "quarantine/custom.qcow2"
+        assert request.required == image_upload.DEFAULT_REQUIRED_CONTRACT
 
     asyncio.run(_run())
 

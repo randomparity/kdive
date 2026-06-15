@@ -1,4 +1,4 @@
-"""Unit tests for SshBuildTransport + materialized_ssh_identity (Task 6 — ADR-0342).
+"""Unit tests for SshBuildTransport and materialized_ssh_identity (ADR-0099).
 
 No real SSH or network connections are made. subprocess.run is monkeypatched at the
 module-level target so argv capture is deterministic.
@@ -15,16 +15,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
-from kdive.providers.build_host.ssh_transport import (
+from kdive.providers.shared.build_host.ssh_transport import (
     _MAX_REMOTE_READ_B64_BYTES,
     SshBuildTransport,
     materialized_ssh_identity,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 
-_RUN_TARGET = "kdive.providers.build_host.ssh_transport.subprocess.run"
+_RUN_TARGET = "kdive.providers.shared.build_host.ssh_transport.subprocess.run"
 
 _FAKE_IDENTITY = Path("/tmp/fake-identity.pem")  # noqa: S108 — test constant only
 _FAKE_ADDRESS = "builder@10.0.0.1"
@@ -372,7 +372,7 @@ def test_materialized_ssh_identity_lifecycle(tmp_path: Path) -> None:
 
     with (
         patch(
-            "kdive.providers.build_host.ssh_transport._resolve_ssh_key",
+            "kdive.providers.shared.build_host.ssh_transport._resolve_ssh_key",
             return_value=key_value,
         ),
         materialized_ssh_identity("ssh_key.pem", registry, scope=sentinel) as identity_path,
@@ -397,7 +397,7 @@ def test_materialized_ssh_identity_unlinks_on_body_exception(tmp_path: Path) -> 
 
     with (
         patch(
-            "kdive.providers.build_host.ssh_transport._resolve_ssh_key",
+            "kdive.providers.shared.build_host.ssh_transport._resolve_ssh_key",
             return_value=key_value,
         ),
         pytest.raises(RuntimeError, match="intentional"),

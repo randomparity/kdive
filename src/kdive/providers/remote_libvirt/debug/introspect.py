@@ -20,12 +20,6 @@ from typing import Any, Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.drgn_program import (
-    open_vmcore_program,
-    read_vmcoreinfo_build_id,
-    run_introspection_helper,
-)
-from kdive.providers.debug_common.introspect import assemble_report
 from kdive.providers.ports import IntrospectOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.guest.agent import (
@@ -35,6 +29,12 @@ from kdive.providers.remote_libvirt.guest.agent import (
     qemu_agent_command,
 )
 from kdive.providers.remote_libvirt.transport import remote_connection
+from kdive.providers.shared.debug_common.drgn_program import (
+    open_vmcore_program,
+    read_vmcoreinfo_build_id,
+    run_introspection_helper,
+)
+from kdive.providers.shared.debug_common.introspect import assemble_report
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 

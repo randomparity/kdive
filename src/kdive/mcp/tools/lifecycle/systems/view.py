@@ -16,14 +16,14 @@ from kdive.domain.pcie import parse_match_spec
 from kdive.domain.state import SystemState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 
-DEFAULT_LIST_LIMIT = 50
-MAX_LIST_LIMIT = 200
 CUSTOM_SHAPE_SENTINEL = "__custom__"
 """The ``shape`` filter value selecting full-custom Systems (``shape IS NULL``)."""
 
@@ -164,7 +164,7 @@ async def list_systems(
     )
     if isinstance(filters, ToolResponse):
         return filters
-    capped = max(1, min(request.limit, MAX_LIST_LIMIT))
+    capped = _clamp_list_limit(request.limit)
     with bind_context(principal=ctx.principal):
         if not viewer_projects:
             return _systems_collection([])

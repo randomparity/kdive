@@ -129,7 +129,7 @@ is already in `vmcore.fetch`'s `_VMCORE_METHODS`, the advertisement alone admits
 existing tool — no MCP-seam change.
 
 Constant-memory streaming over the spooled core requires a **file/stream-based artifact write
-path**: today's `ArtifactWriteRequest` carries `data: bytes` (`provider_components/artifacts`),
+path**: today's `ArtifactWriteRequest` carries `data: bytes` (`kdive.artifacts.storage`),
 which would force the whole core back into RAM at upload. Extending the store with a
 file/stream-backed put (used by host_dump, available to kdump/console later) is a named
 prerequisite of this ADR, not an assumed capability.

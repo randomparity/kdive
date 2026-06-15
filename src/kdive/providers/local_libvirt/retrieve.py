@@ -18,22 +18,22 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
-from kdive.providers.debug_common.crash_postmortem import (
-    default_fetch_object,
-    default_read_vmcore_build_id,
-    default_run_crash,
-)
-from kdive.providers.debug_common.crash_postmortem import (
-    run_crash_postmortem as _run_crash_postmortem,
-)
 from kdive.providers.ports import (
     CaptureOutput,
     CrashOutput,
     CrashResult,
+)
+from kdive.providers.shared.debug_common.crash_postmortem import (
+    default_fetch_object,
+    default_read_vmcore_build_id,
+    default_run_crash,
+)
+from kdive.providers.shared.debug_common.crash_postmortem import (
+    run_crash_postmortem as _run_crash_postmortem,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env

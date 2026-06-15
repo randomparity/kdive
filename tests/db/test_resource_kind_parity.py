@@ -8,7 +8,7 @@ import psycopg
 
 from kdive.db import migrate
 from kdive.domain.models import ResourceKind
-from kdive.providers.composition import build_provider_resolver
+from kdive.providers.assembly.composition import build_provider_resolver
 
 
 def _check_allowed_kinds(conn: psycopg.Connection) -> set[str]:

@@ -1,6 +1,6 @@
 """Local-libvirt reconciler ``InfraReaper`` adapter (ADR-0111).
 
-Realizes the reconciler's :class:`~kdive.providers.reaping.InfraReaper` port over the
+Realizes the reconciler's :class:`~kdive.providers.infra.reaping.InfraReaper` port over the
 local-libvirt discovery + provisioning planes, so the periodic ``leaked_domains`` sweep
 actually reaches the local host's domains. ``list_owned`` adapts each
 :class:`~kdive.providers.ports.OwnedInfra` row (``{system_id: str, domain_name: str}``) into
@@ -20,10 +20,10 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from kdive.providers.infra.reaping import OwnedDomain
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.ports import OwnedInfra
-from kdive.providers.reaping import OwnedDomain
 
 
 @dataclass(frozen=True, slots=True)

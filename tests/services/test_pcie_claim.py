@@ -17,11 +17,11 @@ from uuid import UUID, uuid4
 
 import psycopg
 
+import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY, MatchOutcome, PCIeClaim, PCIeDescriptor
 from kdive.domain.state import AllocationState, ResourceStatus
-from kdive.services.allocation import pcie_claim
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 

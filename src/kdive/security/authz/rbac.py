@@ -141,6 +141,18 @@ def require_role(ctx: RequestContext, project: str, role: Role) -> None:
         raise RoleDenied(principal=ctx.principal, project=project, held=held, required=role)
 
 
+def projects_with_role(ctx: RequestContext, role: Role) -> list[str]:
+    """Return caller projects where ``ctx`` satisfies at least ``role``."""
+    projects: list[str] = []
+    for project in ctx.projects:
+        try:
+            require_role(ctx, project, role)
+        except AuthorizationError:
+            continue
+        projects.append(project)
+    return projects
+
+
 def platform_roles_from_claims(claims: Mapping[str, object]) -> frozenset[PlatformRole]:
     """Parse the platform-role set from a verified token's ``platform_roles`` claim.
 

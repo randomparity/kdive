@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.runtime import ProfilePolicy
+from kdive.providers.core.runtime import ProfilePolicy
 
 
 def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> ProvisioningProfile:

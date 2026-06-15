@@ -13,10 +13,10 @@ import asyncio
 import pytest
 from psycopg.rows import dict_row
 
+from kdive.artifacts.storage import ArtifactWriteRequest
 from kdive.domain.models import Sensitivity
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.tools.catalog.artifacts.uploads import create_system_upload
-from kdive.provider_components.artifacts import ArtifactWriteRequest
 from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     SYSTEM_PROVISION_HANDLERS as _SYSTEM_PROVISION_HANDLERS,

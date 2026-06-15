@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from kdive.provider_components.catalog import DEFAULT_FIXTURE_CATALOG_PATH, load_fixture_catalog
+from kdive.components.catalog import DEFAULT_FIXTURE_CATALOG_PATH, load_fixture_catalog
 
 
 def test_default_fixture_catalog_has_no_rootfs_entries() -> None:

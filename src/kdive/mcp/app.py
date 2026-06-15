@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -20,6 +20,8 @@ from opentelemetry import metrics, trace
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
+from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
 from kdive.diagnostics.service import default_service_factory
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import Job, JobKind
@@ -62,11 +64,16 @@ from kdive.mcp.tools.ops.build_hosts import registrar as ops_build_hosts_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
-from kdive.providers.build_host.dispatch import BuildHostTransportFactories
-from kdive.providers.composition import ProviderComposition
-from kdive.providers.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.assembly.composition import ProviderComposition
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
+from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+if TYPE_CHECKING:
+    from kdive.store.objectstore import ObjectStore
+
+_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +109,7 @@ def _pool_only_plane_registrar(
 def _register_reconcile_tools(
     app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
-    ops_reconcile_tools.register_with_reaper(
+    ops_reconcile_tools.register(
         app,
         pool,
         reaper=assembly.reaper,
@@ -125,12 +132,6 @@ def _register_ops_resource_host_tools(
     app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
     ops_resource_host_tools.register(app, pool)
-
-
-def _register_ops_resource_mutation_tools(
-    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
-) -> None:
-    ops_resource_mutation_tools.register_mutation_tools(app, pool)
 
 
 def _register_systems_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
@@ -187,7 +188,20 @@ def _register_ops_build_hosts_tools(
 def _register_ops_images_tools(
     app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
-    ops_images_tools.register_from_env(app, pool)
+    store = _resolve_ops_images_store()
+    ops_images_tools.register(app, pool, image_store=store, upload_store=store)
+
+
+def _resolve_ops_images_store() -> ObjectStore | None:
+    """Resolve the shared object store for ops image tools, or ``None`` when unconfigured."""
+    from kdive.store.objectstore import object_store_from_env
+
+    try:
+        return object_store_from_env()
+    except CategorizedError:
+        if _S3_OPTIONAL_ENV_NAMES.isdisjoint(config.env_snapshot()):
+            return None
+        raise
 
 
 def _register_ops_secrets_tools(
@@ -250,7 +264,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_reconcile_tools,
     _register_reconcile_systems_tools,
     _register_ops_resource_host_tools,
-    _register_ops_resource_mutation_tools,
+    _pool_only_plane_registrar(ops_resource_mutation_tools.register),
     _pool_only_plane_registrar(allocations.register),
     _pool_only_plane_registrar(ops_breakglass_tools.register),
     _register_systems_tools,
@@ -333,6 +347,60 @@ _HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
 # `Tool.output_schema` and because a JSON schema nests non-str values.
 ENVELOPE_OUTPUT_SCHEMA: dict[str, Any] = {"type": "object"}
 
+_TOOL_DESCRIPTION_OVERRIDES = {
+    "accounting.report_all_projects": "Return platform-wide accounting usage for all projects.",
+    "accounting.report_granted_set": "Return accounting usage for the caller's granted projects.",
+    "accounting.usage_investigation": "Return usage totals for one investigation.",
+    "accounting.usage_project": "Return usage totals for one project.",
+    "allocations.get": "Return one allocation visible to the caller.",
+    "allocations.list": "List allocations visible in a project.",
+    "allocations.release": "Release an active allocation.",
+    "allocations.renew": "Extend an allocation lease window.",
+    "allocations.request": "Request capacity and create an allocation grant.",
+    "build_hosts.disable": "Disable a registered build host.",
+    "build_hosts.list": "List registered build hosts.",
+    "build_hosts.register_ephemeral_libvirt": "Register an ephemeral-libvirt build host.",
+    "build_hosts.register_ssh": "Register an SSH build host.",
+    "build_hosts.remove": "Remove a registered build host.",
+    "images.build": "Enqueue an image build job.",
+    "images.delete": "Delete an image catalog entry.",
+    "images.extend": "Extend an image catalog entry lease.",
+    "images.list": "List published image catalog entries.",
+    "images.prune_expired": "Prune expired image catalog entries.",
+    "images.publish": "Publish a built image into the catalog.",
+    "images.upload": "Create an image upload request.",
+    "investigations.close": "Close an investigation.",
+    "investigations.get": "Return one investigation.",
+    "investigations.link": "Link a run to an investigation.",
+    "investigations.open": "Open an investigation.",
+    "investigations.unlink": "Unlink a run from an investigation.",
+    "jobs.cancel": "Cancel a queued or running job.",
+    "jobs.get": "Return one durable job.",
+    "jobs.list": "List jobs visible to the caller.",
+    "jobs.wait": "Poll one durable job until it is terminal or the timeout elapses.",
+    "ops.reconcile_now": "Run reconciler cleanup once.",
+    "postmortem.crash": "Run crash postmortem commands for a captured vmcore.",
+    "postmortem.triage": "Run the default crash triage for a captured vmcore.",
+    "resources.deregister": "Deregister a runtime resource.",
+    "resources.describe": "Return one runtime resource.",
+    "resources.list": "List runtime resources.",
+    "resources.register_fault_inject": "Register a fault-inject runtime resource.",
+    "resources.register_local_libvirt": "Register a local-libvirt runtime resource.",
+    "resources.register_remote_libvirt": "Register a remote-libvirt runtime resource.",
+    "resources.renew": "Renew a runtime resource lease.",
+    "runs.boot": "Boot an installed run.",
+    "runs.build": "Enqueue a kernel build for a run.",
+    "runs.complete_build": "Complete an externally built run.",
+    "runs.create": "Create a run under a system.",
+    "runs.get": "Return one run.",
+    "runs.install": "Install a built run onto its system.",
+    "shapes.delete": "Delete a system shape.",
+    "shapes.list": "List system shapes.",
+    "shapes.set": "Create or update a system shape.",
+    "vmcore.fetch": "Capture and persist a vmcore.",
+    "vmcore.list": "List vmcore artifacts for one system.",
+}
+
 
 def _advertise_flat_output_schema(app: FastMCP) -> int:
     """Override every registered tool's advertised `outputSchema` with the flat envelope schema.
@@ -355,6 +423,22 @@ def _advertise_flat_output_schema(app: FastMCP) -> int:
             "no tools found to advertise a flat outputSchema for; the FastMCP registry accessor "
             "(app.local_provider._components) may have changed (ADR-0113)"
         )
+    return swept
+
+
+def _fill_missing_tool_descriptions(app: FastMCP) -> int:
+    """Backfill reviewed descriptions for decorator wrappers that do not carry docstrings."""
+    swept = 0
+    for component in app.local_provider._components.values():
+        if not isinstance(component, Tool):
+            continue
+        if component.description:
+            continue
+        description = _TOOL_DESCRIPTION_OVERRIDES.get(component.name)
+        if description is None:
+            continue
+        component.description = description
+        swept += 1
     return swept
 
 
@@ -395,31 +479,27 @@ def build_app(
     )
     for register in _PLANE_REGISTRARS:
         register(app, pool, assembly)
+    _fill_missing_tool_descriptions(app)
     _advertise_flat_output_schema(app)
     return app
 
 
 def build_handler_registry(
     *,
-    provider_resolver: ProviderResolver | None = None,
     secret_registry: SecretRegistry,
-    build_host_transport_factories: BuildHostTransportFactories | None = None,
+    provider_composition: ProviderComposition | None = None,
 ) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars.
 
     Args:
-        provider_resolver: Injected per-kind provider resolver passed to worker handler
-            registrars; when ``None``, built from the default provider composition.
         secret_registry: Worker-owned registry shared by redaction boundaries and logging.
+        provider_composition: Provider assembly owner used when the worker constructs its
+            provider resolver and provider-owned support ports.
     """
     registry = HandlerRegistry()
-    composition = ProviderComposition(secret_registry=secret_registry)
-    resolver = provider_resolver or composition.build_provider_resolver()
-    transport_factories = (
-        build_host_transport_factories
-        if build_host_transport_factories is not None
-        else composition.build_build_host_transport_factories()
-    )
+    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    resolver = composition.build_provider_resolver()
+    transport_factories = composition.build_build_host_transport_factories()
     for register in _HANDLER_REGISTRARS:
         register(registry, resolver, secret_registry, transport_factories)
     return registry

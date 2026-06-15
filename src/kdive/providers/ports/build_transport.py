@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from kdive.provider_components.artifacts import PresignedUpload
+from kdive.artifacts.storage import PresignedUpload
 
 
 @dataclass(slots=True, frozen=True)

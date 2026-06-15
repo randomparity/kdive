@@ -197,7 +197,11 @@ class Worker:
     async def _run_handler(self, job: Job, handler: JobHandler, span: JobSpan) -> None:
         try:
             async with self._pool.connection() as conn:
-                result_ref = await handler(conn, job)
+                await conn.set_autocommit(True)
+                try:
+                    result_ref = await handler(conn, job)
+                finally:
+                    await conn.set_autocommit(False)
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
             span.set_outcome("error")
             category = _failure_category(exc)

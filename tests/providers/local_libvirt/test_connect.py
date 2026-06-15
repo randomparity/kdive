@@ -12,10 +12,11 @@ from typing import cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.rsp import rsp_frame, valid_rsp_frame
 from kdive.providers.local_libvirt.lifecycle import connect as connect_mod
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports import DebugTransportKind, SystemHandle, TransportHandleData
+from kdive.providers.shared.debug_common import rsp as rsp_mod
+from kdive.providers.shared.debug_common.rsp import rsp_frame, valid_rsp_frame
 
 # --- RSP framing codec ---------------------------------------------------------------------
 
@@ -55,6 +56,19 @@ def test_valid_rsp_frame_rejects_non_hex_checksum() -> None:
 
 def test_valid_rsp_frame_rejects_checksum_mismatch() -> None:
     assert valid_rsp_frame(b"$?#00") is False
+
+
+def test_rsp_reachable_returns_false_when_connection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
+        assert address == ("127.0.0.1", 1234)
+        assert timeout > 0
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(rsp_mod.socket, "create_connection", fail_connect)
+
+    assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is False
 
 
 # --- TransportHandleData codec -------------------------------------------------------------

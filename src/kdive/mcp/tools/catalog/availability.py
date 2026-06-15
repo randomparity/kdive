@@ -8,22 +8,23 @@ scheduler path stays the authority (ADR-0070).
 
 Headroom uses the **same occupancy predicate as admission** — :data:`OCCUPYING` (the
 `GRANTED/ACTIVE/RELEASING` states, ADR-0069), imported from
-:mod:`kdive.services.allocation.admission` so the two reads can never disagree; a queued
+:mod:`kdive.services.allocation.admission.core` so the two reads can never disagree; a queued
 `requested` row holds only a queue position and is excluded. Availability is
 **schedulability-aware**: a `cordoned`, non-`available`, or invalid-cap host is flagged
 non-schedulable and never counts as "fits now", so the view never points the agent at a
 host every request would refuse.
 
-Resources are shared infrastructure (no `project` column), so the per-host view leaks
-nothing and the read requires only an authenticated context — the `resources.list`
-precedent. Queue depth is reported only as fleet/kind counts, never per project. Untrusted
+The per-host view is filtered by the same project affinity predicate used by allocation
+placement: callers see global resources plus resources placeable by at least one of their
+projects. Queue depth is reported only as fleet/kind counts, never per project. Untrusted
 host-derived PCIe labels are not returned (only the portable `bdf/vendor/device`).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Annotated, Any, NamedTuple
+from typing import TYPE_CHECKING, Annotated, NamedTuple
+from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
@@ -33,6 +34,7 @@ from pydantic import Field
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.models import Resource, SystemShape
 from kdive.domain.pcie import (
     MatchOutcome,
@@ -47,8 +49,9 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.services.allocation import pcie_claim
-from kdive.services.allocation.admission import OCCUPYING_VALUES
+from kdive.security.authz.rbac import Role, projects_with_role
+from kdive.services.allocation.admission.affinity import resource_visible_to_projects
+from kdive.services.allocation.admission.core import OCCUPYING_VALUES, pcie_claim
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext
@@ -80,7 +83,15 @@ def _resolve_cap(resource: Resource) -> int | None:
     return cap
 
 
-async def _occupancy_by_resource(conn: AsyncConnection) -> dict[Any, int]:
+def _resource_id(value: object) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if isinstance(value, str):
+        return UUID(value)
+    raise TypeError(f"expected UUID resource_id from allocations query, got {type(value).__name__}")
+
+
+async def _occupancy_by_resource(conn: AsyncConnection) -> dict[UUID, int]:
     """Fleet-wide occupancy count per host (one query, no N+1).
 
     Counts the host's allocations in the shared :data:`OCCUPYING` predicate
@@ -94,7 +105,7 @@ async def _occupancy_by_resource(conn: AsyncConnection) -> dict[Any, int]:
             (OCCUPYING_VALUES,),
         )
         rows = await cur.fetchall()
-    return {row[0]: int(row[1]) for row in rows}
+    return {_resource_id(row[0]): int(row[1]) for row in rows}
 
 
 async def _queue_depth(conn: AsyncConnection) -> dict[str, JsonValue]:
@@ -126,7 +137,7 @@ async def _queue_depth(conn: AsyncConnection) -> dict[str, JsonValue]:
     return {"total": total, "by_kind": by_kind, "by_id": by_id}
 
 
-async def _claims_by_resource(conn: AsyncConnection) -> dict[Any, list[PCIeClaim]]:
+async def _claims_by_resource(conn: AsyncConnection) -> dict[UUID, list[PCIeClaim]]:
     """Fleet-wide active PCIe claims grouped by host (one query, no per-host N+1).
 
     Unions the ``pcie_claim`` snapshots of every allocation in the shared non-terminal
@@ -134,16 +145,16 @@ async def _claims_by_resource(conn: AsyncConnection) -> dict[Any, list[PCIeClaim
     ``resource_id``. Availability is an unlocked read — unlike the in-lock claim path, it
     needs the whole fleet's occupancy in one round-trip, not one host under a held lock.
     """
-    by_resource: dict[Any, list[PCIeClaim]] = {}
+    by_resource: dict[UUID, list[PCIeClaim]] = {}
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT resource_id, pcie_claim FROM allocations "
             "WHERE resource_id IS NOT NULL AND state = ANY(%s) AND pcie_claim <> '[]'::jsonb",
-            (list(pcie_claim.NON_TERMINAL_STATES_VALUES),),
+            (list(NON_TERMINAL_ALLOCATION_STATE_VALUES),),
         )
         rows = await cur.fetchall()
     for resource_id, held_list in rows:
-        bucket = by_resource.setdefault(resource_id, [])
+        bucket = by_resource.setdefault(_resource_id(resource_id), [])
         for held in held_list:
             bucket.append(
                 PCIeClaim(bdf=held["bdf"], vendor_id=held["vendor_id"], device_id=held["device_id"])
@@ -237,11 +248,12 @@ async def _resolve_shapes(conn: AsyncConnection, shape: str | None) -> list[Syst
     return [resolved]
 
 
-async def _fetch_resources(conn: AsyncConnection) -> list[Resource]:
+async def _fetch_resources(conn: AsyncConnection, projects: tuple[str, ...]) -> list[Resource]:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM resources ORDER BY created_at, id")
         rows = await cur.fetchall()
-    return [Resource.model_validate(row) for row in rows]
+    resources = [Resource.model_validate(row) for row in rows]
+    return [resource for resource in resources if resource_visible_to_projects(resource, projects)]
 
 
 def _passes_pcie_filter(free: list[PCIeDescriptor], pcie: str | None) -> bool:
@@ -264,10 +276,11 @@ async def availability_tool(
 ) -> ToolResponse:
     """Report fleet availability: per-host headroom / free PCIe / fitting shapes + queue depth.
 
-    Viewer (any authenticated context; shared infra has no project scope). ``pcie`` narrows
-    to hosts with a free matching device; ``shape`` restricts the fitting computation to one
-    named shape. A malformed ``pcie`` spec or an unknown ``shape`` is a
-    ``configuration_error``. The view is a point-in-time hint, not a reservation (ADR-0070).
+    Viewer (any authenticated context) sees global resources plus resources visible to one of the
+    caller's projects. ``pcie`` narrows to hosts with a free matching device; ``shape``
+    restricts the fitting computation to one named shape. A malformed ``pcie`` spec or an
+    unknown ``shape`` is a ``configuration_error``. The view is a point-in-time hint, not a
+    reservation (ADR-0070).
     """
     if pcie is not None:
         try:
@@ -285,7 +298,7 @@ async def availability_tool(
                 shapes = await _resolve_shapes(conn, shape)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(_TOOL, exc, suggested_next_actions=[_TOOL])
-            resources = await _fetch_resources(conn)
+            resources = await _fetch_resources(conn, tuple(projects_with_role(ctx, Role.VIEWER)))
             occupancy = await _occupancy_by_resource(conn)
             claims = await _claims_by_resource(conn)
             queue = await _queue_depth(conn)

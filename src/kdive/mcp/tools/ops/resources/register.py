@@ -12,6 +12,7 @@ secret bytes — only the secret *reference* strings are recorded).
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -21,6 +22,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, ConfigDict, Field
 
 import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
@@ -38,7 +40,6 @@ from kdive.mcp.tools.ops.resources._common import (
     TcpResourceProbe,
     config_error,
     denied,
-    resolve_block_kind,
     secret_ref_resolves,
 )
 from kdive.security import audit
@@ -49,6 +50,49 @@ from kdive.security.secrets.secrets import secrets_root_from_env
 _log = logging.getLogger(__name__)
 
 _FAULT_INJECT_HOST_URI = "fault-inject://local"
+
+
+class RuntimeResourceRegistration(BaseModel):
+    """Shared MCP request fields for runtime resource registration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="The (kind, name) identity for the new resource.")
+    cost_class: str = Field(description="The cost class for pricing.")
+    concurrent_allocation_cap: int = Field(
+        default=1, description="Per-host concurrent-allocation cap (> 0)."
+    )
+    secret_refs: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. "
+            "Only the references are stored; secret bytes are never fetched or logged."
+        ),
+    )
+    owner_project: str | None = Field(
+        default=None,
+        description=(
+            "Owning project; defaults to the single registering project. Pass '*' for a "
+            "global (any-project) resource."
+        ),
+    )
+
+
+class RemoteLibvirtResourceRegistration(RuntimeResourceRegistration):
+    """Remote-libvirt runtime resource registration request."""
+
+    host_uri: str = Field(description="Remote-libvirt provider host URI.")
+    base_image: str = Field(description="Registered remote-libvirt base image name.")
+
+
+class LocalLibvirtResourceRegistration(RuntimeResourceRegistration):
+    """Local-libvirt runtime resource registration request."""
+
+    host_uri: str = Field(description="Local-libvirt provider host URI.")
+
+
+class FaultInjectResourceRegistration(RuntimeResourceRegistration):
+    """Fault-inject runtime resource registration request."""
 
 
 def _lease_deadline() -> datetime:
@@ -78,59 +122,46 @@ def _resolve_owner_project(
     )
 
 
-async def _network_preflight(
-    *,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    secret_refs: tuple[str, ...],
-    base_image: str | None,
-    probe: ResourceProbe,
-    secrets_root: Path,
+def _validate_secret_refs(
+    *, name: str, secret_refs: tuple[str, ...], secrets_root: Path
 ) -> ToolResponse | None:
-    """Run the non-DB preflight (secret refs + reachability); fail envelope, or ``None``.
-
-    Deliberately runs **before** any DB connection/transaction is opened so the bounded TCP
-    probe and the filesystem secret-ref reads never stall a pooled connection (or hold a row
-    lock) for the network round-trip.
-
-    * ``remote-libvirt`` — every cert/secret ref resolves + reachability probe + ``base_image``
-      is present (its ``registered`` status is checked under the DB transaction).
-    * ``local-libvirt`` — host reachability only (no ``base_image``).
-    * ``fault-inject`` — secret ref resolves only (synthetic host; **no** reachability, **no**
-      ``base_image`` — a missing ``base_image`` never fails a fault-inject register).
-    """
     for ref in secret_refs:
         if not secret_ref_resolves(ref, secrets_root):
             return config_error(name, f"secret reference {ref!r} does not resolve")
-    if kind is ResourceKind.FAULT_INJECT:
-        return None
-    if not await probe.probe(host_uri):
-        return config_error(name, f"host {host_uri!r} is not reachable")
-    if kind is ResourceKind.REMOTE_LIBVIRT and not base_image:
-        return config_error(name, "remote-libvirt requires a base_image")
     return None
 
 
-async def _db_preflight(
-    conn: AsyncConnection, *, kind: ResourceKind, name: str, base_image: str | None
+async def _validate_reachability(
+    *, name: str, host_uri: str, probe: ResourceProbe
 ) -> ToolResponse | None:
-    """Run the DB-dependent preflight (config-name collision + base_image registered).
+    if not await probe.probe(host_uri):
+        return config_error(name, f"host {host_uri!r} is not reachable")
+    return None
 
-    Held inside the write transaction so the collision check and the INSERT are atomic.
-    """
+
+async def _validate_runtime_name_available(
+    conn: AsyncConnection, *, kind: ResourceKind, name: str
+) -> ToolResponse | None:
     if await _reject_config_name(conn, kind, name):
         return ToolResponse.failure(
             name,
             ErrorCategory.CONFLICT,
             data={"reason": f"{name!r} is a config-managed resource; edit systems.toml"},
         )
-    if kind is ResourceKind.REMOTE_LIBVIRT:
-        assert base_image is not None  # _network_preflight rejected a missing base_image
-        if not await _base_image_registered(conn, kind, base_image):
-            return config_error(
-                name, f"base_image {base_image!r} is not a registered image for {kind.value}"
-            )
+    return None
+
+
+async def _validate_remote_base_image(
+    conn: AsyncConnection, *, name: str, base_image: str
+) -> ToolResponse | None:
+    if not base_image:
+        return config_error(name, "remote-libvirt requires a base_image")
+    if not await _base_image_registered(conn, ResourceKind.REMOTE_LIBVIRT, base_image):
+        return config_error(
+            name,
+            f"base_image {base_image!r} is not a registered image for "
+            f"{ResourceKind.REMOTE_LIBVIRT.value}",
+        )
     return None
 
 
@@ -157,44 +188,13 @@ async def _reject_config_name(conn: AsyncConnection, kind: ResourceKind, name: s
         return (await cur.fetchone()) is not None
 
 
-async def _register_resource(
+async def _authorize_registration(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     tool: str,
-    block: str,
     name: str,
-    cost_class: str,
-    host_uri: str | None = None,
-    base_image: str | None = None,
-    concurrent_allocation_cap: int = 1,
-    secret_refs: tuple[str, ...] = (),
-    owner_project: str | None = None,
-    probe: ResourceProbe | None = None,
-    secrets_root: Path | None = None,
-) -> ToolResponse:
-    """Register a runtime provider resource. Requires ``platform_admin``.
-
-    Args:
-        pool: The shared async connection pool.
-        ctx: The caller's request context (must hold ``platform_admin``).
-        block: The ``systems.toml`` block name: ``remote_libvirt`` / ``local_libvirt`` /
-            ``fault_inject``.
-        name: The stable ``(kind, name)`` identity for the new row.
-        cost_class: The cost class column value.
-        host_uri: The provider host URI (required for remote/local; defaulted for fault-inject).
-        base_image: The registered image name (remote-libvirt only).
-        concurrent_allocation_cap: The per-host concurrent-allocation cap (> 0).
-        secret_refs: Credential reference strings to resolve (never their bytes).
-        owner_project: The owning project; defaults to the single registering project, or pass
-            ``'*'`` for a global resource.
-        probe: Reachability probe port (defaults to a bounded TCP connect).
-        secrets_root: Secrets root for ref resolution (defaults to ``KDIVE_SECRETS_ROOT``).
-
-    Returns:
-        A success envelope with the new resource id, or a typed failure envelope
-        (authorization_denied / conflict / configuration_error).
-    """
+) -> ToolResponse | None:
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)
     except AuthorizationError:
@@ -202,56 +202,34 @@ async def _register_resource(
             pool, ctx, tool=tool, scope=f"denied:{name}", args={"name": name}
         )
         return denied(name, tool)
+    return None
 
-    kind = resolve_block_kind(block)
-    if kind is None:
-        return config_error(name, f"unsupported resource block {block!r}")
-    if concurrent_allocation_cap <= 0:
-        return config_error(name, "concurrent_allocation_cap must be a positive integer")
 
-    resolved_owner = _resolve_owner_project(ctx, owner_project)
+def _common_registration(
+    ctx: RequestContext,
+    request: RuntimeResourceRegistration,
+) -> tuple[ToolResponse | None, str | None]:
+    if request.concurrent_allocation_cap <= 0:
+        return (
+            config_error(request.name, "concurrent_allocation_cap must be a positive integer"),
+            None,
+        )
+    resolved_owner = _resolve_owner_project(ctx, request.owner_project)
     if isinstance(resolved_owner, ToolResponse):
-        return resolved_owner
-
-    effective_host_uri = host_uri
-    if kind is ResourceKind.FAULT_INJECT:
-        effective_host_uri = _FAULT_INJECT_HOST_URI
-    elif not (effective_host_uri and effective_host_uri.strip()):
-        return config_error(name, f"{block} requires a host URI")
-
-    probe = probe or TcpResourceProbe()
-    secrets_root = secrets_root or secrets_root_from_env()
-
-    # Non-DB preflight (bounded TCP probe + filesystem secret-ref reads) runs before any
-    # connection is acquired, so a slow/unreachable host never holds a pooled connection.
-    network_failure = await _network_preflight(
-        kind=kind,
-        name=name,
-        host_uri=effective_host_uri,
-        secret_refs=secret_refs,
-        base_image=base_image,
-        probe=probe,
-        secrets_root=secrets_root,
-    )
-    if network_failure is not None:
-        return network_failure
-
-    return await _insert_with_preflight(
-        pool,
-        ctx,
-        kind=kind,
-        name=name,
-        cost_class=cost_class,
-        host_uri=effective_host_uri,
-        base_image=base_image,
-        cap=concurrent_allocation_cap,
-        secret_refs=secret_refs,
-        owner_project=resolved_owner,
-        tool=tool,
-    )
+        return resolved_owner, None
+    return None, resolved_owner
 
 
-async def _insert_with_preflight(
+def _resolve_ports(
+    probe: ResourceProbe | None, secrets_root: Path | None
+) -> tuple[ResourceProbe, Path]:
+    return probe or TcpResourceProbe(), secrets_root or secrets_root_from_env()
+
+
+type ResourceDbPreflight = Callable[[AsyncConnection], Awaitable[ToolResponse | None]]
+
+
+async def _insert_registered_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
@@ -264,6 +242,7 @@ async def _insert_with_preflight(
     secret_refs: tuple[str, ...],
     owner_project: str | None,
     tool: str,
+    db_preflight: ResourceDbPreflight,
 ) -> ToolResponse:
     """Run the DB preflight + the guarded INSERT in one transaction; map conflicts to envelopes."""
     lease = _lease_deadline()
@@ -276,10 +255,10 @@ async def _insert_with_preflight(
             conn.transaction(),
             resource_identity_lock(conn, kind, name),
         ):
-            failure = await _db_preflight(conn, kind=kind, name=name, base_image=base_image)
+            failure = await db_preflight(conn)
             if failure is not None:
                 return failure
-            resource_id = await _do_insert(
+            resource_id = await _insert_runtime_resource(
                 conn,
                 kind=kind,
                 name=name,
@@ -325,7 +304,7 @@ async def _insert_with_preflight(
     )
 
 
-async def _do_insert(
+async def _insert_runtime_resource(
     conn: AsyncConnection,
     *,
     kind: ResourceKind,
@@ -404,94 +383,170 @@ async def _audit_register(
 async def register_remote_libvirt_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
+    request: RemoteLibvirtResourceRegistration,
     *,
-    name: str,
-    cost_class: str,
-    host_uri: str,
-    base_image: str,
-    concurrent_allocation_cap: int = 1,
-    secret_refs: tuple[str, ...] = (),
-    owner_project: str | None = None,
     probe: ResourceProbe | None = None,
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime remote-libvirt resource. Requires ``platform_admin``."""
-    return await _register_resource(
+    failure = await _authorize_registration(
         pool,
         ctx,
         tool=REGISTER_REMOTE_LIBVIRT_TOOL,
-        block="remote_libvirt",
-        name=name,
-        cost_class=cost_class,
-        host_uri=host_uri,
-        base_image=base_image,
-        concurrent_allocation_cap=concurrent_allocation_cap,
-        secret_refs=secret_refs,
+        name=request.name,
+    )
+    if failure is not None:
+        return failure
+    failure, owner_project = _common_registration(ctx, request)
+    if failure is not None:
+        return failure
+    if not request.host_uri.strip():
+        return config_error(request.name, "remote_libvirt requires a host URI")
+    probe, secrets_root = _resolve_ports(probe, secrets_root)
+    failure = _validate_secret_refs(
+        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
+    )
+    if failure is not None:
+        return failure
+    failure = await _validate_reachability(
+        name=request.name, host_uri=request.host_uri, probe=probe
+    )
+    if failure is not None:
+        return failure
+
+    async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
+        failure = await _validate_runtime_name_available(
+            conn, kind=ResourceKind.REMOTE_LIBVIRT, name=request.name
+        )
+        if failure is not None:
+            return failure
+        return await _validate_remote_base_image(
+            conn, name=request.name, base_image=request.base_image
+        )
+
+    return await _insert_registered_resource(
+        pool,
+        ctx,
+        kind=ResourceKind.REMOTE_LIBVIRT,
+        name=request.name,
+        cost_class=request.cost_class,
+        host_uri=request.host_uri,
+        base_image=request.base_image,
+        cap=request.concurrent_allocation_cap,
+        secret_refs=request.secret_refs,
         owner_project=owner_project,
-        probe=probe,
-        secrets_root=secrets_root,
+        tool=REGISTER_REMOTE_LIBVIRT_TOOL,
+        db_preflight=db_preflight,
     )
 
 
 async def register_local_libvirt_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
+    request: LocalLibvirtResourceRegistration,
     *,
-    name: str,
-    cost_class: str,
-    host_uri: str,
-    concurrent_allocation_cap: int = 1,
-    secret_refs: tuple[str, ...] = (),
-    owner_project: str | None = None,
     probe: ResourceProbe | None = None,
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime local-libvirt resource. Requires ``platform_admin``."""
-    return await _register_resource(
+    failure = await _authorize_registration(
         pool,
         ctx,
         tool=REGISTER_LOCAL_LIBVIRT_TOOL,
-        block="local_libvirt",
-        name=name,
-        cost_class=cost_class,
-        host_uri=host_uri,
-        concurrent_allocation_cap=concurrent_allocation_cap,
-        secret_refs=secret_refs,
+        name=request.name,
+    )
+    if failure is not None:
+        return failure
+    failure, owner_project = _common_registration(ctx, request)
+    if failure is not None:
+        return failure
+    if not request.host_uri.strip():
+        return config_error(request.name, "local_libvirt requires a host URI")
+    probe, secrets_root = _resolve_ports(probe, secrets_root)
+    failure = _validate_secret_refs(
+        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
+    )
+    if failure is not None:
+        return failure
+    failure = await _validate_reachability(
+        name=request.name, host_uri=request.host_uri, probe=probe
+    )
+    if failure is not None:
+        return failure
+
+    async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
+        return await _validate_runtime_name_available(
+            conn, kind=ResourceKind.LOCAL_LIBVIRT, name=request.name
+        )
+
+    return await _insert_registered_resource(
+        pool,
+        ctx,
+        kind=ResourceKind.LOCAL_LIBVIRT,
+        name=request.name,
+        cost_class=request.cost_class,
+        host_uri=request.host_uri,
+        base_image=None,
+        cap=request.concurrent_allocation_cap,
+        secret_refs=request.secret_refs,
         owner_project=owner_project,
-        probe=probe,
-        secrets_root=secrets_root,
+        tool=REGISTER_LOCAL_LIBVIRT_TOOL,
+        db_preflight=db_preflight,
     )
 
 
 async def register_fault_inject_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
+    request: FaultInjectResourceRegistration,
     *,
-    name: str,
-    cost_class: str,
-    concurrent_allocation_cap: int = 1,
-    secret_refs: tuple[str, ...] = (),
-    owner_project: str | None = None,
     probe: ResourceProbe | None = None,
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime fault-inject resource. Requires ``platform_admin``."""
-    return await _register_resource(
+    failure = await _authorize_registration(
         pool,
         ctx,
         tool=REGISTER_FAULT_INJECT_TOOL,
-        block="fault_inject",
-        name=name,
-        cost_class=cost_class,
-        concurrent_allocation_cap=concurrent_allocation_cap,
-        secret_refs=secret_refs,
+        name=request.name,
+    )
+    if failure is not None:
+        return failure
+    failure, owner_project = _common_registration(ctx, request)
+    if failure is not None:
+        return failure
+    _, secrets_root = _resolve_ports(probe, secrets_root)
+    failure = _validate_secret_refs(
+        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
+    )
+    if failure is not None:
+        return failure
+
+    async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
+        return await _validate_runtime_name_available(
+            conn, kind=ResourceKind.FAULT_INJECT, name=request.name
+        )
+
+    return await _insert_registered_resource(
+        pool,
+        ctx,
+        kind=ResourceKind.FAULT_INJECT,
+        name=request.name,
+        cost_class=request.cost_class,
+        host_uri=_FAULT_INJECT_HOST_URI,
+        base_image=None,
+        cap=request.concurrent_allocation_cap,
+        secret_refs=request.secret_refs,
         owner_project=owner_project,
-        probe=probe,
-        secrets_root=secrets_root,
+        tool=REGISTER_FAULT_INJECT_TOOL,
+        db_preflight=db_preflight,
     )
 
 
 __all__ = [
+    "FaultInjectResourceRegistration",
+    "LocalLibvirtResourceRegistration",
+    "RemoteLibvirtResourceRegistration",
     "register_fault_inject_resource",
     "register_local_libvirt_resource",
     "register_remote_libvirt_resource",

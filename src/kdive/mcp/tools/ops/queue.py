@@ -26,6 +26,8 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -36,8 +38,6 @@ _JOBS_OBJECT_ID = "jobs"
 _PAUSE_TOOL = "ops.queue_pause"
 _RESUME_TOOL = "ops.queue_resume"
 _JOBS_LIST_TOOL = "ops.jobs_list"
-_DEFAULT_LIST_LIMIT = 50
-_MAX_LIST_LIMIT = 200
 
 
 async def queue_pause(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
@@ -95,7 +95,7 @@ async def jobs_list(
     ctx: RequestContext,
     *,
     states: list[str] | None = None,
-    limit: int = _DEFAULT_LIST_LIMIT,
+    limit: int = DEFAULT_LIST_LIMIT,
 ) -> ToolResponse:
     """Cross-project queue depth + per-job state; ``platform_operator``, read-audited.
 
@@ -124,7 +124,7 @@ async def jobs_list(
                 exc,
                 suggested_next_actions=[_JOBS_LIST_TOOL],
             )
-        capped = max(1, min(limit, _MAX_LIST_LIMIT))
+        capped = _clamp_list_limit(limit)
         async with pool.connection() as conn:
             depth = await queue.queue_depth(conn)
             jobs = await queue.all_recent_jobs(conn, capped, states=parsed_states)
@@ -228,7 +228,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ] = None,
         limit: Annotated[
             int, Field(description="Maximum per-job rows returned (capped at 200).")
-        ] = _DEFAULT_LIST_LIMIT,
+        ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """Cross-project queue depth and per-job state. Requires platform operator."""
         return await jobs_list(pool, current_context(), states=states, limit=limit)

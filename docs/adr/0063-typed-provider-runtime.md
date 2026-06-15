@@ -21,7 +21,7 @@ ports as the live runtime seam.
 
 The actual M0/M1 runtime contract is `providers.runtime.ProviderRuntime`; startup constructs
 one local-libvirt implementation for each typed port (`Provisioner`, `Builder`, `Installer`,
-`Controller`, `Retriever`, debug/introspection ports) in `providers.composition` and passes
+`Controller`, `Retriever`, debug/introspection ports) in `providers.assembly.composition` and passes
 those ports to MCP registrars and worker handlers. That path is deliberate for the
 single-provider milestones: it keeps the entrypoint explicit, type-checkable, and simple
 while the service stabilizes the DB/job/state spine.
@@ -34,7 +34,7 @@ extend the dormant registry instead of the runtime that actually serves requests
 For M0 and M1, the active provider seam is **typed `ProviderRuntime` ports**, not capability
 dispatch.
 
-- `src/kdive/providers/composition.py` is the only production assembly point for concrete
+- `src/kdive/providers/assembly/composition.py` is the only production assembly point for concrete
   provider implementations.
 - MCP tools and worker handlers request typed ports from `ProviderRuntime`; they do not ask
   `CapabilityRegistry` for `BoundOp`s.

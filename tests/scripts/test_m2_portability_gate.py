@@ -32,7 +32,7 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     # The script is stdlib-only (CI runs it without a synced env), so the coverage table
     # is a pinned constant; this test imports the real builders and fails on any drift, so
     # the committed report can never silently diverge from what composition advertises.
-    from kdive.providers.composition import build_local_runtime, build_remote_runtime
+    from kdive.providers.assembly.composition import build_local_runtime, build_remote_runtime
     from kdive.security.secrets.secret_registry import SecretRegistry
 
     registry = SecretRegistry()
@@ -250,6 +250,32 @@ def test_measure_errors_usefully_when_git_is_unavailable(
     assert gate._measure() is None
 
     assert "git executable is unavailable" in capsys.readouterr().err
+
+
+def test_measure_bounds_every_git_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate.shutil, "which", lambda _name: "git")
+    timeouts: list[int] = []
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        assert capture_output is True
+        assert text is True
+        timeouts.append(timeout)
+        stdout = ""
+        if "log" in argv:
+            stdout = "2\t0\tsrc/kdive/domain/models.py\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(gate.subprocess, "run", run)
+
+    assert gate._measure() == {"src/kdive/domain/models.py": 2}
+    assert timeouts == [gate.GIT_COMMAND_TIMEOUT_S] * 3
 
 
 def test_gate_catches_core_change_introduced_only_in_a_merge_commit(gate_repo: Path) -> None:

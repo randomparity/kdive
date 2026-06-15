@@ -15,18 +15,18 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
-from kdive.providers.debug_common import gdbmi
-from kdive.providers.debug_common.execution import ExecutionControl
-from kdive.providers.debug_common.gdbmi import (
+from kdive.providers.local_libvirt.debug import gdbmi as debug_gdbmi
+from kdive.providers.ports import GdbMiAttachment, GdbStopRecord
+from kdive.providers.shared.debug_common import gdbmi
+from kdive.providers.shared.debug_common.execution import ExecutionControl
+from kdive.providers.shared.debug_common.gdbmi import (
     MAX_MEMORY_READ_BYTES,
     GdbMiEngine,
     MiRecord,
     PygdbmiController,
     parse_mi_records,
 )
-from kdive.providers.debug_common.transcript import append_transcript
-from kdive.providers.local_libvirt.debug import gdbmi as debug_gdbmi
-from kdive.providers.ports import GdbMiAttachment, GdbStopRecord
+from kdive.providers.shared.debug_common.transcript import append_transcript
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.distros import SUPPORTED_DISTROS, resolve_base_template
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildPlane, RootfsBuildSpec
-from kdive.providers.composition import build_local_rootfs_build_plane
+from kdive.providers.assembly.composition import build_local_rootfs_build_plane
 
 _log = logging.getLogger(__name__)
 

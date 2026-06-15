@@ -13,22 +13,22 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.state import AllocationState, DebugSessionState, RunState, SystemState
-from kdive.providers.reaping import DumpVolume, InfraReaper, NullReaper
+from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.debug_sessions import repair_dead_sessions
-from kdive.reconciler.gc import (
+from kdive.reconciler.cleanup.gc import (
     reap_console_collectors,
     reap_orphaned_dump_volumes,
 )
-from kdive.reconciler.jobs import repair_abandoned_jobs
+from kdive.reconciler.cleanup.provider_reaping import repair_leaked_domains
 from kdive.reconciler.loop import (
     ReconcileConfig,
     Reconciler,
     ReconcileReport,
     reconcile_once,
 )
-from kdive.reconciler.provider_reaping import repair_leaked_domains
-from kdive.reconciler.systems import repair_orphaned_systems
+from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
+from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
+from kdive.reconciler.repairs.systems import repair_orphaned_systems
 from tests.reconciler.conftest import (
     FakeReaper,
     FakeResetter,
@@ -268,7 +268,7 @@ def test_live_lease_and_attempts_remaining_not_swept(migrated_url: str) -> None:
 
 
 def _detach(stale_after: timedelta, resetter=None):
-    from kdive.providers.transport_reset import NullResetter
+    from kdive.providers.core.transport_reset import NullResetter
 
     r = resetter if resetter is not None else NullResetter()
     return lambda conn: repair_dead_sessions(conn, stale_after, r)
@@ -750,7 +750,7 @@ class _FakeConsoleCollector:
 
 
 def test_console_reap_finalizes_and_drops_gone_system(migrated_url: str) -> None:
-    from kdive.providers.console_hosting import CollectorRegistry
+    from kdive.providers.infra.console_hosting import CollectorRegistry
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
@@ -769,7 +769,7 @@ def test_console_reap_finalizes_and_drops_gone_system(migrated_url: str) -> None
 
 
 def test_console_reap_leaves_live_system_collector(migrated_url: str) -> None:
-    from kdive.providers.console_hosting import CollectorRegistry
+    from kdive.providers.infra.console_hosting import CollectorRegistry
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
@@ -788,7 +788,7 @@ def test_console_reap_leaves_live_system_collector(migrated_url: str) -> None:
 
 def test_console_reap_drops_vanished_system_collector(migrated_url: str) -> None:
     # A System row deleted out from under the collector (no row at all) is "gone" and reaped.
-    from kdive.providers.console_hosting import CollectorRegistry
+    from kdive.providers.infra.console_hosting import CollectorRegistry
 
     async def _run() -> None:
         registry = CollectorRegistry()
@@ -806,7 +806,7 @@ def test_console_reap_drops_vanished_system_collector(migrated_url: str) -> None
 
 def test_console_reap_with_empty_registry_is_noop(migrated_url: str) -> None:
     # A non-leader replica hosts no collectors (AC5): the reap class touches nothing.
-    from kdive.providers.console_hosting import CollectorRegistry
+    from kdive.providers.infra.console_hosting import CollectorRegistry
 
     async def _run() -> None:
         registry = CollectorRegistry()
@@ -838,7 +838,7 @@ class _FakeDumpVolumeReaper:
 
 
 def test_null_dump_volume_reaper_is_a_dump_volume_reaper() -> None:
-    from kdive.providers.reaping import DumpVolumeReaper, NullDumpVolumeReaper
+    from kdive.providers.infra.reaping import DumpVolumeReaper, NullDumpVolumeReaper
 
     async def _run() -> None:
         reaper = NullDumpVolumeReaper()

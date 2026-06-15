@@ -17,7 +17,7 @@ from kdive.domain.models import Job, JobKind, System
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.store.objectstore import register_artifact_row
 

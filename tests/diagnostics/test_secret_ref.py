@@ -10,6 +10,7 @@ identifiers. A backend that cannot be reached at all is `error`, not a contract 
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 from kdive.diagnostics.checks import CheckStatus, SecretRefCheck, run_check
@@ -56,6 +57,22 @@ def test_unresolved_project_ref_is_never_disclosed() -> None:
     assert "acme" not in result.detail
     assert result.fix is not None and _PROJECT_REF not in result.fix
     assert "1" in result.detail  # one unresolved
+
+
+def test_unresolved_project_ref_log_is_sanitized(caplog) -> None:
+    def _resolve(ref: str) -> None:
+        if ref == _PROJECT_REF:
+            raise FileNotFoundError(ref)
+
+    caplog.set_level(logging.WARNING, logger="kdive.diagnostics.checks")
+    check = SecretRefCheck(refs=_refs(), resolve=_resolve)
+    result = asyncio.run(check.run())
+
+    assert result.status is CheckStatus.FAIL
+    assert "FileNotFoundError" in caplog.text
+    assert "non-platform ref" in caplog.text
+    assert _PROJECT_REF not in caplog.text
+    assert "acme" not in caplog.text
 
 
 def test_unresolved_platform_ref_may_be_named() -> None:

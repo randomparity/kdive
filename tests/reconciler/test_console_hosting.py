@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from uuid import uuid4
 
-from kdive.providers.console_hosting import (
+from kdive.providers.infra.console_hosting import (
     CollectorRegistry,
     ConsoleHostingLoop,
 )
@@ -116,6 +117,33 @@ def test_attach_watcher_does_not_reopen_existing_collector() -> None:
     asyncio.run(_run())
     assert len(made) == 1
     assert made[sid].pumps == 2
+
+
+def test_attach_watcher_logs_factory_failure_traceback(caplog) -> None:  # noqa: ANN001
+    lock = FakeLeaderLock()
+    running = FakeRunning()
+    sid = uuid4()
+    running.systems = {sid}
+    reg = CollectorRegistry()
+
+    def factory(_system_id):  # noqa: ANN001
+        raise RuntimeError("factory boom")
+
+    loop = ConsoleHostingLoop(
+        leader_lock=lock,
+        running_systems=running,
+        collector_factory=factory,
+        registry=reg,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="kdive.providers.infra.console_hosting"):
+        asyncio.run(loop.tick())
+
+    assert reg.system_ids() == set()
+    record = next(
+        record for record in caplog.records if "opening console collector" in record.message
+    )
+    assert record.exc_info is not None
 
 
 def test_lock_loss_closes_all_streams_before_reacquire() -> None:

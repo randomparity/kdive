@@ -12,7 +12,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import PowerAction
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
-from kdive.providers.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain
