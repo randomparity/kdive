@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 import pytest
@@ -17,9 +18,10 @@ _FINAL = "local/runs/x/vmlinux"
 
 
 class _FakeStore:
-    def __init__(self, *, fail_copy_at: int | None = None) -> None:
+    def __init__(self, *, fail_copy_at: int | None = None, fail_abort: bool = False) -> None:
         self.events: list[tuple[object, ...]] = []
         self._fail_copy_at = fail_copy_at
+        self._fail_abort = fail_abort
 
     def head(self, key: str) -> HeadResult | None:
         sizes = {".part0001": (6, "c0"), ".part0002": (4, "c1")}
@@ -50,6 +52,8 @@ class _FakeStore:
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         self.events.append(("abort", key))
+        if self._fail_abort:
+            raise CategorizedError("abort failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
 
 def _entry() -> ManifestEntry:
@@ -70,6 +74,24 @@ def test_reassemble_aborts_on_copy_failure() -> None:
     with pytest.raises(CategorizedError):
         reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
     assert ("abort", _FINAL) in store.events
+
+
+def test_reassemble_preserves_copy_failure_when_abort_also_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = _FakeStore(fail_copy_at=2, fail_abort=True)
+    with (
+        caplog.at_level(logging.WARNING, logger="kdive.artifacts.reassembly"),
+        pytest.raises(CategorizedError, match="boom"),
+    ):
+        reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
+    assert ("abort", _FINAL) in store.events
+    record = next(
+        record for record in caplog.records if "multipart upload abort failed" in record.message
+    )
+    assert _FINAL in record.message
+    assert "uid" in record.message
+    assert record.exc_info is not None
 
 
 def test_reassemble_fails_before_mpu_on_chunk_mismatch() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -9,6 +10,8 @@ from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.validation import verify_chunks
 from kdive.domain.models import Sensitivity
+
+_log = logging.getLogger(__name__)
 
 
 class ReassemblyStore(Protocol):
@@ -60,5 +63,13 @@ def reassemble_chunked(
             parts.append((part_number, etag))
         store.complete_multipart_upload(final_key, upload_id, parts)
     except BaseException:
-        store.abort_multipart_upload(final_key, upload_id)
+        try:
+            store.abort_multipart_upload(final_key, upload_id)
+        except Exception:  # noqa: BLE001 - cleanup must not replace the primary failure
+            _log.warning(
+                "multipart upload abort failed for %s upload %s",
+                final_key,
+                upload_id,
+                exc_info=True,
+            )
         raise
