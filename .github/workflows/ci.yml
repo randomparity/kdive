@@ -273,7 +273,7 @@ jobs:
 
       - name: Audit runtime dependencies
         run: |
-          uv export --no-emit-project --no-dev --no-default-groups \
+          uv export --no-emit-project --no-dev --no-default-groups --group live \
             --format requirements-txt > runtime-reqs.txt
           uvx pip-audit@2.10.0 --no-deps --strict -r runtime-reqs.txt
 
