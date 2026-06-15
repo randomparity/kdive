@@ -15,6 +15,7 @@ contract). Coverage maps to the #139 acceptance bullets:
 from __future__ import annotations
 
 import asyncio
+import tomllib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -29,6 +30,7 @@ from kdive.domain.cost import Selector, resolve_coeff
 from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
+from kdive.inventory.model import InventoryDoc
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import tuning
 from kdive.security.authz.rbac import PlatformRole, Role
@@ -415,3 +417,49 @@ async def _ledger_rows(url: str) -> list[tuple[object, ...]]:
             "SELECT allocation_id, cost_class, event_type, kcu_delta FROM ledger ORDER BY id"
         )
         return list(await cur.fetchall())
+
+
+# ---- export_cost_classes --------------------------------------------------------------
+
+
+def test_export_cost_classes_requires_platform_operator(migrated_url: str) -> None:
+    # No platform role → denied (the gate), no table read amplification.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await tuning.export_cost_classes(pool, _ctx())
+            assert resp.status == "error"
+            assert resp.error_category == "authorization_denied"
+
+    asyncio.run(_run())
+
+
+def test_export_cost_classes_returns_deterministic_sorted_toml(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await tuning.set_cost_class_coeff(pool, _OPERATOR, cost_class="zeta", coeff="3.0")
+            await tuning.set_cost_class_coeff(pool, _OPERATOR, cost_class="alpha", coeff="0.5")
+            resp = await tuning.export_cost_classes(pool, _OPERATOR)
+            assert resp.status == "ok"
+            toml_text = str(resp.data["toml"])
+        # 'local' is seeded; the export is name-sorted, so alpha < local < zeta.
+        assert toml_text.index("alpha") < toml_text.index("local") < toml_text.index("zeta")
+        # The successful read is audited — exactly one export row, alongside the two set rows.
+        rows = await _platform_audit_rows(migrated_url)
+        export_rows = [r for r in rows if r[2] == "ops.export_cost_classes"]
+        assert len(export_rows) == 1
+
+    asyncio.run(_run())
+
+
+def test_export_round_trips_through_the_model(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await tuning.set_cost_class_coeff(pool, _OPERATOR, cost_class="premium", coeff="2.5")
+            resp = await tuning.export_cost_classes(pool, _OPERATOR)
+            toml_text = str(resp.data["toml"])
+        parsed = tomllib.loads("schema_version = 2\n" + toml_text)
+        doc = InventoryDoc.parse(parsed)
+        by_name = {c.name: c.coeff for c in doc.cost_class}
+        assert by_name["premium"] == Decimal("2.5")
+
+    asyncio.run(_run())
