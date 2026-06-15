@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -406,3 +407,46 @@ def test_duplicate_instance_name_error_preserves_kind_and_field() -> None:
         assert exc.field == "name"
     else:  # pragma: no cover - parse must raise
         pytest.fail("expected InventoryError")
+
+
+def test_cost_class_block_parses() -> None:
+    d = _doc(cost_class=[{"name": "premium", "coeff": 2.5}])
+    doc = InventoryDoc.parse(d)
+    assert doc.cost_class[0].name == "premium"
+    assert doc.cost_class[0].coeff == Decimal("2.5")
+
+
+def test_cost_class_coeff_uses_decimal_string_construction() -> None:
+    # A TOML float 0.1 must land as Decimal("0.1"), not the binary-float expansion.
+    doc = InventoryDoc.parse(_doc(cost_class=[{"name": "c", "coeff": 0.1}]))
+    assert doc.cost_class[0].coeff == Decimal("0.1")
+
+
+def test_cost_class_absent_defaults_empty() -> None:
+    assert InventoryDoc.parse(_doc()).cost_class == []
+
+
+@pytest.mark.parametrize("bad", ["", "   "])
+def test_cost_class_blank_name_rejected(bad: str) -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(_doc(cost_class=[{"name": bad, "coeff": 1.0}]))
+
+
+@pytest.mark.parametrize("bad", [0, -1, "0", "-2"])
+def test_cost_class_non_positive_coeff_rejected(bad: object) -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(_doc(cost_class=[{"name": "c", "coeff": bad}]))
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf"])
+def test_cost_class_non_finite_coeff_rejected(bad: str) -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(_doc(cost_class=[{"name": "c", "coeff": bad}]))
+
+
+def test_duplicate_cost_class_name_rejected() -> None:
+    d = _doc(cost_class=[{"name": "dup", "coeff": 1.0}, {"name": "dup", "coeff": 2.0}])
+    with pytest.raises(InventoryError) as excinfo:
+        InventoryDoc.parse(d)
+    assert excinfo.value.entry == "cost_class"
+    assert excinfo.value.field == "name"
