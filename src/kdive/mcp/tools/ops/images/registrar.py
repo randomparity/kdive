@@ -10,13 +10,12 @@ Each workflow owns its authorization and audit shape:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
-from kdive.domain.errors import CategorizedError
 from kdive.domain.image_format import ImageFormat
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.auth import current_context
@@ -36,9 +35,6 @@ from kdive.mcp.tools.ops.images.retention import extend, prune_expired
 from kdive.mcp.tools.ops.images.upload import ImageUploadRequest, upload
 from kdive.services.images.retention import ImageSweepStore
 from kdive.services.images.upload import UploadObjectStore
-
-if TYPE_CHECKING:
-    from kdive.store.objectstore import ObjectStore
 
 
 class ImageBuildRequest(BaseModel):
@@ -69,22 +65,6 @@ class ImageBuildRequest(BaseModel):
             format=self.format,
             root_device=self.root_device,
         )
-
-
-def _resolve_object_store() -> ObjectStore | None:
-    """Resolve the shared S3 object store from ``KDIVE_S3_*``, or ``None`` if unconfigured."""
-    from kdive.store.objectstore import object_store_from_env
-
-    try:
-        return object_store_from_env()
-    except CategorizedError:
-        return None
-
-
-def register_from_env(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register the ``images.*`` tools, resolving the object store from the environment."""
-    store = _resolve_object_store()
-    register(app, pool, image_store=store, upload_store=store)
 
 
 def register(
@@ -165,5 +145,4 @@ def register(
 __all__ = [
     "ImageBuildRequest",
     "register",
-    "register_from_env",
 ]

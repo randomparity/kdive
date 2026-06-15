@@ -160,6 +160,43 @@ def test_build_app_uses_injected_composition_secret_registry(
     assert captured[0].secret_registry is composition_registry
 
 
+def test_ops_images_registration_uses_standard_register_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("probe")
+    store = object()
+    captured: dict[str, object] = {}
+
+    def _store_from_env() -> object:
+        return store
+
+    def _register(
+        registered_app: FastMCP,
+        registered_pool: AsyncConnectionPool,
+        *,
+        image_store: object | None,
+        upload_store: object | None = None,
+    ) -> None:
+        captured["app"] = registered_app
+        captured["pool"] = registered_pool
+        captured["image_store"] = image_store
+        captured["upload_store"] = upload_store
+
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _store_from_env)
+    monkeypatch.setattr(app_module.ops_images_tools, "register", _register)
+
+    app_module._register_ops_images_tools(app, pool, cast(Any, None))
+
+    assert not hasattr(app_module.ops_images_tools, "register_from_env")
+    assert captured == {
+        "app": app,
+        "pool": pool,
+        "image_store": store,
+        "upload_store": store,
+    }
+
+
 def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the build plane (#18)
     # registers build, the install + boot plane (#19) registers install/boot, and the

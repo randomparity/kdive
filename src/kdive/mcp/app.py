@@ -20,6 +20,8 @@ from opentelemetry import metrics, trace
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
+from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
 from kdive.diagnostics.service import default_service_factory
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import Job, JobKind
@@ -67,6 +69,8 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +185,20 @@ def _register_ops_build_hosts_tools(
 def _register_ops_images_tools(
     app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
-    ops_images_tools.register_from_env(app, pool)
+    store = _resolve_ops_images_store()
+    ops_images_tools.register(app, pool, image_store=store, upload_store=store)
+
+
+def _resolve_ops_images_store() -> Any | None:
+    """Resolve the shared object store for ops image tools, or ``None`` when unconfigured."""
+    from kdive.store.objectstore import object_store_from_env
+
+    try:
+        return object_store_from_env()
+    except CategorizedError:
+        if _S3_OPTIONAL_ENV_NAMES.isdisjoint(config.env_snapshot()):
+            return None
+        raise
 
 
 def _register_ops_secrets_tools(
