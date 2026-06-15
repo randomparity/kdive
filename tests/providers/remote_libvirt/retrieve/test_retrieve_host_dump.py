@@ -413,7 +413,7 @@ def test_host_dump_non_dir_pool_is_configuration_error_before_dump(tmp_path: Pat
     assert pool.xml_desc_calls == 1
 
 
-def test_host_dump_forbidden_pool_xml_is_configuration_error_before_dump(
+def test_host_dump_forbidden_pool_xml_is_infrastructure_failure_before_dump(
     tmp_path: Path,
 ) -> None:
     vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
@@ -424,7 +424,11 @@ def test_host_dump_forbidden_pool_xml_is_configuration_error_before_dump(
     with pytest.raises(CategorizedError) as exc:
         _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
 
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "operation": "preflighting host_dump storage pool",
+        "storage_pool": _POOL,
+    }
     assert not conn.domain.core_dumps
     assert pool.xml_desc_calls == 1
 

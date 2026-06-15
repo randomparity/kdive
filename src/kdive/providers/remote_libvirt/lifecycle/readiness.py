@@ -8,7 +8,7 @@ from typing import Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected
+from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected_strict
 
 type Sleep = Callable[[float], None]
 type Monotonic = Callable[[], float]
@@ -42,7 +42,11 @@ def wait_for_agent(
         try:
             domain = conn.lookupByName(domain_name)
             running = bool(domain.isActive())
-            connected = running and agent_channel_connected(domain.XMLDesc())
+            connected = running and agent_channel_connected_strict(
+                domain.XMLDesc(),
+                operation="polling the guest-agent channel",
+                domain=domain_name,
+            )
         except libvirt.libvirtError as exc:
             raise _infra("polling the guest-agent channel", domain=domain_name) from exc
         if connected:

@@ -8,7 +8,7 @@ from typing import Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.lifecycle.xml import recorded_gdb_port
+from kdive.providers.remote_libvirt.lifecycle.xml import recorded_gdb_port_strict
 
 DOMAIN_PREFIX = "kdive-"
 
@@ -71,7 +71,11 @@ def used_gdb_ports(conn: GdbPortConn) -> dict[str, int]:
             name = domain.name()
             if not name.startswith(DOMAIN_PREFIX):
                 continue
-            port = recorded_gdb_port(domain.XMLDesc())
+            port = recorded_gdb_port_strict(
+                domain.XMLDesc(),
+                operation="enumerating gdbstub ports",
+                domain=name,
+            )
         except libvirt.libvirtError as exc:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
                 continue

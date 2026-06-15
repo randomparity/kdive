@@ -195,7 +195,11 @@ class HostDumpCapturer:
     def _preflight_pool_dir(pool: Any, pool_name: str) -> Path:
         """Return the pool's target directory, or fail on a non-dir/filesystem pool."""
         pool_xml = pool.XMLDesc(0)
-        pool_type, target = pool_type_and_target(pool_xml)
+        pool_type, target = pool_type_and_target_strict(
+            pool_xml,
+            operation="preflighting host_dump storage pool",
+            storage_pool=pool_name,
+        )
         if pool_type not in DIR_POOL_TYPES or target is None:
             raise CategorizedError(
                 "remote storage_pool is not a filesystem/dir pool; host_dump requires one",
@@ -337,6 +341,22 @@ def pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
         root: ET.Element = _safe_fromstring(pool_xml)
     except (ET.ParseError, DefusedXmlException):
         return None, None
+    target = root.findtext("./target/path")
+    return root.get("type"), target
+
+
+def pool_type_and_target_strict(
+    pool_xml: str, *, operation: str, storage_pool: str
+) -> tuple[str | None, str | None]:
+    """Return storage-pool type and target; malformed XML is an infrastructure fault."""
+    try:
+        root: ET.Element = _safe_fromstring(pool_xml)
+    except (ET.ParseError, DefusedXmlException):
+        raise CategorizedError(
+            "malformed remote-libvirt storage-pool XML",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": operation, "storage_pool": storage_pool},
+        ) from None
     target = root.findtext("./target/path")
     return root.get("type"), target
 

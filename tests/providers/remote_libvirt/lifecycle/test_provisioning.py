@@ -354,6 +354,28 @@ def test_used_gdb_ports_maps_xml_failure_to_infrastructure_failure() -> None:
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_used_gdb_ports_maps_malformed_domain_xml_to_infrastructure_failure() -> None:
+    class _MalformedDomain:
+        def name(self) -> str:
+            return "kdive-malformed"
+
+        def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+            return "<domain"
+
+    class _Conn:
+        def listAllDomains(self, flags: int = 0) -> list[_MalformedDomain]:  # noqa: N802
+            return [_MalformedDomain()]
+
+    with pytest.raises(CategorizedError) as excinfo:
+        used_gdb_ports(_Conn())
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details == {
+        "domain": "kdive-malformed",
+        "operation": "enumerating gdbstub ports",
+    }
+
+
 def test_wait_for_agent_returns_when_live_xml_reports_connected() -> None:
     conn = _conn_with_base()
     domain = conn.defineXML(
@@ -483,6 +505,35 @@ def test_wait_for_agent_maps_xml_failure_to_infrastructure_failure() -> None:
         )
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_wait_for_agent_maps_malformed_domain_xml_to_infrastructure_failure() -> None:
+    class _MalformedDomain:
+        def isActive(self) -> int:  # noqa: N802
+            return 1
+
+        def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+            return "<domain"
+
+    class _Conn:
+        def lookupByName(self, name: str) -> _MalformedDomain:  # noqa: N802
+            return _MalformedDomain()
+
+    with pytest.raises(CategorizedError) as excinfo:
+        wait_for_agent(
+            _Conn(),
+            DOMAIN_NAME,
+            monotonic=_ticker(),
+            sleep=lambda _s: None,
+            timeout_s=10.0,
+            poll_s=0.25,
+        )
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details == {
+        "domain": DOMAIN_NAME,
+        "operation": "polling the guest-agent channel",
+    }
 
 
 # --- RemoteLibvirtProvisioning orchestration over fakes ------------------------------
