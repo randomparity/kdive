@@ -182,8 +182,10 @@ async def build_handler(
     The build host is read from the BUILD payload (admitted under capacity at the ``runs.build``
     boundary): a worker-local host runs the resolved runtime builder directly; an ssh host runs a
     transport-bound remote-libvirt builder inside the materialized-identity context manager. The
-    capacity lease is released on a committed path on both success and failure so a failure frees
-    the slot (a worker-local run holds no lease, so the release is a harmless no-op).
+    capacity lease is released only after ``finalize_build`` succeeds. Categorized build failures
+    retain the lease across retries; once the job reaches a terminal state, the reconciler reclaims
+    the orphaned build-host lease. A worker-local run holds no lease, so success-path release is a
+    harmless no-op there.
     """
     payload = load_payload(job, BuildPayload)
     run_id = UUID(payload.run_id)
