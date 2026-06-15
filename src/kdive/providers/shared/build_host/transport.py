@@ -12,6 +12,7 @@ import subprocess  # noqa: S404 - fixed argv only, no shell
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -76,15 +77,42 @@ class LocalBuildTransport:
 
     def read_text(self, path: str) -> str:
         """Read *path* as UTF-8 text."""
-        return Path(path).read_text(encoding="utf-8")
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise _transport_error(
+                "local build transport could not decode UTF-8 text",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                path=path,
+            ) from exc
+        except OSError as exc:
+            raise _transport_error(
+                "local build transport could not read text",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                path=path,
+            ) from exc
 
     def read_bytes(self, path: str) -> bytes:
         """Read *path* as bytes using :meth:`Path.read_bytes`."""
-        return Path(path).read_bytes()
+        try:
+            return Path(path).read_bytes()
+        except OSError as exc:
+            raise _transport_error(
+                "local build transport could not read bytes",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                path=path,
+            ) from exc
 
     def write_bytes(self, path: str, data: bytes) -> None:
         """Write *data* to *path* using :meth:`Path.write_bytes`."""
-        Path(path).write_bytes(data)
+        try:
+            Path(path).write_bytes(data)
+        except OSError as exc:
+            raise _transport_error(
+                "local build transport could not write bytes",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                path=path,
+            ) from exc
 
     def clone(self, remote: str, ref: str, dest: str) -> None:  # noqa: ARG002
         """Reject git clone — local builds use the warm tree, not a fresh clone.
@@ -107,8 +135,21 @@ class LocalBuildTransport:
         Returns:
             The ETag returned by the object store, with surrounding quotes removed.
         """
-        data = Path(path).read_bytes()
-        raw_etag = self._http_put(presigned.url, data, presigned.required_headers)
+        data = self.read_bytes(path)
+        try:
+            raw_etag = self._http_put(presigned.url, data, presigned.required_headers)
+        except Exception as exc:
+            raise CategorizedError(
+                "local build transport could not upload file",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"url": _safe_url(presigned.url)},
+            ) from exc
+        if not raw_etag:
+            raise CategorizedError(
+                "local build transport upload response did not include an ETag",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"url": _safe_url(presigned.url)},
+            )
         return raw_etag.strip('"')
 
     def cleanup(self, path: str) -> None:
@@ -122,3 +163,14 @@ class LocalBuildTransport:
         else:
             with contextlib.suppress(OSError):
                 target.unlink()
+
+
+def _transport_error(message: str, *, category: ErrorCategory, path: str) -> CategorizedError:
+    return CategorizedError(message, category=category, details={"path": path})
+
+
+def _safe_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if not parsed.query:
+        return url
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "<redacted>", parsed.fragment))

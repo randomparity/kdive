@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -106,6 +107,25 @@ def test_read_text_returns_file_content(tmp_path: Path) -> None:
     assert transport.read_text(str(p)) == "CONFIG_CRASH_DUMP=y\n"
 
 
+def test_read_text_invalid_utf8_maps_to_configuration_error(tmp_path: Path) -> None:
+    p = tmp_path / "config.txt"
+    p.write_bytes(b"\xff")
+    transport = LocalBuildTransport()
+    with pytest.raises(CategorizedError) as exc_info:
+        transport.read_text(str(p))
+    assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert exc_info.value.details == {"path": str(p)}
+
+
+def test_read_bytes_missing_file_maps_to_infrastructure_failure(tmp_path: Path) -> None:
+    p = tmp_path / "missing"
+    transport = LocalBuildTransport()
+    with pytest.raises(CategorizedError) as exc_info:
+        transport.read_bytes(str(p))
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc_info.value.details == {"path": str(p)}
+
+
 def test_read_bytes_returns_file_bytes(tmp_path: Path) -> None:
     """read_bytes returns the raw bytes written to disk."""
     p = tmp_path / "bzImage"
@@ -120,6 +140,15 @@ def test_write_bytes_creates_file(tmp_path: Path) -> None:
     transport = LocalBuildTransport()
     transport.write_bytes(str(p), b"hello")
     assert p.read_bytes() == b"hello"
+
+
+def test_write_bytes_failure_maps_to_infrastructure_failure(tmp_path: Path) -> None:
+    target = tmp_path / "missing-parent" / "out.bin"
+    transport = LocalBuildTransport()
+    with pytest.raises(CategorizedError) as exc_info:
+        transport.write_bytes(str(target), b"hello")
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc_info.value.details == {"path": str(target)}
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +181,37 @@ def test_upload_file_calls_http_put_and_strips_etag(tmp_path: Path) -> None:
     assert data == payload
     assert headers == {"x-amz-checksum": "sha256val"}
     assert etag == "abc123"  # quotes stripped
+
+
+def test_upload_file_put_failure_maps_to_infrastructure_failure(tmp_path: Path) -> None:
+    payload = tmp_path / "bzImage"
+    payload.write_bytes(b"kernel-image-bytes")
+
+    def failing_put(url: str, data: bytes, headers: dict[str, str]) -> str:
+        raise urllib.error.URLError("upload refused")
+
+    transport = LocalBuildTransport(http_put=failing_put)
+    with pytest.raises(CategorizedError) as exc_info:
+        transport.upload_file(
+            str(payload),
+            PresignedUpload(url="https://s3.example.com/put?token=secret", required_headers={}),
+        )
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc_info.value.details == {"url": "https://s3.example.com/put?<redacted>"}
+
+
+def test_upload_file_missing_etag_maps_to_infrastructure_failure(tmp_path: Path) -> None:
+    payload = tmp_path / "bzImage"
+    payload.write_bytes(b"kernel-image-bytes")
+    transport = LocalBuildTransport(http_put=lambda _url, _data, _headers: "")
+
+    with pytest.raises(CategorizedError) as exc_info:
+        transport.upload_file(
+            str(payload),
+            PresignedUpload(url="https://s3.example.com/put", required_headers={}),
+        )
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc_info.value.details == {"url": "https://s3.example.com/put"}
 
 
 # ---------------------------------------------------------------------------
