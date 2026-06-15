@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -174,7 +175,17 @@ def remote_connection[C: ClosableConn](
         try:
             yield conn
         finally:
-            conn.close()
+            if sys.exc_info()[0] is None:
+                conn.close()
+            else:
+                _close_best_effort(conn)
+
+
+def _close_best_effort(conn: ClosableConn) -> None:
+    try:
+        conn.close()
+    except libvirt.libvirtError:
+        _log.warning("remote-libvirt connection close failed during cleanup", exc_info=True)
 
 
 @dataclass(frozen=True)

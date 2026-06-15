@@ -204,3 +204,24 @@ def test_remote_connection_closes_conn_when_body_raises(tmp_path: Path) -> None:
         raise RuntimeError("op failed")
     assert conn.closed
     assert list(tmp_path.iterdir()) == []
+
+
+def test_remote_connection_close_failure_does_not_mask_body_error(tmp_path: Path) -> None:
+    class _CloseFails(FakeConn):
+        def close(self) -> None:
+            self.closed = True
+            raise libvirt.libvirtError("close failed")
+
+    conn = _CloseFails()
+    with (
+        pytest.raises(RuntimeError, match="op failed"),
+        remote_connection(
+            _config(),
+            RecordingBackend(),
+            open_connection=lambda _uri: conn,
+            pki_base_dir=tmp_path,
+        ),
+    ):
+        raise RuntimeError("op failed")
+    assert conn.closed
+    assert list(tmp_path.iterdir()) == []

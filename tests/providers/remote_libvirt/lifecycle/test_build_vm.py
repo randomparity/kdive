@@ -11,6 +11,7 @@ import json
 from typing import Any
 from uuid import UUID
 
+import libvirt
 import pytest
 
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
@@ -24,7 +25,7 @@ from kdive.providers.remote_libvirt.lifecycle.build_vm import (
 from kdive.providers.remote_libvirt.lifecycle.xml import recorded_gdb_port
 from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.providers.remote_libvirt.conftest import RecordingBackend
+from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 from tests.providers.remote_libvirt.lifecycle.test_provisioning import (
     _BASE_VOLUME,
     FakePool,
@@ -122,3 +123,23 @@ def test_session_tears_down_even_when_body_raises(tmp_path: Any) -> None:
     # Teardown still ran: domain gone, overlay reclaimed.
     assert DOMAIN_NAME not in conn.domains
     assert OVERLAY in conn.pools["default"].deleted
+
+
+def test_session_teardown_failure_preserves_body_error_and_logs_context(
+    tmp_path: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    conn = _conn_with_base()
+    vm = _build_vm(conn, tmp_path)
+
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(RuntimeError, match="boom"),
+        vm.session(_BASE_VOLUME, run_id=RUN_ID),
+    ):
+        conn.domains[DOMAIN_NAME].destroy_error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+        raise RuntimeError("boom")
+
+    assert any(
+        record.exc_info is not None and "domain teardown failed" in record.message
+        for record in caplog.records
+    )

@@ -266,11 +266,19 @@ class EphemeralBuildVm:
             domain.undefine()
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
-                _log.warning("build VM %s domain teardown failed; reaper reclaims", domain_name)
+                _log.warning(
+                    "build VM %s domain teardown failed; reaper reclaims",
+                    domain_name,
+                    exc_info=True,
+                )
         try:
             delete_volume(conn, config.storage_pool, build_overlay_volume_name(run_id))
         except CategorizedError:
-            _log.warning("build VM %s overlay delete failed; reaper reclaims", domain_name)
+            _log.warning(
+                "build VM %s overlay delete failed; reaper reclaims",
+                domain_name,
+                exc_info=True,
+            )
 
 
 @contextmanager
