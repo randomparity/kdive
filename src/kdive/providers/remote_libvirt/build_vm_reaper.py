@@ -15,23 +15,24 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
-from contextlib import AbstractContextManager
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
 import libvirt
 
 from kdive.providers.infra.reaping import BuildVm
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import remote_config_from_inventory
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BUILD_DOMAIN_PREFIX,
     build_overlay_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import delete_volume
-from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
+from kdive.providers.remote_libvirt.transport import (
+    RemoteLibvirtReaperConnections,
+    open_libvirt_protocol,
+    remote_libvirt_reaper_connections,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 _log = logging.getLogger(__name__)
 
@@ -82,17 +83,13 @@ class RemoteLibvirtBuildVmReaper:
         self,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
-        open_connection: OpenReaperConnection = open_libvirt_reaper,
-        secret_backend_factory: Callable[[], SecretBackend] | None = None,
-        pki_base_dir: Path | None = None,
+        connections: RemoteLibvirtReaperConnections[_ReaperConn] | None = None,
     ) -> None:
-        self._config_factory = config_factory
-        self._open_connection = open_connection
-        self._secret_backend_factory = secret_backend_factory or (
-            lambda: secret_backend_from_env(registry=secret_registry)
+        self._connections = connections or remote_libvirt_reaper_connections(
+            secret_registry=secret_registry,
+            config_factory=remote_config_from_inventory,
+            open_connection=open_libvirt_reaper,
         )
-        self._pki_base_dir = pki_base_dir
 
     @classmethod
     def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtBuildVmReaper:
@@ -108,8 +105,8 @@ class RemoteLibvirtBuildVmReaper:
         await asyncio.to_thread(self._delete_blocking, domain_name)
 
     def _list_blocking(self) -> list[BuildVm]:  # pragma: no cover - live_vm
-        config = self._config_factory()
-        with self._connection(config) as conn:
+        config = self._connections.config()
+        with self._connections.connection(config) as conn:
             vms: list[BuildVm] = []
             for domain in conn.listAllDomains(0):
                 name = domain.name()
@@ -119,9 +116,9 @@ class RemoteLibvirtBuildVmReaper:
             return vms
 
     def _delete_blocking(self, domain_name: str) -> None:  # pragma: no cover - live_vm
-        config = self._config_factory()
+        config = self._connections.config()
         run_id = run_id_from_build_vm_name(domain_name)
-        with self._connection(config) as conn:
+        with self._connections.connection(config) as conn:
             try:
                 domain = conn.lookupByName(domain_name)
             except libvirt.libvirtError:
@@ -144,14 +141,6 @@ class RemoteLibvirtBuildVmReaper:
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
                 _log.warning("build VM %s undefine failed during reap", domain_name)
-
-    def _connection(self, config: RemoteLibvirtConfig) -> AbstractContextManager[_ReaperConn]:
-        return remote_connection(
-            config,
-            self._secret_backend_factory(),
-            open_connection=self._open_connection,
-            pki_base_dir=self._pki_base_dir,
-        )
 
 
 __all__ = ["RemoteLibvirtBuildVmReaper", "run_id_from_build_vm_name"]
