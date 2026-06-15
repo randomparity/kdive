@@ -27,6 +27,7 @@ non-autocommit pool connection so the real transaction framing is exercised.
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -40,12 +41,16 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import ObjectListing
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.loader import load_inventory
+from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile import ReconcileDiff
+from kdive.inventory.reconcile_coefficients import reconcile_coefficients
 from kdive.inventory.reconcile_images import reconcile_images
 from kdive.inventory.reconcile_resources import reconcile_resources
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import PlatformRole
 
 # `migrated_url` is provided as a fixture by tests/integration/conftest.py (re-exported from
 # tests.db.conftest), resolved by pytest at call time — no import (avoids the F811 shadow).
@@ -848,7 +853,12 @@ def _fault_inject_toml(
 
 
 def _remote_libvirt_toml(
-    *, name: str, base_image: str = "base", vcpus: int = 8, memory_mb: int = 16384
+    *,
+    name: str,
+    base_image: str = "base",
+    vcpus: int = 8,
+    memory_mb: int = 16384,
+    cost_class: str = "remote",
 ) -> str:
     return (
         "schema_version = 2\n"
@@ -871,7 +881,7 @@ def _remote_libvirt_toml(
         'client_key_ref = "k.pem"\n'  # pragma: allowlist secret - filename ref
         'ca_cert_ref = "ca.pem"\n'  # pragma: allowlist secret - filename ref
         f'base_image = "{base_image}"\n'
-        'cost_class = "remote"\n'
+        f'cost_class = "{cost_class}"\n'
         f"vcpus = {vcpus}\n"
         f"memory_mb = {memory_mb}\n"
         "concurrent_allocation_cap = 1\n"
@@ -1955,5 +1965,107 @@ def test_build_host_readopt_clears_disabled_cordon(migrated_url: str, tmp_path: 
             row = await _build_host_by_name(check, "bh-revive")
         assert row["enabled"] is True  # re-enabled by the re-declaration
         assert "bh-revive" in {u.name for u in diff.updated}
+
+    asyncio.run(_run())
+
+
+# --- ADR-0115 Finding-1: coefficient pricing across BOTH reconcile orchestrators -----
+#
+# A config host declaring a novel cost_class PLUS its matching [[cost_class]] block must be
+# priced in the SAME reconcile that creates the host — no unpriced-cost_class wall — via BOTH
+# resource-reconciling paths (the background loop AND the on-demand ops.reconcile_systems tool,
+# the one that silently skipped pricing before Task 4). Plus the seed-floor and a drift-under-
+# concurrency case.
+
+
+def _priced_remote_toml(coeff: str) -> str:
+    # A remote host on a novel cost_class plus its matching [[cost_class]] block.
+    return _remote_libvirt_toml(name="h1", cost_class="premium") + (
+        f'[[cost_class]]\nname = "premium"\ncoeff = {coeff}\n'
+    )
+
+
+async def _coeff_row(pool: AsyncConnectionPool, name: str) -> Decimal | None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT coeff FROM cost_class_coefficients WHERE cost_class = %s", (name,)
+        )
+        row = await cur.fetchone()
+    return Decimal(row[0]) if row else None
+
+
+def test_loop_prices_before_creating_the_host(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The REAL background-loop entry point (InventoryReconcilePass.run, via reconcile_once) —
+    # NOT reconcile_all directly — so Task 4's loop wiring is what's under test. After one
+    # loop pass the coefficient row exists and the host is priced: no unpriced-cost_class wall.
+    async def _run() -> None:
+        path = _write_toml(tmp_path, _priced_remote_toml("3.0"))
+        monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            report = await reconcile_once(pool, NullReaper(), config=_config_with_inventory_spec())
+            assert "reconcile_inventory" not in report.failures  # the loop pass succeeded
+            assert await _coeff_row(pool, "premium") == Decimal("3.0")
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "h1")
+        assert row["cost_class"] == "premium"
+
+    asyncio.run(_run())
+
+
+def test_on_demand_reconcile_systems_also_prices(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The path that silently skipped pricing before Task 4 — pin it explicitly.
+    from kdive.config.core_settings import SYSTEMS_TOML
+    from kdive.mcp.tools.ops import reconcile_systems as rs
+
+    async def _run() -> None:
+        path = _write_toml(tmp_path, _priced_remote_toml("4.0"))
+        monkeypatch.setattr(
+            rs.config, "get", lambda key: str(path) if key is SYSTEMS_TOML else None
+        )
+        ctx = RequestContext(
+            principal="admin-1",
+            agent_session="s",
+            projects=(),
+            platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            resp = await rs.reconcile_systems(pool, ctx, image_store=None)
+            assert resp.status == "ok"
+            assert await _coeff_row(pool, "premium") == Decimal("4.0")
+
+    asyncio.run(_run())
+
+
+def test_absent_file_leaves_seed_floor_priced(migrated_url: str) -> None:
+    # Floor: the 0002/0032 seeds survive with no file, so resolve_coeff succeeds for them.
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            assert await _coeff_row(pool, "local") == Decimal("1.0")
+            assert await _coeff_row(pool, "remote") == Decimal("1.0")
+
+    asyncio.run(_run())
+
+
+def test_drift_detected_under_concurrent_ops_override(migrated_url: str) -> None:
+    # A reconcile clobbering a differing prior value (the ops-override case) emits drift.
+    async def _run() -> None:
+        doc = InventoryDoc.parse(
+            {"schema_version": 2, "cost_class": [{"name": "premium", "coeff": 1.0}]}
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with await _connect(migrated_url) as seed:
+                await seed.execute(
+                    "INSERT INTO cost_class_coefficients (cost_class, coeff) "
+                    "VALUES ('premium', 8.0) "
+                    "ON CONFLICT (cost_class) DO UPDATE SET coeff = EXCLUDED.coeff"
+                )
+            async with pool.connection() as conn:
+                diff = await reconcile_coefficients(conn, doc)
+            assert [r.name for r in diff.warned] == ["premium"]
+            assert await _coeff_row(pool, "premium") == Decimal("1.0")
 
     asyncio.run(_run())
