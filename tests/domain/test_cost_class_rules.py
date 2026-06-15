@@ -19,6 +19,17 @@ def test_blank_name_rejected(bad: str) -> None:
         validate_cost_class_name(bad)
 
 
+@pytest.mark.parametrize("good", ["local", "remote", "premium", "tier-1", "tier_2", "tier.3"])
+def test_valid_token_names_accepted(good: str) -> None:
+    assert validate_cost_class_name(good) == good
+
+
+@pytest.mark.parametrize("bad", ['a"b', "a\nb", "a b", "a]b", "a=b", "a#b", "a\\b"])
+def test_toml_significant_name_rejected(bad: str) -> None:
+    with pytest.raises(ValueError, match="letters, digits"):
+        validate_cost_class_name(bad)
+
+
 @pytest.mark.parametrize("value", ["2.5", 2.5, 1, Decimal("0.25")])
 def test_positive_coeff_parsed_to_decimal(value: object) -> None:
     parsed = parse_positive_coeff(value)

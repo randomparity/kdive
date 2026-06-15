@@ -10,16 +10,27 @@ load, ``CONFIGURATION_ERROR`` for the tool).
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal, DecimalException, InvalidOperation
+
+_NAME_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def validate_cost_class_name(name: str) -> str:
-    """Return ``name`` if non-blank; raise ``ValueError`` otherwise (fail closed).
+    """Return ``name`` if it is a non-blank token; raise ``ValueError`` otherwise (fail closed).
 
-    A blank class would seed an unreachable junk row no host can carry.
+    A blank class would seed an unreachable junk row no host can carry. The charset is
+    restricted to ``[A-Za-z0-9._-]`` so a name can never carry a TOML-significant character
+    (``"``, newline, ``[``/``]``/``=``/``#``); ``ops.export_cost_classes`` interpolates the
+    name into a ``[[cost_class]]`` fragment, and an unescaped quote/newline would corrupt or
+    silently mis-parse the exported TOML on the export→commit→reconcile loop.
     """
     if not name.strip():
         raise ValueError(f"cost_class name {name!r} must be non-blank")
+    if not _NAME_PATTERN.fullmatch(name):
+        raise ValueError(
+            f"cost_class name {name!r} must contain only letters, digits, '.', '_', or '-'"
+        )
     return name
 
 

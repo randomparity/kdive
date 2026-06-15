@@ -239,6 +239,18 @@ def test_set_coeff_rejects_blank_cost_class(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_set_cost_class_coeff_rejects_toml_significant_name(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await tuning.set_cost_class_coeff(
+                pool, _OPERATOR, cost_class='evil"\ncoeff = "9', coeff="1.0"
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
 # ---- set_host_capacity ----------------------------------------------------------------
 
 
