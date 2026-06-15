@@ -11,6 +11,7 @@ Audit: one ``platform_audit_log`` row (never containing secret bytes).
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import LiteralString
 
 import psycopg.errors
@@ -97,39 +98,62 @@ _EPHEMERAL_INSERT: LiteralString = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class _InsertPlan:
+    sql: LiteralString
+    values: tuple[object, ...]
+    kind: BuildHostKind
+
+
 def _ssh_plan(
     request: SshBuildHostRegistration,
-) -> tuple[LiteralString, tuple[object, ...]] | ToolResponse:
+) -> _InsertPlan | ToolResponse:
     if not _validate_credential_ref(request.ssh_credential_ref):
         return _config_error(
             request.name, "ssh_credential_ref must be a non-blank reference string"
         )
     if not request.address.strip():
         return _config_error(request.name, "an ssh build host requires an address")
-    return _SSH_INSERT, (
-        request.name,
-        BuildHostKind.SSH.value,
-        request.address,
-        request.ssh_credential_ref,
-        request.workspace_root,
-        request.max_concurrent,
+    return _InsertPlan(
+        sql=_SSH_INSERT,
+        values=(
+            request.name,
+            BuildHostKind.SSH.value,
+            request.address,
+            request.ssh_credential_ref,
+            request.workspace_root,
+            request.max_concurrent,
+        ),
+        kind=BuildHostKind.SSH,
     )
 
 
 def _ephemeral_plan(
     request: EphemeralLibvirtBuildHostRegistration,
-) -> tuple[LiteralString, tuple[object, ...]] | ToolResponse:
+) -> _InsertPlan | ToolResponse:
     if not request.base_image_volume.strip():
         return _config_error(
             request.name, "an ephemeral_libvirt build host requires a base_image_volume"
         )
-    return _EPHEMERAL_INSERT, (
-        request.name,
-        BuildHostKind.EPHEMERAL_LIBVIRT.value,
-        request.base_image_volume,
-        request.workspace_root,
-        request.max_concurrent,
+    return _InsertPlan(
+        sql=_EPHEMERAL_INSERT,
+        values=(
+            request.name,
+            BuildHostKind.EPHEMERAL_LIBVIRT.value,
+            request.base_image_volume,
+            request.workspace_root,
+            request.max_concurrent,
+        ),
+        kind=BuildHostKind.EPHEMERAL_LIBVIRT,
     )
+
+
+def _insert_plan_for(
+    request: SshBuildHostRegistration | EphemeralLibvirtBuildHostRegistration,
+) -> _InsertPlan | ToolResponse:
+    if isinstance(request, SshBuildHostRegistration):
+        return _ssh_plan(request)
+    return _ephemeral_plan(request)
 
 
 async def _register_build_host(
@@ -137,7 +161,6 @@ async def _register_build_host(
     ctx: RequestContext,
     *,
     tool: str,
-    kind: BuildHostKind,
     request: SshBuildHostRegistration | EphemeralLibvirtBuildHostRegistration,
 ) -> ToolResponse:
     """INSERT a new remote build host row. Requires ``platform_admin``.
@@ -154,7 +177,6 @@ async def _register_build_host(
     Args:
         pool: The shared async connection pool.
         ctx: The caller's request context (must hold ``platform_admin``).
-        kind: ``'ssh'`` or ``'ephemeral_libvirt'``.
         request: Validated per-kind request model. SSH requests carry address and credential
             reference; ephemeral-libvirt requests carry the operator-staged base image volume.
 
@@ -177,26 +199,14 @@ async def _register_build_host(
     if request.max_concurrent <= 0:
         return _config_error(request.name, "max_concurrent must be a positive integer")
 
-    if kind is BuildHostKind.SSH:
-        if not isinstance(request, SshBuildHostRegistration):
-            return _config_error(request.name, "ssh registration requires an ssh request")
-        plan = _ssh_plan(request)
-    elif kind is BuildHostKind.EPHEMERAL_LIBVIRT:
-        if not isinstance(request, EphemeralLibvirtBuildHostRegistration):
-            return _config_error(
-                request.name, "ephemeral_libvirt registration requires an ephemeral request"
-            )
-        plan = _ephemeral_plan(request)
-    else:
-        return _config_error(request.name, f"unsupported build host kind {kind.value!r}")
+    plan = _insert_plan_for(request)
     if isinstance(plan, ToolResponse):
         return plan
-    insert_sql, values = plan
 
     try:
         async with pool.connection() as conn, conn.transaction():
             async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(insert_sql, values)
+                await cur.execute(plan.sql, plan.values)
                 row = await cur.fetchone()
             assert row is not None
             host_id = row["id"]
@@ -210,7 +220,7 @@ async def _register_build_host(
                     scope=f"build_host:{host_id}",
                     args={
                         "name": request.name,
-                        "kind": kind.value,
+                        "kind": plan.kind.value,
                         "address": getattr(request, "address", None),
                         "ssh_credential_ref": getattr(request, "ssh_credential_ref", None),
                         "base_image_volume": getattr(request, "base_image_volume", None),
@@ -247,7 +257,6 @@ async def register_ssh_build_host(
         pool,
         ctx,
         tool=REGISTER_SSH_TOOL,
-        kind=BuildHostKind.SSH,
         request=request,
     )
 
@@ -262,7 +271,6 @@ async def register_ephemeral_libvirt_build_host(
         pool,
         ctx,
         tool=REGISTER_EPHEMERAL_LIBVIRT_TOOL,
-        kind=BuildHostKind.EPHEMERAL_LIBVIRT,
         request=request,
     )
 
