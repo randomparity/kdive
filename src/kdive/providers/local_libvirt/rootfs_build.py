@@ -44,12 +44,13 @@ from kdive.prereqs.managed_ssh_key import (
     ensure_managed_keypair,
     managed_public_key_path,
 )
+from kdive.providers.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _DEFAULT_IMAGE_SIZE = "6G"
 _READINESS_MARKER = "kdive-ready"
-_VIRT_BUILDER_TIMEOUT_S = 30 * 60
-_REPACK_TIMEOUT_S = 30 * 60
+_VIRT_BUILDER_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
+_REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _GUESTFISH_TIMEOUT_S = 5 * 60
 
 _READINESS_UNIT = f"""[Unit]
