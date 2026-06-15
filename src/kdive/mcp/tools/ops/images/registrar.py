@@ -10,13 +10,14 @@ Each workflow owns its authorization and audit shape:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
 from kdive.domain.errors import CategorizedError
+from kdive.domain.image_format import ImageFormat
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -53,7 +54,7 @@ class ImageBuildRequest(BaseModel):
     capabilities: tuple[str, ...] = Field(
         default=(), description="The guest-contract tags the image must satisfy."
     )
-    format: Literal["qcow2"] = Field(default="qcow2", description="The image format.")
+    format: ImageFormat = Field(default="qcow2", description="The image format.")
     root_device: str = Field(default="/dev/vda", description="The guest root device path.")
 
     def to_payload(self) -> ImageBuildPayload:
