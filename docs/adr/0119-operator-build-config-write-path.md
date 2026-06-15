@@ -59,11 +59,23 @@ operator override from the seed.
   - `content` is decoded/encoded as UTF-8 and capped at `KDIVE_MAX_BUILD_CONFIG_BYTES`
     (default 256 KiB; kernel-config fragments are a few KiB). Empty or over-cap →
     `CONFIGURATION_ERROR`.
-- **Write:** `put_artifact` to the same reserved key the seed uses
-  (`tenant=system`, `owner_kind=build-configs`, `owner_id=<name>`, `name=<name>.config`,
-  `Sensitivity.REDACTED`, `retention_class=build-config`). The key is deterministic in
-  `name`, so a re-set overwrites in place — no orphaned object. Then upsert the catalog row
-  with `source='operator'`.
+- **Write, serialized per name:** the object PUT + row upsert + audit run inside one
+  transaction holding `advisory_xact_lock(BUILD_CONFIG, name)` (a new string-keyed lock scope,
+  mirroring the existing per-object advisory locks), so two concurrent sets for the same `name`
+  cannot interleave and commit a row sha256 that describes the other writer's bytes. `set`
+  holds this single lock, so the cross-scope total order is unaffected. The PUT targets the
+  same reserved key the seed uses (`tenant=system`, `owner_kind=build-configs`,
+  `owner_id=<name>`, `name=<name>.config`, `Sensitivity.REDACTED`,
+  `retention_class=build-config`); the key is deterministic in `name`, so a re-set overwrites
+  in place — no orphaned object. The row upserts with the just-PUT bytes' sha256 and
+  `source='operator'`; an omitted `description` preserves the prior one
+  (`COALESCE(NULLIF(EXCLUDED.description,''), existing)`) rather than blanking it.
+- **Non-atomicity is fail-closed, not hidden:** an object store is not transactional with
+  Postgres, so a process/DB failure between a successful PUT and the row commit leaves the
+  object holding new bytes and the row holding the old sha256. `buildconfig.get` and the
+  build-path fetch both `verify_bytes`, so they raise `INFRASTRUCTURE_FAILURE` on the mismatch
+  rather than serving mismatched bytes; the remedy is a re-`set`. A `set` error means "state
+  unknown — re-`set` to converge."
 - **Response:** `ToolResponse.success(name, "published", data={name, sha256, bytes, source})`.
   `suggested_next_actions=["buildconfig.get"]`. Content is not echoed (the caller supplied it;
   `buildconfig.get` serves it back).
@@ -76,16 +88,18 @@ Migration `0034` adds to `build_config_catalog`:
 source text NOT NULL DEFAULT 'seed' CHECK (source IN ('seed', 'operator'))
 ```
 
-- `seed_build_configs` upserts a row **only** when it is absent or `source='seed'`. A row
-  with `source='operator'` is left untouched: the seed reads the row's `source` (not just its
-  sha256) and skips it. A fresh install still seeds the packaged default; a later `migrate`
-  still propagates a *packaged* fragment change to seed-owned rows; an operator override is
-  never clobbered.
-- `buildconfig.set` writes `source='operator'`. Once an operator has overridden a fragment,
-  it stays operator-owned until they overwrite it again (also `operator`).
-- The existing `ON CONFLICT (name) DO UPDATE` upsert is split by writer: the seed's upsert
-  carries `source='seed'` but is gated by a pre-read so it never overwrites an operator row;
-  the tool's upsert carries `source='operator'` unconditionally.
+- The no-clobber invariant is **DB-enforced**: the seed's upsert is
+  `ON CONFLICT (name) DO UPDATE SET ... source='seed' ... WHERE build_config_catalog.source =
+  'seed'`, so the database refuses to overwrite an `operator` row even if a live
+  `buildconfig.set` lands between the seed's pre-read and its write (a rolling redeploy runs
+  `migrate` while the prior server still serves `set`). The seed's `source`/sha pre-read is an
+  optimization (skip the object PUT when nothing changed), not the safety boundary.
+- A fresh install still seeds the packaged default; a later `migrate` still propagates a
+  *packaged* fragment change to seed-owned rows; an operator override is never clobbered.
+- `buildconfig.set` writes `source='operator'` via a separate unconditional writer. Once an
+  operator has overridden a fragment, it stays operator-owned until they overwrite it again
+  (also `operator`). The two writers (`upsert_seed_build_config` source-guarded,
+  `upsert_operator_build_config` unconditional) replace the single shared upsert.
 
 The packaged default therefore remains the seed for a fresh install, and an operator
 override is not clobbered by a later `migrate` (AC#3).
@@ -94,7 +108,8 @@ override is not clobbered by a later `migrate` (AC#3).
 
 - One new tool (`buildconfig.set`), one additive migration (`0034`, nullable-safe via the
   `DEFAULT 'seed'` so existing rows backfill to seed-owned), one new env knob
-  (`KDIVE_MAX_BUILD_CONFIG_BYTES`). No change to `buildconfig.get`, the build-path fetch, the
+  (`KDIVE_MAX_BUILD_CONFIG_BYTES`), one new advisory-lock scope (`LockScope.BUILD_CONFIG`,
+  string-keyed by fragment name). No change to `buildconfig.get`, the build-path fetch, the
   reserved-key scheme, or the `ToolResponse`/flat-schema contracts.
 - The seed gains a per-row `source` read before upsert; its sha256 fast-path is unchanged for
   seed-owned rows. The `build_config_catalog` migration + tool file are provider-agnostic core,
@@ -130,3 +145,17 @@ override is not clobbered by a later `migrate` (AC#3).
 - **A separate `build_config_overrides` table layered over the seed table.** Rejected: two
   tables for one logical catalog complicate the read-path (`get`, the build fetch) for no
   gain; one table with a `source` column keeps a single lookup and a single reserved key.
+- **Enforce no-clobber with the seed's Python pre-read alone (no SQL `WHERE source='seed'`).**
+  Rejected: check-then-act has a TOCTOU window — a `buildconfig.set` committing between the
+  pre-read and the seed's upsert would be clobbered, the precise failure the column exists to
+  prevent. The guard belongs in the conflict clause so the database enforces it atomically.
+- **No per-name lock; accept last-writer-wins on concurrent `set`.** Rejected: the object PUT
+  and the row upsert are separate writes, so two concurrent sets can commit a row whose sha256
+  describes one writer's bytes while the object holds the other's, which then trips
+  `verify_bytes` (`INFRASTRUCTURE_FAILURE`) on every read until a re-set. A per-name
+  `advisory_xact_lock` (the established per-object serialization mechanism) removes the window
+  for the cost of one extra lock on a rare admin op.
+- **Make the object PUT and row write atomic.** Not possible: the object store is not
+  transactional with Postgres. The design instead makes the only residual window (a crash
+  between PUT and commit) fail closed via the existing sha256 verify, with re-`set` as the
+  documented convergence path.
