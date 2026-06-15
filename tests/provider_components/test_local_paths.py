@@ -50,5 +50,21 @@ def test_rejects_sha256_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(CategorizedError) as caught:
         validate_local_component_path(str(image), allowed_roots=[root], sha256="sha256:" + "0" * 64)
-
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_digest_read_failure_maps_to_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    image = root / "disk.qcow2"
+    image.write_bytes(b"content")
+
+    def fail_digest(_path: Path) -> str:
+        raise OSError("read race")
+
+    monkeypatch.setattr("kdive.components.local_paths._file_sha256", fail_digest)
+    with pytest.raises(CategorizedError) as exc_info:
+        validate_local_component_path(str(image), allowed_roots=[root], sha256="sha256:" + "0" * 64)
+    assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR

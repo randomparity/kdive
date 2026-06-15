@@ -32,8 +32,13 @@ def validate_local_component_path(
         raise _config_error("local component path is not a regular file")
     if not os.access(resolved, os.R_OK):
         raise _config_error("local component path is not readable")
-    if sha256 is not None and _file_sha256(resolved) != sha256.removeprefix("sha256:"):
-        raise _config_error("local component sha256 does not match")
+    if sha256 is not None:
+        try:
+            actual = _file_sha256(resolved)
+        except OSError as exc:
+            raise _config_error("local component sha256 could not be read") from exc
+        if actual != sha256.removeprefix("sha256:"):
+            raise _config_error("local component sha256 does not match")
     return resolved
 
 
