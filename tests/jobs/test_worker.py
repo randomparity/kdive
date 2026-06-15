@@ -94,9 +94,11 @@ def test_run_once_happy_path(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
             calls: list[Job] = []
+            autocommit_states: list[bool] = []
 
             async def handler(conn: psycopg.AsyncConnection, job: Job) -> str:
                 calls.append(job)
+                autocommit_states.append(conn.autocommit)
                 return "s3://out"
 
             reg = HandlerRegistry()
@@ -110,6 +112,7 @@ def test_run_once_happy_path(migrated_url: str) -> None:
             processed = await worker.run_once()
             assert processed is not None and processed.id == job.id
             assert len(calls) == 1
+            assert autocommit_states == [True]
             final = await _final_state(migrated_url, job.id)
             assert final.state is JobState.SUCCEEDED
             assert final.result_ref == "s3://out"

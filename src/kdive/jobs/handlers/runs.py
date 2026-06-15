@@ -112,13 +112,6 @@ async def _release_build_lease(conn: AsyncConnection, run_id: UUID) -> None:
     a retry (BUILD jobs retry up to ``max_attempts``) cannot over-admit the host; the reconciler
     reclaims it when the job is terminal (see ``_build_and_record``).
 
-    The ``conn.transaction()`` here is NOT an independent commit: the handler's earlier bare
-    ``RUNS.get`` opened a long-lived implicit transaction on this non-autocommit pool connection,
-    so this (and every other ``conn.transaction()`` in the handler) is a SAVEPOINT nested in that
-    parent — RELEASE on exit leaves the parent open and uncommitted. The DELETE becomes durable on
-    the handler's clean exit, when the pool-connection context manager commits the parent. See the
-    rollback hazard documented on :func:`kdive.db.build_hosts.release_lease`.
-
     Errors are logged and swallowed — the reconciler is the backstop. A worker-local run holds no
     lease, so this is an idempotent no-op DELETE.
     """
@@ -190,6 +183,31 @@ async def build_handler(
     the orphaned build-host lease. A worker-local run holds no lease, so success-path release is a
     harmless no-op there.
     """
+    restore_autocommit = False
+    if not conn.autocommit:
+        await conn.set_autocommit(True)
+        restore_autocommit = True
+    try:
+        return await _build_handler_autocommit(
+            conn,
+            job,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            transport_factories=transport_factories,
+        )
+    finally:
+        if restore_autocommit:
+            await conn.set_autocommit(False)
+
+
+async def _build_handler_autocommit(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+    transport_factories: BuildHostTransportFactories | None = None,
+) -> str | None:
     payload = load_payload(job, BuildPayload)
     run_id = UUID(payload.run_id)
     run = await RUNS.get(conn, run_id)
@@ -258,12 +276,6 @@ async def _build_and_record(
         )
     except CategorizedError as exc:
         await _fail_build(conn, job, run, exc.category)
-        # LOAD-BEARING — do not remove. The handler's bare RUNS.get opened an implicit transaction
-        # on this non-autocommit pool connection, so _fail_build's FAILED transition is a SAVEPOINT
-        # nested in that still-open parent; the pool-connection context manager would roll the
-        # parent back on the re-raise below, reverting the FAILED state. This commit makes the
-        # FAILED transition durable. (The lease is intentionally NOT released here — see above.)
-        await conn.commit()
         raise
     return BuildStepResult(
         kernel_ref=output.kernel_ref,
