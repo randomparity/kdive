@@ -26,7 +26,7 @@
 - **Modify** `src/kdive/services/allocation/promotion.py` — persist the cause at the two queued-terminate transitions.
 - **Modify** `src/kdive/mcp/tools/lifecycle/allocations.py` — read the cause in the envelope, add the queue-position helper, surface it in `get`, add the `wait` handler + tool.
 - **Modify** `tests/db/test_migrate.py` — add `"0033"` to the applied-version list.
-- **Create** `tests/mcp/lifecycle/test_allocations_wait.py` — `allocations.wait` + position behavior tests.
+- **Extend** `tests/mcp/lifecycle/test_allocations_tools.py` — `allocations.wait` + queue-position behavior tests reuse its existing harness (`_ctx`, `_pool`, `_register`, `_seed_alloc`) plus two new local helpers (`_seed_requested`, `_force_grant`). No new test file (its `_pool`/`_ctx` are module-local and not importable).
 - **Modify** `tests/domain/test_models.py`, `tests/mcp/core/test_responses.py` (or the existing responses test module), `tests/mcp/lifecycle/test_allocations_tools.py`, `tests/mcp/core/test_tool_docs.py` — unit/behavior coverage and the tool-docs mapping.
 - **Regenerate** `docs/guide/reference/allocations.md` (+ index) via `just docs`.
 
@@ -513,47 +513,101 @@ $(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>')
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/allocations.py` (add `_queue_position`; add a `queue_position` param to `_envelope_for_allocation`; wire `get_allocation`)
-- Test: `tests/mcp/lifecycle/test_allocations_wait.py` (create — shared by Task 7)
+- Test: `tests/mcp/lifecycle/test_allocations_tools.py` (extend — reuse `_ctx`, `_pool`, `_register`, `_seed_alloc`; add a `_seed_requested` helper)
 
-- [ ] **Step 1: Write the failing test**
+This task and Task 7 add tests to the **existing** `test_allocations_tools.py`, not a new file: its `_pool` and `_ctx` are module-local `@asynccontextmanager`/function definitions, so a separate file cannot import them. `_ctx()` defaults to `Role.OPERATOR` on project `"proj"`, which satisfies the `viewer` floor `get_allocation`/`list_allocations` require.
 
-Create `tests/mcp/lifecycle/test_allocations_wait.py`. Use the project's allocation-test setup (copy the resource/budget/quota seeding + `request_allocation` helpers from `tests/mcp/lifecycle/test_allocations_tools.py`; configure `max_pending_allocations > 0` and a host cap of 0/full so `on_capacity="queue"` enqueues). Then:
+- [ ] **Step 1: Write the failing tests**
+
+First add `ResourceKind` to the test file's model import (the existing line is `from kdive.domain.models import Allocation, Budget, Quota`):
 
 ```python
-def test_queue_position_counts_same_target_fifo(migrated_url: str) -> None:
+from kdive.domain.models import Allocation, Budget, Quota, ResourceKind
+```
+
+Add a seed helper beside the existing `_seed_alloc` that creates a queued `requested` row with a caller-chosen `created_at` and target, so FIFO position is deterministic (a `requested` row holds no host — `resource_id` is NULL per the 0016 CHECK):
+
+```python
+async def _seed_requested(
+    pool: AsyncConnectionPool,
+    *,
+    created_at: datetime,
+    kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    resource_id: str | None = None,
+) -> str:
+    # by-id when resource_id is given (requested_resource_id set, requested_kind NULL);
+    # otherwise by-kind (requested_kind set). Mirrors how a real queued row is shaped.
+    async with pool.connection() as conn:
+        alloc = await ALLOCATIONS.insert(
+            conn,
+            Allocation(
+                id=uuid4(),
+                created_at=created_at,
+                updated_at=created_at,
+                principal="user-1",
+                project="proj",
+                resource_id=None,
+                state=AllocationState.REQUESTED,
+                requested_kind=None if resource_id is not None else kind,
+                requested_resource_id=UUID(resource_id) if resource_id is not None else None,
+            ),
+        )
+    return str(alloc.id)
+```
+
+Then the tests:
+
+```python
+def test_queue_position_counts_same_kind_fifo(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            # Enqueue three same-kind requests in order a, b, c (host cap full).
-            a = await _enqueue_requested(pool)  # helper: returns allocation_id, kind K
-            b = await _enqueue_requested(pool)
-            c = await _enqueue_requested(pool)
-            ra = await alloc_tools.get_allocation(pool, OPERATOR_CTX, a)
-            rb = await alloc_tools.get_allocation(pool, OPERATOR_CTX, b)
-            rc = await alloc_tools.get_allocation(pool, OPERATOR_CTX, c)
-        assert ra.data["queue_position"] == 1 and ra.data["queue_ahead"] == 0
-        assert rb.data["queue_position"] == 2 and rb.data["queue_ahead"] == 1
-        assert rc.data["queue_position"] == 3 and rc.data["queue_ahead"] == 2
+            a = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            b = await _seed_requested(pool, created_at=datetime(2026, 1, 2, tzinfo=UTC))
+            c = await _seed_requested(pool, created_at=datetime(2026, 1, 3, tzinfo=UTC))
+            ra = await alloc_tools.get_allocation(pool, _ctx(), a)
+            rb = await alloc_tools.get_allocation(pool, _ctx(), b)
+            rc = await alloc_tools.get_allocation(pool, _ctx(), c)
+        assert (ra.data["queue_position"], ra.data["queue_ahead"]) == (1, 0)
+        assert (rb.data["queue_position"], rb.data["queue_ahead"]) == (2, 1)
+        assert (rc.data["queue_position"], rc.data["queue_ahead"]) == (3, 2)
 
     asyncio.run(_run())
 
 
-def test_queue_position_absent_on_non_requested_and_in_list(migrated_url: str) -> None:
+def test_queue_position_scoped_to_same_target(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            granted = await _enqueue_granted(pool)  # a host with free capacity -> granted
-            rg = await alloc_tools.get_allocation(pool, OPERATOR_CTX, granted)
-            rl = await alloc_tools.list_allocations(pool, OPERATOR_CTX, project=PROJECT, limit=50)
+            res = await _register(pool)  # a real resource id to be the by-id target
+            # Two by-kind rows ahead in time, plus one later by-id row. The by-id row's
+            # position counts only same-requested_resource_id rows, so the by-kind rows
+            # (requested_resource_id NULL) do not shift it.
+            await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            await _seed_requested(pool, created_at=datetime(2026, 1, 2, tzinfo=UTC))
+            by_id = await _seed_requested(
+                pool, created_at=datetime(2026, 1, 3, tzinfo=UTC), resource_id=res
+            )
+            r = await alloc_tools.get_allocation(pool, _ctx(), by_id)
+        assert r.data["queue_position"] == 1
+
+    asyncio.run(_run())
+
+
+def test_queue_position_absent_on_granted_and_in_list(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool)
+            granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
+            rg = await alloc_tools.get_allocation(pool, _ctx(), granted)
+            rl = await alloc_tools.list_allocations(pool, _ctx(), project="proj", limit=50)
         assert "queue_position" not in rg.data
         assert all("queue_position" not in item.data for item in rl.items)
 
     asyncio.run(_run())
 ```
 
-(If a by-id queued request is easy to set up in this harness, add a third test asserting a by-id request counts only same-`requested_resource_id` rows and a cross-kind queued row does not shift the count. If the harness makes by-id setup heavy, cover the by-id branch in a focused `_queue_position` unit test against seeded rows instead.)
-
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_wait.py -q`
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py -q -k queue_position`
 Expected: FAIL — `queue_position` is not in `data`.
 
 - [ ] **Step 3: Add the helper, the envelope param, and wire `get`**
@@ -653,7 +707,7 @@ Wire `get_allocation` to compute the position in the same connection (replace it
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_wait.py -q`
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py -q -k queue_position`
 Expected: PASS.
 
 - [ ] **Step 5: Run guardrails**
@@ -664,7 +718,7 @@ Expected: clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/lifecycle/allocations.py tests/mcp/lifecycle/test_allocations_wait.py
+git add src/kdive/mcp/tools/lifecycle/allocations.py tests/mcp/lifecycle/test_allocations_tools.py
 git commit -m "feat(mcp): surface queue_position hint on a requested allocation (#430)
 
 $(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>')"
@@ -676,20 +730,29 @@ $(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>')
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/allocations.py` (add `wait_allocation` + the `allocations.wait` tool in `register`)
-- Modify: `tests/mcp/lifecycle/test_allocations_wait.py` (wait behavior)
-- Modify: `tests/mcp/core/test_tool_docs.py` (`_BEHAVIOR_TESTS_BY_TOOL` entry)
+- Modify: `tests/mcp/lifecycle/test_allocations_tools.py` (wait behavior; add a `_force_grant` helper)
+- Modify: `tests/mcp/core/test_tool_docs.py` (`_BEHAVIOR_TESTS_BY_TOOL` entry → `mcp/lifecycle/test_allocations_tools.py`)
 - Regenerate: `docs/guide/reference/allocations.md` (+ index) via `just docs`
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/mcp/lifecycle/test_allocations_wait.py` (mirror `test_jobs_tools.py`'s seam — inject `sleep` and flip the row mid-wait):
+Add to `tests/mcp/lifecycle/test_allocations_tools.py`, reusing `_ctx`/`_pool`/`_register`/`_seed_alloc`/`_seed_requested` (from Task 6). Add one more helper that flips a queued row to granted out of band (a `granted` row needs a non-NULL `resource_id` per the 0016 CHECK), mirroring `test_jobs_tools.py`'s inject-`sleep`-and-mutate seam:
 
 ```python
+async def _force_grant(pool: AsyncConnectionPool, alloc_id: str, resource_id: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE allocations SET state = 'granted', resource_id = %s WHERE id = %s",
+            (UUID(resource_id), UUID(alloc_id)),
+        )
+
+
 def test_wait_returns_immediately_when_already_settled(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            granted = await _enqueue_granted(pool)
-            resp = await alloc_tools.wait_allocation(pool, OPERATOR_CTX, granted, timeout_s=5.0)
+            res = await _register(pool)
+            granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), granted, timeout_s=5.0)
         assert resp.status == "granted"
 
     asyncio.run(_run())
@@ -698,17 +761,18 @@ def test_wait_returns_immediately_when_already_settled(migrated_url: str) -> Non
 def test_wait_returns_on_requested_to_granted_transition(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            queued = await _enqueue_requested(pool)
-            promoted = {"done": False}
+            res = await _register(pool)
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            flipped = {"done": False}
 
-            async def _sleep(delay: float) -> None:
-                if not promoted["done"]:
-                    await _force_grant(pool, queued)  # flip requested -> granted out of band
-                    promoted["done"] = True
+            async def _sleep(_delay: float) -> None:
+                if not flipped["done"]:
+                    await _force_grant(pool, queued, res)
+                    flipped["done"] = True
                 await asyncio.sleep(0)
 
             resp = await alloc_tools.wait_allocation(
-                pool, OPERATOR_CTX, queued, timeout_s=5.0, sleep=_sleep
+                pool, _ctx(), queued, timeout_s=5.0, sleep=_sleep
             )
         assert resp.status == "granted"
 
@@ -718,8 +782,8 @@ def test_wait_returns_on_requested_to_granted_transition(migrated_url: str) -> N
 def test_wait_returns_current_envelope_at_deadline_while_requested(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            queued = await _enqueue_requested(pool)
-            resp = await alloc_tools.wait_allocation(pool, OPERATOR_CTX, queued, timeout_s=0.0)
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), queued, timeout_s=0.0)
         assert resp.status == "requested"
         assert resp.data["queue_position"] == 1
 
@@ -729,9 +793,8 @@ def test_wait_returns_current_envelope_at_deadline_while_requested(migrated_url:
 def test_wait_not_found_for_absent_and_malformed(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            from uuid import uuid4
-            absent = await alloc_tools.wait_allocation(pool, OPERATOR_CTX, str(uuid4()), timeout_s=0.0)
-            bad = await alloc_tools.wait_allocation(pool, OPERATOR_CTX, "not-a-uuid", timeout_s=0.0)
+            absent = await alloc_tools.wait_allocation(pool, _ctx(), str(uuid4()), timeout_s=0.0)
+            bad = await alloc_tools.wait_allocation(pool, _ctx(), "not-a-uuid", timeout_s=0.0)
         assert absent.error_category == "not_found"
         assert bad.error_category == "configuration_error"
 
@@ -740,7 +803,7 @@ def test_wait_not_found_for_absent_and_malformed(migrated_url: str) -> None:
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_wait.py -q -k wait`
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py -q -k wait`
 Expected: FAIL — `wait_allocation` does not exist.
 
 - [ ] **Step 3: Add the handler and register the tool**
@@ -827,7 +890,7 @@ Register the tool inside `register` (alongside the other `@app.tool`s):
 In `tests/mcp/core/test_tool_docs.py`, add an entry to `_BEHAVIOR_TESTS_BY_TOOL` (keep the dict's ordering/format consistent with its neighbours):
 
 ```python
-    "allocations.wait": ["mcp/lifecycle/test_allocations_wait.py"],
+    "allocations.wait": ["mcp/lifecycle/test_allocations_tools.py"],
 ```
 
 - [ ] **Step 5: Regenerate the tool reference**
@@ -838,7 +901,7 @@ Expected: `docs/guide/reference/allocations.md` (and the index) now include `all
 
 - [ ] **Step 6: Run the tests + tool-docs guards**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_wait.py tests/mcp/core/test_tool_docs.py -q`
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_allocations_tools.py tests/mcp/core/test_tool_docs.py -q`
 Expected: PASS (including `test_active_tools_have_a_covering_test`).
 
 - [ ] **Step 7: Run guardrails**
@@ -849,7 +912,7 @@ Expected: clean.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/lifecycle/allocations.py tests/mcp/lifecycle/test_allocations_wait.py tests/mcp/core/test_tool_docs.py docs/guide/reference/
+git add src/kdive/mcp/tools/lifecycle/allocations.py tests/mcp/lifecycle/test_allocations_tools.py tests/mcp/core/test_tool_docs.py docs/guide/reference/
 git commit -m "feat(mcp): add allocations.wait long-poll tool (#430)
 
 $(printf 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>')"
