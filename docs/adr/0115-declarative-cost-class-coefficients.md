@@ -30,10 +30,11 @@ the declarative half.
 
 ### 1. A `[[cost_class]]` table in `systems.toml`, reconciled into `cost_class_coefficients`
 
-`InventoryDoc` gains `cost_class: list[CostClassEntry]` (`name: str`, `coeff: Decimal`). Validation
-reuses the rules `ops.set_cost_class_coeff` already enforces — non-blank name, finite `coeff > 0`,
-parsed via `Decimal(str(value))` — so the declarative and imperative surfaces cannot diverge.
-A duplicate name in the file is an `InventoryError`.
+`InventoryDoc` gains `cost_class: list[CostClassEntry]` (`name: str`, `coeff: Decimal`). The model
+validator **calls the same `ops` functions** (`tuning._validate_cost_class` /
+`tuning._parse_positive_coeff`) — non-blank name, finite `coeff > 0`, parsed via
+`Decimal(str(value))` — rather than re-implementing them, so the declarative and imperative
+surfaces share code and cannot diverge. A duplicate name in the file is an `InventoryError`.
 
 ### 2. File-authoritative for declared classes; `ops` owns the rest
 
@@ -47,22 +48,48 @@ irreducible floor for the absent/empty-file case.
 ### 3. Upsert-only — never prune
 
 Reconcile never deletes a coefficient. A class removed from the file simply stops being
-re-asserted (last value persists); deliberate removal is an explicit `ops` act. This keeps the
-pass trivial and makes it impossible for reconcile to strand a host or misprice in-flight work by
-deleting a coefficient still in use.
+re-asserted; its last value persists. This keeps the pass trivial and makes it impossible for
+reconcile to strand a host or misprice in-flight work by deleting a coefficient still in use.
+
+There is **no removal path today**: neither reconcile (this rule) nor the `ops` surface
+(`ops.set_cost_class_coeff` only upserts; there is no unset) can delete a coefficient row, so
+removing a `[[cost_class]]` block from the file is intentionally a no-op, not an effective delete.
+This is a deliberate trade for safety; a coefficient-unset capability is out of scope (a possible
+follow-up). An orphaned, unreferenced coefficient is harmless — nothing prices against a
+`cost_class` no host carries.
 
 ### 4. Ordered before the resource pass
 
 The coefficient pass runs in the reconciler loop's inventory pass (`reconciler/inventory.py::run`),
-**before** `reconcile_resources`, so a config host's class is priced in the same reconcile run that
-creates the host. The unpriced-cost_class admission wall therefore cannot occur for any
-config-declared host.
+**before** `reconcile_resources`, so when the file declares both a host and a matching
+`[[cost_class]]` block, the class is priced in the same reconcile run that creates the host — no
+unpriced-cost_class wall.
+
+**Scope of the guarantee.** The wall is closed for a config host **whose `cost_class` is priced** —
+a matching `[[cost_class]]` block, or a seeded class (`local`/`remote`). It is *not* an unconditional
+property of "any config-declared host": a `[[remote_libvirt]]`/`[[fault_inject]]` block may name a
+`cost_class` for which no `[[cost_class]]` block (and no seed) exists, and that host hits the same
+denial. Two cases this does not cover:
+
+- **Host class with no matching coefficient block.** A config host declaring `cost_class = "premium"`
+  with no `[[cost_class]] premium` block (and no seed) is unpriced and hits the wall. A *load-time*
+  cross-check ("every host `cost_class` is priced") is not free: the inventory loader is pure and
+  cannot see the DB seed floor (`local`/`remote` are not in the file), so it cannot distinguish
+  "unpriced" from "priced by a seed". A *reconcile-time* warning is feasible (the pass has DB
+  access and runs after the coefficient upsert, so it can see seeds), but is left as a possible
+  follow-up, not solved here.
+- **`resources.register_*` hosts.** The runtime registration path carries an operator-supplied
+  `cost_class` and seeds **no** coefficient, so a novel class there hits the same denial. Price the
+  class first — a reconciled `[[cost_class]]` block, or `ops.set_cost_class_coeff` before
+  registering. A register-time preflight is out of scope here (a possible follow-up).
 
 ### 5. Drift is loud
 
 When reconcile overwrites a coefficient whose DB value differs from the file (i.e. it is clobbering
-a runtime override), it records a `ReconcileDiff` `warned` entry and an audit line. The only
-surprising behavior in the model is never silent.
+a runtime override), it records a `ReconcileDiff` `warned` entry and an audit line — the one
+behavior that *changes* a value is never silent. Note the complementary case (§3): removing a
+`[[cost_class]]` block does **not** change anything (upsert-only), so that no-op is silent by
+design and must not be mistaken for an effective delete.
 
 ### 6. `ops.export_cost_classes` closes the loop
 
@@ -71,14 +98,25 @@ TOML fragment so a break-glass override can be captured back into the file (over
 commit → reconcile re-asserts). It returns text and does not write files; full-file regeneration
 is #429.
 
+**Which overrides this can capture.** The loop is reliable only for an **ops-owned** class — one
+not yet in the file — whose override persists (reconcile never touches it), so a later export
+returns it. It does **not** reliably capture an override on an **already-declared** class: per §2
+that override is transient, and the continuous reconciler can re-assert the file value (seconds
+later) before the operator runs the export, so the export would return the file value, not the
+override. For a class already in the file the durable change is to **edit the file directly**, not
+override-then-capture.
+
 ## Consequences
 
 - The costing baseline becomes a reviewable, reproducible artifact in the inventory file.
-- The unpriced-cost_class admission wall closes for every config-declared host.
-- `ops.set_cost_class_coeff` keeps its role for ad-hoc/undeclared classes and break-glass; its
-  transient effect on a *declared* class is explicit and flagged, and capturable via
-  `ops.export_cost_classes`.
-- A runtime override on a declared class is durable only once captured into the file — the
-  deliberate cost of keeping the file authoritative.
+- The unpriced-cost_class admission wall closes for a config host **whose `cost_class` is priced**
+  (a matching `[[cost_class]]` block or a seed) — not unconditionally for any config-declared host;
+  see §4 for the two uncovered cases.
+- `ops.set_cost_class_coeff` keeps its role for ad-hoc/**undeclared** classes (durable, and
+  capturable into the file via `ops.export_cost_classes`) and for break-glass. On a **declared**
+  class its effect is transient and flagged (§5); it is **not** reliably capturable (§6), so the
+  durable way to change a declared price is to edit the file.
+- The file is authoritative for declared classes by design: a runtime override on one is not a
+  durable change. That is the deliberate cost of a reproducible file.
 - Budgets/quotas, the `W_CPU`/`W_MEM` weights, coefficient pruning, and whole-file regeneration
   are explicitly excluded; the last is tracked as #429.
