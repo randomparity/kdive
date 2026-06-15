@@ -154,6 +154,24 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # max_concurrent = 2
 
 # ---------------------------------------------------------------------------------------------
+# COST CLASSES — reconciled into cost_class_coefficients (ADR-0115).
+#
+# Each [[cost_class]] declares the pricing coefficient for a cost_class label a host carries
+# (the [[remote_libvirt]]/[[fault_inject]] `cost_class` field). The file is authoritative:
+# a declared coefficient is re-asserted on every reconcile, so an `ops.set_cost_class_coeff`
+# override on a declared class is transient — edit this file to change a declared price.
+#
+# A host whose cost_class has no matching block here (and is not a seeded `local`/`remote`)
+# is admitted into the catalog but DENIED every allocation (configuration_error). Declare the
+# block to price it. `coeff` may be a number (2.5) or a quoted decimal string ("2.5"); the
+# latter is what `ops.export_cost_classes` emits for an exact round-trip.
+# ---------------------------------------------------------------------------------------------
+
+[[cost_class]]
+name = "remote"
+coeff = "1.0"
+
+# ---------------------------------------------------------------------------------------------
 # COVERAGE-CAMPAIGN KNOBS — read ONLY by scripts/coverage_campaign/systems.py, ignored by the
 # app's inventory loader. These are the per-deployment facts the campaign needs that are not part
 # of the declarative inventory: workstation paths, the remote host's network/SSH/ACL facts, and
