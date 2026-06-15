@@ -19,7 +19,7 @@ role gets an ``authorization_denied`` envelope (the denial is audited iff the ca
 
 from __future__ import annotations
 
-from decimal import Decimal, DecimalException, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
@@ -28,6 +28,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.domain.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.log import bind_context
@@ -132,37 +133,27 @@ async def set_host_capacity(
 
 
 def _validate_cost_class(cost_class: str) -> None:
-    """Reject a blank cost class (fail closed); an empty key would seed unreachable junk."""
-    if not cost_class.strip():
+    """Reject a blank cost class (fail closed); delegates to the shared rule (ADR-0115 §1)."""
+    try:
+        validate_cost_class_name(cost_class)
+    except ValueError as exc:
         raise CategorizedError(
-            "cost_class must be a non-blank string",
+            str(exc),
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"field": "cost_class", "value": cost_class},
-        )
+        ) from None
 
 
 def _parse_positive_coeff(value: object) -> Decimal:
-    """Parse ``value`` into a finite, positive coefficient (fail closed).
-
-    A coefficient is a price multiplier; ``0`` or negative would price work as free or as a
-    budget credit, so both are rejected as ``configuration_error`` (the same fail-closed
-    discipline ``domain/cost.py`` applies to the row).
-    """
+    """Parse ``value`` into a finite, positive coefficient (the shared rule; ADR-0115 §1)."""
     try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, DecimalException, ValueError, TypeError):
+        return parse_positive_coeff(value)
+    except ValueError as exc:
         raise CategorizedError(
-            f"coeff {value!r} is not a number",
+            str(exc),
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"field": "coeff", "value": str(value)},
         ) from None
-    if not parsed.is_finite() or parsed <= 0:
-        raise CategorizedError(
-            f"coeff {value!r} must be a finite number > 0",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"field": "coeff", "value": str(value)},
-        )
-    return parsed
 
 
 def _parse_cap(value: int) -> int:
