@@ -45,9 +45,7 @@ def whoami(ctx: RequestContext) -> ToolResponse:
                 data={"project": project, "role": role.value if role is not None else ""},
             )
         )
-    platform_roles: list[JsonValue] = []
-    for value in sorted(role.value for role in ctx.platform_roles):
-        platform_roles.append(value)
+    platform_roles: list[JsonValue] = list(sorted(role.value for role in ctx.platform_roles))
     return ToolResponse.collection(
         _OBJECT_ID,
         "ok",
