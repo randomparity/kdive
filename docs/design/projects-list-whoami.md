@@ -28,7 +28,13 @@ See ADR-0117 for the full record. In brief: add a thin, read-only `projects.list
     "role": <role value or "">}`. A **role-less** membership yields `role: ""` — the
     honest "you are a member but hold no role" signal that #426 deferred here.
   - top-level `data = {"principal": ctx.principal, "platform_roles": [<sorted role
-    values>]}`. `count` is added by `ToolResponse.collection`.
+    values>]}`. **Both keys are always present**: `principal` is the non-empty token
+    subject, and `platform_roles` is always a JSON list — `[]` (present, not omitted
+    or null) for a project-only token — so a client can read it unconditionally.
+    `count` is added by `ToolResponse.collection`. (A list value in `data` is allowed
+    — see `fixtures.list`, `data={"fixtures": [...]}` — and passes the envelope's
+    `validate_json_value` JSON-safety check; the advertised schema stays the flat
+    `{"type":"object"}` of ADR-0113.)
   - `suggested_next_actions = ["accounting.report_granted_set"]` so discovery chains
     into usage, as the structured envelope encourages.
 - **Determinism / robustness:** items are sorted by project name, and projects are
@@ -50,11 +56,16 @@ registrar still takes the pool (the `register(app, pool)` seam) and ignores it.
 - A **role-less** membership (`projects: ["x"]`, no `roles["x"]`) returns one item
   `{"project": "x", "role": ""}` — the membership is surfaced, not dropped.
 - A platform-only token (no projects, has platform roles) returns zero items
-  (`count == "0"`) with `data.platform_roles` populated.
+  (`count == "0"`), `data.platform_roles` populated, and `data.principal` present.
+- A project-only token (no platform roles) returns `data.platform_roles == []` (the
+  key is present as an empty list, not omitted or null) and `data.principal` present.
 - Items are ordered by project name; a duplicated project in the token yields exactly
   one item.
-- No DB connection is opened (the tool is a pure context projection); a missing/invalid
-  token is rejected by the auth layer (the tool requires `current_context()`).
+- No DB connection is opened (the tool is a pure context projection). Token presence
+  is the **shared transport-level contract** every tool inherits via `current_context()`
+  (the verifier already gated the transport); the handler test drives the unit with an
+  injected `RequestContext`, like every other tool test, and does not re-test the
+  transport rejection path.
 - The tool is fully documented (description + the generated `docs/guide/reference/projects.md`
   entry) and mapped to a behavior test in `test_tool_docs._BEHAVIOR_TESTS_BY_TOOL`.
 
