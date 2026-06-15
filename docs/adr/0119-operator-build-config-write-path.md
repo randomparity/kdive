@@ -88,12 +88,20 @@ Migration `0034` adds to `build_config_catalog`:
 source text NOT NULL DEFAULT 'seed' CHECK (source IN ('seed', 'operator'))
 ```
 
-- The no-clobber invariant is **DB-enforced**: the seed's upsert is
-  `ON CONFLICT (name) DO UPDATE SET ... source='seed' ... WHERE build_config_catalog.source =
-  'seed'`, so the database refuses to overwrite an `operator` row even if a live
-  `buildconfig.set` lands between the seed's pre-read and its write (a rolling redeploy runs
-  `migrate` while the prior server still serves `set`). The seed's `source`/sha pre-read is an
-  optimization (skip the object PUT when nothing changed), not the safety boundary.
+- The no-clobber invariant rests on **two cooperating guards**, because the deterministic
+  reserved key means an object PUT, not only the row write, can clobber an override:
+  1. **Shared per-name lock.** The seed runs each fragment under the *same*
+     `advisory_xact_lock(BUILD_CONFIG, name)` the tool takes, so a concurrent `buildconfig.set`
+     cannot interleave with the seed's read → PUT → upsert. This makes the seed's `source` read
+     authoritative, so the seed never PUTs packaged bytes over an operator override at the
+     shared key. (`migrate`'s seed connection is autocommit, and the lock needs an open
+     transaction, so the seed opens an explicit per-fragment `conn.transaction()`.)
+  2. **DB `WHERE source='seed'` clause** on the seed's `ON CONFLICT DO UPDATE` — defence in
+     depth on the row even if the lock discipline regresses; the database refuses to overwrite
+     an `operator` row outright.
+
+  Together they hold the invariant at both the row and the object layer in the rolling-redeploy
+  window (`migrate` running while the prior server still serves `set`).
 - A fresh install still seeds the packaged default; a later `migrate` still propagates a
   *packaged* fragment change to seed-owned rows; an operator override is never clobbered.
 - `buildconfig.set` writes `source='operator'` via a separate unconditional writer. Once an

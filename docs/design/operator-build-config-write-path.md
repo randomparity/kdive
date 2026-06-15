@@ -102,14 +102,24 @@ change), so the migration is safe to apply over a populated table.
 ### Seed becomes source-aware
 
 `seed_build_configs` today republishes whenever the stored sha256 differs from the packaged
-bytes. New rule:
+bytes. The new rule runs **per fragment under the same `advisory_xact_lock(BUILD_CONFIG,
+name)` the tool takes**, so a concurrent `buildconfig.set` cannot interleave with the seed's
+read → PUT → upsert on a name. `migrate`'s seed connection is autocommit
+(`_run_async_db_step`), and `advisory_xact_lock` raises unless a transaction is open, so the
+seed opens an explicit `conn.transaction()` per fragment to hold the lock across the PUT and
+upsert. Inside the lock:
 
 - Read the row's `(sha256, source)` for `name`. If the row exists, `source='seed'`, and its
   sha256 == packaged sha256 → skip (return 0; the unchanged fast-path, no object write).
-- If the row exists and `source='operator'` → skip (return 0); the operator owns it.
+- If the row exists and `source='operator'` → skip (return 0); the operator owns it. Because
+  the read is under the shared lock, no concurrent `set` can flip the row to `operator`
+  *after* this check, so the seed never PUTs over operator-owned object bytes.
 - Otherwise publish the packaged bytes and run the **source-guarded** seed upsert.
 
-The no-clobber invariant is **DB-enforced, not check-then-act**: the seed's upsert is
+The no-clobber invariant rests on **two cooperating guards**: the shared per-name lock makes
+the seed's `source` read authoritative (so its object PUT never clobbers an operator override
+at the deterministic key), and the DB `WHERE source='seed'` clause is defence in depth on the
+row even if the lock discipline regresses. The seed's upsert is
 
 ```sql
 INSERT INTO build_config_catalog (name, object_key, sha256, description, source)
@@ -121,13 +131,14 @@ WHERE build_config_catalog.source = 'seed';
 ```
 
 The `WHERE build_config_catalog.source = 'seed'` on the conflict path means the database
-itself refuses to overwrite an `operator` row, closing the TOCTOU window where a live
-`buildconfig.set` lands between the seed's pre-read and its upsert (e.g. a rolling redeploy
-running `migrate` while the prior server still serves `set`). The pre-read is an optimization
-(skip the object PUT when nothing changed), not the safety boundary.
+itself refuses to overwrite an `operator` row. Combined with the shared per-name lock (which
+also makes the seed's *object* PUT safe, not just its row write), this closes the TOCTOU
+window where a live `buildconfig.set` lands during a `migrate` (e.g. a rolling redeploy
+running `migrate` while the prior server still serves `set`).
 
 So a fresh install seeds the default, a shipped packaged-fragment change still flows to
-seed-owned rows on the next `migrate`, and an operator override is never clobbered.
+seed-owned rows on the next `migrate`, and an operator override is never clobbered — at the
+row *and* the object layer.
 
 ### Repository changes (`catalog.py`)
 
@@ -158,6 +169,7 @@ seed-owned rows on the next `migrate`, and an operator override is never clobber
 | Two concurrent `set` for the same name | Serialized by `advisory_xact_lock(BUILD_CONFIG, name)`; the second blocks until the first commits, so the committed sha256 always matches the bytes at the key |
 | Re-set identical bytes | Idempotent: same object key overwritten, sha256 unchanged, `source` stays `operator` |
 | `set` an operator override, then `migrate` | Seed reads `source='operator'`, skips; override survives |
+| `set` and `migrate`'s seed race the same name | Both take `advisory_xact_lock(BUILD_CONFIG, name)`; serialized, so the seed never PUTs over operator object bytes and the row guard never matters in practice |
 | Packaged `kdump.config` changes, row is seed-owned, then `migrate` | Seed re-publishes; row refreshed |
 
 ## Test plan (behavior, not implementation)
@@ -191,6 +203,9 @@ Adversarial (`tests/adversarial/`):
   so the no-clobber boundary is proven at the SQL, not at the application read.
 - Two concurrent `set` calls for the same name converge to a row whose sha256 matches the
   object bytes at the key (the per-name advisory lock holds).
+- A seed and a `set` interleaved on the same name leave the row sha256 and the object bytes in
+  agreement (the seed and tool serialize on the shared `BUILD_CONFIG` lock; the seed never
+  PUTs over an operator override).
 
 Wiring/guard tests:
 
