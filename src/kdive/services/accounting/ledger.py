@@ -140,6 +140,24 @@ def _zero_total() -> RollupRow:
     return RollupRow(project="*", principal=None, reserved=zero, reconciled=zero, variance=zero)
 
 
+def empty_row(project: str) -> RollupRow:
+    """Return a quantized all-zero :class:`RollupRow` for ``project`` (ungrouped, #426).
+
+    ``report()`` emits no row for a project with no ledger rows, so a caller naming an
+    authorized-but-unspent project (the granted-set report) synthesizes its row here.
+    Quantization stays in the domain (``quantize_kcu``), so the zero row serializes
+    ``"0.0000"`` byte-identically to a real zero row rather than ``"0"``.
+
+    Args:
+        project: The project name to label the zero row with.
+
+    Returns:
+        A :class:`RollupRow` with ``principal=None`` and all sums quantized zero.
+    """
+    zero = quantize_kcu(Decimal(0))
+    return RollupRow(project=project, principal=None, reserved=zero, reconciled=zero, variance=zero)
+
+
 def _total_of(rows: tuple[RollupRow, ...]) -> RollupRow:
     reserved = sum((r.reserved for r in rows), Decimal(0))
     reconciled = sum((r.reconciled for r in rows), Decimal(0))

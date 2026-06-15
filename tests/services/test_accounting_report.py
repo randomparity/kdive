@@ -226,3 +226,18 @@ def test_report_project_with_no_ledger_rows_contributes_no_row(migrated_url: str
         assert report.total.reserved == Decimal("5.0000")
 
     asyncio.run(_run())
+
+
+def test_empty_row_is_a_quantized_zero_row_for_the_named_project() -> None:
+    # The tool layer synthesizes a zero RollupRow for a granted project with no ledger
+    # rows (#426). Quantization stays in the domain so the row serializes "0.0000"
+    # byte-identically to a real zero row, not "0".
+    row = accounting.empty_row("proj-a")
+    assert row.project == "proj-a"
+    assert row.principal is None
+    assert row.reserved == Decimal("0.0000")
+    assert row.reconciled == Decimal("0.0000")
+    assert row.variance == Decimal("0.0000")
+    assert str(row.reserved) == "0.0000"
+    assert str(row.reconciled) == "0.0000"
+    assert str(row.variance) == "0.0000"

@@ -280,9 +280,11 @@ def test_granted_set_default_resolves_member_projects_with_role(migrated_url: st
     asyncio.run(_run())
 
 
-def test_granted_set_audits_two_projects_even_when_only_one_has_spend(migrated_url: str) -> None:
-    # The audit trigger counts the authorized set (A+B), not the returned rows: only A has
-    # ledger rows but the 2-project read is still audited.
+def test_granted_set_names_both_projects_when_only_one_has_spend(migrated_url: str) -> None:
+    # The granted set names every authorized project (#426): A has ledger rows and B does
+    # not, but BOTH appear (B zero-filled). The audit trigger still counts the authorized
+    # set (A+B), and the audit scope is derived from sorted(targets), not from the rows —
+    # so it stays "granted-set:proj-a,proj-b" even though only A has spend.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
@@ -297,8 +299,105 @@ def test_granted_set_audits_two_projects_even_when_only_one_has_spend(migrated_u
             )
             resp = await report_granted_set(pool, ctx)
         assert resp.status == "ok"
-        assert {r["project"] for r in _rows(resp)} == {"proj-a"}
-        assert await _count_platform_audit(migrated_url) == 1
+        by_project = {r["project"]: r for r in _rows(resp)}
+        assert set(by_project) == {"proj-a", "proj-b"}
+        assert by_project["proj-a"]["reserved"] == "5.0000"
+        # B is zero-filled, byte-identical to a real zero row.
+        assert by_project["proj-b"]["reserved"] == "0.0000"
+        assert by_project["proj-b"]["reconciled"] == "0.0000"
+        assert by_project["proj-b"]["variance"] == "0.0000"
+        assert by_project["proj-b"]["principal"] == ""
+        rows = await _platform_audit_rows(migrated_url)
+        assert len(rows) == 1
+        assert rows[0][3] == "granted-set:proj-a,proj-b"
+
+    asyncio.run(_run())
+
+
+def test_granted_set_zero_spend_project_is_named(migrated_url: str) -> None:
+    # The observed #426 bug: a single granted project with no ledger rows was never named
+    # (empty items, only total_project="*"). It must now appear as one zero-filled item.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _budget(conn, "proj-a")
+            ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
+            resp = await report_granted_set(pool, ctx)
+        assert resp.status == "ok"
+        assert data_str(resp, "project_count") == "1"
+        rows = _rows(resp)
+        assert len(rows) == 1
+        assert rows[0]["project"] == "proj-a"
+        assert rows[0]["reserved"] == "0.0000"
+        assert rows[0]["reconciled"] == "0.0000"
+        assert rows[0]["variance"] == "0.0000"
+
+    asyncio.run(_run())
+
+
+def test_granted_set_zero_fill_is_deterministically_ordered(migrated_url: str) -> None:
+    # Three granted projects, none with spend: all are zero-filled and the items come back
+    # sorted by project name (stable across runs).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            ctx = _ctx(
+                roles={"proj-c": Role.VIEWER, "proj-a": Role.VIEWER, "proj-b": Role.VIEWER},
+                projects=("proj-c", "proj-a", "proj-b"),
+            )
+            resp = await report_granted_set(pool, ctx)
+        assert resp.status == "ok"
+        assert [r["project"] for r in _rows(resp)] == ["proj-a", "proj-b", "proj-c"]
+
+    asyncio.run(_run())
+
+
+def test_granted_set_group_by_principal_names_zero_spend_project(migrated_url: str) -> None:
+    # group_by=principal over {proj-a (alice spend), proj-b (none)}: proj-a breaks down per
+    # principal, proj-b appears once with an empty principal (its item id is the bare name).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                res = await _resource(conn)
+                await _budget(conn, "proj-a")
+                await _budget(conn, "proj-b")
+                a = await _alloc(conn, res, "proj-a", "alice")
+                await _ledger(conn, "proj-a", a, "reserved", "7")
+            ctx = _ctx(
+                roles={"proj-a": Role.VIEWER, "proj-b": Role.VIEWER},
+                projects=("proj-a", "proj-b"),
+            )
+            resp = await report_granted_set(pool, ctx, group_by="principal")
+        assert resp.status == "ok"
+        rows = _rows(resp)
+        proj_b = [r for r in rows if r["project"] == "proj-b"]
+        assert len(proj_b) == 1
+        assert proj_b[0]["principal"] == ""
+        assert proj_b[0]["reserved"] == "0.0000"
+        by_principal = {r["principal"]: r for r in rows if r["project"] == "proj-a"}
+        assert by_principal["alice"]["reserved"] == "7.0000"
+
+    asyncio.run(_run())
+
+
+def test_granted_set_window_excludes_spend_names_zero(migrated_url: str) -> None:
+    # A granted project with ledger rows only OUTSIDE the requested window is named with
+    # zeros inside it (zero-fill keys off "no rows in the window", not "never any spend").
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                res = await _resource(conn)
+                await _budget(conn, "proj-a")
+                a = await _alloc(conn, res, "proj-a", "alice")
+                outside = datetime(2026, 3, 1, tzinfo=UTC)
+                await _ledger(conn, "proj-a", a, "reserved", "100", outside)
+            ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
+            window = ["2026-01-01T00:00:00+00:00", "2026-02-01T00:00:00+00:00"]
+            resp = await report_granted_set(pool, ctx, window=window)
+        assert resp.status == "ok"
+        rows = _rows(resp)
+        assert len(rows) == 1
+        assert rows[0]["project"] == "proj-a"
+        assert rows[0]["reserved"] == "0.0000"
 
     asyncio.run(_run())
 
