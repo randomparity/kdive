@@ -164,37 +164,110 @@ async def _upsert_config_resource(
         cur, kind=kind, name=name, host_uri=host_uri, adopt_by_host=adopt_by_host
     )
     if row is None:
-        await cur.execute(
-            "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, "
-            " host_uri, managed_by) "
-            "VALUES (%s, %s, %s, 'default', %s, 'available', %s, %s)",
-            (kind.value, name, Jsonb(caps), cost_class, host_uri, CONFIG_MANAGED_BY),
+        await _insert_config_resource(
+            cur,
+            diff,
+            kind=kind,
+            name=name,
+            host_uri=host_uri,
+            cost_class=cost_class,
+            caps=caps,
         )
-        diff.created.append(_record(kind, name))
         return
     merged = {**_caps(row), **caps}
-    # Adopting a runtime row: a config identity owns this (kind, name), so the row becomes
-    # config-managed, sheds its runtime lease, and takes the config-declared affinity. The
-    # model declares no per-instance scope, so config affinity is global — clearing
-    # owner_project / affinity_allowlist widens a previously project-scoped runtime resource.
-    changed = (
-        row["name"] != name
-        or row["host_uri"] != host_uri
-        or row["cost_class"] != cost_class
-        or str(row["managed_by"]) != CONFIG_MANAGED_BY
+    if _needs_config_adoption(row):
+        await _adopt_config_resource(
+            cur,
+            diff,
+            row=row,
+            kind=kind,
+            name=name,
+            host_uri=host_uri,
+            cost_class=cost_class,
+            caps=merged,
+        )
+        return
+    await _update_config_resource(
+        cur,
+        diff,
+        row=row,
+        kind=kind,
+        name=name,
+        host_uri=host_uri,
+        cost_class=cost_class,
+        caps=merged,
+    )
+
+
+async def _insert_config_resource(
+    cur: Any,
+    diff: ReconcileDiff,
+    *,
+    kind: ResourceKind,
+    name: str,
+    host_uri: str,
+    cost_class: str,
+    caps: dict[str, Any],
+) -> None:
+    await cur.execute(
+        "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, "
+        " host_uri, managed_by) "
+        "VALUES (%s, %s, %s, 'default', %s, 'available', %s, %s)",
+        (kind.value, name, Jsonb(caps), cost_class, host_uri, CONFIG_MANAGED_BY),
+    )
+    diff.created.append(_record(kind, name))
+
+
+async def _adopt_config_resource(
+    cur: Any,
+    diff: ReconcileDiff,
+    *,
+    row: dict[str, Any],
+    kind: ResourceKind,
+    name: str,
+    host_uri: str,
+    cost_class: str,
+    caps: dict[str, Any],
+) -> None:
+    """Convert a non-config or scoped resource row into the declared config identity."""
+    await cur.execute(
+        "UPDATE resources SET name = %s, host_uri = %s, cost_class = %s, capabilities = %s, "
+        "managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
+        "affinity_allowlist = '{}' WHERE id = %s",
+        (name, host_uri, cost_class, Jsonb(caps), CONFIG_MANAGED_BY, row["id"]),
+    )
+    diff.updated.append(_record(kind, name))
+
+
+async def _update_config_resource(
+    cur: Any,
+    diff: ReconcileDiff,
+    *,
+    row: dict[str, Any],
+    kind: ResourceKind,
+    name: str,
+    host_uri: str,
+    cost_class: str,
+    caps: dict[str, Any],
+) -> None:
+    """Apply ordinary config field changes to an already config-managed row."""
+    if row["host_uri"] == host_uri and row["cost_class"] == cost_class and _caps(row) == caps:
+        return
+    await cur.execute(
+        "UPDATE resources SET host_uri = %s, cost_class = %s, capabilities = %s WHERE id = %s",
+        (host_uri, cost_class, Jsonb(caps), row["id"]),
+    )
+    diff.updated.append(_record(kind, name))
+
+
+def _needs_config_adoption(row: dict[str, Any]) -> bool:
+    return (
+        str(row["managed_by"]) != CONFIG_MANAGED_BY
+        or row["name"] is None
         or row["lease_expires_at"] is not None
         or row["owner_project"] is not None
         or list(row["affinity_allowlist"]) != []
-        or _caps(row) != merged
     )
-    if changed:
-        await cur.execute(
-            "UPDATE resources SET name = %s, host_uri = %s, cost_class = %s, capabilities = %s, "
-            "managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
-            "affinity_allowlist = '{}' WHERE id = %s",
-            (name, host_uri, cost_class, Jsonb(merged), CONFIG_MANAGED_BY, row["id"]),
-        )
-        diff.updated.append(_record(kind, name))
 
 
 async def _find_existing(
