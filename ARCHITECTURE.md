@@ -47,7 +47,7 @@ machine; the design doc's "Domain model" section gives the per-object lifecycles
 ## The provider-runtime seam
 
 Providers plug in behind `ProviderRuntime` typed ports (ADR-0063). Production
-assembly happens in `providers/composition.py`, which builds a `ProviderResolver`
+assembly happens in `providers/assembly/composition.py`, which builds a `ProviderResolver`
 over the registered runtimes:
 
 - **local-libvirt** is the default production provider.
