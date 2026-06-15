@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -69,6 +69,9 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+if TYPE_CHECKING:
+    from kdive.store.objectstore import ObjectStore
 
 _S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
@@ -189,7 +192,7 @@ def _register_ops_images_tools(
     ops_images_tools.register(app, pool, image_store=store, upload_store=store)
 
 
-def _resolve_ops_images_store() -> Any | None:
+def _resolve_ops_images_store() -> ObjectStore | None:
     """Resolve the shared object store for ops image tools, or ``None`` when unconfigured."""
     from kdive.store.objectstore import object_store_from_env
 
