@@ -28,6 +28,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.affinity import resource_visible_to_projects
 
 _log = logging.getLogger(__name__)
@@ -67,13 +68,14 @@ async def list_resources_tool(
         except ValueError:
             return resource_config_error("resources.list")
     with bind_context(principal=ctx.principal):
+        viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
             rows = await _fetch_resource_rows(conn, resource_kind)
         responses: list[ToolResponse] = []
         for row in rows:
             try:
                 resource = Resource.model_validate(row)
-                if not resource_visible_to_projects(resource, ctx.projects):
+                if not resource_visible_to_projects(resource, viewer_projects):
                     continue
                 responses.append(
                     resource_envelope(
@@ -104,9 +106,10 @@ async def describe_resource(
     except ValueError:
         return resource_config_error(resource_id)
     with bind_context(principal=ctx.principal):
+        viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
             resource = await RESOURCES.get(conn, uid)
-        if resource is None or not resource_visible_to_projects(resource, ctx.projects):
+        if resource is None or not resource_visible_to_projects(resource, viewer_projects):
             return resource_config_error(resource_id)
         envelope = resource_envelope(resource, next_actions=["allocations.request"])
         envelope.data["pool"] = resource.pool

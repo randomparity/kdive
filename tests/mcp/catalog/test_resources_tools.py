@@ -23,12 +23,18 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
-from kdive.security.authz.rbac import PlatformRole
+from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
 from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
+VIEWER_CTX = RequestContext(
+    principal="viewer-1",
+    agent_session="s",
+    projects=("proj",),
+    roles={"proj": Role.VIEWER},
+)
 
 
 @asynccontextmanager
@@ -101,6 +107,26 @@ def test_list_hides_resources_outside_project_affinity(migrated_url: str) -> Non
 
     visible, item_ids = asyncio.run(_run())
     assert item_ids == [visible]
+
+
+def test_list_hides_scoped_resources_without_viewer_role(migrated_url: str) -> None:
+    async def _run() -> tuple[str, list[str], list[str]]:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await _set_affinity(pool, res_id, owner_project="proj")
+            member_resp = await catalog_resources_tools.list_resources_tool(pool, CTX, kind=None)
+            viewer_resp = await catalog_resources_tools.list_resources_tool(
+                pool, VIEWER_CTX, kind=None
+            )
+        return (
+            res_id,
+            [item.object_id for item in member_resp.items],
+            [item.object_id for item in viewer_resp.items],
+        )
+
+    res_id, member_ids, viewer_ids = asyncio.run(_run())
+    assert member_ids == []
+    assert viewer_ids == [res_id]
 
 
 def test_list_kind_filter_miss_is_configuration_error(migrated_url: str) -> None:

@@ -49,6 +49,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation import pcie_claim
 from kdive.services.allocation.admission import OCCUPYING_VALUES
 from kdive.services.allocation.affinity import resource_visible_to_projects
@@ -276,7 +277,7 @@ async def availability_tool(
 ) -> ToolResponse:
     """Report fleet availability: per-host headroom / free PCIe / fitting shapes + queue depth.
 
-    Viewer (any authenticated context) sees only resources visible to at least one of the
+    Viewer (any authenticated context) sees global resources plus resources visible to one of the
     caller's projects. ``pcie`` narrows to hosts with a free matching device; ``shape``
     restricts the fitting computation to one named shape. A malformed ``pcie`` spec or an
     unknown ``shape`` is a ``configuration_error``. The view is a point-in-time hint, not a
@@ -298,7 +299,7 @@ async def availability_tool(
                 shapes = await _resolve_shapes(conn, shape)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(_TOOL, exc, suggested_next_actions=[_TOOL])
-            resources = await _fetch_resources(conn, ctx.projects)
+            resources = await _fetch_resources(conn, tuple(projects_with_role(ctx, Role.VIEWER)))
             occupancy = await _occupancy_by_resource(conn)
             claims = await _claims_by_resource(conn)
             queue = await _queue_depth(conn)
