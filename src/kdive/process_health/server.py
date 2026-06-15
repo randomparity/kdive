@@ -2,7 +2,7 @@
 
 Binds the generic, dependency-set-agnostic :mod:`kdive.health` primitives to the
 server's concrete backends: a Postgres ``SELECT 1`` over the shared pool and an OIDC
-discovery/JWKS reachability ``HEAD``. Kept out of :mod:`kdive.health` so that package
+discovery/JWKS reachability ``GET``. Kept out of :mod:`kdive.health` so that package
 stays free of server-stack imports (the worker/reconciler reuse it with their own
 probes in issue #267).
 """
@@ -18,7 +18,7 @@ import kdive.config as config
 from kdive.config.core_settings import OIDC_JWKS_URI
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-#: Reachability-probe timeout (seconds) for the OIDC JWKS HEAD; bounded so a hung IdP
+#: Reachability-probe timeout (seconds) for the OIDC JWKS GET; bounded so a hung IdP
 #: reads as down within the per-check timeout rather than stalling the probe.
 _OIDC_PROBE_TIMEOUT = 1.5
 
