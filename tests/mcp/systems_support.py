@@ -23,10 +23,10 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.provider_components.validation import ComponentSourceCapabilities
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role
 from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn

@@ -32,7 +32,7 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     # The script is stdlib-only (CI runs it without a synced env), so the coverage table
     # is a pinned constant; this test imports the real builders and fails on any drift, so
     # the committed report can never silently diverge from what composition advertises.
-    from kdive.providers.composition import build_local_runtime, build_remote_runtime
+    from kdive.providers.assembly.composition import build_local_runtime, build_remote_runtime
     from kdive.security.secrets.secret_registry import SecretRegistry
 
     registry = SecretRegistry()

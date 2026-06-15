@@ -23,14 +23,14 @@ from kdive.domain.models import ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import ResourceStatus
-from kdive.providers.libvirt_xml import (
+from kdive.providers.core.libvirt_xml import (
     KDIVE_METADATA_NS,
     parse_capabilities_arch,
     parse_metadata_system_id,
 )
+from kdive.providers.core.runtime_paths import system_id_from_domain_name
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports import OwnedInfra
-from kdive.providers.runtime_paths import system_id_from_domain_name
 
 _log = logging.getLogger(__name__)
 

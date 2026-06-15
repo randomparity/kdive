@@ -32,7 +32,7 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     create_system_upload as _create_system_upload,
 )
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:

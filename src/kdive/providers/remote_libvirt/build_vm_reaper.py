@@ -22,7 +22,7 @@ from uuid import UUID
 
 import libvirt
 
-from kdive.providers.reaping import BuildVm
+from kdive.providers.infra.reaping import BuildVm
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BUILD_DOMAIN_PREFIX,

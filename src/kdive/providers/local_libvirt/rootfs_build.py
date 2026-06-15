@@ -44,7 +44,7 @@ from kdive.prereqs.managed_ssh_key import (
     ensure_managed_keypair,
     managed_public_key_path,
 )
-from kdive.providers.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+from kdive.providers.core.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 _DEFAULT_WORKSPACE = "/var/lib/kdive/build/images"
 _DEFAULT_IMAGE_SIZE = "6G"

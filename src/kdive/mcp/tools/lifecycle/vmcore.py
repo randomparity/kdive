@@ -46,8 +46,8 @@ from kdive.mcp.tools._common import (
 )
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run, with_runtime_for_system
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import CrashPostmortem
-from kdive.providers.resolver import ProviderResolver
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

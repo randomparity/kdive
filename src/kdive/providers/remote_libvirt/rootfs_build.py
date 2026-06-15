@@ -41,7 +41,7 @@ from kdive.images.planes._build_common import (
     validate_image_name,
 )
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
-from kdive.providers.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+from kdive.providers.core.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 
 # The remote provisioning base image's catalog name is no longer a code literal (ADR-0112): it is
 # a `staged` `[[image]]` entry in `systems.toml`, reconciled into `image_catalog`. The provider

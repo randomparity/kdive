@@ -59,8 +59,8 @@ from kdive.mcp.tools.lifecycle import allocations as alloc_tools
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
+from kdive.providers.infra.reaping import NullReaper
 from kdive.providers.local_libvirt.lifecycle.provisioning import domain_name_for
-from kdive.providers.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.accounting import ledger as accounting

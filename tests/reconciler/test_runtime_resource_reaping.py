@@ -21,7 +21,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.loop import reconcile_once
 from kdive.reconciler.runtime_resources import reap_expired_runtime_resources

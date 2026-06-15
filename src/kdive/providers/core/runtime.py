@@ -2,7 +2,7 @@
 
 The dataclass in this module is the high-level MCP and worker provider seam. It imports only
 provider port protocols and domain value types; concrete provider assembly stays in
-``kdive.providers.composition``.
+``kdive.providers.assembly.composition``.
 """
 
 from __future__ import annotations

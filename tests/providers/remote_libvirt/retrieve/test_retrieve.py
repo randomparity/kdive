@@ -21,6 +21,7 @@ from kdive.provider_components.artifacts import (
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.providers.core.runtime_paths import domain_name_for
 from kdive.providers.ports import CrashResult
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, qemu_agent_command
@@ -30,7 +31,6 @@ from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_READINESS_POLL_S,
     KdumpCapturer,
 )
-from kdive.providers.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain

@@ -62,10 +62,10 @@ from kdive.mcp.tools.ops.build_hosts import registrar as ops_build_hosts_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
+from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.build_host.dispatch import BuildHostTransportFactories
-from kdive.providers.composition import ProviderComposition
-from kdive.providers.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 

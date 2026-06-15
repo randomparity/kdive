@@ -17,11 +17,13 @@ from kdive.provider_components.references import (
     ComponentSourceKind,
 )
 from kdive.provider_components.validation import ComponentSourceCapabilities
-from kdive.providers.debug_common.gdbmi import GdbMiEngine
-from kdive.providers.discovery_registration import (
+from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
 )
+from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
+from kdive.providers.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.infra.reaping import InfraReaper
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import (
@@ -37,8 +39,6 @@ from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePoli
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
-from kdive.providers.reaping import InfraReaper
-from kdive.providers.runtime import DebugCapabilities, ProviderRuntime
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

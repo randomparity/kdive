@@ -37,7 +37,7 @@ from kdive.provider_components.uploads import (
     ChunkEntry,
     ManifestEntry,
 )
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.store.objectstore import (

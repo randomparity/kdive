@@ -7,8 +7,8 @@ from datetime import timedelta
 
 from psycopg import AsyncConnection
 
-from kdive.providers.console_hosting import CollectorRegistry
-from kdive.providers.reaping import DumpVolumeReaper
+from kdive.providers.infra.console_hosting import CollectorRegistry
+from kdive.providers.infra.reaping import DumpVolumeReaper
 from kdive.reconciler.allocations import has_active_capture_job
 from kdive.reconciler.systems import gone_system_state_values
 

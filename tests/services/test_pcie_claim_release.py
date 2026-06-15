@@ -28,7 +28,7 @@ from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.security import audit
 from kdive.services.allocation import pcie_claim

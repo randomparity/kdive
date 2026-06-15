@@ -43,7 +43,7 @@ from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile_images import reconcile_images
 from kdive.inventory.reconcile_resources import reconcile_resources
 from kdive.provider_components.artifacts import ObjectListing
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 

@@ -32,8 +32,8 @@ from kdive.mcp.tools.lifecycle.systems.view import (
     list_systems as _list_systems,
 )
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:

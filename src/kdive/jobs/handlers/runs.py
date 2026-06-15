@@ -26,10 +26,10 @@ from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.build_host.dispatch import BuildHostTransportFactories, run_build_on_host
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.core.runtime_paths import console_log_path, read_console_log
 from kdive.providers.ports import Booter, InstallRequest
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
-from kdive.providers.runtime_paths import console_log_path, read_console_log
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
 from kdive.security.authz.context import RequestContext

@@ -11,7 +11,7 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.runs.steps import install_method_for as _install_method_for

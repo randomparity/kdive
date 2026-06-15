@@ -14,8 +14,8 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.diagnostics.egress_probe import DEFAULT_PROBE_HEARTBEAT_STALE_AFTER
 from kdive.domain.models import JobKind
 from kdive.domain.state import JobState, SystemState
-from kdive.providers.reaping import InfraReaper
-from kdive.providers.runtime_paths import system_id_from_domain_name
+from kdive.providers.core.runtime_paths import system_id_from_domain_name
+from kdive.providers.infra.reaping import InfraReaper
 
 _log = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ async def repair_leaked_domains(conn: AsyncConnection, reaper: InfraReaper) -> i
 class ProbeReaper(Protocol):
     """The narrow provider port the reconciler consumes to destroy a leaked probe guest.
 
-    Structurally a subset of :class:`kdive.providers.reaping.InfraReaper` (``destroy(name)``),
+    Structurally a subset of :class:`kdive.providers.infra.reaping.InfraReaper` (``destroy(name)``),
     so the reconciler reuses its existing reaper for both the leaked-domain and the
     leaked-probe sweep — a probe guest is destroyed by domain name like any other domain.
     """

@@ -24,8 +24,8 @@ from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 
 
 def register(

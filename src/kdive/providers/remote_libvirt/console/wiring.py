@@ -26,10 +26,10 @@ from kdive.provider_components.artifacts import (
     artifact_key,
     owner_prefix,
 )
+from kdive.providers.core.runtime_paths import domain_name_for
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.console.collector import ConsoleStream
 from kdive.providers.remote_libvirt.transport import remote_connection
-from kdive.providers.runtime_paths import domain_name_for
 from kdive.security.secrets.secrets import SecretBackend
 
 _log = logging.getLogger(__name__)

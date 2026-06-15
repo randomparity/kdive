@@ -14,7 +14,8 @@ from uuid import UUID
 
 import libvirt
 
-from kdive.providers.reaping import BuildVmReaper
+from kdive.providers.core.runtime_paths import domain_name_for
+from kdive.providers.infra.reaping import BuildVmReaper
 from kdive.providers.remote_libvirt.build_vm_reaper import (
     OpenReaperConnection,
     RemoteLibvirtBuildVmReaper,
@@ -26,7 +27,6 @@ from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     build_domain_name,
     build_overlay_volume_name,
 )
-from kdive.providers.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import libvirt_error
 

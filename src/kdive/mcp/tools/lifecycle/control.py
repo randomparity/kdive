@@ -44,7 +44,7 @@ from kdive.mcp.tools._common import (
 )
 from kdive.mcp.tools._common import job_envelope
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed

@@ -17,7 +17,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.build_hosts import reclaim_orphan_build_host_leases
 from kdive.reconciler.loop import reconcile_once
@@ -253,7 +253,7 @@ def test_reclaim_spec_registered_in_loop() -> None:
 
 from datetime import timedelta  # noqa: E402
 
-from kdive.providers.reaping import BuildVm  # noqa: E402
+from kdive.providers.infra.reaping import BuildVm  # noqa: E402
 from kdive.reconciler.build_hosts import reap_orphan_build_vms  # noqa: E402
 
 

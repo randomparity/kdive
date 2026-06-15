@@ -24,7 +24,7 @@ from kdive.domain.state import AllocationState, ResourceStatus, SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.payloads import Authorizing, SystemPayload
-from kdive.providers.composition import build_provider_resolver
+from kdive.providers.assembly.composition import build_provider_resolver
 from tests.integration._seed import provisioning_profile
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

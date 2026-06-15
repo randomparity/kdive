@@ -22,7 +22,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES, SYSTEMS
 from kdive.domain.models import Allocation, Budget, Resource, ResourceKind, System
 from kdive.domain.state import AllocationState, ResourceStatus, SystemState
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import allocations as allocation_repairs
 from kdive.reconciler import loop
 from kdive.reconciler.gc import gc_idempotency_keys

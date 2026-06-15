@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.runtime_paths import console_log_path
+from kdive.providers.core.runtime_paths import console_log_path
 
 _log = logging.getLogger(__name__)
 

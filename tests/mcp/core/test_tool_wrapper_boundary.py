@@ -33,7 +33,7 @@ from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resources_tools
 from kdive.provider_components.artifacts import PresignedUpload, PresignPutRequest
-from kdive.providers import composition
+from kdive.providers.assembly import composition
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.context import RequestContext

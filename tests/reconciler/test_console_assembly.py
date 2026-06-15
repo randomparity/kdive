@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers import console_hosting
+from kdive.providers.infra import console_hosting
 from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 

@@ -24,7 +24,7 @@ from hypothesis import strategies as st
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.libvirt_xml import parse_capabilities_arch, parse_metadata_system_id
+from kdive.providers.core.libvirt_xml import parse_capabilities_arch, parse_metadata_system_id
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall, ReadinessResult
 from kdive.providers.local_libvirt.lifecycle.provisioning import render_domain_xml
 from kdive.providers.ports import InstallRequest

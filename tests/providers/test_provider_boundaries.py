@@ -9,7 +9,7 @@ from pathlib import Path
 def test_only_composition_imports_local_libvirt_provider_details() -> None:
     src_root = Path("src/kdive")
     allowed = {
-        Path("src/kdive/providers/composition.py"),
+        Path("src/kdive/providers/assembly/composition.py"),
         Path("src/kdive/providers/local_libvirt"),
     }
     offenders: list[str] = []

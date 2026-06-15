@@ -34,6 +34,7 @@ from kdive.provider_components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.providers.core.runtime_paths import console_log_path, domain_name_for
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     MaterializableRootfsRef,
     RootfsMaterializationContext,
@@ -47,7 +48,6 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.runtime_paths import console_log_path, domain_name_for
 
 __all__ = [
     "LocalLibvirtProvisioning",

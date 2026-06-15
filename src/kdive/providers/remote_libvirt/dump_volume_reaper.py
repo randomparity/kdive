@@ -25,7 +25,7 @@ from uuid import UUID
 import libvirt
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
-from kdive.providers.reaping import DumpVolume
+from kdive.providers.infra.reaping import DumpVolume
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.security.secrets.secret_registry import SecretRegistry

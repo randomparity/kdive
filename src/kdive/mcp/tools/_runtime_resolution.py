@@ -11,8 +11,8 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid, config_error
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 
 type _RuntimeResolver = Callable[[AsyncConnection, UUID], Awaitable[ProviderRuntime]]
 type RuntimeHandler = Callable[[ProviderRuntime], Awaitable[ToolResponse]]

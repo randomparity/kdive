@@ -34,14 +34,14 @@ from kdive.config.core_settings import (
 from kdive.db.pool import create_pool
 from kdive.domain.errors import CategorizedError
 from kdive.images.rootfs_command import add_build_fs_parser, run_build_fs
-from kdive.providers.console_hosting import start_console_hosting
+from kdive.providers.infra.console_hosting import start_console_hosting
 from kdive.version import full_version
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
     from kdive.health.probe import HealthProbe
     from kdive.observability.facade import Telemetry
-    from kdive.providers.resolver import ProviderResolver
+    from kdive.providers.core.resolver import ProviderResolver
     from kdive.security.secrets.secret_registry import SecretRegistry
     from kdive.store.objectstore import ObjectStore
 
@@ -407,7 +407,7 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
     from kdive.health.heartbeat import Heartbeat
     from kdive.process_health.server import build_postgres_ping
     from kdive.process_health.worker import build_worker_probe
-    from kdive.providers.composition import ProviderComposition
+    from kdive.providers.assembly.composition import ProviderComposition
     from kdive.reconciler.loop import ReconcileConfig, Reconciler
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
     from kdive.store.objectstore import object_store_from_env

@@ -21,7 +21,7 @@ from kdive.domain.discovery import ResourceRecord
 from kdive.domain.models import ResourceKind
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import ResourceStatus
-from kdive.providers.libvirt_xml import parse_capabilities_arch
+from kdive.providers.core.libvirt_xml import parse_capabilities_arch
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.transport import (
     OpenConnection,

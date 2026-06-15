@@ -15,7 +15,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.app import build_app, build_handler_registry
-from kdive.providers import composition
+from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 

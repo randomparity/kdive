@@ -70,10 +70,10 @@ def test_malformed_capabilities_xml_yields_unknown_arch(tmp_path: Path) -> None:
     assert discovery.list_resources()[0]["capabilities"]["arch"] == "unknown"
 
 
-def test_from_env_without_uri_raises_configuration_error(
-    monkeypatch: pytest.MonkeyPatch,
+def test_from_env_without_inventory_raises_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KDIVE_REMOTE_LIBVIRT_URI", raising=False)
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
     with pytest.raises(CategorizedError) as excinfo:
         RemoteLibvirtDiscovery.from_env(secret_registry=SecretRegistry())
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR

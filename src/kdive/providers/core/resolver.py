@@ -4,7 +4,7 @@ The resolver maps a ``ResourceKind`` to the ``ProviderRuntime`` that serves it.
 Post-System worker ops resolve their runtime from the System's Resource kind
 (``job -> system -> allocation -> resource.kind``); an unregistered kind fails
 closed with ``configuration_error`` rather than falling through to a default.
-Concrete runtimes are still constructed only in :mod:`kdive.providers.composition`.
+Concrete runtimes are still constructed only in :mod:`kdive.providers.assembly.composition`.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ResourceKind
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.core.runtime import ProviderRuntime
 
 _log = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class ProviderBinding:
 class ProviderResolver:
     """A static ``ResourceKind -> ProviderRuntime`` registry.
 
-    Built per deployment by :func:`kdive.providers.composition.build_provider_resolver`.
+    Built per deployment by :func:`kdive.providers.assembly.composition.build_provider_resolver`.
     Selection is exhaustive and fail-closed: an unregistered kind raises
     ``configuration_error`` at resolution.
     """

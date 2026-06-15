@@ -6,7 +6,7 @@ import asyncio
 import logging
 from uuid import uuid4
 
-from kdive.providers.console_hosting import (
+from kdive.providers.infra.console_hosting import (
     CollectorRegistry,
     ConsoleHostingLoop,
 )
@@ -136,7 +136,7 @@ def test_attach_watcher_logs_factory_failure_traceback(caplog) -> None:  # noqa:
         registry=reg,
     )
 
-    with caplog.at_level(logging.WARNING, logger="kdive.providers.console_hosting"):
+    with caplog.at_level(logging.WARNING, logger="kdive.providers.infra.console_hosting"):
         asyncio.run(loop.tick())
 
     assert reg.system_ids() == set()

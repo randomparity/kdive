@@ -26,7 +26,7 @@ from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.provider_components.validation import ComponentSourceCapabilities
-from kdive.providers.runtime import ProfilePolicy
+from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security.authz.context import RequestContext
 from kdive.services.systems.admission import (
     AdmissionFailure,

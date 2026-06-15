@@ -28,7 +28,7 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.build_host.guest_exec_transport import GuestExecBuildTransport
-from kdive.providers.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
+from kdive.providers.core.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.guest.agent import AgentCommand, qemu_agent_command
 from kdive.providers.remote_libvirt.lifecycle.provisioning import (

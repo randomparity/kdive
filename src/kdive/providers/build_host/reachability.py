@@ -3,7 +3,7 @@
 The reconciler flips ``build_hosts.state`` ``ready`` ↔ ``unreachable`` so build-host
 selection skips a dead SSH builder proactively (today an unreachable host fails its build
 and the lease reclaim later frees the slot). This narrow port lets the reconciler probe a
-host without importing the build plane — mirroring :mod:`kdive.providers.transport_reset`.
+host without importing the build plane — mirroring :mod:`kdive.providers.core.transport_reset`.
 
 ``SshBuildHostProber`` is the only implementation; it is wired unconditionally in the
 reconciler (SSH build hosts are independent of the remote-libvirt provider). The repair

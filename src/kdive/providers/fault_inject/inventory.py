@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from kdive.providers.reaping import OwnedDomain as ReaperOwnedDomain
+from kdive.providers.infra.reaping import OwnedDomain as ReaperOwnedDomain
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +23,7 @@ class OwnedDomain:
     """A synthetic domain the mock owns, in the provider reaper ``OwnedDomain`` shape.
 
     A concrete dataclass that structurally satisfies the
-    :class:`~kdive.providers.reaping.OwnedDomain` protocol (``name`` + ``system_id``), so a
+    :class:`~kdive.providers.infra.reaping.OwnedDomain` protocol (``name`` + ``system_id``), so a
     :class:`FaultInjectReaper` plugs into leaked-domain repair directly.
     """
 

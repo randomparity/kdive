@@ -19,8 +19,8 @@ from kdive.mcp.tools._runtime_resolution import (
     with_runtime_for_run,
     with_runtime_for_system,
 )
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 
 type _RuntimeWrapper = Callable[
     [AsyncConnectionPool, ProviderResolver, str, RuntimeHandler],

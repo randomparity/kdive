@@ -10,13 +10,13 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
-from kdive.providers.libvirt_xml import (
+from kdive.providers.core.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
     register_kdive_namespace,
     register_qemu_namespace,
 )
-from kdive.providers.runtime_paths import domain_name_for
+from kdive.providers.core.runtime_paths import domain_name_for
 
 _DEFAULT_NETWORK = "default"
 _GUEST_AGENT_CHANNEL = "org.qemu.guest_agent.0"

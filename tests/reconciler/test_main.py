@@ -11,7 +11,7 @@ import kdive.config as config
 from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.observability.facade import Telemetry
-from kdive.providers.reaping import NullBuildVmReaper
+from kdive.providers.infra.reaping import NullBuildVmReaper
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
@@ -80,7 +80,7 @@ def _fake_telemetry() -> Telemetry:
 def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """`_run_reconciler` opens a pool, constructs a Reconciler, runs, closes."""
     from kdive import __main__
-    from kdive.providers import composition
+    from kdive.providers.assembly import composition
     from kdive.reconciler import loop
 
     events: list[str] = []

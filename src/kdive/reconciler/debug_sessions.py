@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.domain.state import DebugSessionState
-from kdive.providers.transport_reset import TransportResetter
+from kdive.providers.core.transport_reset import TransportResetter
 
 _log = logging.getLogger(__name__)
 

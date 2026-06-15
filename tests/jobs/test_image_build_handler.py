@@ -31,9 +31,9 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, ImageBuildPayload
 from kdive.jobs.worker import Worker
 from kdive.provider_components import artifacts as artifact_types
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import ProviderRuntime
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _AUTHORIZING = Authorizing(principal="op", agent_session=None, project="platform")

@@ -10,7 +10,7 @@ from kdive.provider_components.validation import (
     ComponentSourceCapabilities,
     reject_unsupported_component_source,
 )
-from kdive.providers.runtime import ProfilePolicy
+from kdive.providers.core.runtime import ProfilePolicy
 
 type RootfsValidator = Callable[[RootfsSource], None]
 

@@ -14,7 +14,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import Run, System
 from kdive.profiles.provider_policy import capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.runtime import ProfilePolicy
+from kdive.providers.core.runtime import ProfilePolicy
 
 _REQUIRED_BASE_CMDLINE = "console=ttyS0 root=/dev/vda"
 _KDUMP_CRASHKERNEL = "crashkernel=256M"

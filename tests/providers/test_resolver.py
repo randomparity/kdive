@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ResourceKind
-from kdive.providers.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderResolver
 
 
 class _Runtime:

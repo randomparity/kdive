@@ -234,7 +234,7 @@ def test_dead_session_from_connect_transport_drop_is_detached(migrated_url: str)
             session_id = await seed_debug_session(
                 seed, run_id, state=DebugSessionState.LIVE, heartbeat_ago=timedelta(hours=1)
             )
-        from kdive.providers.transport_reset import NullResetter
+        from kdive.providers.core.transport_reset import NullResetter
 
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(

@@ -3,7 +3,7 @@
 When the reconciler detaches a stale ``live`` DebugSession whose worker died, a remote
 provider's single-client gdbstub can still be held by the dead worker's lingering TCP
 connection (ADR-0079). This narrow port lets the reconciler reset that transport without
-importing a provider — mirroring :mod:`kdive.providers.reaping`. ``NullResetter`` is the
+importing a provider — mirroring :mod:`kdive.providers.infra.reaping`. ``NullResetter`` is the
 default (local-libvirt's co-located gdbstub is freed by the host OS on worker death).
 """
 

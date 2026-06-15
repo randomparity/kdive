@@ -33,7 +33,7 @@ from kdive.domain.models import (
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus, SystemState
 from kdive.mcp.auth import RequestContext
-from kdive.providers.reaping import NullReaper
+from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import allocations as allocation_repairs
 from kdive.reconciler import loop
 from kdive.services.accounting import ledger as accounting

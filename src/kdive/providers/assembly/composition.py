@@ -21,13 +21,15 @@ from kdive.domain.models import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.providers.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.build_host.reachability import BuildHostProber, SshBuildHostProber
-from kdive.providers.console_hosting import DbRunningRemoteSystems
-from kdive.providers.discovery_registration import ProviderDiscoveryRegistration
+from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
+from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.fault_inject import composition as fault_inject_composition
 from kdive.providers.fault_inject.faulting.engine import FaultEngine
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
-from kdive.providers.local_libvirt import composition as local_composition
-from kdive.providers.reaping import (
+from kdive.providers.infra.console_hosting import DbRunningRemoteSystems
+from kdive.providers.infra.reaping import (
     BuildVmReaper,
     DumpVolumeReaper,
     InfraReaper,
@@ -35,16 +37,14 @@ from kdive.providers.reaping import (
     NullDumpVolumeReaper,
     OwnedDomain,
 )
+from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
-from kdive.providers.resolver import ProviderResolver
-from kdive.providers.runtime import DiscoveryRegistrar, ProviderRuntime
-from kdive.providers.transport_reset import NullResetter, TransportResetter
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.resources.discovery import ensure_discovered_resource_registered
 
 if TYPE_CHECKING:
-    from kdive.providers.console_hosting import ConsoleHosting
+    from kdive.providers.infra.console_hosting import ConsoleHosting
 
 type _ConsoleHostingFactory = Callable[[], Awaitable["ConsoleHosting | None"]]
 

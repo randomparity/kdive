@@ -29,6 +29,7 @@ from kdive.provider_components.artifacts import (
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.providers.core.runtime_paths import domain_name_for
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
@@ -37,7 +38,6 @@ from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     HostDumpOptions,
     host_dump_volume_name,
 )
-from kdive.providers.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 
