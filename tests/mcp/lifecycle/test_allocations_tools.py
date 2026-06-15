@@ -774,6 +774,68 @@ def test_queue_position_absent_on_granted_and_in_list(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+async def _force_grant(pool: AsyncConnectionPool, alloc_id: str, resource_id: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE allocations SET state = 'granted', resource_id = %s WHERE id = %s",
+            (UUID(resource_id), UUID(alloc_id)),
+        )
+
+
+def test_wait_returns_immediately_when_already_settled(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool)
+            granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), granted, timeout_s=5.0)
+        assert resp.status == "granted"
+
+    asyncio.run(_run())
+
+
+def test_wait_returns_on_requested_to_granted_transition(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool)
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            flipped: dict[str, bool] = {"done": False}
+
+            async def _sleep(_delay: float) -> None:
+                if not flipped["done"]:
+                    await _force_grant(pool, queued, res)
+                    flipped["done"] = True
+                await asyncio.sleep(0)
+
+            resp = await alloc_tools.wait_allocation(
+                pool, _ctx(), queued, timeout_s=5.0, sleep=_sleep
+            )
+        assert resp.status == "granted"
+
+    asyncio.run(_run())
+
+
+def test_wait_returns_current_envelope_at_deadline_while_requested(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), queued, timeout_s=0.0)
+        assert resp.status == "requested"
+        assert resp.data["queue_position"] == 1
+
+    asyncio.run(_run())
+
+
+def test_wait_not_found_for_absent_and_malformed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            absent = await alloc_tools.wait_allocation(pool, _ctx(), str(uuid4()), timeout_s=0.0)
+            bad = await alloc_tools.wait_allocation(pool, _ctx(), "not-a-uuid", timeout_s=0.0)
+        assert absent.error_category == "not_found"
+        assert bad.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
 def test_shapes_set_after_stamping_does_not_resize_allocation(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

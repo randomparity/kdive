@@ -13,7 +13,10 @@ malformed id stays `configuration_error` (ADR-0097).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -54,6 +57,9 @@ from kdive.services.allocation.release import (
 from kdive.services.allocation.renew import RenewOutcome, renew
 
 _log = logging.getLogger(__name__)
+
+POLL_INTERVAL_S = 0.5
+MAX_WAIT_S = 300.0
 
 
 async def _queue_position(conn: AsyncConnection, alloc: Allocation) -> int:
@@ -336,6 +342,46 @@ def _renew_response(uid: UUID, outcome: RenewOutcome) -> ToolResponse:
     )
 
 
+async def wait_allocation(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    allocation_id: str,
+    timeout_s: float,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> ToolResponse:
+    """Poll until the allocation leaves ``requested`` or ``timeout_s`` (clamped) elapses.
+
+    A queued ``requested`` allocation settles into ``granted`` (promoted), ``released``
+    (cancelled), or ``failed`` (budget terminate / ``queue_timeout`` reap). Each poll
+    acquires and releases a pool connection (holds none while sleeping); a non-positive or
+    non-finite timeout means a single read. Auth/no-leak match ``allocations.get`` (ADR-0118).
+    """
+    uid = _as_uuid(allocation_id)
+    if uid is None:
+        return _config_error(allocation_id)
+    if not math.isfinite(timeout_s):
+        return _config_error(allocation_id)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + min(max(timeout_s, 0.0), MAX_WAIT_S)
+    with bind_context(principal=ctx.principal):
+        while True:
+            async with pool.connection() as conn:
+                alloc = await ALLOCATIONS.get(conn, uid)
+                if alloc is None or alloc.project not in ctx.projects:
+                    return _not_found(allocation_id)
+                require_role(ctx, alloc.project, Role.VIEWER)
+                position = (
+                    await _queue_position(conn, alloc)
+                    if alloc.state is AllocationState.REQUESTED
+                    else None
+                )
+            now = loop.time()
+            if alloc.state is not AllocationState.REQUESTED or now >= deadline:
+                return _envelope_for_allocation(alloc, queue_position=position)
+            await sleep(min(POLL_INTERVAL_S, deadline - now))
+
+
 async def list_allocations(
     pool: AsyncConnectionPool, ctx: RequestContext, *, project: str, limit: int
 ) -> ToolResponse:
@@ -460,3 +506,28 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         return await list_allocations(pool, current_context(), project=project, limit=limit)
+
+    @app.tool(
+        name="allocations.wait",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def allocations_wait(
+        allocation_id: Annotated[
+            str,
+            Field(
+                description=("The Allocation to poll until it leaves the requested (queued) state.")
+            ),
+        ],
+        timeout_s: Annotated[
+            float, Field(description="Maximum seconds to wait (capped at 300).")
+        ] = 30.0,
+    ) -> ToolResponse:
+        """Poll until the allocation leaves the queued state or the deadline elapses.
+
+        Blocks (long-poll) until the ``requested`` allocation is promoted to ``granted``,
+        cancelled to ``released``, or terminated to ``failed``. Returns the settled
+        envelope immediately when the allocation is already settled. ``timeout_s`` is
+        capped at 300 s; a zero or negative value means a single read with no wait.
+        """
+        return await wait_allocation(pool, current_context(), allocation_id, timeout_s)
