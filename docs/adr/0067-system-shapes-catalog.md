@@ -41,7 +41,7 @@ is exact and a shape can never price a fractional GB the `Selector` cannot repre
 `disk_gb` and `pcie_match` are **not** `Selector` fields — they are carried to provisioning
 (`disk_gb`) and to PCIe admission (`pcie_match`, the ADR-0068 matcher), not to the cost
 gate. A shape fixes **size only**: `cost_class` (and therefore price) is resolved
-admission-side from the chosen Resource (`services/allocation_admission.py`), not from the
+admission-side from the chosen Resource (`services/allocation/admission/core.py`), not from the
 shape, so the same shape on a costlier host costs more.
 
 **Size is authoritative at the allocation; provisioning derives from it, never
@@ -77,7 +77,7 @@ owned by ADR-0070; this ADR only guarantees the sizing is stably persisted and q
   the single source for the cost estimate, the **per-allocation** `≤ host` capacity check,
   and the libvirt domain. It does **not** add size-summed packing — aggregate
   oversubscription across concurrent allocations stays the count-based
-  `concurrent_allocation_cap`'s job (`services/allocation_admission.py`), unchanged here;
+  `concurrent_allocation_cap`'s job (`services/allocation/admission/core.py`), unchanged here;
   shapes size each claim, they do not bin-pack the host.
 - Operators tune the catalog at runtime through the existing `require_platform_role` seam;
   no new authorization plumbing, and changing the catalog is no longer a deploy.

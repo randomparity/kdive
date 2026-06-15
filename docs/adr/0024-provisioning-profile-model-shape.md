@@ -129,7 +129,7 @@ native `ValidationError` on an unknown or missing field. The taxonomy
 `ProvisioningProfile.parse(data)` — that calls `model_validate` and re-raises any
 `ValidationError` as `CategorizedError(category=CONFIGURATION_ERROR)`. This mirrors
 the existing boundary pattern in `store/objectstore.py` and
-`domain/allocation_admission.py`: the model declares structure; one function maps a
+`services/allocation/admission/request.py`: the model declares structure; one function maps a
 structural failure onto the wire taxonomy. `parse` is the **sanctioned entry
 point**; constructing `ProvisioningProfile(**data)` or calling `model_validate`
 directly bypasses the mapping and surfaces a raw `ValidationError`, which is a

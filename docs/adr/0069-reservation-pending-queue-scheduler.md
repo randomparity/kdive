@@ -29,13 +29,12 @@ row is ever persisted as `requested`. That unused state is the shape of a queued
 admitted to the backlog, not yet granted.
 
 **But `requested` is not semantically free.** The existing occupancy counters
-(`services/allocation_admission.py`) define `_NON_TERMINAL = (REQUESTED, GRANTED, ACTIVE,
-RELEASING)` and count it for **both** the per-host cap (`_count_non_terminal`) and the
-project grant quota (`_within_alloc_quota`). So persisting queued rows as `requested`
-without changing those counters would make a queued request occupy the very slot it is
-waiting for — blocking other grants and livelocking its own promotion (the promotion's
-capacity replay would count the candidate row itself). Reusing the state therefore requires
-a deliberate counter change, made below; this is the load-bearing detail, not an
+(`services/allocation/admission/core.py`) now define `OCCUPYING = (GRANTED, ACTIVE,
+RELEASING)`, deliberately excluding `REQUESTED` for **both** the per-host cap and the
+project grant quota. Otherwise a queued request would occupy the very slot it is waiting for
+— blocking other grants and livelocking its own promotion (the promotion's capacity replay
+would count the candidate row itself). Reusing the state therefore requires this deliberate
+counter split; this is the load-bearing detail, not an
 incidental one.
 
 The full scheduler — priority, preemption, future-window booking, backfill — is a large

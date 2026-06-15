@@ -23,7 +23,7 @@ Two of the three factors are reachable from the wire surface the driver uses: th
 comes from the `admin` OIDC token (sub-issue A's `mint_token`), and the profile opt-in is a
 field of the `systems.provision` `profile` dict. **The capability scope is not.** The wire
 `allocations.request` tool always grants an **empty** scope —
-`allocation_admission._grant` constructs the `Allocation` with `capability_scope={}`, and no
+`services/allocation/admission/core.py` grants the `Allocation` with `capability_scope={}`, and no
 shipped tool mutates it afterward. Granting a destructive capability is a privileged platform
 action deliberately kept off the per-project operator surface (a project operator must not be
 able to self-grant `force_crash`); ADR-0042 forbids adding product code in this epic. So the
