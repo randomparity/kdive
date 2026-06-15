@@ -48,8 +48,9 @@
 2. Run the tests; confirm they fail because the module/handler does not exist.
 3. **Implement** `whoami(ctx: RequestContext) -> ToolResponse`:
    - dedupe + sort: `for project in sorted(set(ctx.projects))`.
-   - per-project item: `ToolResponse.success(project, "ok", data={"project": project,
-     "role": role.value if (role := ctx.roles.get(project)) else ""})`.
+   - per-project item: look the role up with an explicit `None` check (clearer than a
+     truthiness test and immune to any future falsy `Role` member):
+     `role = ctx.roles.get(project)`; `"role": role.value if role is not None else ""`.
    - top-level: `ToolResponse.collection("projects", "ok", items, data={"principal":
      ctx.principal, "platform_roles": sorted(r.value for r in ctx.platform_roles)},
      suggested_next_actions=["accounting.report_granted_set"])`.
@@ -87,10 +88,18 @@ generated), `docs/guide/reference/index.md` (generated).
 **Steps:**
 1. Add `"projects.list": ("tests/mcp/catalog/test_projects_tools.py",)` to
    `_BEHAVIOR_TESTS_BY_TOOL`.
-2. Run `just docs` to regenerate the reference (creates `projects.md`, updates
-   `index.md`). Review the generated entry — the tool description must be a single
-   clean line with no `|`/newline (parameter table N/A: no params).
-3. `uv run pytest -q tests/mcp/core/test_tool_docs.py` (every-tool-documented +
+2. **Description source (decided):** the generated reference takes the tool's
+   description from the `@app.tool` docstring unless `_TOOL_DESCRIPTION_OVERRIDES`
+   has an entry (`fixtures.list` relies on its docstring). Write the inner tool
+   docstring as a single clean line with no `|` or newline (the generator raises on a
+   table-breaking character), e.g. *"List the projects the caller's token grants, with
+   each project's role and the caller's platform roles (whoami)."* Do **not** add a
+   `_TOOL_DESCRIPTION_OVERRIDES` entry — the single-line docstring is the description,
+   keeping one source of truth (matches `fixtures.list`).
+3. Run `just docs` to regenerate the reference (creates `projects.md`, updates
+   `index.md`). Review the generated entry matches that one-liner (no params table:
+   `projects.list` takes no arguments).
+4. `uv run pytest -q tests/mcp/core/test_tool_docs.py` (every-tool-documented +
    behavior-test-mapping guards) and `just docs-check` (generated reference matches).
 
 **Acceptance:** `test_tool_docs` passes (description present, behavior-test mapped);
