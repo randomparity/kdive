@@ -1,4 +1,4 @@
-"""Focused parser-helper tests for local-libvirt gdb/MI records."""
+"""Focused parser-helper tests for shared gdb/MI records."""
 
 from __future__ import annotations
 
