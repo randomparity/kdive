@@ -351,6 +351,45 @@ def test_granted_set_zero_fill_is_deterministically_ordered(migrated_url: str) -
     asyncio.run(_run())
 
 
+def test_granted_set_mixed_spent_and_zero_is_ordered(migrated_url: str) -> None:
+    # A granted set mixing a spent project (proj-b) with two unspent ones returns items
+    # ordered by project name — the whole set, not just the zero-fill tail (the domain
+    # rollup query is unordered, so _name_targets sorts).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                res = await _resource(conn)
+                await _budget(conn, "proj-b")
+                b = await _alloc(conn, res, "proj-b", "bob")
+                await _ledger(conn, "proj-b", b, "reserved", "9")
+            ctx = _ctx(
+                roles={"proj-b": Role.VIEWER, "proj-a": Role.VIEWER, "proj-c": Role.VIEWER},
+                projects=("proj-b", "proj-a", "proj-c"),
+            )
+            resp = await report_granted_set(pool, ctx)
+        assert resp.status == "ok"
+        assert [r["project"] for r in _rows(resp)] == ["proj-a", "proj-b", "proj-c"]
+        by_project = {r["project"]: r for r in _rows(resp)}
+        assert by_project["proj-b"]["reserved"] == "9.0000"
+        assert by_project["proj-a"]["reserved"] == "0.0000"
+
+    asyncio.run(_run())
+
+
+def test_granted_set_duplicate_target_names_project_once(migrated_url: str) -> None:
+    # ctx.projects is not deduplicated upstream; a duplicated unspent project must still
+    # produce exactly one zero-filled item, not one per duplicate.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            ctx = _ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a", "proj-a"))
+            resp = await report_granted_set(pool, ctx)
+        assert resp.status == "ok"
+        rows = _rows(resp)
+        assert [r["project"] for r in rows] == ["proj-a"]
+
+    asyncio.run(_run())
+
+
 def test_granted_set_group_by_principal_names_zero_spend_project(migrated_url: str) -> None:
     # group_by=principal over {proj-a (alice spend), proj-b (none)}: proj-a breaks down per
     # principal, proj-b appears once with an empty principal (its item id is the bare name).

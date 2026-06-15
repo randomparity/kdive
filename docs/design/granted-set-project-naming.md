@@ -43,9 +43,11 @@ See ADR-0116 for the full record. In brief:
    membership is role-less still gets empty items; that discovery is #427's job, see
    §2). The cross-project `total` row is unchanged (`total_project: "*"`).
 
-   **Ordering is deterministic:** zero-filled projects are sorted by name and
-   appended after the domain's `rollup.rows` (which the domain already orders), so the
-   response and its tests are stable across runs.
+   **Ordering is deterministic:** the domain rollup query is *unordered*, so the
+   granted-set form sorts the full row set (spent + zero-filled) by
+   `(project, principal)` before rendering — not just the zero-fill tail — so a mixed
+   spent/unspent set is stable across runs. `ctx.projects` is not deduplicated
+   upstream, so the zero-fill target set is deduplicated to avoid duplicate zero rows.
 
 2. **Keep the viewer floor; do not surface role-less membership in this report.**
    `require_role(ctx, project, VIEWER)` raises `RoleDenied` when the held role is
@@ -74,9 +76,12 @@ of scope for #426; changing it would re-shape an unrelated report.
   `project` is that project name with `reserved/reconciled/variance` each serialized
   as `"0.0000"` (byte-identical to a real zero row, not `"0"`).
 - A granted set of two projects where only one has spend names **both** projects
-  (the spent one with its sums, the other zero-filled), and the zero-filled item is
-  ordered deterministically (zero rows sorted by project name, appended after the
-  domain rows).
+  (the spent one with its sums, the other zero-filled).
+- A granted set mixing a spent project with unspent ones returns items ordered by
+  `(project, principal)` over the **whole** set (the domain rollup is unordered, so
+  sorting spans spent + zero rows, not just the zero-fill tail).
+- A duplicated target (`ctx.projects` is not deduplicated upstream) produces exactly
+  one item for that project, not one per duplicate.
 - **group_by=principal with a zero-spend granted project** names that project once
   with an empty `principal` (its item id is the bare project name) and does not
   collide with any principal-keyed row.

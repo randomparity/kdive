@@ -135,16 +135,20 @@ def _name_targets(rollup: accounting_domain.Report, targets: list[str]) -> accou
 
     ``report()`` emits a row only for a project with ledger rows in the window, so a granted
     project with no spend would be unnamed (the observed bug: empty ``items``, only
-    ``total_project="*"``). This appends a quantized zero row (:func:`accounting_domain.empty_row`)
-    for each target absent from ``rollup.rows``, sorted by project name for a deterministic
-    response. The ``total`` row is unchanged (the zero rows add nothing to it).
+    ``total_project="*"``). This adds a quantized zero row (:func:`accounting_domain.empty_row`)
+    for each target absent from ``rollup.rows``, then returns the full set ordered by
+    ``(project, principal)`` so the granted-set response is deterministic — the domain rollup
+    query is unordered, so sorting here (not just the zero-fill tail) is what makes a mixed
+    spent+unspent set stable. ``targets`` may contain duplicates (``ctx.projects`` is not
+    deduplicated upstream), so the missing set is deduplicated to avoid duplicate zero rows.
+    The ``total`` row is unchanged (the zero rows add nothing to it). Granted-set only;
+    ``accounting.report_all_projects`` does not call this and keeps its existing order.
     """
     present = {row.project for row in rollup.rows}
-    missing = sorted(p for p in targets if p not in present)
-    if not missing:
-        return rollup
+    missing = {p for p in targets if p not in present}
     filled = rollup.rows + tuple(accounting_domain.empty_row(p) for p in missing)
-    return accounting_domain.Report(rows=filled, total=rollup.total)
+    ordered = tuple(sorted(filled, key=lambda row: (row.project, row.principal or "")))
+    return accounting_domain.Report(rows=ordered, total=rollup.total)
 
 
 def _audit_granted_set(targets: list[str], group_by: str | None) -> bool:
