@@ -233,6 +233,45 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     assert registry.get(JobKind.CAPTURE_VMCORE) is not None
 
 
+def test_build_handler_registry_derives_worker_ports_from_one_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = object()
+    transports = object()
+    caller_registry = SecretRegistry()
+    captured: dict[str, object | None] = {}
+
+    class _FakeComposition:
+        def build_provider_resolver(self) -> object:
+            return resolver
+
+        def build_build_host_transport_factories(self) -> object:
+            return transports
+
+    def _capture(
+        _registry: HandlerRegistry,
+        provider_resolver: object,
+        secret_registry: SecretRegistry,
+        build_host_transport_factories: object | None,
+    ) -> None:
+        captured["resolver"] = provider_resolver
+        captured["secret_registry"] = secret_registry
+        captured["transports"] = build_host_transport_factories
+
+    monkeypatch.setattr(app_module, "_HANDLER_REGISTRARS", (_capture,))
+
+    build_handler_registry(
+        secret_registry=caller_registry,
+        provider_composition=cast(Any, _FakeComposition()),
+    )
+
+    assert captured == {
+        "resolver": resolver,
+        "secret_registry": caller_registry,
+        "transports": transports,
+    }
+
+
 def test_image_build_handler_preserves_store_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

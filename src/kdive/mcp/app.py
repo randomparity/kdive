@@ -412,25 +412,20 @@ def build_app(
 
 def build_handler_registry(
     *,
-    provider_resolver: ProviderResolver | None = None,
     secret_registry: SecretRegistry,
-    build_host_transport_factories: BuildHostTransportFactories | None = None,
+    provider_composition: ProviderComposition | None = None,
 ) -> HandlerRegistry:
     """Build the worker's `HandlerRegistry` from provider-aware handler registrars.
 
     Args:
-        provider_resolver: Injected per-kind provider resolver passed to worker handler
-            registrars; when ``None``, built from the default provider composition.
         secret_registry: Worker-owned registry shared by redaction boundaries and logging.
+        provider_composition: Provider assembly owner used when the worker constructs its
+            provider resolver and provider-owned support ports.
     """
     registry = HandlerRegistry()
-    composition = ProviderComposition(secret_registry=secret_registry)
-    resolver = provider_resolver or composition.build_provider_resolver()
-    transport_factories = (
-        build_host_transport_factories
-        if build_host_transport_factories is not None
-        else composition.build_build_host_transport_factories()
-    )
+    composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
+    resolver = composition.build_provider_resolver()
+    transport_factories = composition.build_build_host_transport_factories()
     for register in _HANDLER_REGISTRARS:
         register(registry, resolver, secret_registry, transport_factories)
     return registry
