@@ -22,7 +22,7 @@ from typing import cast
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.diagnostics.checks import CheckStatus
+from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.egress_probe import (
     EGRESS_FIX,
     EGRESS_ID,
@@ -272,6 +272,35 @@ def test_concurrent_callers_spin_exactly_one_guest(migrated_url: str) -> None:
         assert all(r.status is CheckStatus.PASS for r in results)
         # Exactly one guest spun despite three concurrent callers.
         assert len(guest.provisioned) == 1
+
+    asyncio.run(_run())
+
+
+def test_singleflight_cleans_up_after_cancelled_waiter() -> None:
+    async def _run() -> None:
+        single_flight = SingleFlight()
+        release = asyncio.Event()
+        calls = 0
+
+        async def factory() -> CheckResult:
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return CheckResult(EGRESS_ID, CheckStatus.PASS, "ok")
+
+        waiter = asyncio.create_task(single_flight.run("p", factory))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        release.set()
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        result = await single_flight.run("p", factory)
+        assert result.status is CheckStatus.PASS
+        assert calls == 2
 
     asyncio.run(_run())
 

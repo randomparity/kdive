@@ -204,12 +204,13 @@ class SingleFlight:
             if task is None:
                 task = asyncio.create_task(factory())
                 self._inflight[key] = task
-        try:
-            return await asyncio.shield(task)
-        finally:
-            async with self._lock:
-                if self._inflight.get(key) is task and task.done():
-                    del self._inflight[key]
+                task.add_done_callback(lambda done: asyncio.create_task(self._cleanup(key, done)))
+        return await asyncio.shield(task)
+
+    async def _cleanup(self, key: str, task: asyncio.Task[CheckResult]) -> None:
+        async with self._lock:
+            if self._inflight.get(key) is task:
+                del self._inflight[key]
 
 
 class GuestEgressCheck(Check):
