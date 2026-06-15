@@ -142,8 +142,8 @@ class ProviderResolver:
             row = await cur.fetchone()
         if row is None:
             raise CategorizedError(
-                f"cannot resolve a provider runtime: no resource kind for {object_kind}",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={object_kind: str(object_id)},
+                f"{object_kind} {object_id} was not found",
+                category=ErrorCategory.NOT_FOUND,
+                details={"object_kind": object_kind, "object_id": str(object_id)},
             )
         return ResourceKind(row["kind"])

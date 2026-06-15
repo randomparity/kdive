@@ -138,6 +138,27 @@ def test_runtime_wrapper_maps_categorized_error_to_failure_response(
     assert pool.connections == 1
 
 
+@pytest.mark.parametrize(("kind", "wrapper"), _WRAPPERS)
+def test_runtime_wrapper_preserves_absent_object_not_found_response(
+    kind: str, wrapper: _RuntimeWrapper
+) -> None:
+    error = CategorizedError(
+        f"{kind} was not found",
+        category=ErrorCategory.NOT_FOUND,
+        details={"object_kind": kind, "object_id": _OBJECT_ID},
+    )
+    pool = _FakePool()
+    resolver = _FakeResolver(error=error)
+
+    result = asyncio.run(wrapper(_pool(pool), _resolver(resolver), _OBJECT_ID, _success_response))
+
+    assert result.object_id == _OBJECT_ID
+    assert result.status == "error"
+    assert result.error_category == "not_found"
+    assert result.data == {"object_kind": kind, "object_id": _OBJECT_ID}
+    assert pool.connections == 1
+
+
 async def _success_response(runtime: ProviderRuntime) -> ToolResponse:
     assert runtime is _RUNTIME
     return ToolResponse.success(_OBJECT_ID, "succeeded")
