@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.introspect import (
+from kdive.providers.shared.debug_common.introspect import (
     helper_modules,
     helper_sysinfo,
     helper_tasks,

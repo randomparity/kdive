@@ -16,8 +16,8 @@ from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.provider_components.artifacts import PresignedUpload
-from kdive.providers.build_host.execution import launch_failure
 from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.execution import launch_failure
 
 # (url, data, headers) -> etag string (may include surrounding quotes)
 type HttpPut = Callable[[str, bytes, dict[str, str]], str]

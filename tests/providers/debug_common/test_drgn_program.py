@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.drgn_program import (
+from kdive.providers.shared.debug_common.drgn_program import (
     read_vmcoreinfo_build_id,
     run_introspection_helper,
 )

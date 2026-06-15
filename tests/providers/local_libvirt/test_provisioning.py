@@ -18,8 +18,6 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.core import libvirt_xml as libvirt_xml_contract
-from kdive.providers.core.libvirt_xml import KDIVE_METADATA_NS, parse_metadata_system_id
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.providers.local_libvirt.lifecycle import xml as xml_module
@@ -32,6 +30,8 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import (
     render_domain_xml,
 )
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
+from kdive.providers.shared import libvirt_xml as libvirt_xml_contract
+from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, parse_metadata_system_id
 from tests.providers.local_libvirt.fakes import libvirt_error
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")

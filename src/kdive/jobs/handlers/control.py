@@ -18,7 +18,7 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 
 

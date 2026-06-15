@@ -12,11 +12,11 @@ from typing import cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common import rsp as rsp_mod
-from kdive.providers.debug_common.rsp import rsp_frame, valid_rsp_frame
 from kdive.providers.local_libvirt.lifecycle import connect as connect_mod
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports import DebugTransportKind, SystemHandle, TransportHandleData
+from kdive.providers.shared.debug_common import rsp as rsp_mod
+from kdive.providers.shared.debug_common.rsp import rsp_frame, valid_rsp_frame
 
 # --- RSP framing codec ---------------------------------------------------------------------
 

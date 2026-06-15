@@ -13,20 +13,20 @@ from typing import cast
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.introspect import (
-    _Module,
-    _Program,
-    _Task,
-    helper_modules,
-    helper_sysinfo,
-    helper_tasks,
-)
 from kdive.providers.local_libvirt.debug.introspect import (
     IntrospectOutput,
     LiveIntrospector,
     LocalLibvirtLiveIntrospect,
     LocalLibvirtVmcoreIntrospect,
     VmcoreIntrospector,
+)
+from kdive.providers.shared.debug_common.introspect import (
+    _Module,
+    _Program,
+    _Task,
+    helper_modules,
+    helper_sysinfo,
+    helper_tasks,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 

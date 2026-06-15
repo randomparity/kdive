@@ -39,11 +39,11 @@ from kdive.jobs import queue
 from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.payloads import BuildPayload
 from kdive.provider_components.build_results import BuildOutput
-from kdive.providers.build_host import dispatch as build_host_dispatch
-from kdive.providers.build_host.dispatch import BuildHostTransportFactories
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
+from kdive.providers.shared.build_host import dispatch as build_host_dispatch
+from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (
     seed_granted_allocation,

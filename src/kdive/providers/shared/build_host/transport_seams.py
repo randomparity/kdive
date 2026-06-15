@@ -2,7 +2,7 @@
 
 These factories wrap a :class:`~kdive.providers.ports.build_transport.BuildTransport`
 and return the ``RunStep``, ``ReadConfig``, and ``Checkout`` callables that
-:class:`~kdive.providers.build_host.orchestration.BuildHostOrchestrator` expects.
+:class:`~kdive.providers.shared.build_host.orchestration.BuildHostOrchestrator` expects.
 
 The local warm-tree checkout (``make_checkout`` / ``real_checkout``) is unchanged.
 This module provides the *git-provenance* checkout for the SSH path and the
@@ -18,8 +18,9 @@ from uuid import UUID
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
 from kdive.provider_components.build_validation import parse_gnu_build_id, patch_target_paths
-from kdive.providers.build_host.config import resolve_local_ref
-from kdive.providers.build_host.execution import (
+from kdive.providers.ports.build_transport import BuildTransport
+from kdive.providers.shared.build_host.config import resolve_local_ref
+from kdive.providers.shared.build_host.execution import (
     MAKE_TIMEOUT_S,
     OBJCOPY_TIMEOUT_S,
     ReadBuildId,
@@ -28,8 +29,7 @@ from kdive.providers.build_host.execution import (
     RunStep,
     build_failure,
 )
-from kdive.providers.build_host.workspace import GIT_APPLY_TIMEOUT_S, Checkout, redacted_tail
-from kdive.providers.ports.build_transport import BuildTransport
+from kdive.providers.shared.build_host.workspace import GIT_APPLY_TIMEOUT_S, Checkout, redacted_tail
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 # ---------------------------------------------------------------------------

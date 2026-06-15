@@ -22,12 +22,12 @@ from kdive.provider_components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
-from kdive.providers.build_host import config as build_host_config
-from kdive.providers.build_host import execution as build_host_execution
-from kdive.providers.build_host import workspace as build_host_workspace
-from kdive.providers.build_host.artifact_publish import ArtifactBytes, ArtifactSource
 from kdive.providers.local_libvirt import build as build_module
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
+from kdive.providers.shared.build_host import config as build_host_config
+from kdive.providers.shared.build_host import execution as build_host_execution
+from kdive.providers.shared.build_host import workspace as build_host_workspace
+from kdive.providers.shared.build_host.artifact_publish import ArtifactBytes, ArtifactSource
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")

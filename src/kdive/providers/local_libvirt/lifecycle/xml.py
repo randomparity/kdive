@@ -6,9 +6,9 @@ import xml.etree.ElementTree as ET
 from uuid import UUID
 
 from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_sizing
-from kdive.providers.core.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
-from kdive.providers.core.runtime_paths import console_log_path, domain_name_for
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
+from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
+from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
 
 _DEFAULT_MACHINE = "q35"
 _PROFILE_POLICY = LocalLibvirtProfilePolicy()

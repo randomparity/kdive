@@ -27,10 +27,6 @@ from kdive.provider_components.artifacts import (
     StoredArtifact,
 )
 from kdive.provider_components.build_validation import parse_gnu_build_id
-from kdive.providers.build_host.transport_seams import (
-    transport_read_build_id,
-    transport_run_modules_install,
-)
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import (
@@ -39,6 +35,10 @@ from kdive.providers.remote_libvirt.build import (
     RemoteLibvirtBuild,
     transport_make_bundle,
     transport_vmlinux_source,
+)
+from kdive.providers.shared.build_host.transport_seams import (
+    transport_read_build_id,
+    transport_run_modules_install,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 

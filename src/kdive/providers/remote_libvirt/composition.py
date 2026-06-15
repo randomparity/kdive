@@ -22,15 +22,12 @@ from kdive.provider_components.references import (
     ComponentSourceKind,
 )
 from kdive.provider_components.validation import ComponentSourceCapabilities
-from kdive.providers.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
 )
 from kdive.providers.core.runtime import DebugCapabilities, ProviderRuntime
 from kdive.providers.core.transport_reset import TransportResetter
-from kdive.providers.debug_common.gdbmi import GdbMiEngine
-from kdive.providers.debug_common.hostpolicy import allow_acl_remote
 from kdive.providers.infra.console_hosting import (
     AsyncioPumpRunner,
     CollectorRegistry,
@@ -64,6 +61,9 @@ from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePo
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTransportResetter
+from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
+from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import secret_backend_from_env

@@ -19,8 +19,6 @@ from kdive.config.core_settings import FAULT_INJECT
 from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.models import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
-from kdive.providers.build_host.dispatch import BuildHostTransportFactory
-from kdive.providers.build_host.reachability import BuildHostProber, SshBuildHostProber
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
@@ -40,6 +38,8 @@ from kdive.providers.infra.reaping import (
 from kdive.providers.local_libvirt import composition as local_composition
 from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
+from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
+from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.resources.discovery import ensure_discovered_resource_registered
 

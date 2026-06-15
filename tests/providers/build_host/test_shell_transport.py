@@ -13,11 +13,11 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.provider_components.artifacts import PresignedUpload
-from kdive.providers.build_host.shell_transport import (
+from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.shell_transport import (
     _MAX_REMOTE_READ_B64_BYTES,
     ShellBuildTransport,
 )
-from kdive.providers.ports.build_transport import CommandResult
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 

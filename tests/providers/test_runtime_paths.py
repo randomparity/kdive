@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.core.runtime_paths import (
+from kdive.providers.shared.runtime_paths import (
     console_log_path,
     domain_name_for,
     read_console_log,

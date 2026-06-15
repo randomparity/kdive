@@ -23,7 +23,6 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
 from kdive.provider_components.artifacts import ArtifactStreamRequest, StoredArtifact
-from kdive.providers.core.runtime_paths import domain_name_for
 from kdive.providers.ports import CaptureOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.retrieve.common import (
@@ -38,6 +37,7 @@ from kdive.providers.remote_libvirt.retrieve.common import (
     lookup,
     persist_redacted,
 )
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend
 

@@ -14,8 +14,8 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.diagnostics.egress_probe import DEFAULT_PROBE_HEARTBEAT_STALE_AFTER
 from kdive.domain.models import JobKind
 from kdive.domain.state import JobState, SystemState
-from kdive.providers.core.runtime_paths import system_id_from_domain_name
 from kdive.providers.infra.reaping import InfraReaper
+from kdive.providers.shared.runtime_paths import system_id_from_domain_name
 
 _log = logging.getLogger(__name__)
 

@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Protocol
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.mi_protocol import MiRecord
 from kdive.providers.ports import GdbMiAttachment, GdbStopRecord
+from kdive.providers.shared.debug_common.mi_protocol import MiRecord
 
 MAX_INTERACTIVE_WAIT_SEC = 60
 STOP_POLL_SLICE_SEC = 0.5

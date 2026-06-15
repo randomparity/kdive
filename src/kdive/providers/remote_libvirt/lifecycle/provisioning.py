@@ -32,7 +32,6 @@ from kdive.profiles.provisioning import (
     RemoteLibvirtProfile,
     require_concrete_sizing,
 )
-from kdive.providers.core.runtime_paths import domain_name_for
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.lifecycle.gdb import (
     DOMAIN_PREFIX,
@@ -59,6 +58,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     disk_pool as _disk_pool,
 )
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 

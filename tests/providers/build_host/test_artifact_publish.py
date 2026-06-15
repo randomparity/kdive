@@ -24,12 +24,12 @@ from kdive.provider_components.artifacts import (
     PresignPutRequest,
     StoredArtifact,
 )
-from kdive.providers.build_host.artifact_publish import (
+from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.artifact_publish import (
     ArtifactBytes,
     ArtifactRemoteFile,
     publish_artifact_source,
 )
-from kdive.providers.ports.build_transport import CommandResult
 
 _RUN = UUID("33333333-3333-3333-3333-333333333333")
 

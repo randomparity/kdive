@@ -38,25 +38,25 @@ from kdive.provider_components.build_results import BuildOutput
 from kdive.provider_components.references import (
     ComponentRef,
 )
-from kdive.providers.build_host import config as _build_config
-from kdive.providers.build_host import execution as _build_exec
-from kdive.providers.build_host import workspace as _build_workspace
-from kdive.providers.build_host.artifact_publish import (
+from kdive.providers.ports.build_transport import BuildTransport
+from kdive.providers.shared.build_host import config as _build_config
+from kdive.providers.shared.build_host import execution as _build_exec
+from kdive.providers.shared.build_host import workspace as _build_workspace
+from kdive.providers.shared.build_host.artifact_publish import (
     ArtifactBytes,
     ArtifactRemoteFile,
     ArtifactSource,
     StorePort,
     publish_artifact_source,
 )
-from kdive.providers.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
-from kdive.providers.build_host.transport_seams import (
+from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
+from kdive.providers.shared.build_host.transport_seams import (
     transport_git_checkout,
     transport_read_build_id,
     transport_read_config,
     transport_run_make,
     transport_run_olddefconfig,
 )
-from kdive.providers.ports.build_transport import BuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 

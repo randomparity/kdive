@@ -83,7 +83,7 @@ def test_from_vmcore_build_id_mismatch_is_configuration_error():
 
 
 def test_from_vmcore_returns_redacted_report():
-    from kdive.providers.debug_common.introspect import (
+    from kdive.providers.shared.debug_common.introspect import (
         helper_modules,
         helper_sysinfo,
         helper_tasks,

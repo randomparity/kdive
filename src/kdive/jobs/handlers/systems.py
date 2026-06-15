@@ -24,7 +24,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.provider_components.artifacts import StoredArtifact
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProfilePolicy
-from kdive.providers.core.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.store import objectstore as _objectstore
 from kdive.store.objectstore import (

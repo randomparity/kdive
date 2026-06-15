@@ -8,8 +8,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.db.build_hosts import BuildHostState, list_probeable_ssh_hosts, mark_state
-from kdive.providers.build_host.reachability import BuildHostProber
 from kdive.providers.infra.reaping import BuildVmReaper
+from kdive.providers.shared.build_host.reachability import BuildHostProber
 
 _log = logging.getLogger(__name__)
 

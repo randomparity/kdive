@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
-from kdive.providers.core.libvirt_xml import (
+from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     parse_capabilities_arch,
     parse_metadata_system_id,
@@ -34,7 +34,7 @@ def test_register_kdive_namespace_is_idempotent(monkeypatch) -> None:
     def fake_register_namespace(prefix: str, uri: str) -> None:
         calls.append((prefix, uri))
 
-    monkeypatch.setattr("kdive.providers.core.libvirt_xml._kdive_namespace_registered", False)
+    monkeypatch.setattr("kdive.providers.shared.libvirt_xml._kdive_namespace_registered", False)
     monkeypatch.setattr(ET, "register_namespace", fake_register_namespace)
     register_kdive_namespace()
     register_kdive_namespace()

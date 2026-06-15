@@ -10,10 +10,10 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.provider_components.artifacts import PresignedUpload
-from kdive.providers.build_host.transport import LocalBuildTransport
 from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.transport import LocalBuildTransport
 
-_RUN_TARGET = "kdive.providers.build_host.transport.subprocess.run"
+_RUN_TARGET = "kdive.providers.shared.build_host.transport.subprocess.run"
 
 # ---------------------------------------------------------------------------
 # 1. run — argv and call-shape preservation

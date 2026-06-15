@@ -45,9 +45,9 @@ from kdive.config.core_settings import INSTALL_STAGING
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.provider_components.artifacts import FetchedArtifact
-from kdive.providers.core.runtime_paths import console_log_path, domain_name_for, read_console_log
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports import InstallRequest
+from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
 from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)

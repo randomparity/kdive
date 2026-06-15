@@ -30,7 +30,7 @@ def test_only_composition_imports_local_libvirt_provider_details() -> None:
 
 
 def test_build_host_modules_do_not_import_remote_libvirt_provider_details() -> None:
-    build_host_root = Path("src/kdive/providers/build_host")
+    build_host_root = Path("src/kdive/providers/shared/build_host")
     offenders: list[str] = []
     for path in build_host_root.rglob("*.py"):
         tree = ast.parse(path.read_text(), filename=str(path))

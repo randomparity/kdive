@@ -12,9 +12,9 @@ import tempfile
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.debug_common.gdbmi import GdbMiEngine
-from kdive.providers.debug_common.hostpolicy import allow_acl_remote
 from kdive.providers.ports import GdbMiAttachment
+from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
+from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 
 
 def _resolve_remote_debuginfo_ref(run_id: str) -> str:  # pragma: no cover - live_vm

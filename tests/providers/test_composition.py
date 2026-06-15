@@ -466,8 +466,8 @@ def test_console_hosting_is_none_without_remote() -> None:
 
 def test_build_host_prober_is_wired_independent_of_remote(monkeypatch: pytest.MonkeyPatch) -> None:
     """The SSH build-host prober is built unconditionally — not gated on remote-libvirt."""
-    from kdive.providers.build_host.reachability import BuildHostProber, SshBuildHostProber
     from kdive.providers.remote_libvirt import config as remote_config
+    from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
 
     # Force remote-libvirt to read as unconfigured; the prober must still be returned.
     monkeypatch.setattr(remote_config, "is_remote_libvirt_configured", lambda: False)

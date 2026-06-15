@@ -12,7 +12,6 @@ from kdive.provider_components.references import (
     ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
 )
-from kdive.providers.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.local_libvirt import composition
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.local_libvirt.debug.introspect import (
@@ -28,6 +27,7 @@ from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePoli
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
+from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
