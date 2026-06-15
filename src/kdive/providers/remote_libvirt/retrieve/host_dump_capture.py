@@ -11,8 +11,9 @@ import re
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, BinaryIO, NamedTuple
 from uuid import UUID
 
 import libvirt
@@ -104,6 +105,27 @@ class HostDumpOptions(NamedTuple):
     core_dmesg_from_file: CoreDmesgFromFile
     dump_format: int
     max_core_bytes: int
+
+
+@dataclass(slots=True)
+class _SpoolSink:
+    handle: BinaryIO
+    system_id: UUID
+    max_bytes: int
+    written: int = 0
+
+    def write_chunk(self, data: bytes) -> None:
+        self.written += len(data)
+        if self.written > self.max_bytes:
+            raise CategorizedError(
+                "host_dump stream exceeded the 5 GiB ceiling mid-download",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"system_id": str(self.system_id), "streamed_bytes": self.written},
+            )
+        self.handle.write(data)
+
+    def recv_all_callback(self, _stream: Any, data: bytes, _opaque: Any) -> None:
+        self.write_chunk(data)
 
 
 class HostDumpCapturer:
@@ -225,24 +247,12 @@ class HostDumpCapturer:
     def _download_to_file(self, conn: Any, volume: Any, spool: Path, system_id: UUID) -> None:
         """Spool the volume to a 0600 temp file; abort+raise if the stream overruns."""
         stream = conn.newStream(0)
-        written = 0
         try:
             fd = os.open(spool, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as handle:
-
-                def _sink(_stream: Any, data: bytes, _opaque: Any) -> None:
-                    nonlocal written
-                    written += len(data)
-                    if written > self._options.max_core_bytes:
-                        raise CategorizedError(
-                            "host_dump stream exceeded the 5 GiB ceiling mid-download",
-                            category=ErrorCategory.CONFIGURATION_ERROR,
-                            details={"system_id": str(system_id), "streamed_bytes": written},
-                        )
-                    handle.write(data)
-
+                sink = _SpoolSink(handle, system_id, self._options.max_core_bytes)
                 volume.download(stream, 0, 0, 0)
-                stream.recvAll(_sink, None)
+                stream.recvAll(sink.recv_all_callback, None)
             stream.finish()
         except CategorizedError:
             with contextlib.suppress(Exception):

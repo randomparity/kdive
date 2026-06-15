@@ -35,6 +35,7 @@ from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     DMESG_UNAVAILABLE,
     HostDumpCapturer,
     HostDumpOptions,
+    _SpoolSink,
     host_dump_volume_name,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -526,6 +527,21 @@ def test_host_dump_stream_overrunning_the_ceiling_is_configuration_error(tmp_pat
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert vol.deleted  # the over-streaming dump volume is still cleaned up
     assert not store.stream_requests  # never uploaded
+
+
+def test_spool_sink_tracks_written_bytes_and_rejects_overrun(tmp_path: Path) -> None:
+    spool = tmp_path / "vmcore"
+    with spool.open("wb") as handle:
+        sink = _SpoolSink(handle=handle, system_id=_SID, max_bytes=5)
+        sink.write_chunk(b"abc")
+        assert sink.written == 3
+
+        with pytest.raises(CategorizedError) as exc:
+            sink.write_chunk(b"def")
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["streamed_bytes"] == 6
+    assert spool.read_bytes() == b"abc"
 
 
 def test_host_dump_spools_to_a_private_mode_file(tmp_path: Path) -> None:
