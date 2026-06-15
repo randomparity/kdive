@@ -79,6 +79,15 @@ async def _set_cap(pool: AsyncConnectionPool, res_id: str, cap: object) -> None:
         )
 
 
+async def _set_vcpus(pool: AsyncConnectionPool, res_id: str, vcpus: int) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE resources SET capabilities = "
+            "jsonb_set(capabilities, '{vcpus}', %s::jsonb) WHERE id = %s",
+            (json.dumps(vcpus), UUID(res_id)),
+        )
+
+
 async def _drop_cap(pool: AsyncConnectionPool, res_id: str) -> None:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
@@ -285,6 +294,25 @@ def test_fits_now_needs_headroom_and_free_device(migrated_url: str) -> None:
         assert "nic-shape" in data_sequence(item, "fits")
         # Fleet-level fits set also carries it.
         assert "nic-shape" in data_sequence(resp, "fits_now")
+
+    asyncio.run(_run())
+
+
+def test_fits_excludes_shapes_above_host_size_ceiling(migrated_url: str) -> None:
+    # P1 honesty: a shape whose vcpus exceed the host's ceiling must NOT be advertised as fitting,
+    # since admission's ≤-resource-caps check would reject it. Catalog: small(1)/medium(2)/large(4)/
+    # max(8); shrink the host ceiling to 2 so large/max drop out while small/medium remain.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)  # discovered host advertises vcpus=8
+            await _set_vcpus(pool, res_id, 2)
+            resp = await availability_tools.availability_tool(pool, CTX, pcie=None, shape=None)
+        item = _host_item(resp, res_id)
+        fits = data_sequence(item, "fits")
+        assert "small" in fits
+        assert "medium" in fits
+        assert "large" not in fits
+        assert "max" not in fits
 
     asyncio.run(_run())
 

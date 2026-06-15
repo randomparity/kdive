@@ -43,7 +43,11 @@ from kdive.domain.pcie import (
     parse_match_spec,
     resolve_spec,
 )
-from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resource_capabilities import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    MEMORY_MB_KEY,
+    VCPUS_KEY,
+)
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -81,6 +85,25 @@ def _resolve_cap(resource: Resource) -> int | None:
     if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
         return None
     return cap
+
+
+def _size_ceiling(resource: Resource) -> tuple[int | None, int | None]:
+    """Read the host's ``(vcpus, memory_mb)`` size ceiling; ``None`` per missing/invalid value.
+
+    Admission's ≤-resource-caps check (``validate_against_resource``) reads these same keys and
+    *raises* ``configuration_error`` when either is absent — i.e. it treats the host as
+    un-grantable. Availability mirrors that verdict without raising: a ``None`` here flags the
+    host non-schedulable (never "fits now"), so the two surfaces agree on what can be allocated.
+    """
+    return _int_cap(resource, VCPUS_KEY), _int_cap(resource, MEMORY_MB_KEY)
+
+
+def _int_cap(resource: Resource, key: str) -> int | None:
+    value = resource.capabilities.get(key)
+    # bool is an int subclass — reject it explicitly so `True` is not read as a ceiling of 1.
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return value
 
 
 def _resource_id(value: object) -> UUID:
@@ -180,15 +203,27 @@ def _redact_descriptor(descriptor: PCIeDescriptor) -> dict[str, JsonValue]:
 
 
 def _shape_fits(
-    shape: SystemShape, *, schedulable: bool, headroom: int, free: list[PCIeDescriptor]
+    shape: SystemShape,
+    *,
+    schedulable: bool,
+    headroom: int,
+    free: list[PCIeDescriptor],
+    ceiling: tuple[int | None, int | None],
 ) -> bool:
-    """Whether ``shape`` fits NOW on this host: schedulable + headroom + a free device.
+    """Whether ``shape`` fits NOW on this host: schedulable + headroom + ceiling + a free device.
 
-    A non-schedulable host or a host with no size headroom never fits. When the shape
-    carries a ``pcie_match``, a free device must resolve for that single spec (MATCHED);
-    a shape with no PCIe requirement fits on size headroom alone.
+    A non-schedulable host or a host with no size headroom never fits. The shape's
+    ``vcpus`` / ``memory_mb`` must not exceed the host's size ceiling — the same ≤-resource-caps
+    bound admission enforces (ADR-0007 §2), so ``fits`` cannot advertise a shape admission would
+    reject. When the shape carries a ``pcie_match``, a free device must resolve for that single
+    spec (MATCHED); a shape with no PCIe requirement fits on size headroom alone.
     """
     if not schedulable or headroom < 1:
+        return False
+    ceiling_vcpus, ceiling_memory_mb = ceiling
+    if ceiling_vcpus is None or ceiling_memory_mb is None:
+        return False
+    if shape.vcpus > ceiling_vcpus or shape.memory_mb > ceiling_memory_mb:
         return False
     if shape.pcie_match is None:
         return True
@@ -204,14 +239,21 @@ def _host_item(
 ) -> _HostAvailability:
     """Build one per-host availability item (headroom, free PCIe, fitting shapes)."""
     cap = _resolve_cap(resource)
+    ceiling = _size_ceiling(resource)
+    has_ceiling = ceiling[0] is not None and ceiling[1] is not None
     schedulable = (
-        cap is not None and resource.status is ResourceStatus.AVAILABLE and not resource.cordoned
+        cap is not None
+        and has_ceiling
+        and resource.status is ResourceStatus.AVAILABLE
+        and not resource.cordoned
     )
     headroom = max(cap - occupancy, 0) if cap is not None else 0
     fits = [
         shape.name
         for shape in shapes
-        if _shape_fits(shape, schedulable=schedulable, headroom=headroom, free=free)
+        if _shape_fits(
+            shape, schedulable=schedulable, headroom=headroom, free=free, ceiling=ceiling
+        )
     ]
     free_devices: list[JsonValue] = [_redact_descriptor(d) for d in free]
     fits_json: list[JsonValue] = list(fits)
