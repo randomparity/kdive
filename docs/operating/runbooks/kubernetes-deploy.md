@@ -251,10 +251,26 @@ storage pool. Those are host-side obligations independent of this chart install.
 
 ## 9. Teardown
 
+Helm releases are **namespace-scoped**, and `helm uninstall` only acts on one namespace. If you
+installed into a non-default namespace (the bundled demo is commonly installed with `-n
+kdive-demo`), a bare `helm uninstall kdive` fails with `Release not loaded` — it queries your
+kubeconfig context's default namespace, not the release's. Target the install namespace explicitly
+(`helm list -A` shows where each release actually lives), and substitute it for `<ns>` below:
+
 ```bash
-helm uninstall kdive
-kubectl delete pvc -l app.kubernetes.io/name=kdive      # PVCs are not removed by uninstall
-kubectl delete secret kdive-remote-tls                  # if created in step 3
+helm uninstall kdive -n <ns>
+kubectl delete pvc -l app.kubernetes.io/name=kdive -n <ns>   # PVCs are not removed by uninstall
+kubectl delete secret kdive-remote-tls -n <ns>               # if created in step 3
+```
+
+`helm uninstall` does **not** garbage-collect the chart's hook resources (the `pre-install`
+migrate Job, the `helm test` smoke pod, and the `systems.toml` ConfigMap) — they carry no
+`hook-delete-policy`, so completed hook objects linger after uninstall. Remove them:
+
+```bash
+kubectl delete job kdive-kdive-migrate -n <ns>
+kubectl delete pod kdive-kdive-smoke -n <ns>
+kubectl delete configmap kdive-systems -n <ns>
 ```
 
 The external backends you stood up in step 2 are uninstalled separately.
