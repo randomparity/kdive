@@ -291,7 +291,13 @@ def _renew_response(uid: UUID, outcome: RenewOutcome) -> ToolResponse:
 async def list_allocations(
     pool: AsyncConnectionPool, ctx: RequestContext, *, project: str, limit: int
 ) -> ToolResponse:
-    """Return the newest allocations for ``project`` in one collection envelope."""
+    """Return the newest allocations for ``project`` in one collection envelope.
+
+    Accepting a granted ``project`` here is working-as-designed (the caller is a
+    viewer+ member of it): this is the viewer floor, not a discovery hole (#426 note).
+    Which projects a token grants is discoverable via ``accounting.report_granted_set``
+    (#426) and ``projects.list`` (#427) — not by probing this tool.
+    """
     require_project(ctx, project)
     require_role(ctx, project, Role.VIEWER)
     capped = _clamp_list_limit(limit)
