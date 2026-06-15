@@ -65,7 +65,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum simultaneous build leases this host may hold (> 0).")
         ],
     ) -> ToolResponse:
-        """Register a new SSH build host. Requires platform_admin."""
         return await register_ssh_build_host(
             pool,
             current_context(),
@@ -95,7 +94,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum simultaneous build leases this host may hold (> 0).")
         ],
     ) -> ToolResponse:
-        """Register a new ephemeral-libvirt build host. Requires platform_admin."""
         return await register_ephemeral_libvirt_build_host(
             pool,
             current_context(),
@@ -107,21 +105,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
     @app.tool(name=LIST_TOOL, annotations=_docmeta.read_only(), meta={"maturity": "implemented"})
     async def build_hosts_list() -> ToolResponse:
-        """List all registered build hosts (id, name, kind, address, credential ref, state)."""
         return await list_build_hosts(pool, current_context())
 
     @app.tool(name=DISABLE_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def build_hosts_disable(
         name: Annotated[str, Field(description="The build host name to disable.")],
     ) -> ToolResponse:
-        """Disable a build host so the scheduler will not select it. Requires platform_admin."""
         return await disable_build_host(pool, current_context(), name=name)
 
     @app.tool(name=REMOVE_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def build_hosts_remove(
         name: Annotated[str, Field(description="The build host name to remove.")],
     ) -> ToolResponse:
-        """Delete a build host from the inventory. Requires platform_admin."""
         return await remove_build_host(pool, current_context(), name=name)
 
 

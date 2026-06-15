@@ -244,7 +244,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def shapes_list() -> ToolResponse:
-        """List the named system-shape presets. Viewer."""
         return await list_shapes(pool, current_context())
 
     @app.tool(
@@ -266,7 +265,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
-        """Upsert a system-shape preset. Never re-sizes existing rows. Operator."""
         return await set_shape(
             pool,
             current_context(),
@@ -287,5 +285,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def shapes_delete(
         name: Annotated[str, Field(description="Shape name to remove.")],
     ) -> ToolResponse:
-        """Delete a system-shape preset. Label-only, never FK-blocks live rows. Operator."""
         return await delete_shape(pool, current_context(), name=name)

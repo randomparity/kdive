@@ -230,7 +230,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_get(
         job_id: Annotated[str, Field(description="The Job to render.")],
     ) -> ToolResponse:
-        """Render a Job by ID. Requires viewer."""
         return await get_job(pool, current_context(), job_id)
 
     @app.tool(
@@ -244,7 +243,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             float, Field(description="Maximum seconds to wait (capped at 300).")
         ] = 30.0,
     ) -> ToolResponse:
-        """Poll a Job until terminal or the timeout elapses. Requires viewer."""
         return await wait_job(pool, current_context(), job_id, timeout_s)
 
     @app.tool(
@@ -255,7 +253,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def jobs_cancel(
         job_id: Annotated[str, Field(description="The Job to cancel.")],
     ) -> ToolResponse:
-        """Cancel a Job cooperatively; error envelope if already terminal. Requires operator."""
         return await cancel_job(pool, current_context(), job_id)
 
     @app.tool(
@@ -268,5 +265,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
-        """List the newest Jobs visible to the caller's readable projects. Requires viewer."""
         return await list_jobs(pool, current_context(), limit=limit)

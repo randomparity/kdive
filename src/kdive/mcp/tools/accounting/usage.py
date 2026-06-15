@@ -121,7 +121,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def accounting_usage_project(
         project: Annotated[str, Field(description="Project to report spend for.")],
     ) -> ToolResponse:
-        """Return spend rollup for one project. Requires viewer."""
         return await usage_project(pool, current_context(), project=project)
 
     @app.tool(
@@ -134,5 +133,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="Investigation UUID to report spend for.")
         ],
     ) -> ToolResponse:
-        """Return spend rollup for one investigation and its owning project. Requires viewer."""
         return await usage_investigation(pool, current_context(), investigation_id=investigation_id)
