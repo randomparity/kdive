@@ -127,12 +127,13 @@ async def build_console_hosting(
 ) -> ConsoleHosting | None:
     """Build the single-leader remote console hosting loop, or ``None`` when unconfigured."""
     try:
-        conninfo = database_url()
-        store = object_store_from_env()
         remote_config = remote_config_from_inventory()
-        secret_backend = secret_backend_from_env(registry=secret_registry)
     except CategorizedError:
         return None
+
+    conninfo = database_url()
+    store = object_store_from_env()
+    secret_backend = secret_backend_from_env(registry=secret_registry)
 
     part_store = RemoteConsolePartStore(store, conninfo)
     leader_conn = await psycopg.AsyncConnection.connect(conninfo, autocommit=True)
