@@ -36,9 +36,16 @@ See ADR-0116 for the full record. In brief:
 1. **Name every resolved granted-set project, zero-filling those with no ledger
    rows.** `accounting.report_granted_set` emits one item per *authorized target
    project*, not one per project-with-spend. A project with no ledger rows in the
-   selected window appears as a zero row (`reserved/reconciled/variance = 0`,
-   `principal` empty), so the caller can read off exactly which projects the token
-   authorizes. The cross-project `total` row is unchanged (`total_project: "*"`).
+   selected window appears as a zero row (`reserved/reconciled/variance` serialized
+   as `"0.0000"`, byte-identical to a real zero, via the domain's `quantize_kcu`;
+   `principal` empty), so the caller can read off the projects the token can read
+   accounting for — i.e. the **role-bearing** granted set (a token whose only
+   membership is role-less still gets empty items; that discovery is #427's job, see
+   §2). The cross-project `total` row is unchanged (`total_project: "*"`).
+
+   **Ordering is deterministic:** zero-filled projects are sorted by name and
+   appended after the domain's `rollup.rows` (which the domain already orders), so the
+   response and its tests are stable across runs.
 
 2. **Keep the viewer floor; do not surface role-less membership in this report.**
    `require_role(ctx, project, VIEWER)` raises `RoleDenied` when the held role is
@@ -64,9 +71,18 @@ of scope for #426; changing it would re-shape an unrelated report.
 
 - `accounting.report_granted_set` over a single granted project with **zero** ledger
   rows returns `status == "ok"`, `project_count == "1"`, and exactly one item whose
-  `project` is that project name with zero `reserved/reconciled/variance`.
+  `project` is that project name with `reserved/reconciled/variance` each serialized
+  as `"0.0000"` (byte-identical to a real zero row, not `"0"`).
 - A granted set of two projects where only one has spend names **both** projects
-  (the spent one with its sums, the other zero-filled).
+  (the spent one with its sums, the other zero-filled), and the zero-filled item is
+  ordered deterministically (zero rows sorted by project name, appended after the
+  domain rows).
+- **group_by=principal with a zero-spend granted project** names that project once
+  with an empty `principal` (its item id is the bare project name) and does not
+  collide with any principal-keyed row.
+- **Window interaction:** a granted project with ledger rows only *outside* the
+  requested window is named with `"0.0000"` zeros *inside* it (the zero-fill keys off
+  "no rows in the window", since the domain rollup is already window-scoped).
 - The cross-project `total` row is unchanged: `total_project == "*"` and the totals
   equal the sum over projects with spend.
 - Audit behaviour is unchanged: the audit trigger still counts the *authorized set*
