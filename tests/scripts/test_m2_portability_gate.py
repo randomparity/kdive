@@ -252,6 +252,32 @@ def test_measure_errors_usefully_when_git_is_unavailable(
     assert "git executable is unavailable" in capsys.readouterr().err
 
 
+def test_measure_bounds_every_git_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate.shutil, "which", lambda _name: "git")
+    timeouts: list[int] = []
+
+    def run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        timeout: int,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        assert capture_output is True
+        assert text is True
+        timeouts.append(timeout)
+        stdout = ""
+        if "log" in argv:
+            stdout = "2\t0\tsrc/kdive/domain/models.py\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(gate.subprocess, "run", run)
+
+    assert gate._measure() == {"src/kdive/domain/models.py": 2}
+    assert timeouts == [gate.GIT_COMMAND_TIMEOUT_S] * 3
+
+
 def test_gate_catches_core_change_introduced_only_in_a_merge_commit(gate_repo: Path) -> None:
     # A conflict resolution (or evil merge) lands only in the merge commit, which
     # per-commit numstat (--no-merges) never sees; the net-diff union must catch it.

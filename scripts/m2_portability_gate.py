@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 BASELINE_TAG = "pre-M2"
+GIT_COMMAND_TIMEOUT_S = 120
 
 # Per-provider advertised capture-method coverage (M2.5 capstone, #304). The four-method
 # vocabulary is fixed (CaptureMethod: console/host_dump/gdbstub/kdump); the milestone exit
@@ -315,6 +316,7 @@ def _measure() -> dict[str, int] | None:
         [git, "rev-parse", "--verify", f"{BASELINE_TAG}^{{commit}}"],
         capture_output=True,
         text=True,
+        timeout=GIT_COMMAND_TIMEOUT_S,
     )  # nosec B603 - git is resolved once via shutil.which; arguments are fixed by this script.
     if tag_check.returncode != 0:
         print(
@@ -338,6 +340,7 @@ def _measure() -> dict[str, int] | None:
         capture_output=True,
         text=True,
         check=True,
+        timeout=GIT_COMMAND_TIMEOUT_S,
     )  # nosec B603 - git is resolved once via shutil.which; arguments are fixed by this script.
     touched = parse_numstat(log.stdout)
     # Union in the net diff: it sees merge-commit-only changes the per-commit walk
@@ -355,6 +358,7 @@ def _measure() -> dict[str, int] | None:
         capture_output=True,
         text=True,
         check=True,
+        timeout=GIT_COMMAND_TIMEOUT_S,
     )  # nosec B603 - git is resolved once via shutil.which; arguments are fixed by this script.
     for path, count in parse_numstat(net.stdout).items():
         touched[path] = max(touched.get(path, 0), count)
