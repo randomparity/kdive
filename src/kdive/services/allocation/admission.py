@@ -71,6 +71,8 @@ _SECONDS_PER_HOUR = 3600
 # The idempotency-store ``kind`` discriminator for a request grant (ADR-0040 §3); the
 # renewal path uses the same store under its own kind.
 _REQUEST_KIND = "allocations.request"
+BUDGET_DENIAL_REASON = "budget_exceeded"
+AFFINITY_DENIAL_REASON = "affinity_denied"
 
 # States that occupy a host-cap / grant-quota slot (ADR-0069, the load-bearing change). A
 # DEDICATED occupancy predicate that EXCLUDES ``requested``: a queued row holds only a queue
@@ -256,11 +258,11 @@ async def admission_gate(
     invert against each other.
 
     Returns a structured result carrying either the claimed PCIe devices to grant, or the
-    typed denial. The denial's ``queueable`` flag (NOT its category) is what routes
-    terminate-vs-wait at promotion: a **budget** denial is ``ALLOCATION_DENIED`` with
-    ``queueable=False`` (terminate); a host-cap / quota / PCIe-busy denial is queueable
-    (wait). A PCIe-config denial (``CONFIGURATION_ERROR``) and the budget denial are the
-    non-queueable cases.
+    typed denial. The denial's explicit reason is what routes terminate-vs-wait at
+    promotion: a **budget** denial is ``ALLOCATION_DENIED`` with
+    ``reason="budget_exceeded"`` (terminate); a host-cap / quota / PCIe-busy denial is
+    queueable (wait). A PCIe-config denial (``CONFIGURATION_ERROR``) and affinity denial are
+    non-queueable but are not budget exhaustion.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if the host cap is invalid or a PCIe spec
@@ -274,7 +276,10 @@ async def admission_gate(
         # strict no-op here, so no existing allocation regresses.
         return _GateResult(
             denial=AdmissionOutcome(
-                granted=False, allocation=None, category=ErrorCategory.ALLOCATION_DENIED
+                granted=False,
+                allocation=None,
+                category=ErrorCategory.ALLOCATION_DENIED,
+                reason=AFFINITY_DENIAL_REASON,
             ),
             devices=[],
         )
@@ -293,7 +298,10 @@ async def admission_gate(
         # queueable — waiting will not free budget (ADR-0069). It hard-denies / terminates.
         return _GateResult(
             denial=AdmissionOutcome(
-                granted=False, allocation=None, category=ErrorCategory.ALLOCATION_DENIED
+                granted=False,
+                allocation=None,
+                category=ErrorCategory.ALLOCATION_DENIED,
+                reason=BUDGET_DENIAL_REASON,
             ),
             devices=[],
         )

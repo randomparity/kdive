@@ -13,13 +13,24 @@ import psycopg
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.cost import Selector
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.security.audit import args_digest
-from kdive.services.allocation.admission import AllocationRequest, admit
-from kdive.services.allocation.promotion import promote_pending, reap_queue_timeouts
+from kdive.services.allocation.admission import (
+    AFFINITY_DENIAL_REASON,
+    BUDGET_DENIAL_REASON,
+    AdmissionOutcome,
+    AllocationRequest,
+    admit,
+)
+from kdive.services.allocation.promotion import (
+    _is_budget_terminate,
+    promote_pending,
+    reap_queue_timeouts,
+)
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -178,6 +189,54 @@ def test_promote_pending_budget_denial_fails_without_retry(migrated_url: str) ->
     first, second, state, audit_row, expected_digest = asyncio.run(_run())
     assert (first, second, state) == (0, 0, "failed")
     assert audit_row == ("system:reconciler", expected_digest)
+
+
+def test_promote_pending_affinity_denial_is_not_budget_failure(migrated_url: str) -> None:
+    async def _run() -> tuple[int, str, int]:
+        async with _conn(migrated_url) as conn:
+            resource = await _resource(conn)
+            await _quota(conn)
+            holder = await _granted(conn, resource.id)
+            queued = await _queued(conn, resource)
+            await conn.execute(
+                "UPDATE resources SET owner_project = 'other' WHERE id = %s",
+                (resource.id,),
+            )
+            await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASING)
+            await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASED)
+
+            promoted = await promote_pending(conn)
+            state = await _state(conn, queued)
+            cur = await conn.execute(
+                "SELECT count(*) FROM audit_log "
+                "WHERE object_id = %s AND transition = 'requested->failed'",
+                (queued,),
+            )
+            failed_audits = await cur.fetchone()
+            assert failed_audits is not None
+        return promoted, state, int(failed_audits[0])
+
+    assert asyncio.run(_run()) == (0, "requested", 0)
+
+
+def test_budget_terminate_requires_budget_reason() -> None:
+    affinity_denial = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+        reason=AFFINITY_DENIAL_REASON,
+        queueable=False,
+    )
+    budget_denial = AdmissionOutcome(
+        granted=False,
+        allocation=None,
+        category=ErrorCategory.ALLOCATION_DENIED,
+        reason=BUDGET_DENIAL_REASON,
+        queueable=False,
+    )
+
+    assert not _is_budget_terminate(affinity_denial)
+    assert _is_budget_terminate(budget_denial)
 
 
 def test_reap_queue_timeouts_fails_only_aged_requested_rows(migrated_url: str) -> None:
