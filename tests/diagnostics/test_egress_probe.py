@@ -18,6 +18,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from typing import cast
+from uuid import UUID
 
 import pytest
 from psycopg_pool import AsyncConnectionPool
@@ -206,6 +207,26 @@ def test_teardown_failure_does_not_change_verdict(migrated_url: str, caplog) -> 
 
     asyncio.run(_run())
     record = next(record for record in caplog.records if "teardown failed" in record.message)
+    assert "provider='p'" in record.message
+    assert record.exc_info is not None
+
+
+def test_release_failure_does_not_change_verdict(migrated_url: str, caplog) -> None:  # noqa: ANN001
+    class BrokenReleaseRegistry(EgressProbeRegistry):
+        async def release(self, probe_id: UUID) -> None:
+            await super().release(probe_id)
+            raise RuntimeError("release write timed out")
+
+    async def _run() -> None:
+        guest = _FakeGuest(outcome=EgressOutcome.REACHABLE)
+        async with _pool(migrated_url) as pool:
+            registry = BrokenReleaseRegistry(pool)
+            with caplog.at_level(logging.WARNING, logger="kdive.diagnostics.egress_probe"):
+                result = await _check("p", guest, registry).run()
+        assert result.status is CheckStatus.PASS
+
+    asyncio.run(_run())
+    record = next(record for record in caplog.records if "marker release failed" in record.message)
     assert "provider='p'" in record.message
     assert record.exc_info is not None
 

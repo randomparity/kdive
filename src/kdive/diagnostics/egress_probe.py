@@ -275,7 +275,7 @@ class GuestEgressCheck(Check):
         finally:
             await _cancel(beat)
             await self._teardown(domain_name)
-            await self._registry.release(probe_id)
+            await self._release_marker(probe_id, domain_name)
 
     async def _beat_until_cancelled(self, probe_id: UUID) -> None:
         """Advance the heartbeat every interval so the reaper never reaps a live (slow) probe.
@@ -313,6 +313,19 @@ class GuestEgressCheck(Check):
         except Exception as exc:  # noqa: BLE001 - teardown is best-effort; reaper is backstop
             _log.warning(
                 "guest egress probe teardown failed for provider=%r domain=%s: %s",
+                self._provider,
+                domain_name,
+                exc,
+                exc_info=True,
+            )
+            return
+
+    async def _release_marker(self, probe_id: UUID, domain_name: str) -> None:
+        try:
+            await self._registry.release(probe_id)
+        except Exception as exc:  # noqa: BLE001 - marker release is best-effort; TTL is backstop
+            _log.warning(
+                "guest egress probe marker release failed for provider=%r domain=%s: %s",
                 self._provider,
                 domain_name,
                 exc,
