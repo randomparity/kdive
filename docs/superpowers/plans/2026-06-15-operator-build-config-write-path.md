@@ -115,11 +115,16 @@ git commit -m "feat(db): add build_config_catalog source column + lock scope (#4
 
 **Files:**
 - Modify: `src/kdive/build_configs/catalog.py`
-- Test: `tests/build_configs/test_catalog.py` (create if absent)
+- Test: **Extend the existing** `tests/build_configs/test_seed_db.py` (the DB-backed home; it already does `from tests.db.conftest import migrated_url, pg_conn, postgres_url`). Do **not** add DB-backed cases to `tests/build_configs/test_catalog.py`/`test_seed.py` unless you also add the explicit fixture imports — the local `tests/build_configs/conftest.py` provides only `fake_conn`/`fake_store`, not `migrated_url`/`minio_store`.
 
-- [ ] **Step 1: Write the failing test**
+> **Harness note (read before writing any test in this plan):** `tests/build_configs/` already contains `test_catalog.py`, `test_seed.py` (fake-double unit tests), and `test_seed_db.py` (DB-backed). The disposable-Postgres `migrated_url`/`pg_conn`/`postgres_url` fixtures live in `tests/db/conftest.py` and the `minio_store` fixture in `tests/store/conftest.py`; they are **only** in scope where explicitly imported. Every DB-backed test in this plan must include, at module top:
+> ```python
+> from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
+> from tests.store.conftest import minio_store  # noqa: F401
+> ```
+> and re-export them via `__all__` (mirror `test_seed_db.py`). Omitting these yields a `fixture 'migrated_url' not found` collection error.
 
-`tests/build_configs/test_catalog.py` (driving the repo against a migrated DB; mirror the `migrated_url` fixture used in `tests/mcp/catalog/test_build_configs_tool.py`):
+- [ ] **Step 1: Write the failing test (append to `tests/build_configs/test_seed_db.py`)**
 
 ```python
 def test_operator_upsert_then_seed_guard_preserves_operator(migrated_url: str) -> None:
@@ -149,12 +154,12 @@ def test_operator_upsert_empty_description_preserves_prior(migrated_url: str) ->
     asyncio.run(_run())
 ```
 
-Add the imports: `import asyncio, psycopg` and `from kdive.build_configs.catalog import (get_build_config, upsert_operator_build_config, upsert_seed_build_config)`.
+`test_seed_db.py` already imports `asyncio`, `psycopg`, and the db fixtures. Add `from kdive.build_configs.catalog import (get_build_config, upsert_operator_build_config, upsert_seed_build_config)` to its imports.
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run python -m pytest tests/build_configs/test_catalog.py -q`
-Expected: FAIL with ImportError (the two upsert functions do not exist yet).
+Run: `uv run python -m pytest tests/build_configs/test_seed_db.py -q`
+Expected: FAIL with ImportError (the two upsert functions do not exist yet). Skips if Docker is absent — run it where Docker is available, or rely on CI.
 
 - [ ] **Step 3: Implement in `src/kdive/build_configs/catalog.py`**
 
@@ -204,16 +209,18 @@ async def upsert_seed_build_config(
 
 Also update `get_build_config_sync`'s `parse_build_config_row` use (it already calls the same parser, so adding `source` to `_SELECT` + parser is enough).
 
+Also update `get_build_config_sync`'s parser use (it shares `parse_build_config_row`, so adding `source` to `_SELECT` + the parser covers it). Check `tests/build_configs/test_catalog.py`: its existing fake-double / parser tests build a row dict for `parse_build_config_row` and may assert `BuildConfigEntry` fields — add `source` to any such row literal there so they still pass.
+
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `uv run python -m pytest tests/build_configs/test_catalog.py -q`
-Expected: PASS.
+Run: `uv run python -m pytest tests/build_configs/test_seed_db.py tests/build_configs/test_catalog.py -q`
+Expected: PASS (or SKIP for the Docker-gated cases).
 
 - [ ] **Step 5: Lint/type + commit**
 
 ```bash
 just lint && just type
-git add src/kdive/build_configs/catalog.py tests/build_configs/test_catalog.py
+git add src/kdive/build_configs/catalog.py tests/build_configs/test_seed_db.py tests/build_configs/test_catalog.py
 git commit -m "feat(build-configs): source field + operator/seed upsert writers (#438)"
 ```
 
@@ -223,11 +230,12 @@ git commit -m "feat(build-configs): source field + operator/seed upsert writers 
 
 **Files:**
 - Modify: `src/kdive/build_configs/seed.py`
-- Test: `tests/build_configs/test_seed.py` (extend; the existing `seed_build_configs` is covered indirectly by `tests/mcp/catalog/test_build_configs_tool.py`)
+- **Retire** the fake-double seed tests: `tests/build_configs/test_seed.py` drives `seed_build_configs` through the `FakeConn`/`_FakeCursor` doubles in `tests/build_configs/conftest.py`. The new seed body uses `conn.transaction()` + `advisory_xact_lock` (a real `pg_advisory_xact_lock` call) and reads a `(sha256, source)` row, neither of which the fake doubles support (`FakeConn` has no `transaction()`; `_FakeCursor.fetchone` returns `{"sha256": ...}` with no `source`). The advisory lock is only meaningful against a real connection, so the fake-double seed path cannot be salvaged.
+  - Delete the now-unrunnable `seed_build_configs` cases from `tests/build_configs/test_seed.py`. If that leaves the file with no remaining tests, delete the file. If the `fake_conn`/`fake_store` fixtures in `conftest.py` then have no users (`rg -n "fake_conn|fake_store" tests/`), delete them too.
+  - Move/re-add the seed's behavioral coverage **DB-backed** in `tests/build_configs/test_seed_db.py` (Step 1 below).
+- Test: append to `tests/build_configs/test_seed_db.py` (already DB-backed, already imports the db fixtures; add `from tests.store.conftest import minio_store  # noqa: F401` to its imports and `"minio_store"` to `__all__`).
 
-- [ ] **Step 1: Write the failing test**
-
-`tests/build_configs/test_seed.py`:
+- [ ] **Step 1: Write the failing test (append to `tests/build_configs/test_seed_db.py`)**
 
 ```python
 def test_seed_skips_operator_override(migrated_url: str, minio_store: ObjectStore) -> None:
@@ -248,12 +256,12 @@ def test_seed_skips_operator_override(migrated_url: str, minio_store: ObjectStor
     asyncio.run(_run())
 ```
 
-Imports: `seed_build_configs` from `kdive.build_configs.seed`; `upsert_operator_build_config, get_build_config` from `kdive.build_configs.catalog`; the `minio_store`/`migrated_url` fixtures.
+Imports (add to `test_seed_db.py`): `upsert_operator_build_config, get_build_config` from `kdive.build_configs.catalog` (seed already imported); the `minio_store` fixture import noted above.
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `uv run python -m pytest tests/build_configs/test_seed.py -q`
-Expected: FAIL — the current seed re-publishes on sha mismatch and overwrites the operator row.
+Run: `uv run python -m pytest tests/build_configs/test_seed_db.py -q`
+Expected: FAIL — the current seed re-publishes on sha mismatch and overwrites the operator row. (Skips without Docker; run where available or via CI.)
 
 - [ ] **Step 3: Implement the source-aware, locked seed in `src/kdive/build_configs/seed.py`**
 
@@ -304,16 +312,16 @@ Add imports: `from psycopg.rows import dict_row`, `from kdive.db.locks import Lo
 
 Note: `store.put_artifact` is synchronous and the lock holds the transaction open across it; the seed runs in `migrate()`'s dedicated `asyncio.run`, so blocking the loop here is harmless and the lock is per-name.
 
-- [ ] **Step 4: Run to verify it passes**
+- [ ] **Step 4: Run the whole build_configs suite + the tool test to verify nothing is left red**
 
-Run: `uv run python -m pytest tests/build_configs/test_seed.py tests/mcp/catalog/test_build_configs_tool.py -q`
-Expected: PASS (the new test + the existing get tests still pass; the existing seed-then-get test seeds on a fresh DB → returns 1).
+Run: `uv run python -m pytest tests/build_configs/ tests/mcp/catalog/test_build_configs_tool.py -q`
+Expected: PASS/SKIP — the new seed test passes, the retired fake-double tests are gone (not erroring), and the existing get tests still pass. A leftover fake-double seed test would surface here as an AttributeError — that is the signal the retirement in this task's Files section was incomplete.
 
 - [ ] **Step 5: Lint/type + commit**
 
 ```bash
 just lint && just type
-git add src/kdive/build_configs/seed.py tests/build_configs/test_seed.py
+git add src/kdive/build_configs/seed.py tests/build_configs/test_seed_db.py tests/build_configs/test_seed.py tests/build_configs/conftest.py
 git commit -m "feat(build-configs): source-aware seed under per-name lock (#438)"
 ```
 
@@ -330,14 +338,26 @@ git commit -m "feat(build-configs): source-aware seed under per-name lock (#438)
 
 - [ ] **Step 1: Write the failing tests (handler-level, injected pool + store + ctx)**
 
-Extend `tests/mcp/catalog/test_build_configs_tool.py`. Build a `platform_admin` `RequestContext` (see `tests/mcp/ops/test_breakglass*.py` or `_platform_auth` tests for how `platform_roles={PlatformRole.PLATFORM_ADMIN}` is set on `RequestContext`). Tests:
+Extend `tests/mcp/catalog/test_build_configs_tool.py` (it lives under `tests/mcp/`, whose `conftest.py` already re-exports `migrated_url`/`minio_store` — so no extra fixture import is needed there, unlike `tests/build_configs/`). Add these module-level context builders (the literal construction from `tests/mcp/ops/test_diagnostics.py` / `test_breakglass.py`) and import `from kdive.security.authz.context import RequestContext`, `from kdive.security.authz.rbac import PlatformRole`, `from kdive.domain.errors import ErrorCategory`:
+
+```python
+_PLATFORM_ADMIN = RequestContext(
+    principal="op-1", agent_session="sess-1", projects=(), roles={},
+    platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
+)
+_PLATFORM_OPERATOR = RequestContext(
+    principal="op-1", agent_session="sess-1", projects=(), roles={},
+    platform_roles=frozenset({PlatformRole.PLATFORM_OPERATOR}),
+)
+```
+
+Tests:
 
 ```python
 def test_set_publishes_and_get_reports_operator_source(migrated_url, minio_store):
     async def _run():
         async with _pool(migrated_url) as pool:
-            ctx = _admin_ctx()  # platform_roles={PLATFORM_ADMIN}
-            resp = await set_build_config(pool, minio_store, ctx, name="kdump",
+            resp = await set_build_config(pool, minio_store, _PLATFORM_ADMIN, name="kdump",
                                           content="CONFIG_X=y\n", description="d")
             assert resp.status == "published"
             assert resp.data["source"] == "operator"
@@ -351,28 +371,26 @@ def test_set_publishes_and_get_reports_operator_source(migrated_url, minio_store
 def test_set_requires_platform_admin(migrated_url, minio_store):
     async def _run():
         async with _pool(migrated_url) as pool:
-            ctx = _platform_operator_ctx()  # holds a platform role, not admin
-            resp = await set_build_config(pool, minio_store, ctx, name="kdump",
+            resp = await set_build_config(pool, minio_store, _PLATFORM_OPERATOR, name="kdump",
                                           content="x\n", description="")
         assert resp.status == "error"
-        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED
+        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
     asyncio.run(_run())
 
 
 def test_set_rejects_bad_name_and_empty_content(migrated_url, minio_store):
     async def _run():
         async with _pool(migrated_url) as pool:
-            ctx = _admin_ctx()
-            bad = await set_build_config(pool, minio_store, ctx, name="../etc",
+            bad = await set_build_config(pool, minio_store, _PLATFORM_ADMIN, name="../etc",
                                          content="x\n", description="")
-            empty = await set_build_config(pool, minio_store, ctx, name="kdump",
+            empty = await set_build_config(pool, minio_store, _PLATFORM_ADMIN, name="kdump",
                                            content="", description="")
-        assert bad.error_category == ErrorCategory.CONFIGURATION_ERROR
-        assert empty.error_category == ErrorCategory.CONFIGURATION_ERROR
+        assert bad.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert empty.error_category == ErrorCategory.CONFIGURATION_ERROR.value
     asyncio.run(_run())
 ```
 
-Also add a `test_set_oversize_content_rejected` using a content longer than the configured cap (monkeypatch `KDIVE_MAX_BUILD_CONFIG_BYTES` to a small value or assert against the 256 KiB default).
+Note `ToolResponse.error_category` stores `category.value` (a string), so compare against `ErrorCategory.X.value`. Also add a `test_set_oversize_content_rejected` that `monkeypatch.setenv("KDIVE_MAX_BUILD_CONFIG_BYTES", "8")` and sends 9+ bytes, asserting `CONFIGURATION_ERROR.value`.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -475,7 +493,12 @@ Expected: PASS. (`test_active_tools_have_a_covering_test` needs the map entry; `
 
 - [ ] **Step 6: Write the adversarial concurrency test**
 
-`tests/adversarial/test_build_config_concurrency.py`: drive two concurrent `set_build_config` calls for the same name with different content via `asyncio.gather` over two pool connections; after both settle, read the row and the object and assert `entry.sha256 == hashlib.sha256(object_bytes).hexdigest()` (the per-name lock keeps row and object in agreement). Also a seed/set interleave: run `seed_build_configs` and a `set` for `kdump` concurrently and assert the same row/object agreement.
+`tests/adversarial/test_build_config_concurrency.py` (new file). `tests/adversarial/conftest.py` does **not** re-export the db/store fixtures, so add at module top:
+```python
+from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
+from tests.store.conftest import minio_store  # noqa: F401
+```
+and re-export via `__all__`. Build the `_PLATFORM_ADMIN` `RequestContext` literal as in Step 1. Drive two concurrent `set_build_config` calls for the same name with different content via `asyncio.gather` over a pool (each `set` opens its own pool connection + lock); after both settle, read the row and fetch the object, asserting `entry.sha256 == hashlib.sha256(object_bytes).hexdigest()` (the per-name lock keeps row and object in agreement). Add a seed/set interleave: `asyncio.gather(seed_build_configs(conn_a, store), set_build_config(pool, store, _PLATFORM_ADMIN, name="kdump", ...))` on the same name and assert the same row/object agreement and that the surviving row's `source` is consistent with its bytes.
 
 Run: `uv run python -m pytest tests/adversarial/test_build_config_concurrency.py -q`
 Expected: PASS (skips if Docker/MinIO absent).
