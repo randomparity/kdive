@@ -22,10 +22,12 @@ always see one exception type.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from kdive.domain.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.image_format import ImageFormat
 from kdive.domain.models import ImageVisibility
 from kdive.inventory.errors import InventoryError
@@ -86,7 +88,14 @@ class _Instance(BaseModel):
 
 
 class RemoteLibvirtInstance(_Instance):
-    """A ``[[remote_libvirt]]`` provider instance."""
+    """A ``[[remote_libvirt]]`` provider instance.
+
+    ``vcpus`` / ``memory_mb`` are the host's billable size ceiling: admission's
+    ≤-resource-caps check (ADR-0007 §2) reads them off the Resource, so a remote host with
+    no declared ceiling is un-grantable (``configuration_error``). Unlike local-libvirt —
+    whose ceiling is probed by discovery — remote-libvirt is config-owned, so the file is the
+    only place the ceiling can come from and both are required.
+    """
 
     uri: str
     gdb_addr: str
@@ -95,6 +104,8 @@ class RemoteLibvirtInstance(_Instance):
     client_key_ref: str
     ca_cert_ref: str
     base_image: str
+    vcpus: int = Field(gt=0)
+    memory_mb: int = Field(gt=0)
     shapes: list[str] = Field(default_factory=list)
 
 
@@ -107,8 +118,8 @@ class LocalLibvirtInstance(_Instance):
 class FaultInjectInstance(_Instance):
     """A ``[[fault_inject]]`` provider instance."""
 
-    vcpus: int
-    memory_mb: int
+    vcpus: int = Field(gt=0)
+    memory_mb: int = Field(gt=0)
     seed: int = 0
 
 
@@ -122,6 +133,29 @@ class BuildHostInstance(BaseModel):
     max_concurrent: int = 1
 
 
+class CostClassEntry(BaseModel):
+    """A single ``[[cost_class]]`` declaration: a pricing coefficient for a cost class.
+
+    Validation delegates to ``domain/cost_class_rules`` — the same rule
+    ``ops.set_cost_class_coeff`` applies — so the file and the tool cannot diverge. A
+    field-validator raising ``ValueError`` surfaces as a pydantic ``ValidationError`` that
+    :meth:`InventoryDoc.parse` maps to :class:`InventoryError` (ADR-0115 §1, §6).
+    """
+
+    name: str
+    coeff: Decimal
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str) -> str:
+        return validate_cost_class_name(value)
+
+    @field_validator("coeff", mode="before")
+    @classmethod
+    def _check_coeff(cls, value: object) -> Decimal:
+        return parse_positive_coeff(value)
+
+
 class InventoryDoc(BaseModel):
     """The parsed ``systems.toml`` v2 document."""
 
@@ -131,6 +165,7 @@ class InventoryDoc(BaseModel):
     local_libvirt: list[LocalLibvirtInstance] = Field(default_factory=list)
     fault_inject: list[FaultInjectInstance] = Field(default_factory=list)
     build_host: list[BuildHostInstance] = Field(default_factory=list)
+    cost_class: list[CostClassEntry] = Field(default_factory=list)
 
     def _check_image_identities(self) -> None:
         seen: set[tuple[str, str, str]] = set()
@@ -176,6 +211,12 @@ class InventoryDoc(BaseModel):
             f"{names}",
         )
 
+    def _check_cost_class_uniqueness(self) -> None:
+        names = [c.name for c in self.cost_class]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise InventoryError("cost_class", "name", f"duplicate cost_class names {dupes}")
+
     @classmethod
     def parse(cls, data: dict[str, Any]) -> Self:
         """Validate ``data`` into an :class:`InventoryDoc`.
@@ -207,4 +248,5 @@ class InventoryDoc(BaseModel):
         doc._check_base_image_refs()
         doc._check_instance_name_uniqueness()
         doc._check_remote_libvirt_singleton()
+        doc._check_cost_class_uniqueness()
         return doc

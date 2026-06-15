@@ -195,14 +195,23 @@ def validate_against_resource(selector: Selector, resource: Resource) -> None:
 
 
 def _resource_cap(resource: Resource, key: str) -> int:
-    """Read a non-negative integer capability ceiling; fail closed on anything invalid."""
+    """Read a non-negative integer capability ceiling; fail closed on anything invalid.
+
+    A missing/invalid ceiling is a property of the **host registration**, not the caller's
+    request — the message says so, so the failure is not misread as a bad ``vcpus`` input (the
+    reported six-attempt hunt).
+    """
     value = resource.capabilities.get(key)
     # bool is an int subclass — reject it so `True` is not read as a ceiling of 1.
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        label = resource.name or str(resource.id)
         raise CategorizedError(
-            f"resource {resource.id} has no valid {key!r} capability",
+            f"host {label} advertises no {key} size ceiling; this is a host-registration gap, "
+            f"not a problem with your request. Re-register the host with a {key} value "
+            "(remote-libvirt/fault-inject declare it in systems.toml or resources.register_*; "
+            "local-libvirt gets it from discovery).",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"resource_id": str(resource.id), "key": key, "value": repr(value)},
+            details={"resource_id": str(resource.id), "resource_name": resource.name, "key": key},
         )
     return value
 

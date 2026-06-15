@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -44,6 +45,8 @@ def _doc(**overrides: Any) -> dict[str, Any]:
                 "base_image": "base",
                 "cost_class": "remote",
                 "concurrent_allocation_cap": 1,
+                "vcpus": 8,
+                "memory_mb": 16384,
                 "shapes": ["small"],
             }
         ],
@@ -59,6 +62,27 @@ def test_wellformed_parses() -> None:
     assert src.volume == "base.qcow2"
     assert doc.image[0].visibility is ImageVisibility.PUBLIC
     assert doc.remote_libvirt[0].base_image == "base"
+
+
+def test_remote_libvirt_requires_size_ceiling() -> None:
+    # vcpus/memory_mb are the admission ≤-resource-caps ceiling; remote-libvirt is config-owned,
+    # so omitting either is a hard parse error (no host without a grantable ceiling).
+    for missing in ("vcpus", "memory_mb"):
+        d = _doc()
+        del d["remote_libvirt"][0][missing]
+        with pytest.raises(InventoryError):
+            InventoryDoc.parse(d)
+
+
+def test_remote_libvirt_size_ceiling_must_be_positive() -> None:
+    # gt=0 matches the resources.register_* schema: a non-positive ceiling (e.g. a `vcpus = 0`
+    # typo) is rejected at config load, not silently admitted into a host that then rejects every
+    # allocation with a misleading "exceeds ceiling 0".
+    for bad_field in ("vcpus", "memory_mb"):
+        d = _doc()
+        d["remote_libvirt"][0][bad_field] = 0
+        with pytest.raises(InventoryError):
+            InventoryDoc.parse(d)
 
 
 def test_empty_document_parses() -> None:
@@ -383,3 +407,46 @@ def test_duplicate_instance_name_error_preserves_kind_and_field() -> None:
         assert exc.field == "name"
     else:  # pragma: no cover - parse must raise
         pytest.fail("expected InventoryError")
+
+
+def test_cost_class_block_parses() -> None:
+    d = _doc(cost_class=[{"name": "premium", "coeff": 2.5}])
+    doc = InventoryDoc.parse(d)
+    assert doc.cost_class[0].name == "premium"
+    assert doc.cost_class[0].coeff == Decimal("2.5")
+
+
+def test_cost_class_coeff_uses_decimal_string_construction() -> None:
+    # A TOML float 0.1 must land as Decimal("0.1"), not the binary-float expansion.
+    doc = InventoryDoc.parse(_doc(cost_class=[{"name": "c", "coeff": 0.1}]))
+    assert doc.cost_class[0].coeff == Decimal("0.1")
+
+
+def test_cost_class_absent_defaults_empty() -> None:
+    assert InventoryDoc.parse(_doc()).cost_class == []
+
+
+@pytest.mark.parametrize("bad", ["", "   "])
+def test_cost_class_blank_name_rejected(bad: str) -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(_doc(cost_class=[{"name": bad, "coeff": 1.0}]))
+
+
+@pytest.mark.parametrize("bad", [0, -1, "0", "-2"])
+def test_cost_class_non_positive_coeff_rejected(bad: object) -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(_doc(cost_class=[{"name": "c", "coeff": bad}]))
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf"])
+def test_cost_class_non_finite_coeff_rejected(bad: str) -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(_doc(cost_class=[{"name": "c", "coeff": bad}]))
+
+
+def test_duplicate_cost_class_name_rejected() -> None:
+    d = _doc(cost_class=[{"name": "dup", "coeff": 1.0}, {"name": "dup", "coeff": 2.0}])
+    with pytest.raises(InventoryError) as excinfo:
+        InventoryDoc.parse(d)
+    assert excinfo.value.entry == "cost_class"
+    assert excinfo.value.field == "name"

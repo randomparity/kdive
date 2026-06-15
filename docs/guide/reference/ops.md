@@ -19,6 +19,12 @@ distinctly).
 | `provider` | `any` | no | Diagnose one named registered provider; omit for all registered. |
 | `with_egress` | `boolean` | no | Opt into the heavy guest_egress probe: provisions a short-lived guest on the target provider and execs a presigned request to object-store from inside it. Audited distinctly; off by default. |
 
+## `ops.export_cost_classes`
+
+`implemented` · `read-only`
+
+Export the cost-class coefficient table as a systems.toml fragment. Operator.
+
 ## `ops.force_release`
 
 `implemented` · `destructive`

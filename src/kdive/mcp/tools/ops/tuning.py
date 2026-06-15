@@ -19,7 +19,7 @@ role gets an ``authorization_denied`` envelope (the denial is audited iff the ca
 
 from __future__ import annotations
 
-from decimal import Decimal, DecimalException, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
@@ -28,6 +28,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.domain.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.log import bind_context
@@ -43,8 +44,11 @@ if TYPE_CHECKING:
 
 _COEFF_OBJECT_ID = "cost_class_coefficient"
 _CAPACITY_OBJECT_ID = "host_capacity"
+_EXPORT_OBJECT_ID = "cost_class_export"
 _SET_COEFF_TOOL = "ops.set_cost_class_coeff"
 _SET_CAPACITY_TOOL = "ops.set_host_capacity"
+_EXPORT_TOOL = "ops.export_cost_classes"
+_EXPORT_SCOPE = "all-cost-classes"
 
 
 async def set_cost_class_coeff(
@@ -78,6 +82,33 @@ async def set_cost_class_coeff(
             "ok",
             suggested_next_actions=["accounting.estimate", "allocations.request"],
             data={"cost_class": cost_class, "coeff": str(parsed)},
+        )
+
+
+async def export_cost_classes(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
+    """Serialize the live ``cost_class_coefficients`` table to a ``[[cost_class]]`` fragment.
+
+    Read-only (``PLATFORM_OPERATOR``; audited as a platform read). Returns a deterministic,
+    name-sorted TOML fragment so a break-glass override can be captured back into
+    ``systems.toml`` (override → export → commit → reconcile re-asserts from the file). It
+    returns text and does **not** write any file. Reliable only for an **ops-owned** class
+    (one not yet in the file); an override on an already-declared class is transient and may
+    be re-asserted by the reconciler before the export runs (ADR-0115 §5).
+    """
+    with bind_context(principal=ctx.principal):
+        try:
+            require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
+        except AuthorizationError:
+            await audit_platform_denial(pool, ctx, tool=_EXPORT_TOOL, scope=_EXPORT_SCOPE)
+            return _denied(_EXPORT_OBJECT_ID, _EXPORT_TOOL)
+        async with pool.connection() as conn:
+            rows = await _all_coefficients(conn)
+            await _audit_read(conn, ctx)
+        return ToolResponse.success(
+            _EXPORT_OBJECT_ID,
+            "ok",
+            suggested_next_actions=[_EXPORT_TOOL],
+            data={"toml": _render_toml(rows)},
         )
 
 
@@ -132,37 +163,27 @@ async def set_host_capacity(
 
 
 def _validate_cost_class(cost_class: str) -> None:
-    """Reject a blank cost class (fail closed); an empty key would seed unreachable junk."""
-    if not cost_class.strip():
+    """Reject a blank cost class (fail closed); delegates to the shared rule (ADR-0115 §1)."""
+    try:
+        validate_cost_class_name(cost_class)
+    except ValueError as exc:
         raise CategorizedError(
-            "cost_class must be a non-blank string",
+            str(exc),
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"field": "cost_class", "value": cost_class},
-        )
+        ) from None
 
 
 def _parse_positive_coeff(value: object) -> Decimal:
-    """Parse ``value`` into a finite, positive coefficient (fail closed).
-
-    A coefficient is a price multiplier; ``0`` or negative would price work as free or as a
-    budget credit, so both are rejected as ``configuration_error`` (the same fail-closed
-    discipline ``domain/cost.py`` applies to the row).
-    """
+    """Parse ``value`` into a finite, positive coefficient (the shared rule; ADR-0115 §1)."""
     try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, DecimalException, ValueError, TypeError):
+        return parse_positive_coeff(value)
+    except ValueError as exc:
         raise CategorizedError(
-            f"coeff {value!r} is not a number",
+            str(exc),
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"field": "coeff", "value": str(value)},
         ) from None
-    if not parsed.is_finite() or parsed <= 0:
-        raise CategorizedError(
-            f"coeff {value!r} must be a finite number > 0",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"field": "coeff", "value": str(value)},
-        )
-    return parsed
 
 
 def _parse_cap(value: int) -> int:
@@ -237,6 +258,38 @@ async def _audit_applied(
     )
 
 
+async def _all_coefficients(conn: AsyncConnection) -> list[tuple[str, Decimal]]:
+    """Read every ``(cost_class, coeff)`` row, name-sorted for a deterministic export."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT cost_class, coeff FROM cost_class_coefficients ORDER BY cost_class"
+        )
+        return [(name, Decimal(coeff)) for name, coeff in await cur.fetchall()]
+
+
+def _render_toml(rows: list[tuple[str, Decimal]]) -> str:
+    """Render rows as ``[[cost_class]]`` blocks; coeff is a quoted string (exact round-trip)."""
+    blocks = [f'[[cost_class]]\nname = "{name}"\ncoeff = "{coeff}"\n' for name, coeff in rows]
+    return "\n".join(blocks)
+
+
+async def _audit_read(conn: AsyncConnection, ctx: RequestContext) -> None:
+    """Audit the platform read to ``platform_audit_log`` (no row mutated)."""
+    async with conn.transaction():
+        await audit.record_platform(
+            conn,
+            principal=ctx.principal,
+            agent_session=ctx.agent_session,
+            event=audit.PlatformAuditEvent(
+                tool=_EXPORT_TOOL,
+                scope=_EXPORT_SCOPE,
+                args={"tool": _EXPORT_TOOL},
+                platform_role=held_platform_roles(ctx),
+                actor=actor_for(ctx),
+            ),
+        )
+
+
 def _denied(object_id: str, tool: str) -> ToolResponse:
     return ToolResponse.failure(
         object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
@@ -283,3 +336,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             resource_id=resource_id,
             concurrent_allocation_cap=concurrent_allocation_cap,
         )
+
+    @app.tool(
+        name=_EXPORT_TOOL,
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def ops_export_cost_classes() -> ToolResponse:
+        """Export the cost-class coefficient table as a systems.toml fragment. Operator."""
+        return await export_cost_classes(pool, current_context())

@@ -13,6 +13,14 @@
 #
 # Load it with `kdive reconcile-systems` (or the deploy `migrate` step, or the reconciler loop).
 # Path is `KDIVE_SYSTEMS_TOML` (default `./systems.toml`; in k8s a mounted ConfigMap).
+#
+# WHOLE-FILE PARSE, ALL-OR-NOTHING: a present-but-malformed file fails the ENTIRE reconcile pass
+# for that iteration — images, cost-class coefficients, resources, and build_hosts are all skipped
+# until the file is corrected (the reconciler logs it and retries next pass). One bad block stalls
+# every entity, not just its own. UPGRADE NOTE: `[[remote_libvirt]]` now REQUIRES `vcpus` and
+# `memory_mb` (the billable size ceiling; admission denies any allocation on a host without it).
+# A pre-existing file whose `[[remote_libvirt]]` block omits them parsed before but now fails to
+# load — add both fields when upgrading.
 # Operational/secret config stays in the `KDIVE_*` env registry (ADR-0087) — this file holds
 # secret *refs* (filenames the SecretRegistry resolves), never secret material.
 #
@@ -98,8 +106,16 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # base_image = "fedora-kdive-remote-base-43"   # -> an [[image]] name
 # cost_class = "remote"
 # concurrent_allocation_cap = 1
+# vcpus and memory_mb are the host's billable size ceiling. Admission's <=-resource-caps
+# check reads them off the Resource, so a remote host without them is un-grantable
+# (allocations.request -> configuration_error). Remote-libvirt is config-owned, so the file
+# is the only place this ceiling comes from; both are required.
+# vcpus = 16
+# memory_mb = 65536
 # shapes = ["small", "medium", "large", "max"]
 
+# Local-libvirt does NOT declare vcpus/memory_mb here: its size ceiling is probed by discovery
+# and merged onto the row, so this overlay only sets name/cost_class/concurrent_allocation_cap.
 # [[local_libvirt]]
 # name = "workstation"
 # host_uri = "qemu:///system"
@@ -144,6 +160,24 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # base_image_volume = "fedora-kdive-remote-base-43.qcow2"
 # workspace_root = "/var/lib/kdive/build"
 # max_concurrent = 2
+
+# ---------------------------------------------------------------------------------------------
+# COST CLASSES — reconciled into cost_class_coefficients (ADR-0115).
+#
+# Each [[cost_class]] declares the pricing coefficient for a cost_class label a host carries
+# (the [[remote_libvirt]]/[[fault_inject]] `cost_class` field). The file is authoritative:
+# a declared coefficient is re-asserted on every reconcile, so an `ops.set_cost_class_coeff`
+# override on a declared class is transient — edit this file to change a declared price.
+#
+# A host whose cost_class has no matching block here (and is not a seeded `local`/`remote`)
+# is admitted into the catalog but DENIED every allocation (configuration_error). Declare the
+# block to price it. `coeff` may be a number (2.5) or a quoted decimal string ("2.5"); the
+# latter is what `ops.export_cost_classes` emits for an exact round-trip.
+# ---------------------------------------------------------------------------------------------
+
+[[cost_class]]
+name = "remote"
+coeff = "1.0"
 
 # ---------------------------------------------------------------------------------------------
 # COVERAGE-CAMPAIGN KNOBS — read ONLY by scripts/coverage_campaign/systems.py, ignored by the

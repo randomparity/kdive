@@ -38,6 +38,8 @@ client_key_ref = "remote-clientkey.pem"  # pragma: allowlist secret
 ca_cert_ref = "remote-ca.pem"
 base_image = "fedora-kdive-remote-base-43"
 cost_class = "remote"
+vcpus = 16
+memory_mb = 65536
 
 [campaign.workstation]
 fault_inject = true

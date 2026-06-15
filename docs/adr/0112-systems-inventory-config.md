@@ -136,3 +136,11 @@ hosts (removes the singleton `KDIVE_REMOTE_LIBVIRT_*` env vars); (4) runtime mut
 - New operational dependency: the reconciler must be able to read `systems.toml` (a ConfigMap in
   k8s). A parse/validate failure fails fast **without half-applying** and is **isolated** from the
   sibling reconciler repairs, which keep running against the last-good state.
+- The inventory parse is **whole-document, all-or-nothing**: one malformed block fails the entire
+  inventory pass for that iteration (images, cost-class coefficients, resources, and build_hosts
+  are all skipped, not just the offending block). This is the deliberate "no half-applied file"
+  contract above, but it means a required-field addition is a breaking config change on upgrade:
+  `[[remote_libvirt]]` requiring `vcpus`/`memory_mb` (the billable size ceiling — admission denies
+  any allocation on a host that lacks it; ADR-0007 §2) means a pre-existing file whose
+  `[[remote_libvirt]]` block omits them parsed before but now stalls the whole pass until both
+  fields are added. The `systems.toml.example` header carries the operator-facing upgrade note.

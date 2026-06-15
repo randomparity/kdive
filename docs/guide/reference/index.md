@@ -60,6 +60,7 @@
 | [`jobs.list`](jobs.md#jobslist) | `implemented` |
 | [`jobs.wait`](jobs.md#jobswait) | `implemented` |
 | [`ops.diagnostics`](ops.md#opsdiagnostics) | `implemented` |
+| [`ops.export_cost_classes`](ops.md#opsexport_cost_classes) | `implemented` |
 | [`ops.force_release`](ops.md#opsforce_release) | `implemented` |
 | [`ops.force_teardown`](ops.md#opsforce_teardown) | `implemented` |
 | [`ops.jobs_list`](ops.md#opsjobs_list) | `implemented` |

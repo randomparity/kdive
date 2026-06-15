@@ -1,8 +1,11 @@
 """The reconciler's inventory pass: reconcile ``systems.toml`` into the catalog (ADR-0112).
 
 This is the loop trigger of the M2.6 inventory engine (#391/#393). Each pass reads the path in
-``KDIVE_SYSTEMS_TOML`` (default ``./systems.toml``) and reconciles it into ``image_catalog``
-via :func:`kdive.inventory.reconcile_images.reconcile_images`, into ``resources`` via
+``KDIVE_SYSTEMS_TOML`` (default ``./systems.toml``) and reconciles it through the one ordered
+chain (:func:`kdive.inventory.reconcile_pipeline.reconcile_all`): into ``image_catalog`` via
+:func:`kdive.inventory.reconcile_images.reconcile_images`, prices ``cost_class_coefficients``
+via :func:`kdive.inventory.reconcile_coefficients.reconcile_coefficients` run **before** the
+resource pass (ADR-0115), into ``resources`` via
 :func:`kdive.inventory.reconcile_resources.reconcile_resources` (the fault-inject/remote
 config overlay that supplies the sizing #385 lacked), and into ``build_hosts`` via
 :func:`kdive.inventory.reconcile_build_hosts.reconcile_build_hosts`.
@@ -41,9 +44,8 @@ from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile import ReconcileDiff
-from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
-from kdive.inventory.reconcile_images import ImageHeadStore, reconcile_images
-from kdive.inventory.reconcile_resources import reconcile_resources
+from kdive.inventory.reconcile_images import ImageHeadStore
+from kdive.inventory.reconcile_pipeline import reconcile_all
 
 _log = logging.getLogger(__name__)
 
@@ -105,10 +107,8 @@ class InventoryReconcilePass:
         doc = self._load(path)
         if doc is None:
             return 0
-        images = await reconcile_images(conn, doc, store)
-        resources = await reconcile_resources(conn, doc)
-        build_hosts = await reconcile_build_hosts(conn, doc)
-        return _changes(images) + _changes(resources) + _changes(build_hosts)
+        diff = await reconcile_all(conn, doc, store)
+        return _changes(diff)
 
     def _load(self, path: Path) -> InventoryDoc | None:
         """Return the parsed doc (from cache when the file is unchanged), or ``None`` if absent.
