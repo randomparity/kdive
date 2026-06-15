@@ -23,8 +23,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
+from kdive.reconciler.cleanup.runtime_resources import reap_expired_runtime_resources
 from kdive.reconciler.loop import reconcile_once
-from kdive.reconciler.runtime_resources import reap_expired_runtime_resources
 from tests.reconciler.conftest import connect, run_repair
 
 
@@ -309,7 +309,7 @@ def test_reap_candidate_failure_logs_exception_context(
         async with await connect(migrated_url) as seed:
             await _seed_resource(seed, managed_by="runtime", lease_seconds=-60, host_uri=host)
 
-        caplog.set_level(logging.WARNING, logger="kdive.reconciler.runtime_resources")
+        caplog.set_level(logging.WARNING, logger="kdive.reconciler.cleanup.runtime_resources")
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(
                 pool, lambda c: reap_expired_runtime_resources(c, _RaisingProbe())

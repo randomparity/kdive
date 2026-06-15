@@ -50,7 +50,7 @@ from kdive.mcp.tools.ops.images._common import (
     UPLOAD_TOOL,
 )
 from kdive.mcp.tools.ops.images.build_publish import BUILD_TOOL, PUBLISH_TOOL
-from kdive.reconciler.images import ImageMtime
+from kdive.reconciler.cleanup.images import ImageMtime
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.images.upload import PrivateUploadRequest, UploadObjectStore

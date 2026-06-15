@@ -19,8 +19,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.build_hosts import reclaim_orphan_build_host_leases
 from kdive.reconciler.loop import reconcile_once
+from kdive.reconciler.repairs.build_hosts import reclaim_orphan_build_host_leases
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
 
 # ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ def test_reclaim_spec_registered_in_loop() -> None:
 from datetime import timedelta  # noqa: E402
 
 from kdive.providers.infra.reaping import BuildVm  # noqa: E402
-from kdive.reconciler.build_hosts import reap_orphan_build_vms  # noqa: E402
+from kdive.reconciler.repairs.build_hosts import reap_orphan_build_vms  # noqa: E402
 
 
 class _FakeBuildVmReaper:
@@ -354,7 +354,7 @@ def test_build_vm_reap_runs_before_lease_reclaim_in_repair_plan() -> None:
 import pytest  # noqa: E402
 
 from kdive.db.build_hosts import BuildHost  # noqa: E402
-from kdive.reconciler.build_hosts import probe_build_host_reachability  # noqa: E402
+from kdive.reconciler.repairs.build_hosts import probe_build_host_reachability  # noqa: E402
 
 
 class _FakeProber:
@@ -508,7 +508,7 @@ def test_probe_one_host_failure_does_not_stop_others(
         prober = _FakeProber({"b-flip": False}, raise_for=frozenset({"a-boom"}))
 
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            caplog.set_level("WARNING", logger="kdive.reconciler.build_hosts")
+            caplog.set_level("WARNING", logger="kdive.reconciler.repairs.build_hosts")
             count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
 
         assert count == 1
@@ -538,7 +538,7 @@ def test_probe_logs_probed_and_changed_counts(
         prober = _FakeProber({"ok-host": True, "down-host": False})
 
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            with caplog.at_level("INFO", logger="kdive.reconciler.build_hosts"):
+            with caplog.at_level("INFO", logger="kdive.reconciler.repairs.build_hosts"):
                 count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
 
         assert count == 1

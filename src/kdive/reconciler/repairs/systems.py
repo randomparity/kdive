@@ -13,7 +13,7 @@ from kdive.domain.models import JobKind
 from kdive.domain.state import AllocationState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload
-from kdive.reconciler.allocations import SYSTEM_RECONCILER_PRINCIPAL
+from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL
 
 _log = logging.getLogger(__name__)
 

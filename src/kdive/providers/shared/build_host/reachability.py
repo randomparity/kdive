@@ -7,7 +7,7 @@ host without importing the build plane — mirroring :mod:`kdive.providers.core.
 
 ``SshBuildHostProber`` is the only implementation; it is wired unconditionally in the
 reconciler (SSH build hosts are independent of the remote-libvirt provider). The repair
-that drives it lives in :mod:`kdive.reconciler.build_hosts`.
+that drives it lives in :mod:`kdive.reconciler.repairs.build_hosts`.
 """
 
 from __future__ import annotations

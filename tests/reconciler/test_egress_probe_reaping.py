@@ -14,7 +14,7 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.reconciler.provider_reaping import repair_leaked_probe_guests
+from kdive.reconciler.cleanup.provider_reaping import repair_leaked_probe_guests
 from tests.reconciler.conftest import connect, run_repair
 
 

@@ -53,7 +53,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ImageVisibility, Sensitivity
 from kdive.images.catalog import resolve_rootfs
 from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
-from kdive.reconciler.images import (
+from kdive.reconciler.cleanup.images import (
     repair_dangling_images,
     repair_leaked_images,
 )

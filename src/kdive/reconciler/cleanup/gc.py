@@ -9,8 +9,8 @@ from psycopg import AsyncConnection
 
 from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import DumpVolumeReaper
-from kdive.reconciler.allocations import has_active_capture_job
-from kdive.reconciler.systems import gone_system_state_values
+from kdive.reconciler.repairs.allocations import has_active_capture_job
+from kdive.reconciler.repairs.systems import gone_system_state_values
 
 _log = logging.getLogger(__name__)
 

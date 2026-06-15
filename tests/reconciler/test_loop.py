@@ -15,20 +15,20 @@ from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.state import AllocationState, DebugSessionState, RunState, SystemState
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
-from kdive.reconciler.debug_sessions import repair_dead_sessions
-from kdive.reconciler.gc import (
+from kdive.reconciler.cleanup.gc import (
     reap_console_collectors,
     reap_orphaned_dump_volumes,
 )
-from kdive.reconciler.jobs import repair_abandoned_jobs
+from kdive.reconciler.cleanup.provider_reaping import repair_leaked_domains
 from kdive.reconciler.loop import (
     ReconcileConfig,
     Reconciler,
     ReconcileReport,
     reconcile_once,
 )
-from kdive.reconciler.provider_reaping import repair_leaked_domains
-from kdive.reconciler.systems import repair_orphaned_systems
+from kdive.reconciler.repairs.debug_sessions import repair_dead_sessions
+from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
+from kdive.reconciler.repairs.systems import repair_orphaned_systems
 from tests.reconciler.conftest import (
     FakeReaper,
     FakeResetter,

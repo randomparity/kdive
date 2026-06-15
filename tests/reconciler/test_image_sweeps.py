@@ -28,13 +28,13 @@ import psycopg
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.reconciler.images import (
+from kdive.reconciler.cleanup.images import (
     ImageMtime,
 )
-from kdive.reconciler.images import (
+from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
 )
-from kdive.reconciler.images import (
+from kdive.reconciler.cleanup.images import (
     repair_leaked_images as _repair_leaked_images,
 )
 from kdive.services.images.retention import (

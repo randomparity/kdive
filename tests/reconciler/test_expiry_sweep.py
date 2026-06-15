@@ -23,9 +23,9 @@ from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES, SYSTEMS
 from kdive.domain.models import Allocation, Budget, Resource, ResourceKind, System
 from kdive.domain.state import AllocationState, ResourceStatus, SystemState
 from kdive.providers.infra.reaping import NullReaper
-from kdive.reconciler import allocations as allocation_repairs
 from kdive.reconciler import loop
-from kdive.reconciler.gc import gc_idempotency_keys
+from kdive.reconciler.cleanup.gc import gc_idempotency_keys
+from kdive.reconciler.repairs import allocations as allocation_repairs
 from kdive.services.accounting import ledger as accounting
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, run_repair

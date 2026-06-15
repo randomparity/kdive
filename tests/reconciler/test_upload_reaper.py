@@ -26,13 +26,13 @@ from kdive.artifacts.uploads import ManifestEntry
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope
 from kdive.domain.state import RunState
-from kdive.reconciler.uploads import (
+from kdive.reconciler.cleanup.uploads import (
     owner_pre_finalize as _owner_pre_finalize,
 )
-from kdive.reconciler.uploads import (
+from kdive.reconciler.cleanup.uploads import (
     reap_one_owner as _reap_one_owner,
 )
-from kdive.reconciler.uploads import (
+from kdive.reconciler.cleanup.uploads import (
     repair_abandoned_uploads as _repair_abandoned_uploads,
 )
 from tests.mcp.systems_support import (
