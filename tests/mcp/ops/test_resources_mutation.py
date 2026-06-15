@@ -238,7 +238,7 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
             resources_registrar, "register_fault_inject_resource", fake_register_fault_inject
         )
         app = FastMCP("resources-registrar-test")
-        resources_registrar.register_mutation_tools(app, pool)
+        resources_registrar.register(app, pool)
         tools = {tool.name: tool for tool in await app.list_tools()}
 
         assert set(tools) == {

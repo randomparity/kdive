@@ -130,7 +130,7 @@ def _register_ops_resource_host_tools(
 def _register_ops_resource_mutation_tools(
     app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
-    ops_resource_mutation_tools.register_mutation_tools(app, pool)
+    ops_resource_mutation_tools.register(app, pool)
 
 
 def _register_systems_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:

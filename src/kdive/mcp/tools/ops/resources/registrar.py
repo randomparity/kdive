@@ -33,7 +33,7 @@ from kdive.mcp.tools.ops.resources.register import (
 from kdive.mcp.tools.ops.resources.renew import renew_resource
 
 
-def register_mutation_tools(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the runtime resource-mutation tools on ``app``, bound to ``pool``."""
 
     @app.tool(
@@ -195,4 +195,4 @@ def register_mutation_tools(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await renew_resource(pool, current_context(), resource_id=resource_id)
 
 
-__all__ = ["register_mutation_tools"]
+__all__ = ["register"]

@@ -107,9 +107,7 @@ def test_resource_host_and_mutation_tools_have_separate_plane_registrars(
         calls.append("mutation")
 
     monkeypatch.setattr(app_module.ops_resource_host_tools, "register", _register_host)
-    monkeypatch.setattr(
-        app_module.ops_resource_mutation_tools, "register_mutation_tools", _register_mutation
-    )
+    monkeypatch.setattr(app_module.ops_resource_mutation_tools, "register", _register_mutation)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     assembly = cast(app_module.AppAssembly, object())
 
