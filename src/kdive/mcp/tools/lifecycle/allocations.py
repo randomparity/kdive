@@ -18,6 +18,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastmcp import FastMCP
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
@@ -28,7 +29,7 @@ from kdive.domain.models import Allocation, Resource
 from kdive.domain.state import AllocationState
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByKind
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
@@ -55,12 +56,45 @@ from kdive.services.allocation.renew import RenewOutcome, renew
 _log = logging.getLogger(__name__)
 
 
-def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:
+async def _queue_position(conn: AsyncConnection, alloc: Allocation) -> int:
+    """1-based FIFO rank of a ``requested`` allocation among same-target queued rows.
+
+    Same target is the by-id ``requested_resource_id`` or the by-kind ``requested_kind``,
+    ordered ``(created_at, id)`` — the order ``promote_pending`` selects on. An **advisory
+    hint, not an ETA**: promotion is work-conserving and per-host (ADR-0118), so a younger
+    request on a free host can be promoted ahead of an older one on a busy host.
+    """
+    if alloc.requested_resource_id is not None:
+        query = (
+            "SELECT count(*) FROM allocations WHERE state = 'requested' "
+            "AND requested_resource_id = %(target)s "
+            "AND (created_at, id) < (%(created_at)s, %(id)s)"
+        )
+        target: object = alloc.requested_resource_id
+    elif alloc.requested_kind is not None:
+        query = (
+            "SELECT count(*) FROM allocations WHERE state = 'requested' "
+            "AND requested_kind = %(target)s "
+            "AND (created_at, id) < (%(created_at)s, %(id)s)"
+        )
+        target = alloc.requested_kind.value
+    else:
+        return 1  # A requested row with no target is degenerate; report "next in line".
+    async with conn.cursor() as cur:
+        await cur.execute(query, {"target": target, "created_at": alloc.created_at, "id": alloc.id})
+        row = await cur.fetchone()
+    ahead = int(row[0]) if row is not None else 0
+    return ahead + 1
+
+
+def _envelope_for_allocation(
+    alloc: Allocation, *, queue_position: int | None = None
+) -> ToolResponse:
     """Render an allocation; ``failed`` becomes a failure envelope (ADR-0023 §6).
 
-    A failed allocation reports its persisted ``failure_category`` (ADR-0118) — so a
-    waiting agent learns ``queue_timeout`` vs ``allocation_denied`` — falling back to
-    ``infrastructure_failure`` when the cause was not recorded.
+    A failed allocation reports its persisted ``failure_category`` (ADR-0118), falling back
+    to ``infrastructure_failure`` when unset. A ``requested`` row carries the advisory
+    ``queue_position``/``queue_ahead`` hint when one was computed (ADR-0118).
     """
     if alloc.state is AllocationState.FAILED:
         category = alloc.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -69,11 +103,15 @@ def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:
             category,
             data={"current_status": alloc.state.value},
         )
+    data: dict[str, JsonValue] = {"project": alloc.project}
+    if alloc.state is AllocationState.REQUESTED and queue_position is not None:
+        data["queue_position"] = queue_position
+        data["queue_ahead"] = queue_position - 1
     return ToolResponse.success(
         str(alloc.id),
         alloc.state.value,
         suggested_next_actions=["allocations.get", "allocations.release"],
-        data={"project": alloc.project},
+        data=data,
     )
 
 
@@ -196,11 +234,15 @@ async def get_allocation(
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             alloc = await ALLOCATIONS.get(conn, uid)
-        # A row in an ungranted project is indistinguishable from not-found (no leak).
-        if alloc is None or alloc.project not in ctx.projects:
-            return _not_found(allocation_id)
-        require_role(ctx, alloc.project, Role.VIEWER)
-        return _envelope_for_allocation(alloc)
+            if alloc is None or alloc.project not in ctx.projects:
+                return _not_found(allocation_id)
+            require_role(ctx, alloc.project, Role.VIEWER)
+            position = (
+                await _queue_position(conn, alloc)
+                if alloc.state is AllocationState.REQUESTED
+                else None
+            )
+        return _envelope_for_allocation(alloc, queue_position=position)
 
 
 async def release_allocation(
