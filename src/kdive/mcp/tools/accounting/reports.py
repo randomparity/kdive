@@ -313,7 +313,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
         ] = None,
     ) -> ToolResponse:
-        """Multi-project usage rollup over caller-authorized projects. Requires viewer."""
         return await report_granted_set(
             pool, current_context(), projects=projects, group_by=group_by, window=window
         )
@@ -333,5 +332,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
         ] = None,
     ) -> ToolResponse:
-        """Multi-project usage rollup over every project. Requires platform auditor."""
         return await report_all_projects(pool, current_context(), group_by=group_by, window=window)

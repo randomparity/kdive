@@ -342,7 +342,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior grant."),
         ] = None,
     ) -> ToolResponse:
-        """Admit an allocation against project budget, quota, and host cap. Requires operator."""
         try:
             payload = AllocationRequestPayload.model_validate(request)
         except ValueError:
@@ -363,7 +362,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_get(
         allocation_id: Annotated[str, Field(description="The Allocation to render.")],
     ) -> ToolResponse:
-        """Render an Allocation; failed maps to a failure envelope. Requires viewer."""
         return await get_allocation(pool, current_context(), allocation_id)
 
     @app.tool(
@@ -374,7 +372,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_release(
         allocation_id: Annotated[str, Field(description="The Allocation to release.")],
     ) -> ToolResponse:
-        """Drive an Allocation to released and reconcile its spend. Requires operator."""
         return await release_allocation(pool, current_context(), allocation_id)
 
     @app.tool(
@@ -393,7 +390,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior renewal."),
         ] = None,
     ) -> ToolResponse:
-        """Extend an Allocation's lease window, re-charged and re-checked. Requires operator."""
         return await renew_allocation(
             pool,
             current_context(),
@@ -413,5 +409,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
-        """List the newest Allocations for a project. Requires viewer."""
         return await list_allocations(pool, current_context(), project=project, limit=limit)

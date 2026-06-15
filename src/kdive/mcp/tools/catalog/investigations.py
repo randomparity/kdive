@@ -376,7 +376,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Optional external tracker refs (each with tracker, id, url)."),
         ] = None,
     ) -> ToolResponse:
-        """Mint an Investigation in the open state for the caller's project. Requires operator."""
         return await open_investigation(
             pool, current_context(), project=project, title=title, external_refs=external_refs
         )
@@ -389,7 +388,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def investigations_get(
         investigation_id: Annotated[str, Field(description="The Investigation to render.")],
     ) -> ToolResponse:
-        """Render an Investigation by ID. Requires viewer."""
         return await get_investigation(pool, current_context(), investigation_id)
 
     @app.tool(
@@ -402,7 +400,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="The Investigation to drive to closed.")
         ],
     ) -> ToolResponse:
-        """Close an Investigation (idempotent on closed; errors on abandoned). Requires operator."""
         return await close_investigation(pool, current_context(), investigation_id)
 
     @app.tool(
@@ -417,7 +414,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="External ref to upsert, with tracker, id, and url."),
         ],
     ) -> ToolResponse:
-        """Upsert an external ref onto an Investigation by (tracker, id) key. Requires operator."""
         return await link_external_ref(pool, current_context(), investigation_id, ref)
 
     @app.tool(
@@ -434,5 +430,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Ref to remove; only tracker and id are used as the key."),
         ],
     ) -> ToolResponse:
-        """Remove an external ref from an Investigation by (tracker, id) key. Requires operator."""
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)
