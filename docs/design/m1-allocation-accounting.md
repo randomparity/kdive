@@ -317,7 +317,7 @@ object id, `status`, `suggested_next_actions`, references — never dumps.
 
 M1 stays on the typed `ProviderRuntime` seam accepted in
 [0063](../adr/0063-typed-provider-runtime.md). Startup wires concrete local-libvirt ports in
-`src/kdive/providers/composition.py`; MCP tools and worker handlers consume those typed ports
+`src/kdive/providers/assembly/composition.py`; MCP tools and worker handlers consume those typed ports
 directly. Capability-dispatch language from [0009](../adr/0009-capability-provider-dispatch.md)
 is historical ADR context, not the active M1 extension path.
 

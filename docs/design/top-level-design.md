@@ -214,7 +214,7 @@ concrete provider, enabled only by explicit profiles for test and failure-path c
 Runtime selection flows through `ProviderResolver`, so tools and handlers resolve the
 provider attached to the Allocation or System instead of assuming local-libvirt. Future
 providers still extend this typed runtime seam. Composition is centralized in
-`src/kdive/providers/composition.py`.
+`src/kdive/providers/assembly/composition.py`.
 
 The capability registry from ADR-0009/ADR-0022 is historical design context, not an
 in-tree prototype or the live dispatch path. It is not used for job routing,
