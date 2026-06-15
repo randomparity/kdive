@@ -23,7 +23,8 @@ host-derived PCIe labels are not returned (only the portable `bdf/vendor/device`
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Annotated, Any, NamedTuple
+from typing import TYPE_CHECKING, Annotated, NamedTuple
+from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
@@ -81,7 +82,15 @@ def _resolve_cap(resource: Resource) -> int | None:
     return cap
 
 
-async def _occupancy_by_resource(conn: AsyncConnection) -> dict[Any, int]:
+def _resource_id(value: object) -> UUID:
+    if isinstance(value, UUID):
+        return value
+    if isinstance(value, str):
+        return UUID(value)
+    raise TypeError(f"expected UUID resource_id from allocations query, got {type(value).__name__}")
+
+
+async def _occupancy_by_resource(conn: AsyncConnection) -> dict[UUID, int]:
     """Fleet-wide occupancy count per host (one query, no N+1).
 
     Counts the host's allocations in the shared :data:`OCCUPYING` predicate
@@ -95,7 +104,7 @@ async def _occupancy_by_resource(conn: AsyncConnection) -> dict[Any, int]:
             (OCCUPYING_VALUES,),
         )
         rows = await cur.fetchall()
-    return {row[0]: int(row[1]) for row in rows}
+    return {_resource_id(row[0]): int(row[1]) for row in rows}
 
 
 async def _queue_depth(conn: AsyncConnection) -> dict[str, JsonValue]:
@@ -127,7 +136,7 @@ async def _queue_depth(conn: AsyncConnection) -> dict[str, JsonValue]:
     return {"total": total, "by_kind": by_kind, "by_id": by_id}
 
 
-async def _claims_by_resource(conn: AsyncConnection) -> dict[Any, list[PCIeClaim]]:
+async def _claims_by_resource(conn: AsyncConnection) -> dict[UUID, list[PCIeClaim]]:
     """Fleet-wide active PCIe claims grouped by host (one query, no per-host N+1).
 
     Unions the ``pcie_claim`` snapshots of every allocation in the shared non-terminal
@@ -135,7 +144,7 @@ async def _claims_by_resource(conn: AsyncConnection) -> dict[Any, list[PCIeClaim
     ``resource_id``. Availability is an unlocked read — unlike the in-lock claim path, it
     needs the whole fleet's occupancy in one round-trip, not one host under a held lock.
     """
-    by_resource: dict[Any, list[PCIeClaim]] = {}
+    by_resource: dict[UUID, list[PCIeClaim]] = {}
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT resource_id, pcie_claim FROM allocations "
@@ -144,7 +153,7 @@ async def _claims_by_resource(conn: AsyncConnection) -> dict[Any, list[PCIeClaim
         )
         rows = await cur.fetchall()
     for resource_id, held_list in rows:
-        bucket = by_resource.setdefault(resource_id, [])
+        bucket = by_resource.setdefault(_resource_id(resource_id), [])
         for held in held_list:
             bucket.append(
                 PCIeClaim(bdf=held["bdf"], vendor_id=held["vendor_id"], device_id=held["device_id"])
