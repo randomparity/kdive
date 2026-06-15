@@ -127,12 +127,6 @@ def _register_ops_resource_host_tools(
     ops_resource_host_tools.register(app, pool)
 
 
-def _register_ops_resource_mutation_tools(
-    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
-) -> None:
-    ops_resource_mutation_tools.register(app, pool)
-
-
 def _register_systems_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
     systems_tools.register(app, pool, resolver=assembly.resolver)
 
@@ -250,7 +244,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_reconcile_tools,
     _register_reconcile_systems_tools,
     _register_ops_resource_host_tools,
-    _register_ops_resource_mutation_tools,
+    _pool_only_plane_registrar(ops_resource_mutation_tools.register),
     _pool_only_plane_registrar(allocations.register),
     _pool_only_plane_registrar(ops_breakglass_tools.register),
     _register_systems_tools,

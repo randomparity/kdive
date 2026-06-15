@@ -95,28 +95,25 @@ def test_build_app_registers_jobs_tools() -> None:
     asyncio.run(_run())
 
 
-def test_resource_host_and_mutation_tools_have_separate_plane_registrars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    def _register_host(_app: FastMCP, _pool: AsyncConnectionPool) -> None:
-        calls.append("host")
-
-    def _register_mutation(_app: FastMCP, _pool: AsyncConnectionPool) -> None:
-        calls.append("mutation")
-
-    monkeypatch.setattr(app_module.ops_resource_host_tools, "register", _register_host)
-    monkeypatch.setattr(app_module.ops_resource_mutation_tools, "register", _register_mutation)
+def test_resource_host_and_mutation_tools_are_registered() -> None:
     pool = AsyncConnectionPool("postgresql://unused", open=False)
-    assembly = cast(app_module.AppAssembly, object())
 
-    assert app_module._register_ops_resource_host_tools in app_module._PLANE_REGISTRARS
-    assert app_module._register_ops_resource_mutation_tools in app_module._PLANE_REGISTRARS
-    app_module._register_ops_resource_host_tools(FastMCP(name="host"), pool, assembly)
-    app_module._register_ops_resource_mutation_tools(FastMCP(name="mutation"), pool, assembly)
+    async def _run() -> None:
+        app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+        names = {tool.name for tool in await app.list_tools()}
+        assert {
+            "resources.set_status",
+            "resources.cordon",
+            "resources.uncordon",
+            "resources.drain",
+            "resources.register_remote_libvirt",
+            "resources.register_local_libvirt",
+            "resources.register_fault_inject",
+            "resources.deregister",
+            "resources.renew",
+        } <= names
 
-    assert calls == ["host", "mutation"]
+    asyncio.run(_run())
 
 
 def test_build_app_produces_a_streamable_http_asgi_app() -> None:
