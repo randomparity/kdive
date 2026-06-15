@@ -418,3 +418,27 @@ def test_resource_kind_has_exactly_the_three_provider_kinds() -> None:
     assert ResourceKind.FAULT_INJECT.value == "fault-inject"
     assert ResourceKind.REMOTE_LIBVIRT.value == "remote-libvirt"
     assert {k.value for k in ResourceKind} == {"local-libvirt", "fault-inject", "remote-libvirt"}
+
+
+def test_allocation_failure_category_coerces_and_defaults() -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from kdive.domain.errors import ErrorCategory
+    from kdive.domain.models import Allocation
+    from kdive.domain.state import AllocationState
+
+    base = {
+        "id": uuid4(),
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+        "principal": "p",
+        "agent_session": "s",
+        "project": "proj",
+        "state": AllocationState.FAILED.value,
+    }
+    # Defaults to None when the column is absent/NULL.
+    assert Allocation.model_validate(base).failure_category is None
+    # A wire string coerces to the enum.
+    got = Allocation.model_validate({**base, "failure_category": "queue_timeout"})
+    assert got.failure_category is ErrorCategory.QUEUE_TIMEOUT
