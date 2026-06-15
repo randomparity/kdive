@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from psycopg import AsyncConnection, Connection
 from psycopg.rows import dict_row
@@ -43,14 +43,25 @@ class BuildConfigEntry:
             )
 
 
-def parse_build_config_row(row: dict[str, Any]) -> BuildConfigEntry:
+def parse_build_config_row(row: Mapping[str, object]) -> BuildConfigEntry:
     """Map a DB row to a catalog entry."""
     return BuildConfigEntry(
-        name=row["name"],
-        object_key=row["object_key"],
-        sha256=row["sha256"],
-        description=row["description"],
+        name=_required_str(row, "name"),
+        object_key=_required_str(row, "object_key"),
+        sha256=_required_str(row, "sha256"),
+        description=_required_str(row, "description"),
     )
+
+
+def _required_str(row: Mapping[str, object], key: str) -> str:
+    value = row.get(key)
+    if not isinstance(value, str):
+        raise CategorizedError(
+            "build-config catalog row has an invalid column",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"column": key},
+        )
+    return value
 
 
 async def get_build_config(conn: AsyncConnection, name: str) -> BuildConfigEntry | None:
