@@ -219,7 +219,9 @@ class ConsoleHostingLoop:
         try:
             collector = self._collector_factory(system_id)
         except Exception:  # noqa: BLE001 - one System's open failure must not stop hosting
-            _log.warning("opening console collector for %s failed; will retry", system_id)
+            _log.warning(
+                "opening console collector for %s failed; will retry", system_id, exc_info=True
+            )
             return
         self._registry.add(collector)
         if self._pump_runner is not None:
