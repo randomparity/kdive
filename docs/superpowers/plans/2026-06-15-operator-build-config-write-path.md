@@ -405,7 +405,7 @@ Add `source` to `read_build_config`'s success `data` (`"source": entry.source`).
 import re
 from kdive.build_configs.catalog import get_build_config, upsert_operator_build_config
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.config import require as _config_require  # or: import kdive.config as config
+import kdive.config as config
 from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.domain.models import Sensitivity
 from kdive.artifacts.storage import ArtifactWriteRequest
@@ -498,7 +498,11 @@ Expected: PASS. (`test_active_tools_have_a_covering_test` needs the map entry; `
 from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
 from tests.store.conftest import minio_store  # noqa: F401
 ```
-and re-export via `__all__`. Build the `_PLATFORM_ADMIN` `RequestContext` literal as in Step 1. Drive two concurrent `set_build_config` calls for the same name with different content via `asyncio.gather` over a pool (each `set` opens its own pool connection + lock); after both settle, read the row and fetch the object, asserting `entry.sha256 == hashlib.sha256(object_bytes).hexdigest()` (the per-name lock keeps row and object in agreement). Add a seed/set interleave: `asyncio.gather(seed_build_configs(conn_a, store), set_build_config(pool, store, _PLATFORM_ADMIN, name="kdump", ...))` on the same name and assert the same row/object agreement and that the surviving row's `source` is consistent with its bytes.
+and re-export via `__all__`. Build the `_PLATFORM_ADMIN` `RequestContext` literal as in Step 1. Two tests:
+
+1. **Writer/writer (genuinely concurrent — both `set` calls use `asyncio.to_thread` for the PUT):** drive two `set_build_config` calls for the same name with different content via `asyncio.gather` over a pool (each `set` opens its own pool connection + lock); after both settle, read the row and fetch the object, asserting `entry.sha256 == hashlib.sha256(object_bytes).hexdigest()` (the per-name lock keeps row and object in agreement; a last-writer wins, but never a torn row/object pair).
+
+2. **Lock-contention probe (DB-level, deterministic — do NOT use `asyncio.gather` with the seed, whose `put_artifact` is synchronous and blocks the loop, making an in-process interleave degenerate):** open connection A, begin a transaction, `SELECT pg_advisory_xact_lock(...)` via `advisory_xact_lock(conn_a, LockScope.BUILD_CONFIG, "kdump")`; from connection B assert `SELECT pg_try_advisory_xact_lock(<same key>)` returns `False` while A holds it, then commit A and assert B can now acquire it. Derive the key with the same `_lock_key(LockScope.BUILD_CONFIG, "kdump")` the helper uses (import it from `kdive.db.locks`) so the probe targets the exact lock `set`/seed take. This proves the serialization mechanism directly without relying on event-loop interleaving. Note in a comment that a single Python process cannot reproduce true cross-process contention; the probe asserts the lock key + blocking semantics that the two server processes rely on.
 
 Run: `uv run python -m pytest tests/adversarial/test_build_config_concurrency.py -q`
 Expected: PASS (skips if Docker/MinIO absent).
