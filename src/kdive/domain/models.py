@@ -248,6 +248,10 @@ class Allocation(DomainModel, _Attribution):
     queued row holds only queue position: ``resource_id`` is ``None``, no reserve or lease is
     held, ``pcie_claim`` is empty, and the original request inputs are persisted for
     promotion re-admission.
+
+    ``failure_category`` records the terminal cause of a ``failed`` allocation (ADR-0118):
+    ``allocation_denied`` for a budget terminate, ``queue_timeout`` for a reap; ``None`` for
+    any other failed path (the response envelope then falls back to ``infrastructure_failure``).
     """
 
     resource_id: UUID | None = None
@@ -264,6 +268,7 @@ class Allocation(DomainModel, _Attribution):
     requested_pcie_specs: list[str] = Field(default_factory=list)
     requested_kind: ResourceKind | None = None
     requested_resource_id: UUID | None = None
+    failure_category: ErrorCategory | None = None
 
 
 class System(DomainModel, _Attribution):

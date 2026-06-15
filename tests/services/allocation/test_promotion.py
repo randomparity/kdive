@@ -134,6 +134,13 @@ async def _state(conn: psycopg.AsyncConnection, alloc_id: UUID) -> str:
     return str(row[0])
 
 
+async def _failure_category(conn: psycopg.AsyncConnection, alloc_id: UUID) -> str | None:
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT failure_category FROM allocations WHERE id = %s", (alloc_id,))
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
 def test_promote_pending_grants_after_capacity_frees(migrated_url: str) -> None:
     async def _run() -> tuple[int, str, tuple[str, str] | None]:
         async with _conn(migrated_url) as conn:
@@ -254,3 +261,34 @@ def test_reap_queue_timeouts_fails_only_aged_requested_rows(migrated_url: str) -
         return reaped, aged_state, young_state
 
     assert asyncio.run(_run()) == (1, "failed", "requested")
+
+
+def test_budget_terminate_writes_allocation_denied_failure_category(migrated_url: str) -> None:
+    async def _run() -> str | None:
+        async with _conn(migrated_url) as conn:
+            resource = await _resource(conn)
+            await _quota(conn)
+            holder = await _granted(conn, resource.id)
+            queued = await _queued(conn, resource)
+            await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASING)
+            await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASED)
+            await conn.execute("UPDATE budgets SET limit_kcu = 0 WHERE project = 'proj'")
+
+            await promote_pending(conn)
+            return await _failure_category(conn, queued)
+
+    assert asyncio.run(_run()) == "allocation_denied"
+
+
+def test_reap_queue_timeouts_writes_queue_timeout_failure_category(migrated_url: str) -> None:
+    async def _run() -> str | None:
+        async with _conn(migrated_url) as conn:
+            resource = await _resource(conn)
+            await _quota(conn)
+            await _granted(conn, resource.id)
+            aged = await _queued(conn, resource, created_offset=timedelta(hours=-48))
+
+            await reap_queue_timeouts(conn, timedelta(hours=24))
+            return await _failure_category(conn, aged)
+
+    assert asyncio.run(_run()) == "queue_timeout"

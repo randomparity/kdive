@@ -41,6 +41,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "allocations.release": ("tests/mcp/lifecycle/test_allocations_reconcile.py",),
     "allocations.renew": ("tests/mcp/lifecycle/test_allocations_renew.py",),
     "allocations.request": ("tests/mcp/lifecycle/test_allocations_tools.py",),
+    "allocations.wait": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "artifacts.create_run_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
     "artifacts.create_system_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
     "artifacts.get": ("tests/mcp/catalog/test_artifacts_tools.py",),

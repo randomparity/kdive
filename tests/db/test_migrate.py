@@ -24,6 +24,7 @@ CHECK_ENUMS = [
     ("jobs_kind_check", models.JobKind),
     ("runs_failure_category_check", errors.ErrorCategory),
     ("jobs_error_category_check", errors.ErrorCategory),
+    ("allocations_failure_category_check", errors.ErrorCategory),
     ("image_visibility_check", models.ImageVisibility),
     ("image_state_check", models.ImageState),
     ("image_catalog_managed_by_check", models.ManagedBy),
@@ -125,6 +126,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0030",
         "0031",
         "0032",
+        "0033",
     ]
     assert second == []
 
@@ -561,6 +563,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0030",
         "0031",
         "0032",
+        "0033",
     ]
 
 

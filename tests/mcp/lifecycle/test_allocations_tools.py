@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Allocation, Budget, Quota
+from kdive.domain.models import Allocation, Budget, Quota, ResourceKind
 from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
@@ -157,6 +157,33 @@ async def _seed_alloc(pool: AsyncConnectionPool, resource_id: str, state: Alloca
                 project="proj",
                 resource_id=UUID(resource_id) if placed else None,
                 state=state,
+            ),
+        )
+    return str(alloc.id)
+
+
+async def _seed_requested(
+    pool: AsyncConnectionPool,
+    *,
+    created_at: datetime,
+    kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    resource_id: str | None = None,
+) -> str:
+    # by-id when resource_id is given (requested_resource_id set, requested_kind NULL);
+    # otherwise by-kind (requested_kind set). Mirrors how a real queued row is shaped.
+    async with pool.connection() as conn:
+        alloc = await ALLOCATIONS.insert(
+            conn,
+            Allocation(
+                id=uuid4(),
+                created_at=created_at,
+                updated_at=created_at,
+                principal="user-1",
+                project="proj",
+                resource_id=None,
+                state=AllocationState.REQUESTED,
+                requested_kind=None if resource_id is not None else kind,
+                requested_resource_id=UUID(resource_id) if resource_id is not None else None,
             ),
         )
     return str(alloc.id)
@@ -658,6 +685,168 @@ def test_over_host_shape_fails_closed_with_no_durable_write(migrated_url: str) -
                 for table in ("allocations", "ledger", "audit_log"):
                     row = await (await conn.execute(f"SELECT count(*) FROM {table}")).fetchone()
                     assert row is not None and row[0] == 0, table
+
+    asyncio.run(_run())
+
+
+def test_failed_envelope_reports_failure_category_else_infrastructure() -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from kdive.domain.errors import ErrorCategory
+    from kdive.domain.models import Allocation
+    from kdive.domain.state import AllocationState
+    from kdive.mcp.tools.lifecycle.allocations import _envelope_for_allocation
+
+    _id = uuid4()
+    _now = datetime.now(UTC)
+
+    def _make(failure_category: ErrorCategory | None = None) -> Allocation:
+        return Allocation(
+            id=_id,
+            created_at=_now,
+            updated_at=_now,
+            principal="p",
+            agent_session="s",
+            project="proj",
+            state=AllocationState.FAILED,
+            failure_category=failure_category,
+        )
+
+    # NULL cause -> the unchanged infrastructure_failure fallback.
+    null_cause = _envelope_for_allocation(_make())
+    assert null_cause.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE.value
+    assert null_cause.retryable is True
+    # A budget terminate -> allocation_denied, terminal.
+    budget = _envelope_for_allocation(_make(ErrorCategory.ALLOCATION_DENIED))
+    assert budget.error_category == ErrorCategory.ALLOCATION_DENIED.value
+    assert budget.retryable is False
+    # A queue timeout -> queue_timeout, retryable.
+    timed_out = _envelope_for_allocation(_make(ErrorCategory.QUEUE_TIMEOUT))
+    assert timed_out.error_category == ErrorCategory.QUEUE_TIMEOUT.value
+    assert timed_out.retryable is True
+
+
+def test_queue_position_counts_same_kind_fifo(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            a = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            b = await _seed_requested(pool, created_at=datetime(2026, 1, 2, tzinfo=UTC))
+            c = await _seed_requested(pool, created_at=datetime(2026, 1, 3, tzinfo=UTC))
+            ra = await alloc_tools.get_allocation(pool, _ctx(), a)
+            rb = await alloc_tools.get_allocation(pool, _ctx(), b)
+            rc = await alloc_tools.get_allocation(pool, _ctx(), c)
+        assert (ra.data["queue_position"], ra.data["queue_ahead"]) == (1, 0)
+        assert (rb.data["queue_position"], rb.data["queue_ahead"]) == (2, 1)
+        assert (rc.data["queue_position"], rc.data["queue_ahead"]) == (3, 2)
+
+    asyncio.run(_run())
+
+
+def test_queue_position_scoped_to_same_target(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool)  # a real resource id to be the by-id target
+            # Two by-kind rows ahead in time, plus one later by-id row. The by-id row's
+            # position counts only same-requested_resource_id rows, so the by-kind rows
+            # (requested_resource_id NULL) do not shift it.
+            await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            await _seed_requested(pool, created_at=datetime(2026, 1, 2, tzinfo=UTC))
+            by_id = await _seed_requested(
+                pool, created_at=datetime(2026, 1, 3, tzinfo=UTC), resource_id=res
+            )
+            r = await alloc_tools.get_allocation(pool, _ctx(), by_id)
+        assert r.data["queue_position"] == 1
+
+    asyncio.run(_run())
+
+
+def test_queue_position_absent_on_granted_and_in_list(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool)
+            granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
+            rg = await alloc_tools.get_allocation(pool, _ctx(), granted)
+            rl = await alloc_tools.list_allocations(pool, _ctx(), project="proj", limit=50)
+        assert "queue_position" not in rg.data
+        assert all("queue_position" not in item.data for item in rl.items)
+
+    asyncio.run(_run())
+
+
+async def _force_grant(pool: AsyncConnectionPool, alloc_id: str, resource_id: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE allocations SET state = 'granted', resource_id = %s WHERE id = %s",
+            (UUID(resource_id), UUID(alloc_id)),
+        )
+
+
+def test_wait_returns_immediately_when_already_settled(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool)
+            granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), granted, timeout_s=5.0)
+        assert resp.status == "granted"
+
+    asyncio.run(_run())
+
+
+def test_wait_returns_on_requested_to_granted_transition(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool)
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            flipped: dict[str, bool] = {"done": False}
+
+            async def _sleep(_delay: float) -> None:
+                if not flipped["done"]:
+                    await _force_grant(pool, queued, res)
+                    flipped["done"] = True
+                await asyncio.sleep(0)
+
+            resp = await alloc_tools.wait_allocation(
+                pool, _ctx(), queued, timeout_s=5.0, sleep=_sleep
+            )
+        assert resp.status == "granted"
+
+    asyncio.run(_run())
+
+
+def test_wait_returns_current_envelope_at_deadline_while_requested(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), queued, timeout_s=0.0)
+        assert resp.status == "requested"
+        assert resp.data["queue_position"] == 1
+
+    asyncio.run(_run())
+
+
+def test_wait_not_found_for_absent_and_malformed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            absent = await alloc_tools.wait_allocation(pool, _ctx(), str(uuid4()), timeout_s=0.0)
+            bad = await alloc_tools.wait_allocation(pool, _ctx(), "not-a-uuid", timeout_s=0.0)
+        assert absent.error_category == "not_found"
+        assert bad.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("timeout_s", [float("nan"), float("inf"), float("-inf")])
+def test_wait_non_finite_timeout_is_configuration_error(
+    migrated_url: str, timeout_s: float
+) -> None:
+    # Mirrors jobs.wait's guard: a non-finite timeout never becomes a deadline.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            queued = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
+            resp = await alloc_tools.wait_allocation(pool, _ctx(), queued, timeout_s=timeout_s)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
 
