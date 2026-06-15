@@ -59,22 +59,37 @@ coeff = 2.5
 
 - New `CostClassEntry` Pydantic model in `inventory/model.py`: `name: str`, `coeff: Decimal`.
 - `InventoryDoc` gains `cost_class: list[CostClassEntry] = Field(default_factory=list)`.
-- **Validation calls the existing `ops` functions so the two surfaces cannot diverge** — the
-  model validator invokes the same `tuning._validate_cost_class` / `tuning._parse_positive_coeff`
-  helpers, not a re-implementation (shared code, not parallel rules):
-  - `name` — non-blank (`tuning._validate_cost_class`).
-  - `coeff` — finite and `> 0` (`tuning._parse_positive_coeff`). Parsed via `Decimal(str(value))`
-    so a TOML float does not introduce binary-float drift.
+- **Validation shares one rule module with `ops` so the two surfaces cannot diverge.** Extract the
+  two rules into a neutral helper module (e.g. `domain/cost_class_rules.py`) that **both**
+  `mcp/tools/ops/tuning.py` and the inventory validator import — *not* `inventory/` importing
+  `mcp/tools/ops` (inventory imports nothing from `mcp/` today; that core→tool edge is a layering
+  inversion). `ops.set_cost_class_coeff` is refactored to call the shared helper too, so the rule
+  has a single home:
+  - `name` — non-blank.
+  - `coeff` — finite and `> 0`, parsed via `Decimal(str(value))` so a TOML float does not introduce
+    binary-float drift.
   - Duplicate `name` within the file → `InventoryError` (mirrors the existing instance-name
     uniqueness check in `InventoryDoc`).
+  - **Error surface:** the shared helper raises a neutral `ValueError`; the inventory validator
+    maps it to `InventoryError` (§6) and `ops` maps it to its `CategorizedError`
+    (`CONFIGURATION_ERROR`) — each layer keeps its own error type, the *rule* is shared.
 
 ### 2. Reconcile pass
 
-A new single-purpose module `inventory/reconcile_coefficients.py`, invoked from the reconciler
-loop's inventory pass (`reconciler/inventory.py::run`, which today chains
-`reconcile_images` → `reconcile_resources` → `reconcile_build_hosts`), **ordered before
-`reconcile_resources`**. That loop is where config resources are reconciled, so coefficients live
-beside them; the CLI `reconcile_systems` is images-only today and is left unchanged.
+A new single-purpose module `inventory/reconcile_coefficients.py`, run **before
+`reconcile_resources` in every orchestrator that reconciles resources**. There are **two** such
+orchestrators today, and both chain `reconcile_resources` independently — the pass must be added to
+both or the on-demand path silently skips pricing:
+
+- the background reconciler loop, `reconciler/inventory.py::run` (`reconcile_images` →
+  `reconcile_resources` → `reconcile_build_hosts`);
+- the on-demand MCP tool `ops.reconcile_systems` (`mcp/tools/ops/reconcile_systems.py`, which calls
+  `reconcile_images`/`reconcile_resources`/`reconcile_build_hosts` directly, **not** via
+  `InventoryReconcilePass.run`).
+
+To keep the two in lockstep (and stop a future third caller from reintroducing the gap), extract
+the ordered chain into one shared helper both call. The images-only CLI `reconcile_systems`
+(`inventory/reconcile_cli.py`) does not reconcile resources and needs no change.
 
 - Upserts each declared `(name, coeff)`:
   `INSERT INTO cost_class_coefficients (cost_class, coeff) VALUES (%s, %s)
@@ -97,13 +112,19 @@ beside them; the CLI `reconcile_systems` is images-only today and is left unchan
 
 ### 3. Loud drift flagging
 
-Before each upsert the pass reads the existing `coeff`. If it differs from the file value the
-pass records a `warned` entry in the `ReconcileDiff` **and** writes an audit line
-(`coefficient 'X' re-asserted from file: was Y, now Z`). The one behavior that *changes* a
-value — reconcile clobbering a runtime `ops.set_cost_class_coeff` override on a *declared*
-class — is therefore never silent. An idempotent re-run (file == DB) produces no drift entry and
-no audit noise. (The complementary no-op — removing a `[[cost_class]]` block, which changes
-nothing per §2 — is silent by design and must not be read as an effective delete.)
+Drift detection is **atomic with the write**, so a concurrent `ops.set_cost_class_coeff` cannot
+slip between a read and the clobber and be reverted unlogged. Each row is handled in one
+transaction that takes the prior value under a row lock — `SELECT coeff … FOR UPDATE`, then the
+upsert (or a `FOR UPDATE` CTE feeding the insert). (Plain `INSERT … ON CONFLICT DO UPDATE …
+RETURNING` returns the *post*-update row, not the prior `coeff`, so it cannot supply the "was Y"
+on its own — the locked read is required.) When the prior value differs from the file value, the
+pass records a `warned` entry in
+the `ReconcileDiff` **and** writes an audit line (`coefficient 'X' re-asserted from file: was Y,
+now Z`). So the one behavior that *changes* a value — reconcile clobbering a runtime override on a
+*declared* class — is never silent, even under a concurrent `ops` write. An idempotent re-run
+(file == DB) produces no drift entry and no audit noise. (The complementary no-op — removing a
+`[[cost_class]]` block, which changes nothing per §2 — is silent by design and must not be read as
+an effective delete.)
 
 ### 4. Authority model
 
@@ -132,9 +153,10 @@ New MCP tool `ops.export_cost_classes` (`PLATFORM_OPERATOR`, `readOnlyHint`):
 
 ### 6. Error handling
 
-- Invalid `name`/`coeff` in the file → `InventoryError` at load. Consistent with all other
-  inventory validation, the whole reconcile of that file aborts (fail fast, clear message).
-- Coefficient parsing uses `Decimal(str(value))`, the same path the `ops` tool already trusts.
+- Invalid `name`/`coeff` in the file → `InventoryError` at load (the inventory validator maps the
+  shared rule module's neutral `ValueError`; see §1). Consistent with all other inventory
+  validation, the whole reconcile of that file aborts (fail fast, clear message).
+- Coefficient parsing uses `Decimal(str(value))`, the shared rule the `ops` tool also calls.
 
 ## Testing
 
@@ -143,19 +165,27 @@ New MCP tool `ops.export_cost_classes` (`PLATFORM_OPERATOR`, `readOnlyHint`):
 - **Reconcile:** upserts declared coeffs; the file value overrides an existing row; drift is
   flagged in the diff and audited; undeclared / `ops`-set / migration-floor classes are
   untouched; removal does **not** delete; re-run is idempotent (no drift).
-- **Finding-1 regression:** declare a host with a custom `cost_class` plus its `[[cost_class]]`,
-  reconcile once, assert `allocations.request` is admitted (no `configuration_error{cost_class}`).
+- **Finding-1 regression (both orchestrators):** declare a host with a custom `cost_class` plus its
+  `[[cost_class]]`; reconcile via **each** resource-reconciling path — the background loop **and**
+  `ops.reconcile_systems` — and assert the coefficient row exists, ordering held (coeff before the
+  host), and `allocations.request` is admitted (no `configuration_error{cost_class}`). The
+  on-demand path is the one that silently skipped pricing before §2's fix, so it must be pinned.
 - **Export tool:** returns deterministic TOML for the current table; enforces the
   `PLATFORM_OPERATOR` gate; round-trips (export → parse → reconcile → identical table).
-- **Floor:** an absent file leaves `local`/`remote` priced and grantable.
+- **Floor:** an absent file leaves `local`/`remote` *priced* — the seed rows survive, so
+  `resolve_coeff` succeeds for them (grantability also needs a host/budget/quota and is covered by
+  the admission tests, not this one).
+- **Drift under concurrency:** a coefficient upsert racing a concurrent `ops.set_cost_class_coeff`
+  on the same class still emits the `warned`/audit drift record (atomic detection, §3).
 
 ## Components and their boundaries
 
 | Unit | Does | Depends on |
 |------|------|-----------|
-| `CostClassEntry` / `InventoryDoc.cost_class` | Parse + validate the `[[cost_class]]` declarations | Pydantic, the shared name/coeff rules |
+| `CostClassEntry` / `InventoryDoc.cost_class` | Parse + validate the `[[cost_class]]` declarations | Pydantic, `domain/cost_class_rules` (shared with `ops`) |
+| `domain/cost_class_rules` | The one name/coeff rule, shared by the inventory validator and `ops` | — (neutral; raises `ValueError`) |
 | `inventory/reconcile_coefficients.py` | Upsert declared coeffs file-authoritatively; flag drift; never delete | `cost_class_coefficients` table, `ReconcileDiff`, audit |
-| reconcile orchestrator | Run the coefficient pass **before** resources | the two passes |
+| coefficient-before-resources ordering helper | Shared by the loop and `ops.reconcile_systems` so both price before creating hosts | `reconcile_coefficients`, `reconcile_resources` |
 | `ops.export_cost_classes` | Serialize the live table to `[[cost_class]]` TOML | `cost_class_coefficients`, platform auth |
 
 ## Consequences
