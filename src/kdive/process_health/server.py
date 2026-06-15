@@ -41,15 +41,15 @@ def build_oidc_ping() -> Callable[[], Awaitable[None]]:
         CategorizedError: ``KDIVE_OIDC_JWKS_URI`` is unset
             (:attr:`ErrorCategory.CONFIGURATION_ERROR`); surfaced as a failed check.
     """
-    jwks_uri = config.get(OIDC_JWKS_URI)
-    if not jwks_uri:
-        raise CategorizedError(
-            f"{OIDC_JWKS_URI.name} is not set; cannot probe OIDC readiness",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"variable": OIDC_JWKS_URI.name, "suggest": OIDC_JWKS_URI.suggest},
-        )
 
     async def ping() -> None:
+        jwks_uri = config.get(OIDC_JWKS_URI)
+        if not jwks_uri:
+            raise CategorizedError(
+                f"{OIDC_JWKS_URI.name} is not set; cannot probe OIDC readiness",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"variable": OIDC_JWKS_URI.name, "suggest": OIDC_JWKS_URI.suggest},
+            )
         async with httpx.AsyncClient(timeout=_OIDC_PROBE_TIMEOUT) as client:
             response = await client.get(jwks_uri)
             response.raise_for_status()
