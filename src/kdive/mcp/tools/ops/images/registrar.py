@@ -83,7 +83,6 @@ def register(
             Field(description="Public image build request."),
         ],
     ) -> ToolResponse:
-        """Enqueue an IMAGE_BUILD job for a public base image. Requires platform_operator."""
         return await build(pool, current_context(), payload=request.to_payload())
 
     @app.tool(name=PUBLISH_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
@@ -93,7 +92,6 @@ def register(
             Field(description="Public image publish request."),
         ],
     ) -> ToolResponse:
-        """Promote a built image to a public catalog row. Requires platform_operator."""
         return await publish(pool, current_context(), payload=request.to_payload())
 
     @app.tool(name=UPLOAD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
@@ -103,7 +101,6 @@ def register(
             Field(description="Private image upload registration request."),
         ],
     ) -> ToolResponse:
-        """Register a quarantined upload as a project-private image. Requires operator."""
         return await upload(pool, current_context(), upload_store, request)
 
     @app.tool(
@@ -112,7 +109,6 @@ def register(
     async def images_delete(
         image_id: Annotated[str, Field(description="The private catalog image to delete.")],
     ) -> ToolResponse:
-        """Delete a project-private image. Requires operator on the image's project."""
         return await delete(pool, current_context(), image_id=image_id)
 
     @app.tool(name=PRUNE_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"})
@@ -121,7 +117,6 @@ def register(
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
-        """Force the expired-private-image sweep now. Requires platform_admin."""
         if image_store is None:
             return _config_error(PRUNE_OBJECT_ID)
         return await prune_expired(pool, current_context(), reason=reason, image_store=image_store)
@@ -136,7 +131,6 @@ def register(
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
-        """Re-arm a private image's expiry. Requires platform_admin."""
         return await extend(
             pool, current_context(), image_id=image_id, seconds=seconds, reason=reason
         )

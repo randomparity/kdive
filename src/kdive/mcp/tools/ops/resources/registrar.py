@@ -68,7 +68,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
-        """Register a runtime remote-libvirt resource. Requires platform_admin."""
         return await register_remote_libvirt_resource(
             pool,
             current_context(),
@@ -112,7 +111,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
-        """Register a runtime local-libvirt resource. Requires platform_admin."""
         return await register_local_libvirt_resource(
             pool,
             current_context(),
@@ -154,7 +152,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
-        """Register a runtime fault-inject resource. Requires platform_admin."""
         return await register_fault_inject_resource(
             pool,
             current_context(),
@@ -180,7 +177,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = False,
     ) -> ToolResponse:
-        """Deregister a runtime resource (force required if live). Requires platform_admin."""
         return await deregister_resource(
             pool, current_context(), resource_id=resource_id, force=force
         )
@@ -191,7 +187,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="The runtime Resource UUID whose lease to renew.")
         ],
     ) -> ToolResponse:
-        """Extend a runtime resource's lease (keyed to the id). Requires platform_admin."""
         return await renew_resource(pool, current_context(), resource_id=resource_id)
 
 

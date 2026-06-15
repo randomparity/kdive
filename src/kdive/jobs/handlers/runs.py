@@ -8,6 +8,7 @@ from typing import Any, LiteralString, NamedTuple
 from uuid import UUID
 
 from psycopg import AsyncConnection
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
@@ -185,6 +186,8 @@ async def build_handler(
     """
     restore_autocommit = False
     if not conn.autocommit:
+        if conn.pgconn.transaction_status != TransactionStatus.IDLE:
+            await conn.rollback()
         await conn.set_autocommit(True)
         restore_autocommit = True
     try:
