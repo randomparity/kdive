@@ -42,16 +42,7 @@ def transport_run_step(
     args: list[str],
     timeout_s: int = MAKE_TIMEOUT_S,
 ) -> RunStep:
-    """Return a ``RunStep`` that runs ``make -C <ws> <args...>`` over the transport.
-
-    Args:
-        t: The build transport to dispatch the command through.
-        args: Extra arguments appended after ``-C <workspace>``.
-        timeout_s: Hard deadline passed to :meth:`BuildTransport.run`.
-
-    Returns:
-        A callable ``(workspace: Path) -> int`` matching the ``RunStep`` type alias.
-    """
+    """Return a ``RunStep`` that runs ``make -C <ws> <args...>`` over the transport."""
 
     def _step(ws: Path) -> int:
         return t.run(["make", "-C", str(ws), *args], cwd=str(ws), timeout_s=timeout_s).returncode
@@ -63,37 +54,17 @@ def transport_run_make(t: BuildTransport) -> RunStep:
     """Return a ``RunStep`` for the parallel kernel build, using ``os.cpu_count()`` jobs.
 
     Mirrors ``real_run_make``'s ``-j{os.cpu_count() or 1}`` parallelism exactly.
-
-    Args:
-        t: The build transport to dispatch ``make`` through.
-
-    Returns:
-        A callable ``(workspace: Path) -> int`` matching the ``RunStep`` type alias.
     """
     return transport_run_step(t, [f"-j{os.cpu_count() or 1}"])
 
 
 def transport_run_olddefconfig(t: BuildTransport) -> RunStep:
-    """Return a ``RunStep`` for ``make olddefconfig`` over the transport.
-
-    Args:
-        t: The build transport to dispatch ``make olddefconfig`` through.
-
-    Returns:
-        A callable ``(workspace: Path) -> int`` matching the ``RunStep`` type alias.
-    """
+    """Return a ``RunStep`` for ``make olddefconfig`` over the transport."""
     return transport_run_step(t, ["olddefconfig"])
 
 
 def transport_read_config(t: BuildTransport) -> ReadConfig:
-    """Return a ``ReadConfig`` that reads ``<workspace>/.config`` via the transport.
-
-    Args:
-        t: The build transport to read from.
-
-    Returns:
-        A callable ``(workspace: Path) -> str`` matching the ``ReadConfig`` type alias.
-    """
+    """Return a ``ReadConfig`` that reads ``<workspace>/.config`` via the transport."""
 
     def _read(ws: Path) -> str:
         return t.read_text(str(ws / ".config"))
@@ -112,12 +83,6 @@ def transport_run_modules_install(t: BuildTransport) -> RunModulesInstall:
     Mirrors ``real_run_modules_install``'s argv exactly — ``make -C <ws>
     INSTALL_MOD_PATH=<mod_root> modules_install`` — staging the module tree at *mod_root* on
     the transport's host.
-
-    Args:
-        t: The build transport to dispatch ``make modules_install`` through.
-
-    Returns:
-        A callable ``(workspace: Path, mod_root: Path) -> int`` matching ``RunModulesInstall``.
     """
 
     def _step(ws: Path, mod_root: Path) -> int:
@@ -134,12 +99,6 @@ def transport_read_build_id(t: BuildTransport) -> ReadBuildId:
     file on the host, the (small) note blob is read back to the worker via ``read_bytes``, and
     :func:`parse_gnu_build_id` parses it on the worker. Only the note — never ``vmlinux`` —
     crosses the transport.
-
-    Args:
-        t: The build transport to run ``objcopy`` and read the note through.
-
-    Returns:
-        A callable ``(workspace: Path) -> str`` matching the ``ReadBuildId`` type alias.
 
     Raises:
         CategorizedError: ``BUILD_FAILURE`` if ``objcopy`` exits non-zero or the note carries
@@ -177,16 +136,6 @@ def transport_git_checkout(
     The returned callable mirrors ``real_checkout``'s logical sequence — clone, merge
     config, optional patch — but every filesystem and subprocess operation goes through
     *t* instead of the local environment.
-
-    Args:
-        t: Build transport (SSH or local) providing ``clone``, ``run``, ``read_bytes``,
-            and ``write_bytes``.
-        git_remote: Git remote URL to clone (validated by the transport's ``clone``).
-        git_ref: Git ref (tag, branch, or commit SHA) to check out.
-        secret_registry: Used to redact secrets in error details.
-
-    Returns:
-        A ``Checkout`` callable ``(run_id, profile, workspace, fragment_bytes) -> None``.
     """
 
     def _checkout(
@@ -213,12 +162,6 @@ def _transport_merge_config(
 
     Mirrors ``merge_config``'s sequence and error mapping, using transport primitives
     instead of local subprocess and filesystem calls.
-
-    Args:
-        t: The build transport.
-        fragment_bytes: Raw kernel config fragment to merge onto the base defconfig.
-        workspace: Remote workspace path (on the transport's host).
-        run_id: Run identifier for error details.
     """
     defconfig_result = t.run(
         ["make", "-C", str(workspace), "defconfig"],
@@ -251,12 +194,6 @@ def _transport_apply_patch(
     Mirrors ``apply_patch``'s silent-skip guards: the ``patch_target_paths`` extraction
     and the before/after byte comparison are shared pure helpers; only the I/O goes
     through the transport.
-
-    Args:
-        t: The build transport.
-        patch_ref: Local ref (absolute path or ``file://`` URL) to the patch file.
-        workspace: Remote workspace path (on the transport's host).
-        secret_registry: Used to redact secrets from error details.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the patch does not apply, is
