@@ -260,6 +260,11 @@ async def _terminate(
 ) -> None:
     """Transition requested → failed (a budget recheck terminate); audit, no ledger write."""
     await ALLOCATIONS.update_state(conn, alloc.id, AllocationState.FAILED)
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE allocations SET failure_category = %s WHERE id = %s",
+            (ErrorCategory.ALLOCATION_DENIED.value, alloc.id),
+        )
     await audit.record_system(
         conn,
         principal=SYSTEM_PROMOTION_PRINCIPAL,
@@ -419,6 +424,11 @@ async def _reap_one(
         if alloc is None:  # Invariant: the age check matched the row.
             return False
         await ALLOCATIONS.update_state(conn, alloc_id, AllocationState.FAILED)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "UPDATE allocations SET failure_category = %s WHERE id = %s",
+                (ErrorCategory.QUEUE_TIMEOUT.value, alloc_id),
+            )
         await audit.record_system(
             conn,
             principal=SYSTEM_PROMOTION_PRINCIPAL,
