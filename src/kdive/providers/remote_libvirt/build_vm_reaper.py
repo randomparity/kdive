@@ -28,9 +28,9 @@ from kdive.providers.remote_libvirt.lifecycle.build_vm import (
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import delete_volume
 from kdive.providers.remote_libvirt.transport import (
-    RemoteLibvirtReaperConnections,
+    RemoteLibvirtConnections,
     open_libvirt_protocol,
-    remote_libvirt_reaper_connections,
+    remote_libvirt_connections,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -83,9 +83,9 @@ class RemoteLibvirtBuildVmReaper:
         self,
         *,
         secret_registry: SecretRegistry,
-        connections: RemoteLibvirtReaperConnections[_ReaperConn] | None = None,
+        connections: RemoteLibvirtConnections[_ReaperConn] | None = None,
     ) -> None:
-        self._connections = connections or remote_libvirt_reaper_connections(
+        self._connections = connections or remote_libvirt_connections(
             secret_registry=secret_registry,
             config_factory=remote_config_from_inventory,
             open_connection=open_libvirt_reaper,

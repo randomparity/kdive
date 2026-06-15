@@ -28,6 +28,7 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import (
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import wait_for_agent
 from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected, disk_pool
+from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 
@@ -680,10 +681,13 @@ def _provisioner(
 
     kwargs: dict[str, Any] = {
         "secret_registry": SecretRegistry(),
-        "config_factory": lambda: config if config is not None else _config(),
-        "open_connection": _open,
-        "secret_backend_factory": RecordingBackend,
-        "pki_base_dir": tmp_path,
+        "connections": remote_libvirt_connections(
+            secret_registry=SecretRegistry(),
+            config_factory=lambda: config if config is not None else _config(),
+            open_connection=_open,
+            secret_backend_factory=RecordingBackend,
+            pki_base_dir=tmp_path,
+        ),
         "sleep": lambda _s: None,
         "monotonic": _ticker(),
         **overrides,

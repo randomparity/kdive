@@ -1,11 +1,11 @@
-"""Tests for shared remote-libvirt reaper connection wiring."""
+"""Tests for shared remote-libvirt connection wiring."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.transport import RemoteLibvirtReaperConnections
+from kdive.providers.remote_libvirt.transport import RemoteLibvirtConnections
 
 _CERT_REFS = TlsCertRefs(
     client_cert_ref="secret://client-cert",
@@ -29,7 +29,7 @@ def test_reaper_connections_materialize_tls_and_close_injected_connection(
         opened_uris.append(uri)
         return conn
 
-    connections = RemoteLibvirtReaperConnections(
+    connections = RemoteLibvirtConnections(
         config_factory=lambda: config,
         open_connection=open_connection,
         secret_backend_factory=_SecretBackend,

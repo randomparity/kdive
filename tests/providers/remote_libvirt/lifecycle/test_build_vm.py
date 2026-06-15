@@ -21,6 +21,7 @@ from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     render_build_domain_xml,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import recorded_gdb_port
+from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 from tests.providers.remote_libvirt.lifecycle.test_provisioning import (
@@ -56,11 +57,14 @@ def _build_vm(conn: FakeProvisionConn, tmp_path: Any) -> EphemeralBuildVm:
 
     return EphemeralBuildVm(
         secret_registry=SecretRegistry(),
-        config_factory=_config,
-        open_connection=_open,
+        connections=remote_libvirt_connections(
+            secret_registry=SecretRegistry(),
+            config_factory=_config,
+            open_connection=_open,
+            secret_backend_factory=RecordingBackend,
+            pki_base_dir=tmp_path,
+        ),
         agent_command=_agent_ok,
-        secret_backend_factory=RecordingBackend,
-        pki_base_dir=tmp_path,
         sleep=lambda _s: None,
         monotonic=_ticker(),
     )

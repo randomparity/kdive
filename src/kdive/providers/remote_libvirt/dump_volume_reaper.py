@@ -26,9 +26,9 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 from kdive.providers.infra.reaping import DumpVolume
 from kdive.providers.remote_libvirt.config import remote_config_from_inventory
 from kdive.providers.remote_libvirt.transport import (
-    RemoteLibvirtReaperConnections,
+    RemoteLibvirtConnections,
     open_libvirt_protocol,
-    remote_libvirt_reaper_connections,
+    remote_libvirt_connections,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -106,9 +106,9 @@ class RemoteLibvirtDumpVolumeReaper:
         self,
         *,
         secret_registry: SecretRegistry,
-        connections: RemoteLibvirtReaperConnections[_ReaperConn] | None = None,
+        connections: RemoteLibvirtConnections[_ReaperConn] | None = None,
     ) -> None:
-        self._connections = connections or remote_libvirt_reaper_connections(
+        self._connections = connections or remote_libvirt_connections(
             secret_registry=secret_registry,
             config_factory=remote_config_from_inventory,
             open_connection=open_libvirt_reaper,

@@ -18,9 +18,8 @@ from __future__ import annotations
 import logging
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -31,7 +30,6 @@ from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_co
 from kdive.providers.remote_libvirt.guest.agent import AgentCommand, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.provisioning import (
-    OpenProvisionConnection,
     open_libvirt_provision,
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import Monotonic, Sleep, wait_for_agent
@@ -40,10 +38,12 @@ from kdive.providers.remote_libvirt.lifecycle.storage import (
     ensure_named_overlay,
     lookup_pool,
 )
-from kdive.providers.remote_libvirt.transport import remote_connection
+from kdive.providers.remote_libvirt.transport import (
+    RemoteLibvirtConnections,
+    remote_libvirt_connections,
+)
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 __all__ = [
     "BUILD_DOMAIN_PREFIX",
@@ -148,24 +148,20 @@ class EphemeralBuildVm:
         self,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
-        open_connection: OpenProvisionConnection = open_libvirt_provision,
+        connections: RemoteLibvirtConnections[_BuildConn] | None = None,
         agent_command: AgentCommand = qemu_agent_command,
-        secret_backend_factory: Callable[[], SecretBackend] | None = None,
-        pki_base_dir: Path | None = None,
         sleep: Sleep = time.sleep,
         monotonic: Monotonic = time.monotonic,
         agent_timeout_s: float = _AGENT_TIMEOUT_S,
         agent_poll_s: float = _AGENT_POLL_S,
     ) -> None:
         self._secret_registry = secret_registry
-        self._config_factory = config_factory
-        self._open_connection = open_connection
-        self._agent_command = agent_command
-        self._secret_backend_factory = secret_backend_factory or (
-            lambda: secret_backend_from_env(registry=secret_registry)
+        self._connections = connections or remote_libvirt_connections(
+            secret_registry=secret_registry,
+            config_factory=remote_config_from_inventory,
+            open_connection=open_libvirt_provision,
         )
-        self._pki_base_dir = pki_base_dir
+        self._agent_command = agent_command
         self._sleep = sleep
         self._monotonic = monotonic
         self._agent_timeout_s = agent_timeout_s
@@ -187,7 +183,7 @@ class EphemeralBuildVm:
                 pool/base volume; ``PROVISIONING_FAILURE`` for overlay/define/start or an agent
                 that never connects; ``TRANSPORT_FAILURE`` when the TLS connect fails.
         """
-        config = self._config_factory()
+        config = self._connections.config()
         domain_name = build_domain_name(run_id)
         with self._connection(config) as conn:
             pool = lookup_pool(conn, config.storage_pool)
@@ -212,12 +208,7 @@ class EphemeralBuildVm:
                 self._teardown(conn, run_id, config)
 
     def _connection(self, config: RemoteLibvirtConfig) -> Any:
-        return remote_connection(
-            config,
-            self._secret_backend_factory(),
-            open_connection=self._open_connection,
-            pki_base_dir=self._pki_base_dir,
-        )
+        return self._connections.connection(config)
 
     def _define_and_start(
         self, conn: _BuildConn, run_id: UUID, *, config: RemoteLibvirtConfig

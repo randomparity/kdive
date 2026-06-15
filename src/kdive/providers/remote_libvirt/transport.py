@@ -178,8 +178,8 @@ def remote_connection[C: ClosableConn](
 
 
 @dataclass(frozen=True)
-class RemoteLibvirtReaperConnections[C: ClosableConn]:
-    """Shared dependency bundle for remote-libvirt reconciler reapers."""
+class RemoteLibvirtConnections[C: ClosableConn]:
+    """Shared dependency bundle for remote-libvirt provider libvirt connections."""
 
     config_factory: Callable[[], RemoteLibvirtConfig]
     open_connection: Callable[[str], C]
@@ -191,7 +191,7 @@ class RemoteLibvirtReaperConnections[C: ClosableConn]:
         return self.config_factory()
 
     def connection(self, config: RemoteLibvirtConfig) -> AbstractContextManager[C]:
-        """Open one reaper connection with the shared TLS materialization lifecycle."""
+        """Open one connection with the shared TLS materialization lifecycle."""
         return remote_connection(
             config,
             self.secret_backend_factory(),
@@ -200,19 +200,19 @@ class RemoteLibvirtReaperConnections[C: ClosableConn]:
         )
 
 
-def remote_libvirt_reaper_connections[C: ClosableConn](
+def remote_libvirt_connections[C: ClosableConn](
     *,
     secret_registry: SecretRegistry,
     config_factory: Callable[[], RemoteLibvirtConfig],
     open_connection: Callable[[str], C],
     secret_backend_factory: Callable[[], SecretBackend] | None = None,
     pki_base_dir: Path | None = None,
-) -> RemoteLibvirtReaperConnections[C]:
-    """Build the shared remote-libvirt reaper connection dependency bundle."""
+) -> RemoteLibvirtConnections[C]:
+    """Build the shared remote-libvirt connection dependency bundle."""
     secret_backend_factory = secret_backend_factory or (
         lambda: secret_backend_from_env(registry=secret_registry)
     )
-    return RemoteLibvirtReaperConnections(
+    return RemoteLibvirtConnections(
         config_factory=config_factory,
         open_connection=open_connection,
         secret_backend_factory=secret_backend_factory,

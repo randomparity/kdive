@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -57,10 +56,13 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     disk_pool as _disk_pool,
 )
-from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
+from kdive.providers.remote_libvirt.transport import (
+    RemoteLibvirtConnections,
+    open_libvirt_protocol,
+    remote_libvirt_connections,
+)
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 
 __all__ = [
     "KDIVE_METADATA_NS",
@@ -125,21 +127,17 @@ class RemoteLibvirtProvisioning:
         self,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
-        open_connection: OpenProvisionConnection = open_libvirt_provision,
-        secret_backend_factory: Callable[[], SecretBackend] | None = None,
-        pki_base_dir: Path | None = None,
+        connections: RemoteLibvirtConnections[_ProvisionConn] | None = None,
         sleep: Sleep = time.sleep,
         monotonic: Monotonic = time.monotonic,
         agent_timeout_s: float = _AGENT_TIMEOUT_S,
         agent_poll_s: float = _AGENT_POLL_S,
     ) -> None:
-        self._config_factory = config_factory
-        self._open_connection = open_connection
-        self._secret_backend_factory = secret_backend_factory or (
-            lambda: secret_backend_from_env(registry=secret_registry)
+        self._connections = connections or remote_libvirt_connections(
+            secret_registry=secret_registry,
+            config_factory=remote_config_from_inventory,
+            open_connection=open_libvirt_provision,
         )
-        self._pki_base_dir = pki_base_dir
         self._sleep = sleep
         self._monotonic = monotonic
         self._agent_timeout_s = agent_timeout_s
@@ -164,7 +162,7 @@ class RemoteLibvirtProvisioning:
         """
         section = self._remote_section(profile)
         require_concrete_sizing(profile)
-        config = self._config_factory()
+        config = self._connections.config()
         gdb_addr = config.gdb_addr
         if gdb_addr is None:
             raise CategorizedError(
@@ -224,19 +222,14 @@ class RemoteLibvirtProvisioning:
                 than the achieved post-states; ``CONFIGURATION_ERROR`` for missing
                 operator config; ``TRANSPORT_FAILURE`` when the TLS connect fails.
         """
-        config = self._config_factory()
+        config = self._connections.config()
         overlay_name = overlay_volume_name(domain_name.removeprefix(DOMAIN_PREFIX))
         with self._connection(config) as conn:
             recorded_pool = self._teardown_domain(conn, domain_name)
             delete_volume(conn, recorded_pool or config.storage_pool, overlay_name)
 
     def _connection(self, config: RemoteLibvirtConfig):  # noqa: ANN202 - contextmanager passthrough
-        return remote_connection(
-            config,
-            self._secret_backend_factory(),
-            open_connection=self._open_connection,
-            pki_base_dir=self._pki_base_dir,
-        )
+        return self._connections.connection(config)
 
     @staticmethod
     def _remote_section(profile: ProvisioningProfile) -> RemoteLibvirtProfile:
