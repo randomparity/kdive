@@ -60,6 +60,16 @@ _log = logging.getLogger(__name__)
 # fault-inject has no real host, so every fault-inject instance shares this synthetic host_uri
 # and is distinguished by its (kind, name) identity (the Phase-3 multi-instance goal).
 _FAULT_INJECT_HOST_URI = "fault-inject://local"
+_RESOURCE_UPSERT_SELECT_BY_NAME = (
+    "SELECT id, name, host_uri, cost_class, capabilities, managed_by, "
+    "lease_expires_at, owner_project, affinity_allowlist "
+    "FROM resources WHERE kind = %s AND name = %s FOR UPDATE"
+)
+_RESOURCE_UPSERT_SELECT_UNNAMED_BY_HOST = (
+    "SELECT id, name, host_uri, cost_class, capabilities, managed_by, "
+    "lease_expires_at, owner_project, affinity_allowlist "
+    "FROM resources WHERE kind = %s AND host_uri = %s AND name IS NULL FOR UPDATE"
+)
 
 
 async def reconcile_resources(conn: AsyncConnection, doc: InventoryDoc) -> ReconcileDiff:
@@ -191,20 +201,15 @@ async def _find_existing(
     cur: Any, *, kind: ResourceKind, name: str, host_uri: str, adopt_by_host: bool
 ) -> dict[str, Any] | None:
     """Resolve the existing row to upsert: by (kind, name) first, then host-adopt for remote."""
-    columns = (
-        "id, name, host_uri, cost_class, capabilities, managed_by, "
-        "lease_expires_at, owner_project, affinity_allowlist"
-    )
     await cur.execute(
-        f"SELECT {columns} FROM resources WHERE kind = %s AND name = %s FOR UPDATE",
+        _RESOURCE_UPSERT_SELECT_BY_NAME,
         (kind.value, name),
     )
     row = await cur.fetchone()
     if row is not None or not adopt_by_host:
         return row
     await cur.execute(
-        f"SELECT {columns} FROM resources WHERE kind = %s AND host_uri = %s AND name IS NULL "
-        "FOR UPDATE",
+        _RESOURCE_UPSERT_SELECT_UNNAMED_BY_HOST,
         (kind.value, host_uri),
     )
     return await cur.fetchone()
