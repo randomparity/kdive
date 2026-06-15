@@ -8,11 +8,11 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.repositories import RESOURCES
 from kdive.domain.models import Resource, ResourceKind
 from kdive.domain.pcie import MatchOutcome
 from kdive.domain.state import ResourceStatus
-from kdive.services.allocation.admission import pcie_claim
 from kdive.services.allocation.admission.affinity import project_may_place
 
 

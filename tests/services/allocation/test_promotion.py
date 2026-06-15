@@ -19,7 +19,7 @@ from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.security.audit import args_digest
-from kdive.services.allocation.admission import (
+from kdive.services.allocation.admission.core import (
     AFFINITY_DENIAL_REASON,
     BUDGET_DENIAL_REASON,
     AdmissionOutcome,

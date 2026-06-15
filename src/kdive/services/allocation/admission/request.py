@@ -14,7 +14,7 @@ from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.pcie import parse_match_spec
 from kdive.domain.shapes import ResolvedSizing
 from kdive.security.authz.context import RequestContext
-from kdive.services.allocation.admission import (
+from kdive.services.allocation.admission.core import (
     AdmissionOutcome,
     AllocationRequest,
     admit,

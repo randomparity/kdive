@@ -38,7 +38,7 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.allocation.admission import AdmissionOutcome
+from kdive.services.allocation.admission.core import AdmissionOutcome
 from kdive.services.allocation.admission.request import (
     AdmissionRequestSpec,
     RequestAdmissionResult,

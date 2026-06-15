@@ -37,7 +37,7 @@ from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import allocations as allocation_repairs
 from kdive.reconciler import loop
 from kdive.services.accounting import ledger as accounting
-from kdive.services.allocation.admission import AllocationRequest, admit
+from kdive.services.allocation.admission.core import AllocationRequest, admit
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, run_repair
 
