@@ -9,7 +9,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.shapes import ResolvedSizing, ShapeSizing
-from kdive.services.allocation.sizing import resolve_request_sizing, resolve_shape
+from kdive.services.allocation.admission.sizing import resolve_request_sizing, resolve_shape
 
 # The four shapes migration 0013 seeds (ADR-0067), with their sizing tuples.
 _SEED_SHAPES = {

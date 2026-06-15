@@ -12,8 +12,8 @@ from kdive.db.repositories import RESOURCES
 from kdive.domain.models import Resource, ResourceKind
 from kdive.domain.pcie import MatchOutcome
 from kdive.domain.state import ResourceStatus
-from kdive.services.allocation import pcie_claim
-from kdive.services.allocation.affinity import project_may_place
+from kdive.services.allocation.admission import pcie_claim
+from kdive.services.allocation.admission.affinity import project_may_place
 
 
 @dataclass(frozen=True, slots=True)

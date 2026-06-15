@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from kdive.domain.models import Resource, ResourceKind
 from kdive.domain.state import ResourceStatus
-from kdive.services.allocation.affinity import project_may_place
+from kdive.services.allocation.admission.affinity import project_may_place
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 

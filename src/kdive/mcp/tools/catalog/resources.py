@@ -29,7 +29,7 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
-from kdive.services.allocation.affinity import resource_visible_to_projects
+from kdive.services.allocation.admission.affinity import resource_visible_to_projects
 
 _log = logging.getLogger(__name__)
 

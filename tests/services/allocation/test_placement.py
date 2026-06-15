@@ -15,7 +15,10 @@ from kdive.domain.models import Allocation, Resource, ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState, ResourceStatus
-from kdive.services.allocation.placement import PlacementRequest, resolve_placement_candidates
+from kdive.services.allocation.admission.placement import (
+    PlacementRequest,
+    resolve_placement_candidates,
+)
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _NIC = PCIeDescriptor(

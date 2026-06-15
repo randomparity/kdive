@@ -39,18 +39,18 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.allocation.admission import AdmissionOutcome
+from kdive.services.allocation.admission.request import (
+    AdmissionRequestSpec,
+    RequestAdmissionResult,
+    denial_details,
+    request_admission,
+)
 from kdive.services.allocation.release import (
     ReleaseOutcome,
     ctx_audit_writer,
     release_with_backstops,
 )
 from kdive.services.allocation.renew import RenewOutcome, renew
-from kdive.services.allocation.request import (
-    AdmissionRequestSpec,
-    RequestAdmissionResult,
-    denial_details,
-    request_admission,
-)
 
 _log = logging.getLogger(__name__)
 

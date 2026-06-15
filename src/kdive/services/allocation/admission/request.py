@@ -19,8 +19,11 @@ from kdive.services.allocation.admission import (
     AllocationRequest,
     admit,
 )
-from kdive.services.allocation.placement import PlacementRequest, resolve_placement_candidates
-from kdive.services.allocation.sizing import resolve_request_sizing
+from kdive.services.allocation.admission.placement import (
+    PlacementRequest,
+    resolve_placement_candidates,
+)
+from kdive.services.allocation.admission.sizing import resolve_request_sizing
 
 
 @dataclass(frozen=True, slots=True)

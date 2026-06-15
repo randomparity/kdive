@@ -16,10 +16,10 @@ from kdive.domain.shapes import ResolvedSizing
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
-from kdive.services.allocation import request as request_service
 from kdive.services.allocation.admission import AdmissionOutcome, AllocationRequest
-from kdive.services.allocation.placement import PlacementCandidates, PlacementRequest
-from kdive.services.allocation.request import (
+from kdive.services.allocation.admission import request as request_service
+from kdive.services.allocation.admission.placement import PlacementCandidates, PlacementRequest
+from kdive.services.allocation.admission.request import (
     AdmissionRequestSpec,
     denial_details,
     request_admission,

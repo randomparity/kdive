@@ -963,7 +963,7 @@ def test_fault_inject_resource_is_admitted_not_configuration_error(
     # ADMITTED, not configuration_error (the vcpus=None denial the issue reports).
     from kdive.domain.models import ResourceKind
     from kdive.security.authz.context import RequestContext
-    from kdive.services.allocation.request import AdmissionRequestSpec, request_admission
+    from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(vcpus=8, memory_mb=16384)))
@@ -1298,7 +1298,7 @@ def test_two_fault_inject_instances_are_each_independently_allocatable(
     # admits an allocation on it — no allocation-API change, selection by resource_id.
     from kdive.domain.models import ResourceKind
     from kdive.security.authz.context import RequestContext
-    from kdive.services.allocation.request import AdmissionRequestSpec, request_admission
+    from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
 
     async def _run() -> None:
         doc = load_inventory(_write_toml(tmp_path, _two_fault_inject_toml()))

@@ -51,7 +51,10 @@ from kdive.services.allocation.admission import (
     admission_gate,
     price_window_and_estimate,
 )
-from kdive.services.allocation.placement import PlacementRequest, resolve_placement_candidates
+from kdive.services.allocation.admission.placement import (
+    PlacementRequest,
+    resolve_placement_candidates,
+)
 
 _log = logging.getLogger(__name__)
 

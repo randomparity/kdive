@@ -50,9 +50,8 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.rbac import Role, projects_with_role
-from kdive.services.allocation import pcie_claim
-from kdive.services.allocation.admission import OCCUPYING_VALUES
-from kdive.services.allocation.affinity import resource_visible_to_projects
+from kdive.services.allocation.admission import OCCUPYING_VALUES, pcie_claim
+from kdive.services.allocation.admission.affinity import resource_visible_to_projects
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext

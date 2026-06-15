@@ -53,8 +53,8 @@ from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.state import AllocationState
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting
-from kdive.services.allocation import pcie_claim
-from kdive.services.allocation.affinity import project_may_place
+from kdive.services.allocation.admission import pcie_claim
+from kdive.services.allocation.admission.affinity import project_may_place
 from kdive.services.allocation.error_details import categorized_details
 from kdive.services.allocation.idempotency import (
     record_key,
