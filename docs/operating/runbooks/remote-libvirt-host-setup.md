@@ -355,9 +355,16 @@ one `pkipath` directory):
 ```bash
 WK=$(kubectl -n kdive-demo get pod -l app=kdive-kdive-worker -o jsonpath='{.items[0].metadata.name}')
 kubectl -n kdive-demo exec "$WK" -- python3 -c '
-import os, tempfile, shutil, libvirt
+import tempfile, shutil, libvirt
 src="/etc/kdive/secrets"; pki=tempfile.mkdtemp()
-for f in ("cacert.pem","clientcert.pem","clientkey.pem"): shutil.copy(src+"/"+f, pki+"/"+f)
+# libvirt pkipath REQUIRES the destination names cacert.pem/clientcert.pem/clientkey.pem.
+# The SOURCE keys are your Secret keys (= the systems.toml *_ref filenames), which equal the
+# destination names only if you named the refs that way. The shipped systems.toml.example uses
+# remote-ca.pem/remote-clientcert.pem/remote-clientkey.pem — match the left side to YOUR refs.
+for ref, name in {"cacert.pem":"cacert.pem",
+                  "clientcert.pem":"clientcert.pem",
+                  "clientkey.pem":"clientkey.pem"}.items():
+    shutil.copy(src+"/"+ref, pki+"/"+name)
 c=libvirt.openReadOnly("qemu+tls://HOST.FQDN/system?pkipath="+pki)
 print("connected:", c.getHostname())
 print("base volume present:", "fedora-kdive-remote-base-43.qcow2" in
