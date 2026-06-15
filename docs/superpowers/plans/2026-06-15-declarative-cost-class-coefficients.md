@@ -13,6 +13,7 @@
 **Test conventions (load-bearing — match these exactly):**
 - **DB-backed tests are sync `def test_…(migrated_url: str)` wrapping an inner `async def _run(): …` invoked via `asyncio.run(_run())`.** This repo does **not** use bare `async def test_` / pytest-asyncio for these suites. Every test that touches a connection follows the `_run()` + `asyncio.run` shape — copy it.
 - The `migrated_url` fixture lives in `tests/db/conftest.py` and is re-exported only by `tests/integration/conftest.py`. A DB test therefore must live under `tests/integration/` (or `tests/db/`), **not** `tests/inventory/`.
+- **DB-backed tests require a running Docker daemon** — `migrated_url` starts a disposable Postgres via testcontainers (ADR-0019). When Docker is unreachable the fixture **`pytest.skip`s** rather than failing, *unless* `KDIVE_REQUIRE_DOCKER=1` is set (then the skip becomes a hard failure). A skip reports as success, so a TDD "verify it passes" step that silently skipped would mask a broken implementation. **Every DB-test run command in this plan therefore prefixes `KDIVE_REQUIRE_DOCKER=1`** so the green step proves the code actually ran. (The red step still works without it — a missing-module `import` fails at collection before the fixture runs — but always use the flag for consistency.) If Docker is unavailable on the executor's machine, that is a hard prerequisite: stop and surface it, do not proceed on skipped greens.
 - `ToolResponse` failures are asserted via `resp.status == "error"` and `resp.error_category == "authorization_denied"` (string), **not** `resp.error.category`. Success is `resp.status == "ok"`; payload is `resp.data["…"]` (string values).
 - Reuse the existing per-file helpers verbatim: in `tests/mcp/ops/test_ops_tuning.py` — `_pool(url)`, `_OPERATOR`, `_ctx(platform_roles=…)`, `_platform_audit_rows(url)`; in `tests/integration/test_reconcile_inventory.py` — `_write_toml(tmp_path, body)`, `_connect(url)`, `_one(conn, name)`, `_resource_by_name(conn, name)`, `_remote_libvirt_toml(...)`, `_FakeImageStore`.
 
@@ -31,6 +32,7 @@
 | `src/kdive/mcp/tools/ops/reconcile_systems.py` | `_run_pass` calls the shared pipeline | Modify |
 | `systems.toml.example` | Document the `[[cost_class]]` block (committed scaffold; real `systems.toml` is gitignored) | Modify |
 | `tests/domain/test_cost_class_rules.py` | Unit-test the shared rule (pure, no DB) | **Create** |
+| `tests/inventory/test_layering.py` | Static guard: `kdive.inventory` imports no `kdive.mcp` (the layering invariant the shared rule exists to keep; pure, no DB) | **Create** |
 | `tests/inventory/test_model.py` | `[[cost_class]]` parse/reject cases (pure, no DB) | Modify |
 | `tests/inventory/test_reconcile_pipeline.py` | Source-order assertion: coefficients before resources (pure, no DB) | **Create** |
 | `tests/integration/test_reconcile_coefficients.py` | Upsert / drift / idempotent / no-delete (**DB** — needs the `migrated_url` fixture, which lives in `tests/db/conftest.py` and is only re-exported under `tests/integration/`) | **Create** |
@@ -201,16 +203,65 @@ Remove the now-unused top-level imports if they are no longer referenced elsewhe
 
 - [ ] **Step 6: Run the tuning tests + lint to verify the refactor preserves behavior**
 
-Run: `uv run pytest tests/mcp/ops/test_ops_tuning.py -q`
-Expected: PASS (the tool's error type and messages are unchanged)
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/mcp/ops/test_ops_tuning.py -q`
+Expected: PASS (the tool's error type and messages are unchanged). Requires Docker — see Test conventions.
 
 Run: `uv run ruff check src/kdive/mcp/tools/ops/tuning.py && uv run ty check src/kdive/mcp/tools/ops/tuning.py`
 Expected: no warnings (fix any unused-import warning from Step 5)
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Add a layering guard test (enforce the no-`mcp`-import invariant)**
+
+The shared rule exists so `inventory/` need not import `mcp/tools/ops` (ADR-0115 §1). That invariant has no automated guard today — add one now so a future edit that reintroduces the inversion fails CI. This is a pure static-AST test (no DB, no Docker).
+
+Create `tests/inventory/test_layering.py`:
+
+```python
+"""Layering guard: kdive.inventory must not import kdive.mcp (ADR-0115 §1).
+
+The shared name/coeff rule lives in kdive.domain precisely so the inventory model can
+validate a [[cost_class]] without importing kdive.mcp.tools.ops — a core→tool inversion.
+This static check walks every inventory module's imports and fails if any reaches kdive.mcp.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+_INVENTORY = Path(__file__).resolve().parents[2] / "src" / "kdive" / "inventory"
+
+
+def _imported_modules(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            names.add(node.module)
+    return names
+
+
+def test_inventory_never_imports_mcp() -> None:
+    offenders = {
+        path.relative_to(_INVENTORY).as_posix(): sorted(
+            m for m in _imported_modules(path) if m == "kdive.mcp" or m.startswith("kdive.mcp.")
+        )
+        for path in sorted(_INVENTORY.rglob("*.py"))
+    }
+    bad = {p: ms for p, ms in offenders.items() if ms}
+    assert not bad, f"inventory must not import kdive.mcp (layering inversion): {bad}"
+```
+
+- [ ] **Step 8: Run the guard test (it should pass against today's tree)**
+
+Run: `uv run pytest tests/inventory/test_layering.py -q`
+Expected: PASS — the model change in Task 2 imports only `kdive.domain.cost_class_rules`, so the invariant holds. (If this ever fails after Task 2, the model is importing `mcp` — fix the import, do not relax the test.)
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/kdive/domain/cost_class_rules.py tests/domain/test_cost_class_rules.py src/kdive/mcp/tools/ops/tuning.py
+git add src/kdive/domain/cost_class_rules.py tests/domain/test_cost_class_rules.py src/kdive/mcp/tools/ops/tuning.py tests/inventory/test_layering.py
 git commit -m "refactor: extract shared cost-class name/coeff rule"
 ```
 
@@ -479,11 +530,28 @@ def test_undeclared_seed_floor_untouched(migrated_url: str) -> None:
             assert await _coeff(pool, "local") == Decimal("1.0")
 
     asyncio.run(_run())
+
+
+def test_file_overrides_a_migration_seed(migrated_url: str) -> None:
+    # ADR-0115 §4: declaring a seeded class in the file overrides the seed default and flags
+    # drift — the path by which an operator reprices the built-in 'local'/'remote' baselines.
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            # 'local' starts at the 0002 seed (1.0), with no prior runtime write.
+            assert await _coeff(pool, "local") == Decimal("1.0")
+            async with pool.connection() as conn:
+                diff = await reconcile_coefficients(conn, _doc(("local", "2.0")))
+            assert await _coeff(pool, "local") == Decimal("2.0")
+            assert [r.name for r in diff.updated] == ["local"]
+            drift = [r for r in diff.warned if r.name == "local"]
+            assert drift and "was 1.0" in drift[0].detail and "now 2.0" in drift[0].detail
+
+    asyncio.run(_run())
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/integration/test_reconcile_coefficients.py -q`
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/integration/test_reconcile_coefficients.py -q`
 Expected: FAIL with `ModuleNotFoundError: No module named 'kdive.inventory.reconcile_coefficients'`
 
 - [ ] **Step 3: Write the pass**
@@ -548,7 +616,17 @@ async def reconcile_coefficients(conn: AsyncConnection, doc: InventoryDoc) -> Re
 
 
 async def _upsert_one(conn: AsyncConnection, entry: CostClassEntry, diff: ReconcileDiff) -> None:
-    """Create or change-detectingly re-assert one coefficient under a per-row lock."""
+    """Create or change-detectingly re-assert one coefficient under a per-row lock.
+
+    File-authoritative even under a create race. ``SELECT … FOR UPDATE`` locks nothing when
+    the row is absent, so a concurrent ``ops.set_cost_class_coeff`` of the same brand-new
+    class can land between the read and our insert. ``INSERT … ON CONFLICT DO NOTHING
+    RETURNING coeff`` distinguishes the two outcomes: if our row was inserted we record
+    ``created``; if a concurrent insert won the PK (no row returned) we **re-read under the
+    lock and fall through to the same compare-and-apply path the existing-row case uses**, so
+    the file value still wins this pass and the diff reflects reality (no false ``created``,
+    no stale concurrent value left for a whole reconcile interval).
+    """
     async with conn.transaction(), conn.cursor() as cur:
         await cur.execute(
             "SELECT coeff FROM cost_class_coefficients WHERE cost_class = %s FOR UPDATE",
@@ -556,15 +634,24 @@ async def _upsert_one(conn: AsyncConnection, entry: CostClassEntry, diff: Reconc
         )
         row = await cur.fetchone()
         if row is None:
-            # Race-safe create: a concurrent ops insert between the SELECT and here would
-            # otherwise abort the pass on the PK; the next pass reconciles any value diff.
             await cur.execute(
                 "INSERT INTO cost_class_coefficients (cost_class, coeff) VALUES (%s, %s) "
-                "ON CONFLICT (cost_class) DO NOTHING",
+                "ON CONFLICT (cost_class) DO NOTHING RETURNING coeff",
                 (entry.name, entry.coeff),
             )
-            diff.created.append(_record(entry.name, f"priced at {entry.coeff}"))
-            return
+            if await cur.fetchone() is not None:
+                diff.created.append(_record(entry.name, f"priced at {entry.coeff}"))
+                return
+            # A concurrent insert won the PK; re-read under the lock and apply the file value
+            # through the compare path below (there is no delete path, so the row now exists).
+            await cur.execute(
+                "SELECT coeff FROM cost_class_coefficients WHERE cost_class = %s FOR UPDATE",
+                (entry.name,),
+            )
+            row = await cur.fetchone()
+            assert row is not None, (  # no coefficient-delete path exists; the row persists
+                f"cost_class {entry.name!r} vanished after a conflicting insert"
+            )
         prior = Decimal(row[0])
         if prior == entry.coeff:
             return  # idempotent: no write, no diff, no log noise
@@ -584,7 +671,7 @@ def _record(name: str, detail: str) -> ReconcileRecord:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/integration/test_reconcile_coefficients.py -q`
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/integration/test_reconcile_coefficients.py -q`
 Expected: PASS
 
 - [ ] **Step 5: Lint + type-check**
@@ -610,25 +697,41 @@ git commit -m "feat: reconcile [[cost_class]] coefficients file-authoritatively"
 
 The coefficient pass must run **before** `reconcile_resources` in **both** resource-reconciling orchestrators, or the on-demand path silently skips pricing. Collapse the duplicated chain into one helper both call.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test (behavioral — assert the actual call order, not the source text)**
 
-Create `tests/inventory/test_reconcile_pipeline.py`:
+Create `tests/inventory/test_reconcile_pipeline.py`. This patches the four sub-passes with recorders and asserts the **runtime** order `reconcile_all` invokes them, so it cannot be satisfied by a mere comment/docstring mention. It is pure (no DB, no Docker):
 
 ```python
 """The shared ordered reconcile pipeline runs coefficients before resources (ADR-0115 §2)."""
 
 from __future__ import annotations
 
-import inspect
+import asyncio
+
+import pytest
 
 from kdive.inventory import reconcile_pipeline
+from kdive.inventory.reconcile import ReconcileDiff
 
 
-def test_pipeline_orders_coefficients_before_resources() -> None:
-    src = inspect.getsource(reconcile_pipeline.reconcile_all)
-    assert src.index("reconcile_coefficients") < src.index("reconcile_resources"), (
-        "coefficients must be priced before the resource rows are created"
-    )
+def _recorder(name: str, calls: list[str]):
+    async def _fn(*_args: object, **_kwargs: object) -> ReconcileDiff:
+        calls.append(name)
+        return ReconcileDiff()
+
+    return _fn
+
+
+def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    for name in ("reconcile_images", "reconcile_coefficients", "reconcile_resources", "reconcile_build_hosts"):
+        monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls))
+
+    asyncio.run(reconcile_pipeline.reconcile_all(object(), object(), object()))
+
+    # The load-bearing invariant: a host's price is upserted before its row is reconciled.
+    assert calls.index("reconcile_coefficients") < calls.index("reconcile_resources")
+    assert calls == ["reconcile_images", "reconcile_coefficients", "reconcile_resources", "reconcile_build_hosts"]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -718,7 +821,11 @@ from kdive.inventory.reconcile_pipeline import reconcile_all
         return _changes(diff)
 ```
 
-Update `_changes` is unchanged — note it counts `created+updated+pruned+cordoned`, so a coefficient drift (which appends to both `updated` and `warned`) is counted once via `updated`, and a clean coefficient create is counted via `created`. No change to `_changes` needed.
+`_changes` is unchanged — note it counts `created+updated+pruned+cordoned`, so a coefficient drift (which appends to both `updated` and `warned`) is counted once via `updated`, and a clean coefficient create is counted via `created`. No change to `_changes` needed.
+
+Also refresh the **module docstring** so it names the new pass (these reconcile-flow docstrings are the codebase's authoritative architecture docs — leaving it at 3 passes would describe a stale flow and hide where pricing is written). Change the sentence that enumerates the passes to include the coefficient pass and its ordering, e.g.:
+
+> …reconciles it into ``image_catalog`` via …``reconcile_images``, prices ``cost_class_coefficients`` via :func:`kdive.inventory.reconcile_coefficients.reconcile_coefficients` (run **before** the resource pass so a config host lands priced — ADR-0115), into ``resources`` via …``reconcile_resources``…, and into ``build_hosts`` via …``reconcile_build_hosts``.
 
 - [ ] **Step 5: Wire `ops.reconcile_systems` onto the pipeline**
 
@@ -755,9 +862,11 @@ async def _run_pass(pool: AsyncConnectionPool, store: ImageHeadStore) -> Reconci
 
 Delete the local `_extend` function (now in `reconcile_pipeline`). Keep `_names`, `_audit_*`, `_response`, etc. The existing `_audit_args` already folds `diff.warned` names into the audit row, so coefficient drift on this path is persisted to `platform_audit_log` with no further change.
 
+Also refresh the **module docstring** so its flow line names the coefficient pass — change `systems.toml → image_catalog / resources / build_hosts` to `systems.toml → image_catalog / cost_class_coefficients / resources / build_hosts` (one-word edit; keeps the authoritative doc honest about the fourth pass and where pricing is written).
+
 - [ ] **Step 6: Run the affected suites + lint**
 
-Run: `uv run pytest tests/inventory/test_reconcile_pipeline.py tests/mcp/ops/test_reconcile_systems.py tests/integration/test_reconcile_inventory.py -q`
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/inventory/test_reconcile_pipeline.py tests/mcp/ops/test_reconcile_systems.py tests/integration/test_reconcile_inventory.py -q`
 Expected: PASS (existing reconcile-systems and integration tests still green — the chain is the same plus the coefficient pass, which is a no-op when no `[[cost_class]]` is declared)
 
 Run: `uv run ruff check src/kdive/inventory/reconcile_pipeline.py src/kdive/reconciler/inventory.py src/kdive/mcp/tools/ops/reconcile_systems.py && uv run ty check src/kdive/inventory/reconcile_pipeline.py src/kdive/reconciler/inventory.py src/kdive/mcp/tools/ops/reconcile_systems.py`
@@ -807,6 +916,11 @@ def test_export_cost_classes_returns_deterministic_sorted_toml(migrated_url: str
             toml_text = resp.data["toml"]
         # 'local' is seeded; the export is name-sorted, so alpha < local < zeta.
         assert toml_text.index("alpha") < toml_text.index("local") < toml_text.index("zeta")
+        # The successful read is audited (tuple shape: principal, platform_role, tool, scope) —
+        # exactly one export row, alongside the two set_cost_class_coeff rows.
+        rows = await _platform_audit_rows(migrated_url)
+        export_rows = [r for r in rows if r[2] == "ops.export_cost_classes"]
+        assert len(export_rows) == 1
 
     asyncio.run(_run())
 
@@ -827,7 +941,7 @@ def test_export_round_trips_through_the_model(migrated_url: str) -> None:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/mcp/ops/test_ops_tuning.py -q -k export`
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/mcp/ops/test_ops_tuning.py -q -k export`
 Expected: FAIL with `AttributeError: module 'kdive.mcp.tools.ops.tuning' has no attribute 'export_cost_classes'`
 
 - [ ] **Step 3: Add the export handler + registration**
@@ -928,7 +1042,7 @@ In `tests/mcp/core/test_tool_docs.py`, add to the `TEST_INDEX` mapping (keep it 
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `uv run pytest tests/mcp/ops/test_ops_tuning.py tests/mcp/core/test_tool_docs.py -q`
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/mcp/ops/test_ops_tuning.py tests/mcp/core/test_tool_docs.py -q`
 Expected: PASS (export tests + `test_active_tools_have_a_covering_test` + `test_every_tool_has_a_description`/`_valid_maturity`)
 
 - [ ] **Step 6: Lint + type-check**
@@ -975,7 +1089,7 @@ and replace the hardcoded line `'cost_class = "remote"\n'` with:
 
 - [ ] **Step 2: Write the failing tests (`asyncio.run` idiom, reuse the file's helpers)**
 
-Append to `tests/integration/test_reconcile_inventory.py`. The imports `asyncio`, `dict_row`, `AsyncConnectionPool`, `load_inventory`, `_FakeImageStore`, `_write_toml`, `_remote_libvirt_toml`, `_resource_by_name` already exist in this module; add `from decimal import Decimal`, `from kdive.inventory.model import InventoryDoc`, `from kdive.inventory.reconcile_pipeline import reconcile_all`, `from kdive.inventory.reconcile_coefficients import reconcile_coefficients`, `from kdive.mcp.auth import RequestContext`, and `from kdive.security.authz.rbac import PlatformRole` if absent:
+Append to `tests/integration/test_reconcile_inventory.py`. Already present in this module: `asyncio`, `AsyncConnectionPool`, `_FakeImageStore`, `_write_toml`, `_connect`, `_remote_libvirt_toml`, `_resource_by_name`, and the **real loop harness** `reconcile_once` / `NullReaper` / `ReconcileConfig` / `_config_with_inventory_spec` (the latter wires a `_FakeImageStore` so the inventory pass is in the loop plan). Add only if absent: `from decimal import Decimal`, `from kdive.inventory.model import InventoryDoc`, `from kdive.inventory.reconcile_coefficients import reconcile_coefficients`, `from kdive.mcp.auth import RequestContext`, `from kdive.security.authz.rbac import PlatformRole`. (No `reconcile_all` import — the loop test drives the real entry point, not the helper.)
 
 ```python
 def _priced_remote_toml(coeff: str) -> str:
@@ -994,18 +1108,23 @@ async def _coeff_row(pool: AsyncConnectionPool, name: str) -> Decimal | None:
     return Decimal(row[0]) if row else None
 
 
-def test_pipeline_prices_before_creating_the_host(migrated_url: str, tmp_path: Path) -> None:
-    # The shared pipeline (the loop's path): the coefficient exists and the host is priced
-    # after one reconcile_all — no unpriced-cost_class wall.
+def test_loop_prices_before_creating_the_host(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The REAL background-loop entry point (InventoryReconcilePass.run, via reconcile_once) —
+    # NOT reconcile_all directly — so Task 4 Step 4's loop wiring is what's under test. After
+    # one loop pass the coefficient row exists and the host is priced: no unpriced-cost_class
+    # wall. Mirrors test_loop_inventory_pass_reconciles_a_present_file.
     async def _run() -> None:
-        doc = load_inventory(_write_toml(tmp_path, _priced_remote_toml("3.0")))
-        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
-            async with pool.connection() as conn:
-                await reconcile_all(conn, doc, _FakeImageStore())
-            assert await _coeff_row(pool, "premium") == Decimal("3.0")
-            async with pool.connection() as conn:
-                row = await _resource_by_name(conn, "h1")
-            assert row["cost_class"] == "premium"
+        path = _write_toml(tmp_path, _priced_remote_toml("3.0"))
+        monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            report = await reconcile_once(pool, NullReaper(), config=_config_with_inventory_spec())
+        assert "reconcile_inventory" not in report.failures  # the loop pass succeeded
+        assert await _coeff_row(pool, "premium") == Decimal("3.0")
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "h1")
+        assert row["cost_class"] == "premium"
 
     asyncio.run(_run())
 
@@ -1075,12 +1194,12 @@ Notes for the implementer:
 
 - [ ] **Step 3: Run the new tests to verify they pass**
 
-Run: `uv run pytest tests/integration/test_reconcile_inventory.py -q -k "prices or floor or drift or on_demand"`
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/integration/test_reconcile_inventory.py -q -k "prices or floor or drift or on_demand"`
 Expected: the four new tests PASS (Task 4 already wired the pipeline). If `test_on_demand_reconcile_systems_also_prices` fails because the coefficient is absent, the pipeline wiring in Task 4 Step 5 is incomplete — fix there, not here.
 
 - [ ] **Step 4: Run the full integration reconcile suite (no regression from the helper change)**
 
-Run: `uv run pytest tests/integration/test_reconcile_inventory.py -q`
+Run: `KDIVE_REQUIRE_DOCKER=1 uv run pytest tests/integration/test_reconcile_inventory.py -q`
 Expected: PASS (new + all existing; the `cost_class` kwarg defaults to `"remote"`, so existing callers are unaffected)
 
 - [ ] **Step 5: Commit**
@@ -1140,10 +1259,10 @@ git commit -m "docs: document the [[cost_class]] block in systems.toml.example"
 
 ## Final verification
 
-- [ ] **Run the full suite (boundary/arch tests live outside the touched dirs)**
+- [ ] **Run the full suite (needs Docker for the DB suites)**
 
-Run: `just test` (or `uv run pytest -q` if `just` is unavailable)
-Expected: PASS. Watch specifically for: the inventory layering/import-boundary test (confirms `inventory/` still imports nothing from `mcp/` — the shared rule in `domain/` is what keeps that true), and the generated tool-docs / `test_tool_docs` suite (the new tool must appear with a description, valid maturity, `read_only` hint, and a covering-test index entry).
+Run: `KDIVE_REQUIRE_DOCKER=1 just test` (or `KDIVE_REQUIRE_DOCKER=1 uv run pytest -q` if `just` is unavailable). The require-flag turns an unavailable container into a hard failure instead of a silent skip, so the green is real (see Test conventions).
+Expected: PASS. Watch specifically for: the `tests/inventory/test_layering.py::test_inventory_never_imports_mcp` guard added in Task 1 (the static check that `inventory/` imports nothing from `kdive.mcp` — the shared rule in `domain/` is what keeps that true; there was no such guard before this plan), and the generated tool-docs / `test_tool_docs` suite (the new tool must appear with a description, valid maturity, `read_only` hint, and a covering-test index entry).
 
 - [ ] **Run lint + types across the whole change**
 
