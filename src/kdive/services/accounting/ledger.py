@@ -136,8 +136,7 @@ async def report(
 
 
 def _zero_total() -> RollupRow:
-    zero = quantize_kcu(Decimal(0))
-    return RollupRow(project="*", principal=None, reserved=zero, reconciled=zero, variance=zero)
+    return empty_row("*")
 
 
 def empty_row(project: str) -> RollupRow:
