@@ -12,6 +12,7 @@ single-argv primitive does not generalize).
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 
 from kdive.artifacts.storage import PresignedUpload
@@ -159,7 +160,14 @@ class ShellBuildTransport:
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"path": path, "max_b64_bytes": _MAX_REMOTE_READ_B64_BYTES},
             )
-        return base64.b64decode(encoded)
+        try:
+            return base64.b64decode(encoded)
+        except (binascii.Error, ValueError) as exc:
+            raise CategorizedError(
+                "remote read_bytes returned malformed base64",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"path": path},
+            ) from exc
 
     def clone(self, remote: str, ref: str, dest: str) -> None:
         """Clone *remote* at *ref* into *dest* using a shallow fetch.

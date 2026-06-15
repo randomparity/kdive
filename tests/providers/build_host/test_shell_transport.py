@@ -79,6 +79,14 @@ def test_read_bytes_non_zero_is_infrastructure_failure() -> None:
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_read_bytes_malformed_base64_is_infrastructure_failure() -> None:
+    t = _RecordingTransport([_ok(stdout="not-base64!")])
+    with pytest.raises(CategorizedError) as exc:
+        t.read_bytes("/corrupt")
+    assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"path": "/corrupt"}
+
+
 def test_clone_issues_init_fetch_checkout_in_order() -> None:
     t = _RecordingTransport([_ok(), _ok(), _ok()])
     t.clone("https://git.example/linux.git", "v6.9", "/src")
