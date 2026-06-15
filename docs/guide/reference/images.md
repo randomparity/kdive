@@ -6,7 +6,7 @@
 
 `implemented`
 
-Enqueue an IMAGE_BUILD job for a public base image. Requires platform_operator.
+Enqueue an image build job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -16,7 +16,7 @@ Enqueue an IMAGE_BUILD job for a public base image. Requires platform_operator.
 
 `implemented` · `destructive`
 
-Delete a project-private image. Requires operator on the image's project.
+Delete an image catalog entry.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -26,7 +26,7 @@ Delete a project-private image. Requires operator on the image's project.
 
 `implemented` · `destructive`
 
-Re-arm a private image's expiry. Requires platform_admin.
+Extend an image catalog entry lease.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -38,13 +38,13 @@ Re-arm a private image's expiry. Requires platform_admin.
 
 `implemented` · `read-only`
 
-List catalog images visible to the caller (public + own-project private). Auth only.
+List published image catalog entries.
 
 ## `images.prune_expired`
 
 `implemented` · `destructive`
 
-Force the expired-private-image sweep now. Requires platform_admin.
+Prune expired image catalog entries.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -54,7 +54,7 @@ Force the expired-private-image sweep now. Requires platform_admin.
 
 `implemented`
 
-Promote a built image to a public catalog row. Requires platform_operator.
+Publish a built image into the catalog.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -64,7 +64,7 @@ Promote a built image to a public catalog row. Requires platform_operator.
 
 `implemented`
 
-Register a quarantined upload as a project-private image. Requires operator.
+Create an image upload request.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

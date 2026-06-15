@@ -68,7 +68,7 @@ Resume the worker's claim loop. Requires platform operator.
 
 `implemented`
 
-Run one reconcile pass on demand; return the repair summary. Platform operator.
+Run reconciler cleanup once.
 
 ## `ops.reconcile_systems`
 

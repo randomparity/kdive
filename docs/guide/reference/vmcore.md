@@ -6,7 +6,7 @@
 
 `partial`
 
-Enqueue a capture_vmcore job on a crashed System. Requires operator.
+Capture and persist a vmcore.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -17,7 +17,7 @@ Enqueue a capture_vmcore job on a crashed System. Requires operator.
 
 `partial` · `read-only`
 
-List the redacted vmcore artifacts for a System. Requires viewer.
+List vmcore artifacts for one system.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

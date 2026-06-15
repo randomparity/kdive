@@ -17,7 +17,7 @@ Price a hypothetical selector over a window without writing anything. Requires v
 
 `implemented` · `read-only`
 
-Multi-project usage rollup over every project. Requires platform auditor.
+Return platform-wide accounting usage for all projects.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -28,7 +28,7 @@ Multi-project usage rollup over every project. Requires platform auditor.
 
 `implemented` · `read-only`
 
-Multi-project usage rollup over caller-authorized projects. Requires viewer.
+Return accounting usage for the caller's granted projects.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -64,7 +64,7 @@ Set a project's concurrency caps and pending-queue cap. Requires admin.
 
 `implemented` · `read-only`
 
-Return spend rollup for one investigation and its owning project. Requires viewer.
+Return usage totals for one investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -74,7 +74,7 @@ Return spend rollup for one investigation and its owning project. Requires viewe
 
 `implemented` · `read-only`
 
-Return spend rollup for one project. Requires viewer.
+Return usage totals for one project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

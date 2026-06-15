@@ -6,7 +6,7 @@
 
 `partial`
 
-Enqueue the boot job for an installed Run; poll jobs.* for completion. Operator only.
+Boot an installed run.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -16,7 +16,7 @@ Enqueue the boot job for an installed Run; poll jobs.* for completion. Operator 
 
 `partial`
 
-Enqueue the kernel build job for a Run; poll jobs.* for completion. Requires operator.
+Enqueue a kernel build for a run.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -27,7 +27,7 @@ Enqueue the kernel build job for a Run; poll jobs.* for completion. Requires ope
 
 `implemented`
 
-Validate an external Run's uploads and finalize it to succeeded. Operator only.
+Complete an externally built run.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -39,7 +39,7 @@ Validate an external Run's uploads and finalize it to succeeded. Operator only.
 
 `implemented`
 
-Bind a Run to a ready System and Investigation in one transaction. Requires operator.
+Create a run under a system.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -53,7 +53,7 @@ Bind a Run to a ready System and Investigation in one transaction. Requires oper
 
 `implemented` · `read-only`
 
-Render a Run; a failed Run maps to a failure envelope. Requires viewer.
+Return one run.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -63,7 +63,7 @@ Render a Run; a failed Run maps to a failure envelope. Requires viewer.
 
 `partial`
 
-Enqueue the install job for a built Run; poll jobs.* for completion. Operator only.
+Install a built run onto its system.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
