@@ -250,8 +250,8 @@ def _retrieve(
     *,
     build_id: str = "deadbeef",
     dmesg: bytes = b"kernel panic\n",
-    build_id_error: CategorizedError | None = None,
-    dmesg_error: CategorizedError | None = None,
+    build_id_error: Exception | None = None,
+    dmesg_error: Exception | None = None,
     max_core_bytes: int = 5 * 1024**3,
 ) -> RemoteLibvirtRetrieve:
     def _read_build_id(path: Path) -> str:
@@ -355,6 +355,21 @@ def test_host_dump_dmesg_extraction_failure_degrades_to_placeholder(tmp_path: Pa
     assert store.put_requests[0].data == DMESG_UNAVAILABLE
 
 
+def test_host_dump_raw_dmesg_failure_degrades_to_placeholder(tmp_path: Path) -> None:
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    out = _retrieve(conn, store, tmp_path, dmesg_error=RuntimeError("drgn helper blew up")).capture(
+        _SID, CaptureMethod.HOST_DUMP
+    )
+
+    assert out.vmcore_build_id == "deadbeef"
+    assert store.put_requests
+    assert store.put_requests[0].data == DMESG_UNAVAILABLE
+
+
 def test_host_dump_missing_drgn_dependency_is_not_degraded(tmp_path: Path) -> None:
     # A genuine MISSING_DEPENDENCY (drgn absent) is an environment fault, not a best-effort
     # degrade — it must surface, not be masked behind the placeholder (#320).
@@ -368,6 +383,24 @@ def test_host_dump_missing_drgn_dependency_is_not_degraded(tmp_path: Path) -> No
         _retrieve(conn, store, tmp_path, dmesg_error=err).capture(_SID, CaptureMethod.HOST_DUMP)
 
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_host_dump_raw_build_id_failure_is_infrastructure_failure(tmp_path: Path) -> None:
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path, build_id_error=RuntimeError("drgn blew up")).capture(
+            _SID, CaptureMethod.HOST_DUMP
+        )
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "system_id": str(_SID),
+        "capture_method": CaptureMethod.HOST_DUMP.value,
+    }
 
 
 def test_host_dump_deletes_a_stale_volume_before_dumping(tmp_path: Path) -> None:

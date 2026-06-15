@@ -272,7 +272,19 @@ class HostDumpCapturer:
             ) from exc
 
     def _store_core(self, system_id: UUID, spool: Path) -> CaptureOutput:
-        build_id = self._options.core_build_id_from_file(spool)
+        try:
+            build_id = self._options.core_build_id_from_file(spool)
+        except CategorizedError:
+            raise
+        except Exception as exc:
+            raise CategorizedError(
+                "host_dump build-id extraction failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "system_id": str(system_id),
+                    "capture_method": CaptureMethod.HOST_DUMP.value,
+                },
+            ) from exc
         dmesg = self._dmesg_best_effort(spool, system_id)
         sha256_b64 = file_sha256_b64(spool)
         raw = self._stream_put(system_id, spool, sha256_b64)
@@ -297,6 +309,14 @@ class HostDumpCapturer:
                 "(core + build-id captured): %s",
                 system_id,
                 exc,
+            )
+            return DMESG_UNAVAILABLE
+        except Exception:
+            _log.warning(
+                "host_dump dmesg extraction failed for system %s; persisting a placeholder "
+                "(core + build-id captured)",
+                system_id,
+                exc_info=True,
             )
             return DMESG_UNAVAILABLE
 
