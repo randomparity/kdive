@@ -45,6 +45,9 @@ dev = [
   "testcontainers==4.14.2",
   "hypothesis==6.142.4",
 ]
+live = [
+  "drgn==0.2.0",
+]
 
 [project.scripts]
 kdivectl = "kdive.cli.__main__:main"

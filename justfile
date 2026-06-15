@@ -164,7 +164,17 @@ m2-report:
 
 # Audit runtime dependencies for known vulnerabilities.
 audit:
-    reqs="$(mktemp)" && trap 'rm -f "$reqs"' EXIT && uv export --no-emit-project --no-dev --no-default-groups --format requirements-txt > "$reqs" && uv run --with 'pip-audit==2.10.0' pip-audit --no-deps --strict -r "$reqs"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    reqs="$(mktemp)"
+    trap 'rm -f "$reqs"' EXIT
+    uv export \
+      --no-emit-project \
+      --no-dev \
+      --no-default-groups \
+      --group live \
+      --format requirements-txt > "$reqs"
+    uv run --with 'pip-audit==2.10.0' pip-audit --no-deps --strict -r "$reqs"
 
 # Set the project version in pyproject.toml AND uv.lock together. `--no-sync` re-locks
 # (updates uv.lock) WITHOUT rebuilding the virtual environment — so a version bump does not
