@@ -1,8 +1,7 @@
-"""LocalBuildTransport for the build-host seam (ADR-0342).
+"""LocalBuildTransport for the build-host seam (ADR-0099).
 
 :class:`LocalBuildTransport` wraps local subprocess and filesystem primitives and is the
-behavior-preserving replacement for the inline calls in ``execution.py``. Later tasks
-add ``SshBuildTransport`` behind the same port.
+behavior-preserving worker-local implementation behind the shared ``BuildTransport`` port.
 """
 
 from __future__ import annotations

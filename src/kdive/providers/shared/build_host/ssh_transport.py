@@ -1,4 +1,4 @@
-"""SshBuildTransport: BuildTransport over SSH for remote build hosts (ADR-0342 §7.3).
+"""SshBuildTransport: BuildTransport over SSH for remote build hosts (ADR-0099).
 
 All remote commands are executed via the SSH CLI (``ssh -i <identity> ... <host> <cmd>``).
 The SSH identity (private key) is materialized into a per-op 0600 temp file from the

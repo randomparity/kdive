@@ -1,4 +1,4 @@
-"""Transport-backed seam factories for BuildHostOrchestrator (Task 7 — ADR-0342).
+"""Transport-backed seam factories for BuildHostOrchestrator (ADR-0099).
 
 These factories wrap a :class:`~kdive.providers.ports.build_transport.BuildTransport`
 and return the ``RunStep``, ``ReadConfig``, and ``Checkout`` callables that

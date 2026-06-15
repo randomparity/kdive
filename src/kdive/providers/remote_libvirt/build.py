@@ -14,7 +14,7 @@ as a third ref (which would need a port change or core DDL beyond migration 0020
 The post-``make`` pipeline (modules_install → build-id → bundle → vmlinux → publish) runs
 through **injected seams** that produce an :class:`ArtifactSource`. The worker-local default
 packages the bundle in memory and publishes via :meth:`ObjectStore.put_artifact` — byte-for-byte
-the historical behavior. The transport-backed seams (ADR-0342) produce the artifacts on a
+the historical behavior. The transport-backed seams (ADR-0099) produce the artifacts on a
 build host and publish each via a presigned PUT whose checksum is computed on the host, so the
 worker never reads the large bundle/vmlinux bytes (it only sees the host-computed sha256).
 
@@ -177,7 +177,7 @@ class RemoteLibvirtBuild:
         git_ref: str,
         secret_registry: SecretRegistry,
     ) -> RemoteLibvirtBuild:
-        """Return a sibling builder whose build runs ON ``transport``'s host (ADR-0342).
+        """Return a sibling builder whose build runs ON ``transport``'s host (ADR-0099).
 
         Every build step — git checkout, ``olddefconfig``, ``.config`` read, ``make``,
         ``modules_install``, build-id, bundle, ``vmlinux`` — runs over ``transport`` on the
@@ -296,7 +296,7 @@ _BUNDLE_TAR_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
 def transport_make_bundle(t: BuildTransport) -> _MakeBundle:
-    """Return a ``_MakeBundle`` that tars the install bundle ON the build host (ADR-0342).
+    """Return a ``_MakeBundle`` that tars the install bundle ON the build host (ADR-0099).
 
     The returned seam runs one ``tar`` over the transport that renames ``arch/x86/boot/bzImage``
     to ``boot/vmlinuz`` and stores the staged ``lib/modules`` tree, excluding the ``build`` and

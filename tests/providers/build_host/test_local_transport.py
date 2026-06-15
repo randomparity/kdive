@@ -1,4 +1,4 @@
-"""Unit tests for LocalBuildTransport (Task 5 — transport seam, ADR-0342)."""
+"""Unit tests for LocalBuildTransport (ADR-0099)."""
 
 from __future__ import annotations
 

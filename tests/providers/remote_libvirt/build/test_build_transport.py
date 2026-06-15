@@ -1,4 +1,4 @@
-"""Tests for the transport-backed post-make pipeline of RemoteLibvirtBuild (Task 7.5, ADR-0342).
+"""Tests for the transport-backed post-make pipeline of RemoteLibvirtBuild (ADR-0099).
 
 The default (worker-local) path publishes from in-memory bytes via ``put_artifact`` and is
 covered in ``test_build.py``. Here we drive the SSH path: the modules_install / objcopy / tar

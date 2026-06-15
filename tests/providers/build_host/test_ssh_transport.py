@@ -1,4 +1,4 @@
-"""Unit tests for SshBuildTransport + materialized_ssh_identity (Task 6 — ADR-0342).
+"""Unit tests for SshBuildTransport and materialized_ssh_identity (ADR-0099).
 
 No real SSH or network connections are made. subprocess.run is monkeypatched at the
 module-level target so argv capture is deterministic.

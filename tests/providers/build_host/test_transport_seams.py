@@ -1,4 +1,4 @@
-"""Unit tests for transport-backed orchestrator seams (Task 7 — ADR-0342).
+"""Unit tests for transport-backed orchestrator seams (ADR-0099).
 
 Tests cover:
 1. Call-order invariant: clone → defconfig → write fragment → merge_config.sh

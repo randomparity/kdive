@@ -1,4 +1,4 @@
-"""Build-handler build-host dispatch + build-host lease release (ADR-0342).
+"""Build-handler build-host dispatch + build-host lease release (ADR-0099).
 
 The build handler reads ``build_host_id`` from the BUILD payload and dispatches:
 
