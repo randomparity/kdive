@@ -112,6 +112,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "resources.uncordon": ("tests/mcp/catalog/test_resources_tools.py",),
     "postmortem.crash": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
     "postmortem.triage": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
+    "projects.list": ("tests/mcp/catalog/test_projects_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.complete_build": ("tests/mcp/lifecycle/test_complete_build_tool.py",),

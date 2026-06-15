@@ -39,6 +39,7 @@ from kdive.mcp.tools.catalog import (
     fixtures,
     investigations,
     jobs,
+    projects,
     resources,
     shapes,
 )
@@ -256,6 +257,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(jobs.register),
     _pool_only_plane_registrar(resources.register),
     _pool_only_plane_registrar(availability.register),
+    _pool_only_plane_registrar(projects.register),
     _pool_only_plane_registrar(shapes.register),
     _pool_only_plane_registrar(register_accounting_estimate),
     _pool_only_plane_registrar(register_accounting_usage),
