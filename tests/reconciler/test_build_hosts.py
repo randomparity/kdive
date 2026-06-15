@@ -495,7 +495,9 @@ def test_probe_skips_local_host(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_probe_one_host_failure_does_not_stop_others(migrated_url: str) -> None:
+def test_probe_one_host_failure_does_not_stop_others(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
     """A prober raising for one host must not stop a second host from flipping."""
 
     async def _run() -> None:
@@ -506,10 +508,17 @@ def test_probe_one_host_failure_does_not_stop_others(migrated_url: str) -> None:
         prober = _FakeProber({"b-flip": False}, raise_for=frozenset({"a-boom"}))
 
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            caplog.set_level("WARNING", logger="kdive.reconciler.build_hosts")
             count = await run_repair(pool, lambda c: probe_build_host_reachability(c, prober))
 
         assert count == 1
         assert set(prober.probed) == {"a-boom", "b-flip"}
+        warnings = [
+            record for record in caplog.records if "probing build host" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert warnings[0].exc_info is not None
+        assert isinstance(warnings[0].exc_info[1], RuntimeError)
         async with await connect(migrated_url) as check:
             assert await _state_of(check, "a-boom") == "ready"  # untouched (probe raised)
             assert await _state_of(check, "b-flip") == "unreachable"

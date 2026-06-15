@@ -81,7 +81,11 @@ async def probe_build_host_reachability(conn: AsyncConnection, prober: BuildHost
                         conn, host.id, new_state=new_state, expected_state=host.state
                     )
         except Exception:  # noqa: BLE001 - isolate one host; a bad probe must not starve the rest
-            _log.warning("reconciler: probing build host %r failed this pass; skipping", host.name)
+            _log.warning(
+                "reconciler: probing build host %r failed this pass; skipping",
+                host.name,
+                exc_info=True,
+            )
     _log.info("reconciler: probed %d ssh build host(s); %d state change(s)", len(hosts), changed)
     return changed
 
