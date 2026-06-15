@@ -33,6 +33,7 @@ from pydantic import Field
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.models import Resource, SystemShape
 from kdive.domain.pcie import (
     MatchOutcome,
@@ -139,7 +140,7 @@ async def _claims_by_resource(conn: AsyncConnection) -> dict[Any, list[PCIeClaim
         await cur.execute(
             "SELECT resource_id, pcie_claim FROM allocations "
             "WHERE resource_id IS NOT NULL AND state = ANY(%s) AND pcie_claim <> '[]'::jsonb",
-            (list(pcie_claim.NON_TERMINAL_STATES_VALUES),),
+            (list(NON_TERMINAL_ALLOCATION_STATE_VALUES),),
         )
         rows = await cur.fetchall()
     for resource_id, held_list in rows:

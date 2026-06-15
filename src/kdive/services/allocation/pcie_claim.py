@@ -7,8 +7,8 @@ inputs the matcher needs and wraps the resolution the in-lock claim performs:
 - :func:`descriptors_for` reads + **validates** a host's static descriptor list out of
   ``capabilities`` (host-derived, untrusted — one malformed entry never blanks the pool).
 - :func:`active_claims` derives the host's occupancy set from the ``pcie_claim`` of its
-  **non-terminal** allocations, using the shared :data:`NON_TERMINAL_STATES` set (which
-  admission reuses) so the occupancy predicate can never drift from the capacity predicate.
+  **non-terminal** allocations, using the shared domain lifecycle state set so the occupancy
+  predicate can never drift from the capacity predicate.
 - :func:`resolve_union` resolves the requested spec union to **distinct** free devices,
   returning the matcher's config-vs-capacity outcome (never raising on busy/absent — only
   malformed grammar raises, fail-closed).
@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from psycopg import AsyncConnection
 
+from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.pcie import (
     PCIE_DEVICES_KEY,
     MultisetResolution,
@@ -31,25 +32,11 @@ from kdive.domain.pcie import (
     PCIeDescriptor,
     resolve_multiset,
 )
-from kdive.domain.state import AllocationState
 
 if TYPE_CHECKING:
     from uuid import UUID
 
     from kdive.domain.models import Resource
-
-# Allocation states that hold a live PCIe claim — the occupancy set, identical to
-# admission's capacity predicate (REQUESTED/GRANTED/ACTIVE/RELEASING). Derived from the
-# enum, not literal strings, so it cannot drift if the state machine gains a value. A
-# device a non-terminal allocation holds is never double-booked; a terminal allocation's
-# snapshot stops counting.
-NON_TERMINAL_STATES = (
-    AllocationState.REQUESTED,
-    AllocationState.GRANTED,
-    AllocationState.ACTIVE,
-    AllocationState.RELEASING,
-)
-NON_TERMINAL_STATES_VALUES = tuple(state.value for state in NON_TERMINAL_STATES)
 
 _DESCRIPTOR_FIELDS = ("bdf", "vendor_id", "device_id", "class_code", "label")
 
@@ -98,7 +85,7 @@ async def active_claims(conn: AsyncConnection, resource_id: UUID) -> list[PCIeCl
         await cur.execute(
             "SELECT pcie_claim FROM allocations "
             "WHERE resource_id = %s AND state = ANY(%s) AND pcie_claim <> '[]'::jsonb",
-            (resource_id, list(NON_TERMINAL_STATES_VALUES)),
+            (resource_id, list(NON_TERMINAL_ALLOCATION_STATE_VALUES)),
         )
         rows = await cur.fetchall()
     for row in rows:

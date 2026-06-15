@@ -76,11 +76,11 @@ _REQUEST_KIND = "allocations.request"
 # DEDICATED occupancy predicate that EXCLUDES ``requested``: a queued row holds only a queue
 # position, so it must occupy neither a host slot nor a grant-quota slot — otherwise it would
 # block other grants and self-block its own promotion (the promotion's capacity replay would
-# count the candidate against itself). This is NOT a redefinition of ``NON_TERMINAL_STATES``
-# (the shared liveness constant): ``requested`` stays non-terminal/live for the lease-expiry
-# and reconciler logic, which reasons about liveness, not occupancy. PCIe occupancy
-# (``pcie_claim.active_claims``) keeps using ``NON_TERMINAL_STATES``; a queued row has an
-# empty ``pcie_claim`` (resolve happens only at grant), so it contributes no device either way.
+# count the candidate against itself). This is not a redefinition of
+# ``NON_TERMINAL_ALLOCATION_STATES``: ``requested`` stays non-terminal/live for lease expiry
+# and reconciler logic, which reason about liveness, not occupancy. PCIe occupancy
+# (``pcie_claim.active_claims``) keeps using the domain liveness rule; a queued row has an empty
+# ``pcie_claim`` (resolve happens only at grant), so it contributes no device either way.
 OCCUPYING = (
     AllocationState.GRANTED,
     AllocationState.ACTIVE,

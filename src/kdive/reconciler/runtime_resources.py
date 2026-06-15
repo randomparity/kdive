@@ -31,9 +31,9 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.models import ManagedBy
 from kdive.inventory.reconcile import PruneOutcome
-from kdive.services.allocation.pcie_claim import NON_TERMINAL_STATES_VALUES
 
 _log = logging.getLogger(__name__)
 
@@ -155,7 +155,7 @@ async def _resource_has_live_allocation(cur: Any, row_id: UUID) -> bool:
     """True when the resource backs a non-terminal allocation (the refuse-if-live predicate)."""
     await cur.execute(
         "SELECT 1 FROM allocations WHERE resource_id = %s AND state = ANY(%s) LIMIT 1",
-        (row_id, list(NON_TERMINAL_STATES_VALUES)),
+        (row_id, list(NON_TERMINAL_ALLOCATION_STATE_VALUES)),
     )
     return await cur.fetchone() is not None
 

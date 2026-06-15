@@ -31,8 +31,8 @@ from kdive.db.locks import (
     advisory_xact_lock,
     session_advisory_lock,
 )
+from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.models import ManagedBy, ResourceKind
-from kdive.services.allocation.pcie_claim import NON_TERMINAL_STATES_VALUES
 from kdive.services.images.retention import image_referenced_by_live_system
 
 __all__ = [
@@ -212,7 +212,7 @@ async def _resource_has_live_allocation(cur: AsyncCursor[dict[str, Any]], row_id
     """True when the resource backs a non-terminal allocation (the refuse-if-live predicate)."""
     await cur.execute(
         "SELECT 1 FROM allocations WHERE resource_id = %s AND state = ANY(%s) LIMIT 1",
-        (row_id, list(NON_TERMINAL_STATES_VALUES)),
+        (row_id, list(NON_TERMINAL_ALLOCATION_STATE_VALUES)),
     )
     return await cur.fetchone() is not None
 
