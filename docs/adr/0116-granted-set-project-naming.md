@@ -53,9 +53,12 @@ project is *considered*, not rowed).
 - The zero-fill is constructed in the tool layer from the resolved target set and a
   new domain helper `empty_row(project)` that uses `quantize_kcu`, so a zero-filled
   row serializes `"0.0000"` byte-identically to a real zero row (no `"0"` vs
-  `"0.0000"` skew). Zero-filled projects are sorted by name and appended after the
-  domain's `rollup.rows`, so item order is deterministic. The audit trigger still
-  counts the *authorized set*, so audit behaviour is unchanged.
+  `"0.0000"` skew). The domain rollup query is unordered, so the granted-set form
+  sorts the full row set (spent + zero-filled) by `(project, principal)` — making a
+  mixed set deterministic, not just the zero-fill tail. `ctx.projects` is not
+  deduplicated upstream, so the zero-fill target set is deduplicated to avoid
+  duplicate zero rows for a duplicated grant. The audit trigger still counts the
+  *authorized set*, so audit behaviour is unchanged.
 - The two report forms now shape "a project with no rows" differently (granted-set
   names it; all-projects does not). That asymmetry is intentional — own-project
   discovery vs cross-tenant oversight — and is documented in both the spec and the
