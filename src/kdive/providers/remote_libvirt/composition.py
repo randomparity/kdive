@@ -168,6 +168,7 @@ def discovery_registration(*, secret_registry: SecretRegistry) -> ProviderDiscov
         kind=ResourceKind.REMOTE_LIBVIRT,
         pool_name=_POOL,
         cost_class=_COST_CLASS,
+        creates=False,
     )
 
 

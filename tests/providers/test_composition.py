@@ -556,6 +556,15 @@ def test_remote_runtime_buildable_without_operator_config(
     assert runtime.discovery_registrar is not None
 
 
+def test_remote_discovery_registration_is_bind_only() -> None:
+    registration = composition.remote_composition.discovery_registration(
+        secret_registry=SecretRegistry()
+    )
+
+    assert registration.kind is ResourceKind.REMOTE_LIBVIRT
+    assert registration.creates is False
+
+
 def test_build_host_transport_factories_follow_remote_libvirt_opt_in() -> None:
     provider_composition = composition.ProviderComposition(secret_registry=SecretRegistry())
 
