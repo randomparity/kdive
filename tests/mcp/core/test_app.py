@@ -197,6 +197,27 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
     }
 
 
+def test_ops_images_store_resolver_preserves_configured_store_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = CategorizedError(
+        "invalid S3 endpoint",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"setting": "KDIVE_S3_ENDPOINT_URL"},
+    )
+
+    def _raise_store() -> object:
+        raise error
+
+    monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "not-a-url")
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _raise_store)
+
+    with pytest.raises(CategorizedError) as caught:
+        app_module._resolve_ops_images_store()
+
+    assert caught.value is error
+
+
 def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     # The provisioning plane (#16) registers provision/teardown, the build plane (#18)
     # registers build, the install + boot plane (#19) registers install/boot, and the
