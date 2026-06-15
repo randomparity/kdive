@@ -15,6 +15,7 @@ breakage must not emit a confident wrong fix when a backend was simply down.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Annotated, Protocol
 
 from fastmcp import FastMCP
@@ -47,6 +48,7 @@ _TOOL = "ops.diagnostics"
 # run.
 _EGRESS_TOOL = "ops.diagnostics.egress"
 _OBJECT_ID = "diagnostics"
+_log = logging.getLogger(__name__)
 
 
 class ServiceFactory(Protocol):
@@ -116,7 +118,14 @@ async def _diagnostics_report_from_service(
     """
     try:
         service = service_factory(provider, with_egress=with_egress)
-    except Exception:  # noqa: BLE001 - a build/config fault is an error verdict, not a crash
+    except Exception as exc:  # noqa: BLE001 - a build/config fault is an error verdict, not a crash
+        _log.error(
+            "diagnostics assembly failed for provider=%r with_egress=%s: %s",
+            provider,
+            with_egress,
+            exc,
+            exc_info=True,
+        )
         return DiagnosticsReport(
             results=[
                 CheckResult(

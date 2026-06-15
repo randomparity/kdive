@@ -9,6 +9,7 @@ check that does not answer within its per-check timeout is `error`, not a hang.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -74,14 +75,17 @@ def test_run_check_maps_timeout_to_error() -> None:
     assert result.check_id == "slow"
 
 
-def test_run_check_maps_unexpected_exception_to_error() -> None:
+def test_run_check_maps_unexpected_exception_to_error(caplog: pytest.LogCaptureFixture) -> None:
     class _Boom(_Static):
         async def run(self) -> CheckResult:
             raise RuntimeError("backend exploded")
 
+    caplog.set_level(logging.ERROR, logger="kdive.diagnostics.checks")
     boom = _Boom(CheckResult(check_id="boom", status=CheckStatus.PASS, detail="ok"))
     result = asyncio.run(run_check(boom, timeout=1.0))
     assert result.status is CheckStatus.ERROR
     assert result.fix is None
     assert result.check_id == "boom"
     assert "backend exploded" not in result.detail
+    assert "backend exploded" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)

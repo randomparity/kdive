@@ -16,6 +16,7 @@ exception into `error` — so a check can never wedge or crash the aggregating s
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from enum import StrEnum
 SECRET_REF_ID = "secret_ref"
 PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
+
+_log = logging.getLogger(__name__)
 
 
 class CheckStatus(StrEnum):
@@ -117,7 +120,8 @@ async def run_check(check: Check, *, timeout: float) -> CheckResult:
             status=CheckStatus.ERROR,
             detail=f"check did not respond within {timeout:g}s",
         )
-    except Exception:  # noqa: BLE001 - backstop: a leaked error must not wedge the service
+    except Exception as exc:  # noqa: BLE001 - backstop: a leaked error must not wedge the service
+        _log.error("diagnostic check %s raised unexpectedly: %s", check.id, exc, exc_info=True)
         return CheckResult(
             check_id=check.id,
             status=CheckStatus.ERROR,

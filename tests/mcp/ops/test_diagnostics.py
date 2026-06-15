@@ -16,10 +16,12 @@ The handler is called directly with an injected pool + service factory + Request
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import psycopg
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
@@ -280,9 +282,13 @@ def test_secret_ref_aggregate_carries_no_per_tenant_ref(migrated_url: str) -> No
     asyncio.run(_run())
 
 
-def test_factory_build_failure_is_error_verdict_and_audited(migrated_url: str) -> None:
+def test_factory_build_failure_is_error_verdict_and_audited(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
     def _failing_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
         raise RuntimeError("malformed KDIVE_* secret value")
+
+    caplog.set_level(logging.ERROR, logger="kdive.mcp.tools.ops.diagnostics")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -292,6 +298,7 @@ def test_factory_build_failure_is_error_verdict_and_audited(migrated_url: str) -
         item = resp.items[0]
         assert item.data["status"] == "error"
         assert item.data["fix"] is None
+        assert "malformed KDIVE" not in data_str(item, "detail")
         assert resp.data["has_error"] == "true"
         assert resp.data["has_failure"] == "false"
         # The served attempt is still audited.
@@ -300,3 +307,5 @@ def test_factory_build_failure_is_error_verdict_and_audited(migrated_url: str) -
         assert rows[0][1] == "platform_operator"
 
     asyncio.run(_run())
+    assert "malformed KDIVE_* secret value" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
