@@ -92,9 +92,8 @@ def _resolve_ssh_key(
 ) -> str:
     """Resolve *credential_ref* against the secrets root, register with *secret_registry*.
 
-    Uses :class:`~kdive.security.secrets.secrets.FileRefBackend` confined to the
-    ``KDIVE_SECRETS_ROOT`` — the same mechanism :mod:`kdive.providers.remote_libvirt.transport`
-    uses for TLS material. The value is registered into ``secret_registry`` under ``scope``
+    Uses :class:`~kdive.security.secrets.secrets.FileRefBackend` confined to
+    ``KDIVE_SECRETS_ROOT``. The value is registered into ``secret_registry`` under ``scope``
     before being returned.
 
     Args:

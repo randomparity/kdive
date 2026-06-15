@@ -13,7 +13,7 @@ from uuid import UUID
 
 import pytest
 
-from kdive.providers.build_host.guest_exec_transport import GuestExecBuildTransport
+from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     EphemeralBuildVm,
     build_domain_name,

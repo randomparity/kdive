@@ -16,7 +16,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.provider_components.artifacts import PresignedUpload
-from kdive.providers.build_host.guest_exec_transport import GuestExecBuildTransport
+from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
