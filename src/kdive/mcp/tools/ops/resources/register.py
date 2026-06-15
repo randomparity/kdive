@@ -21,6 +21,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, ConfigDict, Field
 
 import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
@@ -49,6 +50,49 @@ from kdive.security.secrets.secrets import secrets_root_from_env
 _log = logging.getLogger(__name__)
 
 _FAULT_INJECT_HOST_URI = "fault-inject://local"
+
+
+class RuntimeResourceRegistration(BaseModel):
+    """Shared MCP request fields for runtime resource registration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="The (kind, name) identity for the new resource.")
+    cost_class: str = Field(description="The cost class for pricing.")
+    concurrent_allocation_cap: int = Field(
+        default=1, description="Per-host concurrent-allocation cap (> 0)."
+    )
+    secret_refs: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. "
+            "Only the references are stored; secret bytes are never fetched or logged."
+        ),
+    )
+    owner_project: str | None = Field(
+        default=None,
+        description=(
+            "Owning project; defaults to the single registering project. Pass '*' for a "
+            "global (any-project) resource."
+        ),
+    )
+
+
+class RemoteLibvirtResourceRegistration(RuntimeResourceRegistration):
+    """Remote-libvirt runtime resource registration request."""
+
+    host_uri: str = Field(description="Remote-libvirt provider host URI.")
+    base_image: str = Field(description="Registered remote-libvirt base image name.")
+
+
+class LocalLibvirtResourceRegistration(RuntimeResourceRegistration):
+    """Local-libvirt runtime resource registration request."""
+
+    host_uri: str = Field(description="Local-libvirt provider host URI.")
+
+
+class FaultInjectResourceRegistration(RuntimeResourceRegistration):
+    """Fault-inject runtime resource registration request."""
 
 
 def _lease_deadline() -> datetime:
@@ -404,14 +448,8 @@ async def _audit_register(
 async def register_remote_libvirt_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
+    request: RemoteLibvirtResourceRegistration,
     *,
-    name: str,
-    cost_class: str,
-    host_uri: str,
-    base_image: str,
-    concurrent_allocation_cap: int = 1,
-    secret_refs: tuple[str, ...] = (),
-    owner_project: str | None = None,
     probe: ResourceProbe | None = None,
     secrets_root: Path | None = None,
 ) -> ToolResponse:
@@ -421,13 +459,13 @@ async def register_remote_libvirt_resource(
         ctx,
         tool=REGISTER_REMOTE_LIBVIRT_TOOL,
         block="remote_libvirt",
-        name=name,
-        cost_class=cost_class,
-        host_uri=host_uri,
-        base_image=base_image,
-        concurrent_allocation_cap=concurrent_allocation_cap,
-        secret_refs=secret_refs,
-        owner_project=owner_project,
+        name=request.name,
+        cost_class=request.cost_class,
+        host_uri=request.host_uri,
+        base_image=request.base_image,
+        concurrent_allocation_cap=request.concurrent_allocation_cap,
+        secret_refs=request.secret_refs,
+        owner_project=request.owner_project,
         probe=probe,
         secrets_root=secrets_root,
     )
@@ -436,13 +474,8 @@ async def register_remote_libvirt_resource(
 async def register_local_libvirt_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
+    request: LocalLibvirtResourceRegistration,
     *,
-    name: str,
-    cost_class: str,
-    host_uri: str,
-    concurrent_allocation_cap: int = 1,
-    secret_refs: tuple[str, ...] = (),
-    owner_project: str | None = None,
     probe: ResourceProbe | None = None,
     secrets_root: Path | None = None,
 ) -> ToolResponse:
@@ -452,12 +485,12 @@ async def register_local_libvirt_resource(
         ctx,
         tool=REGISTER_LOCAL_LIBVIRT_TOOL,
         block="local_libvirt",
-        name=name,
-        cost_class=cost_class,
-        host_uri=host_uri,
-        concurrent_allocation_cap=concurrent_allocation_cap,
-        secret_refs=secret_refs,
-        owner_project=owner_project,
+        name=request.name,
+        cost_class=request.cost_class,
+        host_uri=request.host_uri,
+        concurrent_allocation_cap=request.concurrent_allocation_cap,
+        secret_refs=request.secret_refs,
+        owner_project=request.owner_project,
         probe=probe,
         secrets_root=secrets_root,
     )
@@ -466,12 +499,8 @@ async def register_local_libvirt_resource(
 async def register_fault_inject_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
+    request: FaultInjectResourceRegistration,
     *,
-    name: str,
-    cost_class: str,
-    concurrent_allocation_cap: int = 1,
-    secret_refs: tuple[str, ...] = (),
-    owner_project: str | None = None,
     probe: ResourceProbe | None = None,
     secrets_root: Path | None = None,
 ) -> ToolResponse:
@@ -481,17 +510,20 @@ async def register_fault_inject_resource(
         ctx,
         tool=REGISTER_FAULT_INJECT_TOOL,
         block="fault_inject",
-        name=name,
-        cost_class=cost_class,
-        concurrent_allocation_cap=concurrent_allocation_cap,
-        secret_refs=secret_refs,
-        owner_project=owner_project,
+        name=request.name,
+        cost_class=request.cost_class,
+        concurrent_allocation_cap=request.concurrent_allocation_cap,
+        secret_refs=request.secret_refs,
+        owner_project=request.owner_project,
         probe=probe,
         secrets_root=secrets_root,
     )
 
 
 __all__ = [
+    "FaultInjectResourceRegistration",
+    "LocalLibvirtResourceRegistration",
+    "RemoteLibvirtResourceRegistration",
     "register_fault_inject_resource",
     "register_local_libvirt_resource",
     "register_remote_libvirt_resource",

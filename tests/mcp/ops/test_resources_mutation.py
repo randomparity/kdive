@@ -52,6 +52,8 @@ from kdive.mcp.tools.ops.resources._common import (
 )
 from kdive.mcp.tools.ops.resources.deregister import deregister_resource
 from kdive.mcp.tools.ops.resources.register import (
+    FaultInjectResourceRegistration,
+    RemoteLibvirtResourceRegistration,
     register_fault_inject_resource,
     register_remote_libvirt_resource,
 )
@@ -213,6 +215,44 @@ def _destructive_hint(tool: object) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _fault_request(
+    name: str,
+    *,
+    cost_class: str = "standard",
+    concurrent_allocation_cap: int = 1,
+    secret_refs: tuple[str, ...] = (),
+    owner_project: str | None = None,
+) -> FaultInjectResourceRegistration:
+    return FaultInjectResourceRegistration(
+        name=name,
+        cost_class=cost_class,
+        concurrent_allocation_cap=concurrent_allocation_cap,
+        secret_refs=secret_refs,
+        owner_project=owner_project,
+    )
+
+
+def _remote_request(
+    name: str,
+    *,
+    cost_class: str = "standard",
+    host_uri: str = "qemu+tls://host/system",
+    base_image: str = "base-img",
+    concurrent_allocation_cap: int = 1,
+    secret_refs: tuple[str, ...] = (),
+    owner_project: str | None = None,
+) -> RemoteLibvirtResourceRegistration:
+    return RemoteLibvirtResourceRegistration(
+        name=name,
+        cost_class=cost_class,
+        host_uri=host_uri,
+        base_image=base_image,
+        concurrent_allocation_cap=concurrent_allocation_cap,
+        secret_refs=secret_refs,
+        owner_project=owner_project,
+    )
+
+
 async def _call_registered_tool(tool: object, *args: object) -> ToolResponse:
     fn = cast(Any, tool).fn
     result = await fn(*args)
@@ -226,16 +266,16 @@ async def _call_registered_tool(tool: object, *args: object) -> ToolResponse:
 def test_registrar_exposes_annotations_and_invokes_wrappers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[object, RequestContext, dict[str, object]]] = []
+    calls: list[tuple[object, RequestContext, FaultInjectResourceRegistration]] = []
     pool = cast(AsyncConnectionPool, object())
     ctx = _admin_ctx(principal="registrar-admin", projects=("registrar-team",))
 
     async def fake_register_fault_inject(
         bound_pool: AsyncConnectionPool,
         bound_ctx: RequestContext,
-        **kwargs: object,
+        request: FaultInjectResourceRegistration,
     ) -> ToolResponse:
-        calls.append((bound_pool, bound_ctx, kwargs))
+        calls.append((bound_pool, bound_ctx, request))
         return ToolResponse.success("resource:fi-registrar", "registered")
 
     async def _run() -> None:
@@ -260,11 +300,12 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
 
         resp = await _call_registered_tool(
             tools[REGISTER_FAULT_INJECT_TOOL],
-            "fi-registrar",
-            "standard",
-            4,
-            ["ref-a", "ref-b"],
-            "*",
+            _fault_request(
+                "fi-registrar",
+                concurrent_allocation_cap=4,
+                secret_refs=("ref-a", "ref-b"),
+                owner_project="*",
+            ),
         )
 
         assert resp.status == "registered"
@@ -272,13 +313,12 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
             (
                 pool,
                 ctx,
-                {
-                    "name": "fi-registrar",
-                    "cost_class": "standard",
-                    "concurrent_allocation_cap": 4,
-                    "secret_refs": ("ref-a", "ref-b"),
-                    "owner_project": "*",
-                },
+                _fault_request(
+                    "fi-registrar",
+                    concurrent_allocation_cap=4,
+                    secret_refs=("ref-a", "ref-b"),
+                    owner_project="*",
+                ),
             )
         ]
 
@@ -337,8 +377,7 @@ def test_non_admin_register_denied(migrated_url: str, tmp_path: Path) -> None:
             resp = await register_fault_inject_resource(
                 pool,
                 _non_admin_ctx(),
-                name="fi-1",
-                cost_class="standard",
+                _fault_request("fi-1"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
@@ -367,9 +406,7 @@ def test_platform_auditor_overreach_denied_and_audited(migrated_url: str, tmp_pa
             resp = await register_fault_inject_resource(
                 pool,
                 _auditor_ctx(),
-                name="fi-aud",
-                cost_class="standard",
-                owner_project="*",
+                _fault_request("fi-aud", owner_project="*"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
@@ -391,8 +428,7 @@ def test_register_allocate_renew_deregister_round_trip(migrated_url: str, tmp_pa
             reg = await register_fault_inject_resource(
                 pool,
                 _admin_ctx(),
-                name="fi-roundtrip",
-                cost_class="standard",
+                _fault_request("fi-roundtrip"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
@@ -451,17 +487,14 @@ def test_register_defaults_owner_to_single_project_and_star_is_global(
             scoped = await register_fault_inject_resource(
                 pool,
                 _admin_ctx(projects=("only-proj",)),
-                name="fi-scoped",
-                cost_class="standard",
+                _fault_request("fi-scoped"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
             glob = await register_fault_inject_resource(
                 pool,
                 _admin_ctx(projects=("only-proj",)),
-                name="fi-global",
-                cost_class="standard",
-                owner_project="*",
+                _fault_request("fi-global", owner_project="*"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
@@ -479,8 +512,7 @@ def test_register_ambiguous_project_requires_explicit(migrated_url: str, tmp_pat
             resp = await register_fault_inject_resource(
                 pool,
                 _admin_ctx(projects=("a", "b")),
-                name="fi-amb",
-                cost_class="standard",
+                _fault_request("fi-amb"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
@@ -505,8 +537,7 @@ def test_register_rejects_config_name_collision(migrated_url: str, tmp_path: Pat
             resp = await register_fault_inject_resource(
                 pool,
                 _admin_ctx(),
-                name="fi-config",
-                cost_class="standard",
+                _fault_request("fi-config"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
@@ -524,8 +555,7 @@ def test_register_duplicate_runtime_name_conflict(migrated_url: str, tmp_path: P
                 return await register_fault_inject_resource(
                     pool,
                     _admin_ctx(),
-                    name="fi-dup",
-                    cost_class="standard",
+                    _fault_request("fi-dup"),
                     probe=_Reachable(),
                     secrets_root=root,
                 )
@@ -551,12 +581,11 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
             ok = await register_remote_libvirt_resource(
                 pool,
                 _admin_ctx(),
-                name="rl-ok",
-                cost_class="standard",
-                host_uri="qemu+tls://host/system",
-                base_image="base-img",
-                secret_refs=("client.pem", "client.key", "ca.pem"),
-                owner_project="*",
+                _remote_request(
+                    "rl-ok",
+                    secret_refs=("client.pem", "client.key", "ca.pem"),
+                    owner_project="*",
+                ),
                 probe=_Reachable(),
                 secrets_root=root,
             )
@@ -565,12 +594,7 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
             unreachable = await register_remote_libvirt_resource(
                 pool,
                 _admin_ctx(),
-                name="rl-unreach",
-                cost_class="standard",
-                host_uri="qemu+tls://host/system",
-                base_image="base-img",
-                secret_refs=("client.pem",),
-                owner_project="*",
+                _remote_request("rl-unreach", secret_refs=("client.pem",), owner_project="*"),
                 probe=_Unreachable(),
                 secrets_root=root,
             )
@@ -579,12 +603,7 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
             missing_secret = await register_remote_libvirt_resource(
                 pool,
                 _admin_ctx(),
-                name="rl-nosecret",
-                cost_class="standard",
-                host_uri="qemu+tls://host/system",
-                base_image="base-img",
-                secret_refs=("absent.pem",),
-                owner_project="*",
+                _remote_request("rl-nosecret", secret_refs=("absent.pem",), owner_project="*"),
                 probe=_Reachable(),
                 secrets_root=root,
             )
@@ -593,12 +612,12 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
             no_image = await register_remote_libvirt_resource(
                 pool,
                 _admin_ctx(),
-                name="rl-noimage",
-                cost_class="standard",
-                host_uri="qemu+tls://host/system",
-                base_image="nope",
-                secret_refs=("client.pem",),
-                owner_project="*",
+                _remote_request(
+                    "rl-noimage",
+                    base_image="nope",
+                    secret_refs=("client.pem",),
+                    owner_project="*",
+                ),
                 probe=_Reachable(),
                 secrets_root=root,
             )
@@ -617,10 +636,8 @@ def test_fault_inject_register_ignores_base_image_and_reachability(
             resp = await register_fault_inject_resource(
                 pool,
                 _admin_ctx(),
-                name="fi-synthetic",
-                cost_class="standard",
+                _fault_request("fi-synthetic", owner_project="*"),
                 probe=_Unreachable(),
-                owner_project="*",
                 secrets_root=_secrets_root(tmp_path),
             )
         assert resp.status == "registered", resp.model_dump()
@@ -638,10 +655,7 @@ def test_fault_inject_register_fails_on_unresolvable_secret(
             resp = await register_fault_inject_resource(
                 pool,
                 _admin_ctx(),
-                name="fi-badsecret",
-                cost_class="standard",
-                secret_refs=("absent.key",),
-                owner_project="*",
+                _fault_request("fi-badsecret", secret_refs=("absent.key",), owner_project="*"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
@@ -725,12 +739,12 @@ def test_no_secret_bytes_in_audit_or_envelope(migrated_url: str, tmp_path: Path)
             resp = await register_remote_libvirt_resource(
                 pool,
                 _admin_ctx(),
-                name="rl-leak",
-                cost_class="standard",
-                host_uri="qemu+tls://host/system",
-                base_image="leak-img",
-                secret_refs=("client.pem",),
-                owner_project="*",
+                _remote_request(
+                    "rl-leak",
+                    base_image="leak-img",
+                    secret_refs=("client.pem",),
+                    owner_project="*",
+                ),
                 probe=_Reachable(),
                 secrets_root=root,
             )
