@@ -111,8 +111,10 @@ class RemoteLibvirtTransportResetter:
         except CategorizedError:
             _log.info("reconciler: undecodable transport handle; skipping reset")
             return None
+        if data.kind != _GDBSTUB:
+            return None
         config = self._config_factory()
-        if data.kind != _GDBSTUB or data.host != config.gdb_addr:
+        if data.host != config.gdb_addr:
             return None  # a local loopback gdbstub, or not our gdb_addr — not ours to reset
         if domain_name is None:
             _log.info("reconciler: remote gdbstub session has no domain_name; cannot reset")
