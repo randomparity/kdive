@@ -39,6 +39,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import ManagedBy, ResourceKind
 from kdive.domain.state import AllocationState
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.ops.resources import host_ops as resources_host_ops
 from kdive.mcp.tools.ops.resources import registrar as resources_registrar
 from kdive.mcp.tools.ops.resources._common import (
     DEREGISTER_TOOL,
@@ -274,6 +275,49 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
                 },
             )
         ]
+
+    asyncio.run(_run())
+
+
+def test_host_ops_registrar_exposes_annotations_and_invokes_wrappers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, RequestContext, str, str]] = []
+    pool = cast(AsyncConnectionPool, object())
+    ctx = _admin_ctx(principal="host-op", projects=())
+
+    async def fake_set_status(
+        bound_pool: AsyncConnectionPool,
+        bound_ctx: RequestContext,
+        *,
+        resource_id: str,
+        status: str,
+    ) -> ToolResponse:
+        calls.append((bound_pool, bound_ctx, resource_id, status))
+        return ToolResponse.success(resource_id, status)
+
+    async def _run() -> None:
+        monkeypatch.setattr(resources_host_ops, "current_context", lambda: ctx)
+        monkeypatch.setattr(resources_host_ops, "set_resource_status", fake_set_status)
+        app = FastMCP("resources-host-ops-test")
+        resources_host_ops.register(app, pool)
+        tools = {tool.name: tool for tool in await app.list_tools()}
+
+        assert set(tools) == {
+            "resources.set_status",
+            "resources.cordon",
+            "resources.uncordon",
+            "resources.drain",
+        }
+        assert _destructive_hint(tools["resources.set_status"]) is False
+        assert _destructive_hint(tools["resources.cordon"]) is False
+        assert _destructive_hint(tools["resources.uncordon"]) is False
+        assert _destructive_hint(tools["resources.drain"]) is True
+
+        resp = await _call_registered_tool(tools["resources.set_status"], "resource-1", "degraded")
+
+        assert resp.status == "degraded"
+        assert calls == [(pool, ctx, "resource-1", "degraded")]
 
     asyncio.run(_run())
 
