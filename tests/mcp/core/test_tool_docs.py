@@ -269,7 +269,9 @@ def test_build_host_register_tools_are_variant_specific() -> None:
     assert "build_hosts.register" not in tools
 
     ssh_params = set(tools["build_hosts.register_ssh"].parameters["properties"])
-    assert ssh_params == {
+    assert ssh_params == {"request"}
+    ssh_request = tools["build_hosts.register_ssh"].parameters["properties"]["request"]
+    assert set(ssh_request["properties"]) == {
         "address",
         "max_concurrent",
         "name",
@@ -278,7 +280,11 @@ def test_build_host_register_tools_are_variant_specific() -> None:
     }
 
     ephemeral_params = set(tools["build_hosts.register_ephemeral_libvirt"].parameters["properties"])
-    assert ephemeral_params == {
+    assert ephemeral_params == {"request"}
+    ephemeral_request = tools["build_hosts.register_ephemeral_libvirt"].parameters["properties"][
+        "request"
+    ]
+    assert set(ephemeral_request["properties"]) == {
         "base_image_volume",
         "max_concurrent",
         "name",
@@ -299,12 +305,21 @@ def test_resource_register_tools_are_variant_specific() -> None:
         "secret_refs",
     }
     remote_params = set(tools["resources.register_remote_libvirt"].parameters["properties"])
+    assert remote_params == {"request"}
+    remote_request = tools["resources.register_remote_libvirt"].parameters["properties"]["request"]
+    remote_params = set(remote_request["properties"])
     assert remote_params == common | {"base_image", "host_uri"}
 
     local_params = set(tools["resources.register_local_libvirt"].parameters["properties"])
+    assert local_params == {"request"}
+    local_request = tools["resources.register_local_libvirt"].parameters["properties"]["request"]
+    local_params = set(local_request["properties"])
     assert local_params == common | {"host_uri"}
 
     fault_params = set(tools["resources.register_fault_inject"].parameters["properties"])
+    assert fault_params == {"request"}
+    fault_request = tools["resources.register_fault_inject"].parameters["properties"]["request"]
+    fault_params = set(fault_request["properties"])
     assert fault_params == common
 
 
