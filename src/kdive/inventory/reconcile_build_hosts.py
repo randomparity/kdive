@@ -215,7 +215,7 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
         name = row["name"]
         if name in declared:
             continue
-        outcome = await prune_or_cordon_build_host(conn, row["id"], name)
+        outcome = await prune_or_cordon_build_host(conn, row["id"])
         record = ReconcileRecord(name=name, entry=f"build_host[{name}]")
         if outcome.cordoned:
             diff.cordoned.append(record)

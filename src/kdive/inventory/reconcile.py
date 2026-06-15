@@ -133,7 +133,7 @@ async def inventory_pass_lock(conn: AsyncConnection) -> AsyncIterator[None]:
         yield
 
 
-async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID, name: str) -> PruneOutcome:
+async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID) -> PruneOutcome:
     """Apply the non-destructive prune contract to one config image row (ADR-0112).
 
     Runs in its own transaction (so the liveness re-check and the row delete are atomic, and
@@ -146,7 +146,6 @@ async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID, name: str) 
     Args:
         conn: The reconcile pass connection (a fresh transaction is opened here).
         row_id: The config image row's id.
-        name: The image name (for the returned record).
 
     Returns:
         A :class:`PruneOutcome` recording whether the row was pruned or cordoned.
@@ -217,9 +216,7 @@ async def _resource_has_live_allocation(cur: AsyncCursor[dict[str, Any]], row_id
     return await cur.fetchone() is not None
 
 
-async def prune_or_cordon_build_host(
-    conn: AsyncConnection, row_id: UUID, name: str
-) -> PruneOutcome:
+async def prune_or_cordon_build_host(conn: AsyncConnection, row_id: UUID) -> PruneOutcome:
     """Apply the non-destructive prune contract to one config build-host row (ADR-0112).
 
     Mirrors :func:`prune_or_cordon_resource`, but the build-host "live" predicate is an
@@ -233,7 +230,6 @@ async def prune_or_cordon_build_host(
     Args:
         conn: The reconcile pass connection (a fresh transaction is opened here).
         row_id: The config build-host row's id.
-        name: The build-host name (for the returned record).
 
     Returns:
         A :class:`PruneOutcome` recording whether the row was pruned or cordoned.

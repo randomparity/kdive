@@ -364,7 +364,7 @@ async def _prune_departed(
         if identity in declared:
             continue
         name = str(row["name"])
-        outcome = await prune_or_cordon_image(conn, _row_id(row), name)
+        outcome = await prune_or_cordon_image(conn, _row_id(row))
         entry = ReconcileRecord(
             name=name, entry=f"image[{identity[0]}/{identity[1]}/{identity[2]}]"
         )

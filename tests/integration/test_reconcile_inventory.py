@@ -1648,7 +1648,7 @@ def test_build_host_prune_cordons_when_lease_wins_lock_first(
             AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
             pool.connection() as conn,
         ):
-            outcome = await prune_or_cordon_build_host(conn, hid, "race-bh2")  # must not raise
+            outcome = await prune_or_cordon_build_host(conn, hid)  # must not raise
         assert outcome.cordoned is True
         assert outcome.pruned is False
         async with await _connect(migrated_url) as check:
