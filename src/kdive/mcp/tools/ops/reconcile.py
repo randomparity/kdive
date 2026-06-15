@@ -188,7 +188,7 @@ def _s3_env_is_absent() -> bool:
     return _S3_OPTIONAL_ENV_NAMES.isdisjoint(config.env_snapshot())
 
 
-def register_with_reaper(
+def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
     *,
@@ -206,7 +206,6 @@ def register_with_reaper(
         meta={"maturity": "implemented"},
     )
     async def ops_reconcile_now() -> ToolResponse:
-        """Run one reconcile pass on demand; return the repair summary. Platform operator."""
         return await reconcile_now(
             pool,
             current_context(),

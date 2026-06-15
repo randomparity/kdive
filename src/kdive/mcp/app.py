@@ -106,7 +106,7 @@ def _pool_only_plane_registrar(
 def _register_reconcile_tools(
     app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
-    ops_reconcile_tools.register_with_reaper(
+    ops_reconcile_tools.register(
         app,
         pool,
         reaper=assembly.reaper,
