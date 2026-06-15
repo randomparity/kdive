@@ -88,9 +88,8 @@ async def _upsert_one(conn: AsyncConnection, entry: CostClassEntry, diff: Reconc
                 (entry.name,),
             )
             row = await cur.fetchone()
-            assert row is not None, (  # no coefficient-delete path exists; the row persists
-                f"cost_class {entry.name!r} vanished after a conflicting insert"
-            )
+            if row is None:  # no coefficient-delete path exists; the row must persist
+                raise RuntimeError(f"cost_class {entry.name!r} vanished after a conflicting insert")
         prior = Decimal(row[0])
         if prior == entry.coeff:
             return  # idempotent: no write, no diff, no log noise
