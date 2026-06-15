@@ -1,7 +1,8 @@
 """``ops.reconcile_systems`` — trigger one inventory reconcile pass over MCP (M2.6 #399).
 
-The inventory engine (``systems.toml`` → ``image_catalog`` / ``resources`` / ``build_hosts``)
-runs from three places: the ``kdive reconcile-systems`` CLI, the reconciler-loop drift pass, and
+The inventory engine (``systems.toml`` → ``image_catalog`` / ``cost_class_coefficients`` /
+``resources`` / ``build_hosts``) runs from three places: the ``kdive reconcile-systems`` CLI,
+the reconciler-loop drift pass, and
 this on-demand MCP trigger. Unlike ``ops.reconcile_now`` (gated ``platform_operator``), this pass
 can **prune** config rows that left the file (and the row-delete frees an image's S3 bytes to the
 existing GC), so it is gated tighter at ``platform_admin`` — a dedicated tool rather than widening
@@ -29,9 +30,8 @@ from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile import ReconcileDiff, ReconcileRecord
-from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
-from kdive.inventory.reconcile_images import ImageHeadStore, reconcile_images
-from kdive.inventory.reconcile_resources import reconcile_resources
+from kdive.inventory.reconcile_images import ImageHeadStore
+from kdive.inventory.reconcile_pipeline import reconcile_all
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -77,9 +77,9 @@ async def reconcile_systems(
     """Run one inventory reconcile pass on demand; audit and return the combined diff.
 
     Gates ``platform_admin`` first (a denial writes no inventory change), reconciles the
-    ``systems.toml`` into ``image_catalog`` / ``resources`` / ``build_hosts``, audits the action
-    to ``platform_audit_log`` (actor + diff), and returns the per-category counts and the
-    pruned/cordoned identities.
+    ``systems.toml`` into ``image_catalog`` / ``cost_class_coefficients`` / ``resources`` /
+    ``build_hosts``, audits the action to ``platform_audit_log`` (actor + diff), and returns the
+    per-category counts and the pruned/cordoned identities.
 
     Args:
         pool: The shared async pool the pass draws a fresh connection from.
@@ -125,28 +125,15 @@ async def _run_pass(pool: AsyncConnectionPool, store: ImageHeadStore) -> Reconci
     :class:`~kdive.inventory.InventoryError`, surfaced as a categorized failure to the caller.
     """
     doc = _load()
-    merged = ReconcileDiff()
     if doc is None:
-        return merged
+        return ReconcileDiff()
     async with pool.connection() as conn:
-        _extend(merged, await reconcile_images(conn, doc, store))
-        _extend(merged, await reconcile_resources(conn, doc))
-        _extend(merged, await reconcile_build_hosts(conn, doc))
-    return merged
+        return await reconcile_all(conn, doc, store)
 
 
 def _load() -> InventoryDoc | None:
     """Load the inventory doc from the default path; an absent file returns ``None``."""
     return load_inventory_optional(_resolve_path())
-
-
-def _extend(into: ReconcileDiff, part: ReconcileDiff) -> None:
-    """Fold one per-entity diff into the merged diff."""
-    into.created.extend(part.created)
-    into.updated.extend(part.updated)
-    into.pruned.extend(part.pruned)
-    into.cordoned.extend(part.cordoned)
-    into.warned.extend(part.warned)
 
 
 def _names(records: list[ReconcileRecord]) -> list[str]:
