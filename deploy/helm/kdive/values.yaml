@@ -80,6 +80,13 @@ demo:
     image: postgres:17
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    # Expose the bundled object store off-cluster (needed for remote-libvirt guest
+    # install/capture and external build uploads — see the deploy README, "Single object
+    # store"). Default ClusterIP keeps it in-cluster; with NodePort also set a node-routable
+    # config.KDIVE_S3_ENDPOINT_URL so presigned URLs carry an address every party reaches.
+    service:
+      type: ClusterIP
+      nodePort: ""
   mc:
     image: minio/mc:RELEASE.2025-04-16T18-13-26Z
   oidc:
