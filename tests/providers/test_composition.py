@@ -71,6 +71,8 @@ client_key_ref = "clientkey.pem"  # pragma: allowlist secret
 ca_cert_ref = "cacert.pem"
 base_image = "base"
 cost_class = "remote"
+vcpus = 8
+memory_mb = 16384
 """
 
 

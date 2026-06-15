@@ -327,6 +327,8 @@ def test_resource_register_tools_are_variant_specific() -> None:
         "name",
         "owner_project",
         "secret_refs",
+        "vcpus",
+        "memory_mb",
     }
     remote_params = set(tools["resources.register_remote_libvirt"].parameters["properties"])
     assert remote_params == {"request"}

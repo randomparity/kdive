@@ -182,7 +182,8 @@ async def _resource_row(url: str, resource_id: str) -> dict[str, object] | None:
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
     async with conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT managed_by, owner_project, lease_expires_at FROM resources WHERE id = %s",
+            "SELECT managed_by, owner_project, lease_expires_at, capabilities "
+            "FROM resources WHERE id = %s",
             (UUID(resource_id),),
         )
         return await cur.fetchone()
@@ -227,6 +228,8 @@ def _fault_request(
         name=name,
         cost_class=cost_class,
         concurrent_allocation_cap=concurrent_allocation_cap,
+        vcpus=8,
+        memory_mb=16384,
         secret_refs=secret_refs,
         owner_project=owner_project,
     )
@@ -248,6 +251,8 @@ def _remote_request(
         host_uri=host_uri,
         base_image=base_image,
         concurrent_allocation_cap=concurrent_allocation_cap,
+        vcpus=8,
+        memory_mb=16384,
         secret_refs=secret_refs,
         owner_project=owner_project,
     )
@@ -438,6 +443,11 @@ def test_register_allocate_renew_deregister_round_trip(migrated_url: str, tmp_pa
             assert row is not None
             assert str(row["managed_by"]) == ManagedBy.RUNTIME.value
             assert row["owner_project"] == "team-a"
+            # The reporter's exact wall: a runtime-registered host must carry the vcpus/memory_mb
+            # size ceiling so admission's <=-resource-caps check has a value to read.
+            caps = cast("dict[str, Any]", row["capabilities"])
+            assert caps["vcpus"] == 8
+            assert caps["memory_mb"] == 16384
             first_lease = row["lease_expires_at"]
             assert isinstance(first_lease, datetime)
 

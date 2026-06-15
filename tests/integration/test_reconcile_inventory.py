@@ -847,7 +847,9 @@ def _fault_inject_toml(
     )
 
 
-def _remote_libvirt_toml(*, name: str, base_image: str = "base") -> str:
+def _remote_libvirt_toml(
+    *, name: str, base_image: str = "base", vcpus: int = 8, memory_mb: int = 16384
+) -> str:
     return (
         "schema_version = 2\n"
         "[[image]]\n"
@@ -870,6 +872,8 @@ def _remote_libvirt_toml(*, name: str, base_image: str = "base") -> str:
         'ca_cert_ref = "ca.pem"\n'  # pragma: allowlist secret - filename ref
         f'base_image = "{base_image}"\n'
         'cost_class = "remote"\n'
+        f"vcpus = {vcpus}\n"
+        f"memory_mb = {memory_mb}\n"
         "concurrent_allocation_cap = 1\n"
     )
 
@@ -987,6 +991,80 @@ def test_fault_inject_resource_is_admitted_not_configuration_error(
                     spec=AdmissionRequestSpec(
                         resource_id=None,
                         kind=ResourceKind.FAULT_INJECT,
+                        shape="small",
+                        vcpus=None,
+                        memory_gb=None,
+                        disk_gb=None,
+                        window=None,
+                        pcie_devices=(),
+                        on_capacity="deny",
+                    ),
+                )
+        assert result.error is None, f"unexpected error: {result.error}"
+        assert result.category is None, f"unexpected denial category: {result.category}"
+        assert result.allocation is not None, f"not admitted: {result.denial}"
+
+    asyncio.run(_run())
+
+
+def test_remote_libvirt_overlay_lands_vcpus_memory_in_caps(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # Tool-feedback regression: a config remote-libvirt host carries vcpus/memory_mb in the
+    # capabilities jsonb so admission's ≤-resource-caps check has a ceiling to read.
+    async def _run() -> None:
+        doc = load_inventory(
+            _write_toml(tmp_path, _remote_libvirt_toml(name="rl-1", vcpus=8, memory_mb=16384))
+        )
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "rl-1")
+        caps = _row_caps(row)
+        assert caps["vcpus"] == 8
+        assert caps["memory_mb"] == 16384
+        assert caps["concurrent_allocation_cap"] == 1
+
+    asyncio.run(_run())
+
+
+def test_remote_libvirt_resource_is_admitted_not_configuration_error(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # Tool-feedback regression headline: allocations.request(kind=remote-libvirt) is ADMITTED,
+    # not configuration_error{vcpus=None} — the universal wall the agent run hit. The seeded
+    # remote-libvirt host now declares a vcpus/memory_mb ceiling, so shape "small" (1 vcpu) fits.
+    from kdive.domain.models import ResourceKind
+    from kdive.security.authz.context import RequestContext
+    from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
+
+    async def _run() -> None:
+        doc = load_inventory(
+            _write_toml(tmp_path, _remote_libvirt_toml(name="rl-1", vcpus=8, memory_mb=16384))
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            async with await _connect(migrated_url) as seed:
+                await seed.execute(
+                    "INSERT INTO budgets (project, limit_kcu, spent_kcu) "
+                    "VALUES ('proj', 1000000, 0)"
+                )
+                await seed.execute(
+                    "INSERT INTO quotas (project, max_concurrent_allocations, "
+                    " max_concurrent_systems) VALUES ('proj', 100, 100)"
+                )
+            async with pool.connection() as conn:
+                result = await request_admission(
+                    conn,
+                    RequestContext(principal="alice", agent_session="s", projects=("proj",)),
+                    project="proj",
+                    spec=AdmissionRequestSpec(
+                        resource_id=None,
+                        kind=ResourceKind.REMOTE_LIBVIRT,
                         shape="small",
                         vcpus=None,
                         memory_gb=None,

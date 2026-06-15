@@ -158,6 +158,8 @@ async def _create_config_resources(
                 )
         for inst in doc.remote_libvirt:
             caps: ResourceCaps = {
+                VCPUS_KEY: inst.vcpus,
+                MEMORY_MB_KEY: inst.memory_mb,
                 CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
             }
             async with resource_identity_lock(conn, ResourceKind.REMOTE_LIBVIRT, inst.name):
@@ -170,6 +172,7 @@ async def _create_config_resources(
                     cost_class=inst.cost_class,
                     caps=caps,
                     adopt_by_host=True,
+                    discovery_owned_keys=(VCPUS_KEY, MEMORY_MB_KEY),
                 )
 
 
@@ -183,6 +186,7 @@ async def _upsert_config_resource(
     cost_class: str,
     caps: ResourceCaps,
     adopt_by_host: bool,
+    discovery_owned_keys: tuple[str, ...] = (),
 ) -> None:
     """Create or change-detectingly update one config-owned resource row keyed by (kind, name).
 
@@ -194,6 +198,11 @@ async def _upsert_config_resource(
     ``caps`` into the existing capabilities jsonb so a discovery-contributed hardware fact is never
     clobbered. ``cost_class`` lands in the COLUMN, never jsonb. Adoption/update flips ``managed_by``
     to ``config`` and writes the ``name`` + ``host_uri``.
+
+    ``discovery_owned_keys`` are capability keys a discovery row owns as ground truth (e.g.
+    ``vcpus`` / ``memory_mb`` hardware facts): a present existing value wins over the
+    config-supplied one, so the config value is only a fallback for a pure-config host with no
+    discovered size.
     """
     row = await _find_existing(
         cur, kind=kind, name=name, host_uri=host_uri, adopt_by_host=adopt_by_host
@@ -209,7 +218,11 @@ async def _upsert_config_resource(
             caps=caps,
         )
         return
-    merged = {**_caps(row), **caps}
+    existing = _caps(row)
+    merged = {**existing, **caps}
+    for key in discovery_owned_keys:
+        if key in existing:
+            merged[key] = existing[key]
     if _needs_config_adoption(row):
         await _adopt_config_resource(
             cur,

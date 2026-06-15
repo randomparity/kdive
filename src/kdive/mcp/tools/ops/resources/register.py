@@ -28,7 +28,11 @@ import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import ManagedBy, ResourceKind, ResourceStatus
-from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resource_capabilities import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    MEMORY_MB_KEY,
+    VCPUS_KEY,
+)
 from kdive.inventory.reconcile import resource_identity_lock
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -61,6 +65,16 @@ class RuntimeResourceRegistration(BaseModel):
     cost_class: str = Field(description="The cost class for pricing.")
     concurrent_allocation_cap: int = Field(
         default=1, description="Per-host concurrent-allocation cap (> 0)."
+    )
+    vcpus: int = Field(
+        gt=0,
+        description=(
+            "The host's vCPU size ceiling. Admission rejects a selector larger than this "
+            "(ADR-0007 §2), so a host registered without it is un-grantable."
+        ),
+    )
+    memory_mb: int = Field(
+        gt=0, description="The host's memory size ceiling in MiB (admission ≤-resource-caps check)."
     )
     secret_refs: tuple[str, ...] = Field(
         default=(),
@@ -239,6 +253,8 @@ async def _insert_registered_resource(
     host_uri: str,
     base_image: str | None,
     cap: int,
+    vcpus: int,
+    memory_mb: int,
     secret_refs: tuple[str, ...],
     owner_project: str | None,
     tool: str,
@@ -246,7 +262,11 @@ async def _insert_registered_resource(
 ) -> ToolResponse:
     """Run the DB preflight + the guarded INSERT in one transaction; map conflicts to envelopes."""
     lease = _lease_deadline()
-    caps = {CONCURRENT_ALLOCATION_CAP_KEY: cap}
+    caps = {
+        VCPUS_KEY: vcpus,
+        MEMORY_MB_KEY: memory_mb,
+        CONCURRENT_ALLOCATION_CAP_KEY: cap,
+    }
     try:
         # Serialize with the inventory reconcile on the (kind, name) identity so a concurrent
         # reconcile adopt/prune of this name and this register cannot interleave (ADR-0112).
@@ -433,6 +453,8 @@ async def register_remote_libvirt_resource(
         host_uri=request.host_uri,
         base_image=request.base_image,
         cap=request.concurrent_allocation_cap,
+        vcpus=request.vcpus,
+        memory_mb=request.memory_mb,
         secret_refs=request.secret_refs,
         owner_project=owner_project,
         tool=REGISTER_REMOTE_LIBVIRT_TOOL,
@@ -488,6 +510,8 @@ async def register_local_libvirt_resource(
         host_uri=request.host_uri,
         base_image=None,
         cap=request.concurrent_allocation_cap,
+        vcpus=request.vcpus,
+        memory_mb=request.memory_mb,
         secret_refs=request.secret_refs,
         owner_project=owner_project,
         tool=REGISTER_LOCAL_LIBVIRT_TOOL,
@@ -536,6 +560,8 @@ async def register_fault_inject_resource(
         host_uri=_FAULT_INJECT_HOST_URI,
         base_image=None,
         cap=request.concurrent_allocation_cap,
+        vcpus=request.vcpus,
+        memory_mb=request.memory_mb,
         secret_refs=request.secret_refs,
         owner_project=owner_project,
         tool=REGISTER_FAULT_INJECT_TOOL,

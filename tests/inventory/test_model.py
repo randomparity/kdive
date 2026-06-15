@@ -44,6 +44,8 @@ def _doc(**overrides: Any) -> dict[str, Any]:
                 "base_image": "base",
                 "cost_class": "remote",
                 "concurrent_allocation_cap": 1,
+                "vcpus": 8,
+                "memory_mb": 16384,
                 "shapes": ["small"],
             }
         ],
@@ -59,6 +61,16 @@ def test_wellformed_parses() -> None:
     assert src.volume == "base.qcow2"
     assert doc.image[0].visibility is ImageVisibility.PUBLIC
     assert doc.remote_libvirt[0].base_image == "base"
+
+
+def test_remote_libvirt_requires_size_ceiling() -> None:
+    # vcpus/memory_mb are the admission ≤-resource-caps ceiling; remote-libvirt is config-owned,
+    # so omitting either is a hard parse error (no host without a grantable ceiling).
+    for missing in ("vcpus", "memory_mb"):
+        d = _doc()
+        del d["remote_libvirt"][0][missing]
+        with pytest.raises(InventoryError):
+            InventoryDoc.parse(d)
 
 
 def test_empty_document_parses() -> None:

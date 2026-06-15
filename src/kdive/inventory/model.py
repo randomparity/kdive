@@ -86,7 +86,14 @@ class _Instance(BaseModel):
 
 
 class RemoteLibvirtInstance(_Instance):
-    """A ``[[remote_libvirt]]`` provider instance."""
+    """A ``[[remote_libvirt]]`` provider instance.
+
+    ``vcpus`` / ``memory_mb`` are the host's billable size ceiling: admission's
+    ≤-resource-caps check (ADR-0007 §2) reads them off the Resource, so a remote host with
+    no declared ceiling is un-grantable (``configuration_error``). Unlike local-libvirt —
+    whose ceiling is probed by discovery — remote-libvirt is config-owned, so the file is the
+    only place the ceiling can come from and both are required.
+    """
 
     uri: str
     gdb_addr: str
@@ -95,6 +102,8 @@ class RemoteLibvirtInstance(_Instance):
     client_key_ref: str
     ca_cert_ref: str
     base_image: str
+    vcpus: int
+    memory_mb: int
     shapes: list[str] = Field(default_factory=list)
 
 

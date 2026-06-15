@@ -98,8 +98,16 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # base_image = "fedora-kdive-remote-base-43"   # -> an [[image]] name
 # cost_class = "remote"
 # concurrent_allocation_cap = 1
+# vcpus and memory_mb are the host's billable size ceiling. Admission's <=-resource-caps
+# check reads them off the Resource, so a remote host without them is un-grantable
+# (allocations.request -> configuration_error). Remote-libvirt is config-owned, so the file
+# is the only place this ceiling comes from; both are required.
+# vcpus = 16
+# memory_mb = 65536
 # shapes = ["small", "medium", "large", "max"]
 
+# Local-libvirt does NOT declare vcpus/memory_mb here: its size ceiling is probed by discovery
+# and merged onto the row, so this overlay only sets name/cost_class/concurrent_allocation_cap.
 # [[local_libvirt]]
 # name = "workstation"
 # host_uri = "qemu:///system"
