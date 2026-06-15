@@ -210,7 +210,7 @@ async def _create_entry(
             entry.arch,
             entry.format,
             entry.root_device,
-            entry.visibility,
+            entry.visibility.value,
             entry.capabilities,
             object_key,
             volume,
@@ -235,7 +235,7 @@ async def _update_entry(
     desired = {
         "format": entry.format,
         "root_device": entry.root_device,
-        "visibility": entry.visibility,
+        "visibility": entry.visibility.value,
         "capabilities": list(entry.capabilities),
     }
     head = await _resolve_s3_head(entry, row, store)
