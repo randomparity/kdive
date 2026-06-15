@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from kdive.provider_components.artifacts import HeadResult
+from kdive.artifacts.storage import HeadResult
 
 
 class BuildOutput(NamedTuple):

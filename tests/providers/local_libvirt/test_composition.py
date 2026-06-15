@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
-from kdive.provider_components.references import (
+from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
     KERNEL_COMPONENT,
@@ -12,6 +10,8 @@ from kdive.provider_components.references import (
     ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
 )
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.models import ResourceKind
 from kdive.providers.local_libvirt import composition
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.local_libvirt.debug.introspect import (

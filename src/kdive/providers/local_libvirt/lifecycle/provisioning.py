@@ -22,17 +22,17 @@ from uuid import UUID
 import libvirt
 
 import kdive.config as config
+from kdive.components.references import (
+    ArtifactComponentRef,
+    CatalogComponentRef,
+    LocalComponentRef,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     RootfsSource,
     _UploadRootfs,
     validate_rootfs_reference,
-)
-from kdive.provider_components.references import (
-    ArtifactComponentRef,
-    CatalogComponentRef,
-    LocalComponentRef,
 )
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     MaterializableRootfsRef,

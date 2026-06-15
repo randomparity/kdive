@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import asyncio
 
+from kdive.build_artifacts.results import BuildOutput
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import RUNS
 from kdive.domain.state import RunState
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
-from kdive.provider_components.build_results import BuildOutput
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from tests.mcp.complete_build_support import (
     FakeValidator,
     ctx,
@@ -86,10 +86,10 @@ def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> N
 import psycopg  # noqa: E402
 from psycopg.types.json import Jsonb  # noqa: E402
 
+from kdive.artifacts.storage import HeadResult  # noqa: E402
+from kdive.artifacts.uploads import ChunkEntry, ManifestEntry  # noqa: E402
 from kdive.domain.errors import CategorizedError, ErrorCategory  # noqa: E402
 from kdive.domain.models import Sensitivity  # noqa: E402
-from kdive.provider_components.artifacts import HeadResult  # noqa: E402
-from kdive.provider_components.uploads import ChunkEntry, ManifestEntry  # noqa: E402
 from kdive.services.runs.steps import BuildStepResult  # noqa: E402
 
 _CHUNKED = ManifestEntry("kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3)))

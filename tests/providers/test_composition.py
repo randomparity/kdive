@@ -12,18 +12,18 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts.storage import StoredArtifact
+from kdive.build_artifacts.results import BuildOutput
+from kdive.components.references import (
+    CONFIG_COMPONENT,
+    PATCH_COMPONENT,
+    LocalComponentRef,
+)
 from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import ResourceKind, Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.provider_components.artifacts import StoredArtifact
-from kdive.provider_components.build_results import BuildOutput
-from kdive.provider_components.references import (
-    CONFIG_COMPONENT,
-    PATCH_COMPONENT,
-    LocalComponentRef,
-)
 from kdive.providers.assembly import composition
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy

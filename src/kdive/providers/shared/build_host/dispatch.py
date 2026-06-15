@@ -7,10 +7,10 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from uuid import UUID
 
+from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import BuildHost, BuildHostKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitKernelSource, ServerBuildProfile
-from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.ssh_transport import SshBuildTransport

@@ -15,9 +15,9 @@ import os
 from pathlib import Path
 from uuid import UUID
 
+from kdive.build_artifacts.validation import parse_gnu_build_id, patch_target_paths
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
-from kdive.provider_components.build_validation import parse_gnu_build_id, patch_target_paths
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.config import resolve_local_ref
 from kdive.providers.shared.build_host.execution import (

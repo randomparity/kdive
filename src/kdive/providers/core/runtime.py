@@ -13,12 +13,12 @@ from typing import Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.references import ComponentRef
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.models import DestructiveJobKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
-from kdive.provider_components.references import ComponentRef
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.ports import (
     AttachSeam,
     Booter,

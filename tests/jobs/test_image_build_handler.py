@@ -19,6 +19,7 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import storage as artifact_types
 from kdive.db.repositories import IMAGE_CATALOG, JOBS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ImageState, JobKind, ResourceKind
@@ -30,7 +31,6 @@ from kdive.jobs.handlers.image_build import image_build_handler, register_handle
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, ImageBuildPayload
 from kdive.jobs.worker import Worker
-from kdive.provider_components import artifacts as artifact_types
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy

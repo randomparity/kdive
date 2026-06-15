@@ -15,8 +15,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
 from kdive.providers.shared.build_host.ssh_transport import (
     _MAX_REMOTE_READ_B64_BYTES,
     SshBuildTransport,

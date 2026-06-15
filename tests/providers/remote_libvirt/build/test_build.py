@@ -20,20 +20,20 @@ from uuid import UUID
 
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     PresignedUpload,
     PresignPutRequest,
     StoredArtifact,
 )
-from kdive.provider_components.references import (
+from kdive.components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
+from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.shared.build_host import config as build_host_config

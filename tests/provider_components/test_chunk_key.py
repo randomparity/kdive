@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from kdive.artifacts.storage import chunk_key, owner_prefix
 from kdive.domain.errors import CategorizedError
-from kdive.provider_components.artifacts import chunk_key, owner_prefix
 
 _PREFIX = owner_prefix("local", "runs", "11111111-1111-1111-1111-111111111111")
 

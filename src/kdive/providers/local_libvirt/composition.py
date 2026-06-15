@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
-from kdive.provider_components.references import (
+from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
     KERNEL_COMPONENT,
@@ -16,7 +14,9 @@ from kdive.provider_components.references import (
     ComponentKind,
     ComponentSourceKind,
 )
-from kdive.provider_components.validation import ComponentSourceCapabilities
+from kdive.components.validation import ComponentSourceCapabilities
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.models import ResourceKind
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,

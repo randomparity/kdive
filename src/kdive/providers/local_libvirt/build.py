@@ -26,18 +26,18 @@ from pathlib import Path
 from uuid import UUID
 
 import kdive.config as config
+from kdive.artifacts.storage import StoredArtifact
+from kdive.build_artifacts.results import BuildOutput
 from kdive.build_configs.defaults import (
     CatalogConfigFetch,
     build_config_fetch_from_env,
 )
+from kdive.components.references import (
+    ComponentRef,
+)
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
 from kdive.domain.models import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
-from kdive.provider_components.artifacts import StoredArtifact
-from kdive.provider_components.build_results import BuildOutput
-from kdive.provider_components.references import (
-    ComponentRef,
-)
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host import config as _build_config
 from kdive.providers.shared.build_host import execution as _build_exec

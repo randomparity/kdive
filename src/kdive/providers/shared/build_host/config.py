@@ -7,16 +7,16 @@ from urllib.parse import urlsplit
 
 import kdive.config as config
 from kdive.build_configs.defaults import CatalogConfigFetch
-from kdive.config.core_settings import BUILD_COMPONENT_ROOTS
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.catalog import load_fixture_catalog
-from kdive.provider_components.local_paths import validate_local_component_path
-from kdive.provider_components.references import (
+from kdive.components.catalog import load_fixture_catalog
+from kdive.components.local_paths import validate_local_component_path
+from kdive.components.references import (
     CatalogComponentRef,
     ComponentRef,
     LocalComponentRef,
 )
-from kdive.provider_components.requirements import ConfigRequirements
+from kdive.components.requirements import ConfigRequirements
+from kdive.config.core_settings import BUILD_COMPONENT_ROOTS
+from kdive.domain.errors import CategorizedError, ErrorCategory
 
 DEFAULT_BUILD_COMPONENT_ROOT = "/var/lib/kdive/build/components"
 

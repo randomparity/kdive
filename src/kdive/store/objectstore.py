@@ -19,19 +19,19 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 import kdive.config as config
+from kdive.artifacts import storage as artifact_types
+from kdive.artifacts.storage import (
+    artifact_key as artifact_key,
+)
+from kdive.artifacts.storage import (
+    chunk_key as chunk_key,
+)
+from kdive.artifacts.storage import (
+    owner_prefix as owner_prefix,
+)
 from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Artifact, Sensitivity
-from kdive.provider_components import artifacts as artifact_types
-from kdive.provider_components.artifacts import (
-    artifact_key as artifact_key,
-)
-from kdive.provider_components.artifacts import (
-    chunk_key as chunk_key,
-)
-from kdive.provider_components.artifacts import (
-    owner_prefix as owner_prefix,
-)
 
 # boto3 ships no inline types and boto3-stubs is not a dependency; alias the S3
 # client type to Any at this single site rather than add a stubs package.

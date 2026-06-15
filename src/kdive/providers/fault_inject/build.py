@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from uuid import UUID
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.build_artifacts.results import BuildOutput
 from kdive.domain.models import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
-from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT, StorePort
 
 

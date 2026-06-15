@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -42,7 +43,6 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     create_run_upload as _create_run_upload,
 )
-from kdive.provider_components.artifacts import PresignedUpload, PresignPutRequest
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp.systems_support import SYSTEM_PROVISION_HANDLERS, provider_resolver
 from tests.mcp.systems_support import granted_allocation as _granted_allocation

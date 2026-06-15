@@ -10,6 +10,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.build_artifacts.results import BuildOutput
 from kdive.db import build_hosts
 from kdive.db.build_hosts import BuildHost
 from kdive.db.idempotency import abandon_run_step, claim_run_step, complete_run_step
@@ -23,8 +25,6 @@ from kdive.jobs.handlers.runs_shared import finalize_build
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import BuildPayload, RunPayload, load_payload
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
-from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports import Booter, InstallRequest

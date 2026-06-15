@@ -14,6 +14,15 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
+from kdive.artifacts.uploads import (
+    MAX_PART_BYTES,
+    MAX_PARTS,
+    MIN_PART_BYTES,
+    SINGLE_PUT_MAX_BYTES,
+    ChunkEntry,
+    ManifestEntry,
+)
 from kdive.config.core_settings import MAX_UPLOAD_BYTES, UPLOAD_TTL_SECONDS
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -28,15 +37,6 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile
 from kdive.profiles.provider_policy import rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.provider_components.artifacts import PresignedUpload, PresignPutRequest
-from kdive.provider_components.uploads import (
-    MAX_PART_BYTES,
-    MAX_PARTS,
-    MIN_PART_BYTES,
-    SINGLE_PUT_MAX_BYTES,
-    ChunkEntry,
-    ManifestEntry,
-)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

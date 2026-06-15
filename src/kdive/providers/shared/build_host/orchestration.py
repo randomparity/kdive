@@ -9,10 +9,10 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.build_configs.defaults import DEFAULT_CONFIG_REF, CatalogConfigFetch
+from kdive.components.references import ComponentRef
+from kdive.components.requirements import validate_config_requirements
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
-from kdive.provider_components.references import ComponentRef
-from kdive.provider_components.requirements import validate_config_requirements
 from kdive.providers.shared.build_host.common import _dropped_fragment_symbols
 from kdive.providers.shared.build_host.config import (
     DEFAULT_BUILD_COMPONENT_ROOT,

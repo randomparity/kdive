@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
 

@@ -11,8 +11,8 @@ import base64
 
 import pytest
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.shell_transport import (
     _MAX_REMOTE_READ_B64_BYTES,

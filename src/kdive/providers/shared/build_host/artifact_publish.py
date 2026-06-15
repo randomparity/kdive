@@ -15,16 +15,16 @@ from typing import Protocol
 from uuid import UUID
 
 import kdive.config as config
-from kdive.config.core_settings import UPLOAD_TTL_SECONDS
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     PresignedUpload,
     PresignPutRequest,
     StoredArtifact,
     artifact_key,
 )
+from kdive.config.core_settings import UPLOAD_TTL_SECONDS
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
 from kdive.providers.ports.build_transport import BuildTransport
 
 _MAX_PRESIGN_TTL_S = 3600

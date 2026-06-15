@@ -37,12 +37,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import ObjectListing
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.loader import load_inventory
 from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile_images import reconcile_images
 from kdive.inventory.reconcile_resources import reconcile_resources
-from kdive.provider_components.artifacts import ObjectListing
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once

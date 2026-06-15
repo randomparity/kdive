@@ -21,6 +21,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -38,7 +39,6 @@ from kdive.profiles.provisioning import (
     require_concrete_sizing,
 )
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

@@ -30,8 +30,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, NamedTuple, Protocol
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry

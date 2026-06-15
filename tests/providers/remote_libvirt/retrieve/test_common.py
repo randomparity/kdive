@@ -7,10 +7,7 @@ from uuid import UUID
 import libvirt
 import pytest
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactStreamRequest,
     ArtifactWriteRequest,
     HeadResult,
@@ -18,6 +15,9 @@ from kdive.provider_components.artifacts import (
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
 from kdive.providers.remote_libvirt.retrieve import common
 from kdive.security.secrets.secret_registry import SecretRegistry
 

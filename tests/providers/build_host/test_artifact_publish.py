@@ -16,14 +16,14 @@ from uuid import UUID
 
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     PresignedUpload,
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.artifact_publish import (
     ArtifactBytes,

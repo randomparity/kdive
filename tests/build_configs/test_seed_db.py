@@ -74,7 +74,7 @@ class _FakeStore:
         self.put_keys: list[str] = []
 
     def put_artifact(self, request: object) -> object:
-        import kdive.provider_components.artifacts as _art
+        import kdive.artifacts.storage as _art
         from kdive.domain.models import Sensitivity
 
         req = cast(_art.ArtifactWriteRequest, request)

@@ -24,8 +24,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.artifacts.storage import ObjectListing
 from kdive.domain.models import ImageState
-from kdive.provider_components.artifacts import ObjectListing
 from kdive.services.images.retention import ImageSweepStore
 
 _log = logging.getLogger(__name__)

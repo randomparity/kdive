@@ -15,6 +15,14 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import ArtifactWriteRequest
+from kdive.artifacts.uploads import ManifestEntry
+from kdive.components.references import (
+    ArtifactComponentRef,
+    CatalogComponentRef,
+    ComponentRef,
+    LocalComponentRef,
+)
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -37,14 +45,6 @@ from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardow
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.profiles.provisioning import RootfsSource
-from kdive.provider_components.artifacts import ArtifactWriteRequest
-from kdive.provider_components.references import (
-    ArtifactComponentRef,
-    CatalogComponentRef,
-    ComponentRef,
-    LocalComponentRef,
-)
-from kdive.provider_components.uploads import ManifestEntry
 from kdive.providers.local_libvirt.lifecycle.materialize import (
     MaterializableRootfsRef,
     RootfsMaterializationContext,

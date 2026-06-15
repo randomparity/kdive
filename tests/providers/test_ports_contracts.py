@@ -8,10 +8,10 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
+from kdive.artifacts.storage import HeadResult, StoredArtifact
+from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import HeadResult, StoredArtifact
-from kdive.provider_components.build_results import BuildOutput, ValidatedUpload
 from kdive.providers.ports._common import ProviderModel, config_error
 from kdive.providers.ports.debug import (
     GdbBreakpointRef,

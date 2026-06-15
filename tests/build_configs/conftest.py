@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
+from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import StoredArtifact
 
 
 class _FakeCursor:

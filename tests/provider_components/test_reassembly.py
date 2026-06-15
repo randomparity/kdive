@@ -6,11 +6,11 @@ from collections.abc import Sequence
 
 import pytest
 
+from kdive.artifacts.reassembly import reassemble_chunked
+from kdive.artifacts.storage import HeadResult
+from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import HeadResult
-from kdive.provider_components.reassembly import reassemble_chunked
-from kdive.provider_components.uploads import ChunkEntry, ManifestEntry
 
 _PREFIX = "local/runs/x/"
 _FINAL = "local/runs/x/vmlinux"

@@ -7,10 +7,10 @@ from uuid import UUID
 
 import pytest
 
+from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import StoredArtifact
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
 from kdive.providers.remote_libvirt.retrieve import postmortem
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve

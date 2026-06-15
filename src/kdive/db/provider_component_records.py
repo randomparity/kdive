@@ -15,10 +15,10 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.local_paths import validate_local_component_path
+from kdive.components.references import ComponentKind, ComponentRef, parse_component_ref
+from kdive.components.visibility import Visibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.local_paths import validate_local_component_path
-from kdive.provider_components.references import ComponentKind, ComponentRef, parse_component_ref
-from kdive.provider_components.visibility import Visibility
 
 type UploadVisibility = Literal["public", "project"]
 

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import (
     BuildProfile,
@@ -16,7 +17,6 @@ from kdive.profiles.build import (
     dump_build_profile,
     is_git_source,
 )
-from kdive.provider_components.references import LocalComponentRef
 
 _VALID: dict[str, Any] = {
     "schema_version": 1,

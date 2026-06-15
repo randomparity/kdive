@@ -14,8 +14,8 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.execution import launch_failure
 

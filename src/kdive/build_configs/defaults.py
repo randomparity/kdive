@@ -8,9 +8,9 @@ import psycopg
 
 import kdive.config as config
 from kdive.build_configs.catalog import get_build_config_sync
+from kdive.components.references import CatalogComponentRef
 from kdive.config.core_settings import DATABASE_URL
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.references import CatalogComponentRef
 from kdive.store.objectstore import object_store_from_env
 
 # The implicit config ref a build resolves when a profile names none: the seeded ``kdump``

@@ -12,9 +12,9 @@ from psycopg.cursor_async import AsyncCursor
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.artifacts.storage import ObjectListing
 from kdive.domain.models import ImageVisibility, ResourceKind
 from kdive.domain.state import SystemState
-from kdive.provider_components.artifacts import ObjectListing
 
 _log = logging.getLogger(__name__)
 

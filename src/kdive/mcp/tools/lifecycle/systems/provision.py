@@ -14,6 +14,7 @@ from typing import cast
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.log import bind_context
 from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools._common import (
@@ -25,7 +26,6 @@ from kdive.mcp.tools._common import (
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle.systems.view import defined_system_envelope
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security.authz.context import RequestContext
 from kdive.services.systems.admission import (

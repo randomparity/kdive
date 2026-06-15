@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
+from kdive.artifacts.storage import HeadResult, chunk_key
+from kdive.artifacts.uploads import ManifestEntry
+from kdive.build_artifacts.validation import verify_chunks
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import HeadResult, chunk_key
-from kdive.provider_components.build_validation import verify_chunks
-from kdive.provider_components.uploads import ManifestEntry
 
 
 class ReassemblyStore(Protocol):

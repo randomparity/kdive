@@ -18,9 +18,9 @@ from typing import Protocol
 
 from psycopg import AsyncConnection
 
+from kdive.artifacts import storage as artifact_types
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.catalog import resolve_rootfs
-from kdive.provider_components import artifacts as artifact_types
 
 _SHA256_DIGEST = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 

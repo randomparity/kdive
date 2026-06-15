@@ -9,12 +9,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import kdive.config as config
+from kdive.components.references import ComponentRef
+from kdive.components.requirements import CmdlineRequirements, ConfigRequirements
+from kdive.components.visibility import PUBLIC_VISIBILITY, Visibility
 from kdive.config.core_settings import FIXTURE_CATALOG_PATH
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.image_format import ImageFormat
-from kdive.provider_components.references import ComponentRef
-from kdive.provider_components.requirements import CmdlineRequirements, ConfigRequirements
-from kdive.provider_components.visibility import PUBLIC_VISIBILITY, Visibility
 
 DEFAULT_FIXTURE_CATALOG_PATH = Path(__file__).parents[3] / "fixtures" / "local-libvirt"
 

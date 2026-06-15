@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
+from kdive.components.references import ROOTFS_COMPONENT, ComponentSourceKind
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
-from kdive.provider_components.references import ROOTFS_COMPONENT, ComponentSourceKind
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.services.systems.validation import (

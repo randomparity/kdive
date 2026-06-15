@@ -12,16 +12,16 @@ from uuid import UUID
 
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
-from kdive.provider_components.build_validation import parse_gnu_build_id
-from kdive.provider_components.references import (
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.build_artifacts.validation import parse_gnu_build_id
+from kdive.components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
+from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.local_libvirt import build as build_module
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.shared.build_host import config as build_host_config
@@ -420,7 +420,7 @@ class _PresignStore:
         return StoredArtifact(request.key(), "etag", request.sensitivity, request.retention_class)
 
     def presign_put(self, request: Any) -> Any:
-        from kdive.provider_components.artifacts import PresignedUpload
+        from kdive.artifacts.storage import PresignedUpload
 
         self.presigns.append(request)
         return PresignedUpload(url=f"https://s3/{request.key}", required_headers={})

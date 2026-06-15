@@ -9,8 +9,8 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
 
+from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.build_validation import parse_gnu_build_id
 
 MAKE_TIMEOUT_S = 2 * 60 * 60
 OBJCOPY_TIMEOUT_S = 60

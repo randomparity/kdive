@@ -12,6 +12,8 @@ from uuid import UUID
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import HeadResult
+from kdive.components.visibility import Visibility
 from kdive.db.provider_component_records import (
     ArtifactComponentRequest,
     ComponentRegistration,
@@ -28,8 +30,6 @@ from kdive.db.provider_component_records import (
     list_visible_components,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import HeadResult
-from kdive.provider_components.visibility import Visibility
 
 
 class _ObjectStore:

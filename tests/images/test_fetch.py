@@ -15,10 +15,10 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from kdive.artifacts import storage as artifact_types
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ImageCatalogEntry, ImageState, ImageVisibility, Sensitivity
 from kdive.images.fetch import fetch_registered_rootfs
-from kdive.provider_components import artifacts as artifact_types
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _QCOW2 = b"qcow2-bytes-for-test"

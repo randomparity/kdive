@@ -6,7 +6,7 @@ fixture bundle now carries only the **profiles** half — the kernel-config/cmdl
 local-libvirt provider checks a built kernel against — plus a manifest that declares an empty
 rootfs list (the rootfs catalog is the DB now).
 
-The manifest is built from the :class:`~kdive.provider_components.catalog.FixtureManifest` model
+The manifest is built from the :class:`~kdive.components.catalog.FixtureManifest` model
 rather than an embedded YAML literal, so this module holds no inline inventory YAML.
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from kdive.provider_components.catalog import FixtureManifest, FixtureStorage
+from kdive.components.catalog import FixtureManifest, FixtureStorage
 
 _PROFILE_RELATIVE = "profiles/console-ready_x86_64.yaml"
 

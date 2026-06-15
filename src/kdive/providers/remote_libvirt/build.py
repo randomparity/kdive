@@ -19,12 +19,12 @@ build host and publish each via a presigned PUT whose checksum is computed on th
 worker never reads the large bundle/vmlinux bytes (it only sees the host-computed sha256).
 
 This module is **independent** of ``local_libvirt`` (ADR-0076: no shared layer with the
-provider headed for removal); it reuses only the already-neutral ``provider_components`` /
-``provider_components.build_validation`` helpers and duplicates the build mechanics. The slow,
-environment-bound operations are **injected seams** that default to the real implementations,
-so unit tests cover the orchestration/error contract without a toolchain; the real ``make``
-path is exercised under the ``live_vm`` gate. `build()` is synchronous; the async build
-handler offloads the whole call via ``asyncio.to_thread``.
+provider headed for removal); it reuses only the neutral artifact, component-reference, and
+build-artifact helpers and duplicates the build mechanics. The slow, environment-bound
+operations are **injected seams** that default to the real implementations, so unit tests
+cover the orchestration/error contract without a toolchain; the real ``make`` path is
+exercised under the ``live_vm`` gate. `build()` is synchronous; the async build handler
+offloads the whole call via ``asyncio.to_thread``.
 """
 
 from __future__ import annotations
@@ -38,17 +38,17 @@ from pathlib import Path
 from uuid import UUID
 
 import kdive.config as config
+from kdive.artifacts.storage import StoredArtifact
+from kdive.build_artifacts.results import BuildOutput
 from kdive.build_configs.defaults import (
     CatalogConfigFetch,
     build_config_fetch_from_env,
 )
+from kdive.components.references import ComponentRef
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
-from kdive.provider_components.artifacts import StoredArtifact
-from kdive.provider_components.build_results import BuildOutput
-from kdive.provider_components.references import ComponentRef
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host import config as _build_config
 from kdive.providers.shared.build_host import execution as _build_exec

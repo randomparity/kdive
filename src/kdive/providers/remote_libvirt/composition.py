@@ -9,19 +9,19 @@ from uuid import UUID
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.references import (
+    CONFIG_COMPONENT,
+    PATCH_COMPONENT,
+    ComponentKind,
+    ComponentSourceKind,
+)
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.build_hosts import BuildHost
 from kdive.db.locks import CONSOLE_HOSTING_LEADER, SessionAdvisoryLock
 from kdive.db.pool import create_pool, database_url
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ResourceKind
-from kdive.provider_components.references import (
-    CONFIG_COMPONENT,
-    PATCH_COMPONENT,
-    ComponentKind,
-    ComponentSourceKind,
-)
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,

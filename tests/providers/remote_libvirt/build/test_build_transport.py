@@ -18,15 +18,15 @@ from uuid import UUID
 
 import pytest
 
-from kdive.domain.models import Sensitivity
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     PresignedUpload,
     PresignPutRequest,
     StoredArtifact,
 )
-from kdive.provider_components.build_validation import parse_gnu_build_id
+from kdive.build_artifacts.validation import parse_gnu_build_id
+from kdive.domain.models import Sensitivity
+from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import (

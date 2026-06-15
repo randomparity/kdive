@@ -33,6 +33,7 @@ from psycopg.cursor_async import AsyncCursor
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.artifacts import storage as artifact_types
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.image_format import ImageFormat
 from kdive.domain.models import (
@@ -41,7 +42,6 @@ from kdive.domain.models import (
     ImageVisibility,
     Sensitivity,
 )
-from kdive.provider_components import artifacts as artifact_types
 
 _RETENTION_CLASS = "image"
 

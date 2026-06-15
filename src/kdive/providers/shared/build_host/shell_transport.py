@@ -14,8 +14,8 @@ from __future__ import annotations
 import base64
 import logging
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.workspace import redacted_tail
 from kdive.security.secrets.secret_registry import SecretRegistry

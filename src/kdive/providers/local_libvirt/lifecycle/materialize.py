@@ -15,13 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import _UploadRootfs
-from kdive.provider_components.local_paths import validate_local_component_path
-from kdive.provider_components.references import (
+from kdive.components.local_paths import validate_local_component_path
+from kdive.components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.profiles.provisioning import _UploadRootfs
 
 # Resolve a `catalog` reference to a provider-readable local path (DB row → object → cache).
 type CatalogFetch = Callable[[CatalogComponentRef], Path]

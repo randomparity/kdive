@@ -24,6 +24,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import (
     BuildHost,
     BuildHostKind,
@@ -38,7 +39,6 @@ from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.payloads import BuildPayload
-from kdive.provider_components.build_results import BuildOutput
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild

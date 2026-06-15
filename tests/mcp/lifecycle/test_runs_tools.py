@@ -18,6 +18,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.references import CatalogComponentRef
+from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
@@ -50,8 +52,6 @@ from kdive.mcp.tools.lifecycle.runs.create import (
 )
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
-from kdive.provider_components.references import CatalogComponentRef
-from kdive.provider_components.validation import ComponentSourceCapabilities
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs import steps as run_steps
@@ -1686,10 +1686,10 @@ def test_build_host_ephemeral_free_slot_lease_and_job_committed(migrated_url: st
 
 # --- build_handler (the worker) ------------------------------------------------------
 
+from kdive.build_artifacts.results import BuildOutput  # noqa: E402
 from kdive.jobs import queue  # noqa: E402
 from kdive.jobs.models import HandlerRegistry  # noqa: E402
 from kdive.jobs.payloads import BuildPayload, RunPayload  # noqa: E402
-from kdive.provider_components.build_results import BuildOutput  # noqa: E402
 
 
 class _FakeBuilder:

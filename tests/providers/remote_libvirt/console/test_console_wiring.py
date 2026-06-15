@@ -7,8 +7,8 @@ from uuid import uuid4
 
 import psycopg
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
 
 
@@ -24,7 +24,7 @@ class FakeObjectStore:
         return StoredArtifact(key, f"etag-{len(self.objects)}", request.sensitivity, "console")
 
     def get_artifact(self, key: str, etag):  # noqa: ANN001, ANN201
-        from kdive.provider_components.artifacts import FetchedArtifact
+        from kdive.artifacts.storage import FetchedArtifact
 
         return FetchedArtifact(self.objects[key], Sensitivity.REDACTED, "console")
 

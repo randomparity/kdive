@@ -16,7 +16,19 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts.reassembly import reassemble_chunked
+from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
+from kdive.artifacts.uploads import ManifestEntry
+from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
+from kdive.build_artifacts.validation import validate_external_artifacts
 from kdive.build_configs.defaults import DEFAULT_CONFIG_REF
+from kdive.components.catalog import load_fixture_catalog
+from kdive.components.references import CONFIG_COMPONENT, ComponentRef
+from kdive.components.requirements import ConfigRequirements
+from kdive.components.validation import (
+    ComponentSourceCapabilities,
+    reject_unsupported_component_source,
+)
 from kdive.config.core_settings import UPLOAD_TTL_SECONDS
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
@@ -36,18 +48,6 @@ from kdive.mcp.tools.lifecycle.runs.common import (
     run_job_envelope,
 )
 from kdive.profiles.build import BuildProfile, ExternalBuildProfile, ServerBuildProfile
-from kdive.provider_components.artifacts import HeadResult, StoredArtifact, chunk_key
-from kdive.provider_components.build_results import BuildOutput, ValidatedUpload
-from kdive.provider_components.build_validation import validate_external_artifacts
-from kdive.provider_components.catalog import load_fixture_catalog
-from kdive.provider_components.reassembly import reassemble_chunked
-from kdive.provider_components.references import CONFIG_COMPONENT, ComponentRef
-from kdive.provider_components.requirements import ConfigRequirements
-from kdive.provider_components.uploads import ManifestEntry
-from kdive.provider_components.validation import (
-    ComponentSourceCapabilities,
-    reject_unsupported_component_source,
-)
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

@@ -9,12 +9,12 @@ from uuid import UUID
 import pytest
 
 import kdive.providers.fault_inject.lifecycle.connect as connect_module
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import PowerAction, Sensitivity
 from kdive.profiles.build import ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.fault_inject.build import FaultInjectBuild
 from kdive.providers.fault_inject.debug.gdb import (
     FaultInjectDebugEngine,

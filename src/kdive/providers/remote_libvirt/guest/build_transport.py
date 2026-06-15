@@ -22,9 +22,9 @@ import shlex
 import time
 from typing import Any
 
+from kdive.artifacts.storage import PresignedUpload
 from kdive.diagnostics.egress_probe import redact_presigned
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import PresignedUpload
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt.guest.agent import (
     AgentCommand,

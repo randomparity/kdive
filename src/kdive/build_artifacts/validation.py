@@ -7,11 +7,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from kdive.artifacts.storage import HeadResult, chunk_key
+from kdive.artifacts.uploads import ManifestEntry
+from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
+from kdive.components.requirements import ConfigRequirements, validate_config_requirements
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import HeadResult, chunk_key
-from kdive.provider_components.build_results import BuildOutput, ValidatedUpload
-from kdive.provider_components.requirements import ConfigRequirements, validate_config_requirements
-from kdive.provider_components.uploads import ManifestEntry
 
 _NT_GNU_BUILD_ID = 3
 _ELF_MAGIC = b"\x7fELF"

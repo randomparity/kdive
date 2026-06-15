@@ -20,6 +20,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
+from kdive.artifacts import storage as artifact_types
 from kdive.config.core_settings import (
     IMAGE_PRIVATE_LIFETIME_MAX,
     IMAGE_PRIVATE_MAX_BYTES,
@@ -29,7 +30,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ImageState, ImageVisibility, Sensitivity
 from kdive.images.catalog import resolve_rootfs
 from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
-from kdive.provider_components import artifacts as artifact_types
 from kdive.services.images.upload import PrivateUploadRequest, register_private_upload
 
 _REQUIRED = ("agent", "kdump", "drgn", "helpers")

@@ -47,12 +47,12 @@ import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts import storage as artifact_types
+from kdive.artifacts.storage import ObjectListing
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ImageVisibility, Sensitivity
 from kdive.images.catalog import resolve_rootfs
 from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
-from kdive.provider_components import artifacts as artifact_types
-from kdive.provider_components.artifacts import ObjectListing
 from kdive.reconciler.images import (
     repair_dangling_images,
     repair_leaked_images,

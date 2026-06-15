@@ -19,11 +19,11 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from kdive.artifacts import storage as artifact_types
 from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.images.catalog import resolve_rootfs
-from kdive.provider_components import artifacts as artifact_types
 from kdive.services.images.publish import PublishRequest, publish_image
 
 _QCOW2 = b"qcow2-bytes-for-publish-test"

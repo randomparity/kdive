@@ -15,9 +15,9 @@ from uuid import uuid4
 import libvirt
 import pytest
 
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.provider_components.artifacts import ArtifactWriteRequest, StoredArtifact
 from kdive.providers.ports import InstallRequest
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult

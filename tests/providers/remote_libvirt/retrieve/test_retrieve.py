@@ -10,10 +10,7 @@ from uuid import UUID
 
 import pytest
 
-from kdive.domain.capture import CaptureMethod
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
-from kdive.provider_components.artifacts import (
+from kdive.artifacts.storage import (
     ArtifactStreamRequest,
     ArtifactWriteRequest,
     HeadResult,
@@ -21,6 +18,9 @@ from kdive.provider_components.artifacts import (
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.domain.capture import CaptureMethod
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.models import Sensitivity
 from kdive.providers.ports import CrashResult
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, qemu_agent_command
