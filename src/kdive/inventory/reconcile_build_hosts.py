@@ -38,7 +38,7 @@ idle host's row is then pruned; a busy one is cordoned until its lease drains).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TypedDict
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -59,6 +59,21 @@ _log = logging.getLogger(__name__)
 # Kinds the v2 [[build_host]] model can fully express (it carries no address/ssh_credential_ref,
 # which the build_hosts_fields_check CHECK requires for the 'ssh' kind).
 _CONFIG_EXPRESSIBLE_KINDS = (BuildHostKind.LOCAL, BuildHostKind.EPHEMERAL_LIBVIRT)
+
+
+class _UpsertBuildHostRow(TypedDict):
+    id: UUID
+    kind: str
+    base_image_volume: str | None
+    workspace_root: str
+    max_concurrent: int
+    enabled: bool
+    managed_by: str
+
+
+class _PruneBuildHostRow(TypedDict):
+    id: UUID
+    name: str
 
 
 async def reconcile_build_hosts(conn: AsyncConnection, doc: InventoryDoc) -> ReconcileDiff:
@@ -143,10 +158,10 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
         "FROM build_hosts WHERE name = %s FOR UPDATE",
         (inst.name,),
     )
-    row = await cur.fetchone()
+    raw_row = await cur.fetchone()
     kind = BuildHostKind(inst.kind)
     base_image_volume = inst.base_image_volume if kind is BuildHostKind.EPHEMERAL_LIBVIRT else None
-    if row is None:
+    if raw_row is None:
         await cur.execute(
             "INSERT INTO build_hosts "
             "(name, kind, base_image_volume, workspace_root, max_concurrent, enabled, managed_by) "
@@ -162,6 +177,7 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
         )
         diff.created.append(_record(inst.name))
         return
+    row = _upsert_row(raw_row)
     changed = (
         row["kind"] != kind.value
         or row["base_image_volume"] != base_image_volume
@@ -194,11 +210,12 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
             "SELECT id, name FROM build_hosts WHERE managed_by = %s", (CONFIG_MANAGED_BY,)
         )
         rows = await cur.fetchall()
-    for row in rows:
-        name = str(row["name"])
+    for raw_row in rows:
+        row = _prune_row(raw_row)
+        name = row["name"]
         if name in declared:
             continue
-        outcome = await prune_or_cordon_build_host(conn, _row_id(row), name)
+        outcome = await prune_or_cordon_build_host(conn, row["id"], name)
         record = ReconcileRecord(name=name, entry=f"build_host[{name}]")
         if outcome.cordoned:
             diff.cordoned.append(record)
@@ -214,10 +231,38 @@ def _record(name: str, detail: str = "") -> ReconcileRecord:
     return ReconcileRecord(name=name, entry=f"build_host[{name}]", detail=detail)
 
 
-def _row_id(row: dict[str, Any]) -> UUID:
-    value = row["id"]
-    assert isinstance(value, UUID)
-    return value
+def _upsert_row(row: dict[str, Any]) -> _UpsertBuildHostRow:
+    row_id = row["id"]
+    kind = row["kind"]
+    base_image_volume = row["base_image_volume"]
+    workspace_root = row["workspace_root"]
+    max_concurrent = row["max_concurrent"]
+    enabled = row["enabled"]
+    managed_by = row["managed_by"]
+    assert isinstance(row_id, UUID)
+    assert isinstance(kind, str)
+    assert base_image_volume is None or isinstance(base_image_volume, str)
+    assert isinstance(workspace_root, str)
+    assert isinstance(max_concurrent, int) and not isinstance(max_concurrent, bool)
+    assert isinstance(enabled, bool)
+    assert isinstance(managed_by, str)
+    return {
+        "id": row_id,
+        "kind": kind,
+        "base_image_volume": base_image_volume,
+        "workspace_root": workspace_root,
+        "max_concurrent": max_concurrent,
+        "enabled": enabled,
+        "managed_by": managed_by,
+    }
+
+
+def _prune_row(row: dict[str, Any]) -> _PruneBuildHostRow:
+    row_id = row["id"]
+    name = row["name"]
+    assert isinstance(row_id, UUID)
+    assert isinstance(name, str)
+    return {"id": row_id, "name": name}
 
 
 __all__ = ["reconcile_build_hosts"]
