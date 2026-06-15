@@ -35,15 +35,24 @@ commits on one branch, closing #430. The deferred items (historical-timing ETAs,
 
 ## Decision
 
-We will close the three gaps at single insertion points in existing code, with no schema
-change and no migration:
+We will close the three gaps at single insertion points in existing code. The only schema
+change is one additive nullable column (Gap 1's failed-settle cause); the rest is new
+tool, derived field, and a count query:
 
 1. **`allocations.wait(allocation_id, timeout_s=30.0)`** — a read-only tool that mirrors
    `wait_job` exactly: poll `ALLOCATIONS.get` every `POLL_INTERVAL_S`, holding no
    connection while sleeping, returning when the allocation **leaves `requested`** (settles
    to `granted`/`released`/`failed`) or the clamped `≤ MAX_WAIT_S` deadline elapses. Auth,
    no-leak, malformed-id, and non-finite/non-positive-timeout behavior are identical to
-   `allocations.get` / `wait_job`.
+   `allocations.get` / `wait_job`. Because the most important settle for a waiting agent is
+   `failed` and `_envelope_for_allocation` today collapses every failed allocation to
+   `infrastructure_failure` (the table stores no cause), we add **one additive nullable
+   column `allocations.failure_category`**: the queued-terminate transitions (`_terminate`
+   → `allocation_denied`, `_reap_one` → `queue_timeout`) persist the cause, the envelope
+   reads it (NULL falls back to `infrastructure_failure`), so the derived `retryable`
+   (decision 3) is correct on the wait path. Without it a budget-terminated queued request
+   would report `retryable=true` and the agent would re-queue a request that can never be
+   granted — the spin #430 exists to stop.
 
 2. **Queue-position hint** — for a `requested` row only, `allocations.get` and
    `allocations.wait` surface `queue_position` (1-based FIFO rank among `requested` rows
@@ -72,18 +81,21 @@ change and no migration:
 - Every failure envelope now answers "should I retry?" uniformly across all planes, in
   one place the agent already reads. Adding the field touches: `ToolResponse`
   (`mcp/responses.py`), one `allocations.wait` handler + registrar entry, the
-  `_envelope_for_allocation` path (position), and the regenerated agent-facing reference
-  (`just docs`, the `docs-check` gate) plus the `test_tool_docs` mapping for the new tool.
-  No schema, migration, dependency, or auth-model change; the advertised `outputSchema`
-  stays flat (ADR-0113).
+  `_envelope_for_allocation` path (position + failure-cause read), the new
+  `failure_category` migration + its writes in `promotion.py`, and the regenerated
+  agent-facing reference (`just docs`, the `docs-check` gate) plus the `test_tool_docs`
+  mapping for the new tool. One additive nullable column is the only schema change; no
+  dependency or auth-model change, and the advertised `outputSchema` stays flat (ADR-0113).
 - New obligation: the classification table is now a maintained contract. A new
   `ErrorCategory` will fail the table-completeness test until classified — deliberate, so
   no category ships unclassified.
-- The position query is one indexed count per `get`/`wait` on a `requested` row, riding
-  the access pattern `promote_pending` already drives; negligible added load, and only on
-  the queued path.
-- Nothing is persisted, so rollback is removal (drop the tool, the two keys, the field +
-  validator clause) with no data to unwind.
+- The position query is one count per `get`/`wait` on a `requested` row, riding the
+  `created_at` partial index `promote_pending` already uses (same-target + `id` are
+  residual filters); negligible added load, and only on the queued path.
+- Rollback is removal of the tool surface (drop the tool, the two keys, the field +
+  validator clause) with no data to unwind. The migration runner is forward-only
+  (ADR-0015), so the added `failure_category` column is left in place — a harmless nullable
+  column once the envelope's read is reverted.
 
 ## Alternatives considered
 

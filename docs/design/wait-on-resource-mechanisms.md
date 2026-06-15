@@ -53,9 +53,11 @@ spec + the implementing commits on `feat/wait-on-resource-430`, closing #430.
 ## Decision summary
 
 See [ADR-0118](../adr/0118-wait-on-resource-mechanisms.md) for the full record. Each gap
-lands at a single insertion point in existing, proven code. No schema change, no
-migration: the wait tool reuses the `jobs.wait` poll loop, the position is one indexed
-query, and `retryable` is *derived* from `error_category`.
+lands at a single insertion point in existing, proven code. The wait tool reuses the
+`jobs.wait` poll loop, the position is one count query, and `retryable` is *derived* from
+`error_category`. The only schema change is one additive nullable column
+(`allocations.failure_category`) so a failed queued allocation can report its cause to a
+waiting agent (see Gap 1) — a forward-only migration with no backfill.
 
 ### Gap 1 — `allocations.wait(allocation_id, timeout_s=30.0)`
 
@@ -70,6 +72,24 @@ holding no pool connection while it sleeps, and returns when the allocation **le
   `requested` in `domain/state.py`. Calling `wait` on an already-settled allocation
   returns its current envelope immediately, the same semantics `jobs.wait` has on a
   terminal job.
+- **Failed-settle must report *why* (the one place that needs a schema change).** The
+  most important settle for a *waiting* agent is `failed`, and it most needs to know
+  whether the cause was a `queue_timeout` (retryable — re-queue) or a budget terminate
+  (`allocation_denied`, terminal — stop). But `_envelope_for_allocation` today hardcodes
+  `infrastructure_failure` for *every* failed allocation
+  (`mcp/tools/lifecycle/allocations.py:58-65`), and the `allocations` table stores no
+  failure cause (verified: no such column across `db/schema/*.sql`). Composed with Gap 3,
+  a budget-terminated queued request would surface as `infrastructure_failure` →
+  `retryable=true` → the agent re-queues a request that can never be granted — the exact
+  spin this feature exists to stop, on the path it adds. So this design adds **one
+  additive nullable column, `allocations.failure_category text`** (a new forward-only
+  migration; no backfill — existing failed rows stay NULL). The two queued-terminate
+  transitions persist the cause: `_terminate` writes `allocation_denied`, `_reap_one`
+  writes `queue_timeout` (`services/allocation/promotion.py`). `_envelope_for_allocation`
+  reads the column for a `failed` allocation and falls back to `infrastructure_failure`
+  when it is NULL (back-compat for any other failed path that does not yet set it). This
+  makes the derived `retryable` correct on the wait path: `queue_timeout → true`,
+  `allocation_denied → false`.
 - **Why `requested` is the only waited state:** a `granted`/`active` allocation is
   already usable; the agent waits *for a grant*, not past it. Waiting for lease expiry or
   release is not a use case (those are agent- or reconciler-driven, not awaited).
@@ -109,11 +129,16 @@ candidates (`_candidate_hosts`, `promotion.py:279`).
   ordering is itself cross-project.
 - **`allocations.list` omits the hint** to avoid an N+1 query (one position query per
   row). Position is a per-request datum available via `get`/`wait`; a list is a roster.
-- **Query.** One indexed count:
+- **Query.** One count:
   `SELECT count(*) FROM allocations WHERE state='requested' AND (<same-target predicate>)
-  AND (created_at, id) < (<this row's created_at, id>)`, then `+1`. The
-  `(state, created_at, id)` access pattern is the one `promote_pending` already drives,
-  so the existing partial index on `state='requested'` serves it.
+  AND (created_at, id) < (<this row's created_at, id>)`, then `+1`. The existing partial
+  index `idx_allocations_requested_created_at ON allocations (created_at) WHERE
+  state='requested'` (`db/schema/0016_pending_queue.sql`) serves the `created_at` age
+  range; the same-target column(s) (`requested_kind` / `requested_resource_id`) and the
+  `id` tiebreak are residual filters on top of that range, the same ordering
+  `promote_pending` selects on. This is adequate for expected queue sizes; a covering
+  index on `(requested_kind, requested_resource_id, created_at, id)` is a future option if
+  queues grow large enough to matter.
 
 ### Gap 3 — `retryable`, derived from `error_category`
 
@@ -212,6 +237,14 @@ the project convention:
   envelope (not an error) at deadline while still `requested`; `not_found` for
   absent/ungranted/malformed ids; non-positive and non-finite `timeout_s` do a single
   read; `viewer` is required.
+- **Failed-settle cause (the Gap-1 schema change):** a `queue_timeout`-reaped allocation
+  reports `error_category=queue_timeout` with `retryable=true`; a budget-terminated
+  allocation reports `error_category=allocation_denied` with `retryable=false` (the
+  load-bearing case — proves a waiting agent is not told to re-queue an over-budget
+  request); a `failed` allocation with `failure_category` NULL still reports
+  `infrastructure_failure` (the unchanged fallback). These hold through both
+  `allocations.get` and `allocations.wait`, since both render via
+  `_envelope_for_allocation`.
 - **Queue position:** a lone `requested` row reports `queue_position=1`, `queue_ahead=0`;
   with three same-kind queued rows, the middle reports `2`/`1`; a by-id request counts
   only same-`requested_resource_id` rows; a by-kind request counts only same-kind rows; a
@@ -226,7 +259,10 @@ the project convention:
 
 ## Rollback
 
-Nothing persisted, so rollback is removal: drop `allocations.wait`, the two `data` keys,
-and the `retryable` field/validator clause. No migration, no data to unwind. Regenerate
-the tool reference (`just docs`) in the same change so the committed reference matches the
-live registry (the `docs-check` CI gate).
+The tool surface is removal-only: drop `allocations.wait`, the two position `data` keys,
+and the `retryable` field/validator clause; none persist anything to unwind. The migration
+runner is forward-only (ADR-0015), so the one added column (`allocations.failure_category`)
+is not "un-migrated" — left in place it is a harmless nullable column that nothing reads
+once `_envelope_for_allocation`'s read is reverted (the writes in `promotion.py` become
+dead and can be removed in a follow-up). Regenerate the tool reference (`just docs`) in the
+same change so the committed reference matches the live registry (the `docs-check` CI gate).
