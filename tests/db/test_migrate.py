@@ -24,6 +24,7 @@ CHECK_ENUMS = [
     ("jobs_kind_check", models.JobKind),
     ("runs_failure_category_check", errors.ErrorCategory),
     ("jobs_error_category_check", errors.ErrorCategory),
+    ("allocations_failure_category_check", errors.ErrorCategory),
     ("image_visibility_check", models.ImageVisibility),
     ("image_state_check", models.ImageState),
     ("image_catalog_managed_by_check", models.ManagedBy),
