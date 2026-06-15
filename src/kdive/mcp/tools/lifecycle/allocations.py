@@ -334,7 +334,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_request(
         project: Annotated[str, Field(description="Project to admit the allocation for.")],
         request: Annotated[
-            dict[str, Any],
+            AllocationRequestPayload,
             Field(description="Allocation request payload: size, lease window, resource selector."),
         ],
         idempotency_key: Annotated[
@@ -342,15 +342,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior grant."),
         ] = None,
     ) -> ToolResponse:
-        try:
-            payload = AllocationRequestPayload.model_validate(request)
-        except ValueError:
-            return _config_error(project)
         return await request_allocation(
             pool,
             current_context(),
             project=project,
-            request=payload,
+            request=request,
             idempotency_key=idempotency_key,
         )
 

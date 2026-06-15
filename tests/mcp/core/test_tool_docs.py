@@ -263,6 +263,30 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "root=/dev/vda" not in description
 
 
+def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
+    tools = {t.name: t for t in TOOLS}
+
+    allocation_request = tools["allocations.request"].parameters["properties"]["request"]
+    assert set(allocation_request["properties"]) == {
+        "disk_gb",
+        "memory_gb",
+        "on_capacity",
+        "pcie_devices",
+        "resource",
+        "shape",
+        "vcpus",
+        "window",
+    }
+
+    estimate_request = tools["accounting.estimate"].parameters["properties"]["request"]
+    assert set(estimate_request["properties"]) == {
+        "cost_class",
+        "memory_gb",
+        "vcpus",
+        "window",
+    }
+
+
 def test_build_host_register_tools_are_variant_specific() -> None:
     tools = {t.name: t for t in TOOLS}
 
