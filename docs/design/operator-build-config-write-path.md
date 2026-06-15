@@ -103,6 +103,15 @@ So this is **one tool + one provenance column**, not a new subsystem.
   suggested_next_actions=["buildconfig.get"])`. Content is not echoed.
 - **Annotations:** `_docmeta.mutating()`, `meta={"maturity": "implemented"}`. Not destructive.
 
+### Read-path change: `buildconfig.get` surfaces `source`
+
+`buildconfig.get`'s response `data` gains `source` (`"seed"` | `"operator"`), so an operator or
+agent can tell on the read path whether the active fragment is the packaged default or an
+operator override — the most likely production diagnostic ("why is this build using a different
+kdump policy than the image ships?"). It is the only behavioral change to the existing read
+tool (the row already carries `source`); `content`, `sha256`, and `merge_recipe` are unchanged.
+The sync build-path fetch is untouched.
+
 ### Migration `0034`: `source` provenance column
 
 ```sql
@@ -158,8 +167,9 @@ row *and* the object layer.
 ### Repository changes (`catalog.py`)
 
 - `BuildConfigEntry` gains a `source: str` field (read into both async/sync getters; the
-  `_SELECT` adds `source`). The build-path fetch and `buildconfig.get` ignore it — they only
-  need bytes + sha256 — but it is read so the seed can branch on it.
+  `_SELECT` adds `source`). The sync build-path fetch ignores it (it only needs bytes + sha256);
+  the seed branches on it; and `buildconfig.get` **surfaces** it (below) so an override is
+  observable on the read path.
 - **Two distinct writers, not one shared unconditional upsert:**
   - `upsert_operator_build_config(conn, name, object_key, sha256, description)` — the tool's
     writer: unconditional `ON CONFLICT (name) DO UPDATE` setting `source='operator'`. To avoid
@@ -204,6 +214,8 @@ Unit (driving `set_build_config` directly with an injected pool + object store +
 - A successful set writes exactly one `platform_audit_log` success row whose `args_digest`
   is not the plaintext content.
 - Re-`set` of `kdump` with no `description` preserves the prior description (finding-4 guard).
+- `buildconfig.get` reports `source='operator'` after a `set` and `source='seed'` on a freshly
+  seeded fragment (the read-path provenance surface).
 
 Seed (driving `seed_build_configs`):
 

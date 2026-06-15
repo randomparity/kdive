@@ -117,8 +117,9 @@ override is not clobbered by a later `migrate` (AC#3).
 - One new tool (`buildconfig.set`), one additive migration (`0034`, nullable-safe via the
   `DEFAULT 'seed'` so existing rows backfill to seed-owned), one new env knob
   (`KDIVE_MAX_BUILD_CONFIG_BYTES`), one new advisory-lock scope (`LockScope.BUILD_CONFIG`,
-  string-keyed by fragment name). No change to `buildconfig.get`, the build-path fetch, the
-  reserved-key scheme, or the `ToolResponse`/flat-schema contracts.
+  string-keyed by fragment name). `buildconfig.get` gains one response field (`source`) so an
+  override is observable on the read path; the build-path fetch, the reserved-key scheme, and
+  the `ToolResponse`/flat-schema contracts are unchanged.
 - The seed gains a per-row `source` read before upsert; its sha256 fast-path is unchanged for
   seed-owned rows. The `build_config_catalog` migration + tool file are provider-agnostic core,
   so the M2 portability gate `ALLOWED_FILES` and its meta-test frozenset gain the new migration.
