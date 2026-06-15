@@ -11,7 +11,13 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job, JobKind
 from kdive.domain.state import JobState
-from kdive.mcp.responses import ResponseData, ToolResponse, current_status_data, reason_data
+from kdive.mcp.responses import (
+    _RETRYABLE_BY_CATEGORY,
+    ResponseData,
+    ToolResponse,
+    current_status_data,
+    reason_data,
+)
 from kdive.mcp.tools import _common
 
 _NOW = dt.datetime(2026, 6, 3, 12, 0, tzinfo=dt.UTC)
@@ -234,3 +240,65 @@ def test_common_job_envelope_preserves_job_fields_and_adds_object_key() -> None:
     assert resp.refs == {"result": "tenant/run/abc/kernel"}
     assert resp.suggested_next_actions == ["jobs.get"]
     assert resp.data == {"kind": "build", "run_id": str(object_id)}
+
+
+# ---------------------------------------------------------------------------
+# Task 3: derived retryable field (ADR-0118)
+# ---------------------------------------------------------------------------
+
+
+def test_retryable_table_is_exhaustive_over_error_category() -> None:
+    # Every category is classified; none stale. A new ErrorCategory must be a deliberate edit.
+    assert set(_RETRYABLE_BY_CATEGORY) == set(ErrorCategory)
+
+
+def test_retryable_is_none_on_success() -> None:
+    resp = ToolResponse.success("id", "ok", data={"x": 1})
+    assert resp.retryable is None
+
+
+def test_retryable_derived_on_failure() -> None:
+    transient = ToolResponse.failure("id", ErrorCategory.QUEUE_TIMEOUT)
+    terminal = ToolResponse.failure("id", ErrorCategory.ALLOCATION_DENIED)
+    assert transient.retryable is True
+    assert terminal.retryable is False
+
+
+def test_retryable_is_never_caller_set() -> None:
+    # A caller-supplied value is overwritten by the derived one.
+    forced = ToolResponse(
+        object_id="id",
+        status="error",
+        error_category=ErrorCategory.CONFIGURATION_ERROR.value,
+        retryable=True,
+    )
+    assert forced.retryable is False  # configuration_error is terminal
+
+
+def test_every_category_has_an_explicit_expected_bool() -> None:
+    # Pin each category's classification so a reclassification is a visible diff.
+    expected = {
+        ErrorCategory.INFRASTRUCTURE_FAILURE: True,
+        ErrorCategory.PROVISIONING_FAILURE: True,
+        ErrorCategory.BOOT_TIMEOUT: True,
+        ErrorCategory.READINESS_FAILURE: True,
+        ErrorCategory.TRANSPORT_FAILURE: True,
+        ErrorCategory.TRANSPORT_CONFLICT: True,
+        ErrorCategory.DEBUG_ATTACH_FAILURE: True,
+        ErrorCategory.CONTROL_FAILURE: True,
+        ErrorCategory.CAPACITY_EXHAUSTED: True,
+        ErrorCategory.QUEUE_TIMEOUT: True,
+        ErrorCategory.CONFIGURATION_ERROR: False,
+        ErrorCategory.MISSING_DEPENDENCY: False,
+        ErrorCategory.BUILD_FAILURE: False,
+        ErrorCategory.INSTALL_FAILURE: False,
+        ErrorCategory.STALE_HANDLE: False,
+        ErrorCategory.LEASE_EXPIRED: False,
+        ErrorCategory.NOT_IMPLEMENTED: False,
+        ErrorCategory.NOT_FOUND: False,
+        ErrorCategory.CONFLICT: False,
+        ErrorCategory.AUTHORIZATION_DENIED: False,
+        ErrorCategory.QUOTA_EXCEEDED: False,
+        ErrorCategory.ALLOCATION_DENIED: False,
+    }
+    assert expected == _RETRYABLE_BY_CATEGORY

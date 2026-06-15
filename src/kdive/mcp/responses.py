@@ -33,6 +33,35 @@ _NEXT_ACTIONS: dict[JobState, list[str]] = {
 # tool-level `error` status; both require an error category, all others forbid one.
 _FAILURE_STATUSES = frozenset({JobState.FAILED.value, "error"})
 
+# Retryability is a pure function of the failure category (ADR-0118): a bare
+# re-invocation may succeed once a transient condition clears, with no caller change.
+# Exhaustive over ErrorCategory; the bias is terminal when transience is ambiguous,
+# since the flag exists to stop an agent hammering a permanent failure (#430).
+_RETRYABLE_BY_CATEGORY: dict[ErrorCategory, bool] = {
+    ErrorCategory.INFRASTRUCTURE_FAILURE: True,
+    ErrorCategory.PROVISIONING_FAILURE: True,
+    ErrorCategory.BOOT_TIMEOUT: True,
+    ErrorCategory.READINESS_FAILURE: True,
+    ErrorCategory.TRANSPORT_FAILURE: True,
+    ErrorCategory.TRANSPORT_CONFLICT: True,
+    ErrorCategory.DEBUG_ATTACH_FAILURE: True,
+    ErrorCategory.CONTROL_FAILURE: True,
+    ErrorCategory.CAPACITY_EXHAUSTED: True,
+    ErrorCategory.QUEUE_TIMEOUT: True,
+    ErrorCategory.CONFIGURATION_ERROR: False,
+    ErrorCategory.MISSING_DEPENDENCY: False,
+    ErrorCategory.BUILD_FAILURE: False,
+    ErrorCategory.INSTALL_FAILURE: False,
+    ErrorCategory.STALE_HANDLE: False,
+    ErrorCategory.LEASE_EXPIRED: False,
+    ErrorCategory.NOT_IMPLEMENTED: False,
+    ErrorCategory.NOT_FOUND: False,
+    ErrorCategory.CONFLICT: False,
+    ErrorCategory.AUTHORIZATION_DENIED: False,
+    ErrorCategory.QUOTA_EXCEEDED: False,
+    ErrorCategory.ALLOCATION_DENIED: False,
+}
+
 ResponseData = dict[str, JsonValue]
 ResponseDataInput = Mapping[str, JsonValue]
 
@@ -65,6 +94,7 @@ class ToolResponse(BaseModel):
     suggested_next_actions: list[str] = Field(default_factory=list)
     refs: dict[str, str] = Field(default_factory=dict)
     error_category: str | None = None
+    retryable: bool | None = None
     data: dict[str, JsonValue] = Field(default_factory=dict)
     items: list[ToolResponse] = Field(default_factory=list)
 
@@ -79,17 +109,22 @@ class ToolResponse(BaseModel):
 
     @model_validator(mode="after")
     def _category_iff_failed(self) -> ToolResponse:
-        """Enforce: ``error_category`` is set iff the object is in a failure status.
+        """Enforce category-iff-failure and derive ``retryable`` from the category.
 
         A failure status without a category, or any other status carrying one, is a
-        producer bug — fail fast at construction (ADR-0019). Batch callers
-        (``*.list``) isolate this per row so one bad object cannot blank a list.
+        producer bug — fail fast at construction (ADR-0019). ``retryable`` is a pure
+        function of the category (ADR-0118), derived here so it can never drift and is
+        never caller-set; ``None`` on success, a ``bool`` on a classified failure.
         """
         is_failure = self.status in _FAILURE_STATUSES
         if is_failure and self.error_category is None:
             raise ValueError(f"status {self.status!r} requires an error_category")
         if not is_failure and self.error_category is not None:
             raise ValueError(f"error_category set on non-failure status {self.status!r}")
+        if is_failure and self.error_category is not None:
+            self.retryable = _RETRYABLE_BY_CATEGORY[ErrorCategory(self.error_category)]
+        else:
+            self.retryable = None
         return self
 
     @classmethod
