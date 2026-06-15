@@ -74,15 +74,30 @@ So this is **one tool + one provenance column**, not a new subsystem.
   3. Upsert the catalog row with the just-computed `sha256` and `source='operator'`, and write
      the `platform_audit_log` row — both on the same connection in the same transaction, so the
      row and its audit entry commit together.
-- **Non-atomicity contract (object store is not transactional with Postgres):** the object PUT
-  (step 2) lands before the transaction (step 3) commits. The per-name lock removes the
-  *concurrent*-writer corruption, but a process/DB failure between a successful PUT and the row
-  commit still leaves the object holding the new bytes while the unchanged row holds the old
-  sha256. This is **fail-closed**: `buildconfig.get` and the build-path fetch both call
-  `verify_bytes`, so they raise `INFRASTRUCTURE_FAILURE` on the mismatch rather than serving
-  mismatched bytes. The remedy is a re-`set` (it re-PUTs and re-commits the matching sha); the
-  prior bytes are not recoverable from the row. A `set` that returns an error therefore means
-  "state unknown — re-`set` to converge," not "nothing changed."
+- **Non-atomicity contract (object store is not transactional with Postgres).** The object PUT
+  (step 2) lands before the transaction (step 3) commits, and the deterministic key is
+  overwritten in place, so the catalog row's sha256 and the object's bytes are momentarily out
+  of step. Two distinct windows follow; the per-name lock serializes *writers* but readers
+  (`buildconfig.get`, the build-path fetch) take no `BUILD_CONFIG` lock, so both windows are
+  visible to a concurrent reader. Both are **fail-closed** — `buildconfig.get` and the
+  build-path fetch both call `verify_bytes`, so on a sha mismatch they raise
+  `INFRASTRUCTURE_FAILURE` rather than serving mismatched bytes; neither ever serves wrong bytes.
+  - **Transient (a healthy `set`):** between a successful PUT and the row commit (sub-second), a
+    reader can fetch the new bytes against the still-old row sha and get
+    `INFRASTRUCTURE_FAILURE`. It clears the instant the `set` commits. The build path absorbs it
+    automatically: a build job requeues on a non-terminal `INFRASTRUCTURE_FAILURE` up to
+    `DEFAULT_MAX_ATTEMPTS` (3), and the window is gone by the next attempt; a direct
+    `buildconfig.get` caller re-issues the read. No build is terminally failed by an operator's
+    concurrent `set`.
+  - **Persistent (a crashed `set`):** a process/DB failure between the PUT and the commit leaves
+    the object holding new bytes and the row holding the old sha indefinitely; reads keep failing
+    closed until a re-`set` re-PUTs and re-commits the matching sha. The prior bytes are not
+    recoverable from the row, so a `set` that returns an error means "state unknown — re-`set` to
+    converge," not "nothing changed."
+
+  The in-place key is kept deliberately (ADR-0096's no-orphan property; see the ADR's rejected
+  versioned-key alternative): the transient window is bounded and self-healing via job retry,
+  which does not justify permanent orphan accumulation + a reaper for a rarely-changed catalog.
 - **Response:** `ToolResponse.success(name, "published",
   data={"name": name, "sha256": sha256, "bytes": len(data), "source": "operator"},
   suggested_next_actions=["buildconfig.get"])`. Content is not echoed.
@@ -165,7 +180,8 @@ row *and* the object layer.
 | `content` empty | `CONFIGURATION_ERROR` (`field=content`) |
 | `content` over the byte cap | `CONFIGURATION_ERROR` (`field=content`, `limit`, `actual`) |
 | Object store unconfigured | `CONFIGURATION_ERROR` from `object_store_from_env` (same as `buildconfig.get`) |
-| Process/DB failure after PUT, before row commit | Object holds new bytes, row holds old sha256; `get`/build fetch fail closed (`INFRASTRUCTURE_FAILURE` via `verify_bytes`); remedy is re-`set`. A `set` error means "state unknown — re-`set`" |
+| Reader races a *healthy* in-flight `set` (PUT done, row not yet committed) | Transient `INFRASTRUCTURE_FAILURE` via `verify_bytes` (fail-closed); clears on commit; build job requeues (≤ 3 attempts) and a direct `get` caller re-reads — no terminal build failure |
+| Process/DB failure after PUT, before row commit | Object holds new bytes, row holds old sha256 *persistently*; `get`/build fetch fail closed (`INFRASTRUCTURE_FAILURE` via `verify_bytes`); remedy is re-`set`. A `set` error means "state unknown — re-`set`" |
 | Two concurrent `set` for the same name | Serialized by `advisory_xact_lock(BUILD_CONFIG, name)`; the second blocks until the first commits, so the committed sha256 always matches the bytes at the key |
 | Re-set identical bytes | Idempotent: same object key overwritten, sha256 unchanged, `source` stays `operator` |
 | `set` an operator override, then `migrate` | Seed reads `source='operator'`, skips; override survives |

@@ -164,6 +164,17 @@ override is not clobbered by a later `migrate` (AC#3).
   `advisory_xact_lock` (the established per-object serialization mechanism) removes the window
   for the cost of one extra lock on a rare admin op.
 - **Make the object PUT and row write atomic.** Not possible: the object store is not
-  transactional with Postgres. The design instead makes the only residual window (a crash
-  between PUT and commit) fail closed via the existing sha256 verify, with re-`set` as the
-  documented convergence path.
+  transactional with Postgres. The design instead makes the residual windows (a crash between
+  PUT and commit, and a reader racing a healthy in-flight set) fail closed via the existing
+  sha256 verify, with re-`set` as the convergence path for the crash and job retry / re-read for
+  the transient.
+- **Versioned / content-addressed object keys (`…/<sha>.config`) with an atomic row-pointer
+  flip, to eliminate the reader/writer mismatch window.** Rejected: it would make every read
+  consistent (old readers resolve the old key, new readers the new) and make a crashed set
+  non-destructive, but it permanently orphans the prior object on every change and orphans the
+  new object on a failed commit, so it needs a build-config object reaper — disproportionate for
+  a catalog that changes rarely, and it discards ADR-0096's deliberate no-orphan in-place key.
+  The transient mismatch is sub-second, fail-closed, and self-heals: a build job requeues on the
+  non-terminal `INFRASTRUCTURE_FAILURE` (`DEFAULT_MAX_ATTEMPTS=3`) and a direct `buildconfig.get`
+  caller re-reads. The bounded, self-healing window does not justify the standing orphan-reaper
+  obligation.
