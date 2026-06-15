@@ -21,6 +21,11 @@ Copy [`mcp.json`](mcp.json) to a file named `.mcp.json` in your project root.
 Claude Code reads it at startup and the entry is shared with everyone who checks
 out the repository.
 
+The first time you launch `claude` in that directory, Claude Code prompts you to
+approve the project's MCP servers — a security gate for shared `.mcp.json` files.
+Until you approve it, `claude mcp list` reports the server as `⏸ Pending approval`
+(this is expected, not a connection error); approve it once to connect.
+
 Claude Code connects to remote MCP servers over HTTP natively, so the entry uses
 the streamable-HTTP transport directly:
 
