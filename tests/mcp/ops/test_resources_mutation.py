@@ -40,6 +40,7 @@ from kdive.domain.models import ManagedBy, ResourceKind
 from kdive.domain.state import AllocationState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops.resources import host_ops as resources_host_ops
+from kdive.mcp.tools.ops.resources import register as register_module
 from kdive.mcp.tools.ops.resources import registrar as resources_registrar
 from kdive.mcp.tools.ops.resources._common import (
     DEREGISTER_TOOL,
@@ -59,6 +60,11 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 
 _SECRET_BYTES = "-----BEGIN CERTIFICATE-----FAKEKEYBYTES"  # pragma: allowlist secret
+
+
+def test_resource_register_helper_name_matches_insert_operation() -> None:
+    assert hasattr(register_module, "_insert_runtime_resource")
+    assert not hasattr(register_module, "_do_insert")
 
 
 @asynccontextmanager

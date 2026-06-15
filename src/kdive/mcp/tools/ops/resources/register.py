@@ -279,7 +279,7 @@ async def _insert_with_preflight(
             failure = await _db_preflight(conn, kind=kind, name=name, base_image=base_image)
             if failure is not None:
                 return failure
-            resource_id = await _do_insert(
+            resource_id = await _insert_runtime_resource(
                 conn,
                 kind=kind,
                 name=name,
@@ -325,7 +325,7 @@ async def _insert_with_preflight(
     )
 
 
-async def _do_insert(
+async def _insert_runtime_resource(
     conn: AsyncConnection,
     *,
     kind: ResourceKind,
