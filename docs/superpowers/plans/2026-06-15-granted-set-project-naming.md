@@ -58,9 +58,12 @@ target project, zero-filling those absent from `rollup.rows`, deterministically 
      `reserved/reconciled/variance == "0.0000"`.
    - Update `test_granted_set_audits_two_projects_even_when_only_one_has_spend`
      (currently asserts `{"proj-a"}`): the rows now name **both** `proj-a` (its sums)
-     and `proj-b` (zero-filled). Keep the audit-count assertion (still 1) — the audit
-     trigger is unchanged. This test pinned the *old buggy* behaviour; updating it is
-     the behaviour change, not a weakening.
+     and `proj-b` (zero-filled). Keep the audit-count assertion (still 1) **and also
+     assert the audit scope string** `rows[0][3] == "granted-set:proj-a,proj-b"` — the
+     scope is derived from the *authorized set* (`sorted(targets)`, `reports.py:100`),
+     independently of which projects have rows, so a future refactor that derived it
+     from `rollup.rows` instead must fail here. This test pinned the *old buggy*
+     behaviour; updating it is the behaviour change, not a weakening.
    - `test_granted_set_zero_fill_is_deterministically_ordered`: a granted set of three
      projects, none with spend, returns items whose `project`s are sorted ascending.
    - `test_granted_set_group_by_principal_names_zero_spend_project`: group_by=principal
@@ -79,7 +82,9 @@ target project, zero-filling those absent from `rollup.rows`, deterministically 
 4. Confirm the new + existing report tests pass; `just lint` + `just type`.
 
 **Acceptance:** all spec acceptance criteria for the granted-set form hold; the
-all-projects tests and audit-count assertions are unchanged.
+all-projects tests are unchanged and the audit-count/scope assertions still pass;
+`reports.py` imports and calls `accounting_domain.empty_row` (no tool-layer `Decimal`
+or `RollupRow` construction), so the domain helper is the single zero-row source.
 
 ## Task 3 — Record the `allocations.list` non-bug
 
