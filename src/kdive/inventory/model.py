@@ -102,8 +102,8 @@ class RemoteLibvirtInstance(_Instance):
     client_key_ref: str
     ca_cert_ref: str
     base_image: str
-    vcpus: int
-    memory_mb: int
+    vcpus: int = Field(gt=0)
+    memory_mb: int = Field(gt=0)
     shapes: list[str] = Field(default_factory=list)
 
 
@@ -116,8 +116,8 @@ class LocalLibvirtInstance(_Instance):
 class FaultInjectInstance(_Instance):
     """A ``[[fault_inject]]`` provider instance."""
 
-    vcpus: int
-    memory_mb: int
+    vcpus: int = Field(gt=0)
+    memory_mb: int = Field(gt=0)
     seed: int = 0
 
 

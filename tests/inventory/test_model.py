@@ -73,6 +73,17 @@ def test_remote_libvirt_requires_size_ceiling() -> None:
             InventoryDoc.parse(d)
 
 
+def test_remote_libvirt_size_ceiling_must_be_positive() -> None:
+    # gt=0 matches the resources.register_* schema: a non-positive ceiling (e.g. a `vcpus = 0`
+    # typo) is rejected at config load, not silently admitted into a host that then rejects every
+    # allocation with a misleading "exceeds ceiling 0".
+    for bad_field in ("vcpus", "memory_mb"):
+        d = _doc()
+        d["remote_libvirt"][0][bad_field] = 0
+        with pytest.raises(InventoryError):
+            InventoryDoc.parse(d)
+
+
 def test_empty_document_parses() -> None:
     doc = InventoryDoc.parse({"schema_version": 2})
     assert doc.image == []
