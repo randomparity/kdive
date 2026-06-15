@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum, auto
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -73,9 +73,7 @@ class MatchOutcome(StrEnum):
     CAPACITY = auto()
 
 
-class _Kind(StrEnum):
-    VENDOR_DEVICE = auto()
-    CLASS = auto()
+type _MatchKind = Literal["vendor_device", "class"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +84,7 @@ class MatchSpec:
     or 4-hex string) for a ``class=`` spec. Build only via :func:`parse_match_spec`.
     """
 
-    kind: _Kind
+    kind: _MatchKind
     vendor_id: str | None = None
     device_id: str | None = None
     class_prefix: str | None = None
@@ -133,10 +131,10 @@ def parse_match_spec(spec: str) -> MatchSpec:
     """
     if _VENDOR_DEVICE_RE.match(spec):
         vendor_id, device_id = spec.split(":")
-        return MatchSpec(kind=_Kind.VENDOR_DEVICE, vendor_id=vendor_id, device_id=device_id)
+        return MatchSpec(kind="vendor_device", vendor_id=vendor_id, device_id=device_id)
     class_match = _CLASS_RE.match(spec)
     if class_match:
-        return MatchSpec(kind=_Kind.CLASS, class_prefix=class_match.group(1))
+        return MatchSpec(kind="class", class_prefix=class_match.group(1))
     raise CategorizedError(
         f"malformed PCIe match spec {spec!r}: expected '<4hex>:<4hex>' or 'class=<2|4 hex>'",
         category=ErrorCategory.CONFIGURATION_ERROR,
@@ -146,7 +144,7 @@ def parse_match_spec(spec: str) -> MatchSpec:
 
 def descriptor_matches(spec: MatchSpec, descriptor: PCIeDescriptor) -> bool:
     """Return whether ``descriptor`` satisfies ``spec`` (occupancy not considered)."""
-    if spec.kind is _Kind.VENDOR_DEVICE:
+    if spec.kind == "vendor_device":
         return (
             descriptor["vendor_id"] == spec.vendor_id and descriptor["device_id"] == spec.device_id
         )
