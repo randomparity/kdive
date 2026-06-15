@@ -11,6 +11,7 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_allocation, with_runtime_for_system
 from kdive.mcp.tools.lifecycle.systems.admin import (
     SystemAdminHandlers as _SystemAdminHandlers,
@@ -20,9 +21,6 @@ from kdive.mcp.tools.lifecycle.systems.admin import (
 )
 from kdive.mcp.tools.lifecycle.systems.provision import (
     SystemProvisionHandlers as _SystemProvisionHandlers,
-)
-from kdive.mcp.tools.lifecycle.systems.view import (
-    DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT,
 )
 from kdive.mcp.tools.lifecycle.systems.view import (
     SystemsListRequest as _SystemsListRequest,

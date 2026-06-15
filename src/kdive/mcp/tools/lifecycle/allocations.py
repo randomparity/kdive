@@ -31,7 +31,9 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByKind
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext, require_project
@@ -51,9 +53,6 @@ from kdive.services.allocation.request import (
 )
 
 _log = logging.getLogger(__name__)
-
-DEFAULT_LIST_LIMIT = 50
-MAX_LIST_LIMIT = 200
 
 
 def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:
@@ -295,7 +294,7 @@ async def list_allocations(
     """Return the newest allocations for ``project`` in one collection envelope."""
     require_project(ctx, project)
     require_role(ctx, project, Role.VIEWER)
-    capped = max(1, min(limit, MAX_LIST_LIMIT))
+    capped = _clamp_list_limit(limit)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
