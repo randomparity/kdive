@@ -15,6 +15,7 @@ import pytest
 
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
+    BuildVmTiming,
     EphemeralBuildVm,
     build_domain_name,
     build_overlay_volume_name,
@@ -65,8 +66,7 @@ def _build_vm(conn: FakeProvisionConn, tmp_path: Any) -> EphemeralBuildVm:
             pki_base_dir=tmp_path,
         ),
         agent_command=_agent_ok,
-        sleep=lambda _s: None,
-        monotonic=_ticker(),
+        timing=BuildVmTiming(sleep=lambda _s: None, monotonic=_ticker()),
     )
 
 

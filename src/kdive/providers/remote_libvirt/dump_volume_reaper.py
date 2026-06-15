@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
 from typing import Protocol
 from uuid import UUID
 
@@ -24,11 +23,12 @@ import libvirt
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.providers.infra.reaping import DumpVolume
-from kdive.providers.remote_libvirt.config import remote_config_from_inventory
+from kdive.providers.remote_libvirt.reaper_connections import (
+    open_libvirt_reaper,
+    remote_libvirt_reaper_connections,
+)
 from kdive.providers.remote_libvirt.transport import (
     RemoteLibvirtConnections,
-    open_libvirt_protocol,
-    remote_libvirt_connections,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -57,14 +57,6 @@ class _Pool(Protocol):
 class _ReaperConn(Protocol):
     def storagePoolLookupByName(self, name: str) -> _Pool: ...  # noqa: N802 - binding name
     def close(self) -> None: ...
-
-
-type OpenReaperConnection = Callable[[str], _ReaperConn]
-
-
-def open_libvirt_reaper(uri: str) -> _ReaperConn:
-    """Production opener (live-host path; unit tests inject a fake)."""
-    return open_libvirt_protocol(uri)
 
 
 def system_id_from_dump_volume_name(name: str) -> UUID | None:
@@ -108,9 +100,8 @@ class RemoteLibvirtDumpVolumeReaper:
         secret_registry: SecretRegistry,
         connections: RemoteLibvirtConnections[_ReaperConn] | None = None,
     ) -> None:
-        self._connections = connections or remote_libvirt_connections(
+        self._connections = connections or remote_libvirt_reaper_connections(
             secret_registry=secret_registry,
-            config_factory=remote_config_from_inventory,
             open_connection=open_libvirt_reaper,
         )
 

@@ -21,16 +21,17 @@ from uuid import UUID
 import libvirt
 
 from kdive.providers.infra.reaping import BuildVm
-from kdive.providers.remote_libvirt.config import remote_config_from_inventory
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BUILD_DOMAIN_PREFIX,
     build_overlay_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import delete_volume
+from kdive.providers.remote_libvirt.reaper_connections import (
+    open_libvirt_reaper,
+    remote_libvirt_reaper_connections,
+)
 from kdive.providers.remote_libvirt.transport import (
     RemoteLibvirtConnections,
-    open_libvirt_protocol,
-    remote_libvirt_connections,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -71,11 +72,6 @@ class _ReaperConn(Protocol):
 type OpenReaperConnection = Callable[[str], _ReaperConn]
 
 
-def open_libvirt_reaper(uri: str) -> _ReaperConn:
-    """Production opener (live-host path; unit tests inject a fake)."""
-    return open_libvirt_protocol(uri)
-
-
 class RemoteLibvirtBuildVmReaper:
     """List + delete leaked ephemeral build-VM domains on the remote host (the reconciler seam)."""
 
@@ -85,9 +81,8 @@ class RemoteLibvirtBuildVmReaper:
         secret_registry: SecretRegistry,
         connections: RemoteLibvirtConnections[_ReaperConn] | None = None,
     ) -> None:
-        self._connections = connections or remote_libvirt_connections(
+        self._connections = connections or remote_libvirt_reaper_connections(
             secret_registry=secret_registry,
-            config_factory=remote_config_from_inventory,
             open_connection=open_libvirt_reaper,
         )
 

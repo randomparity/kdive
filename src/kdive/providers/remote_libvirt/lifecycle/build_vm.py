@@ -20,6 +20,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -47,6 +48,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
     "BUILD_DOMAIN_PREFIX",
+    "BuildVmTiming",
     "EphemeralBuildVm",
     "build_domain_name",
     "build_overlay_volume_name",
@@ -67,6 +69,19 @@ _BUILD_ARCH = "x86_64"
 
 _AGENT_TIMEOUT_S = 180.0
 _AGENT_POLL_S = 2.0
+
+
+@dataclass(frozen=True)
+class BuildVmTiming:
+    """Clock and timeout seams for build-VM guest-agent readiness."""
+
+    sleep: Sleep = time.sleep
+    monotonic: Monotonic = time.monotonic
+    agent_timeout_s: float = _AGENT_TIMEOUT_S
+    agent_poll_s: float = _AGENT_POLL_S
+
+
+_DEFAULT_BUILD_VM_TIMING = BuildVmTiming()
 
 
 def build_domain_name(run_id: UUID) -> str:
@@ -150,10 +165,7 @@ class EphemeralBuildVm:
         secret_registry: SecretRegistry,
         connections: RemoteLibvirtConnections[_BuildConn] | None = None,
         agent_command: AgentCommand = qemu_agent_command,
-        sleep: Sleep = time.sleep,
-        monotonic: Monotonic = time.monotonic,
-        agent_timeout_s: float = _AGENT_TIMEOUT_S,
-        agent_poll_s: float = _AGENT_POLL_S,
+        timing: BuildVmTiming = _DEFAULT_BUILD_VM_TIMING,
     ) -> None:
         self._secret_registry = secret_registry
         self._connections = connections or remote_libvirt_connections(
@@ -162,10 +174,7 @@ class EphemeralBuildVm:
             open_connection=open_libvirt_provision,
         )
         self._agent_command = agent_command
-        self._sleep = sleep
-        self._monotonic = monotonic
-        self._agent_timeout_s = agent_timeout_s
-        self._agent_poll_s = agent_poll_s
+        self._timing = timing
 
     @contextmanager
     def session(self, base_image_volume: str, *, run_id: UUID) -> Iterator[GuestExecBuildTransport]:
@@ -193,10 +202,10 @@ class EphemeralBuildVm:
                 wait_for_agent(
                     conn,
                     domain_name,
-                    monotonic=self._monotonic,
-                    sleep=self._sleep,
-                    timeout_s=self._agent_timeout_s,
-                    poll_s=self._agent_poll_s,
+                    monotonic=self._timing.monotonic,
+                    sleep=self._timing.sleep,
+                    timeout_s=self._timing.agent_timeout_s,
+                    poll_s=self._timing.agent_poll_s,
                 )
                 transport = GuestExecBuildTransport(
                     domain=conn.lookupByName(domain_name),
