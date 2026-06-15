@@ -45,9 +45,9 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.build_hosts import BuildHostKind
-from kdive.domain.models import ManagedBy
 from kdive.inventory.model import BuildHostInstance, InventoryDoc
 from kdive.inventory.reconcile import (
+    CONFIG_MANAGED_BY,
     ReconcileDiff,
     ReconcileRecord,
     inventory_pass_lock,
@@ -55,8 +55,6 @@ from kdive.inventory.reconcile import (
 )
 
 _log = logging.getLogger(__name__)
-
-_CONFIG = ManagedBy.CONFIG.value
 
 # Kinds the v2 [[build_host]] model can fully express (it carries no address/ssh_credential_ref,
 # which the build_hosts_fields_check CHECK requires for the 'ssh' kind).
@@ -159,7 +157,7 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
                 base_image_volume,
                 inst.workspace_root,
                 inst.max_concurrent,
-                _CONFIG,
+                CONFIG_MANAGED_BY,
             ),
         )
         diff.created.append(_record(inst.name))
@@ -170,7 +168,7 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
         or row["workspace_root"] != inst.workspace_root
         or row["max_concurrent"] != inst.max_concurrent
         or row["enabled"] is not True
-        or str(row["managed_by"]) != _CONFIG
+        or str(row["managed_by"]) != CONFIG_MANAGED_BY
     )
     if changed:
         await cur.execute(
@@ -181,7 +179,7 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
                 base_image_volume,
                 inst.workspace_root,
                 inst.max_concurrent,
-                _CONFIG,
+                CONFIG_MANAGED_BY,
                 row["id"],
             ),
         )
@@ -192,7 +190,9 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
     """Prune (or cordon) each config build host whose ``name`` left the file."""
     declared = {inst.name for inst in doc.build_host if _unexpressible_reason(inst) is None}
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT id, name FROM build_hosts WHERE managed_by = %s", (_CONFIG,))
+        await cur.execute(
+            "SELECT id, name FROM build_hosts WHERE managed_by = %s", (CONFIG_MANAGED_BY,)
+        )
         rows = await cur.fetchall()
     for row in rows:
         name = str(row["name"])

@@ -36,6 +36,8 @@ from kdive.services.allocation.pcie_claim import NON_TERMINAL_STATES_VALUES
 from kdive.services.images.retention import image_referenced_by_live_system
 
 __all__ = [
+    "CONFIG_MANAGED_BY",
+    "DISCOVERY_MANAGED_BY",
     "ManagedBy",
     "ReconcileDiff",
     "ReconcileRecord",
@@ -47,6 +49,9 @@ __all__ = [
     "prune_or_cordon_resource",
     "prune_or_cordon_build_host",
 ]
+
+CONFIG_MANAGED_BY = ManagedBy.CONFIG.value
+DISCOVERY_MANAGED_BY = ManagedBy.DISCOVERY.value
 
 
 def resource_identity_lock_key(kind: ResourceKind, name: str) -> str:
@@ -149,7 +154,7 @@ async def prune_or_cordon_image(conn: AsyncConnection, row_id: UUID, name: str) 
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id FROM image_catalog WHERE id = %s AND managed_by = %s FOR UPDATE",
-            (row_id, ManagedBy.CONFIG.value),
+            (row_id, CONFIG_MANAGED_BY),
         )
         if await cur.fetchone() is None:
             return PruneOutcome(pruned=False, cordoned=False)
@@ -190,7 +195,7 @@ async def prune_or_cordon_resource(
     ):
         await cur.execute(
             "SELECT id FROM resources WHERE id = %s AND managed_by = %s FOR UPDATE",
-            (row_id, ManagedBy.CONFIG.value),
+            (row_id, CONFIG_MANAGED_BY),
         )
         if await cur.fetchone() is None:
             return PruneOutcome(pruned=False, cordoned=False)
@@ -236,7 +241,7 @@ async def prune_or_cordon_build_host(
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id FROM build_hosts WHERE id = %s AND managed_by = %s FOR UPDATE",
-            (row_id, ManagedBy.CONFIG.value),
+            (row_id, CONFIG_MANAGED_BY),
         )
         if await cur.fetchone() is None:
             return PruneOutcome(pruned=False, cordoned=False)

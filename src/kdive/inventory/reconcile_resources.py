@@ -38,7 +38,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.domain.models import ManagedBy, ResourceKind
+from kdive.domain.models import ResourceKind
 from kdive.domain.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
@@ -46,6 +46,8 @@ from kdive.domain.resource_capabilities import (
 )
 from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
 from kdive.inventory.reconcile import (
+    CONFIG_MANAGED_BY,
+    DISCOVERY_MANAGED_BY,
     ReconcileDiff,
     ReconcileRecord,
     inventory_pass_lock,
@@ -54,8 +56,6 @@ from kdive.inventory.reconcile import (
 )
 
 _log = logging.getLogger(__name__)
-
-_CONFIG = ManagedBy.CONFIG.value
 
 # fault-inject has no real host, so every fault-inject instance shares this synthetic host_uri
 # and is distinguished by its (kind, name) identity (the Phase-3 multi-instance goal).
@@ -158,7 +158,7 @@ async def _upsert_config_resource(
             "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, "
             " host_uri, managed_by) "
             "VALUES (%s, %s, %s, 'default', %s, 'available', %s, %s)",
-            (kind.value, name, Jsonb(caps), cost_class, host_uri, _CONFIG),
+            (kind.value, name, Jsonb(caps), cost_class, host_uri, CONFIG_MANAGED_BY),
         )
         diff.created.append(_record(kind, name))
         return
@@ -171,7 +171,7 @@ async def _upsert_config_resource(
         row["name"] != name
         or row["host_uri"] != host_uri
         or row["cost_class"] != cost_class
-        or str(row["managed_by"]) != _CONFIG
+        or str(row["managed_by"]) != CONFIG_MANAGED_BY
         or row["lease_expires_at"] is not None
         or row["owner_project"] is not None
         or list(row["affinity_allowlist"]) != []
@@ -182,7 +182,7 @@ async def _upsert_config_resource(
             "UPDATE resources SET name = %s, host_uri = %s, cost_class = %s, capabilities = %s, "
             "managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
             "affinity_allowlist = '{}' WHERE id = %s",
-            (name, host_uri, cost_class, Jsonb(merged), _CONFIG, row["id"]),
+            (name, host_uri, cost_class, Jsonb(merged), CONFIG_MANAGED_BY, row["id"]),
         )
         diff.updated.append(_record(kind, name))
 
@@ -262,7 +262,7 @@ async def _name_unconfigured_discovered(
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, host_uri FROM resources WHERE managed_by = %s AND name IS NULL FOR UPDATE",
-            (ManagedBy.DISCOVERY.value,),
+            (DISCOVERY_MANAGED_BY,),
         )
         rows = await cur.fetchall()
         for row in rows:
@@ -276,7 +276,9 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
     """Prune (or cordon) each config resource whose (kind, name) left the file."""
     declared = _declared_config_identities(doc)
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT id, kind, name FROM resources WHERE managed_by = %s", (_CONFIG,))
+        await cur.execute(
+            "SELECT id, kind, name FROM resources WHERE managed_by = %s", (CONFIG_MANAGED_BY,)
+        )
         rows = await cur.fetchall()
     for row in rows:
         identity = (str(row["kind"]), str(row["name"]))

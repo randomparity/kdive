@@ -36,7 +36,7 @@ from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import ImageState, ManagedBy
+from kdive.domain.models import ImageState
 from kdive.inventory.model import (
     BuildSource,
     ImageEntry,
@@ -45,6 +45,7 @@ from kdive.inventory.model import (
     StagedSource,
 )
 from kdive.inventory.reconcile import (
+    CONFIG_MANAGED_BY,
     ReconcileDiff,
     ReconcileRecord,
     inventory_pass_lock,
@@ -53,7 +54,6 @@ from kdive.inventory.reconcile import (
 
 _log = logging.getLogger(__name__)
 
-_CONFIG = ManagedBy.CONFIG.value
 _DEFINED = ImageState.DEFINED.value
 _REGISTERED = ImageState.REGISTERED.value
 
@@ -170,7 +170,7 @@ async def _load_config_rows(
             "SELECT id, provider, name, arch, format, root_device, visibility, capabilities, "
             "       object_key, digest, volume, state "
             "FROM image_catalog WHERE managed_by = %s",
-            (_CONFIG,),
+            (CONFIG_MANAGED_BY,),
         )
         rows = await cur.fetchall()
     return {(r["provider"], r["name"], r["arch"]): r for r in rows}
@@ -216,7 +216,7 @@ async def _create_entry(
             volume,
             digest,
             state,
-            _CONFIG,
+            CONFIG_MANAGED_BY,
         ),
     )
     diff.created.append(_record(entry))
