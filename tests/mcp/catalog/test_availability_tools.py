@@ -107,6 +107,14 @@ async def _set_schedulability(
         )
 
 
+async def _set_affinity(pool: AsyncConnectionPool, res_id: str, *, owner_project: str) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE resources SET owner_project = %s WHERE id = %s",
+            (owner_project, UUID(res_id)),
+        )
+
+
 async def _ensure_budget(pool: AsyncConnectionPool, project: str) -> None:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
@@ -192,6 +200,19 @@ def test_headroom_is_cap_minus_occupancy(migrated_url: str) -> None:
         assert item.data["headroom"] == 1
 
     asyncio.run(_run())
+
+
+def test_availability_hides_resources_outside_project_affinity(migrated_url: str) -> None:
+    async def _run() -> tuple[str, list[str]]:
+        async with _pool(migrated_url) as pool:
+            visible = await _register(pool, host_uri="qemu:///visible")
+            hidden = await _register(pool, host_uri="qemu:///hidden")
+            await _set_affinity(pool, hidden, owner_project="other")
+            resp = await availability_tools.availability_tool(pool, CTX, pcie=None, shape=None)
+        return visible, [item.object_id for item in resp.items]
+
+    visible, item_ids = asyncio.run(_run())
+    assert item_ids == [visible]
 
 
 def test_active_and_releasing_occupy_requested_does_not(migrated_url: str) -> None:

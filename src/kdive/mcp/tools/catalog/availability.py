@@ -14,9 +14,9 @@ Headroom uses the **same occupancy predicate as admission** — :data:`OCCUPYING
 non-schedulable and never counts as "fits now", so the view never points the agent at a
 host every request would refuse.
 
-Resources are shared infrastructure (no `project` column), so the per-host view leaks
-nothing and the read requires only an authenticated context — the `resources.list`
-precedent. Queue depth is reported only as fleet/kind counts, never per project. Untrusted
+The per-host view is filtered by the same project affinity predicate used by allocation
+placement: callers see global resources plus resources placeable by at least one of their
+projects. Queue depth is reported only as fleet/kind counts, never per project. Untrusted
 host-derived PCIe labels are not returned (only the portable `bdf/vendor/device`).
 """
 
@@ -51,6 +51,7 @@ from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.services.allocation import pcie_claim
 from kdive.services.allocation.admission import OCCUPYING_VALUES
+from kdive.services.allocation.affinity import resource_visible_to_projects
 
 if TYPE_CHECKING:
     from kdive.security.authz.context import RequestContext
@@ -247,11 +248,12 @@ async def _resolve_shapes(conn: AsyncConnection, shape: str | None) -> list[Syst
     return [resolved]
 
 
-async def _fetch_resources(conn: AsyncConnection) -> list[Resource]:
+async def _fetch_resources(conn: AsyncConnection, projects: tuple[str, ...]) -> list[Resource]:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM resources ORDER BY created_at, id")
         rows = await cur.fetchall()
-    return [Resource.model_validate(row) for row in rows]
+    resources = [Resource.model_validate(row) for row in rows]
+    return [resource for resource in resources if resource_visible_to_projects(resource, projects)]
 
 
 def _passes_pcie_filter(free: list[PCIeDescriptor], pcie: str | None) -> bool:
@@ -274,10 +276,11 @@ async def availability_tool(
 ) -> ToolResponse:
     """Report fleet availability: per-host headroom / free PCIe / fitting shapes + queue depth.
 
-    Viewer (any authenticated context; shared infra has no project scope). ``pcie`` narrows
-    to hosts with a free matching device; ``shape`` restricts the fitting computation to one
-    named shape. A malformed ``pcie`` spec or an unknown ``shape`` is a
-    ``configuration_error``. The view is a point-in-time hint, not a reservation (ADR-0070).
+    Viewer (any authenticated context) sees only resources visible to at least one of the
+    caller's projects. ``pcie`` narrows to hosts with a free matching device; ``shape``
+    restricts the fitting computation to one named shape. A malformed ``pcie`` spec or an
+    unknown ``shape`` is a ``configuration_error``. The view is a point-in-time hint, not a
+    reservation (ADR-0070).
     """
     if pcie is not None:
         try:
@@ -295,7 +298,7 @@ async def availability_tool(
                 shapes = await _resolve_shapes(conn, shape)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(_TOOL, exc, suggested_next_actions=[_TOOL])
-            resources = await _fetch_resources(conn)
+            resources = await _fetch_resources(conn, ctx.projects)
             occupancy = await _occupancy_by_resource(conn)
             claims = await _claims_by_resource(conn)
             queue = await _queue_depth(conn)

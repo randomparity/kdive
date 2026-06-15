@@ -1,10 +1,10 @@
 """The `resources.*` MCP tools (Discovery plane reads) (ADR-0023).
 
 Thin FastMCP wrappers over plain async handlers that take the pool + request context as
-arguments (tested directly, never through MCP). Resources are shared infrastructure (no
-`project` column), so reads require only an authenticated context — no RBAC scoping. The
-nested `capabilities` jsonb is projected to a flat `dict[str, str]` for the response
-envelope (ADR-0019 `data` is `dict[str, str]`).
+arguments (tested directly, never through MCP). Resource reads are filtered by the same
+project affinity predicate used by allocation placement. The nested `capabilities` jsonb is
+projected to a flat `dict[str, str]` for the response envelope (ADR-0019 `data` is
+`dict[str, str]`).
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.security.authz.context import RequestContext
+from kdive.services.allocation.affinity import resource_visible_to_projects
 
 _log = logging.getLogger(__name__)
 
@@ -72,6 +73,8 @@ async def list_resources_tool(
         for row in rows:
             try:
                 resource = Resource.model_validate(row)
+                if not resource_visible_to_projects(resource, ctx.projects):
+                    continue
                 responses.append(
                     resource_envelope(
                         resource, next_actions=["resources.describe", "allocations.request"]
@@ -103,7 +106,7 @@ async def describe_resource(
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             resource = await RESOURCES.get(conn, uid)
-        if resource is None:
+        if resource is None or not resource_visible_to_projects(resource, ctx.projects):
             return resource_config_error(resource_id)
         envelope = resource_envelope(resource, next_actions=["allocations.request"])
         envelope.data["pool"] = resource.pool
