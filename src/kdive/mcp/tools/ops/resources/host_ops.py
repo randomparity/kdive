@@ -28,7 +28,6 @@ from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
-from kdive.mcp.tools.ops.breakglass import breakglass_release_allocation
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
@@ -36,7 +35,11 @@ from kdive.security.authz.rbac import (
     PlatformRole,
     require_platform_role,
 )
-from kdive.services.allocation.release import ReleaseOutcome
+from kdive.services.allocation.release import (
+    BreakglassReleaseAudit,
+    ReleaseOutcome,
+    breakglass_release_allocation,
+)
 
 _SET_STATUS_TOOL = "resources.set_status"
 _CORDON_TOOL = "resources.cordon"
@@ -206,7 +209,15 @@ async def _force_release_allocations(
     items: list[ToolResponse] = []
     for alloc in live:
         outcome = await breakglass_release_allocation(
-            pool, ctx, alloc=alloc, tool=_DRAIN_TOOL, reason=reason
+            pool,
+            ctx,
+            alloc=alloc,
+            release_audit=BreakglassReleaseAudit(
+                tool=_DRAIN_TOOL,
+                reason=reason,
+                platform_role=held_platform_roles(ctx),
+                actor=actor_for(ctx),
+            ),
         )
         items.append(_classify_drain_release(str(alloc.id), outcome))
     counts = Counter(item.status for item in items)

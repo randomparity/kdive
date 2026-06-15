@@ -32,7 +32,7 @@ from pydantic import Field
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Allocation, Job, JobKind
+from kdive.domain.models import Job, JobKind
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload
@@ -48,21 +48,16 @@ from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, hel
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
-from kdive.services.allocation.release import AuditWriter, ReleaseOutcome, release_with_backstops
+from kdive.services.allocation.release import (
+    BreakglassReleaseAudit,
+    ReleaseOutcome,
+    breakglass_release_allocation,
+)
 
 _log = logging.getLogger(__name__)
 
 _FORCE_RELEASE_TOOL = "ops.force_release"
 _FORCE_TEARDOWN_TOOL = "ops.force_teardown"
-
-
-def _breakglass_audit_writer(principal: str) -> AuditWriter:
-    """Guard-exempt writer: `record_system` under the platform principal (no membership guard)."""
-
-    async def _write(conn: AsyncConnection, event: audit.AuditEvent) -> None:
-        await audit.record_system(conn, principal=principal, event=event)
-
-    return _write
 
 
 def _blank(reason: str) -> bool:
@@ -139,42 +134,25 @@ async def force_release(
             alloc = await ALLOCATIONS.get(conn, uid)
         if alloc is None:
             return _config_error(allocation_id)
+        _log.warning(
+            "break-glass release of allocation %s in project %s by %s via %s",
+            alloc.id,
+            alloc.project,
+            ctx.principal,
+            _FORCE_RELEASE_TOOL,
+        )
         outcome = await breakglass_release_allocation(
-            pool, ctx, alloc=alloc, tool=_FORCE_RELEASE_TOOL, reason=reason
+            pool,
+            ctx,
+            alloc=alloc,
+            release_audit=BreakglassReleaseAudit(
+                tool=_FORCE_RELEASE_TOOL,
+                reason=reason,
+                platform_role=held_platform_roles(ctx),
+                actor=actor_for(ctx),
+            ),
         )
         return _force_release_response(uid, outcome)
-
-
-async def breakglass_release_allocation(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    *,
-    alloc: Allocation,
-    tool: str,
-    reason: str,
-) -> ReleaseOutcome:
-    """Audit-then-release one allocation through the break-glass path.
-
-    Writes the always-on `platform_audit_log` accountability row (attributed to ``tool``),
-    then releases via the guard-exempt writer (the admin is not a project member). Shared by
-    `ops.force_release` and `resources.drain` (`mode=force_release`) so both route through the
-    identical attribution path (ADR-0062 §3/§4); the accountability row is committed before the
-    release mechanic, so a failed/stale release is still audited. The caller resolves ``alloc``
-    and holds the platform-role authorization.
-    """
-    await _record_breakglass(
-        pool, ctx, tool=tool, project=alloc.project, object_id=str(alloc.id), reason=reason
-    )
-    _log.warning(
-        "break-glass release of allocation %s in project %s by %s via %s",
-        alloc.id,
-        alloc.project,
-        ctx.principal,
-        tool,
-    )
-    return await release_with_backstops(
-        pool, alloc.id, project=alloc.project, audit_writer=_breakglass_audit_writer(ctx.principal)
-    )
 
 
 def _force_release_response(uid: UUID, outcome: ReleaseOutcome) -> ToolResponse:
