@@ -13,6 +13,14 @@
 #
 # Load it with `kdive reconcile-systems` (or the deploy `migrate` step, or the reconciler loop).
 # Path is `KDIVE_SYSTEMS_TOML` (default `./systems.toml`; in k8s a mounted ConfigMap).
+#
+# WHOLE-FILE PARSE, ALL-OR-NOTHING: a present-but-malformed file fails the ENTIRE reconcile pass
+# for that iteration — images, cost-class coefficients, resources, and build_hosts are all skipped
+# until the file is corrected (the reconciler logs it and retries next pass). One bad block stalls
+# every entity, not just its own. UPGRADE NOTE: `[[remote_libvirt]]` now REQUIRES `vcpus` and
+# `memory_mb` (the billable size ceiling; admission denies any allocation on a host without it).
+# A pre-existing file whose `[[remote_libvirt]]` block omits them parsed before but now fails to
+# load — add both fields when upgrading.
 # Operational/secret config stays in the `KDIVE_*` env registry (ADR-0087) — this file holds
 # secret *refs* (filenames the SecretRegistry resolves), never secret material.
 #
