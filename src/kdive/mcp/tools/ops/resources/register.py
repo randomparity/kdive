@@ -122,7 +122,7 @@ def _resolve_owner_project(
     )
 
 
-def _secret_ref_failure(
+def _validate_secret_refs(
     *, name: str, secret_refs: tuple[str, ...], secrets_root: Path
 ) -> ToolResponse | None:
     for ref in secret_refs:
@@ -131,7 +131,7 @@ def _secret_ref_failure(
     return None
 
 
-async def _reachability_failure(
+async def _validate_reachability(
     *, name: str, host_uri: str, probe: ResourceProbe
 ) -> ToolResponse | None:
     if not await probe.probe(host_uri):
@@ -139,7 +139,7 @@ async def _reachability_failure(
     return None
 
 
-async def _config_name_failure(
+async def _validate_runtime_name_available(
     conn: AsyncConnection, *, kind: ResourceKind, name: str
 ) -> ToolResponse | None:
     if await _reject_config_name(conn, kind, name):
@@ -151,7 +151,7 @@ async def _config_name_failure(
     return None
 
 
-async def _remote_base_image_failure(
+async def _validate_remote_base_image(
     conn: AsyncConnection, *, name: str, base_image: str
 ) -> ToolResponse | None:
     if not base_image:
@@ -403,22 +403,24 @@ async def register_remote_libvirt_resource(
     if not request.host_uri.strip():
         return config_error(request.name, "remote_libvirt requires a host URI")
     probe, secrets_root = _resolve_ports(probe, secrets_root)
-    failure = _secret_ref_failure(
+    failure = _validate_secret_refs(
         name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
     )
     if failure is not None:
         return failure
-    failure = await _reachability_failure(name=request.name, host_uri=request.host_uri, probe=probe)
+    failure = await _validate_reachability(
+        name=request.name, host_uri=request.host_uri, probe=probe
+    )
     if failure is not None:
         return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
-        failure = await _config_name_failure(
+        failure = await _validate_runtime_name_available(
             conn, kind=ResourceKind.REMOTE_LIBVIRT, name=request.name
         )
         if failure is not None:
             return failure
-        return await _remote_base_image_failure(
+        return await _validate_remote_base_image(
             conn, name=request.name, base_image=request.base_image
         )
 
@@ -461,17 +463,21 @@ async def register_local_libvirt_resource(
     if not request.host_uri.strip():
         return config_error(request.name, "local_libvirt requires a host URI")
     probe, secrets_root = _resolve_ports(probe, secrets_root)
-    failure = _secret_ref_failure(
+    failure = _validate_secret_refs(
         name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
     )
     if failure is not None:
         return failure
-    failure = await _reachability_failure(name=request.name, host_uri=request.host_uri, probe=probe)
+    failure = await _validate_reachability(
+        name=request.name, host_uri=request.host_uri, probe=probe
+    )
     if failure is not None:
         return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
-        return await _config_name_failure(conn, kind=ResourceKind.LOCAL_LIBVIRT, name=request.name)
+        return await _validate_runtime_name_available(
+            conn, kind=ResourceKind.LOCAL_LIBVIRT, name=request.name
+        )
 
     return await _insert_registered_resource(
         pool,
@@ -510,14 +516,16 @@ async def register_fault_inject_resource(
     if failure is not None:
         return failure
     _, secrets_root = _resolve_ports(probe, secrets_root)
-    failure = _secret_ref_failure(
+    failure = _validate_secret_refs(
         name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
     )
     if failure is not None:
         return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
-        return await _config_name_failure(conn, kind=ResourceKind.FAULT_INJECT, name=request.name)
+        return await _validate_runtime_name_available(
+            conn, kind=ResourceKind.FAULT_INJECT, name=request.name
+        )
 
     return await _insert_registered_resource(
         pool,
