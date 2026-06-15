@@ -96,6 +96,7 @@ async def _report_granted_set(
         rollup = await accounting_domain.report(
             conn, projects=targets, group_by=group_by, window=window
         )
+        rollup = _name_targets(rollup, targets)
         if _audit_granted_set(targets, group_by):
             scope_value = f"{_SCOPE_GRANTED_SET}:{','.join(sorted(targets))}"
             async with conn.transaction():
@@ -127,6 +128,23 @@ def _resolve_granted_set(ctx: RequestContext, named: list[str] | None) -> list[s
     for project in named:
         require_role(ctx, project, Role.VIEWER)
     return list(named)
+
+
+def _name_targets(rollup: accounting_domain.Report, targets: list[str]) -> accounting_domain.Report:
+    """Name every authorized granted-set project, zero-filling those with no rows (#426).
+
+    ``report()`` emits a row only for a project with ledger rows in the window, so a granted
+    project with no spend would be unnamed (the observed bug: empty ``items``, only
+    ``total_project="*"``). This appends a quantized zero row (:func:`accounting_domain.empty_row`)
+    for each target absent from ``rollup.rows``, sorted by project name for a deterministic
+    response. The ``total`` row is unchanged (the zero rows add nothing to it).
+    """
+    present = {row.project for row in rollup.rows}
+    missing = sorted(p for p in targets if p not in present)
+    if not missing:
+        return rollup
+    filled = rollup.rows + tuple(accounting_domain.empty_row(p) for p in missing)
+    return accounting_domain.Report(rows=filled, total=rollup.total)
 
 
 def _audit_granted_set(targets: list[str], group_by: str | None) -> bool:
