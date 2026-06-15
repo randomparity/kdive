@@ -662,6 +662,44 @@ def test_over_host_shape_fails_closed_with_no_durable_write(migrated_url: str) -
     asyncio.run(_run())
 
 
+def test_failed_envelope_reports_failure_category_else_infrastructure() -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from kdive.domain.errors import ErrorCategory
+    from kdive.domain.models import Allocation
+    from kdive.domain.state import AllocationState
+    from kdive.mcp.tools.lifecycle.allocations import _envelope_for_allocation
+
+    _id = uuid4()
+    _now = datetime.now(UTC)
+
+    def _make(failure_category: ErrorCategory | None = None) -> Allocation:
+        return Allocation(
+            id=_id,
+            created_at=_now,
+            updated_at=_now,
+            principal="p",
+            agent_session="s",
+            project="proj",
+            state=AllocationState.FAILED,
+            failure_category=failure_category,
+        )
+
+    # NULL cause -> the unchanged infrastructure_failure fallback.
+    null_cause = _envelope_for_allocation(_make())
+    assert null_cause.error_category == ErrorCategory.INFRASTRUCTURE_FAILURE.value
+    assert null_cause.retryable is True
+    # A budget terminate -> allocation_denied, terminal.
+    budget = _envelope_for_allocation(_make(ErrorCategory.ALLOCATION_DENIED))
+    assert budget.error_category == ErrorCategory.ALLOCATION_DENIED.value
+    assert budget.retryable is False
+    # A queue timeout -> queue_timeout, retryable.
+    timed_out = _envelope_for_allocation(_make(ErrorCategory.QUEUE_TIMEOUT))
+    assert timed_out.error_category == ErrorCategory.QUEUE_TIMEOUT.value
+    assert timed_out.retryable is True
+
+
 def test_shapes_set_after_stamping_does_not_resize_allocation(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

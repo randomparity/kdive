@@ -56,11 +56,17 @@ _log = logging.getLogger(__name__)
 
 
 def _envelope_for_allocation(alloc: Allocation) -> ToolResponse:
-    """Render an allocation; ``failed`` becomes a failure envelope (ADR-0023 §6)."""
+    """Render an allocation; ``failed`` becomes a failure envelope (ADR-0023 §6).
+
+    A failed allocation reports its persisted ``failure_category`` (ADR-0118) — so a
+    waiting agent learns ``queue_timeout`` vs ``allocation_denied`` — falling back to
+    ``infrastructure_failure`` when the cause was not recorded.
+    """
     if alloc.state is AllocationState.FAILED:
+        category = alloc.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
         return ToolResponse.failure(
             str(alloc.id),
-            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            category,
             data={"current_status": alloc.state.value},
         )
     return ToolResponse.success(
