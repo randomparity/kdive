@@ -74,14 +74,24 @@ so the template prepends per-role variants keyed on `client_id` ahead of the cat
 - any other `client_id` (default `kdive-demo`) falls through to the unchanged catch-all
   full-admin grant.
 
-Each variant reuses the configured `projects`/`sub` and pins `aud:["kdive"]`, and the
-variants are emitted **only when `projects` is non-empty** (a project role is meaningless
-without membership; a blanked-`claims` override still degrades to the `{sub,aud}` floor with
-no variants). `scripts/demo-token.sh --role {admin|operator|viewer}` selects the matching
+Each variant is a *downgrade* of the admin grant: it reuses the admin claim's `projects` and
+pins `aud:["kdive"]`, but rebuilds `roles` by mapping every project in the **configured
+`roles` map** to `<role>` and drops `platform_roles`. The variant role-map keys come from the
+same `roles` map the admin grant uses — not from `projects` — so the admin and variant tokens
+can never disagree about which project is graded (an operator who renames the demo project
+updates one map and both paths follow). Variants are emitted **only when the `roles` map is
+non-empty**; a blanked-`claims` override still degrades to the `{sub,aud}` floor with no
+variants. `scripts/demo-token.sh --role {admin|operator|viewer}` selects the matching
 `client_id`; `admin` is the default and uses the catch-all, so existing callers are
 unaffected. Dropping `platform_roles` from the narrowed variants is what makes both a
 project-rank denial (viewer/operator under `require_role`) and a platform-role denial
 (`require_platform_role`) reachable from a stock demo without any chart edit.
+
+The variants-before-catch-all ordering is load-bearing (first-match-wins): a regression that
+reordered them, or drift between the script's `client_id` literals and the template's `match`
+values, would silently mint a *full-admin* token for a narrowed request. Both are pinned by
+render tests (`test_bundled_oidc_variant_mappings_precede_catch_all`,
+`test_demo_token_script_client_ids_match_rendered_variants`).
 
 ## Consequences
 

@@ -8,6 +8,8 @@ validates nothing, so CI must provide the binary for this gate to mean anything.
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,6 +31,25 @@ def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
     for s in set_args:
         args += ["--set", s]
     return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def _oidc_request_mappings(res: subprocess.CompletedProcess[str]) -> list[dict[str, Any]]:
+    """Parse the demo issuer's ``requestMappings`` out of the rendered JSON_CONFIG env var.
+
+    Returns the ordered list of mappings (order is load-bearing: mock-oauth2-server is
+    first-match-wins). Raises if the oidc Deployment or its JSON_CONFIG is absent.
+    """
+    for doc in yaml.safe_load_all(res.stdout):
+        if not (isinstance(doc, dict) and doc.get("kind") == "Deployment"):
+            continue
+        if not str(doc.get("metadata", {}).get("name", "")).endswith("-oidc"):
+            continue
+        env = doc["spec"]["template"]["spec"]["containers"][0]["env"]
+        raw = next(e["value"] for e in env if e["name"] == "JSON_CONFIG")
+        mappings = json.loads(raw)["tokenCallbacks"][0]["requestMappings"]
+        assert isinstance(mappings, list)
+        return mappings
+    raise AssertionError("no -oidc Deployment with a JSON_CONFIG env var in the render")
 
 
 def test_renders_three_deployments_against_external_backends() -> None:
@@ -399,11 +420,60 @@ def test_bundled_oidc_mints_role_scoped_variants() -> None:
     )
 
 
+def test_bundled_oidc_variant_mappings_precede_catch_all() -> None:
+    # The feature's load-bearing invariant: every per-role client_id mapping must come BEFORE
+    # the grant_type:"*" catch-all. mock-oauth2-server is first-match-wins, so if a reorder
+    # ever put the catch-all first, a client_id=kdive-demo-viewer request would match it and
+    # silently mint a FULL-ADMIN token — a privilege escalation for a request that asked for
+    # less. A presence-only assertion can't catch that; pin the order explicitly.
+    res = _template("bundledBackends=true", "demoAcknowledged=true")
+    assert res.returncode == 0, res.stderr
+    mappings = _oidc_request_mappings(res)
+    catch_all_idx = next(
+        i for i, m in enumerate(mappings) if m["requestParam"] == "grant_type" and m["match"] == "*"
+    )
+    client_id_idxs = [i for i, m in enumerate(mappings) if m["requestParam"] == "client_id"]
+    assert client_id_idxs, "expected per-role client_id mappings"
+    assert max(client_id_idxs) < catch_all_idx, (
+        "a client_id variant mapping is at/after the catch-all; first-match-wins would mint "
+        "an admin token for a narrowed-role request"
+    )
+    # The catch-all is the only mapping carrying platform_roles (the full admin grant); the
+    # variants must not, or the denial they exist to demonstrate would not occur.
+    for m in mappings:
+        if m["requestParam"] == "client_id":
+            assert "platform_roles" not in m["claims"], m["match"]
+
+
+def test_demo_token_script_client_ids_match_rendered_variants() -> None:
+    # The script (scripts/demo-token.sh) and the chart hold the client_id literals in two
+    # places; if they drift (e.g. the template prefix changes), `--role viewer` sends an
+    # unmatched client_id that falls through to the admin catch-all and silently mints a full
+    # token. Pin that every non-admin role the script can request maps to a client_id the
+    # chart actually registers as a variant.
+    res = _template("bundledBackends=true", "demoAcknowledged=true")
+    assert res.returncode == 0, res.stderr
+    rendered_variant_ids = {
+        m["match"] for m in _oidc_request_mappings(res) if m["requestParam"] == "client_id"
+    }
+
+    script = (Path(CHART).resolve().parents[2] / "scripts" / "demo-token.sh").read_text()
+    # Lines like: `viewer) client_id="kdive-demo-viewer" ;;`
+    script_ids = {
+        m.group(2)
+        for m in re.finditer(r'^(\w+)\)\s*client_id="([^"]+)"', script, re.MULTILINE)
+        if m.group(1) != "admin"  # admin intentionally uses the catch-all, not a variant
+    }
+    assert script_ids, "no non-admin client_id literals parsed from demo-token.sh"
+    missing = script_ids - rendered_variant_ids
+    assert not missing, f"script client_ids with no chart variant mapping (drift): {missing}"
+
+
 def test_bundled_oidc_blanked_claims_degrade_to_floor() -> None:
     # Blanking the claims map (a plausible "token with no grant" override) must render the
-    # safe {sub,aud} floor, not a nil-pointer template error. With no project membership the
-    # role-scoped variants are suppressed (a project role is meaningless without a project),
-    # so the catch-all mapping is the only one rendered.
+    # safe {sub,aud} floor, not a nil-pointer template error. With no role grant the
+    # role-scoped variants are suppressed (there is nothing to downgrade), so the catch-all
+    # mapping is the only one rendered.
     res = _template("bundledBackends=true", "demoAcknowledged=true", "demo.oidc.claims=null")
     assert res.returncode == 0, res.stderr
     assert '"aud":["kdive"]' in res.stdout
