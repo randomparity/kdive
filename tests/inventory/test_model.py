@@ -192,6 +192,13 @@ def test_unknown_source_kind_rejected() -> None:
         InventoryDoc.parse(d)
 
 
+def test_unsupported_image_format_rejected() -> None:
+    d = _doc()
+    d["image"][0]["format"] = "raw"
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
 def test_wrong_schema_version_rejected() -> None:
     d = _doc(schema_version=1)
     with pytest.raises(InventoryError):

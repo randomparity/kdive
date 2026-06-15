@@ -26,6 +26,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, Field, ValidationError
 
+from kdive.domain.image_format import ImageFormat
 from kdive.inventory.errors import InventoryError
 
 
@@ -63,7 +64,7 @@ class ImageEntry(BaseModel):
     provider: str
     name: str
     arch: str
-    format: str
+    format: ImageFormat
     root_device: str
     visibility: Literal["public", "private"]
     capabilities: list[str] = Field(default_factory=list)

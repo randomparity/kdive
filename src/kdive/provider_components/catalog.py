@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import kdive.config as config
 from kdive.config.core_settings import FIXTURE_CATALOG_PATH
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.image_format import ImageFormat
 from kdive.provider_components.references import ComponentRef
 from kdive.provider_components.requirements import CmdlineRequirements, ConfigRequirements
 from kdive.provider_components.visibility import PUBLIC_VISIBILITY, Visibility
@@ -29,7 +30,7 @@ class FixtureStorage(BaseModel):
 class RootfsRequirements(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    format: Literal["qcow2"]
+    format: ImageFormat
     root_device: str
     capabilities: list[str] = Field(default_factory=list)
 
@@ -58,7 +59,7 @@ class RootfsCatalogEntry(BaseModel):
     provider: str
     name: str
     arch: str
-    format: Literal["qcow2"]
+    format: ImageFormat
     root_device: str
     source: ComponentRef
     visibility: Visibility

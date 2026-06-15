@@ -8,12 +8,13 @@ sharing raw dict key conventions across modules.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.image_format import ImageFormat
 from kdive.domain.models import ImageVisibility, Job, JobAuthorizing, JobKind, PowerAction
 
 
@@ -102,7 +103,7 @@ class ImageBuildPayload(_PayloadBase):
     packages: tuple[str, ...] = ()
     source_image_digest: str
     capabilities: tuple[str, ...] = ()
-    format: Literal["qcow2"]
+    format: ImageFormat
     root_device: str
     visibility: ImageVisibility = ImageVisibility.PUBLIC
     owner: str | None = None

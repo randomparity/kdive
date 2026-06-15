@@ -25,7 +25,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection, sql
@@ -34,6 +34,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.image_format import ImageFormat
 from kdive.domain.models import (
     ImageCatalogEntry,
     ImageState,
@@ -80,7 +81,7 @@ class PublishRequest:
     provider: str
     name: str
     arch: str
-    format: Literal["qcow2"]
+    format: ImageFormat
     root_device: str
     digest: str
     capabilities: tuple[str, ...]

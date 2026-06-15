@@ -897,6 +897,17 @@ def test_migration_0030_defined_row_with_neither_is_admitted(
     assert row is not None and row[0] == "defined"
 
 
+def test_migration_0031_rejects_unsupported_image_format(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute(
+            "INSERT INTO image_catalog (provider, name, arch, format, root_device, "
+            "visibility, state, object_key) "
+            "VALUES ('local-libvirt', 'raw', 'x86_64', 'raw', '/dev/vda', "
+            "'public', 'registered', 'rootfs/raw.img')"
+        )
+
+
 def test_migration_0030_adds_resource_inventory_columns(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     cols = _columns(pg_conn, "resources")
