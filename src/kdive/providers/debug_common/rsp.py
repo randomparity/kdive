@@ -54,7 +54,10 @@ def rsp_reachable(host: str, port: int) -> bool:  # pragma: no cover - live_vm
     The real socket path runs only under the ``live_vm`` gate.
     """
     deadline = time.monotonic() + _PROBE_TIMEOUT_S
-    sock = socket.create_connection((host, port), timeout=_PROBE_TIMEOUT_S)
+    try:
+        sock = socket.create_connection((host, port), timeout=_PROBE_TIMEOUT_S)
+    except (OSError, TimeoutError):
+        return False
     buffer = b""
     try:
         sock.sendall(b"+" + rsp_frame("?"))
