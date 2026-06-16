@@ -12,8 +12,9 @@ ErrorCategory).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
 
 from fastmcp import FastMCP
@@ -25,6 +26,7 @@ from pydantic import Field, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import ExternalRef, Investigation
 from kdive.domain.state import IllegalTransition, InvestigationState
 from kdive.log import bind_context
@@ -36,9 +38,27 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
-from kdive.security.authz.rbac import Role, require_role
+from kdive.security.authz.rbac import Role, projects_with_role, require_role
+from kdive.serialization import JsonValue
+
+_log = logging.getLogger(__name__)
 
 _TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
+
+_TITLE_MAX = 200
+_DESCRIPTION_MAX = 4096
+
+
+def _validate_text(title: str | None, description: str | None) -> bool:
+    """Return whether supplied title/description are within their write-boundary bounds.
+
+    A ``None`` field is "not supplied" and is not checked. ``title`` (when supplied) must be
+    1..=200 chars; ``description`` (when supplied) must be 0..=4096 chars. Bounds live here, not on
+    the model, so reading a pre-existing out-of-bound row never raises (ADR-0135).
+    """
+    if title is not None and not (1 <= len(title) <= _TITLE_MAX):
+        return False
+    return description is None or len(description) <= _DESCRIPTION_MAX
 
 
 class ExternalRefInput(TypedDict):
@@ -62,11 +82,16 @@ def _envelope_for_investigation(inv: Investigation) -> ToolResponse:
         actions = ["investigations.get"]
     else:
         actions = ["investigations.get", "investigations.close", "runs.create"]
+    data: dict[str, JsonValue] = {
+        "project": inv.project,
+        "title": inv.title,
+        "description": inv.description,
+        "external_refs": [r.model_dump() for r in inv.external_refs],
+        "state": inv.state.value,
+        "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,
+    }
     return ToolResponse.success(
-        str(inv.id),
-        inv.state.value,
-        suggested_next_actions=actions,
-        data={"project": inv.project, "external_refs": str(len(inv.external_refs))},
+        str(inv.id), inv.state.value, suggested_next_actions=actions, data=data
     )
 
 
@@ -91,12 +116,16 @@ async def open_investigation(
     *,
     project: str,
     title: str,
+    description: str | None = None,
     external_refs: list[ExternalRefInput] | None = None,
 ) -> ToolResponse:
     """Mint an Investigation (`open`) for the caller's project."""
     require_project(ctx, project)
     require_role(ctx, project, Role.OPERATOR)
     with bind_context(principal=ctx.principal):
+        if not _validate_text(title, description):
+            return _config_error(project)
+        normalized_description = description or None  # "" -> None on open (ADR-0135 §2)
         try:
             refs = _parse_external_refs(external_refs)
         except (ValidationError, TypeError):
@@ -113,6 +142,7 @@ async def open_investigation(
                     agent_session=ctx.agent_session,
                     project=project,
                     title=title,
+                    description=normalized_description,
                     external_refs=refs,
                     state=InvestigationState.OPEN,
                 ),
@@ -129,12 +159,7 @@ async def open_investigation(
                     project=project,
                 ),
             )
-        return ToolResponse.success(
-            str(inv.id),
-            "open",
-            suggested_next_actions=["investigations.get", "runs.create"],
-            data={"project": project},
-        )
+        return _envelope_for_investigation(inv)
 
 
 async def get_investigation(
@@ -360,6 +385,140 @@ async def unlink_external_ref(
             return await _unlink_locked(conn, ctx, uid, key, project=inv.project)
 
 
+async def _set_locked(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    uid: UUID,
+    *,
+    title: str | None,
+    description: str | None,
+    project: str,
+) -> ToolResponse:
+    """Apply a title/description edit under the per-Investigation lock (ADR-0135).
+
+    The lock + ``FOR UPDATE`` read serialize every title/description writer, so writing both
+    columns from the locked ``current`` snapshot cannot clobber a concurrent edit.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
+        current = await _get_mutable_investigation_locked(conn, uid)
+        if isinstance(current, ToolResponse):
+            return current
+        new_title = title if title is not None else current.title
+        # description: None -> leave unchanged; "" -> NULL (clear); else the new value.
+        new_description = current.description if description is None else (description or None)
+        audit_args: dict[str, JsonValue] = {}
+        if title is not None:
+            audit_args["title"] = title
+        if description is not None:
+            audit_args["description"] = "cleared" if description == "" else "set"
+        await conn.execute(
+            "UPDATE investigations SET title = %s, description = %s WHERE id = %s",
+            (new_title, new_description, uid),
+        )
+        await audit.record(
+            conn,
+            ctx,
+            audit.AuditEvent(
+                tool="investigations.set",
+                object_kind="investigations",
+                object_id=uid,
+                transition="set",
+                args=audit_args,
+                project=project,
+            ),
+        )
+        updated = current.model_copy(update={"title": new_title, "description": new_description})
+    return _envelope_for_investigation(updated)
+
+
+async def set_investigation(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    investigation_id: str,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+) -> ToolResponse:
+    """Edit an Investigation's title and/or description (partial, value-based; ADR-0135)."""
+    uid = _as_uuid(investigation_id)
+    if uid is None:
+        return _config_error(investigation_id)
+    if title is None and description is None:
+        return _config_error(investigation_id)
+    if not _validate_text(title, description):
+        return _config_error(investigation_id)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
+            if isinstance(inv, ToolResponse):
+                return inv
+            return await _set_locked(
+                conn, ctx, uid, title=title, description=description, project=inv.project
+            )
+
+
+async def _fetch_investigation_rows(
+    conn: AsyncConnection, projects: tuple[str, ...], state: InvestigationState | None
+) -> list[dict[str, Any]]:
+    query = "SELECT * FROM investigations WHERE project = ANY(%s)"
+    params: list[object] = [list(projects)]
+    if state is not None:
+        query += " AND state = %s"
+        params.append(state.value)
+    query += " ORDER BY created_at DESC, id DESC"
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, params)
+        return await cur.fetchall()
+
+
+def _investigation_row_error(row: dict[str, Any]) -> ToolResponse:
+    """Degraded envelope for a row that violates the model invariant (matches resources.list)."""
+    object_id = row.get("id")
+    return ToolResponse.failure(
+        str(object_id) if object_id is not None else "investigations.list",
+        ErrorCategory.CONFIGURATION_ERROR,
+    )
+
+
+async def list_investigations(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    project: str | None = None,
+    state: str | None = None,
+) -> ToolResponse:
+    """List the caller's viewer-project Investigations, newest-first (ADR-0135)."""
+    resolved_state: InvestigationState | None = None
+    if state is not None:
+        try:
+            resolved_state = InvestigationState(state)
+        except ValueError:
+            return _config_error("investigations.list")
+    with bind_context(principal=ctx.principal):
+        viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
+        if project is not None:
+            viewer_projects = tuple(p for p in viewer_projects if p == project)
+        async with pool.connection() as conn:
+            rows = await _fetch_investigation_rows(conn, viewer_projects, resolved_state)
+        items: list[ToolResponse] = []
+        for row in rows:
+            try:
+                items.append(_envelope_for_investigation(Investigation.model_validate(row)))
+            except ValueError:
+                _log.warning(
+                    "investigation %s violates the response invariant; degraded",
+                    row.get("id", "<missing>"),
+                    exc_info=True,
+                )
+                items.append(_investigation_row_error(row))
+        return ToolResponse.collection(
+            "investigations",
+            "ok",
+            items,
+            suggested_next_actions=["investigations.get", "investigations.open"],
+        )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
 
@@ -370,14 +529,23 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def investigations_open(
         project: Annotated[str, Field(description="Project to create the Investigation under.")],
-        title: Annotated[str, Field(description="Human-readable title for the Investigation.")],
+        title: Annotated[str, Field(description="Human-readable title (1..=200 chars).")],
+        description: Annotated[
+            str | None,
+            Field(description="Optional free-form description for reporting (<=4096 chars)."),
+        ] = None,
         external_refs: Annotated[
             list[ExternalRefInput] | None,
             Field(description="Optional external tracker refs (each with tracker, id, url)."),
         ] = None,
     ) -> ToolResponse:
         return await open_investigation(
-            pool, current_context(), project=project, title=title, external_refs=external_refs
+            pool,
+            current_context(),
+            project=project,
+            title=title,
+            description=description,
+            external_refs=external_refs,
         )
 
     @app.tool(
@@ -431,3 +599,42 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ],
     ) -> ToolResponse:
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)
+
+    @app.tool(
+        name="investigations.set",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_set(
+        investigation_id: Annotated[str, Field(description="The Investigation to edit.")],
+        title: Annotated[
+            str | None,
+            Field(description="New title (1..=200 chars); omit to leave unchanged."),
+        ] = None,
+        description: Annotated[
+            str | None,
+            Field(description='New description (<=4096); "" clears it; omit to leave unchanged.'),
+        ] = None,
+    ) -> ToolResponse:
+        """Edit a non-terminal Investigation's title and/or free-form description."""
+        return await set_investigation(
+            pool, current_context(), investigation_id, title=title, description=description
+        )
+
+    @app.tool(
+        name="investigations.list",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_list(
+        project: Annotated[
+            str | None,
+            Field(description="Restrict to one project you can view; omit for all."),
+        ] = None,
+        state: Annotated[
+            str | None,
+            Field(description="Filter by state (open/active/closed/abandoned)."),
+        ] = None,
+    ) -> ToolResponse:
+        """List the Investigations you can view, newest-first, for reporting."""
+        return await list_investigations(pool, current_context(), project=project, state=state)

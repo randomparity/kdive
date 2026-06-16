@@ -292,9 +292,16 @@ class System(DomainModel, _Attribution):
 
 
 class Investigation(DomainModel, _Attribution):
-    """A project-scoped campaign grouping Runs toward a goal."""
+    """A project-scoped campaign grouping Runs toward a goal.
+
+    ``title`` and ``description`` are agent-settable for reporting (ADR-0135). Length bounds are
+    enforced at the write boundary (the ``investigations.open``/``set`` handlers), not as ``Field``
+    constraints, so deserializing a pre-existing row (``title`` had no bound before ADR-0135) never
+    raises on read.
+    """
 
     title: str
+    description: str | None = None
     external_refs: list[ExternalRef] = Field(default_factory=list)
     state: InvestigationState
     last_run_at: datetime | None = None

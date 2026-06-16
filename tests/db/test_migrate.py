@@ -130,6 +130,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0034",
         "0035",
         "0036",
+        "0037",
     ]
     assert second == []
 
@@ -264,6 +265,22 @@ def test_check_constraint_covers_every_enum_value(
     definition = row[0]
     missing = [m.value for m in enum if f"'{m.value}'" not in definition]
     assert not missing, f"{constraint} is missing enum values {missing}"
+
+
+def test_investigations_description_column(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    columns = _columns(pg_conn, "investigations")
+    assert columns["description"] == "text"
+
+
+def test_investigations_description_length_check(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    pg_conn.execute(
+        "INSERT INTO investigations (title, state, principal, project) "
+        "VALUES ('t', 'open', 'p', 'proj')"
+    )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute("UPDATE investigations SET description = repeat('x', 4097)")
 
 
 def _columns(conn: psycopg.Connection, table: str) -> dict[str, str]:
@@ -570,6 +587,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0034",
         "0035",
         "0036",
+        "0037",
     ]
 
 

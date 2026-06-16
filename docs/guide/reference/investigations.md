@@ -33,6 +33,17 @@ Link a run to an investigation.
 | `investigation_id` | `string` | yes | The Investigation to add the ref to. |
 | `ref` | `object` | yes | External ref to upsert, with tracker, id, and url. |
 
+## `investigations.list`
+
+`implemented` · `read-only`
+
+List the Investigations you can view, newest-first, for reporting.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `project` | `any` | no | Restrict to one project you can view; omit for all. |
+| `state` | `any` | no | Filter by state (open/active/closed/abandoned). |
+
 ## `investigations.open`
 
 `implemented`
@@ -41,9 +52,22 @@ Open an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `description` | `any` | no | Optional free-form description for reporting (<=4096 chars). |
 | `external_refs` | `any` | no | Optional external tracker refs (each with tracker, id, url). |
 | `project` | `string` | yes | Project to create the Investigation under. |
-| `title` | `string` | yes | Human-readable title for the Investigation. |
+| `title` | `string` | yes | Human-readable title (1..=200 chars). |
+
+## `investigations.set`
+
+`implemented`
+
+Edit a non-terminal Investigation's title and/or free-form description.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `description` | `any` | no | New description (<=4096); "" clears it; omit to leave unchanged. |
+| `investigation_id` | `string` | yes | The Investigation to edit. |
+| `title` | `any` | no | New title (1..=200 chars); omit to leave unchanged. |
 
 ## `investigations.unlink`
 

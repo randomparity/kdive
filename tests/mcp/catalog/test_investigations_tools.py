@@ -113,9 +113,23 @@ def test_get_own_investigation_renders_state(migrated_url: str) -> None:
             opened = await _open(pool, _ctx(), project="proj", title="t")
             resp = await inv_tools.get_investigation(pool, _ctx(), opened.object_id)
         assert resp.status == "open"
-        assert resp.data["external_refs"] == "0"
+        assert resp.data["external_refs"] == []
 
     asyncio.run(_run())
+
+
+def test_get_reports_title_and_description(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="xfs oops", description="hyp")
+            resp = await inv_tools.get_investigation(pool, _ctx(), opened.object_id)
+            assert resp.data["title"] == "xfs oops"
+            assert resp.data["description"] == "hyp"
+            assert resp.data["external_refs"] == []
+            assert resp.data["state"] == "open"
+            assert resp.data["last_run_at"] is None
+
+    asyncio.run(scenario())
 
 
 def test_get_investigation_requires_viewer_role(migrated_url: str) -> None:
@@ -426,3 +440,274 @@ def test_link_acquires_investigation_lock(migrated_url: str) -> None:
             assert resp.status == "open"
 
     asyncio.run(_run())
+
+
+def test_open_persists_description(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="t", description="oops in xfs")
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT description FROM investigations WHERE id = %s", (resp.object_id,)
+                )
+                row = await cur.fetchone()
+            assert row is not None and row["description"] == "oops in xfs"
+
+    asyncio.run(scenario())
+
+
+def test_open_empty_description_stores_null(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="t", description="")
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT description FROM investigations WHERE id = %s", (resp.object_id,)
+                )
+                row = await cur.fetchone()
+            assert row is not None and row["description"] is None
+
+    asyncio.run(scenario())
+
+
+def test_open_overlong_description_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="t", description="x" * 4097)
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_open_overlong_title_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="x" * 201)
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_set_updates_title_and_description(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="old")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="new", description="note"
+            )
+            assert resp.data["title"] == "new"
+            assert resp.data["description"] == "note"
+
+    asyncio.run(scenario())
+
+
+def test_set_clear_description_with_empty_string(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t", description="x")
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, description="")
+            assert resp.data["description"] is None
+
+    asyncio.run(scenario())
+
+
+def test_set_omitting_description_leaves_it(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t", description="keep")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="renamed"
+            )
+            assert resp.data["description"] == "keep"
+            assert resp.data["title"] == "renamed"
+
+    asyncio.run(scenario())
+
+
+def test_set_requires_at_least_one_field(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id)
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_set_overlong_title_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="x" * 201
+            )
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_set_empty_title_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="")
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_set_on_closed_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="new")
+            assert resp.error_category == "configuration_error"
+            assert resp.data["current_status"] == "closed"
+
+    asyncio.run(scenario())
+
+
+def test_set_requires_operator_role(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            with pytest.raises(AuthorizationError):
+                await inv_tools.set_investigation(
+                    pool, _ctx(Role.VIEWER), opened.object_id, title="new"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_set_audits_title_value_and_description_flag(migrated_url: str) -> None:
+    """The audit digest covers the title value + a description flag, never the body."""
+
+    async def scenario() -> None:
+        from kdive.security.audit import args_digest
+
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="old")
+            await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="renamed", description="a secret note body"
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT args_digest FROM audit_log WHERE transition = 'set' AND object_id = %s",
+                    (opened.object_id,),
+                )
+                row = await cur.fetchone()
+        assert row is not None
+        # Digest matches title value + the "set" flag — not the description body.
+        assert row["args_digest"] == args_digest({"title": "renamed", "description": "set"})
+
+    asyncio.run(scenario())
+
+
+def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
+    """Finding-1 regression: a title written before the bound stays readable/editable."""
+
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                # No id given — the column defaults to gen_random_uuid(); no uuid4 needed.
+                await cur.execute(
+                    "INSERT INTO investigations (title, state, principal, project) "
+                    "VALUES (%s, 'open', 'p', 'proj') RETURNING id",
+                    ("y" * 300,),
+                )
+                row = await cur.fetchone()
+            assert row is not None
+            inv_id = row["id"]
+            resp = await inv_tools.get_investigation(pool, _ctx(), str(inv_id))
+            assert resp.status == "open"  # read did not raise on the 300-char title
+
+    asyncio.run(scenario())
+
+
+def test_list_scopes_to_viewer_projects(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="a")
+            await _open(pool, _ctx(), project="proj", title="b")
+            resp = await inv_tools.list_investigations(pool, _ctx())
+            assert resp.data["count"] == "2"
+            assert {i.data["title"] for i in resp.items} == {"a", "b"}
+
+    asyncio.run(scenario())
+
+
+def test_list_excludes_other_projects(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="mine")
+            # A viewer of only "other" sees none of proj's investigations.
+            resp = await inv_tools.list_investigations(pool, _ctx(projects=("other",)))
+            assert resp.data["count"] == "0"
+
+    asyncio.run(scenario())
+
+
+def test_list_state_filter(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="a")
+            await _open(pool, _ctx(), project="proj", title="b")
+            await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
+            resp = await inv_tools.list_investigations(pool, _ctx(), state="open")
+            assert {i.data["title"] for i in resp.items} == {"b"}
+
+    asyncio.run(scenario())
+
+
+def test_list_bad_state_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await inv_tools.list_investigations(pool, _ctx(), state="nonsense")
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_list_requires_viewer_role(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="a")
+            # A caller with no viewer role anywhere sees an empty collection.
+            resp = await inv_tools.list_investigations(pool, _ctx(role=None))
+            assert resp.data["count"] == "0"
+
+    asyncio.run(scenario())
+
+
+def test_investigation_row_error_envelope() -> None:
+    """The degraded-row helper yields a configuration_error envelope (no DB needed)."""
+    from uuid import uuid4 as _u  # local import; module-level imports include only UUID
+
+    resp = inv_tools._investigation_row_error({"id": _u()})
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+
+
+def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One row failing model_validate degrades to an error item; the rest still render."""
+
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="good-a")
+            await _open(pool, _ctx(), project="proj", title="good-b")
+            calls = {"n": 0}
+            real = inv_tools.Investigation.model_validate
+
+            def flaky(row: object) -> object:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise ValueError("synthetic invalid row")
+                return real(row)
+
+            monkeypatch.setattr(inv_tools.Investigation, "model_validate", staticmethod(flaky))
+            resp = await inv_tools.list_investigations(pool, _ctx())
+            assert resp.data["count"] == "2"
+            assert sorted(i.status for i in resp.items) == ["error", "open"]
+
+    asyncio.run(scenario())
