@@ -168,15 +168,22 @@ def test_seed_build_configs_step_with_s3_seeds_and_is_idempotent(
     assert row is not None and row[0] == "kdump"
 
 
-def test_seed_build_configs_command_invokes_step(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_seed_build_configs_command_dispatches_to_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Drive the parser + dispatch table directly rather than main(): main() runs the logging
+    # bootstrap (bootstrap_stdout_floor), which reconfigures global logging and pollutes
+    # caplog-based tests that run later in the suite. This still proves the subcommand is
+    # registered, parses, and that its handler invokes the seed step.
     from kdive import __main__ as main_mod
+    from kdive.security.secrets.secret_registry import SecretRegistry
 
     called: list[str] = []
     monkeypatch.setattr(
         "kdive.admin.bootstrap.seed_build_configs_step",
         lambda: called.append("seeded"),
     )
-    main_mod.main(["seed-build-configs"])
+    args = main_mod.build_parser().parse_args(["seed-build-configs"])
+    assert args.command == "seed-build-configs"
+    main_mod._COMMAND_BY_NAME[args.command].handler(args, SecretRegistry(), None)
     assert called == ["seeded"]
 
 
