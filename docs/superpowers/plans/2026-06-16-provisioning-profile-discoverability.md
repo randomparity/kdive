@@ -121,7 +121,7 @@ name (remote uses its instance `base_image`, itself a declared image). Never rea
 ## Task 4 — Wiring + generated docs (finding A5)
 
 **Files:** `tests/mcp/core/test_tool_docs.py` (`_BEHAVIOR_TESTS_BY_TOOL` += `systems.profile_examples`
-→ its test file), regenerated `docs/guide/reference/tools.md` (via `just docs`).
+→ its test file), regenerated `docs/guide/reference/systems.md` (via `just docs`).
 
 **Steps:**
 1. Add the tool→test map entry; run `tests/mcp/core/test_tool_docs.py` (the coverage guard).
