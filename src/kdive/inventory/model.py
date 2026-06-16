@@ -27,6 +27,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from kdive.build_configs.rules import validate_build_config_content, validate_build_config_name
 from kdive.domain.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.image_format import ImageFormat
 from kdive.domain.models import ImageVisibility
@@ -156,6 +157,30 @@ class CostClassEntry(BaseModel):
         return parse_positive_coeff(value)
 
 
+class BuildConfigDecl(BaseModel):
+    """A single ``[[build_config]]`` declaration: a named kernel-config fragment (ADR-0122).
+
+    ``content`` is the inline fragment text; the reconcile pass publishes it to the reserved
+    object key. ``name``/``content`` validation delegates to the neutral ``build_configs/rules``
+    the ``buildconfig.set`` tool shares; the byte cap is enforced where config is available
+    (``reconcile-systems --check`` and the reconcile pass), not here, so the loader stays pure.
+    """
+
+    name: str
+    content: str
+    description: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, value: str) -> str:
+        return validate_build_config_name(value)
+
+    @field_validator("content")
+    @classmethod
+    def _check_content(cls, value: str) -> str:
+        return validate_build_config_content(value)
+
+
 class InventoryDoc(BaseModel):
     """The parsed ``systems.toml`` v2 document."""
 
@@ -166,6 +191,7 @@ class InventoryDoc(BaseModel):
     fault_inject: list[FaultInjectInstance] = Field(default_factory=list)
     build_host: list[BuildHostInstance] = Field(default_factory=list)
     cost_class: list[CostClassEntry] = Field(default_factory=list)
+    build_config: list[BuildConfigDecl] = Field(default_factory=list)
 
     def _check_image_identities(self) -> None:
         seen: set[tuple[str, str, str]] = set()
@@ -217,6 +243,12 @@ class InventoryDoc(BaseModel):
         if dupes:
             raise InventoryError("cost_class", "name", f"duplicate cost_class names {dupes}")
 
+    def _check_build_config_uniqueness(self) -> None:
+        names = [b.name for b in self.build_config]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            raise InventoryError("build_config", "name", f"duplicate build_config names {dupes}")
+
     @classmethod
     def parse(cls, data: dict[str, Any]) -> Self:
         """Validate ``data`` into an :class:`InventoryDoc`.
@@ -249,4 +281,5 @@ class InventoryDoc(BaseModel):
         doc._check_instance_name_uniqueness()
         doc._check_remote_libvirt_singleton()
         doc._check_cost_class_uniqueness()
+        doc._check_build_config_uniqueness()
         return doc
