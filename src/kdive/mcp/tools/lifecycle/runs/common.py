@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import cast
 from uuid import UUID
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import ErrorCategory, suppressed_detail
 from kdive.domain.models import Job, Run
 from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.mcp.responses import JsonValue, ToolResponse
@@ -53,10 +53,18 @@ def envelope_for_run(
 
 
 def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None) -> ToolResponse:
-    """Build the `failed` Run envelope, surfacing the linked job's redacted reason (ADR-0141)."""
+    """Build the `failed` Run envelope, surfacing the linked job's redacted reason (ADR-0141).
+
+    The job-derived surface (`detail`, `failing_job_id`, and any `failure_detail_*` keys) is
+    suppressed entirely for a no-leak category (ADR-0123): `ToolResponse.failure` already
+    suppresses `detail`, but the `data` extras bypass that seam, so they are gated here on the
+    same rule. `suppressed_detail(category, None) is not None` is true exactly for a suppressed
+    category (it returns the fixed constant even when `raw` is `None`).
+    """
     data: dict[str, JsonValue] = {"current_status": run.state.value}
     detail: str | None = None
-    if failing_job is not None:
+    no_leak = suppressed_detail(category, None) is not None
+    if failing_job is not None and not no_leak:
         data["failing_job_id"] = str(failing_job.id)
         context = failing_job.failure_context
         detail = context.get("failure_message") or None
