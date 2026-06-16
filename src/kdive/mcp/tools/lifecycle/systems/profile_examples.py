@@ -42,6 +42,17 @@ _REPLACE_NOTE = (
     "base_image_volume reference) with a real value for your host before provisioning."
 )
 
+# Sizing guidance (#461): the example carries concrete vcpu/memory_mb/disk_gb so it parses alone
+# and provisions a full-custom (no-shape) allocation as-is. But a shape-sized allocation resolves
+# its own vcpu/memory_mb/disk_gb, and `systems.provision` rejects a profile that restates a
+# *different* size (`reconcile_profile_sizing`). So an agent provisioning onto a shape-sized
+# allocation must omit these three fields (they are filled from the allocation) or match the shape.
+_SIZING_NOTE = (
+    "vcpu/memory_mb/disk_gb are an example custom size: when provisioning onto a shape-sized "
+    "allocation, omit these three fields (they are filled from the allocation) or set them to the "
+    "shape's size — a mismatch is rejected as a configuration_error."
+)
+
 # The provider-agnostic core every example carries; sizing is concrete so the example parses alone.
 _CORE: dict[str, JsonValue] = {
     "schema_version": 1,
@@ -95,13 +106,17 @@ def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
 
     Every example carries a ``note``: even when the rootfs/base-image reference is resolved to a
     real inventory name, the ``kernel_source_ref`` is always a placeholder the caller must replace.
-    ``uses_real_reference`` reports whether the provider rootfs/base-image was a real inventory ref.
+    It also carries a ``sizing_note`` (#461) telling the caller the example's concrete
+    ``vcpu``/``memory_mb``/``disk_gb`` must be omitted or matched when provisioning onto a
+    shape-sized allocation. ``uses_real_reference`` reports whether the provider rootfs/base-image
+    was a real inventory ref.
     """
     profile, placeholder = _example_profile(provider, doc)
     data: dict[str, JsonValue] = {
         "provider": provider,
         "profile": profile,
         "note": _REPLACE_NOTE,
+        "sizing_note": _SIZING_NOTE,
         "uses_real_reference": not placeholder,
     }
     return ToolResponse.success(provider, "ok", data=data)

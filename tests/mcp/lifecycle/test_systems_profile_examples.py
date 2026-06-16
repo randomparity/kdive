@@ -211,3 +211,16 @@ def test_collection_chains_into_define(tmp_path: Path) -> None:
     resp = build_profile_examples(None)
     assert "systems.define" in resp.suggested_next_actions
     assert "allocations.request" in resp.suggested_next_actions
+
+
+def test_examples_carry_sizing_note_and_concrete_size() -> None:
+    # #461: the example carries concrete sizing (so it parses alone and provisions a full-custom
+    # allocation as-is) AND a sizing_note telling the caller to omit/match for a shape-sized
+    # allocation, whose resolved size would otherwise conflict.
+    for data in _examples(None).values():
+        profile = _profile_of(data)
+        for field in ("vcpu", "memory_mb", "disk_gb"):
+            assert isinstance(profile[field], int)
+        sizing_note = data["sizing_note"]
+        assert "omit" in sizing_note.lower()
+        assert "shape" in sizing_note.lower()
