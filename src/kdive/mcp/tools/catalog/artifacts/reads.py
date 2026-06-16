@@ -202,6 +202,10 @@ async def _artifact_content(
         head = await asyncio.to_thread(store.head, key)
         if head is None:
             return {"content_unavailable": "store_error"}
+        # The redaction gate, enforced before the URI is minted so it covers every size:
+        # a sensitive object at a redacted row's key is not-found-shaped (DB/object drift).
+        if head.sensitivity is not Sensitivity.REDACTED:
+            return None
         refs["download_uri"] = await asyncio.to_thread(store.presign_get, key, expires_in=ttl)
         if head.size_bytes > inline_cap:
             return {"size_bytes": str(head.size_bytes), "content_omitted": "artifact_too_large"}

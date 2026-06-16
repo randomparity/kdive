@@ -51,10 +51,15 @@ viewer role, project-scoped, quarantined/sensitive ids are not-found-shaped):
    `store.presign_get(key, expires_in=KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS)` with a
    bounded default expiry (900s). This is the escape hatch for an artifact at or
    above the inline cap. The URL is a bearer capability scoped to the one
-   `redacted` object key; because only `redacted` objects reach this path and a
-   `redacted` object stores already-redacted bytes, the URL exposes no
-   unredacted content. The URI is minted from the same authorized key, so it
-   cannot point at the `sensitive` sibling.
+   `redacted` object key; the URI is minted from the same authorized key, so it
+   cannot point at the `sensitive` sibling. The URI is minted **only after the
+   object's own metadata sensitivity is confirmed `REDACTED`** via
+   `head` (which now surfaces the class it already reads, `HeadResult.sensitivity`).
+   This makes the URI path enforce the same object-metadata redaction gate the
+   inline path applies — for every size, including artifacts above the inline cap
+   that are never fetched — so a DB-row/object sensitivity drift (a row labelled
+   `redacted` over a `sensitive` object) yields a not-found-shaped error on both
+   paths rather than leaking via the URL.
 
 Both are best-effort and independent of the not-found/authz envelope: a store
 outage degrades content/URI but the metadata envelope (`refs.object`, `available`)
@@ -82,7 +87,11 @@ Two new server-scoped config settings: `KDIVE_ARTIFACT_INLINE_MAX_BYTES`
   (ADR-0113); the generated tool reference description changes (new `data`/`refs`
   fields documented in prose), so the generated docs are regenerated.
 - No DB migration; no new object-store method (reuses `head`, `get_artifact`,
-  `presign_get`); two new env settings (inline cap, download TTL).
+  `presign_get`). `HeadResult` gains a trailing optional `sensitivity` field
+  (populated from metadata `head` already retrieves) so the URI path can gate on
+  the object's class without fetching the body; the field defaults to `None`, so
+  existing `HeadResult` construction sites are unaffected. Two new env settings
+  (inline cap, download TTL).
 
 ## Considered & rejected
 

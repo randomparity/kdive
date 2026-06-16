@@ -135,11 +135,18 @@ class FetchedArtifact(NamedTuple):
 
 
 class HeadResult(NamedTuple):
-    """An object's stored size, base64 SHA-256 checksum if present, and bare etag."""
+    """An object's stored size, base64 SHA-256 checksum if present, bare etag, and class.
+
+    ``sensitivity`` is the class read from object metadata (``None`` when the metadata
+    is absent or uninterpretable). It lets a caller gate on the object's own sensitivity
+    without fetching the body — the redaction gate for the presigned-download path
+    (ADR-0140), parallel to :class:`FetchedArtifact`'s post-fetch ``sensitivity``.
+    """
 
     size_bytes: int
     checksum_sha256: str | None
     etag: str
+    sensitivity: Sensitivity | None = None
 
 
 class ObjectListing(NamedTuple):

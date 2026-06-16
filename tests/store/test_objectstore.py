@@ -381,6 +381,11 @@ def test_sensitivity_persisted_as_object_metadata(minio_store: ObjectStore, key_
     assert raw["Metadata"]["sensitivity"] == "sensitive"
     assert raw["Metadata"]["retention-class"] == "transcript"
 
+    # head() surfaces the object's class without fetching the body (ADR-0140 gate).
+    head = minio_store.head(stored.key)
+    assert head is not None
+    assert head.sensitivity is Sensitivity.SENSITIVE
+
 
 def test_get_with_stale_etag_raises_stale_handle(minio_store: ObjectStore, key_ns: str) -> None:
     stored = minio_store.put_artifact(

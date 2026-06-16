@@ -85,6 +85,7 @@ class _SearchStore:
         *,
         size: int | None = None,
         sensitivity: Sensitivity = Sensitivity.REDACTED,
+        head_sensitivity: Sensitivity | None = Sensitivity.REDACTED,
         head_error: CategorizedError | None = None,
         get_error: CategorizedError | None = None,
         presign_error: CategorizedError | None = None,
@@ -93,6 +94,7 @@ class _SearchStore:
         self.data = data
         self.size = len(data) if size is None else size
         self.sensitivity = sensitivity
+        self.head_sensitivity = head_sensitivity
         self.head_error = head_error
         self.get_error = get_error
         self.presign_error = presign_error
@@ -108,7 +110,12 @@ class _SearchStore:
             raise self.head_error
         if self.missing_head:
             return None
-        return HeadResult(size_bytes=self.size, checksum_sha256=None, etag="e")
+        return HeadResult(
+            size_bytes=self.size,
+            checksum_sha256=None,
+            etag="e",
+            sensitivity=self.head_sensitivity,
+        )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
         self.got = True
@@ -395,6 +402,41 @@ def test_artifacts_get_rejects_non_redacted_fetch(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert store.got is True
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_rejects_non_redacted_head_before_uri(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            # Object metadata says sensitive though the DB row says redacted (drift):
+            # the URI must NOT be minted and the body must NOT be fetched.
+            store = _SearchStore(b"panic", head_sensitivity=Sensitivity.SENSITIVE)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert store.presigned_key is None  # URI never minted
+        assert store.got is False  # body never fetched
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_oversized_honors_head_redaction_gate(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            # An oversized object whose metadata says sensitive: no URI, not-found-shaped.
+            store = _SearchStore(b"", size=64 * 1024 + 1, head_sensitivity=Sensitivity.SENSITIVE)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert store.presigned_key is None
+        assert store.got is False
 
     asyncio.run(_run())
 

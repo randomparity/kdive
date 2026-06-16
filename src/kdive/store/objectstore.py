@@ -221,9 +221,12 @@ class ObjectStore:
             raise _infrastructure_error("head_bucket", self._bucket, err) from err
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
-        """Return the object's size/checksum/etag, or ``None`` if it does not exist.
+        """Return the object's size/checksum/etag/sensitivity, or ``None`` if it is absent.
 
-        Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned.
+        Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned. The
+        ``sensitivity`` is read from object metadata (``None`` when absent or
+        uninterpretable), so a caller can gate on the object's own class without fetching
+        the body.
 
         Raises:
             CategorizedError: any non-404 store error
@@ -238,10 +241,15 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("head_object", key, err) from err
+        try:
+            sensitivity = Sensitivity(resp["Metadata"]["sensitivity"])
+        except (KeyError, ValueError):
+            sensitivity = None
         return artifact_types.HeadResult(
             size_bytes=int(resp["ContentLength"]),
             checksum_sha256=resp.get("ChecksumSHA256"),
             etag=_normalize_etag(resp["ETag"]),
+            sensitivity=sensitivity,
         )
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
