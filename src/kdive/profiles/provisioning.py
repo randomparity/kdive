@@ -251,7 +251,7 @@ class ProvisioningProfile(_ProfileBase):
     memory_mb: int | None = Field(default=None, gt=0, strict=True)
     disk_gb: int | None = Field(default=None, gt=0, strict=True)
     boot_method: BootMethod
-    kernel_source_ref: NonEmptyStr
+    kernel_source_ref: NonEmptyStr | None = None
     provider: ProviderSection
 
     _reject_coerced_version = schema_version_validator
@@ -266,6 +266,19 @@ class ProvisioningProfile(_ProfileBase):
                 "boot_method 'disk-image' and the remote-libvirt provider section "
                 "require each other (ADR-0080)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_kernel_source_for_direct_kernel(self) -> ProvisioningProfile:
+        """``kernel_source_ref`` is required on ``direct-kernel`` and optional on ``disk-image``.
+
+        A ``disk-image`` provision boots the operator-staged base image's own kernel (ADR-0078/0080)
+        and never reads ``kernel_source_ref``, so the VM-only flow must not be forced to supply one
+        (#472). The ``direct-kernel`` lane keeps the requirement (the learnable build-iterating
+        shape). A present value on ``disk-image`` is accepted and ignored (backward compatible).
+        """
+        if self.boot_method is BootMethod.DIRECT_KERNEL and self.kernel_source_ref is None:
+            raise ValueError("kernel_source_ref is required for boot_method 'direct-kernel'")
         return self
 
     @classmethod
