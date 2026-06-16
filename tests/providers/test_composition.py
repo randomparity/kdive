@@ -460,6 +460,55 @@ def test_local_libvirt_enabled_by_default_and_opt_out_via_env(
     assert _local_libvirt_enabled(True) is True
 
 
+def test_resolver_excludes_local_libvirt_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0131: disabling local-libvirt must drop its runtime from the resolver entirely, so
+    # the reconciler's register_all_discovery never composes the local discovery registrar
+    # (which would connect to a non-existent qemu:///system socket).
+    _declare_remote(tmp_path, monkeypatch)
+    resolver = composition.build_provider_resolver(enable_local_libvirt=False)
+
+    assert ResourceKind.LOCAL_LIBVIRT not in resolver.registered_kinds()
+    assert ResourceKind.REMOTE_LIBVIRT in resolver.registered_kinds()
+
+
+def test_resolver_excludes_local_libvirt_via_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
+    _declare_remote(tmp_path, monkeypatch)
+
+    resolver = composition.build_provider_resolver()
+
+    assert ResourceKind.LOCAL_LIBVIRT not in resolver.registered_kinds()
+
+
+def test_disabled_local_libvirt_does_not_compose_local_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The local-libvirt discovery registration (creates=True) builds a LocalLibvirtDiscovery,
+    # which opens the libvirt socket. With local disabled its runtime is not composed, so
+    # register_all_discovery must never construct that target. (Remote discovery is bind-only,
+    # creates=False, so it cannot be the failing sibling — see test_resolver.py for the
+    # raise-isolation property over synthetic creates=True runtimes.)
+    constructed: list[str] = []
+    monkeypatch.setattr(
+        "kdive.providers.local_libvirt.composition._discovery_target",
+        lambda: constructed.append("local") or _unreachable_target(),
+    )
+    _declare_remote(tmp_path, monkeypatch)
+    resolver = composition.build_provider_resolver(enable_local_libvirt=False)
+
+    asyncio.run(resolver.register_all_discovery(cast(AsyncConnectionPool, object())))
+
+    assert constructed == []
+
+
+def _unreachable_target() -> object:
+    raise AssertionError("local discovery target must not be constructed when local disabled")
+
+
 def test_transport_resetter_is_null_without_remote() -> None:
     from kdive.providers.core.transport_reset import NullResetter
 

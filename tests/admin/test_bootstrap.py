@@ -1,10 +1,12 @@
 import asyncio
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import psycopg
 import pytest
 
+import kdive.config as config
 from kdive.admin.bootstrap import (
     default_fixture_files,
     install_fixtures,
@@ -70,6 +72,32 @@ def test_seed_demo_registers_local_resource(
     )
 
     assert calls == ["registered"]
+
+
+def test_register_local_resource_skips_local_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ADR-0131: the migrate-time register_local_resource step is a
+    # build_provider_resolver().register_all_discovery() call. With local-libvirt disabled and
+    # no other provider configured the resolver is empty, so it registers nothing local and
+    # never constructs the local discovery target (which would open the libvirt socket).
+    from psycopg_pool import AsyncConnectionPool
+
+    from kdive.admin.bootstrap import register_local_resource
+
+    monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
+    config.load()
+    monkeypatch.setattr(
+        "kdive.providers.local_libvirt.composition._discovery_target",
+        _fail_local_discovery_target,
+    )
+
+    asyncio.run(register_local_resource(cast(AsyncConnectionPool, object())))
+
+
+def _fail_local_discovery_target() -> object:
+    raise AssertionError("local discovery must not run when local-libvirt is disabled")
 
 
 def test_default_fixture_files_include_catalog() -> None:

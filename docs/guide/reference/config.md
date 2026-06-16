@@ -102,7 +102,7 @@
 |----------|-----------|---------|----------|-------|
 | `KDIVE_LIBVIRT_ALLOCATION_CAP` | reconciler, worker | `1` | no | Per-host concurrent-Allocation cap. |
 | `KDIVE_LIBVIRT_URI` | reconciler, worker | `qemu:///system` | no | libvirt connection URI for the local host. |
-| `KDIVE_LOCAL_LIBVIRT_ENABLED` | migrate, reconciler, server, worker | `true` | no | Whether the local-libvirt reconciler reaper is composed (default on). Set to false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s deploy) so the leaked-domain sweep does not fail every pass on a missing socket. |
+| `KDIVE_LOCAL_LIBVIRT_ENABLED` | migrate, reconciler, server, worker | `true` | no | Whether the local-libvirt provider is composed (default on): its reconciler leaked-domain reaper and its provider-discovery registration and resolver runtime. Set to false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s deploy) so neither the leaked-domain sweep nor startup discovery fails on a missing socket. |
 
 ## logging
 

@@ -96,7 +96,10 @@ the correct fix for #468.
   (the migrate Job has no local libvirt socket); the function name now means "register this
   deployment's discoverable resources." Renaming is out of scope; the behavior is tested.
 - A zero-provider deployment (every provider disabled) is no longer a startup crash; it is a
-  single `INFO` log line and a resolver that fails every resolution with `configuration_error`.
+  `WARN` from the `ProviderResolver` constructor (so the server and worker tiers, whose
+  readiness probes do not inspect provider composition, surface it at startup), an `INFO` line
+  from `register_all_discovery` on the discovery path, and a resolver that fails every
+  resolution with `configuration_error`.
 - `ProviderResolver` accepts an empty runtime map. The single existing constructor-guard test
   is removed; the resolve-time fail-closed behavior (the real safety property) is retained
   and tested.
