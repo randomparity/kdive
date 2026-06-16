@@ -8,6 +8,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import Job
 from kdive.jobs.context import authorizing, context_from_job
 from kdive.mcp.responses import ResponseDataInput, ToolResponse, current_status_data
+from kdive.serialization import JsonValue
 
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
@@ -45,6 +46,20 @@ def stale_handle(object_id: str, *, current_status: str) -> ToolResponse:
     )
 
 
+def authz_denied(object_id: str, missing_checks: list[str]) -> ToolResponse:
+    """Build an ``authorization_denied`` envelope naming the failed gate checks (ADR-0129).
+
+    ``missing_checks`` is the destructive-op gate's closed enum of policy-check tokens
+    (``capability_scope``, ``admin_role``/``operator_role``, ``profile_opt_in``) — never a
+    resource identifier — so it is safe to surface in ``data`` under the no-leak seam
+    (ADR-0123), which suppresses ``detail`` only, not ``data``.
+    """
+    checks: list[JsonValue] = list(missing_checks)
+    return ToolResponse.failure(
+        object_id, ErrorCategory.AUTHORIZATION_DENIED, data={"missing_checks": checks}
+    )
+
+
 def job_envelope(job: Job, object_key: str, object_id: UUID) -> ToolResponse:
     base = ToolResponse.from_job(job)
     return base.model_copy(update={"data": {**base.data, object_key: str(object_id)}})
@@ -55,6 +70,7 @@ __all__ = [
     "MAX_LIST_LIMIT",
     "as_uuid",
     "authorizing",
+    "authz_denied",
     "clamp_list_limit",
     "config_error",
     "context_from_job",
