@@ -1,0 +1,161 @@
+"""Boundary profile-binding middleware: re-envelope a binding ValidationError (#451, ADR-0124).
+
+``ProvisioningProfile`` is ``extra="forbid"``, so FastMCP validates the typed ``profile`` param at
+argument binding — *before* the tool body and before the ``_runtime_resolution`` catch that builds
+our envelope. ``ProfileBindingMiddleware`` catches that ``pydantic.ValidationError`` for the three
+typed-profile tools and returns the standard ``configuration_error`` envelope (reusing ADR-0123's
+``detail`` + sanitized ``errors`` surfacing), instead of letting a raw FastMCP ``ToolError`` reach
+the caller. Any other tool, or any other exception, passes through unchanged.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+from fastmcp import Client, FastMCP
+from fastmcp.tools.base import ToolResult
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from kdive.domain.errors import ErrorCategory
+from kdive.mcp.middleware import ProfileBindingMiddleware
+from kdive.mcp.responses import ToolResponse
+from kdive.profiles.provisioning import ProvisioningProfile
+
+
+def _envelope(result: ToolResult) -> dict[str, Any]:
+    """Extract the structured-content envelope a short-circuiting middleware returns."""
+    assert isinstance(result, ToolResult)
+    content = result.structured_content
+    assert isinstance(content, dict)
+    return content
+
+
+class _FakeMessage:
+    def __init__(self, name: str, arguments: dict[str, object] | None = None) -> None:
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeContext:
+    def __init__(self, tool: str, arguments: dict[str, object] | None = None) -> None:
+        self.message = _FakeMessage(tool, arguments)
+
+
+class _StubModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    x: int
+
+
+def _profile_validation_error() -> ValidationError:
+    """A raw pydantic ``ValidationError``, standing in for what FastMCP raises at binding."""
+    try:
+        _StubModel.model_validate({"bogus": 1})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+def _drive(tool: str, arguments: dict[str, object] | None, exc: BaseException) -> Any:
+    mw = ProfileBindingMiddleware()
+
+    async def _call_next(_ctx: Any) -> Any:
+        raise exc
+
+    async def _run() -> Any:
+        return await mw.on_call_tool(_FakeContext(tool, arguments), _call_next)
+
+    return asyncio.run(_run())
+
+
+def test_binding_error_on_typed_profile_tool_becomes_configuration_error() -> None:
+    envelope = _envelope(
+        _drive(
+            "systems.define",
+            {"allocation_id": "alloc-1", "profile": {"bogus": 1}},
+            _profile_validation_error(),
+        )
+    )
+    assert envelope["status"] == "error"
+    assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert envelope["object_id"] == "alloc-1"  # the call's allocation_id, not the tool name
+    assert envelope["detail"]  # ADR-0123 detail is non-empty
+    errors = envelope["data"].get("errors")
+    assert isinstance(errors, list) and errors  # field-path entries surfaced
+    assert all(set(e) <= {"loc", "msg", "type"} for e in errors)  # no input/ctx echoed
+
+
+def test_reprovision_uses_system_id_as_object_id() -> None:
+    envelope = _envelope(
+        _drive(
+            "systems.reprovision",
+            {"system_id": "sys-9", "profile": {"bogus": 1}},
+            _profile_validation_error(),
+        )
+    )
+    assert envelope["object_id"] == "sys-9"
+
+
+def test_missing_id_argument_falls_back_to_tool_name() -> None:
+    envelope = _envelope(
+        _drive("systems.provision", {"profile": {"bogus": 1}}, _profile_validation_error())
+    )
+    assert envelope["object_id"] == "systems.provision"
+
+
+def test_validation_error_on_other_tool_is_reraised() -> None:
+    exc = _profile_validation_error()
+    with pytest.raises(ValidationError):
+        _drive("jobs.get", {"job_id": "j1"}, exc)
+
+
+def test_non_validation_error_is_reraised() -> None:
+    boom = RuntimeError("boom")
+    with pytest.raises(RuntimeError):
+        _drive("systems.define", {"allocation_id": "a1"}, boom)
+
+
+def test_valid_call_passes_through_unchanged() -> None:
+    mw = ProfileBindingMiddleware()
+    sentinel = ToolResponse.success("ok", "ok")
+
+    async def _call_next(_ctx: Any) -> Any:
+        return sentinel
+
+    async def _run() -> Any:
+        return await mw.on_call_tool(_FakeContext("systems.define", {}), _call_next)
+
+    assert asyncio.run(_run()) is sentinel
+
+
+def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
+    # The integration proof: a typed-profile tool behind the middleware returns the envelope for a
+    # malformed profile rather than raising a client-side ToolError.
+    from kdive.mcp.app import _advertise_flat_output_schema
+
+    app: FastMCP = FastMCP(name="probe")
+    app.add_middleware(ProfileBindingMiddleware())
+
+    @app.tool(name="systems.define")
+    async def _define(allocation_id: str, profile: ProvisioningProfile) -> ToolResponse:
+        return ToolResponse.success(allocation_id, "ok")
+
+    # The real build_app sweeps every tool to a flat output schema (ADR-0113); apply it here so the
+    # client can parse the structured envelope (the recursive ToolResponse schema would otherwise
+    # break the per-call TypeAdapter).
+    _advertise_flat_output_schema(app)
+
+    async def _run() -> dict[str, Any] | None:
+        async with Client(app) as client:
+            result = await client.call_tool(
+                "systems.define",
+                {"allocation_id": "alloc-1", "profile": {"schema_version": 1}},
+            )
+            return result.data
+
+    data = asyncio.run(_run())
+    assert data is not None
+    assert data["status"] == "error"
+    assert data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert data["detail"]
