@@ -112,6 +112,26 @@ To enable the remote-libvirt provider, declare a `[[remote_libvirt]]` instance i
 cert/key/CA refs live there now, not in `config.KDIVE_REMOTE_LIBVIRT_*` (#395). See the
 remote-libvirt host-setup runbook for the instance block.
 
+### Upgrading a release (config-default drift — ADR-0134)
+
+**Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the previous
+release's merged values and *ignores the new chart's `values.yaml` defaults*, so a config default
+added in a later chart (e.g. `config.KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`, ADR-0127) never reaches
+an already-installed release — the new image then runs without it (the local-libvirt reaper
+crash-loops on a pod with no libvirt socket). Capture your current overrides and re-apply them on
+top of the fresh defaults instead:
+
+```bash
+helm get values kdive -o yaml > kdive-values.yaml   # your overrides only (no chart defaults)
+helm upgrade kdive deploy/helm/kdive -f kdive-values.yaml --set image.tag=$SHA
+```
+
+`-f kdive-values.yaml` preserves your overrides **and** layers the new chart's defaults on top, so
+a new config default is not dropped. As a backstop the chart renders
+`KDIVE_LOCAL_LIBVIRT_ENABLED` from a defensive `default "false"`, so even a bare `--reuse-values`
+no longer reintroduces that crash-loop — but `-f kdive-values.yaml` is the general fix for *any*
+future config-default drift, so prefer it.
+
 ### Deploy-time Jobs: validate, migrate, seed (ADR-0121)
 
 A `helm upgrade` runs three single-responsibility Jobs, so each failure names exactly what broke
@@ -157,10 +177,13 @@ kubectl get pods -l app.kubernetes.io/name=kdive
 ```
 
 > **Updating config after install.** `config.*` renders into a ConfigMap the pods read **once**
-> via `envFrom` at start. After a `helm upgrade` that changes config, restart the pods
-> (`kubectl rollout restart deploy/kdive-kdive-server deploy/kdive-kdive-worker
-> deploy/kdive-kdive-reconciler`) or they keep the old values. The ConfigMap is also a pre-install
-> hook, so `helm upgrade --no-hooks` **skips** it — use a hooked upgrade for config changes.
+> via `envFrom` at start. A `helm upgrade` that changes a `config.*` value now rolls the
+> server/worker/reconciler automatically — their pod templates carry a `checksum/config`
+> annotation (ADR-0134) that changes with the ConfigMap, so the rollout picks up the new values
+> with no manual `kubectl rollout restart`. The bundled Postgres/MinIO backends carry no such
+> annotation, so a config change never rolls their `emptyDir` pods (which would wipe demo data).
+> The external-path ConfigMap is also a pre-upgrade hook, so `helm upgrade --no-hooks` **skips**
+> it — use a hooked upgrade for config changes.
 
 ## 5. Reach the MCP endpoint
 
@@ -177,7 +200,8 @@ kubectl port-forward svc/kdive-kdive-server 8000:8000
 Ingress/LoadBalancer). Set it at install/upgrade — optionally pinning the port:
 
 ```bash
-helm upgrade kdive deploy/helm/kdive --reuse-values \
+helm get values kdive -o yaml > kdive-values.yaml   # capture overrides (not --reuse-values; see Upgrade)
+helm upgrade kdive deploy/helm/kdive -f kdive-values.yaml \
   --set service.type=NodePort --set service.nodePort=30800
 kubectl get svc kdive-kdive-server -o jsonpath='{.spec.ports[0].nodePort}'
 # MCP at http://<node-ip>:<nodePort>/mcp
@@ -258,10 +282,14 @@ guest cannot reach a cluster-internal name. To use the bundled store off-cluster
 point the endpoint at a node-routable address all three parties reach:
 
 ```bash
-helm upgrade kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml --reuse-values \
+helm get values kdive -o yaml > kdive-values.yaml   # capture overrides (not --reuse-values; see Upgrade)
+helm upgrade kdive deploy/helm/kdive \
+  -f deploy/helm/kdive/values-demo.yaml -f kdive-values.yaml \
   --set demo.minio.service.type=NodePort --set demo.minio.service.nodePort=30900 \
   --set config.KDIVE_S3_ENDPOINT_URL=http://<node-ip>:30900
-kubectl rollout restart deploy -l app.kubernetes.io/name=kdive   # pick up the new endpoint
+# The endpoint change rolls server/worker/reconciler automatically (checksum/config, ADR-0134);
+# no manual rollout restart — and never `rollout restart -l app.kubernetes.io/name=kdive`, whose
+# selector also restarts the emptyDir Postgres/MinIO and wipes demo data.
 ```
 
 > **The cluster network/firewall must permit this.** A locked-down cluster that only admits the
