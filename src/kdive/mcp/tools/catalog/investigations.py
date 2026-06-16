@@ -381,6 +381,78 @@ async def unlink_external_ref(
             return await _unlink_locked(conn, ctx, uid, key, project=inv.project)
 
 
+async def _set_locked(
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    uid: UUID,
+    *,
+    title: str | None,
+    description: str | None,
+    project: str,
+) -> ToolResponse:
+    """Apply a title/description edit under the per-Investigation lock (ADR-0135).
+
+    The lock + ``FOR UPDATE`` read serialize every title/description writer, so writing both
+    columns from the locked ``current`` snapshot cannot clobber a concurrent edit.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
+        current = await _get_mutable_investigation_locked(conn, uid)
+        if isinstance(current, ToolResponse):
+            return current
+        new_title = title if title is not None else current.title
+        # description: None -> leave unchanged; "" -> NULL (clear); else the new value.
+        new_description = current.description if description is None else (description or None)
+        audit_args: dict[str, JsonValue] = {}
+        if title is not None:
+            audit_args["title"] = title
+        if description is not None:
+            audit_args["description"] = "cleared" if description == "" else "set"
+        await conn.execute(
+            "UPDATE investigations SET title = %s, description = %s WHERE id = %s",
+            (new_title, new_description, uid),
+        )
+        await audit.record(
+            conn,
+            ctx,
+            audit.AuditEvent(
+                tool="investigations.set",
+                object_kind="investigations",
+                object_id=uid,
+                transition="set",
+                args=audit_args,
+                project=project,
+            ),
+        )
+        updated = current.model_copy(update={"title": new_title, "description": new_description})
+    return _envelope_for_investigation(updated)
+
+
+async def set_investigation(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    investigation_id: str,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+) -> ToolResponse:
+    """Edit an Investigation's title and/or description (partial, value-based; ADR-0135)."""
+    uid = _as_uuid(investigation_id)
+    if uid is None:
+        return _config_error(investigation_id)
+    if title is None and description is None:
+        return _config_error(investigation_id)
+    if not _validate_text(title, description):
+        return _config_error(investigation_id)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
+            if isinstance(inv, ToolResponse):
+                return inv
+            return await _set_locked(
+                conn, ctx, uid, title=title, description=description, project=inv.project
+            )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
 
@@ -461,3 +533,23 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ],
     ) -> ToolResponse:
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)
+
+    @app.tool(
+        name="investigations.set",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_set(
+        investigation_id: Annotated[str, Field(description="The Investigation to edit.")],
+        title: Annotated[
+            str | None,
+            Field(description="New title (1..=200 chars); omit to leave unchanged."),
+        ] = None,
+        description: Annotated[
+            str | None,
+            Field(description='New description (<=4096); "" clears it; omit to leave unchanged.'),
+        ] = None,
+    ) -> ToolResponse:
+        return await set_investigation(
+            pool, current_context(), investigation_id, title=title, description=description
+        )

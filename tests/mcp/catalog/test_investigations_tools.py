@@ -486,3 +486,140 @@ def test_open_overlong_title_is_config_error(migrated_url: str) -> None:
             assert resp.error_category == "configuration_error"
 
     asyncio.run(scenario())
+
+
+def test_set_updates_title_and_description(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="old")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="new", description="note"
+            )
+            assert resp.data["title"] == "new"
+            assert resp.data["description"] == "note"
+
+    asyncio.run(scenario())
+
+
+def test_set_clear_description_with_empty_string(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t", description="x")
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, description="")
+            assert resp.data["description"] is None
+
+    asyncio.run(scenario())
+
+
+def test_set_omitting_description_leaves_it(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t", description="keep")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="renamed"
+            )
+            assert resp.data["description"] == "keep"
+            assert resp.data["title"] == "renamed"
+
+    asyncio.run(scenario())
+
+
+def test_set_requires_at_least_one_field(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id)
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_set_overlong_title_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            resp = await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="x" * 201
+            )
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_set_empty_title_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="")
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_set_on_closed_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
+            resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id, title="new")
+            assert resp.error_category == "configuration_error"
+            assert resp.data["current_status"] == "closed"
+
+    asyncio.run(scenario())
+
+
+def test_set_requires_operator_role(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            with pytest.raises(AuthorizationError):
+                await inv_tools.set_investigation(
+                    pool, _ctx(Role.VIEWER), opened.object_id, title="new"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_set_audits_title_value_and_description_flag(migrated_url: str) -> None:
+    """The audit digest covers the title value + a description flag, never the body."""
+
+    async def scenario() -> None:
+        from kdive.security.audit import args_digest
+
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="old")
+            await inv_tools.set_investigation(
+                pool, _ctx(), opened.object_id, title="renamed", description="a secret note body"
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT args_digest FROM audit_log WHERE transition = 'set' AND object_id = %s",
+                    (opened.object_id,),
+                )
+                row = await cur.fetchone()
+        assert row is not None
+        # Digest matches title value + the "set" flag — not the description body.
+        assert row["args_digest"] == args_digest({"title": "renamed", "description": "set"})
+
+    asyncio.run(scenario())
+
+
+def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
+    """Finding-1 regression: a title written before the bound stays readable/editable."""
+
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                # No id given — the column defaults to gen_random_uuid(); no uuid4 needed.
+                await cur.execute(
+                    "INSERT INTO investigations (title, state, principal, project) "
+                    "VALUES (%s, 'open', 'p', 'proj') RETURNING id",
+                    ("y" * 300,),
+                )
+                row = await cur.fetchone()
+            assert row is not None
+            inv_id = row["id"]
+            resp = await inv_tools.get_investigation(pool, _ctx(), str(inv_id))
+            assert resp.status == "open"  # read did not raise on the 300-char title
+
+    asyncio.run(scenario())
