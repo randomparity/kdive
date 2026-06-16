@@ -22,11 +22,13 @@ The operator establishing a project's policy needs a token whose claims grant
 - `projects` includes the project name, e.g. `["acme"]`;
 - `roles` maps the project to `admin`, e.g. `{"acme": "admin"}`.
 
-How you mint this token is your IdP's concern. In the bundled mock-OIDC dev setup,
-`kdivectl login` and the live-stack harness mint such tokens; in production your IdP
-asserts the `projects` and `roles` claims. The per-project `admin` role is distinct
-from the platform tier (`platform_admin` and friends) — a platform role does **not**
-grant project-scoped accounting writes, and project `admin` does not grant
+How you mint this token is your IdP's concern: in production your IdP asserts the
+`projects` and `roles` claims. In the bundled mock-OIDC dev setup, project-role tokens
+are minted programmatically against the issuer (the live-stack harness's `mint_token`
+does this) — `kdivectl login` covers only the platform-role axis, not the per-project
+role, so it cannot mint a project-`admin` token. The per-project `admin` role is
+distinct from the platform tier (`platform_admin` and friends) — a platform role does
+**not** grant project-scoped accounting writes, and project `admin` does not grant
 cross-project authority.
 
 ## 2. Set the budget and quota
