@@ -35,16 +35,26 @@ We will close all three gaps with one small surface, keeping the existing
 
 1. **First-class `description` column.** Add a nullable `description text` column to
    `investigations` (migration `0037`) and a `description: str | None` field to the
-   `Investigation` model, bounded to 4096 characters at the Pydantic boundary and backstopped
-   by a DB `CHECK (char_length(description) <= 4096)`. `title` gains a matching 200-character
-   Pydantic bound (it had none). `investigations.open` accepts an optional `description`.
+   `Investigation` model, backstopped by a DB `CHECK (char_length(description) <= 4096)`.
+   `investigations.open` accepts an optional `description`. **Length bounds are enforced at the
+   write boundary (the `open`/`set` handlers), not as `Field` constraints on the model**, because
+   `model_validate` runs on the read path (the repository deserializes every row through it): a
+   retroactive field bound would make any already-persisted out-of-bound row unreadable. `title`
+   was previously a bare unbounded `str` (and `''` is storable), so a field bound on it would
+   break reads of existing rows; the boundary check (`1..=200` chars for `title`, `0..=4096` for
+   `description`) avoids that. `description`'s column is brand-new, so its DB `CHECK` cannot
+   reject any existing row and serves as defence-in-depth behind the boundary check. A
+   `description` of `""` normalizes to `NULL` on both `open` and `set`.
 
 2. **`investigations.set` (new, mutating, `operator`).** Update `title` and/or `description`
    on a **non-terminal** Investigation (`open`/`active`), under the per-Investigation advisory
-   lock, audited. Partial update: a field omitted (`None`) is left unchanged; passing an empty
-   string clears `description` (sets NULL). At least one field must be supplied. A terminal
-   (`closed`/`abandoned`) Investigation rejects with `configuration_error` carrying
-   `current_status`, matching `link`/`unlink`. `title` thereby becomes mutable while open.
+   lock, audited. Partial update is **value-based, not a Python sentinel** (the transport cannot
+   distinguish an omitted optional from an explicit `null` — both arrive as `None`): `None` for a
+   field means *leave unchanged*; `description=""` is the *clear* signal (sets `NULL`); `title`
+   cannot be cleared (`NOT NULL`) and `title=""` is a `configuration_error`. At least one field
+   must be supplied. A terminal (`closed`/`abandoned`) Investigation rejects with
+   `configuration_error` carrying `current_status`, matching `link`/`unlink`. `title` thereby
+   becomes mutable while open.
 
 3. **Surface the fields.** `investigations.get` (and the mutators' rendered envelope) return
    `title`, `description`, the full `external_refs` list, `state`, and `last_run_at` in
