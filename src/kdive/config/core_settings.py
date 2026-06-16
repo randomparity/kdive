@@ -168,6 +168,20 @@ MAX_UPLOAD_BYTES = Setting(
     suggest="an integer number of bytes, e.g. 53687091200 (50 GiB)",
 )
 
+MAX_BUILD_CONFIG_BYTES = Setting(
+    name="KDIVE_MAX_BUILD_CONFIG_BYTES",
+    parse=_int,
+    default=str(256 * 1024),
+    group="upload",
+    processes=_SERVER,
+    help=(
+        "Maximum accepted build-config fragment size in bytes for buildconfig.set "
+        "(ADR-0119). Kernel-config fragments are a few KiB; the cap bounds a hostile or "
+        "accidental large upload."
+    ),
+    suggest="an integer number of bytes, e.g. 262144 (256 KiB)",
+)
+
 DEBUG_DIR = Setting(
     name="KDIVE_DEBUG_DIR",
     parse=_str,
@@ -413,6 +427,7 @@ SETTINGS = [
     LEASE_MAX,
     UPLOAD_TTL_SECONDS,
     MAX_UPLOAD_BYTES,
+    MAX_BUILD_CONFIG_BYTES,
     DEBUG_DIR,
     CRASH_DIR,
     SECRETS_ROOT,

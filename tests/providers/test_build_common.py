@@ -183,6 +183,7 @@ def test_build_config_fetch_returns_verified_bytes_and_closes_conn(
         object_key="system/build-configs/kdump/kdump.config",
         sha256=hashlib.sha256(data).hexdigest(),
         description="",
+        source="seed",
     )
 
     class _FakeStore:

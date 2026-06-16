@@ -54,6 +54,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "build_hosts.register_ssh": ("tests/mcp/ops/test_build_hosts.py",),
     "build_hosts.remove": ("tests/mcp/ops/test_build_hosts.py",),
     "buildconfig.get": ("tests/mcp/catalog/test_build_configs_tool.py",),
+    "buildconfig.set": ("tests/mcp/catalog/test_build_configs_tool.py",),
     "control.force_crash": ("tests/mcp/lifecycle/test_control_tools.py",),
     "control.power": ("tests/mcp/lifecycle/test_control_tools.py",),
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
