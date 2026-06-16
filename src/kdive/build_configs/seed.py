@@ -38,7 +38,8 @@ async def seed_build_configs(conn: AsyncConnection, store: ObjectStore) -> int:
     autocommit, and the advisory lock needs an open transaction), so a concurrent operator
     ``set`` cannot interleave with the read/PUT/upsert and the seed never PUTs over an operator
     override (ADR-0119). Idempotent: an unchanged seed-owned fragment writes nothing; an
-    operator-owned row is skipped. The ``WHERE source='seed'`` guard on
+    operator-owned **or config-owned** row is skipped (a declared ``[[build_config]]`` is
+    file-authoritative, ADR-0122). The ``WHERE source='seed'`` guard on
     :func:`upsert_seed_build_config` is defence in depth on the row.
 
     Args:
@@ -53,7 +54,7 @@ async def seed_build_configs(conn: AsyncConnection, store: ObjectStore) -> int:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.BUILD_CONFIG, _KDUMP_NAME):
         stored = await read_build_config_provenance(conn, _KDUMP_NAME)
         if stored is not None and (
-            (stored[0] == sha256 and stored[1] == "seed") or stored[1] == "operator"
+            (stored[0] == sha256 and stored[1] == "seed") or stored[1] in {"operator", "config"}
         ):
             return 0
         written = store.put_artifact(
