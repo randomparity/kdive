@@ -149,7 +149,11 @@ def test_full_inventory_examples_are_valid_and_use_real_refs(
     local_rootfs = _profile_of(examples["local-libvirt"])["provider"]["local-libvirt"]["rootfs"]
     assert local_rootfs == {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-public"}
     remote = _profile_of(examples["remote-libvirt"])["provider"]["remote-libvirt"]
-    assert remote["base_image_volume"] == "remote-base"
+    # base_image_volume is the operator-staged libvirt *volume* (rootfs_build.py), which the
+    # provider looks up by name — not the catalog image name. The example must emit a value that
+    # actually resolves on the host: the staged source's volume (`remote-base.qcow2`), not
+    # `remote-base`. Emitting the bare name leaves provisioning to fail "base image not staged".
+    assert remote["base_image_volume"] == "remote-base.qcow2"
 
 
 def test_placeholder_examples_are_still_valid_when_no_public_image(

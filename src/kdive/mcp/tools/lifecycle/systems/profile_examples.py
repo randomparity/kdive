@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kdive.domain.models import ImageVisibility
-from kdive.inventory.model import ImageEntry, InventoryDoc
+from kdive.inventory.model import ImageEntry, InventoryDoc, StagedSource
 from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
 
@@ -142,9 +142,9 @@ def _local_profile(doc: InventoryDoc | None) -> tuple[dict[str, JsonValue], bool
 
 def _remote_profile(doc: InventoryDoc | None) -> tuple[dict[str, JsonValue], bool]:
     """A ``remote-libvirt`` example: ``disk-image`` boot + a ``base_image_volume``."""
-    base_image = _remote_base_image(doc)
-    placeholder = base_image is None
-    volume = base_image if base_image is not None else _PLACEHOLDER_BASE_IMAGE
+    staged_volume = _remote_base_volume(doc)
+    placeholder = staged_volume is None
+    volume = staged_volume if staged_volume is not None else _PLACEHOLDER_BASE_IMAGE
     provider: JsonValue = {_REMOTE: {"base_image_volume": volume}}
     profile: dict[str, JsonValue] = {
         **_CORE,
@@ -174,19 +174,22 @@ def _public_image(doc: InventoryDoc | None, provider: str) -> ImageEntry | None:
     return None
 
 
-def _remote_base_image(doc: InventoryDoc | None) -> str | None:
-    """The remote instance's ``base_image`` when it names a ``PUBLIC`` image, else ``None``.
+def _remote_base_volume(doc: InventoryDoc | None) -> str | None:
+    """The operator-staged libvirt **volume** for the remote instance's base image, else ``None``.
 
-    The instance's ``base_image`` cross-references a declared ``[[image]]`` (the loader enforces
-    this), but a private image name must not be surfaced — so it is emitted only when that declared
-    image is ``PUBLIC``.
+    ``base_image_volume`` is the staged volume name the provider looks up on the host's storage
+    pool (``rootfs_build.py``, ADR-0080) — not the catalog image name. The instance's
+    ``base_image`` cross-references a declared ``[[image]]`` (the loader enforces this); this
+    returns that image's ``staged`` source volume, and only when the declared image is ``PUBLIC``
+    (a private image's volume must not be surfaced) and is actually staged (a non-staged source has
+    no host volume to provision from).
     """
     if doc is None or not doc.remote_libvirt:
         return None
     base_image = doc.remote_libvirt[0].base_image
     public = _public_image(doc, _REMOTE)
-    if public is not None and public.name == base_image:
-        return base_image
+    if public is not None and public.name == base_image and isinstance(public.source, StagedSource):
+        return public.source.volume
     return None
 
 

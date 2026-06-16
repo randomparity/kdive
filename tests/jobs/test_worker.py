@@ -197,6 +197,45 @@ def test_run_once_dead_letters_after_max_attempts(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_run_once_terminal_error_dead_letters_at_once(migrated_url: str) -> None:
+    # A handler that raises a `terminal` CategorizedError dead-letters on the first attempt even
+    # for a normally-retryable category (INFRASTRUCTURE_FAILURE) and despite max_attempts > 1 —
+    # the terminal flag, not the category, drives the immediate dead-letter.
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+            calls = 0
+
+            async def terminal_raises(conn: psycopg.AsyncConnection, job: Job) -> str:
+                nonlocal calls
+                calls += 1
+                raise CategorizedError(
+                    "unrecoverable", category=ErrorCategory.INFRASTRUCTURE_FAILURE, terminal=True
+                )
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.BUILD, terminal_raises)
+            worker = _worker(pool, reg, worker_id="w1")
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.BUILD,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-terminal",
+                    max_attempts=3,
+                )
+
+            await worker.run_once()
+            assert calls == 1
+            final = await _final_state(migrated_url, job.id)
+            assert final.state is JobState.FAILED
+            assert final.attempt == 1  # terminal: not requeued despite max_attempts=3
+            assert final.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            assert await worker.run_once() is None  # dead-lettered: not re-dequeued
+
+    asyncio.run(_run())
+
+
 def test_failed_job_persists_redacted_failure_context(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -93,6 +93,7 @@ class CategorizedError(Exception):
         *,
         category: ErrorCategory,
         details: dict[str, object] | None = None,
+        terminal: bool = False,
     ) -> None:
         """Build a categorized error.
 
@@ -101,7 +102,13 @@ class CategorizedError(Exception):
             category: The taxonomy category this failure maps to.
             details: Optional structured context (must be free of secret material;
                 it may be surfaced in responses and logs).
+            terminal: Whether the job raising this error must dead-letter at once rather
+                than requeue, irrespective of category. Set when a retry cannot succeed
+                because the failure already drove the target to a terminal state (e.g. a
+                provision failure left the System ``failed``), so requeuing would only mask
+                the failure as a success on the next attempt.
         """
         super().__init__(message)
         self.category = category
         self.details = details or {}
+        self.terminal = terminal
