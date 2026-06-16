@@ -60,6 +60,42 @@ def test_pass_result_is_clean() -> None:
     assert result.provider is None
 
 
+def test_pass_result_forbids_a_failure_category() -> None:
+    with pytest.raises(ValueError, match="failure_category"):
+        CheckResult(
+            check_id="x",
+            status=CheckStatus.PASS,
+            detail="ok",
+            failure_category="transport_failure",
+        )
+
+
+def test_fail_result_may_carry_a_failure_category() -> None:
+    result = CheckResult(
+        check_id="x",
+        status=CheckStatus.FAIL,
+        detail="host down",
+        fix="bring it up",
+        failure_category="transport_failure",
+    )
+    assert result.failure_category == "transport_failure"
+
+
+def test_error_result_may_carry_a_failure_category() -> None:
+    result = CheckResult(
+        check_id="x",
+        status=CheckStatus.ERROR,
+        detail="bad config",
+        failure_category="configuration_error",
+    )
+    assert result.failure_category == "configuration_error"
+
+
+def test_failure_category_defaults_to_none() -> None:
+    result = CheckResult(check_id="x", status=CheckStatus.PASS, detail="ok")
+    assert result.failure_category is None
+
+
 def test_run_check_returns_the_checks_result() -> None:
     expected = CheckResult(check_id="x", status=CheckStatus.PASS, detail="ok")
     result = asyncio.run(run_check(_Static(expected), timeout=1.0))

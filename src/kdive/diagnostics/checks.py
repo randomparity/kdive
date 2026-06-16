@@ -26,6 +26,13 @@ from enum import StrEnum
 SECRET_REF_ID = "secret_ref"
 PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
+REACHABILITY_ID = "remote_libvirt_reachability"
+
+# The failure-category labels the reachability verdict carries (ADR-0125). They mirror the
+# ``ErrorCategory`` the underlying connection raises, kept as plain strings so ``checks`` stays
+# free of provider/transport imports.
+_TRANSPORT_FAILURE = "transport_failure"
+_CONFIGURATION_ERROR = "configuration_error"
 
 _log = logging.getLogger(__name__)
 
@@ -62,6 +69,11 @@ class CheckResult:
             ``error``/``pass`` carrying a fix is a producer bug).
         provider: The provider this result pertains to, or ``None`` for a
             provider-independent check (``secret_ref``).
+        failure_category: The :class:`ErrorCategory`-style label for *why* the contract was
+            violated (``fail``) or the check could not run (``error``) — e.g.
+            ``transport_failure`` vs ``configuration_error`` for a reachability probe. ``None``
+            on ``pass`` (a clean read has no failure to categorize); a ``pass`` carrying one is a
+            producer bug, mirroring the ``fix``-only-on-``fail`` rule.
     """
 
     check_id: str
@@ -69,6 +81,7 @@ class CheckResult:
     detail: str
     fix: str | None = None
     provider: str | None = None
+    failure_category: str | None = None
 
     def __post_init__(self) -> None:
         if self.status is CheckStatus.FAIL and not self.fix:
@@ -77,6 +90,11 @@ class CheckResult:
             raise ValueError(
                 f"{self.check_id}: only a fail result may carry a fix "
                 f"(status {self.status.value!r} carried {self.fix!r})"
+            )
+        if self.status is CheckStatus.PASS and self.failure_category is not None:
+            raise ValueError(
+                f"{self.check_id}: a pass result must not carry a failure_category "
+                f"(carried {self.failure_category!r})"
             )
 
 
@@ -359,4 +377,78 @@ class GdbstubAclCheck(Check):
                 "open the host firewall / ACL for it"
             ),
             provider=self._provider,
+        )
+
+
+class ReachabilityOutcome(StrEnum):
+    """The three observable outcomes of a remote-libvirt reachability probe (ADR-0125).
+
+    ``REACHABLE`` — the ``qemu+tls://`` connection opened and ``getInfo()`` returned.
+    ``UNREACHABLE`` — the TLS connect failed (host down / port closed): a contract ``fail``.
+    ``MISCONFIGURED`` — the probe could not run (bad URI/cert/inventory): an ``error``, never a
+    confident "host down".
+    """
+
+    REACHABLE = "reachable"
+    UNREACHABLE = "unreachable"
+    MISCONFIGURED = "misconfigured"
+
+
+ReachabilityProbe = Callable[[], Awaitable[ReachabilityOutcome]]
+
+
+class RemoteLibvirtReachabilityCheck(Check):
+    """Server-vantage: the remote-libvirt ``qemu+tls://`` host is libvirt-reachable (ADR-0125).
+
+    The server itself opens the libvirt client connection, so this is ``Vantage.SERVER`` (it must
+    run even when the worker is down — that is exactly when an operator needs to know whether the
+    host is reachable). The verdict is scoped to **libvirt-reachability**: a reachable-but-
+    misconfigured host (no storage pool/network) still reports ``pass`` and surfaces its config
+    failure at provision time. Host-down is a contract ``fail`` (``transport_failure``); a probe
+    that could not run (bad URI/cert/inventory) is ``error`` (``configuration_error``) — emitting a
+    "host down" fix when the operator's own config blocked the probe is the confident-wrong-fix
+    failure ADR-0091 forbids.
+    """
+
+    def __init__(self, *, provider: str, probe: ReachabilityProbe) -> None:
+        self._provider = provider
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return REACHABILITY_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.SERVER
+
+    async def run(self) -> CheckResult:
+        outcome = await self._probe()
+        if outcome is ReachabilityOutcome.REACHABLE:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail="remote-libvirt host is reachable over qemu+tls (libvirt-reachable only; "
+                "config usability still surfaces at provision)",
+                provider=self._provider,
+            )
+        if outcome is ReachabilityOutcome.UNREACHABLE:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.FAIL,
+                detail="remote-libvirt host is not reachable over qemu+tls",
+                fix=(
+                    "remote-libvirt host unreachable; bring the host up and open its libvirt "
+                    "TLS port (16514), then retry"
+                ),
+                provider=self._provider,
+                failure_category=_TRANSPORT_FAILURE,
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.ERROR,
+            detail="remote-libvirt reachability could not be probed; check the [[remote_libvirt]] "
+            "URI, TLS cert refs, and systems.toml inventory",
+            provider=self._provider,
+            failure_category=_CONFIGURATION_ERROR,
         )
