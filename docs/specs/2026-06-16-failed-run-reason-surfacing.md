@@ -86,7 +86,11 @@ Consequences this feature exposes (none a regression — it makes existing state
 - Multi-attempt build: `failing_job_id` is set once (first `_fail_build`) and stays pointed at the
   same job row across requeues; the no-op second `_fail_build` does not overwrite or clear it.
 - No-leak: a (hypothetical) `not_found`/`authorization_denied` failed Run surfaces the seam
-  constant, never the job message — proven by routing through `suppressed_detail`.
+  constant and **no job-derived data at all** (no `failing_job_id`, no `failure_detail_*`) —
+  `detail` is suppressed by `ToolResponse.failure`, and the `data` extras (which bypass that
+  seam) are gated in `_failed_envelope` on the same suppressed-category check
+  (`suppressed_detail(category, None) is not None`). Defence-in-depth: the build path never
+  produces a suppressed category, but the seam — not the producer — enforces no-leak (ADR-0123).
 
 ## Out of scope
 

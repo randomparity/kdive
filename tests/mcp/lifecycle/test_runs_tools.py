@@ -303,8 +303,14 @@ def test_envelope_for_run_failed_no_link_when_job_absent() -> None:
 
 def test_envelope_for_run_failed_suppresses_detail_for_no_leak_categories() -> None:
     # A linked job reason must never leak past the no-leak seam (ADR-0123): a not_found
-    # failure surfaces the seam constant, not the job message.
-    job = _failed_job({"failure_message": "secret-host-name leaked here"})
+    # failure surfaces the seam constant, not the job message, and surfaces NO job-derived
+    # data (no failing_job_id, no failure_detail_* keys).
+    job = _failed_job(
+        {
+            "failure_message": "secret-host-name leaked here",
+            "failure_detail_host": "secret-host",
+        }
+    )
     resp = runs_common.envelope_for_run(
         _run_model(RunState.FAILED, failure=ErrorCategory.NOT_FOUND),
         failing_job=job,
@@ -312,6 +318,8 @@ def test_envelope_for_run_failed_suppresses_detail_for_no_leak_categories() -> N
 
     assert resp.error_category == "not_found"
     assert resp.detail == "not found"
+    assert "failing_job_id" not in resp.data
+    assert "failure_detail_host" not in resp.data
 
 
 def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
