@@ -73,6 +73,17 @@ _log = logging.getLogger(__name__)
 # the agent cannot attach either way.
 _ATTACH_FAILURE = frozenset({ErrorCategory.DEBUG_ATTACH_FAILURE, ErrorCategory.TRANSPORT_FAILURE})
 
+# Author-controlled prose + next actions for the caller-actionable `debug.start_session`
+# preconditions (#487, ADR-0142). `configuration_error` is not suppressed, so the `detail`
+# reaches the caller alongside the existing `data` reason/`current_status` token. Fixed strings —
+# no run state, guest output, or resource id is interpolated (no-leak seam, ADR-0123).
+_NOT_BOOTED_DETAIL = "run is not booted; it must reach a successful boot before a live session"
+_BOOT_FIRST_DETAIL = "run has no successful boot; boot it before starting a live session"
+_EXPECTED_CRASH_DETAIL = (
+    "run booted into an expected crash and is not live-debuggable; analyze its captured core "
+    "instead"
+)
+
 # A live/attach session occupies the System's single endpoint **for that transport kind**
 # (single-attach per transport, ADR-0039 §4): a gdbstub and a drgn-live session may coexist on
 # one System, but a second attach over the same transport is `transport_conflict`.
@@ -424,12 +435,30 @@ async def _attach_preconditions(
     conflict check is scoped to ``transport`` (per-transport single-attach, ADR-0039 §4).
     """
     if run.state is not RunState.SUCCEEDED:
-        return _config_error(str(run.id), data={"current_status": run.state.value})
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail=_NOT_BOOTED_DETAIL,
+            suggested_next_actions=["runs.get"],
+            data={"current_status": run.state.value},
+        )
     boot_result = await _succeeded_boot_result(conn, run.id)
     if boot_result is None:
-        return _config_error(str(run.id), data={"reason": "boot_first"})
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail=_BOOT_FIRST_DETAIL,
+            suggested_next_actions=["runs.boot", "runs.get"],
+            data={"reason": "boot_first"},
+        )
     if boot_result.get("boot_outcome") == "expected_crash_observed":
-        return _config_error(str(run.id), data={"reason": "expected_crash_not_live_debuggable"})
+        return ToolResponse.failure(
+            str(run.id),
+            ErrorCategory.CONFIGURATION_ERROR,
+            detail=_EXPECTED_CRASH_DETAIL,
+            suggested_next_actions=["postmortem.triage", "vmcore.fetch"],
+            data={"reason": "expected_crash_not_live_debuggable"},
+        )
     system = await _system_for_run(conn, run)
     if system is None:
         return _config_error(str(run.id))

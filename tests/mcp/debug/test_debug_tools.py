@@ -462,6 +462,9 @@ def test_start_session_run_not_succeeded_is_config_error(migrated_url: str) -> N
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "created"
+        # The precondition is named in detail + a next action (#487).
+        assert resp.detail is not None and "not booted" in resp.detail
+        assert resp.suggested_next_actions == ["runs.get"]
         assert count == 0
         assert conn_fake.opened == []  # connector not invoked
 
@@ -480,6 +483,8 @@ def test_start_session_unbooted_run_is_boot_first(migrated_url: str) -> None:
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["reason"] == "boot_first"
+        assert resp.detail is not None and "boot it" in resp.detail
+        assert resp.suggested_next_actions == ["runs.boot", "runs.get"]
         assert count == 0
 
     asyncio.run(_run())
@@ -524,6 +529,8 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "expected_crash_not_live_debuggable"
+        assert resp.detail is not None and "captured core" in resp.detail
+        assert resp.suggested_next_actions == ["postmortem.triage", "vmcore.fetch"]
         assert count == 0
         assert conn_fake.opened == []
 
