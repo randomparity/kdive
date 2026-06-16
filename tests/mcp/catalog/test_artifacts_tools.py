@@ -87,6 +87,7 @@ class _SearchStore:
         sensitivity: Sensitivity = Sensitivity.REDACTED,
         head_error: CategorizedError | None = None,
         get_error: CategorizedError | None = None,
+        presign_error: CategorizedError | None = None,
         missing_head: bool = False,
     ) -> None:
         self.data = data
@@ -94,9 +95,12 @@ class _SearchStore:
         self.sensitivity = sensitivity
         self.head_error = head_error
         self.get_error = get_error
+        self.presign_error = presign_error
         self.missing_head = missing_head
         self.headed = False
         self.got = False
+        self.presigned_key: str | None = None
+        self.presigned_expires_in: int | None = None
 
     def head(self, key: str) -> HeadResult | None:
         self.headed = True
@@ -112,6 +116,13 @@ class _SearchStore:
             raise self.get_error
         assert etag == "e"
         return FetchedArtifact(self.data, self.sensitivity, "console")
+
+    def presign_get(self, key: str, *, expires_in: int) -> str:
+        self.presigned_key = key
+        self.presigned_expires_in = expires_in
+        if self.presign_error is not None:
+            raise self.presign_error
+        return f"https://store.example/{key}?token=stub"
 
 
 def _artifact_read_handlers(store: _SearchStore) -> ArtifactReadHandlers:
@@ -332,6 +343,121 @@ def test_artifacts_get_redacted_returns_ref(migrated_url: str) -> None:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             resp = await artifacts_get(pool, _ctx(), artifact_id=red_id)
         assert resp.status != "error" and resp.refs
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_inlines_small_redacted_content(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"panic: redacted log\n")
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert data_str(resp, "content") == "panic: redacted log\n"
+        assert data_str(resp, "content_truncated") == "false"
+        assert data_str(resp, "size_bytes") == str(len(b"panic: redacted log\n"))
+        assert resp.refs["download_uri"].endswith("?token=stub")
+        # default TTL reaches presign_get with no env set
+        assert store.presigned_expires_in == 900
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_omits_oversized_content_keeps_uri(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"", size=64 * 1024 + 1)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert "content" not in resp.data
+        assert data_str(resp, "content_omitted") == "artifact_too_large"
+        assert resp.refs["download_uri"].endswith("?token=stub")
+        assert store.got is False  # never fetched the oversized body
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_rejects_non_redacted_fetch(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(b"panic", sensitivity=Sensitivity.SENSITIVE)
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        # The redaction gate: a sensitive object at a redacted row's key is not-found-shaped.
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert store.got is True
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_degrades_when_store_unconfigured(migrated_url: str) -> None:
+    error = CategorizedError("S3 unset", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    def _raise_store() -> _SearchStore:
+        raise error
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_get(pool, _ctx(), artifact_id=red_id, store_factory=_raise_store)
+        # Metadata envelope still returns; only the content/URI enrichment degrades.
+        assert resp.status == "available"
+        assert resp.refs["object"]
+        assert "download_uri" not in resp.refs
+        assert "content" not in resp.data
+        assert data_str(resp, "content_unavailable") == "store_unconfigured"
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_degrades_on_store_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(
+                b"panic",
+                head_error=CategorizedError(
+                    "store down", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                ),
+            )
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert resp.refs["object"]
+        assert "download_uri" not in resp.refs
+        assert "content" not in resp.data
+        assert data_str(resp, "content_unavailable") == "store_error"
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_degrades_on_presign_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, _, red_id = await _seed_system_with_artifacts(pool)
+            store = _SearchStore(
+                b"panic",
+                presign_error=CategorizedError(
+                    "presign down", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+                ),
+            )
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=red_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert "download_uri" not in resp.refs
+        assert "content" not in resp.data
+        assert data_str(resp, "content_unavailable") == "store_error"
 
     asyncio.run(_run())
 
