@@ -263,6 +263,10 @@ def test_project_membership_denied_envelopes_without_audit(migrated_url: str) ->
             result = await mw.on_call_tool(_FakeContext("allocations.list"), _call_next)
             assert isinstance(result, ToolResponse)
             assert result.error_category == "authorization_denied"
+            # No-leak (#450, ADR-0123): the seam collapses the denial to a generic constant; the
+            # named project from the raised message must not ride on the envelope.
+            assert result.detail == "access denied"
+            assert "other" not in result.model_dump_json()
             async with pool.connection() as conn:
                 assert await _count_audit(conn) == 0
 

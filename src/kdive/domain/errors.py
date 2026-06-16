@@ -54,6 +54,32 @@ class ErrorCategory(StrEnum):
     CAPACITY_EXHAUSTED = "capacity_exhausted"
 
 
+# Categories whose human-readable reason must never reach a client (ADR-0123): a denial or a
+# by-id lookup miss carries a fixed constant so no raise site — even one whose message embeds a
+# named project or object id — can leak resource existence through the envelope's `detail`.
+_SUPPRESSED_DETAIL: dict[ErrorCategory, str] = {
+    ErrorCategory.AUTHORIZATION_DENIED: "access denied",
+    ErrorCategory.NOT_FOUND: "not found",
+}
+
+
+def suppressed_detail(category: ErrorCategory, raw: str | None) -> str | None:
+    """Resolve the surfaced ``detail`` for ``category`` under the no-leak seam rule (ADR-0123).
+
+    For a suppressed category the fixed constant wins and ``raw`` is ignored, so no raise site can
+    leak a resource name through ``detail``. For every other (diagnostic) category ``raw`` — the
+    ``CategorizedError`` message — passes through unchanged.
+
+    Args:
+        category: The failure category being enveloped.
+        raw: The candidate detail (typically ``str(exc)``); may be ``None``.
+
+    Returns:
+        The fixed constant for a suppressed category, else ``raw``.
+    """
+    return _SUPPRESSED_DETAIL.get(category, raw)
+
+
 class CategorizedError(Exception):
     """An error carrying the :class:`ErrorCategory` a failure response needs.
 

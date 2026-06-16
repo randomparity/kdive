@@ -9,7 +9,6 @@ in ``kdive.jobs.handlers.systems``.
 
 from __future__ import annotations
 
-import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -24,7 +23,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
 from kdive.domain.models import Allocation, Job, JobKind, System
 from kdive.domain.sizing import MB_PER_GB, AllocationSizing
 from kdive.domain.state import AllocationState, IllegalTransition, SystemState
@@ -43,6 +42,7 @@ from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import safe_error_details
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -86,6 +86,7 @@ class AdmissionFailure:
     category: ErrorCategory
     data: dict[str, object]
     suggested_next_actions: tuple[str, ...] = ()
+    detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,29 +109,24 @@ def _failure(
     *,
     data: dict[str, object] | None = None,
     suggested_next_actions: tuple[str, ...] = (),
+    detail: str | None = None,
 ) -> AdmissionFailure:
     return AdmissionFailure(
         object_id=str(object_id),
         category=category,
         data=data or {},
         suggested_next_actions=suggested_next_actions,
+        detail=suppressed_detail(category, detail),
     )
 
 
-def _safe_error_details(details: dict[str, object]) -> dict[str, object]:
-    safe: dict[str, object] = {}
-    for key, value in details.items():
-        if isinstance(value, float):
-            if math.isfinite(value):
-                safe[key] = value
-            continue
-        if isinstance(value, (str, bool, int)):
-            safe[key] = value
-    return safe
-
-
 def _failure_from_error(object_id: str | UUID, exc: CategorizedError) -> AdmissionFailure:
-    return _failure(object_id, exc.category, data=_safe_error_details(exc.details))
+    return _failure(
+        object_id,
+        exc.category,
+        data=dict(safe_error_details(exc.details)),
+        detail=str(exc),
+    )
 
 
 def _stored_profile_for(

@@ -45,6 +45,7 @@ def _admission_response(result: AdmissionResult) -> ToolResponse:
         return ToolResponse.failure(
             result.object_id,
             result.category,
+            detail=result.detail,
             suggested_next_actions=list(result.suggested_next_actions),
             data=cast(ResponseData, result.data),
         )

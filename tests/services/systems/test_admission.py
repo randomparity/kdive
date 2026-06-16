@@ -71,6 +71,34 @@ def test_failure_from_error_keeps_only_json_safe_scalar_details() -> None:
     }
 
 
+def test_failure_from_error_threads_detail_and_structured_errors() -> None:
+    exc = CategorizedError(
+        "invalid provisioning profile",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "errors": [{"loc": ("provider", "kind"), "msg": "field required", "type": "missing"}]
+        },
+    )
+
+    failure = admission._failure_from_error("object-1", exc)
+
+    assert failure.detail == "invalid provisioning profile"
+    assert failure.data["errors"] == [
+        {"loc": ["provider", "kind"], "msg": "field required", "type": "missing"}
+    ]
+
+
+def test_failure_from_error_suppresses_detail_for_not_found() -> None:
+    exc = CategorizedError(
+        "system 11111111-2222-3333-4444-555555555555 was not found",
+        category=ErrorCategory.NOT_FOUND,
+    )
+
+    failure = admission._failure_from_error("object-1", exc)
+
+    assert failure.detail == "not found"
+
+
 def test_stored_profile_fills_sizing_from_allocation_snapshot() -> None:
     stored = admission._stored_profile_for(_profile(), _allocation())
 

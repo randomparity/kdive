@@ -7,7 +7,11 @@ import re
 
 import pytest
 
-from kdive.serialization import ensure_json_value, validate_json_value
+from kdive.serialization import (
+    ensure_json_value,
+    safe_error_details,
+    validate_json_value,
+)
 
 
 def test_ensure_json_value_accepts_nested_json_tree() -> None:
@@ -43,3 +47,68 @@ def test_validate_json_value_rejects_nested_invalid_values_with_path() -> None:
         match=re.escape("payload.items[0].metadata.owner contains non-JSON value object"),
     ):
         validate_json_value(invalid, path="payload")
+
+
+# ---------------------------------------------------------------------------
+# safe_error_details — scalar filter + reserved `errors` widening (ADR-0123)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_error_details_keeps_finite_scalars_and_drops_collections() -> None:
+    out = safe_error_details(
+        {
+            "field": "rootfs",
+            "flag": False,
+            "count": 3,
+            "ratio": 1.5,
+            "nan": math.nan,
+            "nested": {"x": 1},
+            "list": ["a"],
+        }
+    )
+    assert out == {"field": "rootfs", "flag": False, "count": 3, "ratio": 1.5}
+
+
+def test_safe_error_details_preserves_bounded_errors_list() -> None:
+    entries = [{"loc": (f"f{i}",), "msg": "bad", "type": "missing"} for i in range(25)]
+    out = safe_error_details({"errors": entries})
+    assert isinstance(out["errors"], list)
+    assert len(out["errors"]) == 20
+    assert out["errors"][0] == {"loc": ["f0"], "msg": "bad", "type": "missing"}
+
+
+def test_safe_error_details_strips_input_and_ctx_from_error_entries() -> None:
+    out = safe_error_details(
+        {
+            "errors": [
+                {
+                    "loc": ("provider", "kind"),
+                    "msg": "field required",
+                    "type": "missing",
+                    "input": "SUBMITTED",
+                    "ctx": {"internal": "noise"},
+                    "url": "https://errors.pydantic.dev/x",
+                }
+            ]
+        }
+    )
+    assert out["errors"] == [
+        {"loc": ["provider", "kind"], "msg": "field required", "type": "missing"}
+    ]
+
+
+def test_safe_error_details_errors_loc_keeps_int_segments() -> None:
+    out = safe_error_details({"errors": [{"loc": ("items", 2, "name"), "msg": "m", "type": "t"}]})
+    assert out["errors"] == [{"loc": ["items", 2, "name"], "msg": "m", "type": "t"}]
+
+
+def test_safe_error_details_drops_non_mapping_error_entries() -> None:
+    out = safe_error_details({"errors": ["not-a-dict", {"loc": ("a",), "msg": "m", "type": "t"}]})
+    assert out["errors"] == [{"loc": ["a"], "msg": "m", "type": "t"}]
+
+
+def test_safe_error_details_non_list_errors_value_dropped_as_scalar() -> None:
+    # An `errors` key that is not a list falls through to the scalar rule (a string survives).
+    assert safe_error_details({"errors": "boom"}) == {"errors": "boom"}
+    # A dict under `errors` (not a list) is dropped like any non-scalar.
+    assert safe_error_details({"errors": {"x": 1}}) == {}
