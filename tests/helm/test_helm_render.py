@@ -170,6 +170,26 @@ def _jobs_by_name(*set_args: str) -> dict[str, dict[str, Any]]:
     return jobs
 
 
+def test_validate_hook_rendered_only_with_systems_configmap() -> None:
+    without = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert "validate-systems" not in without
+    with_cm = _jobs_by_name(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
+    )
+    assert "validate-systems" in with_cm
+
+
+def test_validate_hook_is_pre_upgrade_weighted_before_migrate() -> None:
+    jobs = _jobs_by_name(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
+    )
+    v = jobs["validate-systems"]
+    assert "pre-install" in v["phase"] and "pre-upgrade" in v["phase"]
+    assert v["weight"] < jobs["migrate"]["weight"]  # runs before migrate
+    assert v["args"][:2] == ["reconcile-systems", "--check"]
+    assert "kdive-systems" in v["volumes"]
+
+
 def test_migrate_job_has_no_systems_volume() -> None:
     # migrate() no longer reads systems.toml (ADR-0121), so the migrate Job must not mount the
     # systems ConfigMap even when one is configured.
