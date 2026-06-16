@@ -97,6 +97,14 @@ shared seam, all tools benefit.
   `str(exc)` (the `CategorizedError` message) in `failure_from_error` and exposed as a `detail=`
   kwarg on `failure()`. Advertised schema stays the flat `{"type": "object"}` (ADR-0113); this
   is an additive field on the wire payload, not an output-schema change.
+- **`detail` is a new client egress — message hygiene is part of the contract.** Exception
+  messages in this codebase interpolate runtime values (e.g.
+  `ProjectMembershipDenied(f"project {project!r} is not granted to {ctx.principal!r}")`,
+  `src/kdive/security/authz/context.py:72`). The rule: a message surfaced as `detail` must be
+  author-controlled and must not interpolate secrets, secret-ref paths, internal hostnames, or
+  object-store keys. `CategorizedError` raise sites that fail this rule are fixed as part of work
+  item B (the audit is bounded — only categories that reach `detail`, see the seam rule below).
+  No automatic redaction pass is added; the discipline is "don't put it in the message."
 - **Structured errors survive:** `_safe_error_details` is widened to preserve one reserved
   nested key — `errors: list[{loc, msg, type}]` (exactly the shape `parse()` already produces
   via `exc.errors(include_url=False, include_input=False, include_context=False)`) — bounded to
@@ -108,11 +116,16 @@ shared seam, all tools benefit.
   `AdmissionFailure` later mapped to `ToolResponse`. `AdmissionFailure` gains a `detail` field
   threaded through the `provision.py` mapper. (The duplicated `_safe_error_details` is
   consolidated to one helper.)
-- **No-leak guard (load-bearing):** `detail` is populated for diagnostic categories
-  (`configuration_error`, `missing_dependency`, `build_failure`, …) but **stays generic** for
-  `authorization_denied` and the by-id `not_found` no-leak path (ADR-0097/0098). The membership
-  denial envelope (`ProjectMembershipDenied`, ADR-0098) is constructed without a leaky detail —
-  a regression test asserts no resource name appears in a non-member denial's `detail`.
+- **No-leak guard (load-bearing) — enforced at the seam, not at the raise site.** The seam
+  (`failure`/`failure_from_error`) holds a closed set of *suppressed categories*
+  (`authorization_denied`, `not_found`): for those, `detail` is set to a fixed constant
+  (`"access denied"` / `"not found"`) and `str(exc)` is **ignored**, so no raise site can leak
+  through `detail` even if its message embeds the named resource. `detail` is populated from
+  `str(exc)` only for the diagnostic categories (`configuration_error`, `missing_dependency`,
+  `build_failure`, …). This is a single seam check, not a distributed invariant across every
+  raise site. A regression test asserts a non-member denial and a by-id `not_found` both carry
+  the constant `detail` with no project/resource name and (for `not_found`) preserve the ADR-0097
+  existence-no-leak property.
 
 ### Work item A — Provisioning-profile discoverability (ADR-0124, finding 1)
 
@@ -120,25 +133,40 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
 
 - **Typed parameter:** `systems.define`/`systems.provision` type `profile` as
   `ProvisioningProfile` so FastMCP advertises its JSON schema (required fields, the discriminated
-  `rootfs`, the provider sections). Because FastMCP validates a typed model **at the boundary**,
-  before the tool body, a bad profile would otherwise raise FastMCP's own `ValidationError` and
-  bypass our envelope. A dispatch-boundary conversion (reusing work item B's surfacing) catches
-  `pydantic.ValidationError` raised during input binding and returns the standard
-  `configuration_error` envelope with `detail` + `errors`. This unifies findings 1 and 2 at the
-  input boundary.
-- **Spike (gates the typed-param half):** confirm the FastMCP 3.4.0 client renders a
-  `$defs`/`discriminator` **input** schema cleanly. ADR-0113 flattened *output* schemas because
-  the client's per-call `TypeAdapter` choked on recursive `$ref`; inputs are validated
-  server-side and only displayed, and `ProvisioningProfile` is not self-recursive — but the
-  spike verifies the client neither errors nor renders an unusable blob. If it chokes, the
-  typed-param half falls back to a hand-authored flattened input schema (still far richer than
-  `additionalProperties: true`); the discovery tool below ships regardless.
+  `rootfs`, the provider sections). `ProvisioningProfile` is `extra="forbid"`
+  (`src/kdive/profiles/provisioning.py:69`), so FastMCP validates *and rejects* malformed or
+  extra-key profiles **at argument binding** — before the tool body and before the
+  `_runtime_resolution` catch that builds our envelope. Two consequences must be designed, not
+  assumed: (a) interception, below; (b) extra keys a caller could previously send (the old
+  `additionalProperties: true`) are now rejected — an intended tightening, called out so it is not
+  a surprise regression.
+- **Two gating spikes (the typed-param half ships only if both pass):**
+  1. **Interception** — confirm a binding-time `pydantic.ValidationError` can be converted into
+     our `configuration_error` envelope (with the call's `object_id`/`allocation_id`, which binds
+     fine as a separate `str` param). The candidate seam is FastMCP middleware
+     (`TelemetryMiddleware`/`DenialAuditMiddleware`) or a FastMCP error hook; this is **unverified**
+     and load-bearing — if binding failures cannot be re-enveloped, the typed param *regresses*
+     malformed-input handling on the most important tool to a raw FastMCP error.
+  2. **Client rendering** — confirm the FastMCP 3.4.0 client renders a `$defs`/`discriminator`
+     **input** schema usably (ADR-0113 flattened recursive *output* schemas for this client;
+     `ProvisioningProfile` is not self-recursive, but inputs are unverified for this client).
+- **Fallback if either spike fails (preserves today's good error path):** keep `profile` as
+  `Mapping[str, object]` (validation stays in our `parse()` → envelope path, unchanged) and
+  advertise the schema by attaching `ProvisioningProfile.model_json_schema()` to the param via
+  FastMCP `json_schema_extra` — schema discoverability *without* moving validation to the
+  boundary. The discovery tool below ships regardless, so finding 1 is closed either way.
 - **Discovery tool `systems.profile_examples`** (modeled on `projects.list`, ADR-0117):
   read-only, auth-only, no project gate, no audit. Returns one item per configured provider with
-  a ready-to-edit example profile dict, populated with real reference names drawn from the
-  `systems.toml` inventory (e.g. the `base_image_volume` for remote-libvirt, catalog image names
-  for local-libvirt). Chains into `systems.define` / `allocations.request` via
-  `suggested_next_actions`. This is the always-works answer to "what is a valid profile here?"
+  a ready-to-edit example profile dict. Where the `systems.toml` inventory supplies a usable
+  reference, the example uses the real name (e.g. a remote-libvirt `base_image_volume`, a
+  local-libvirt `catalog` image declared in inventory); where it does not, the example carries a
+  clearly-marked placeholder reference (and a `note`) the caller must replace. **The examples are
+  schema-and-policy valid, not necessarily provisionable as-is:** a placeholder rootfs path won't
+  exist on a host, `kind:"upload"` is only accepted by `systems.define` (it opens an upload
+  window) and rejected by `systems.provision`, and a `catalog` ref must name a real inventory
+  image — so the tool's contract is "this parses and passes provider policy; fill in the marked
+  references for your host," not "paste this and it boots." Chains into `systems.define` /
+  `allocations.request` via `suggested_next_actions`.
 
 ### Work item D — Diagnostics host reachability (ADR-0125, finding 4)
 
@@ -146,51 +174,89 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
   factory (closing the deferred "egress-probe wave" gap).
 - Add a remote-libvirt **reachability check**: open `remote_connection()` and call
   `conn.getInfo()` under a bounded per-check timeout, reusing the `SshBuildHostProber` pattern
-  (`asyncio.to_thread` + timeout). Report per-host `pass`/`fail`/`error` with the connection
-  failure category (`transport_failure` vs `configuration_error`), so a caller can tell
-  "host unreachable" from "bad config." Gated like the other diagnostics checks (ADR-0091).
+  (`asyncio.to_thread` + timeout). Report `pass`/`fail`/`error` with the connection failure
+  category (`transport_failure` vs `configuration_error`).
+- **Probe scope (anti-amplification):** `remote_connection()` materializes TLS certs and opens a
+  libvirt connection — not free, and authz-gated does not mean rate-limited. The probe targets a
+  **single** `[[remote_libvirt]]` instance, selected by an optional `host`/`instance` argument; it
+  does **not** fan out to every configured instance on one call (which would turn one cheap MCP
+  call into N TLS handshakes against remote hosts). With no argument it probes the inventory's
+  default/sole instance. The per-check timeout bounds a hung host (a probe cannot stall the report
+  past it). Gated like the other diagnostics checks (ADR-0091).
+- **Scope of the claim:** a successful connection proves the host is **libvirt-reachable**, not
+  that it is provision-ready — a reachable-but-misconfigured host (missing storage pool/network)
+  still reports `pass` and fails later at provision. The check distinguishes "unreachable/bad
+  transport" from "reachable"; config-usability failures remain a provision-time signal (now
+  legible via work item B's `detail`).
 
 ### Work item C — Synchronous-tool transport bound (ADR-0126, finding 3)
 
 - **Audit + offload:** find the synchronous blocking call(s) in the `systems.provision` request
   path (DB lock acquisition / libvirt call during admission) and offload to `asyncio.to_thread`
   so the event loop is never blocked while one request runs.
-- **Dispatch-boundary timeout:** wrap synchronous tool bodies with an execution-time bound; on
-  timeout (or an otherwise-uncaught transport-level failure), return a `transport_failure`
-  envelope (with work item B's `detail`) instead of letting the socket drop.
-- **Spike (gates the bound's threshold):** reproduce the stall to confirm the blocking call and
-  set the timeout above the legitimate worst case.
+- **The timeout must not orphan a mutation (load-bearing).** Python cannot kill a running thread:
+  an `asyncio.wait_for` over a `to_thread` future abandons the *future* but the thread runs to
+  completion. `systems.provision` mutates state (mints the System row, enqueues the provision
+  job), and `transport_failure` is `retryable=True` (`src/kdive/mcp/responses.py:45`). A naive
+  "wrap the body in a timeout → return `transport_failure`" therefore lets the mutation land in
+  the background while the caller is told it failed and **auto-retries → a duplicate
+  System/allocation/job**. So the bound is applied **only to the pre-mutation segment** of the
+  request path (validation, admission checks, lock acquisition) — the segment that legitimately
+  blocks the event loop and where a timeout is safe because no state has changed yet. Once the
+  first mutation begins, the request runs to its own completion and returns its real envelope; it
+  is never abandoned by the dispatch timeout. (The fast mutation+enqueue itself is sub-second; the
+  observed stall was in the pre-mutation segment.)
+- **Idempotency backstop:** even with the segmented bound, a client that retries after a genuine
+  transport drop must not double-provision. `systems.provision`/`define` carry an idempotency key
+  (the existing idempotency ledger, ADR-0016) so a retried identical request is deduped rather
+  than minting a second System. If the ledger does not already cover this path, adding it is part
+  of work item C.
+- **Spike (gates the threshold and the segment boundary):** reproduce the stall to confirm *which*
+  call blocks and that it is in the pre-mutation segment, and set the timeout above the legitimate
+  worst case for that segment.
 
 ## Failure modes and edges
 
 | Condition | Result |
 |---|---|
-| Bad profile via typed param | Boundary `ValidationError` → `configuration_error` envelope + `detail` + `errors` field-paths |
-| Bad profile, FastMCP client can't render typed input schema | Spike fallback: flattened input schema; `systems.profile_examples` still serves a valid example |
-| `authorization_denied` / non-member denial | Generic `detail` only; no resource name leaks (no-leak regression test) |
-| `not_found` by id | Generic `detail`; ADR-0097 no-leak path untouched |
+| Bad profile via typed param (interception spike passed) | Boundary `ValidationError` → `configuration_error` envelope + `detail` + `errors` field-paths |
+| Either typed-param spike fails | Fallback: param stays `Mapping`, schema advertised via `json_schema_extra`; our `parse()`→envelope path is unchanged; `systems.profile_examples` still serves an example |
+| Caller sends extra keys (old `additionalProperties:true`) | Now rejected (`extra="forbid"`) — intended tightening |
+| `authorization_denied` / non-member denial | Seam forces constant `detail` (`"access denied"`); `str(exc)` ignored; no project/resource name leaks |
+| `not_found` by id | Seam forces constant `detail` (`"not found"`); ADR-0097 existence-no-leak preserved |
 | Structured error with >20 sub-errors | First 20 surfaced; bounded so the envelope stays small |
-| `systems.provision` stalls on a blocking call | `transport_failure` envelope, not a dropped socket |
-| Remote-libvirt host down | `ops.diagnostics` reachability check reports `fail` + `transport_failure` |
+| `systems.provision` stalls in the pre-mutation segment | `transport_failure` envelope, not a dropped socket |
+| Timeout would fire after a mutation began | Cannot — bound covers only the pre-mutation segment; the request completes and returns its real envelope |
+| Client retries a genuine transport drop | Idempotency ledger (ADR-0016) dedups; no duplicate System/allocation/job |
+| Remote-libvirt host down | reachability check reports `fail` + `transport_failure` (single targeted instance) |
 | Remote-libvirt misconfigured URI/cert | reachability check reports `error` + `configuration_error` |
-| `systems.profile_examples` with no inventory | Returns generic per-provider examples (placeholder reference names) + a note |
+| Remote-libvirt reachable but not provision-ready (no storage pool) | reachability reports `pass`; failure surfaces at provision with a legible `detail` |
+| `ops.diagnostics` called with no host arg, multiple instances configured | Probes the default/sole instance only; no fan-out |
+| `systems.profile_examples` with no usable inventory ref | Example carries a marked placeholder + `note`; still schema-and-policy valid, not provisionable as-is |
 
 ## Test plan (behavior, not implementation)
 
 - **B:** a rejected `configuration_error` carries a non-empty `detail` and an `errors` list with
-  field paths; an `authorization_denied` / non-member denial carries a generic `detail` with no
-  resource name (no-leak guard); the `errors` list is bounded at 20 and input values never echo.
+  field paths; an `authorization_denied` non-member denial **and** a by-id `not_found` each carry
+  the seam's constant `detail` with no project/resource name (the seam ignores `str(exc)` for
+  those categories — asserted with a raise site whose message *does* embed the name, proving the
+  seam, not the raiser, enforces it); the `errors` list is bounded at 20 and input values never
+  echo.
 - **A:** the advertised `systems.define` input schema is no longer `additionalProperties: true`
-  (or, on spike-fallback, is the flattened schema); a malformed profile returns the
-  `configuration_error` envelope (not a raw FastMCP error); `systems.profile_examples` returns a
-  valid example per provider whose `base_image_volume`/catalog name matches the `systems.toml`
-  inventory, and the example round-trips through `systems.define` without a `configuration_error`.
-- **D:** the default diagnostics factory now includes the TLS/ACL checks; a reachable host
-  reports `pass`, an unreachable host reports `fail` + `transport_failure`, a bad URI reports
-  `error` + `configuration_error`.
-- **C:** a tool body that exceeds the bound returns a `transport_failure` envelope rather than
-  raising/dropping; the provision request path runs no sync blocking call on the event loop
-  (asserted by an injected slow DB/libvirt double not stalling a concurrent request).
+  (typed-param path: a `$ref` schema; fallback path: the `json_schema_extra` schema); a malformed
+  profile returns the `configuration_error` envelope, not a raw FastMCP error; **each
+  `systems.profile_examples` example, with its placeholders resolved to inventory references,
+  passes `ProvisioningProfile.parse()` + `validate_profile_for_provider()`** (the schema+policy
+  layer — not the full allocation-scoped admission path, which also enforces sizing/upload-window
+  and so cannot isolate schema validity).
+- **D:** the default diagnostics factory now includes the TLS/ACL checks; against a single
+  targeted instance, a reachable host reports `pass`, an unreachable host reports `fail` +
+  `transport_failure`, a bad URI reports `error` + `configuration_error`; a no-host call with
+  multiple instances configured probes only the default instance (no fan-out).
+- **C:** a stall in the pre-mutation segment returns a `transport_failure` envelope rather than
+  dropping; the provision request path runs no sync blocking call on the event loop (asserted by
+  an injected slow DB/libvirt double not stalling a concurrent request); a retried identical
+  provision after a transport drop is deduped by the idempotency ledger (no second System).
 - **Wiring/guard:** `tests/mcp/core/test_tool_docs.py` tool→test map includes
   `systems.profile_examples`; the generated tool-reference doc lists it; no new migration.
 

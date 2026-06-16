@@ -26,14 +26,22 @@ validates the connection, and `SshBuildHostProber`
 We will wire the existing `ProviderTlsCheck`/`GdbstubAclCheck` into the default diagnostics
 service factory and add a remote-libvirt reachability check that opens `remote_connection()` and
 calls `conn.getInfo()` under a bounded per-check timeout (reusing the `SshBuildHostProber`
-offload pattern), reporting per-host `pass`/`fail`/`error` with the connection failure category
+offload pattern), reporting `pass`/`fail`/`error` with the connection failure category
 (`transport_failure` for an unreachable host, `configuration_error` for a bad URI/cert). The
-check is server-side authz-gated like the other diagnostics checks (ADR-0091).
+probe targets a **single** `[[remote_libvirt]]` instance selected by an optional `host` argument
+(defaulting to the sole/default instance) and does **not** fan out across all configured
+instances on one call, so a single authz'd MCP call cannot amplify into N TLS handshakes against
+remote hosts. The check is server-side authz-gated like the other diagnostics checks (ADR-0091),
+and its claim is scoped to libvirt-reachability — a reachable-but-misconfigured host (no storage
+pool/network) reports `pass` and surfaces its config failure at provision time (now legible via
+ADR-0123's `detail`).
 
 ## Consequences
 
-- `ops.diagnostics` can tell an operator whether a provisioning failure is the host or the
-  config, which was the missing signal during onboarding.
+- `ops.diagnostics` can tell an operator whether a provisioning failure is an unreachable/bad
+  transport vs. a reachable host — the missing signal during onboarding. It does not certify
+  provision-readiness (config-usability still surfaces at provision), and that boundary is stated
+  rather than implied.
 - The probe performs network egress and TLS materialization from the server, so it inherits the
   diagnostics timeout/gating discipline; a hung host cannot stall the report beyond the per-check
   timeout.

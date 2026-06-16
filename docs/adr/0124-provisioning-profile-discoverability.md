@@ -25,25 +25,35 @@ handling of a `$defs`/`discriminator` *input* schema is unverified.
 ## Decision
 
 We will type the `profile` parameter as `ProvisioningProfile` (advertising its JSON schema) and
-convert any `pydantic.ValidationError` raised during input binding into the standard
+convert the `pydantic.ValidationError` it raises during input binding into the standard
 `configuration_error` envelope using ADR-0123's `detail` + `errors` surfacing, and we will add a
 read-only discovery tool `systems.profile_examples` (modeled on `projects.list`, ADR-0117:
-auth-only, no project gate, no audit) that returns one ready-to-edit example profile per
-configured provider, populated with real reference names from the `systems.toml` inventory and
-chained via `suggested_next_actions`. The typed-param half is gated on a spike confirming the
-FastMCP 3.4.0 client renders the discriminated-union input schema; if it does not, the
-typed-param half falls back to a hand-authored flattened input schema while the discovery tool
-ships regardless.
+auth-only, no project gate, no audit) returning one ready-to-edit example profile per configured
+provider — using real inventory references where available and a marked placeholder otherwise —
+chained via `suggested_next_actions`. The typed-param half is gated on **two** spikes: (1) that a
+binding-time `ValidationError` can be intercepted and re-enveloped (the candidate seam is FastMCP
+middleware/error-hook; load-bearing because `ProvisioningProfile` is `extra="forbid"`, so FastMCP
+rejects bad input *before* the tool body and before `_runtime_resolution`'s catch), and (2) that
+the FastMCP 3.4.0 client renders the `$defs`/discriminator input schema usably. If either fails,
+the typed-param half falls back to keeping `profile` as `Mapping[str, object]` (validation stays
+in our `parse()`→envelope path, unchanged) with the schema advertised via
+`json_schema_extra`. The discovery tool ships regardless, so finding 1 is closed on every branch.
 
 ## Consequences
 
 - A new agent can discover a valid profile from the MCP surface alone — the discovery tool is the
   guaranteed-working path independent of client schema rendering.
-- Boundary validation errors now produce the project's envelope (not a raw FastMCP error),
-  unifying this with ADR-0123 at the input boundary.
-- New obligations: the spike on client input-schema rendering; an example-round-trips-through-
-  `systems.define` test so the advertised examples cannot rot; tool-docs/reference wiring for the
-  new tool.
+- On the typed-param branch, boundary validation errors produce the project's envelope (not a raw
+  FastMCP error), unifying this with ADR-0123 at the input boundary; on the fallback branch the
+  existing `parse()`→envelope path is untouched. Either way malformed input never regresses to a
+  raw framework error.
+- Typing the param tightens the contract: extra keys previously tolerated under
+  `additionalProperties: true` are now rejected (`extra="forbid"`) — an intended change, flagged
+  so it is not a surprise.
+- New obligations: the two gating spikes (interception, client rendering); an example-validity
+  test driving `ProvisioningProfile.parse()` + `validate_profile_for_provider()` directly (not the
+  allocation-scoped admission path) so the advertised examples cannot rot; tool-docs/reference
+  wiring for the new tool.
 - This refines ADR-0011/0024 (the schema is now advertised, not just enforced) and depends on
   ADR-0123 landing first.
 

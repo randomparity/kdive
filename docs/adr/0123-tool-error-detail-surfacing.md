@@ -29,8 +29,14 @@ We will add a `detail: str | None` field to `ToolResponse`, populated from the
 `errors: list[{loc, msg, type}]` key (bounded to 20 entries, each sanitized to scalars). The
 duplicated `_safe_error_details` is consolidated to one helper, and `AdmissionFailure` gains a
 `detail` field threaded through the systems mapper so both the generic and the admission seams
-surface the reason. `detail` stays **generic** for `authorization_denied` and the by-id
-`not_found` no-leak path (ADR-0097/0098), so no resource existence leaks.
+surface the reason. The no-leak guard is enforced **at the seam**, not at the raise site: the
+seam holds a closed set of suppressed categories (`authorization_denied`, `not_found`) for which
+`detail` is a fixed constant and `str(exc)` is ignored, so no raise site — including
+`ProjectMembershipDenied`, whose message embeds the named project — can leak through `detail`.
+Because `detail` is a new client egress, messages surfaced for the diagnostic categories must be
+author-controlled and must not interpolate secrets, secret-ref paths, internal hostnames, or
+object-store keys; raise sites that violate this are fixed in the same change. No automatic
+redaction pass is added.
 
 ## Consequences
 
@@ -38,8 +44,11 @@ surface the reason. `detail` stays **generic** for `authorization_denied` and th
   is unblocked even before its own work item lands.
 - The advertised output schema is unchanged (stays flat per ADR-0113); `detail` is an additive
   wire field, and `errors` rides the already-recursive `data` payload.
-- New obligation: a no-leak regression test must assert non-member/`not_found` denials carry no
-  resource name in `detail`. This is the load-bearing guard.
+- New obligation: a no-leak regression test must assert non-member/`not_found` denials carry the
+  seam's constant `detail` with no resource name — driven through a raise site whose message *does*
+  embed the name, so the test proves the seam (not the raiser) enforces it.
+- New obligation: a one-time audit of `CategorizedError` raise sites for the diagnostic categories
+  to confirm none interpolate secrets/paths into the now-surfaced message.
 - This refines ADR-0019's "references, never dumps" rule: a bounded, sanitized reason is now
   allowed because an opaque category proved un-actionable.
 
