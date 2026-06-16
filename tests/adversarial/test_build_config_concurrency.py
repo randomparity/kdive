@@ -101,3 +101,42 @@ def test_concurrent_set_converges_row_and_object(
         assert content in ("AAAA\n", "BBBB\n")
 
     asyncio.run(_run())
+
+
+def test_concurrent_reconciles_keep_row_and_object_consistent(
+    migrated_url: str, minio_store: ObjectStore
+) -> None:
+    """Two reconciles publishing different bytes for one name converge consistently.
+
+    The per-name BUILD_CONFIG lock serializes the two passes, so the surviving catalog row's
+    sha256 must hash the object's final bytes at the reserved key (no interleave that commits a
+    row sha describing the other writer's object). Reconcile-vs-set is covered above; this adds
+    the reconcile path against the shared lock.
+    """
+    from kdive.build_configs.catalog import read_build_config_provenance
+    from kdive.inventory.model import InventoryDoc
+    from kdive.inventory.reconcile_build_configs import reconcile_build_configs
+
+    key = "system/build-configs/kdump/kdump.config"
+
+    def _doc(content: str) -> InventoryDoc:
+        return InventoryDoc.parse(
+            {"schema_version": 2, "build_config": [{"name": "kdump", "content": content}]}
+        )
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=4) as pool:
+
+            async def _reconcile(content: str) -> None:
+                async with pool.connection() as conn:
+                    await reconcile_build_configs(conn, _doc(content), minio_store)
+
+            await asyncio.gather(_reconcile("CONFIG_A=y\n"), _reconcile("CONFIG_B=y\n"))
+            async with pool.connection() as conn:
+                prov = await read_build_config_provenance(conn, "kdump")
+
+        assert prov is not None
+        fetched = minio_store.get_artifact(key, None)
+        assert prov[0] == hashlib.sha256(fetched.data).hexdigest()  # row sha == object bytes
+
+    asyncio.run(_run())
