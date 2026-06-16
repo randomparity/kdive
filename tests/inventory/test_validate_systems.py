@@ -59,3 +59,29 @@ def test_validate_absent_default_path_returns_zero(
 
     config.load()
     assert validate_systems(None) == 0
+
+
+def test_validate_rejects_over_cap_build_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("KDIVE_MAX_BUILD_CONFIG_BYTES", "10")
+    path = tmp_path / "systems.toml"
+    path.write_text(
+        "schema_version = 2\n"
+        '[[build_config]]\nname = "kdump"\ncontent = "CONFIG_KEXEC=y_way_too_long"\n',
+        encoding="utf-8",
+    )
+    assert validate_systems(path) != 0
+    assert "kdump" in capsys.readouterr().err
+
+
+def test_validate_accepts_in_cap_build_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KDIVE_MAX_BUILD_CONFIG_BYTES", "4096")
+    path = tmp_path / "systems.toml"
+    path.write_text(
+        'schema_version = 2\n[[build_config]]\nname = "kdump"\ncontent = "y\\n"\n',
+        encoding="utf-8",
+    )
+    assert validate_systems(path) == 0
