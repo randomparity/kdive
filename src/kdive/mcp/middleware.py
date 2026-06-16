@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +43,7 @@ from pydantic import ValidationError
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import SHAPE_XOR_ERROR_TYPE
 from kdive.security import audit
 from kdive.security.authz.errors import ProjectMembershipDenied
 from kdive.security.authz.rbac import RoleDenied
@@ -177,44 +179,106 @@ class DenialAuditMiddleware(Middleware):
             )
 
 
-# The typed-profile tools (#451): FastMCP validates their ``ProvisioningProfile`` param at binding,
-# so a malformed profile raises before the tool body. Each maps to the call argument that names the
-# call's object, so the re-enveloped error carries the same object_id the body path would have.
-_PROFILE_TOOL_ID_ARG: dict[str, str] = {
-    "systems.define": "allocation_id",
-    "systems.provision": "allocation_id",
-    "systems.reprovision": "system_id",
+def _loc_under(param: str) -> Callable[[ValidationError], bool]:
+    """Predicate: every error location is under ``param`` (a binding failure for that param).
+
+    FastMCP raises a binding ``ValidationError`` whose ``loc`` starts with the param name for a
+    malformed typed param. Requiring *all* entries to start there distinguishes the binding failure
+    from an unrelated ``ValidationError`` the tool body might surface, so only the former is
+    re-enveloped.
+    """
+
+    def _predicate(exc: ValidationError) -> bool:
+        errors = exc.errors()
+        return bool(errors) and all(
+            bool(err.get("loc")) and err["loc"][0] == param for err in errors
+        )
+
+    return _predicate
+
+
+def _is_shape_xor_error(exc: ValidationError) -> bool:
+    """Whether every error entry is the shape-XOR-custom validator error (#473, ADR-0132).
+
+    The XOR rule is a model-level constraint JSON Schema cannot express, raised as a typed
+    ``shape_xor_custom`` error so it is distinguishable from a field-level error on the same
+    payload (a typo'd extra field, a bad ``resource.mode`` discriminator, a non-int ``vcpus``),
+    which must keep FastMCP's per-field detail and is therefore re-raised, not converted.
+    """
+    errors = exc.errors()
+    return bool(errors) and all(err.get("type") == SHAPE_XOR_ERROR_TYPE for err in errors)
+
+
+def _profile_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
+    """Envelope a malformed typed-profile binding error (ADR-0124, reuses ADR-0123)."""
+    error = CategorizedError(
+        "invalid provisioning profile",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "errors": exc.errors(include_url=False, include_input=False, include_context=False),
+        },
+    )
+    return ToolResponse.failure_from_error(object_id, error)
+
+
+def _shape_xor_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
+    """Envelope a shape-XOR-custom binding error with a precise ``detail`` (#473, ADR-0132)."""
+    both = any(err.get("ctx", {}).get("both") for err in exc.errors())
+    detail = (
+        "supplied both a shape and a custom size; supply exactly one sizing source "
+        "(a shape, or the full {vcpus, memory_gb, disk_gb} triple)"
+        if both
+        else (
+            "supplied neither a shape nor a full {vcpus, memory_gb, disk_gb} triple; "
+            "supply exactly one sizing source"
+        )
+    )
+    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, detail=detail)
+
+
+@dataclass(frozen=True, slots=True)
+class _BindingConversion:
+    """How to convert one tool's binding ``ValidationError`` into a returned envelope."""
+
+    id_arg: str
+    matches: Callable[[ValidationError], bool]
+    build: Callable[[str, ValidationError], ToolResponse]
+
+
+# Tools whose typed params FastMCP validates at argument binding (before the tool body). Each maps
+# the binding error to the call argument that names the call's object — so the re-enveloped error
+# carries the same object_id the body path would have — plus the predicate that recognises *its*
+# binding failure and the envelope builder. A tool not listed here, or a ValidationError its
+# predicate rejects, propagates unchanged so role/membership denials still route through
+# ``DenialAuditMiddleware``.
+_BINDING_CONVERSIONS: dict[str, _BindingConversion] = {
+    "systems.define": _BindingConversion("allocation_id", _loc_under("profile"), _profile_envelope),
+    "systems.provision": _BindingConversion(
+        "allocation_id", _loc_under("profile"), _profile_envelope
+    ),
+    "systems.reprovision": _BindingConversion(
+        "system_id", _loc_under("profile"), _profile_envelope
+    ),
+    "allocations.request": _BindingConversion("project", _is_shape_xor_error, _shape_xor_envelope),
 }
 
 
-def _is_profile_binding_error(exc: ValidationError) -> bool:
-    """Whether every error location is under the ``profile`` param (a binding failure).
+class BindingErrorMiddleware(Middleware):
+    """Convert a binding-time ``ValidationError`` into the uniform envelope (ADR-0124, ADR-0132).
 
-    FastMCP raises a binding ``ValidationError`` whose ``loc`` always starts with ``"profile"`` for
-    a malformed typed profile. Requiring *all* entries to start there distinguishes a profile-bind
-    failure from an unrelated ``ValidationError`` that might surface from the tool body, so only the
-    former is re-enveloped as ``invalid provisioning profile``.
-    """
-    errors = exc.errors()
-    return bool(errors) and all(
-        bool(err.get("loc")) and err["loc"][0] == "profile" for err in errors
-    )
-
-
-class ProfileBindingMiddleware(Middleware):
-    """Convert a binding-time profile ``ValidationError`` into the project envelope (ADR-0124).
-
-    The typed ``profile`` param is ``ProvisioningProfile`` (``extra="forbid"``), so FastMCP
-    validates and rejects a malformed profile at argument binding — before the tool body and before
-    the ``_runtime_resolution`` catch that builds the envelope. Without this seam the caller would
-    get a raw FastMCP ``ToolError`` instead of the uniform ``configuration_error`` envelope.
+    FastMCP validates a tool's typed params at argument binding — before the tool body and before
+    any in-body catch that builds the envelope — so a malformed typed param (a bad provisioning
+    ``profile``, or an ``allocations.request`` payload that violates the shape-XOR-custom rule)
+    raises a ``pydantic.ValidationError`` the caller would otherwise see as a raw FastMCP
+    ``ToolError``. This seam re-envelopes it as the standard ``configuration_error`` response.
 
     Registered **innermost** of the three middlewares (after ``TelemetryMiddleware`` and
     ``DenialAuditMiddleware``), so it converts the binding error into a *returned* envelope inside
-    the telemetry span — counted as a normal completion, matching a body-rejected bad profile. It
-    acts only for the typed-profile tools (:data:`_PROFILE_TOOL_ID_ARG`); every other tool and every
-    non-``ValidationError`` exception propagates unchanged, so role/membership denials still route
-    through ``DenialAuditMiddleware``.
+    the telemetry span — counted as a normal completion, matching a body-rejected bad input. It acts
+    only for the tools in :data:`_BINDING_CONVERSIONS`, and only for the binding error its
+    per-tool predicate recognises (a field-level error on the same payload is re-raised so FastMCP's
+    per-field detail is preserved); every other tool and every non-``ValidationError`` exception
+    propagates unchanged.
     """
 
     async def on_call_tool(
@@ -222,43 +286,34 @@ class ProfileBindingMiddleware(Middleware):
         context: Any,
         call_next: Callable[[Any], Any],
     ) -> Any:
-        """Dispatch one call; re-envelope a typed-profile binding ``ValidationError``."""
-        tool = context.message.name
-        id_arg = _PROFILE_TOOL_ID_ARG.get(tool)
-        if id_arg is None:
+        """Dispatch one call; re-envelope a recognised binding ``ValidationError``."""
+        conversion = _BINDING_CONVERSIONS.get(context.message.name)
+        if conversion is None:
             return await call_next(context)
         try:
             return await call_next(context)
         except ValidationError as exc:
-            if not _is_profile_binding_error(exc):
-                # A ValidationError whose locations are not all under the ``profile`` param is not a
-                # profile-binding failure (the tool bodies convert their own parse() errors to
-                # CategorizedError, never a raw ValidationError) — let it propagate unchanged rather
-                # than mislabel it as an invalid profile.
+            if not conversion.matches(exc):
+                # Not this tool's binding failure (e.g. a field-level error on the same payload,
+                # or a ValidationError the body surfaced) — propagate, never mislabel it.
                 raise
-            envelope = self._envelope(tool, id_arg, context, exc)
+            object_id = _binding_object_id(context, conversion.id_arg)
+            envelope = conversion.build(object_id, exc)
             # The middleware short-circuits the tool body, so it must return the same ``ToolResult``
             # FastMCP builds from a tool's ``ToolResponse`` return — a bare ``ToolResponse`` has no
             # ``to_mcp_result`` and would raise at serialization. ``structured_content`` is the flat
             # envelope dict (ADR-0113), matching the swept output schema.
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
 
-    def _envelope(self, tool: str, id_arg: str, context: Any, exc: ValidationError) -> ToolResponse:
-        """Build the ``configuration_error`` envelope for a binding error (reuses ADR-0123)."""
-        arguments = getattr(context.message, "arguments", None)
-        object_id = tool
-        if isinstance(arguments, dict):
-            value = arguments.get(id_arg)
-            if isinstance(value, str):
-                object_id = value
-        error = CategorizedError(
-            "invalid provisioning profile",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={
-                "errors": exc.errors(include_url=False, include_input=False, include_context=False),
-            },
-        )
-        return ToolResponse.failure_from_error(object_id, error)
+
+def _binding_object_id(context: Any, id_arg: str) -> str:
+    """The call's object id from ``id_arg``, falling back to the tool name."""
+    arguments = getattr(context.message, "arguments", None)
+    if isinstance(arguments, dict):
+        value = arguments.get(id_arg)
+        if isinstance(value, str):
+            return value
+    return str(context.message.name)
 
 
 class TelemetryMiddleware(Middleware):

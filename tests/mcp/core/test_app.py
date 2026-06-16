@@ -116,19 +116,19 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
     asyncio.run(_run())
 
 
-def test_profile_binding_middleware_is_registered_innermost() -> None:
-    # ProfileBindingMiddleware must sit after Telemetry + DenialAudit so a binding ValidationError
-    # is converted to a returned envelope inside the telemetry span (#451, ADR-0124).
+def test_binding_error_middleware_is_registered_innermost() -> None:
+    # BindingErrorMiddleware must sit after Telemetry + DenialAudit so a binding ValidationError
+    # is converted to a returned envelope inside the telemetry span (ADR-0124; ADR-0132).
     from kdive.mcp.middleware import (
+        BindingErrorMiddleware,
         DenialAuditMiddleware,
-        ProfileBindingMiddleware,
         TelemetryMiddleware,
     )
 
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
     order = [type(m).__name__ for m in app.middleware]
-    assert order.index(ProfileBindingMiddleware.__name__) > order.index(
+    assert order.index(BindingErrorMiddleware.__name__) > order.index(
         DenialAuditMiddleware.__name__
     )
     assert order.index(DenialAuditMiddleware.__name__) > order.index(TelemetryMiddleware.__name__)

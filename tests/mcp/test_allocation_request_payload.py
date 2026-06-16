@@ -15,6 +15,15 @@ from kdive.domain.models import ResourceKind
 from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload, ResourceByKind
 
 
+def test_published_schema_shape_description_names_shapes_list_and_xor_rule() -> None:
+    # #473 acceptance: the published input schema documents `shape` — a pointer to shapes.list
+    # and the XOR rule JSON Schema cannot express.
+    schema = AllocationRequestPayload.model_json_schema()
+    description = schema["properties"]["shape"]["description"]
+    assert "shapes.list" in description
+    assert "mutually exclusive" in description
+
+
 def test_shape_only_is_valid() -> None:
     payload = AllocationRequestPayload.model_validate({"shape": "medium"})
     assert payload.shape == "medium"
@@ -44,6 +53,19 @@ def test_by_kind_selector_uses_resource_kind_enum() -> None:
     assert explicit.resource.kind is ResourceKind.FAULT_INJECT
 
 
+def _xor_error_entry(payload: dict[str, object]) -> tuple[str, object]:
+    """Validate ``payload`` and return the sole entry's ``(type, ctx['both'])``."""
+    try:
+        AllocationRequestPayload.model_validate(payload)
+    except ValidationError as exc:
+        entries = exc.errors()
+        assert len(entries) == 1
+        entry = entries[0]
+        ctx = entry.get("ctx") or {}
+        return str(entry["type"]), ctx.get("both")
+    raise AssertionError("expected a ValidationError")
+
+
 def test_shape_and_custom_together_is_rejected() -> None:
     with pytest.raises(ValidationError):
         AllocationRequestPayload.model_validate(
@@ -54,6 +76,17 @@ def test_shape_and_custom_together_is_rejected() -> None:
 def test_neither_shape_nor_custom_is_rejected() -> None:
     with pytest.raises(ValidationError):
         AllocationRequestPayload.model_validate({})
+
+
+def test_xor_violation_carries_stable_error_type_and_both_flag() -> None:
+    # The shape-XOR violation raises a typed error (not a bare value_error) so the binding
+    # middleware can distinguish it from a field-level error (#473, ADR-0132).
+    assert _xor_error_entry({"shape": "medium", "vcpus": 2, "memory_gb": 4, "disk_gb": 20}) == (
+        "shape_xor_custom",
+        True,
+    )
+    assert _xor_error_entry({}) == ("shape_xor_custom", False)
+    assert _xor_error_entry({"vcpus": 2}) == ("shape_xor_custom", False)
 
 
 @pytest.mark.parametrize(
