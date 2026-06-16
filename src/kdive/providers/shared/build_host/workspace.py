@@ -27,6 +27,28 @@ STDERR_TAIL = 2000
 GIT_APPLY_TIMEOUT_S = 120
 RSYNC_TIMEOUT_S = 10 * 60
 
+# A warm-tree build resolves its source from the worker-process ``KDIVE_KERNEL_SRC``
+# env, which the server cannot see at admission time, so a misconfigured source can
+# only surface here. Both failure strings name the two ways forward — the operator
+# warm-tree staging step (and its doc) and the git build lane (a structured
+# ``kernel_source_ref`` against a registered remote build host) — so the caller can
+# self-correct from the error alone rather than hitting a generic, lane-blind message.
+_BUILD_LANE_GUIDANCE = (
+    "Either stage a kernel source tree on the build worker and set KDIVE_KERNEL_SRC to "
+    "its absolute path (see docs/operating/build-source-staging.md), or submit a git "
+    'build profile instead — a structured kernel_source_ref {"git": {"remote": ..., '
+    '"ref": ...}} routed to a registered remote build host '
+    "(build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)."
+)
+KERNEL_SRC_UNSET_DETAIL = (
+    "This warm-tree build has no kernel source: KDIVE_KERNEL_SRC is not set on the "
+    f"build worker. {_BUILD_LANE_GUIDANCE}"
+)
+KERNEL_SRC_INVALID_DETAIL = (
+    "KDIVE_KERNEL_SRC is set on the build worker but is not an absolute path to an "
+    f"existing kernel source tree. {_BUILD_LANE_GUIDANCE}"
+)
+
 type Checkout = Callable[[UUID, ServerBuildProfile, Path, bytes], None]
 
 
@@ -151,10 +173,15 @@ def sync_tree(
     kernel_src: str, workspace: Path, secret_registry: SecretRegistry | None = None
 ) -> None:
     """Mirror the warm kernel source tree into ``workspace`` with ``rsync -a --delete``."""
-    source = Path(kernel_src) if kernel_src else None
-    if source is None or not source.is_absolute() or source == source.parent or not source.is_dir():
+    if not kernel_src.strip():
         raise CategorizedError(
-            "KDIVE_KERNEL_SRC must be an absolute path to an existing kernel source tree",
+            KERNEL_SRC_UNSET_DETAIL,
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    source = Path(kernel_src)
+    if not source.is_absolute() or source == source.parent or not source.is_dir():
+        raise CategorizedError(
+            KERNEL_SRC_INVALID_DETAIL,
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     if shutil.which("rsync") is None:

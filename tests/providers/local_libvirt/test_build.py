@@ -1166,6 +1166,99 @@ def test_sync_tree_filesystem_root_is_configuration_error(tmp_path: Path) -> Non
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+# --- #481: the warm-tree error names both reachable lanes + the operator doc -------------
+
+_STAGING_DOC = "docs/operating/build-source-staging.md"
+
+
+def _names_both_lanes_and_doc(message: str) -> bool:
+    """Both sync_tree errors must route the caller to either reachable build lane."""
+    lowered = message.lower()
+    return (
+        "kdive_kernel_src" in lowered  # the warm-tree env var
+        and _STAGING_DOC in message  # the operator doc
+        and "git" in lowered  # the git-clone lane
+        and "build host" in lowered  # the remote-build-host requirement of the git lane
+    )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_sync_tree_unset_kernel_src_names_prestage_and_both_lanes(
+    blank: str, tmp_path: Path
+) -> None:
+    # An empty or whitespace-only KDIVE_KERNEL_SRC means the operator never staged a warm
+    # tree; the message says so, points at the doc, and names the git lane as the alternative.
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(blank, tmp_path / "ws")
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    message = str(caught.value)
+    assert _names_both_lanes_and_doc(message)
+    assert "stage" in message.lower()
+
+
+def test_sync_tree_invalid_path_message_is_distinct_from_unset(tmp_path: Path) -> None:
+    # A set-but-invalid path is a different failure than "never staged"; the messages differ
+    # but both still route to the doc + both lanes.
+    with pytest.raises(CategorizedError) as unset:
+        build_host_workspace.sync_tree("", tmp_path / "ws")
+    with pytest.raises(CategorizedError) as invalid:
+        build_host_workspace.sync_tree(str(tmp_path / "absent"), tmp_path / "ws")
+    unset_msg, invalid_msg = str(unset.value), str(invalid.value)
+    assert _names_both_lanes_and_doc(invalid_msg)
+    assert invalid_msg != unset_msg
+
+
+def test_sync_tree_does_not_interpolate_configured_path(tmp_path: Path) -> None:
+    # The configured value is operator host state and must not appear in the message.
+    secret_looking = tmp_path / "S3CRET-KERNEL-PATH"
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(secret_looking), tmp_path / "ws")
+    assert "S3CRET-KERNEL-PATH" not in str(caught.value)
+    assert "S3CRET-KERNEL-PATH" not in str(caught.value.details)
+
+
+def _assert_names_both_build_lanes(message: str) -> None:
+    # Every warm-tree source failure must point the caller at the two ways forward:
+    # the operator warm-tree staging step (and its doc), and the git build lane
+    # (structured ref + a registered remote build host).
+    assert "KDIVE_KERNEL_SRC" in message
+    assert "docs/operating/build-source-staging.md" in message
+    assert '{"git"' in message
+    assert "build_hosts.register" in message
+
+
+def test_sync_tree_unset_kernel_src_names_both_lanes(tmp_path: Path) -> None:
+    # An unset KDIVE_KERNEL_SRC must say so explicitly and name both ways forward,
+    # not emit the generic "must be an absolute path" string.
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree("", tmp_path / "ws")
+    message = str(caught.value)
+    assert "not set" in message
+    _assert_names_both_build_lanes(message)
+
+
+def test_sync_tree_whitespace_kernel_src_reads_as_unset(tmp_path: Path) -> None:
+    # A whitespace-only KDIVE_KERNEL_SRC is effectively unset; it must route to the
+    # "not set" guidance, not the "set but invalid path" case.
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree("   ", tmp_path / "ws")
+    assert "not set" in str(caught.value)
+
+
+def test_sync_tree_invalid_path_message_distinct_from_unset(tmp_path: Path) -> None:
+    # A KDIVE_KERNEL_SRC that is set but points nowhere usable must read differently
+    # from the unset case (so the operator knows whether to set it or fix it), while
+    # still naming both lanes.
+    with pytest.raises(CategorizedError) as unset:
+        build_host_workspace.sync_tree("", tmp_path / "ws")
+    with pytest.raises(CategorizedError) as invalid:
+        build_host_workspace.sync_tree(str(tmp_path / "absent"), tmp_path / "ws")
+    invalid_message = str(invalid.value)
+    assert str(unset.value) != invalid_message
+    assert "not set" not in invalid_message
+    _assert_names_both_build_lanes(invalid_message)
+
+
 def test_sync_tree_missing_rsync_is_missing_dependency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
