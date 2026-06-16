@@ -184,6 +184,7 @@ def _item(result: CheckResult) -> ToolResponse:
             "detail": result.detail,
             "fix": result.fix,
             "provider": result.provider,
+            "failure_category": result.failure_category,
         },
     )
 
