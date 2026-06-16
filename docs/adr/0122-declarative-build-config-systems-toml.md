@@ -137,10 +137,13 @@ consistency; the seed bytes are a valid fragment).
   `domain/cost_class_rules.py`) and run at parse time in the model (the loader stays pure —
   `model.py` does not import `kdive.config`); the helper raises a bare `ValueError` each
   caller maps to its own error type. The config-dependent **byte cap** is **not** enforced in
-  the pydantic model (no DI seam, would break loader purity and the no-DB `--check` mode);
-  the reconcile pass enforces it just before publishing (it already reads config), as a
-  per-fragment `warned` skip, reading the **same** `MAX_BUILD_CONFIG_BYTES` as
-  `buildconfig.set` so the two cannot diverge. `inventory/` must not import `mcp/`;
+  the pydantic model (no DI seam, would break loader purity); it is enforced at the two
+  layers that already read config, both off the same `MAX_BUILD_CONFIG_BYTES` as
+  `buildconfig.set` (so none can diverge): **deploy-time** in `reconcile-systems --check`
+  (`validate_systems` already reads config; an env read is within its no-DB/no-S3 contract,
+  so an over-cap fragment fails the `pre-install` gate like a bad name does — keeping the
+  deploy safety net closed), and **runtime** in the reconcile pass as a per-fragment `warned`
+  skip (for a fragment that grows past the cap after deploy). `inventory/` must not import `mcp/`;
   `build_configs/` is neutral and importable by both.
 - `build_configs/catalog.py` gains `upsert_config_build_config` (writes `source='config'`
   unconditionally) and a `(sha256, source)` reader the pass uses for change-detection and

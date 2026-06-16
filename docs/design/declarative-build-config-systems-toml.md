@@ -194,15 +194,25 @@ frozenset (`tests/scripts/test_m2_portability_gate.py`), the same as migration `
   `kdive.config` today and must not start). The helper raises a bare `ValueError`; each
   caller maps it (`InventoryError` at file load, `CONFIGURATION_ERROR` for the tool).
 - **The byte cap (≤ `KDIVE_MAX_BUILD_CONFIG_BYTES`)** is config-dependent and is **not**
-  enforced in the model — a pydantic field validator has no clean seam to inject the runtime
-  cap, and reading config in the loader would break its purity and the
-  no-DB/no-S3-access `reconcile-systems --check` mode (ADR-0121). Instead the **reconcile
-  pass** enforces the cap (it already reads config) just before publishing: an over-cap
-  declared fragment is a per-fragment `warned` skip (the row is left untouched), not a
-  whole-pass failure — one oversized fragment must not block the others, matching the image
-  pass's per-entry degrade. The pass and `buildconfig.set` read the **same**
-  `config.require(MAX_BUILD_CONFIG_BYTES)`, so the two surfaces cannot diverge on the cap
-  even though they enforce it at different layers.
+  enforced in the pure model/loader — a pydantic field validator has no clean seam to inject
+  the runtime cap, and reading config inside `model.py`/`load_inventory` would break the
+  loader's purity. It is instead enforced at the **two layers that already read config**, both
+  off the same `config.require(MAX_BUILD_CONFIG_BYTES)` (so they cannot diverge):
+  - **Deploy-time, in `reconcile-systems --check` (`validate_systems`).** This is the
+    `pre-install`/`pre-upgrade` fail-fast Helm gate (ADR-0121). It already reads
+    `kdive.config` (it resolves `SYSTEMS_TOML`), and an env read is within its no-DB/no-S3
+    contract, so after parsing it checks each declared fragment's UTF-8 byte length against
+    the cap and exits non-zero (the same fail-the-deploy behavior a bad `name` gets). This
+    keeps the deploy-time safety net closed: an over-cap fragment aborts the upgrade rather
+    than deploying green and silently not publishing.
+  - **Runtime, in the reconcile pass.** As the authority on a running system: an over-cap
+    declared fragment is a per-fragment `warned` skip (row untouched), not a whole-pass
+    failure — one oversized fragment must not block the others, matching the image pass's
+    per-entry degrade. This still fires for a fragment that grew past the cap *after* a deploy
+    (e.g. a live ConfigMap edit the reconciler picks up without a `--check`).
+
+  The cap is therefore caught before deploy **and** defended at runtime; the pure model is
+  the only layer that does not check it.
 
 `inventory/` must not import `mcp/` (a core→tool layering inversion); `build_configs/` is
 neutral and importable by both, like `domain/cost_class_rules.py`.
@@ -215,7 +225,8 @@ neutral and importable by both, like `domain/cost_class_rules.py`.
 name-uniqueness across the list (mirroring `_check_cost_class_uniqueness`). A name/empty
 violation raises `InventoryError` at parse, failing the whole reconcile pass for that
 iteration (the all-or-nothing file contract). The byte cap is **not** checked here (see
-above) — it is a reconcile-time `warned` skip.
+above) — it is enforced deploy-time by `reconcile-systems --check` and at runtime by the
+reconcile pass.
 
 ### Catalog repository
 
@@ -225,9 +236,10 @@ above) — it is a reconcile-time `warned` skip.
   `source='config'` unconditionally (the file is authoritative; it clobbers an `operator`
   or `seed` row). Empty description preserves the prior one (the `COALESCE(NULLIF(...))`
   pattern from `upsert_operator_build_config`).
-- a `(sha256, source)` reader the pass uses for change-detection and drift attribution
-  (the seed's `_stored_row` reads exactly this; it is promoted to the repository or
-  reused).
+- a `(sha256, source, description)` reader the pass uses for change-detection and drift
+  attribution (the seed's `_stored_row` reads `(sha256, source)`; this widens it to include
+  `description`, since the change-detection key compares description too — see the reconcile
+  pass below). Promoted to the repository and shared with the seed.
 
 ### Reconcile pass
 
@@ -272,7 +284,7 @@ union; the callers pass the objects they already pass.
 | Condition | Outcome |
 |-----------|---------|
 | Bad `name` / empty `content` | `InventoryError` at parse → whole pass fails this iteration (loud, retried) |
-| Over-cap `content` (> `KDIVE_MAX_BUILD_CONFIG_BYTES`) | reconcile-time per-fragment `warned` skip (row untouched, others still reconcile); not a whole-pass failure |
+| Over-cap `content` (> `KDIVE_MAX_BUILD_CONFIG_BYTES`) | deploy-time: `reconcile-systems --check` exits non-zero → aborts the upgrade. Runtime (post-deploy growth): per-fragment `warned` skip (row untouched, others still reconcile), not a whole-pass failure |
 | Store cannot publish (no S3 / `_AbsentImageStore`) | `warned` record, rows untouched, pass still succeeds |
 | Store reachable but PUT raises | the per-fragment transaction rolls back; pass surfaces it like other reconcile failures (logged, retried next pass) |
 | PUT succeeds then process/DB crashes before row commit | object holds new bytes, row holds old sha256; `verify_bytes` on `buildconfig.get` / the build fetch raises `INFRASTRUCTURE_FAILURE`; a re-reconcile converges (the #438 fail-closed self-heal) |
@@ -288,6 +300,9 @@ Behavior-first, TDD. Tests mirror the package tree.
 - **Shared rule** (`tests/build_configs/test_rules.py`): the config-free validator
   (name charset, non-empty) accepts/rejects the same inputs as the `buildconfig.set`
   boundary; the tool is refactored to call it and its existing tests stay green.
+- **Validate `--check`** (`tests/inventory/test_reconcile_cli.py`): `validate_systems` exits
+  non-zero on an over-cap `[[build_config]]` (deploy-time cap gate) and exits 0 on an in-cap
+  fragment; uses the same `MAX_BUILD_CONFIG_BYTES` the reconcile pass reads.
 - **Reconcile pass** (`tests/inventory/test_reconcile_build_configs.py`): create a new
   config fragment (publishes + row `source='config'`); change-detecting no-op on an identical
   re-assert; **description-only edit re-asserts** (catalog description updates, no `warned`);
