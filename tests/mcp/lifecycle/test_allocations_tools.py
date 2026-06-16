@@ -197,6 +197,8 @@ def test_request_under_cap_grants(migrated_url: str) -> None:
         assert resp.status == "granted"
         assert resp.error_category is None
         assert resp.data["project"] == "proj"
+        # #462: a granted allocation points the agent at the create-a-VM next step.
+        assert "systems.provision" in resp.suggested_next_actions
 
     asyncio.run(_run())
 
@@ -739,6 +741,9 @@ def test_queue_position_counts_same_kind_fifo(migrated_url: str) -> None:
         assert (ra.data["queue_position"], ra.data["queue_ahead"]) == (1, 0)
         assert (rb.data["queue_position"], rb.data["queue_ahead"]) == (2, 1)
         assert (rc.data["queue_position"], rc.data["queue_ahead"]) == (3, 2)
+        # #462: a queued (requested) allocation holds no host yet, so it does not advertise
+        # systems.provision (no allocation to provision onto until it is promoted to granted).
+        assert "systems.provision" not in ra.suggested_next_actions
 
     asyncio.run(_run())
 
@@ -770,6 +775,8 @@ def test_queue_position_absent_on_granted_and_in_list(migrated_url: str) -> None
             rl = await alloc_tools.list_allocations(pool, _ctx(), project="proj", limit=50)
         assert "queue_position" not in rg.data
         assert all("queue_position" not in item.data for item in rl.items)
+        # #462: reaching a granted allocation via allocations.get also advertises systems.provision.
+        assert "systems.provision" in rg.suggested_next_actions
 
     asyncio.run(_run())
 

@@ -62,6 +62,18 @@ POLL_INTERVAL_S = 0.5
 MAX_WAIT_S = 300.0
 
 
+def _allocation_next_actions(state: AllocationState) -> list[str]:
+    """Breadcrumb for a successful allocation envelope, keyed by state (#462).
+
+    A ``granted`` allocation's next step in the create-a-VM flow is ``systems.provision`` (it
+    consumes ``allocation_id``), so it is advertised between the read and the release. A queued
+    ``requested`` allocation holds no host yet, so it stays read-or-release until promoted.
+    """
+    if state is AllocationState.GRANTED:
+        return ["allocations.get", "systems.provision", "allocations.release"]
+    return ["allocations.get", "allocations.release"]
+
+
 async def _queue_position(conn: AsyncConnection, alloc: Allocation) -> int:
     """1-based FIFO rank of a ``requested`` allocation among same-target queued rows.
 
@@ -116,7 +128,7 @@ def _envelope_for_allocation(
     return ToolResponse.success(
         str(alloc.id),
         alloc.state.value,
-        suggested_next_actions=["allocations.get", "allocations.release"],
+        suggested_next_actions=_allocation_next_actions(alloc.state),
         data=data,
     )
 
@@ -212,7 +224,7 @@ def _grant_or_enqueue_response(
     return ToolResponse.success(
         str(allocation.id),
         allocation.state.value,
-        suggested_next_actions=["allocations.get", "allocations.release"],
+        suggested_next_actions=_allocation_next_actions(allocation.state),
         data=data,
     )
 
@@ -327,7 +339,7 @@ def _renew_response(uid: UUID, outcome: RenewOutcome) -> ToolResponse:
         return ToolResponse.success(
             str(uid),
             outcome.allocation.state.value,
-            suggested_next_actions=["allocations.get", "allocations.release"],
+            suggested_next_actions=_allocation_next_actions(outcome.allocation.state),
             data={"project": outcome.allocation.project},
         )
     category = outcome.category or ErrorCategory.ALLOCATION_DENIED
