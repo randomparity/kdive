@@ -31,15 +31,20 @@ touch the dispatch boundary.
 
 ## Decision
 
-We take the two mitigations that are in kdive's control, and document the retry contract:
+The **documented retry contract is the primary mitigation**; the two code changes are
+supporting, in-control adjustments. Neither code change alone resolves the raw in-flight drop
+(unwrappable, per Context).
 
 1. **Set an explicit uvicorn keepalive on the server transport.** `_run_server` passes
    `uvicorn_config={"timeout_keep_alive": _HTTP_KEEPALIVE_S}` (65 s) to
-   `app.run_async(transport="http", …)`. This governs the idle keepalive between the rapid
-   successive short-wait polls the retry contract recommends, sized just above the common
-   60 s proxy idle default so the connection is not churned closed between polls. It does
-   **not** extend the in-flight hold of a single long `jobs.wait` — no uvicorn knob does —
-   and we do not claim it does.
+   `app.run_async(transport="http", …)`. `timeout_keep_alive` governs only how long the server
+   holds an *idle keepalive TCP connection* open *between* requests on that connection, so its
+   benefit is **conditional**: it reduces reconnect churn only for a client that **reuses** the
+   same TCP connection across successive short polls. It does **nothing** for a client that opens
+   a fresh connection per call, and it does **not** extend the in-flight hold of a single long
+   `jobs.wait` — no uvicorn knob does — and we do not claim it does. `_HTTP_KEEPALIVE_S` (65 s)
+   sits below `MAX_WAIT_S` (300 s) by design: it bounds the between-poll idle gap, not the
+   in-flight hold. This is best-effort churn reduction, not the fix.
 
 2. **Keep `jobs.wait` returning promptly at its cap as a "still running, call again"
    signal, and make that contract explicit.** A non-terminal `jobs.wait` already returns
@@ -55,8 +60,9 @@ We take the two mitigations that are in kdive's control, and document the retry 
    token-efficient pattern is repeated short `jobs.wait` calls (default 30 s) rather than one
    300 s hold. `transport_failure` is already `retryable=true` (ADR-0118), so a
    server-*observable* recoverable stream error already returns a categorized retryable
-   envelope; the gap this ADR closes is the un-observable raw drop, addressed by contract +
-   keepalive, not by inventing a new envelope path.
+   envelope; the gap this ADR closes is the un-observable raw drop, closed by the documented
+   contract (with the keepalive as best-effort churn reduction), not by inventing a new envelope
+   path.
 
 `_HTTP_KEEPALIVE_S` is a module constant, not a `KDIVE_*` setting: it is a deployment-coupling
 default (sized against proxy norms), not per-run agent input, and no current user needs to
