@@ -294,6 +294,7 @@ def test_power_destructive_action_denied_without_scope(migrated_url: str) -> Non
             )
             resp = await _power(pool, _admin_ctx(), system_id=sys_id, action="reset")
             assert resp.status == "error" and resp.error_category == "authorization_denied"
+            assert resp.data["missing_checks"] == ["capability_scope"]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'power'")
                 jobs_row = await cur.fetchone()
@@ -441,15 +442,15 @@ def _operator_ctx() -> RequestContext:
 
 
 @pytest.mark.parametrize(
-    ("scope_ok", "is_admin", "opt_in"),
+    ("scope_ok", "is_admin", "opt_in", "expected_missing"),
     [
-        (False, True, True),  # missing capability_scope
-        (True, False, True),  # missing admin_role
-        (True, True, False),  # missing profile_opt_in
+        (False, True, True, "capability_scope"),
+        (True, False, True, "admin_role"),
+        (True, True, False, "profile_opt_in"),
     ],
 )
 def test_force_crash_denied_returns_authorization_denied(
-    migrated_url: str, scope_ok: bool, is_admin: bool, opt_in: bool
+    migrated_url: str, scope_ok: bool, is_admin: bool, opt_in: bool, expected_missing: str
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -460,6 +461,7 @@ def test_force_crash_denied_returns_authorization_denied(
             ctx = _admin_ctx() if is_admin else _operator_ctx()
             resp = await _crash(pool, ctx, sys_id)
             assert resp.status == "error" and resp.error_category == "authorization_denied"
+            assert resp.data["missing_checks"] == [expected_missing]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT count(*) AS n FROM audit_log "

@@ -24,7 +24,6 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import DestructiveJobKind, JobKind, PowerAction, System
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
@@ -38,6 +37,9 @@ from kdive.mcp.tools._common import (
 )
 from kdive.mcp.tools._common import (
     authorizing as job_authorizing,
+)
+from kdive.mcp.tools._common import (
+    authz_denied as _authz_denied,
 )
 from kdive.mcp.tools._common import (
     config_error as _config_error,
@@ -145,7 +147,7 @@ async def _authorize_destructive(
                     project=system.project,
                 ),
             )
-        return ToolResponse.failure(str(system_uid), ErrorCategory.AUTHORIZATION_DENIED)
+        return _authz_denied(str(system_uid), denied.missing)
     return None
 
 

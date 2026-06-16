@@ -1458,6 +1458,7 @@ def test_reprovision_without_scope_denied(migrated_url: str) -> None:
             )
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
+        assert resp.data["missing_checks"] == ["capability_scope"]
 
     asyncio.run(_run())
 

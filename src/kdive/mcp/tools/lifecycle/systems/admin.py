@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.domain.models import DestructiveJobKind, Job, JobKind, System
 from kdive.domain.state import IllegalTransition, RunState, SystemState
 from kdive.jobs import queue
@@ -109,7 +109,7 @@ async def _reprovision_locked(
             assert_destructive_allowed(ctx, allocation, op, required_role=Role.OPERATOR)
         except DestructiveOpDenied as denied:
             await _audit_destructive_denied(conn, ctx, system, _REPROVISION, denied.missing)
-            return ToolResponse.failure(str(system_id), ErrorCategory.AUTHORIZATION_DENIED)
+            return _authz_denied(str(system_id), denied.missing)
         digest = profile_digest(profile)
         dedup_key = f"{system_id}:reprovision:{digest}"
         if system.state is SystemState.REPROVISIONING:
