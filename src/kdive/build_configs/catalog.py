@@ -136,3 +136,60 @@ async def upsert_seed_build_config(
             "WHERE build_config_catalog.source = 'seed'",
             {"name": name, "object_key": object_key, "sha256": sha256, "description": description},
         )
+
+
+async def read_build_config_provenance(
+    conn: AsyncConnection, name: str
+) -> tuple[str, str, str] | None:
+    """Return ``(sha256, source, description)`` for ``name``, or ``None`` if absent.
+
+    The inventory reconcile pass uses this for change-detection (sha256 + description) and
+    drift attribution (source), and the seed reuses it for its source-aware skip (ADR-0122).
+
+    Args:
+        conn: An open async psycopg connection.
+        name: The fragment catalog name.
+
+    Returns:
+        The ``(sha256, source, description)`` triple, or ``None`` when no row exists.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT sha256, source, description FROM build_config_catalog WHERE name = %(name)s",
+            {"name": name},
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return (str(row["sha256"]), str(row["source"]), str(row["description"]))
+
+
+async def upsert_config_build_config(
+    conn: AsyncConnection, name: str, object_key: str, sha256: str, description: str
+) -> None:
+    """Upsert a config-declared fragment row (``source='config'``), unconditionally (ADR-0122).
+
+    The ``systems.toml`` file is authoritative, so this clobbers a ``seed`` or ``operator`` row
+    AND writes ``description`` **verbatim** (the file fully specifies the fragment each
+    reconcile). It deliberately does NOT use the ``COALESCE``-preserve pattern the operator
+    writer uses: that pattern would make a file declaring an empty description un-converge
+    against the reconcile pass's ``(sha256, source, description)`` change-detection key (the
+    stored description would never blank, so the pass would re-assert every cycle). Verbatim
+    keeps the pass idempotent.
+
+    Args:
+        conn: An open async psycopg connection.
+        name: The fragment catalog name.
+        object_key: The reserved object-store key the bytes were published to.
+        sha256: The hex digest of the published bytes.
+        description: The fragment's description, written verbatim.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO build_config_catalog (name, object_key, sha256, description, source) "
+            "VALUES (%(name)s, %(object_key)s, %(sha256)s, %(description)s, 'config') "
+            "ON CONFLICT (name) DO UPDATE SET "
+            "object_key = EXCLUDED.object_key, sha256 = EXCLUDED.sha256, "
+            "description = EXCLUDED.description, source = 'config', updated_at = now()",
+            {"name": name, "object_key": object_key, "sha256": sha256, "description": description},
+        )
