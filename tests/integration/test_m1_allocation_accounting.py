@@ -909,7 +909,7 @@ def test_c6_operator_refused_admin_ops(migrated_url: str) -> None:
                 pool, op, system_id=sys_id, action="off", resolver=_provider_resolver()
             )
             assert power.status == "error" and power.error_category == "authorization_denied"
-            teardown = await teardown_system(pool, op, sys_id, resolver=_provider_resolver())
+            teardown = await teardown_system(pool, op, sys_id)
             assert teardown.status == "error"
             assert teardown.error_category == "authorization_denied"
 

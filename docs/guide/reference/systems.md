@@ -79,7 +79,7 @@ Enqueue in-place reprovision for a ready System. Requires operator and opt-in.
 
 `partial` · `destructive`
 
-Enqueue teardown for a System. Requires admin and destructive-op opt-in.
+Enqueue teardown for a System. Requires admin on the System's project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
