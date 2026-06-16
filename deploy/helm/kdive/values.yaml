@@ -19,6 +19,10 @@ config:
   KDIVE_S3_ENDPOINT_URL: ""
   KDIVE_S3_BUCKET: kdive-artifacts
   KDIVE_S3_REGION: us-east-1
+  # k8s pods run no local libvirtd, so the local-libvirt reconciler reaper would fail its
+  # leaked-domain sweep every pass on a missing socket. Disable it here (ADR-0127); remote
+  # providers stay active. Set true only on a node that genuinely exposes a libvirt socket.
+  KDIVE_LOCAL_LIBVIRT_ENABLED: "false"
 
 # Optional declarative inventory (systems.toml, ADR-0112). Create a ConfigMap with a
 # `systems.toml` key and set configMapName to mount it on migrate/server/worker/reconciler.

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.config.core_settings import FAULT_INJECT
+from kdive.config.core_settings import FAULT_INJECT, LOCAL_LIBVIRT_ENABLED
 from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.models import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
@@ -33,6 +33,7 @@ from kdive.providers.infra.reaping import (
     InfraReaper,
     NullBuildVmReaper,
     NullDumpVolumeReaper,
+    NullReaper,
     OwnedDomain,
 )
 from kdive.providers.local_libvirt import composition as local_composition
@@ -136,6 +137,13 @@ def _remote_libvirt_enabled(enable_remote_libvirt: bool | None) -> bool:
     return is_remote_libvirt_configured()
 
 
+def _local_libvirt_enabled(enable_local_libvirt: bool | None) -> bool:
+    """Resolve the gate: an explicit flag wins, else read the env (default on)."""
+    if enable_local_libvirt is not None:
+        return enable_local_libvirt
+    return (config.get(LOCAL_LIBVIRT_ENABLED) or "").strip().lower() not in {"0", "false", "no"}
+
+
 class _CompositeReaper:
     """Fan out leaked-domain reconciliation across configured provider reapers."""
 
@@ -224,9 +232,12 @@ class ProviderComposition:
         self,
         *,
         enable_fault_inject: bool | None,
+        enable_local_libvirt: bool | None,
         libvirt_reaper: InfraReaper | None,
     ) -> tuple[Callable[[], InfraReaper], ...]:
-        factories = [lambda: libvirt_reaper or local_composition.build_reaper()]
+        factories: list[Callable[[], InfraReaper]] = []
+        if _local_libvirt_enabled(enable_local_libvirt):
+            factories.append(lambda: libvirt_reaper or local_composition.build_reaper())
         if _fault_inject_enabled(enable_fault_inject):
             factories.append(
                 lambda: fault_inject_composition.build_reaper(self._fault_inject_inventory)
@@ -311,24 +322,29 @@ class ProviderComposition:
         self,
         *,
         enable_fault_inject: bool | None = None,
+        enable_local_libvirt: bool | None = None,
         libvirt_reaper: InfraReaper | None = None,
     ) -> InfraReaper:
         """Assemble the provider-aware leaked-infra reaper for reconciliation.
 
-        Local-libvirt is always-on (``KDIVE_LIBVIRT_URI`` defaults to ``qemu:///system`` and
-        the local runtime is always registered), so the libvirt-backed reaper (ADR-0111) is
-        always present — a stock deployment is no longer ``NullReaper``-backed, so an orphaned
-        ``kdive-<uuid>`` domain reaches ``repair_leaked_domains``. The fault-inject reaper is
-        composed in when enabled. ``libvirt_reaper`` is an injection seam for tests (the real
-        reaper opens a libvirt connection on ``list_owned``); production passes ``None``.
+        Local-libvirt is on by default (``KDIVE_LOCAL_LIBVIRT_ENABLED``), so a stock deployment
+        composes the libvirt-backed reaper (ADR-0111) and an orphaned ``kdive-<uuid>`` domain
+        reaches ``repair_leaked_domains``. A remote-libvirt-only deployment with no local libvirt
+        socket (e.g. k8s) sets the flag false so the sweep does not fail every pass; the fault-
+        inject reaper is composed in when enabled. With neither enabled the reaper is a
+        :class:`NullReaper`. ``libvirt_reaper`` is an injection seam for tests (the real reaper
+        opens a libvirt connection on ``list_owned``); production passes ``None``.
         """
         reapers = [
             factory()
             for factory in self._reconciler_reaper_factories(
                 enable_fault_inject=enable_fault_inject,
+                enable_local_libvirt=enable_local_libvirt,
                 libvirt_reaper=libvirt_reaper,
             )
         ]
+        if not reapers:
+            return NullReaper()
         if len(reapers) == 1:
             return reapers[0]
         return _CompositeReaper(tuple(reapers))

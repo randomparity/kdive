@@ -410,6 +410,56 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
     asyncio.run(reaper.destroy(domain))
 
 
+def test_reconciler_reaper_is_null_when_local_libvirt_disabled() -> None:
+    # A deployment with no local libvirt (e.g. k8s, remote-libvirt only) opts the local reaper
+    # out so repair_leaked_domains never tries to open a non-existent qemu:///system socket.
+    import asyncio
+
+    from kdive.providers.infra.reaping import NullReaper
+
+    comp = composition.ProviderComposition()
+    reaper = comp.build_reconciler_reaper(
+        enable_local_libvirt=False,
+        libvirt_reaper=_FakeLibvirtReaper(_FakeOwnedDomain(name="kdive-should-not-appear")),
+    )
+
+    assert isinstance(reaper, NullReaper)
+    assert asyncio.run(reaper.list_owned()) == []
+
+
+def test_reconciler_reaper_is_fault_inject_only_when_local_disabled() -> None:
+    # Local disabled but fault-inject enabled: the reaper is the fault-inject one alone — the
+    # injected libvirt sentinel must not surface (no composite with the opted-out local reaper).
+    import asyncio
+
+    comp = composition.ProviderComposition()
+    reaper = comp.build_reconciler_reaper(
+        enable_local_libvirt=False,
+        enable_fault_inject=True,
+        libvirt_reaper=_FakeLibvirtReaper(_FakeOwnedDomain(name="kdive-should-not-appear")),
+    )
+
+    owned = [item.name for item in asyncio.run(reaper.list_owned())]
+    assert "kdive-should-not-appear" not in owned
+
+
+def test_local_libvirt_enabled_by_default_and_opt_out_via_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.providers.assembly.composition import _local_libvirt_enabled
+
+    monkeypatch.delenv("KDIVE_LOCAL_LIBVIRT_ENABLED", raising=False)
+    config.reset()
+    assert _local_libvirt_enabled(None) is True
+
+    monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
+    config.reset()
+    assert _local_libvirt_enabled(None) is False
+
+    # An explicit flag wins over the environment.
+    assert _local_libvirt_enabled(True) is True
+
+
 def test_transport_resetter_is_null_without_remote() -> None:
     from kdive.providers.core.transport_reset import NullResetter
 
