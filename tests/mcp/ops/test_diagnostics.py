@@ -237,6 +237,31 @@ def test_verdict_carries_each_check_status_detail_fix_provider(migrated_url: str
     asyncio.run(_run())
 
 
+def test_verdict_projects_failure_category(migrated_url: str) -> None:
+    results = [
+        CheckResult(
+            check_id="remote_libvirt_reachability",
+            status=CheckStatus.FAIL,
+            detail="host not reachable over qemu+tls",
+            fix="bring the host up",
+            provider="remote-libvirt",
+            failure_category="transport_failure",
+        ),
+        CheckResult(check_id="secret_ref", status=CheckStatus.PASS, detail="all resolve"),
+    ]
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await diagnostics.run_diagnostics(pool, _factory(results), _OPERATOR)
+        by_check = {item.data["check"]: item for item in resp.items}
+        reachability_item = by_check["remote_libvirt_reachability"]
+        assert reachability_item.data["failure_category"] == "transport_failure"
+        # A pass item carries None (clean read has no failure to categorize).
+        assert by_check["secret_ref"].data["failure_category"] is None
+
+    asyncio.run(_run())
+
+
 def test_down_dependency_is_error_not_failure(migrated_url: str) -> None:
     results = [
         CheckResult(

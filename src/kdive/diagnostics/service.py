@@ -21,18 +21,26 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import kdive.config as config
+import kdive.diagnostics.reachability as reachability
 from kdive.config.core_settings import SECRETS_ROOT
 from kdive.diagnostics.checks import (
     Check,
     CheckResult,
     CheckStatus,
+    GdbstubAclCheck,
+    ProviderTlsCheck,
+    RemoteLibvirtReachabilityCheck,
     SecretRefCheck,
+    TlsProbeOutcome,
     Vantage,
     run_check,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
+
+_REMOTE_PROVIDER = "remote-libvirt"
 
 WORKER_UNAVAILABLE_DETAIL = "worker could not pick up the diagnostic job; check /livez and /readyz"
 
@@ -201,15 +209,50 @@ def _secret_ref_check() -> SecretRefCheck:
     )
 
 
+async def _never_tls(_ca_path: str) -> TlsProbeOutcome:
+    # Never invoked: the check is substituted under worker_available=False. The raise guards a
+    # future wiring mistake (running a worker-vantage check without a real probe).
+    raise NotImplementedError("provider_tls has no worker-job probe in this deployment")
+
+
+async def _never_acl(_host: str, _range: str) -> bool | None:
+    raise NotImplementedError("gdbstub_acl has no worker-job probe in this deployment")
+
+
+def _remote_libvirt_checks() -> list[Check]:
+    """Assemble the remote-libvirt diagnostic checks when an instance is declared.
+
+    The server-vantage ``remote_libvirt_reachability`` check is the concrete probe (ADR-0125); it
+    resolves config lazily at run time. The worker-vantage ``provider_tls``/``gdbstub_acl`` checks
+    are **named** but have no worker-job probe in this slice, so they are built with empty fields
+    and a never-called probe — the service substitutes them with the honest worker-unavailable
+    error (``worker_available=False``) rather than fabricating a "host unreachable" verdict.
+    """
+    reachability_check = RemoteLibvirtReachabilityCheck(
+        provider=_REMOTE_PROVIDER,
+        probe=reachability.remote_libvirt_reachability_probe(),
+    )
+    tls_check = ProviderTlsCheck(provider=_REMOTE_PROVIDER, ca_path="", probe=_never_tls)
+    acl_check = GdbstubAclCheck(provider=_REMOTE_PROVIDER, host="", port_range="", probe=_never_acl)
+    return [reachability_check, tls_check, acl_check]
+
+
 def default_service_factory(
     provider: str | None, *, with_egress: bool = False
 ) -> DiagnosticsService:
     """Build the production read-only diagnostics service for ``provider``.
 
-    Assembles the server-vantage ``secret_ref`` check over the configured secret refs,
-    resolved against the file-ref backend under ``KDIVE_SECRETS_ROOT``. The worker-vantage
-    provider checks (``provider_tls``/``gdbstub_acl``) are assembled with their worker-job
-    probe wiring in the egress-probe wave; this factory ships the cheap server-vantage read.
+    Assembles the server-vantage ``secret_ref`` check over the configured secret refs, resolved
+    against the file-ref backend under ``KDIVE_SECRETS_ROOT``. When a ``[[remote_libvirt]]``
+    instance is declared (``is_remote_libvirt_configured()``), it also assembles the server-vantage
+    ``remote_libvirt_reachability`` check (ADR-0125, the qemu+tls reachability probe) and the
+    worker-vantage ``provider_tls``/``gdbstub_acl`` checks.
+
+    The service is built with ``worker_available=False``: this slice wires no worker-job dispatch,
+    so the worker-vantage checks surface as an honest ``error`` ("worker could not pick up the
+    diagnostic job; check /livez and /readyz") rather than a fabricated probe verdict. The
+    server-vantage ``secret_ref`` and ``remote_libvirt_reachability`` checks are unaffected by the
+    flag and still run.
 
     ``with_egress`` opts into the heavy mutating ``guest_egress`` probe, which provisions a
     short-lived guest on the target provider. Its production probe-guest seam needs a bootable
@@ -228,8 +271,16 @@ def default_service_factory(
             "target provider; none is wired in this deployment (ADR-0091, M2.4)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
+    checks: list[Check] = [_secret_ref_check()]
+    if is_remote_libvirt_configured():
+        checks.extend(_remote_libvirt_checks())
+    # worker_available=False is load-bearing: _remote_libvirt_checks builds the worker-vantage
+    # TLS/ACL checks with empty fields + never-called probes on the contract that they are
+    # substituted (never run) here. A future flip to True must replace those placeholder
+    # constructions with real probes (see ADR-0125's worker-job follow-up) — do not flip it alone.
     return DiagnosticsService(
-        checks=[_secret_ref_check()],
+        checks=checks,
         per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,
         overall_timeout=_DEFAULT_OVERALL_TIMEOUT,
+        worker_available=False,
     )
