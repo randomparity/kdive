@@ -47,9 +47,19 @@ This is the cost_class §2 model (ADR-0115) applied verbatim: a class named in t
 file-owned and a runtime override on it is transient; a class not in the file is
 `ops`-owned and untouched. For build-config, a `buildconfig.set` on a **declared** name
 still writes `source='operator'`, but the next reconcile re-asserts the file value and
-flips it back to `source='config'`. That clobber is **loud**: a `ReconcileDiff.warned`
-entry, the drift log line, and (on the on-demand path) the existing `platform_audit_log`
-row `ops.reconcile_systems` writes.
+flips it back to `source='config'`.
+
+**The clobber's loudness is path-dependent — do not overstate it.** The continuous
+reconciler loop (`reconciler/inventory.py`), which does *most* of the clobbering because it
+runs every interval, emits only a `ReconcileDiff.warned` entry and a drift log line — it
+writes **no** `platform_audit_log` row. The `platform_audit_log` row exists **only** on the
+on-demand `ops.reconcile_systems` path. So an operator's `buildconfig.set` on a declared
+name is typically reverted within one reconcile interval, with only a log line as the
+operator-visible trace (the `warned` entry is surfaced in the on-demand response and the
+loop's change count, not pushed anywhere). The durable way to change a declared fragment is
+to **edit the file**; `buildconfig.set` on a declared name is for break-glass only and is
+expected to be transient (this is the same window cost_class §6 documents). Names **not** in
+the file keep `buildconfig.set`'s full durability — they are never reconciled.
 
 The #438 **seed-vs-operator** protection is untouched. The seed's `WHERE source='seed'`
 conflict guard already refuses to overwrite any non-`seed` row, so it refuses both
@@ -126,15 +136,32 @@ describes another writer's bytes (which then trips `verify_bytes` on every read 
 re-write). `BUILD_CONFIG` is always held alone (outside the cross-scope co-hold total
 order), so adding a third taker does not affect lock ordering.
 
-### 5. Interaction with the `migrate()` seed — layer, no seed-logic change
+### 5. Interaction with the deploy seed — layer, no seed-logic change
 
-Seed and config **layer**. The seed publishes the packaged default for any name **not**
-declared in config. For a **declared** name, the config reconcile flips the row to
-`source='config'`, and the seed's existing `WHERE source='seed'` guard then refuses to
-touch it on a later `migrate`. The only seed change is the skip condition in `seed.py`
-(skip when the stored `source` is `operator` **or** `config`, was `operator` only) and the
-migration's CHECK constraint gaining `'config'`. The seed's source-guarded upsert SQL is
-unchanged.
+ADR-0121 already moved the build-config seed **out of `migrate()`**: `migrate()` is now
+SQL-only, and the seed runs as the `seed-build-configs` command, wired as the
+`post-install`/`post-upgrade` Helm hook (`job-seed-build-configs.yaml`, weight 10). So the
+deploy-time order is: validate `systems.toml` (`pre-install` hook, weight −10) → `migrate`
+(SQL, weight 0) → `seed-build-configs` (post, weight 10). The reconciler loop runs
+**continuously** in the running deployment (not a deploy hook).
+
+Seed and config **layer**. The `seed-build-configs` step publishes the packaged default for
+any name **not** declared in config. For a **declared** name, the continuous reconciler loop
+flips the row to `source='config'`, and the seed's existing `WHERE source='seed'` conflict
+guard then refuses to touch it on any later `seed-build-configs` run (it already refuses any
+non-`seed` row). The only seed change is the skip condition in `seed.py` (skip when the
+stored `source` is `operator` **or** `config`, was `operator` only) and the migration's CHECK
+constraint gaining `'config'`. The seed's source-guarded upsert SQL is unchanged.
+
+**Fresh-install ordering window.** On a first install where the operator declares
+`[[build_config]] name="kdump"` with bytes that differ from the packaged default,
+`seed-build-configs` publishes the packaged bytes (`source='seed'`) before the running
+reconciler loop's first pass re-asserts the file bytes (`source='config'`). A build started
+in that sub-interval window fetches the packaged bytes, not the declared ones. This is
+acceptable eventual consistency (the next reconcile converges and the loop runs on a short
+interval); it is called out, not engineered around, because the seed bytes are a valid
+kdump fragment and no build correctness invariant depends on the declared override landing
+before the first reconcile.
 
 ## Architecture
 
@@ -154,15 +181,28 @@ the M2 portability-gate `ALLOWED_FILES` (`scripts/m2_portability_gate.py`) and i
 frozenset (`tests/scripts/test_m2_portability_gate.py`), the same as migration `0034`
 (ADR-0119).
 
-### Shared validation rule
+### Shared validation rule, and where each check runs
 
-`buildconfig.set` validates `name` (`^[a-z0-9][a-z0-9_-]{0,63}$`) and `content` (non-empty
-UTF-8 ≤ `KDIVE_MAX_BUILD_CONFIG_BYTES`) at its write boundary. These rules are extracted
-into a neutral `build_configs/rules.py` — mirroring `domain/cost_class_rules.py` — so the
-inventory model and the tool validate identically and cannot diverge. The helper raises a
-bare `ValueError`; each caller maps it (`InventoryError` at file load, `CONFIGURATION_ERROR`
-for the tool). The cap is read from config at the call site (the helper takes it as an
-argument; `rules.py` imports no config singleton).
+`buildconfig.set` validates two things at its write boundary: `name`
+(`^[a-z0-9][a-z0-9_-]{0,63}$`) and `content` (non-empty UTF-8 ≤
+`KDIVE_MAX_BUILD_CONFIG_BYTES`). These split cleanly by whether they need config:
+
+- **Config-free checks (`name` charset, content non-empty)** move into a neutral
+  `build_configs/rules.py` — mirroring `domain/cost_class_rules.py` — and run **at parse
+  time** in the inventory model's field validators. They need no runtime value, so the
+  loader stays pure (it imports no config singleton; `model.py` does not import
+  `kdive.config` today and must not start). The helper raises a bare `ValueError`; each
+  caller maps it (`InventoryError` at file load, `CONFIGURATION_ERROR` for the tool).
+- **The byte cap (≤ `KDIVE_MAX_BUILD_CONFIG_BYTES`)** is config-dependent and is **not**
+  enforced in the model — a pydantic field validator has no clean seam to inject the runtime
+  cap, and reading config in the loader would break its purity and the
+  no-DB/no-S3-access `reconcile-systems --check` mode (ADR-0121). Instead the **reconcile
+  pass** enforces the cap (it already reads config) just before publishing: an over-cap
+  declared fragment is a per-fragment `warned` skip (the row is left untouched), not a
+  whole-pass failure — one oversized fragment must not block the others, matching the image
+  pass's per-entry degrade. The pass and `buildconfig.set` read the **same**
+  `config.require(MAX_BUILD_CONFIG_BYTES)`, so the two surfaces cannot diverge on the cap
+  even though they enforce it at different layers.
 
 `inventory/` must not import `mcp/` (a core→tool layering inversion); `build_configs/` is
 neutral and importable by both, like `domain/cost_class_rules.py`.
@@ -170,10 +210,12 @@ neutral and importable by both, like `domain/cost_class_rules.py`.
 ### Inventory model
 
 `InventoryDoc` gains `build_config: list[BuildConfigDecl]` (`name: str`,
-`content: str`, `description: str = ""`). Field validators delegate to `build_configs/rules.py`;
-a semantic check enforces name-uniqueness across the list (mirroring
-`_check_cost_class_uniqueness`). A malformed block raises `InventoryError` at parse, failing
-the whole reconcile pass for that iteration (the all-or-nothing file contract).
+`content: str`, `description: str = ""`). Field validators delegate the config-free checks
+(name charset, non-empty content) to `build_configs/rules.py`; a semantic check enforces
+name-uniqueness across the list (mirroring `_check_cost_class_uniqueness`). A name/empty
+violation raises `InventoryError` at parse, failing the whole reconcile pass for that
+iteration (the all-or-nothing file contract). The byte cap is **not** checked here (see
+above) — it is a reconcile-time `warned` skip.
 
 ### Catalog repository
 
@@ -201,12 +243,23 @@ the whole reconcile pass for that iteration (the all-or-nothing file contract).
   This keeps `reconcile_all`'s call signature unchanged, so **the only M2-gated file the
   change touches is the new migration** (the two `reconcile_all` callers,
   `reconciler/inventory.py` and `mcp/tools/ops/reconcile_systems.py`, are not edited).
-- Per declared fragment, under `advisory_xact_lock(BUILD_CONFIG, name)` in its own
-  transaction: read `(sha256, source)` `FOR UPDATE`; if the row already has this sha256 and
-  `source='config'`, no-op (change-detecting — steady state writes nothing, no phantom
-  drift); otherwise PUT the bytes, upsert `source='config'`, append `created`/`updated`, and
-  append `warned` + log the drift line **only** when the prior row existed with a different
-  source or sha256 (the clobber-is-loud rule, mirroring `reconcile_coefficients`).
+- Enforces the byte cap first: a declared fragment whose UTF-8 content exceeds
+  `config.require(MAX_BUILD_CONFIG_BYTES)` is appended to `warned` and skipped (row
+  untouched), never published.
+- Per in-cap declared fragment, under `advisory_xact_lock(BUILD_CONFIG, name)` in its own
+  transaction: read `(sha256, source, description)` `FOR UPDATE`. The no-op (change-detecting)
+  condition is **all three** of: row exists, `source='config'`, stored sha256 == file sha256,
+  **and stored description == file description** — only then write nothing (steady state writes
+  nothing, no phantom drift). `description` is in the key because it is a config-owned field the
+  file declares: a description-only edit on byte-identical content must still re-assert, or the
+  file would declare one description and the catalog keep another (the file-authoritative
+  contract would be violated). Otherwise PUT the bytes (when the sha256 changed; a
+  description-only change needs no PUT but the spec keeps the publish path simple by
+  re-PUTting idempotently to the deterministic key), upsert `source='config'`, and append
+  `created` (no prior row) or `updated`. Append `warned` + log the drift line **only** when a
+  prior row existed with `source != 'config'` or a different sha256 (the clobber-is-loud rule,
+  mirroring `reconcile_coefficients`; a benign description-only re-assert on an already-`config`
+  row is `updated`, not `warned`).
 - Pruning: none (Decision 2). The pass never deletes a row.
 
 `reconcile_pipeline.reconcile_all` appends `reconcile_build_configs(conn, doc, store)` after
@@ -218,7 +271,8 @@ union; the callers pass the objects they already pass.
 
 | Condition | Outcome |
 |-----------|---------|
-| Malformed `[[build_config]]` (bad name / empty / over-cap) | `InventoryError` at parse → whole pass fails this iteration (loud, retried) |
+| Bad `name` / empty `content` | `InventoryError` at parse → whole pass fails this iteration (loud, retried) |
+| Over-cap `content` (> `KDIVE_MAX_BUILD_CONFIG_BYTES`) | reconcile-time per-fragment `warned` skip (row untouched, others still reconcile); not a whole-pass failure |
 | Store cannot publish (no S3 / `_AbsentImageStore`) | `warned` record, rows untouched, pass still succeeds |
 | Store reachable but PUT raises | the per-fragment transaction rolls back; pass surfaces it like other reconcile failures (logged, retried next pass) |
 | PUT succeeds then process/DB crashes before row commit | object holds new bytes, row holds old sha256; `verify_bytes` on `buildconfig.get` / the build fetch raises `INFRASTRUCTURE_FAILURE`; a re-reconcile converges (the #438 fail-closed self-heal) |
@@ -229,16 +283,18 @@ union; the callers pass the objects they already pass.
 Behavior-first, TDD. Tests mirror the package tree.
 
 - **Model** (`tests/inventory/test_model.py`): valid `[[build_config]]`; duplicate name →
-  `InventoryError`; bad name, empty content, over-cap → `InventoryError`; absent block →
-  empty list.
-- **Shared rule** (`tests/build_configs/test_rules.py`): the validator accepts/rejects the
-  same inputs as the `buildconfig.set` boundary; the tool is refactored to call it and its
-  existing tests stay green.
+  `InventoryError`; bad name, empty content → `InventoryError`; absent block → empty list.
+  (The byte cap is **not** a model check — it is asserted in the reconcile-pass tests.)
+- **Shared rule** (`tests/build_configs/test_rules.py`): the config-free validator
+  (name charset, non-empty) accepts/rejects the same inputs as the `buildconfig.set`
+  boundary; the tool is refactored to call it and its existing tests stay green.
 - **Reconcile pass** (`tests/inventory/test_reconcile_build_configs.py`): create a new
-  config fragment (publishes + row `source='config'`); change-detecting no-op on a
-  re-assert; re-assert over an `operator` row emits `warned` + flips to `config`; re-assert
-  over a `seed` row flips to `config`; store-cannot-publish degrades to `warned` with rows
-  untouched; removal-from-file leaves the row (no prune).
+  config fragment (publishes + row `source='config'`); change-detecting no-op on an identical
+  re-assert; **description-only edit re-asserts** (catalog description updates, no `warned`);
+  re-assert over an `operator` row emits `warned` + flips to `config`; re-assert over a
+  `seed` row flips to `config`; over-cap content → per-fragment `warned` skip (row
+  untouched, a sibling in-cap fragment still publishes); store-cannot-publish degrades to
+  `warned` with rows untouched; removal-from-file leaves the row (no prune).
 - **Adversarial** (`tests/adversarial/`): concurrent `buildconfig.set` and a reconcile pass
   on the same name serialize on `BUILD_CONFIG` and never commit a row sha256 that mismatches
   the object bytes (the row-vs-object invariant).

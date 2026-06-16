@@ -51,9 +51,13 @@ This is the cost_class §2 model (ADR-0115) verbatim: a class named in the file 
 and a runtime override on it is transient; a class not in the file is `ops`-owned and
 untouched. For build-config, a `buildconfig.set` on a **declared** name still writes
 `source='operator'`, but the next reconcile re-asserts the file value and flips the row back
-to `source='config'`. That clobber is **loud**: a `ReconcileDiff.warned` entry, the drift
-log line, and the `platform_audit_log` row the on-demand `ops.reconcile_systems` already
-writes.
+to `source='config'`. The clobber's loudness is **path-dependent**: the continuous
+reconciler loop (which does most of the clobbering) emits a `ReconcileDiff.warned` entry and
+a drift log line but **no** audit row; only the on-demand `ops.reconcile_systems` path writes
+a `platform_audit_log` row. So a `buildconfig.set` on a declared name is transient (reverted
+within roughly one reconcile interval, the cost_class §6 window) and is for break-glass only
+— the durable change is editing the file. Names not in the file keep `buildconfig.set`'s full
+durability.
 
 The #438 **seed-vs-operator** protection is untouched. The seed's `WHERE source='seed'`
 conflict guard already refuses to overwrite any non-`seed` row, so it refuses both
@@ -107,25 +111,37 @@ which can publish; the on-demand `_AbsentImageStore` (no S3) cannot, so the pass
 already uses. This keeps `reconcile_all`'s call signature unchanged, so the only M2-gated
 file the change touches is the new migration.
 
-### 5. Interaction with the `migrate()` seed — layer, no seed-logic change
+### 5. Interaction with the deploy seed — layer, no seed-logic change
 
-Seed and config **layer**: the seed publishes the packaged default for any name **not**
-declared in config; for a declared name, the config reconcile flips the row to
-`source='config'` and the seed's existing `WHERE source='seed'` guard then refuses to touch
-it. The only seed change is the skip condition in `seed.py` (skip when the stored `source`
-is `operator` **or** `config`, was `operator` only) and the migration's CHECK gaining
-`'config'`. The seed's source-guarded upsert SQL is unchanged.
+ADR-0121 already moved the build-config seed **out of `migrate()`** (now SQL-only) into the
+`seed-build-configs` command, wired as a `post-install`/`post-upgrade` Helm hook (weight 10,
+after the weight-0 `migrate` and the weight −10 `systems.toml` validate). The reconciler loop
+runs continuously, not as a deploy hook. Seed and config **layer**: `seed-build-configs`
+publishes the packaged default for any name **not** declared in config; for a declared name,
+the continuous reconciler loop flips the row to `source='config'` and the seed's existing
+`WHERE source='seed'` guard then refuses to touch it (it already refuses any non-`seed` row).
+The only seed change is the skip condition in `seed.py` (skip when the stored `source` is
+`operator` **or** `config`, was `operator` only) and the migration's CHECK gaining
+`'config'`. The seed's source-guarded upsert SQL is unchanged. On a fresh install where the
+operator declares a fragment with bytes differing from the packaged default, a build in the
+brief window before the loop's first pass fetches the packaged bytes (acceptable eventual
+consistency; the seed bytes are a valid fragment).
 
 ### Schema and shared code
 
 - Migration `0035` drops and re-adds the `source` CHECK to allow `'config'` (no new column).
   Provider-agnostic core, so it joins the M2 portability-gate `ALLOWED_FILES`
   (`scripts/m2_portability_gate.py`) and its meta-test frozenset, as `0034` did.
-- The `name`/`content` validation rules `buildconfig.set` enforces are extracted into a
-  neutral `build_configs/rules.py` (mirroring `domain/cost_class_rules.py`) so the inventory
-  model and the tool validate identically; the helper raises a bare `ValueError` each caller
-  maps to its own error type. `inventory/` must not import `mcp/`; `build_configs/` is
-  neutral and importable by both.
+- Validation splits by whether it needs config. The config-free checks (`name` charset,
+  non-empty `content`) move into a neutral `build_configs/rules.py` (mirroring
+  `domain/cost_class_rules.py`) and run at parse time in the model (the loader stays pure —
+  `model.py` does not import `kdive.config`); the helper raises a bare `ValueError` each
+  caller maps to its own error type. The config-dependent **byte cap** is **not** enforced in
+  the pydantic model (no DI seam, would break loader purity and the no-DB `--check` mode);
+  the reconcile pass enforces it just before publishing (it already reads config), as a
+  per-fragment `warned` skip, reading the **same** `MAX_BUILD_CONFIG_BYTES` as
+  `buildconfig.set` so the two cannot diverge. `inventory/` must not import `mcp/`;
+  `build_configs/` is neutral and importable by both.
 - `build_configs/catalog.py` gains `upsert_config_build_config` (writes `source='config'`
   unconditionally) and a `(sha256, source)` reader the pass uses for change-detection and
   drift attribution.
