@@ -20,11 +20,21 @@ RUN_NON_TERMINAL = frozenset({RunState.CREATED, RunState.RUNNING})
 # A Run holds its System until terminal; at most one non-terminal Run per System.
 
 
-def envelope_for_run(run: Run, *, required_cmdline: str | None = None) -> ToolResponse:
-    """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`."""
+def envelope_for_run(
+    run: Run, *, required_cmdline: str | None = None, failing_job: Job | None = None
+) -> ToolResponse:
+    """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
+
+    When the Run is `failed` and `failing_job` (the Run's `failing_job_id` job) is supplied,
+    the envelope also surfaces the job's already-worker-redacted `failure_message` as `detail`
+    and the `failing_job_id` in `data`, so the caller gets an actionable reason without
+    out-of-band knowledge of the job id (ADR-0141). The `detail` is routed through
+    `ToolResponse.failure`, so the no-leak seam (`suppressed_detail`, ADR-0123) governs it; no
+    new redaction runs here — the worker already redacted `failure_context`.
+    """
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
-        return ToolResponse.failure(str(run.id), category, data={"current_status": run.state.value})
+        return _failed_envelope(run, category, failing_job)
     if run.state in (RunState.CREATED, RunState.RUNNING):
         actions = ["runs.get", "runs.build"]
     else:
@@ -40,6 +50,20 @@ def envelope_for_run(run: Run, *, required_cmdline: str | None = None) -> ToolRe
     return ToolResponse.success(
         str(run.id), run.state.value, suggested_next_actions=actions, data=data
     )
+
+
+def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None) -> ToolResponse:
+    """Build the `failed` Run envelope, surfacing the linked job's redacted reason (ADR-0141)."""
+    data: dict[str, JsonValue] = {"current_status": run.state.value}
+    detail: str | None = None
+    if failing_job is not None:
+        data["failing_job_id"] = str(failing_job.id)
+        context = failing_job.failure_context
+        detail = context.get("failure_message") or None
+        for key, value in context.items():
+            if key.startswith("failure_detail_"):
+                data[key] = value
+    return ToolResponse.failure(str(run.id), category, detail=detail, data=data)
 
 
 def run_job_envelope(job: Job, run_id: UUID) -> ToolResponse:

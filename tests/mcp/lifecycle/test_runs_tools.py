@@ -20,7 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import CatalogComponentRef
 from kdive.components.validation import ComponentSourceCapabilities
-from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
+from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, JOBS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -258,6 +258,62 @@ def test_envelope_for_run_failed_defaults_to_infrastructure_failure() -> None:
     assert resp.error_category == "infrastructure_failure"
 
 
+def _failed_job(failure_context: dict[str, str]) -> Job:
+    job = _job_model(JobState.FAILED)
+    return job.model_copy(
+        update={"error_category": ErrorCategory.BUILD_FAILURE, "failure_context": failure_context}
+    )
+
+
+def test_envelope_for_run_failed_surfaces_linked_job_reason() -> None:
+    job = _failed_job(
+        {"failure_message": "make: defconfig: No such target", "failure_detail_run_id": "abc"}
+    )
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE),
+        failing_job=job,
+    )
+
+    assert resp.status == "error"
+    assert resp.error_category == "build_failure"
+    assert resp.detail == "make: defconfig: No such target"
+    assert resp.data["failing_job_id"] == str(job.id)
+    assert resp.data["failure_detail_run_id"] == "abc"
+
+
+def test_envelope_for_run_failed_links_job_even_without_message() -> None:
+    job = _failed_job({})
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE),
+        failing_job=job,
+    )
+
+    assert resp.detail is None
+    assert resp.data["failing_job_id"] == str(job.id)
+
+
+def test_envelope_for_run_failed_no_link_when_job_absent() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE)
+    )
+
+    assert resp.detail is None
+    assert "failing_job_id" not in resp.data
+
+
+def test_envelope_for_run_failed_suppresses_detail_for_no_leak_categories() -> None:
+    # A linked job reason must never leak past the no-leak seam (ADR-0123): a not_found
+    # failure surfaces the seam constant, not the job message.
+    job = _failed_job({"failure_message": "secret-host-name leaked here"})
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.NOT_FOUND),
+        failing_job=job,
+    )
+
+    assert resp.error_category == "not_found"
+    assert resp.detail == "not found"
+
+
 def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
     expected = {
         "pattern": "__d_lookup|Oops",
@@ -337,6 +393,62 @@ def test_get_failed_run_renders_failure_category(migrated_url: str) -> None:
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.status == "error" and resp.error_category == "build_failure"
         assert resp.data["current_status"] == "failed"
+
+    asyncio.run(_run())
+
+
+async def _seed_failed_build_job(
+    pool: AsyncConnectionPool, run_id: str, failure_context: dict[str, str]
+) -> str:
+    """Insert a dead-lettered BUILD job and link it from the Run via failing_job_id."""
+    async with pool.connection() as conn:
+        job = await JOBS.insert(
+            conn,
+            Job(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                kind=JobKind.BUILD,
+                payload={"run_id": run_id},
+                state=JobState.FAILED,
+                max_attempts=3,
+                error_category=ErrorCategory.BUILD_FAILURE,
+                failure_context=failure_context,
+                authorizing={"principal": "user-1", "agent_session": "s", "project": "proj"},
+                dedup_key=f"{run_id}:build",
+            ),
+        )
+        await conn.execute("UPDATE runs SET failing_job_id = %s WHERE id = %s", (job.id, run_id))
+    return str(job.id)
+
+
+def test_get_failed_run_surfaces_linked_job_reason(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(
+                pool, state=RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE
+            )
+            job_id = await _seed_failed_build_job(
+                pool, run_id, {"failure_message": "make: defconfig: No such target"}
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.status == "error" and resp.error_category == "build_failure"
+        assert resp.detail == "make: defconfig: No such target"
+        assert resp.data["failing_job_id"] == job_id
+
+    asyncio.run(_run())
+
+
+def test_get_failed_run_links_job_without_message(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(
+                pool, state=RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE
+            )
+            job_id = await _seed_failed_build_job(pool, run_id, {})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.detail is None
+        assert resp.data["failing_job_id"] == job_id
 
     asyncio.run(_run())
 
