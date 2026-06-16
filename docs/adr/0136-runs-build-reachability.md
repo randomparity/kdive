@@ -51,13 +51,15 @@ Three changes, each at the layer that owns the failure:
 **1. Reject the misleading git-URI bare string early (parse boundary).** Add a
 field-level validator to `ServerBuildProfile.kernel_source_ref` that rejects a *bare
 string* whose shape signals an intended-but-unstructured git provenance — a leading
-`git:` or `git+` scheme, or any `://` — with a `configuration_error` whose message points
-at the structured `{"git": {"remote": ..., "ref": ...}}` form **and** the need for a
-registered remote build host. This fires at `BuildProfile.parse`, so both `runs.create`
-(early, on the caller's submitted document) and `runs.build` (on the persisted document)
-surface it before any host selection or job enqueue. A bare warm-tree *label* with no
-scheme and no `://` (e.g. `git#v6.9`, `linux-6.9`, an absolute path) stays valid — it is
-legitimate warm-tree provenance metadata and the validator does not touch it.
+`git:` scheme, a `git+<transport>://` scheme, or any `://` — with a `configuration_error`
+whose message points at the structured `{"git": {"remote": ..., "ref": ...}}` form **and**
+the need for a registered remote build host. This fires at `BuildProfile.parse`, so both
+`runs.create` (early, on the caller's submitted document) and `runs.build` (on the
+persisted document) surface it before any host selection or job enqueue. A bare warm-tree
+*label* with no scheme and no `://` (e.g. `git#v6.9`, `git+next`, `linux-6.9`, an absolute
+path) stays valid — it is legitimate warm-tree provenance metadata and the validator does
+not touch it. The `git+` rule is anchored on the `git+…://` URL shape, not a bare `git+`
+prefix, so a scheme-less `git+next` label is not over-rejected.
 
 The check lives in `profiles/build.py` (the parse boundary both tool handlers already
 call) rather than being duplicated into `create.py` and `build.py`, so there is exactly
