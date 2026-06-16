@@ -21,10 +21,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import SYSTEMS
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job, JobKind, PowerAction, System
 from kdive.domain.state import AllocationState, SystemState
 from kdive.jobs import queue
@@ -175,6 +177,34 @@ async def _race_once(pool: AsyncConnectionPool, *, provision_first: bool) -> tup
     )
     await asyncio.gather(*tasks)
     return await _system_state(pool, system_id), prov.live
+
+
+def test_provision_failure_marks_system_failed_and_raises_terminally(migrated_url: str) -> None:
+    # A provision failure drives the System to a terminal `failed` state, so the job must NOT be
+    # retryable: a retry re-enters a terminal System and would report success, masking the failure
+    # (job `succeeded` while the System is `failed`). The handler re-raises the categorized error
+    # marked `terminal` so the worker dead-letters at once and the real reason reaches the agent.
+    class _FailingProvisioner(_TrackingProvisioner):
+        def provision(self, system_id: UUID, profile: Any) -> str:
+            raise CategorizedError(
+                "base image volume not staged",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(pool, SystemState.PROVISIONING)
+            resolver = provider_resolver(provisioner=_FailingProvisioner())
+            pjob = await _enqueue(pool, JobKind.PROVISION, system_id, f"{system_id}:provision")
+            async with pool.connection() as conn:
+                await conn.set_autocommit(True)  # the worker runs handlers in autocommit
+                with pytest.raises(CategorizedError) as excinfo:
+                    await systems_handlers.provision_handler(conn, pjob, resolver=resolver)
+            assert excinfo.value.terminal is True
+            assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert await _system_state(pool, system_id) == SystemState.FAILED.value
+
+    asyncio.run(_run())
 
 
 def test_concurrent_provision_teardown_never_leaks_a_domain(migrated_url: str) -> None:

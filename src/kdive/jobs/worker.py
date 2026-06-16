@@ -205,11 +205,13 @@ class Worker:
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
             span.set_outcome("error")
             category = _failure_category(exc)
+            terminal = isinstance(exc, CategorizedError) and exc.terminal
             async with self._pool.connection() as conn:
                 await queue.fail(
                     conn,
                     job,
                     category,
+                    terminal=terminal,
                     failure_context=_failure_context(exc, self._secret_registry),
                 )
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)

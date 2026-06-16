@@ -192,7 +192,7 @@ async def provision_handler(
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     try:
         domain_name = await asyncio.to_thread(provisioner.provision, system_id, profile)
-    except CategorizedError:
+    except CategorizedError as exc:
         await _record_system_failure(
             conn,
             job,
@@ -202,6 +202,9 @@ async def provision_handler(
             tool="systems.provision",
             operation="provision",
         )
+        # The System is now terminally `failed`; a job retry would re-enter the terminal-state
+        # branch above and return success, masking this failure. Dead-letter at once instead.
+        exc.terminal = True
         raise
     current = await _commit_provision_result(
         conn, job, system, profile, runtime.profile_policy, domain_name
@@ -233,7 +236,7 @@ async def reprovision_handler(
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     try:
         domain_name = await asyncio.to_thread(provisioner.reprovision, system_id, profile)
-    except CategorizedError:
+    except CategorizedError as exc:
         await _record_system_failure(
             conn,
             job,
@@ -243,6 +246,8 @@ async def reprovision_handler(
             tool="systems.reprovision",
             operation="reprovision",
         )
+        # The System is now terminally `failed`; dead-letter at once so a retry cannot mask it.
+        exc.terminal = True
         raise
     fingerprint = profile_digest(profile)
     current: SystemState | None = None
