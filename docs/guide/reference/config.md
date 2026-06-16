@@ -14,7 +14,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_FIXTURE_CATALOG_PATH` | reconciler, worker | — | no | Override path to the provider fixture catalog. |
+| `KDIVE_FIXTURE_CATALOG_PATH` | reconciler, server, worker | — | no | Override path to the provider fixture catalog (operator override, ADR-0120). |
 
 ## cli
 
