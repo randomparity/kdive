@@ -113,8 +113,7 @@ new authority.
 - **Follow-up (out of scope for #463):** `reprovision`, `power` (off/cycle/reset), and
   `force_crash` are still structurally denied on the normal path because nothing populates
   `capability_scope.destructive_ops`. Resolving that — either an allocation-request grant path
-  or a per-op gate revision — is a separate design tracked in a new issue. This ADR does not
-  decide it.
+  or a per-op gate revision — is a separate design tracked in #465. This ADR does not decide it.
 - The advertised output schema is unchanged (stays flat, ADR-0113); `missing_checks` rides the
   existing `data` payload.
 
