@@ -27,3 +27,10 @@ def test_remote_libvirt_connection_singletons_are_gone() -> None:
 def test_no_duplicate_setting_names() -> None:
     names = [s.name for s in config.all_settings()]
     assert len(names) == len(set(names))
+
+
+def test_artifact_get_retrieval_settings_present() -> None:
+    # artifacts.get inline-content cap + presigned-download TTL (#485, ADR-0140).
+    names = {s.name for s in config.all_settings()}
+    assert "KDIVE_ARTIFACT_INLINE_MAX_BYTES" in names
+    assert "KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS" in names
