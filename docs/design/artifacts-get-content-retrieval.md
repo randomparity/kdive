@@ -1,0 +1,98 @@
+# Spec: End-to-end artifact retrieval through `artifacts.get` (#485)
+
+ADR: [ADR-0140](../adr/0140-artifacts-get-content-retrieval.md)
+
+## Problem
+
+`artifacts.get` returns only `refs={"object": key}` — no content, no download URI
+(`src/kdive/mcp/tools/catalog/artifacts/reads.py`). A caller cannot retrieve the
+full bytes of a redacted artifact (console log, redacted dmesg) through the MCP
+surface. `artifacts.search_text` reads the full object but returns only bounded
+match windows. The store already exposes `get_artifact` (full bytes) and
+`presign_get` (time-boxed GET URL); `get` exposes neither.
+
+## Goal
+
+A caller retrieves a redacted artifact's full content end-to-end:
+- inline, within a documented size bound, for small artifacts; **and**
+- via a presigned download URI for any size.
+
+The existing redaction guarantee is preserved: only `redacted` artifacts are
+returned, and content passes the same `sensitivity is REDACTED` gate
+`search_text` applies.
+
+## Behavior
+
+`artifacts.get(artifact_id)` — authorization, sensitivity, project, and
+quarantined/sensitive-is-not-found behavior are unchanged. On success the response
+gains:
+
+1. **`refs["object"]`** — unchanged (the object key).
+2. **`refs["download_uri"]`** — a presigned GET URL for the object key, expiry
+   `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` (default 900). Present whenever the store
+   is reachable.
+3. **`data["size_bytes"]`** — the object size from `head`.
+4. **`data["content"]`** — the UTF-8-decoded (`errors="replace"`) object bytes,
+   present iff `size_bytes <= _MAX_SEARCHABLE_ARTIFACT_BYTES` (1 MiB).
+5. **`data["content_truncated"]`** — `"false"` (the inline body is never a clip;
+   oversized omits `content` entirely).
+
+### Size handling
+
+- `size_bytes <= 1 MiB`: fetch via `get_artifact(key, head.etag)`, re-verify
+  `fetched.sensitivity is REDACTED` (reject to a not-found-shaped
+  `configuration_error` otherwise), and return the decoded bytes in
+  `data["content"]`.
+- `size_bytes > 1 MiB`: omit `content`; set `data["content_omitted"] =
+  "artifact_too_large"`. The presigned `download_uri` is the retrieval path.
+
+### Best-effort degradation
+
+The metadata envelope (`available`, `refs.object`) is the contract `artifacts.get`
+already honors and must not regress. The content/URI enrichment is best-effort:
+
+- store factory raises (`CONFIGURATION_ERROR` — S3 unconfigured): return the
+  metadata envelope with `data["content_unavailable"] = "store_unconfigured"`,
+  no `download_uri`, no `content`.
+- `head`/`get_artifact`/`presign_get` raises `CategorizedError`: return the
+  metadata envelope with `data["content_unavailable"] = "store_error"`, no
+  `download_uri`, no `content`.
+
+A store outage never turns a successful `get` into a tool failure.
+
+## Security
+
+- Only `redacted` artifacts reach this path (`_authorized_redacted_artifact` +
+  the `sensitivity is REDACTED` re-check). A `redacted` object stores redactor
+  output (`_extract_redacted` at capture, `providers/local_libvirt/retrieve.py`),
+  so its bytes are already redacted.
+- `presign_get` is called with the authorized `redacted` key only; the URL cannot
+  address the `sensitive` sibling object. It is a bearer capability bounded by the
+  configured TTL.
+- No new redaction pass is run on fetched bytes — the persisted object is already
+  the redactor's output; the gate is the sensitivity re-check, identical to
+  `search_text`.
+
+## Out of scope
+
+- Streaming/chunked inline bodies for large artifacts (the URI is the bulk path).
+- Range reads, conditional GETs, or content negotiation.
+- Changing the advertised output schema (stays flat `{"type":"object"}`, ADR-0113).
+
+## Tests
+
+Handler-level, injected store seam (mirrors the `search_text` tests):
+
+- redacted ≤cap: `content` present and equals the decoded object, `size_bytes`
+  set, `download_uri` present.
+- redacted >cap: `content` absent, `content_omitted: artifact_too_large`,
+  `download_uri` present, `get_artifact` never called (`store.got is False`).
+- fetched object `sensitivity != REDACTED` at a redacted row's key: not-found-shaped
+  `configuration_error` (the redaction gate).
+- store factory raises: metadata envelope + `content_unavailable: store_unconfigured`,
+  no URI.
+- `head`/`presign_get` raises: metadata envelope + `content_unavailable: store_error`.
+- sensitive / quarantined / cross-project / malformed-uuid id: unchanged
+  not-found-shaped behavior (no content, no URI).
+- viewer-role gate unchanged.
+- `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` is passed to `presign_get` as `expires_in`.
