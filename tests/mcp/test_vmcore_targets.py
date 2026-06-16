@@ -13,8 +13,12 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools._vmcore_targets import (
+    NO_BUILD,
+    NO_DEBUGINFO,
+    NO_VMCORE,
     RunVmcoreTarget,
     resolve_run_vmcore_target,
+    vmcore_target_failure,
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
@@ -102,19 +106,77 @@ def test_resolve_run_vmcore_target_missing_build_id_is_not_found(migrated_url: s
                     await resolve_run_vmcore_target(conn, _ctx(), run_id)
 
         assert exc.value.category is ErrorCategory.NOT_FOUND
+        assert exc.value.details["reason"] == NO_BUILD
+
+    asyncio.run(_run())
+
+
+def test_resolve_run_vmcore_target_null_debuginfo_reason(migrated_url: str) -> None:
+    # A run whose debuginfo_ref is null surfaces the no_debuginfo precondition reason (#487).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(
+                pool, system_id, debuginfo_ref=None, build_id="deadbeef"
+            )
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as exc:
+                    await resolve_run_vmcore_target(conn, _ctx(), run_id)
+
+        assert exc.value.category is ErrorCategory.NOT_FOUND
+        assert exc.value.details["reason"] == NO_DEBUGINFO
+
+    asyncio.run(_run())
+
+
+def test_resolve_run_vmcore_target_no_core_reason(migrated_url: str) -> None:
+    # A built run with no captured vmcore row surfaces the no_vmcore precondition reason (#487).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(
+                pool, system_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef"
+            )
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as exc:
+                    await resolve_run_vmcore_target(conn, _ctx(), run_id)
+
+        assert exc.value.category is ErrorCategory.NOT_FOUND
+        assert exc.value.details["reason"] == NO_VMCORE
 
     asyncio.run(_run())
 
 
 def test_resolve_run_vmcore_target_absent_run_is_not_found(migrated_url: str) -> None:
+    # The absent-Run / ungranted-project miss carries no reason token so the envelope cannot leak
+    # membership (it must stay byte-identical to a genuinely-absent Run).
     async def _run() -> None:
         async with _pool(migrated_url) as pool, pool.connection() as conn:
             with pytest.raises(CategorizedError) as exc:
                 await resolve_run_vmcore_target(conn, _ctx(), str(uuid4()))
 
         assert exc.value.category is ErrorCategory.NOT_FOUND
+        assert "reason" not in exc.value.details
 
     asyncio.run(_run())
+
+
+def test_vmcore_target_failure_maps_reason_to_next_actions() -> None:
+    exc = CategorizedError("miss", category=ErrorCategory.NOT_FOUND, details={"reason": NO_VMCORE})
+    resp = vmcore_target_failure("rid", exc)
+    assert resp.error_category == "not_found"
+    assert resp.data["reason"] == NO_VMCORE
+    assert resp.suggested_next_actions == ["vmcore.fetch", "runs.get"]
+    # detail stays the suppressed constant (no-leak seam, ADR-0123).
+    assert resp.detail == "not found"
+
+
+def test_vmcore_target_failure_no_reason_yields_no_next_actions() -> None:
+    exc = CategorizedError("miss", category=ErrorCategory.NOT_FOUND)
+    resp = vmcore_target_failure("rid", exc)
+    assert resp.error_category == "not_found"
+    assert "reason" not in resp.data
+    assert resp.suggested_next_actions == []
 
 
 def test_resolve_run_vmcore_target_requires_viewer_role(migrated_url: str) -> None:

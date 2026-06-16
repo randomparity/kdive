@@ -161,6 +161,9 @@ def test_from_vmcore_unbuilt_run_is_not_found(migrated_url: str) -> None:
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
+        # The unmet precondition + next actions reach the caller (#487).
+        assert resp.data["reason"] == "no_debuginfo"
+        assert resp.suggested_next_actions == ["runs.get", "runs.build"]
 
     asyncio.run(_run())
 
@@ -177,6 +180,8 @@ def test_from_vmcore_no_build_step_is_not_found(migrated_url: str) -> None:
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
+        assert resp.data["reason"] == "no_build"
+        assert resp.suggested_next_actions == ["runs.build", "runs.get"]
 
     asyncio.run(_run())
 
@@ -192,6 +197,8 @@ def test_from_vmcore_no_captured_core_is_not_found(migrated_url: str) -> None:
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
+        assert resp.data["reason"] == "no_vmcore"
+        assert resp.suggested_next_actions == ["vmcore.fetch", "runs.get"]
 
     asyncio.run(_run())
 
@@ -216,6 +223,10 @@ def test_from_vmcore_cross_project_is_not_found(migrated_url: str) -> None:
                 pool, _ctx(projects=("other",)), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
+        # No-leak: the cross-project miss carries no precondition reason or next actions, so the
+        # envelope is byte-identical to a genuinely-absent run (#487).
+        assert "reason" not in resp.data
+        assert resp.suggested_next_actions == []
 
     asyncio.run(_run())
 

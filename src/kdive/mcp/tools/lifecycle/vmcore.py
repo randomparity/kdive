@@ -45,7 +45,7 @@ from kdive.mcp.tools._common import (
     job_envelope,
 )
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run, with_runtime_for_system
-from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target
+from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import CrashPostmortem
 from kdive.security.artifacts.crash_commands import validate_crash_commands
@@ -241,7 +241,7 @@ async def _postmortem_crash(
             try:
                 resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
             except CategorizedError as exc:
-                return ToolResponse.failure_from_error(run_id, exc)
+                return vmcore_target_failure(run_id, exc)
         try:
             output = await asyncio.to_thread(
                 crash.run_crash_postmortem,

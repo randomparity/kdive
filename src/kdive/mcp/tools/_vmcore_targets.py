@@ -10,10 +10,27 @@ from psycopg import AsyncConnection
 from kdive.db.artifact_queries import raw_vmcore_key
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.runs.steps import existing_build_result
+
+# Structured `reason` tokens for the distinct vmcore-target preconditions (#487, ADR-0142).
+# The token rides in the `not_found` error's `details` (unsuppressed `data`, ADR-0123) and keys
+# `_VMCORE_NEXT_ACTIONS`. Author-controlled; never derived from guest/exception/resource text.
+NO_DEBUGINFO = "no_debuginfo"
+NO_BUILD = "no_build"
+NO_VMCORE = "no_vmcore"
+
+# reason token -> literal next tool names. An absent or unknown reason (e.g. the absent-Run /
+# ungranted-project miss, which carries no reason so the envelope cannot leak membership) maps to
+# no next actions.
+_VMCORE_NEXT_ACTIONS: dict[str, list[str]] = {
+    NO_DEBUGINFO: ["runs.get", "runs.build"],
+    NO_BUILD: ["runs.build", "runs.get"],
+    NO_VMCORE: ["vmcore.fetch", "runs.get"],
+}
 
 
 class RunVmcoreTarget(NamedTuple):
@@ -43,14 +60,27 @@ async def resolve_run_vmcore_target(
         raise _target_not_found()
     require_role(ctx, run.project, Role.VIEWER)
     if run.debuginfo_ref is None:
-        raise _target_not_found()
+        raise _precondition_not_found(NO_DEBUGINFO)
     build_id = await _build_id_for_run(conn, uid)
     if build_id is None:
-        raise _target_not_found()
+        raise _precondition_not_found(NO_BUILD)
     vmcore_ref = await raw_vmcore_key(conn, run.system_id)
     if vmcore_ref is None:
-        raise _target_not_found()
+        raise _precondition_not_found(NO_VMCORE)
     return RunVmcoreTarget(run.debuginfo_ref, build_id, vmcore_ref)
+
+
+def vmcore_target_failure(run_id: str, exc: CategorizedError) -> ToolResponse:
+    """Map a :func:`resolve_run_vmcore_target` miss to its failure envelope (#487, ADR-0142).
+
+    Attaches the reason-keyed ``suggested_next_actions`` so a caller learns which precondition is
+    unmet and the next tool to call. The ``reason`` token rides in ``data`` (unsuppressed); the
+    ``not_found`` ``detail`` stays the suppressed constant (no-leak seam, ADR-0123). An absent or
+    unknown reason (the absent-Run / ungranted-project miss) yields no next actions.
+    """
+    reason = exc.details.get("reason")
+    actions = _VMCORE_NEXT_ACTIONS.get(reason) if isinstance(reason, str) else None
+    return ToolResponse.failure_from_error(run_id, exc, suggested_next_actions=actions)
 
 
 def _target_config_error() -> CategorizedError:
@@ -64,6 +94,14 @@ def _target_not_found() -> CategorizedError:
     return CategorizedError(
         "run does not resolve to a captured vmcore target",
         category=ErrorCategory.NOT_FOUND,
+    )
+
+
+def _precondition_not_found(reason: str) -> CategorizedError:
+    return CategorizedError(
+        "run does not resolve to a captured vmcore target",
+        category=ErrorCategory.NOT_FOUND,
+        details={"reason": reason},
     )
 
 

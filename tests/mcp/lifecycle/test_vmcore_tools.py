@@ -534,6 +534,9 @@ def test_postmortem_triage_propagates_not_found(migrated_url: str) -> None:
             run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id=None)
             resp = await _vmcore_handlers().postmortem_triage(pool, _ctx(), run_id=run_id)
         assert resp.status == "error" and resp.error_category == "not_found"
+        # The granular precondition reason + next actions reach the caller (#487).
+        assert resp.data["reason"] == "no_debuginfo"
+        assert resp.suggested_next_actions == ["runs.get", "runs.build"]
 
     asyncio.run(_run())
 
@@ -549,6 +552,9 @@ def test_postmortem_crash_no_core_is_not_found(migrated_url: str) -> None:
                 pool, _ctx(), run_id=run_id, commands=["log"]
             )
         assert resp.status == "error" and resp.error_category == "not_found"
+        # A built run with no captured core names the no_vmcore precondition + next actions (#487).
+        assert resp.data["reason"] == "no_vmcore"
+        assert resp.suggested_next_actions == ["vmcore.fetch", "runs.get"]
 
     asyncio.run(_run())
 
