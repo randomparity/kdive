@@ -84,7 +84,13 @@ new operator command, `kdive seed-build-configs`, instead of from `migrate()`. T
 gains `job-seed-build-configs.yaml`, a `post-install`/`post-upgrade` hook that runs after migrate
 and after the DB exists. Its failure is a Job named `*-seed-build-configs`, never "migrate" — so
 a genuine object-store error is still surfaced, under an honest name, without blocking the schema
-migration or implying the database is broken. The seed remains a no-op when S3 is unconfigured.
+migration or implying the database is broken. The seed is a clean no-op **only** when S3 is
+*wholly unconfigured* (env absent, `CONFIGURATION_ERROR`); a *configured-but-broken* store
+(missing bucket, bad credentials) is not silently skipped — it raises and fails the
+`*-seed-build-configs` hook (the "no silent failures" rule). Because this hook is `post-*`, a
+seed failure can leave the release marked failed while the app pods are already healthy; the
+operator recovers by fixing the object store and re-running `seed-build-configs`. This
+partial-failure state is documented in the k8s runbook.
 
 ### 3. `reconcile-systems --check` — a validate-only mode (no DB/S3)
 

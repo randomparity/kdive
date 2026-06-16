@@ -56,15 +56,41 @@ stays (re-homed in B). `register_local_resource`/`seed_demo`/`install_fixtures` 
 `job-migrate.yaml` drops the `kdive.systemsEnv`/`systemsVolume`/`systemsVolumeMount` includes
 (migrate no longer reads `systems.toml`).
 
+**New precondition — baseline `image_catalog` rows come from the reconciler, not migrate.**
+Previously the pre-install migrate hook reconciled `systems.toml` `[[image]]` rows *before* the
+app rolled out. After this change those config-owned rows are created by the reconciler loop's
+first inventory pass, which requires the reconciler to be **deployed, ready (Postgres + object
+store healthy — the pass HEADs `s3` images), and not failing-this-pass on a malformed file**.
+Two consequences an operator/implementer must expect: (1) a brief post-deploy
+eventual-consistency window (≈ one reconcile interval, default 30s) where an immediate
+`allocations.request`/build can see no baseline images; (2) a deployment that runs `migrate`
+without a reconciler never seeds baseline inventory — correct, since inventory is the
+reconciler's job (ADR-0112), but no longer silently covered by migrate.
+
 ### B. `seed-build-configs` command + post-deploy hook
 
 - New `__main__` command `seed-build-configs` (handler calls `_seed_build_configs_step` via a
   small public wrapper, e.g. `seed_build_configs_step(database_url) -> int`, exported from
   `admin/bootstrap.py`). S3-gated + idempotent, unchanged behavior.
 - New `deploy/helm/kdive/templates/job-seed-build-configs.yaml`: a `post-install`/`post-upgrade`
-  hook, weighted after migrate, `envFrom` the config ConfigMap (DB + S3). On the bundled path it
-  reuses the `wait-for-db` initContainer pattern. No systems volume. Its failure is named
-  `*-seed-build-configs`.
+  hook with `helm.sh/hook-weight: "10"` (after migrate, which is weight `0` — relevant on the
+  bundled path where migrate is also `post-*`), `envFrom` the config ConfigMap (DB + S3). On the
+  bundled path it reuses the `wait-for-db` initContainer pattern. No systems volume.
+
+**Failure semantics (deliberate — honest signal, not silent skip).** The seed is *not* made
+unconditionally best-effort. `_seed_build_configs_step` skips cleanly **only** when S3 is
+*wholly unconfigured* (it catches `CONFIGURATION_ERROR` from `object_store_from_env()` — the env
+is absent). A *configured-but-broken* object store (missing bucket, wrong credentials) does
+**not** degrade: `object_store_from_env()` succeeds (it never HEADs the bucket), then
+`seed_build_configs → put_artifact` raises an uncaught `NoSuchBucket`/`AccessDenied`, failing
+the hook. This is intentional — a real object-store fault must surface, not be swallowed (the
+"no silent failures" rule). Because the hook is `post-*`, on the external path it runs *after*
+the app pods roll out, so a seed failure yields a Job named `*-seed-build-configs` failing while
+the server/worker/reconciler are already up. The operator recovers by fixing the object store
+and re-running the step (`kubectl create job --from=cronjob`-style, or
+`python -m kdive seed-build-configs`); build-config fragments are only consumed at build time,
+so a delayed seed never breaks a running control plane. This partial-failure state is documented
+in the k8s runbook (AC#3) so "release failed, pods healthy" is not surprising.
 
 ### C. `reconcile-systems --check`
 
@@ -73,9 +99,12 @@ branches on it: with `--check`, it loads + validates the resolved file via the e
 `_load_doc(path)` and exits — **no** `object_store_from_env()`, **no** `create_pool()`. Exit
 codes:
 
-- valid file, or absent default path → `0`
-- malformed/invalid file, or explicit `--path` to a missing file → `1` (the `InventoryError`
-  message `entry.field: msg` to stderr)
+- valid file, or absent **default** path → `0`
+- malformed/invalid file → `1` (the `InventoryError` message `entry.field: msg` to stderr)
+- explicit `--path` to a missing file → `1`. Because the validate hook always passes an explicit
+  `--path` to the mounted file, this is also the "ConfigMap mounted but the key did not match
+  `systems.fileName`" case; the message names the path and the configMapName/fileName-must-match
+  cause so the operator-facing error is actionable, rather than a bare "file not found".
 
 The check path is implemented in `reconcile_cli.py` as `validate_systems(path) -> int` so the
 CLI handler stays thin and the logic is unit-testable without argparse.
@@ -95,16 +124,34 @@ New `deploy/helm/kdive/templates/job-validate-systems.yaml`:
 
 A malformed file fails this hook; Helm aborts before migrate and before app rollout.
 
+**ConfigMap preconditions (operator-owned resource).** The systems ConfigMap is referenced **by
+name** (`.Values.systems.configMapName`) and is created out-of-band by the operator — the chart
+never renders it. The hook therefore inherits two preconditions, both shared with the existing
+migrate-job mount:
+
+- *The named ConfigMap must exist.* A `configMapName` pointing at a non-existent ConfigMap leaves
+  the hook pod in `CreateContainerConfigError` until the hook timeout — an opaque blocking
+  failure (the same class as issue #311 for the config ConfigMap). This is pre-existing for
+  `job-migrate.yaml`, but the validate hook now makes it gate the upgrade *earlier*. Documented in
+  the runbook as a checked precondition, not silently assumed.
+- *The ConfigMap key must equal `systems.fileName`.* `kdive.systemsVolume` projects
+  `items: [{key: fileName, path: fileName}]`; a key/`fileName` mismatch yields an empty mount, so
+  `--check --path <mountPath>/<fileName>` hits a missing file. To keep that error actionable
+  rather than a generic "explicit `--path` missing", `validate_systems` distinguishes the
+  mounted-file-absent case with a message naming the mount path and the
+  configMapName/fileName-must-match cause (see C), instead of the bare exit-1 used for an operator
+  who typo'd an explicit `--path` on the CLI.
+
 ## Edge / failure cases
 
-| Input | `migrate` | `reconcile-systems --check` | validate hook | reconciler (unchanged) |
+| Input | `migrate` | `reconcile-systems --check` / validate hook | `seed-build-configs` hook | reconciler (unchanged) |
 |---|---|---|---|---|
-| Valid `systems.toml` | SQL only | exit 0 | pass | reconcile |
-| Malformed `systems.toml` | SQL only (unaffected) | exit 1 + field error | **abort upgrade** | fail-this-pass, keep-last-good |
-| Absent default path | SQL only | exit 0 | hook not rendered (no ConfigMap) | no-op |
-| Explicit `--path` missing | n/a | exit 1 | n/a | n/a |
-| No S3 configured | SQL only | exit 0 (S3 not touched) | pass (S3 not touched) | s3 images stay `defined` |
-| Missing bucket | SQL only (unaffected) | exit 0 (S3 not touched) | pass | seed/reconcile degrade |
+| Valid `systems.toml` | SQL only | exit 0 / pass | seeds (≤1 row) or skip | reconcile |
+| Malformed `systems.toml` | SQL only (unaffected) | exit 1 + field error / **abort upgrade** | not reached (pre-upgrade hook aborted first) | fail-this-pass, keep-last-good |
+| Absent default path | SQL only | exit 0 / hook not rendered (no ConfigMap) | seeds or skip | no-op |
+| ConfigMap missing / key ≠ `fileName` | SQL only | exit 1 (named-path error) or `CreateContainerConfigError` / **abort upgrade** | not reached | n/a |
+| No S3 configured (env absent) | SQL only | exit 0 (S3 not touched) | **skips cleanly** (`CONFIGURATION_ERROR` caught) | s3 images stay `defined` |
+| S3 configured, bucket missing / bad creds | SQL only (unaffected) | exit 0 (S3 not touched) | **hook FAILS** (`put_artifact` raises, uncaught) → release failed, app pods up; recover by fixing S3 + re-running `seed-build-configs` | reconcile pass fails (logged, keep-last-good) |
 
 ## Out of scope
 
@@ -118,11 +165,14 @@ A malformed file fails this hook; Helm aborts before migrate and before app roll
 - `migrate()` is SQL-only: with a `systems.toml` + S3 present, migrate applies the schema and
   creates **no** `image_catalog` config rows and **no** `build_config_catalog` rows (rewrites
   the four existing `test_bootstrap.py` migrate tests).
-- `seed-build-configs`: seeds with S3 (fake store), skips cleanly without S3, idempotent on
-  re-run.
+- `seed-build-configs`: seeds with S3 (fake store), skips cleanly when S3 env is **absent**
+  (returns 0), idempotent on re-run, and **propagates** (does not swallow) a non-configuration
+  object-store error — a store whose `put_artifact` raises a non-`CONFIGURATION_ERROR` must
+  surface, asserting the honest-failure semantics.
 - `validate_systems(path)`: returns 0 on a valid baseline file, 0 on an absent default path,
-  1 + the `InventoryError` field message on a malformed file, 1 on an explicit missing `--path`,
-  and acquires no pool/store (assert via a guard that would raise if S3/DB were touched).
+  1 + the `InventoryError` field message on a malformed file, and 1 with a path-naming message
+  on an explicit missing `--path` (the mounted-file-absent case); and it acquires no pool/store
+  (assert via a guard that would raise if S3/DB were touched).
 - Helm: `helm template` renders `job-validate-systems.yaml` only when `systems.configMapName`
   is set, with weight `-10` and the `--check` args; `job-migrate.yaml` carries no systems
   volume; `job-seed-build-configs.yaml` renders as a `post-*` hook. (Reuse the existing
