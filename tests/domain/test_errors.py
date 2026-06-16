@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import (
+    _SUPPRESSED_DETAIL,
+    CategorizedError,
+    ErrorCategory,
+    suppressed_detail,
+)
 
 # The exact set the spec says M0 may emit (m0-walking-skeleton.md "Error taxonomy"):
 # ten reused PoC categories plus six new distributed categories.
@@ -104,3 +109,34 @@ def test_categorized_error_is_an_exception_carrying_its_category() -> None:
 def test_categorized_error_defaults_details_to_empty_dict() -> None:
     error = CategorizedError("no extra context", category=ErrorCategory.STALE_HANDLE)
     assert error.details == {}
+
+
+# ---------------------------------------------------------------------------
+# No-leak seam rule (#450, ADR-0123)
+# ---------------------------------------------------------------------------
+
+
+def test_suppressed_detail_set_is_exactly_the_diagnostic_no_leak_pair() -> None:
+    # A future taxonomy edit that wants to suppress (or stop suppressing) a category must be a
+    # deliberate diff here, not an accident.
+    assert set(_SUPPRESSED_DETAIL) == {
+        ErrorCategory.AUTHORIZATION_DENIED,
+        ErrorCategory.NOT_FOUND,
+    }
+
+
+def test_suppressed_detail_collapses_not_found_to_constant() -> None:
+    assert suppressed_detail(ErrorCategory.NOT_FOUND, "system abc-123 was not found") == "not found"
+
+
+def test_suppressed_detail_collapses_authorization_denied_to_constant() -> None:
+    out = suppressed_detail(ErrorCategory.AUTHORIZATION_DENIED, "project 'secret' not granted")
+    assert out == "access denied"
+
+
+def test_suppressed_detail_passes_through_diagnostic_category() -> None:
+    assert suppressed_detail(ErrorCategory.CONFIGURATION_ERROR, "bad field") == "bad field"
+
+
+def test_suppressed_detail_passes_through_none_for_diagnostic_category() -> None:
+    assert suppressed_detail(ErrorCategory.CONFIGURATION_ERROR, None) is None
