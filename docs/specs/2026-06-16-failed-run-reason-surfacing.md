@@ -41,13 +41,36 @@ See ADR-0141 for the decision and rejected alternatives. In summary:
 
 ## Behavioural contract
 
-| Run state | `failing_job_id` | job `failure_context` | `runs.get` failure envelope |
-|-----------|------------------|------------------------|------------------------------|
-| `failed`  | set, job terminal w/ message | `{failure_message: "..."}` | `detail="..."`, `data.failing_job_id` set |
-| `failed`  | set, job not yet dead-lettered | empty | `detail=None`, `data.failing_job_id` set (link only) |
-| `failed`  | NULL (reconciler-failed) | n/a | `detail=None`, no `failing_job_id` (today's shape) |
-| `failed`  | set, job row gone (impossible today) | n/a | `detail=None`, `data.failing_job_id` set |
-| not failed | — | — | unchanged success envelope |
+| Run state | linked job state / `failure_context` | `runs.get` failure envelope |
+|-----------|--------------------------------------|------------------------------|
+| `failed`  | job `failed` (dead-lettered) w/ `{failure_message: "..."}` | `detail="..."`, `data.failing_job_id` set |
+| `failed`  | job `queued`/`running` (mid-retry, see below) — `failure_context = '{}'` | `detail=None`, `data.failing_job_id` set (link only) |
+| `failed`  | `failing_job_id` NULL (reconciler-failed, no job) | `detail=None`, no `failing_job_id` (today's shape) |
+| `failed`  | `failing_job_id` set, job row gone (impossible today — no purge path) | `detail=None`, `data.failing_job_id` set |
+| not failed | — | unchanged success envelope |
+
+### Multi-attempt builds — the link precedes a stable reason
+
+BUILD jobs retry (`max_attempts=3`). `_build_and_record` rebuilds on every attempt while
+`existing_build_result` is `None`, and `_fail_build` flips the Run `running -> failed` on the
+**first** failing attempt; subsequent attempts find the Run already terminal and their
+`_fail_build` no-ops via the existing `IllegalTransition` warn path (pre-existing behaviour,
+unchanged here). Meanwhile `queue.fail` **resets `failure_context` to `'{}'` on each non-terminal
+requeue** and writes the real `failure_context` only when the job finally dead-letters (last
+attempt or a `terminal` error).
+
+Consequences this feature exposes (none a regression — it makes existing state visible):
+
+- Setting `failing_job_id` in the first `_fail_build` is correct: it is the same `Job` across all
+  attempts (one row, requeued, not re-enqueued), so the link is stable from attempt 1.
+- Between attempts the linked job is `queued`/`running` with `failure_context = '{}'`, so
+  `runs.get` returns the **link with `detail=None`**. An agent that polls `runs.get` to a stable
+  reason should treat an empty `detail` on a `failed` Run as "reason not yet finalized; the linked
+  job is still retrying" and re-poll (or `jobs.get` the link to see live job state). This is the
+  intended degrade, not an error.
+- The surfaced `detail`, once present, reflects the **last** attempt's failure (the only one
+  `queue.fail` persists). Earlier-attempt messages are not retained — acceptable: the terminal
+  reason is the actionable one, and per-attempt history is out of scope.
 
 ## Edge / error paths to test (behaviour, not implementation)
 
@@ -58,8 +81,10 @@ See ADR-0141 for the decision and rejected alternatives. In summary:
   `IllegalTransition` warn path), and the envelope degrades to `detail=None`.
 - Failed Run with `failing_job_id = NULL` (no job — e.g. reconciler): envelope carries no
   `detail` and no `failing_job_id`, identical to today.
-- A failing job whose `failure_context` is empty (failed before the worker wrote context):
-  link present, `detail=None`.
+- A failing job whose `failure_context` is empty (mid-retry requeue, or failed before the worker
+  wrote context): link present, `detail=None`.
+- Multi-attempt build: `failing_job_id` is set once (first `_fail_build`) and stays pointed at the
+  same job row across requeues; the no-op second `_fail_build` does not overwrite or clear it.
 - No-leak: a (hypothetical) `not_found`/`authorization_denied` failed Run surfaces the seam
   constant, never the job message — proven by routing through `suppressed_detail`.
 
