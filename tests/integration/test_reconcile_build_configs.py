@@ -167,3 +167,35 @@ def test_store_cannot_publish_degrades(migrated_url: str) -> None:
         assert prov is None
 
     asyncio.run(_run())
+
+
+def test_reconcile_all_publishes_build_config_through_pipeline(migrated_url: str) -> None:
+    """The full reconcile_all pipeline threads the store into the build-config pass and publishes.
+
+    Covers the wiring seam (reconcile_all -> reconcile_build_configs(store)) end-to-end, not just
+    the pass in isolation: a doc carrying a [[build_config]] reconciled via reconcile_all must
+    land the catalog row source='config' with the object bytes present at the reserved key.
+    """
+    from kdive.inventory.reconcile_pipeline import reconcile_all
+
+    async def _run() -> None:
+        store = _FakeStore()
+        doc = InventoryDoc.parse(
+            {
+                "schema_version": 2,
+                "build_config": [
+                    {"name": "kdump", "content": "CONFIG_KEXEC=y\n", "description": "d"}
+                ],
+            }
+        )
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            diff = await reconcile_all(conn, doc, store)
+            prov = await read_build_config_provenance(conn, "kdump")
+        assert [r.name for r in diff.created] == ["kdump"]
+        assert prov == (hashlib.sha256(b"CONFIG_KEXEC=y\n").hexdigest(), "config", "d")
+        assert store.objects[_KEY] == b"CONFIG_KEXEC=y\n"
+
+    asyncio.run(_run())
