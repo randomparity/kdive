@@ -19,6 +19,12 @@ from kdive.mcp.tools.lifecycle.systems.admin import (
 from kdive.mcp.tools.lifecycle.systems.admin import (
     teardown_system as _teardown_system,
 )
+from kdive.mcp.tools.lifecycle.systems.profile_examples import (
+    build_profile_examples as _build_profile_examples,
+)
+from kdive.mcp.tools.lifecycle.systems.profile_examples import (
+    load_inventory_for_examples as _load_inventory_for_examples,
+)
 from kdive.mcp.tools.lifecycle.systems.provision import (
     SystemProvisionHandlers as _SystemProvisionHandlers,
 )
@@ -43,6 +49,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_provision_defined(app, pool, resolver)
     _register_systems_get(app, pool)
     _register_systems_list(app, pool)
+    _register_systems_profile_examples(app)
     _register_systems_teardown(app, pool, resolver)
     _register_systems_reprovision(app, pool, resolver)
 
@@ -214,6 +221,21 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
             current_context(),
             request,
         )
+
+
+def _register_systems_profile_examples(app: FastMCP) -> None:
+    @app.tool(
+        name="systems.profile_examples",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def systems_profile_examples() -> ToolResponse:
+        """Return a ready-to-edit example profile per configured provider. Requires a token."""
+        # Auth-only (ADR-0117): the verifier already gated the transport; enforce token presence as
+        # defence-in-depth. No platform/project gate, no audit — the projection is non-sensitive
+        # inventory identifiers only (ADR-0124).
+        current_context()
+        return _build_profile_examples(_load_inventory_for_examples())
 
 
 def _register_systems_teardown(
