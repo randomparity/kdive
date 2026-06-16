@@ -67,12 +67,49 @@ def test_migrate_is_sql_only(
         configs = conn.execute("SELECT count(*) FROM build_config_catalog").fetchone()
     assert images is not None and images[0] == 0
     assert configs is not None and configs[0] == 0
+
+
+def test_seed_build_configs_step_without_s3_returns_zero(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str
+) -> None:
+    # No KDIVE_S3_* configured: the seed is a clean skip (ADR-0096), returns 0.
+    from kdive.admin.bootstrap import migrate, seed_build_configs_step
+
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    for var in ("KDIVE_S3_ENDPOINT_URL", "KDIVE_S3_BUCKET", "KDIVE_S3_REGION"):
+        monkeypatch.delenv(var, raising=False)
+    migrate(postgres_url)
+
+    assert seed_build_configs_step(postgres_url) == 0
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        configs = conn.execute("SELECT count(*) FROM build_config_catalog").fetchone()
+    assert configs is not None and configs[0] == 0
+
+
+def test_seed_build_configs_step_with_s3_seeds_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch, postgres_url: str
+) -> None:
+    from kdive.admin.bootstrap import migrate, seed_build_configs_step
+
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: _FakeStore())
+    migrate(postgres_url)
+
+    assert seed_build_configs_step(postgres_url) == 1
+    assert seed_build_configs_step(postgres_url) == 0  # idempotent
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        row = conn.execute("SELECT name FROM build_config_catalog WHERE name = 'kdump'").fetchone()
+    assert row is not None and row[0] == "kdump"
 ```
 
-- [ ] **Step 2: Run the new test to verify it fails**
+These three tests are the red→green cycle for both Task-1 functions (`migrate()` going SQL-only and the new `seed_build_configs_step` wrapper). The `_FakeStore` monkeypatch target (`kdive.store.objectstore.object_store_from_env`) matches the function-local `from kdive.store.objectstore import object_store_from_env` inside `_seed_build_configs_step`, which re-looks-up the name on the module at call time — the same pattern the pre-existing migrate tests used.
 
-Run: `uv run python -m pytest tests/admin/test_bootstrap.py::test_migrate_is_sql_only -q`
-Expected: FAIL — current `migrate()` still seeds/reconciles, so the counts are not 0 (and `_FakeStore` lacks `head_present`, so the reconcile may even error).
+- [ ] **Step 2: Run the new tests to verify they fail**
+
+Run: `uv run python -m pytest tests/admin/test_bootstrap.py -k "is_sql_only or seed_build_configs_step" -q`
+Expected: FAIL — `test_migrate_is_sql_only` because `migrate()` still seeds/reconciles (counts not 0); the two `seed_build_configs_step` tests with `ImportError: cannot import name 'seed_build_configs_step'`.
 
 - [ ] **Step 3: Make `migrate()` SQL-only and remove the orphaned helpers**
 
@@ -323,50 +360,29 @@ git commit -m "feat(cli): add reconcile-systems --check validate-only mode (#440
 - Modify: `src/kdive/__main__.py:147-259`
 - Test: `tests/admin/test_bootstrap.py` (append)
 
-- [ ] **Step 1: Write the failing tests for the seed step wrapper**
+> The `seed_build_configs_step` **behavior** tests (no-S3 skip, with-S3 seed + idempotent) live in Task 1, where the function is introduced and can fail-first. This task only adds the test for the **CLI command wiring** (the new failing-first surface here).
 
-Append to `tests/admin/test_bootstrap.py` (the `_FakeStore` class and `_write_baseline_systems_toml` are already in the file):
+- [ ] **Step 1: Write the failing command-wiring test**
+
+Append to `tests/admin/test_bootstrap.py`:
 
 ```python
-def test_seed_build_configs_step_without_s3_returns_zero(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str
-) -> None:
-    # No KDIVE_S3_* configured: the seed is a clean skip (ADR-0096), returns 0.
-    from kdive.admin.bootstrap import migrate, seed_build_configs_step
+def test_seed_build_configs_command_invokes_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kdive import __main__ as main_mod
 
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    for var in ("KDIVE_S3_ENDPOINT_URL", "KDIVE_S3_BUCKET", "KDIVE_S3_REGION"):
-        monkeypatch.delenv(var, raising=False)
-    migrate(postgres_url)
-
-    assert seed_build_configs_step(postgres_url) == 0
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        configs = conn.execute("SELECT count(*) FROM build_config_catalog").fetchone()
-    assert configs is not None and configs[0] == 0
-
-
-def test_seed_build_configs_step_with_s3_seeds_and_is_idempotent(
-    monkeypatch: pytest.MonkeyPatch, postgres_url: str
-) -> None:
-    from kdive.admin.bootstrap import migrate, seed_build_configs_step
-
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", lambda: _FakeStore())
-    migrate(postgres_url)
-
-    assert seed_build_configs_step(postgres_url) == 1
-    assert seed_build_configs_step(postgres_url) == 0  # idempotent
-    with psycopg.connect(postgres_url, autocommit=True) as conn:
-        row = conn.execute("SELECT name FROM build_config_catalog WHERE name = 'kdump'").fetchone()
-    assert row is not None and row[0] == "kdump"
+    called: list[str] = []
+    monkeypatch.setattr(
+        "kdive.admin.bootstrap.seed_build_configs_step",
+        lambda: called.append("seeded"),
+    )
+    main_mod.main(["seed-build-configs"])
+    assert called == ["seeded"]
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/admin/test_bootstrap.py -k seed_build_configs_step -q`
-Expected: PASS already (these exercise the Task-1 `seed_build_configs_step`). If they pass, this step confirms the wrapper behaves; proceed to wire the command. (If Task 1 is not yet merged in this session, run it first.)
+Run: `uv run python -m pytest tests/admin/test_bootstrap.py::test_seed_build_configs_command_invokes_step -q`
+Expected: FAIL — `SystemExit: argument command: invalid choice: 'seed-build-configs'` (the subcommand is not registered yet).
 
 - [ ] **Step 3: Add the `seed-build-configs` command handler**
 
@@ -392,29 +408,12 @@ Add the command to the `_COMMANDS` tuple (after the `migrate` entry, line 234). 
     ),
 ```
 
-- [ ] **Step 4: Add a command-dispatch test**
-
-Append to `tests/admin/test_bootstrap.py` (verifies the CLI wiring calls the step):
-
-```python
-def test_seed_build_configs_command_invokes_step(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kdive import __main__ as main_mod
-
-    called: list[str] = []
-    monkeypatch.setattr(
-        "kdive.admin.bootstrap.seed_build_configs_step",
-        lambda: called.append("seeded"),
-    )
-    main_mod.main(["seed-build-configs"])
-    assert called == ["seeded"]
-```
-
-- [ ] **Step 5: Run the tests + guardrails**
+- [ ] **Step 4: Run the wiring test + guardrails**
 
 Run: `uv run python -m pytest tests/admin/test_bootstrap.py -q && just lint && just type`
 Expected: PASS; clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/kdive/__main__.py tests/admin/test_bootstrap.py
@@ -692,12 +691,31 @@ spec:
                 name: {{ include "kdive.fullname" . }}-config
 ```
 
-- [ ] **Step 4: Run the render test**
+- [ ] **Step 4: Fix the existing external-render hook test (the seed hook adds post-install)**
 
-Run: `uv run python -m pytest tests/helm/test_helm_render.py -k seed_build_configs -q`
-Expected: PASS (or SKIP if helm absent).
+The new seed hook is `post-install,post-upgrade` on **both** paths, so the external render now
+contains the string "post-install". The existing `test_external_render_omits_post_install_migrate_hook`
+(tests/helm/test_helm_render.py:94-98) asserts `"post-install" not in res.stdout` — a blanket
+output scan that this seed hook legitimately violates. Its real intent is "the **migrate** Job is
+not post-install on the external path." Rewrite it to scope the assertion to the migrate Job:
 
-- [ ] **Step 5: Commit**
+```python
+def test_external_render_omits_post_install_migrate_hook() -> None:
+    # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
+    # after the in-chart DB). The seed-build-configs hook is legitimately post-* on both paths, so
+    # assert on the migrate Job's phase, not a blanket output scan.
+    jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert "post-install" not in (jobs["migrate"]["phase"] or "")
+    assert "pre-install" in jobs["migrate"]["phase"]
+```
+
+- [ ] **Step 5: Run the FULL helm-render test file**
+
+Run: `uv run python -m pytest tests/helm/test_helm_render.py -q`
+Expected: PASS (or SKIP if helm absent) — runs every render test, catching any cross-Job
+interaction (e.g. the post-install scan above) at its source rather than at Task 8.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add deploy/helm/kdive/templates/job-seed-build-configs.yaml tests/helm/test_helm_render.py
@@ -746,35 +764,31 @@ git commit -m "docs(runbook): document validate hook, fail-fast policy, seed rec
 
 ---
 
-## Task 8: Full-suite + generated-doc sweep
+## Task 8: Full-suite sweep
 
-**Files:**
-- Possibly: generated CLI/tool reference docs (if `just docs-check` flags drift from the new `seed-build-configs` command / `--check` flag).
+**No generated-doc regen is needed.** `just docs-check` regenerates only the **MCP tool
+reference** (`scripts/gen_tool_reference.py` → `docs/guide/reference/`); there is no generated CLI
+subcommand reference (CLI commands like `reconcile-systems`/`seed-demo` appear only in
+hand-written runbooks, updated by hand in Task 7). This change adds no MCP tool, so `docs-check`
+is unaffected.
 
-- [ ] **Step 1: Regenerate any drifted reference docs**
-
-Run: `just docs-check`
-If it fails citing a stale generated file, run the repo's doc-generation recipe it names (e.g. `just docs` / the generator script) and review the diff. The new `seed-build-configs` command and `--check` flag are CLI surface; if the repo generates a CLI reference, it must regenerate. (If `docs-check` only covers MCP tool docs — which are unchanged here — there is nothing to regenerate.)
-
-- [ ] **Step 2: Run the full guardrail suite**
+- [ ] **Step 1: Run the full guardrail suite**
 
 Run: `just lint && just type && just test`
 Expected: all pass. (`just type` is whole-tree — it type-checks `tests/` too.)
 
-- [ ] **Step 3: Commit any regenerated docs**
+- [ ] **Step 2: Run the doc gates**
 
-```bash
-git add -A
-git commit -m "docs: regenerate references for seed-build-configs/--check (#440)"
-```
-
-(Skip this commit if Step 1 produced no changes.)
+Run: `just docs-check && just docs-links && just docs-paths && just config-docs-check && just config-guard && just env-docs-check && just chart-version-check`
+Expected: all pass (no drift — confirms the no-regen claim above). `config-docs`/`config-guard`
+matter because Task 3 touches the CLI command set, not the config registry, so they should be
+clean; running them proves it.
 
 ---
 
 ## Self-Review notes (author)
 
-- **Spec coverage:** A→Task 1; B→Tasks 3 (command) + 6 (hook); C→Task 2; D→Task 5; migrate-mount cleanup→Task 4; runbook/AC#3→Task 7; baseline-reconcile precondition is a behavior the tests in Task 1 assert (migrate creates no config rows) and Task 7 documents.
+- **Spec coverage:** A→Task 1 (incl. the `seed_build_configs_step` wrapper + its behavior tests); B→Tasks 3 (CLI command wiring) + 6 (hook); C→Task 2; D→Task 5; migrate-mount cleanup→Task 4; runbook/AC#3→Task 7; baseline-reconcile precondition is a behavior the tests in Task 1 assert (migrate creates no config rows) and Task 7 documents.
 - **AC mapping:** AC#1→Task 1 (`test_migrate_is_sql_only`); AC#2→Task 2 + Task 7 (`--check` + kubectl recipe/logs); AC#3→Tasks 5 + 7 (pre-upgrade hook + runbook).
 - **Type consistency:** `seed_build_configs_step(database_url=None)` and `validate_systems(path)` names are used identically across Tasks 1/3 and 2/5. `_jobs_by_name` suffix keys (`migrate`, `validate-systems`, `seed-build-configs`) match the Job `metadata.name` suffixes in Tasks 4/5/6.
 - **Guardrail hazard flagged:** Task 5 Step 5 explicitly handles the existing `_hooks_by_kind` Job-aliasing breakage.
