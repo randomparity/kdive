@@ -289,5 +289,6 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
 - The ephemeral-probe-guest egress check (ADR-0091's separate guest-vantage probe); D adds only
   the server-vantage host-reachability probe.
 - Re-enveloping every FastMCP boundary validation error for every tool (A converts it for the
-  profile path; a project-wide boundary-validation middleware is a possible follow-up but not
+  profile path only on the typed-param branch; on the fallback branch validation stays in
+  `parse()`. A project-wide boundary-validation middleware is a possible follow-up but not
   required by these findings).
