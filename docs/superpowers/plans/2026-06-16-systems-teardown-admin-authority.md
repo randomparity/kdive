@@ -354,22 +354,42 @@ Apply the new helper at the three remaining gate-denial sites so a denied `repro
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/control.py` (`_authorize_destructive` denial return ~148)
 - Modify: `src/kdive/mcp/tools/lifecycle/systems/admin.py` (reprovision denial return ~111)
-- Test: `tests/mcp/lifecycle/test_control_tools.py`
+- Test: `tests/mcp/lifecycle/test_control_tools.py`, `tests/mcp/lifecycle/test_systems_tools.py`
 
-- [ ] **Step 1: Write/extend a failing control denial test**
+This task changes **three** denial sites (reprovision, destructive `power`, `force_crash`), so it needs an assertion on each. The exact tests and their expected `missing_checks` (verified against the current tree):
 
-In `tests/mcp/lifecycle/test_control_tools.py`, find the existing `force_crash` denial test (around line 309, which already checks the `teardown`/`force_crash` denial audit args) and add an envelope assertion:
+1. `test_power_destructive_action_denied_without_scope` — `tests/mcp/lifecycle/test_control_tools.py:288` (admin ctx, profile opts `power` in, unscoped allocation → only `capability_scope` missing). Asserts `missing=["capability_scope"]` in audit args at line 309.
+2. `test_force_crash_denied_returns_authorization_denied` — `tests/mcp/lifecycle/test_control_tools.py:451` — **parametrized** over which gate checks fail (e.g. line 446 `(False, True, True)  # missing capability_scope`). Assert the envelope's `missing_checks` equals the *same* expected-missing list the test already feeds its audit-args assertion, so it stays correct across every parametrized combination.
+3. `test_reprovision_without_scope_denied` — `tests/mcp/lifecycle/test_systems_tools.py:1482` (operator/admin ctx, unscoped allocation → `capability_scope` missing). Expect `missing_checks=["capability_scope"]`.
+
+- [ ] **Step 1: Add a failing `missing_checks` envelope assertion to each of the three tests**
+
+In `test_power_destructive_action_denied_without_scope` (`test_control_tools.py:288`), after the existing `error_category` assertion add:
 
 ```python
-    assert resp.data["missing_checks"] == ["capability_scope"]
+        assert resp.data["missing_checks"] == ["capability_scope"]
 ```
 
-(Use the same `missing` list the test already expects in the audit args — typically `["capability_scope"]` for an unscoped allocation.)
+In `test_force_crash_denied_returns_authorization_denied` (`test_control_tools.py:451`), bind the expected-missing list the parametrization already uses (the same list passed to `args_digest({"system_id": sys_id, "missing": <expected>})`) and assert the envelope carries it:
 
-- [ ] **Step 2: Run to verify it fails**
+```python
+        assert resp.data["missing_checks"] == expected_missing
+```
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -k denied -q`
-Expected: FAIL — `resp.data` has no `missing_checks` key.
+(Name `expected_missing` to match whatever the test already computes for its audit-args assertion; do not hardcode `["capability_scope"]` here — the test is parametrized.)
+
+In `test_reprovision_without_scope_denied` (`test_systems_tools.py:1482`), after the `error_category` assertion add:
+
+```python
+        assert resp.data["missing_checks"] == ["capability_scope"]
+```
+
+Before editing, confirm none of the three already assert `resp.data == {}` (they assert audit args + `error_category`, so a new `data` key is additive).
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -k "denied or force_crash" tests/mcp/lifecycle/test_systems_tools.py -k reprovision_without_scope -q`
+Expected: FAIL — `resp.data` has no `missing_checks` key at any of the three sites.
 
 - [ ] **Step 3: Apply the helper at the denial sites**
 
@@ -393,17 +413,17 @@ In `src/kdive/mcp/tools/lifecycle/systems/admin.py`, change the reprovision deni
 
 - [ ] **Step 4: Verify**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -k denied -q`
-Expected: PASS.
+Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -k "denied or force_crash" -q`
+Expected: PASS (power-without-scope and force_crash denial envelopes carry `missing_checks`).
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_systems_tools.py -k reprovision -q`
-Expected: PASS (existing reprovision denial tests still green; the envelope now also carries `missing_checks`, which they do not forbid — confirm none assert `resp.data == {}`).
+Expected: PASS (the reprovision denial envelope now also carries `missing_checks`; other reprovision tests unaffected).
 Run: `just lint && just type`
 Expected: clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/lifecycle/control.py src/kdive/mcp/tools/lifecycle/systems/admin.py tests/mcp/lifecycle/test_control_tools.py
+git add src/kdive/mcp/tools/lifecycle/control.py src/kdive/mcp/tools/lifecycle/systems/admin.py tests/mcp/lifecycle/test_control_tools.py tests/mcp/lifecycle/test_systems_tools.py
 git commit  # subject: "feat(mcp): surface missing_checks on destructive-op denials"
 ```
 
@@ -438,4 +458,4 @@ gh issue create \
 
 **Placeholder scan:** none — every code step shows the full edit.
 
-**Edge cases covered by tests:** admin-without-scope success (Task 2b), below-admin denial with `missing_checks` + audit digest (Task 2c), admin success with non-opt-in profile (Task 2d), already-torn-down idempotency (Task 2e), control denial envelope `missing_checks` (Task 4). The non-member path is unreachable (ownership checks at the top guarantee `allocation.project in ctx.projects`, so `require_role` raises only `RoleDenied`), so catching `RoleDenied` alone is correct.
+**Edge cases covered by tests:** admin-without-scope success (Task 2b), below-admin denial with `missing_checks` + audit digest (Task 2c), admin success with non-opt-in profile (Task 2d), already-torn-down idempotency (Task 2e), and `missing_checks` on all three still-gated denial envelopes — power-without-scope, parametrized force_crash, and reprovision-without-scope (Task 4). The non-member path is unreachable (ownership checks at the top guarantee `allocation.project in ctx.projects`, so `require_role` raises only `RoleDenied`), so catching `RoleDenied` alone is correct.
