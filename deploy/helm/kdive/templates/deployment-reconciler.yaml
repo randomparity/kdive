@@ -15,6 +15,7 @@ spec:
         app: {{ include "kdive.fullname" . }}-reconciler
         {{- include "kdive.labels" . | nindent 8 }}
       annotations:
+        {{- include "kdive.configChecksum" . | nindent 8 }}
         {{- include "kdive.scrapeAnnotations" 9466 | nindent 8 }}
     spec:
       securityContext:

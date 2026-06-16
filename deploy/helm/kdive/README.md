@@ -32,6 +32,31 @@ already exists, so migrations apply before the app rollout. Migrations must be
 backward-compatible (expand-contract); the runner is forward-only (ADR-0015), so
 rollback is image-only and the prior image must tolerate the newer schema.
 
+## Upgrade
+
+**Do not upgrade with bare `helm upgrade --reuse-values`.** `--reuse-values` carries the
+previous release's merged values and *ignores the fresh `values.yaml` defaults*, so any
+config default added in a newer chart (e.g. `config.KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`,
+ADR-0127) never reaches an already-installed release — the new image runs without it. Capture
+your current values and merge fresh defaults instead:
+
+```sh
+helm get values kdive -o yaml > kdive-values.yaml   # your overrides only (no chart defaults)
+helm upgrade kdive deploy/helm/kdive -f kdive-values.yaml \
+  --set image.tag=<new-tag>
+```
+
+Passing the captured file with `-f` preserves your overrides **and** layers the new chart's
+`values.yaml` defaults on top, so a new config default is not silently dropped. As a backstop
+the chart renders `KDIVE_LOCAL_LIBVIRT_ENABLED` from a defensive `default "false"`, so even a
+bare `--reuse-values` no longer reintroduces the local-libvirt reaper crash-loop — but
+`-f kdive-values.yaml` is the general fix for *any* future config-default drift, so prefer it.
+
+A `helm upgrade` that changes a `config.*` value now rolls the server/worker/reconciler
+Deployments automatically (a `checksum/config` pod annotation, ADR-0134) — no manual
+`kubectl rollout restart` is needed. The bundled Postgres/MinIO backends carry no such
+annotation, so a config change never rolls their `emptyDir` pods.
+
 ## Bundled backends (demo only)
 
 `bundledBackends=true` (co-set with `demoAcknowledged=true`) stands up first-party Postgres,
@@ -60,10 +85,16 @@ not. To use the bundled store off-cluster, expose it and point the endpoint at a
 parties resolve to the same store:
 
 ```sh
-helm upgrade kdive deploy/helm/kdive -f deploy/helm/kdive/values-demo.yaml --reuse-values \
+helm get values kdive -o yaml > kdive-values.yaml
+helm upgrade kdive deploy/helm/kdive \
+  -f deploy/helm/kdive/values-demo.yaml -f kdive-values.yaml \
   --set demo.minio.service.type=NodePort --set demo.minio.service.nodePort=30900 \
   --set config.KDIVE_S3_ENDPOINT_URL=http://<node-ip>:30900
 ```
+
+(Capture-and-`-f`, not `--reuse-values` — see [Upgrade](#upgrade). Later `-f` files and
+`--set` flags win, so your captured overrides and the new endpoint layer on top of the demo
+defaults.)
 
 `config.KDIVE_S3_ENDPOINT_URL` now overrides the bundled default in both modes (it previously could
 not). The cluster network/firewall must permit the chosen NodePort; a cluster that only admits

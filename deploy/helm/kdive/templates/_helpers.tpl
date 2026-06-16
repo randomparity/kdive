@@ -96,6 +96,20 @@ readinessProbe:
 {{- end -}}
 
 {{/*
+Config-checksum pod annotation (ADR-0134, #470). The server/worker/reconciler read config.*
+once via envFrom of the -config ConfigMap, so a config.* change must roll their pods or the
+running env stays stale (helm reports success, nothing changes). Hashing the rendered
+configmap.yaml makes the pod template vary with the ConfigMap, so `helm upgrade` rolls exactly
+the consuming Deployments. Only the chart-rendered ConfigMap is hashed — the optional
+systems/fixtures ConfigMaps are operator-authored and referenced by name, so the chart cannot
+see their content. The demo backends (postgres/minio/oidc) do not include this, so a config
+change never rolls their emptyDir pods and demo data is preserved. Call with the root context.
+*/}}
+{{- define "kdive.configChecksum" -}}
+checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+{{- end -}}
+
+{{/*
 Optional file-secret projection (issue #313). When .Values.secrets.secretName is set, the
 chart mounts that pre-existing Secret read-only under .Values.secrets.mountPath and points
 KDIVE_SECRETS_ROOT at it, so file-ref secrets (e.g. the remote-libvirt TLS client cert/key/CA)
