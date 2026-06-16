@@ -20,10 +20,26 @@ reads the operator-staged `KDIVE_KERNEL_SRC` (worker-process env, server-invisib
 
 ## Goal / acceptance
 
-A caller, using only the MCP surface and its error messages, can reach a successful
-`runs.build` — either by submitting a valid git profile against a registered remote build
-host, or by staging a documented warm tree — without hitting a generic `KDIVE_KERNEL_SRC`
-failure as the first and only signal.
+Every `runs.build` failure on the server-build path is specific and actionably routed,
+rather than collapsing to one generic `KDIVE_KERNEL_SRC` string. Concretely, two failure
+classes are separated:
+
+1. **Caller-resolvable provenance error.** A bare-string `kernel_source_ref` that looks like
+   an intended git URI is rejected early at the caller's own boundary (`runs.create`) with a
+   message naming the structured `{"git": {...}}` form and the remote-build-host
+   requirement. The caller resolves this themselves by resubmitting the structured form.
+
+2. **Operator-prerequisite error.** A warm-tree build with no staged source now names the
+   exact operator step and the operator doc instead of an opaque failure. The caller cannot
+   resolve this alone; the message routes them (or the operator) to the prerequisite.
+
+**Residual stated honestly:** on a default deploy the seeded `worker-local` host exists but
+`KDIVE_KERNEL_SRC` is unset and no *remote* build host is registered, so end-to-end success
+still requires an operator to stage a warm tree (or register a remote host). This issue does
+not automate that operator setup — by construction it cannot, because `KDIVE_KERNEL_SRC` is
+worker-process env the server never reads (ADR-0136). The acceptance is "no generic
+`KDIVE_KERNEL_SRC` failure as the first and only signal," not "an unprivileged caller alone
+reaches a green build on a vanilla deploy."
 
 ## Design (three layers)
 
@@ -35,12 +51,17 @@ intended-but-unstructured git provenance, raise so `BuildProfile.parse` maps it 
 `configuration_error`.
 
 "Looks like an intended git URI" is defined narrowly:
-- a leading `git:` scheme, or
-- a leading `git+` scheme (e.g. `git+ssh://`, `git+https://`), or
+- a leading `git:` scheme (e.g. `git:/home/dave/src/linux#v7.0`), or
+- a leading `git+<transport>://` scheme (e.g. `git+ssh://`, `git+https://`), or
 - any `://` substring (`ssh://`, `https://`, `http://`, …).
+
+The `git+` rule is anchored on the `git+…://` URL shape, **not** a bare `git+` prefix, so a
+hypothetical scheme-less label like `git+next` is left valid (the only `git+` form rejected
+is an actual git-transport URL).
 
 Explicitly **valid** (untouched) bare warm-tree labels:
 - `git#v6.9` (a `#fragment`, no scheme, no `://`) — the existing test fixture form.
+- `git+next` (a `git+` prefix with no `://`) — not a URL, stays a warm-tree label.
 - `linux-6.9`, `mainline`, any scheme-less label.
 - an absolute path `/home/dave/src/linux`.
 
@@ -74,11 +95,13 @@ caller touches.
 
 In `providers/shared/build_host/workspace.py:sync_tree`, split the single generic error:
 
-- `kernel_src` is empty/blank → `configuration_error`: a local `worker-local` build
-  requires the operator to pre-stage a warm kernel source tree (`KDIVE_KERNEL_SRC`); point
-  at the operator doc.
-- `kernel_src` is set but not an absolute existing directory → `configuration_error`: the
-  configured `KDIVE_KERNEL_SRC` is not a usable absolute path to an existing tree.
+- `kernel_src` is empty or whitespace-only (`not kernel_src.strip()`) →
+  `configuration_error`: a local `worker-local` build requires the operator to pre-stage a
+  warm kernel source tree (`KDIVE_KERNEL_SRC`); point at the operator doc. A value set to
+  whitespace by a deploy-template accident routes here (the "you haven't staged a tree"
+  message), not to the invalid-path case.
+- `kernel_src` is non-blank but not an absolute existing directory → `configuration_error`:
+  the configured `KDIVE_KERNEL_SRC` is not a usable absolute path to an existing tree.
 
 Neither message interpolates the configured value (operator host state; the empty case has
 nothing to show). Messages name the env var and the remedy.
@@ -100,6 +123,8 @@ operator doc) covering:
 - `git+ssh://host/linux` (bare) → `CONFIGURATION_ERROR`.
 - `https://github.com/torvalds/linux` (bare) → `CONFIGURATION_ERROR`.
 - `git#v6.9` (bare, existing fixture) → parses as warm-tree, `is_git_source` False (regression guard).
+- `git+next` (bare `git+` prefix, no `://`) → parses as warm-tree (the narrowed `git+…://`
+  rule does not over-reject a scheme-less label).
 - `/home/dave/src/linux` (bare absolute path) → parses as warm-tree (still valid; the L2
   error, not L1, governs a missing tree).
 - structured `{"git": {"remote": "…", "ref": "…"}}` → parses, `is_git_source` True.
@@ -107,6 +132,8 @@ operator doc) covering:
 
 `tests/providers/build_host/test_transport_seams.py` (or the sync_tree test home):
 - empty `kernel_src` → `CONFIGURATION_ERROR` naming the operator pre-stage step.
+- whitespace-only `kernel_src="   "` → same `CONFIGURATION_ERROR` as empty (the pre-stage
+  message, not the invalid-path one).
 - `kernel_src="relative/path"` or a nonexistent absolute dir → `CONFIGURATION_ERROR`
   distinct message (set-but-invalid).
 
