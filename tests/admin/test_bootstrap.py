@@ -168,6 +168,18 @@ def test_seed_build_configs_step_with_s3_seeds_and_is_idempotent(
     assert row is not None and row[0] == "kdump"
 
 
+def test_seed_build_configs_command_invokes_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kdive import __main__ as main_mod
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        "kdive.admin.bootstrap.seed_build_configs_step",
+        lambda: called.append("seeded"),
+    )
+    main_mod.main(["seed-build-configs"])
+    assert called == ["seeded"]
+
+
 def test_install_fixtures_refuses_overwrite_without_force(tmp_path: Path) -> None:
     fixture_dest = tmp_path / "fixtures"
     (fixture_dest / "manifest.yaml").parent.mkdir(parents=True)
