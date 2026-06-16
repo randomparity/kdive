@@ -388,6 +388,19 @@ FAULT_INJECT = Setting(
     help="Presence (1/true/yes) registers the fault-injection provider.",
 )
 
+LOCAL_LIBVIRT_ENABLED = Setting(
+    name="KDIVE_LOCAL_LIBVIRT_ENABLED",
+    parse=_str,
+    default="true",
+    group="local-libvirt",
+    processes=RUNNABLE,
+    help=(
+        "Whether the local-libvirt reconciler reaper is composed (default on). Set to "
+        "false on deployments with no local libvirt host (e.g. a remote-libvirt-only k8s "
+        "deploy) so the leaked-domain sweep does not fail every pass on a missing socket."
+    ),
+)
+
 OTEL_ENABLED = Setting(
     name="KDIVE_OTEL_ENABLED",
     parse=_str,
@@ -471,6 +484,7 @@ SETTINGS = [
     SYSTEMS_TOML,
     RESOURCE_LEASE_TTL_SECONDS,
     FAULT_INJECT,
+    LOCAL_LIBVIRT_ENABLED,
     OTEL_ENABLED,
     OTEL_EXPORTER_OTLP_ENDPOINT,
     OTEL_TRACES_SAMPLER_RATIO,
