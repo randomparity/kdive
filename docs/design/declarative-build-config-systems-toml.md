@@ -234,8 +234,12 @@ reconcile pass.
 
 - `upsert_config_build_config(conn, name, object_key, sha256, description)` — writes
   `source='config'` unconditionally (the file is authoritative; it clobbers an `operator`
-  or `seed` row). Empty description preserves the prior one (the `COALESCE(NULLIF(...))`
-  pattern from `upsert_operator_build_config`).
+  or `seed` row) and writes `description` **verbatim** (no `COALESCE`-preserve). The file
+  fully specifies the fragment each reconcile, so an empty file description blanks the stored
+  one — and verbatim is required for idempotency: with the `COALESCE`-preserve the operator
+  writer uses, a file declaring an empty description would never converge against the pass's
+  `(sha256, source, description)` change key (the stored description would never blank, so the
+  pass would re-assert every cycle).
 - a `(sha256, source, description)` reader the pass uses for change-detection and drift
   attribution (the seed's `_stored_row` reads `(sha256, source)`; this widens it to include
   `description`, since the change-detection key compares description too — see the reconcile
