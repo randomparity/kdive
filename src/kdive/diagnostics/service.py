@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 import kdive.config as config
@@ -43,27 +44,70 @@ from kdive.security.secrets.secrets import read_secret_file
 _REMOTE_PROVIDER = "remote-libvirt"
 
 WORKER_UNAVAILABLE_DETAIL = "worker could not pick up the diagnostic job; check /livez and /readyz"
+FEATURE_NOT_ENABLED_DETAIL = (
+    "worker-vantage diagnostic checks (provider_tls, gdbstub_acl) are not enabled "
+    "in this deployment"
+)
+
+# failure_category labels for the substituted worker-vantage results (ADR-0139). Kept as plain
+# strings, mirroring kdive.diagnostics.checks, so this module stays free of a domain-errors import.
+_TRANSPORT_FAILURE = "transport_failure"
+_NOT_IMPLEMENTED = "not_implemented"
 
 _DEFAULT_PER_CHECK_TIMEOUT = 10.0
 _DEFAULT_OVERALL_TIMEOUT = 30.0
+
+
+class WorkerVantageSubstitution(StrEnum):
+    """Why a worker-vantage check is substituted instead of run (ADR-0139).
+
+    The two causes carry **distinct** details and ``failure_category`` labels so an operator —
+    and a programmatic caller — can tell them apart without parsing prose:
+
+    - ``WORKER_UNAVAILABLE`` — dispatch exists but the worker cannot pick the job up; the detail
+      points at the health endpoints (ADR-0090). This is the historical meaning of a bare
+      ``worker_available=False`` and stays the default.
+    - ``FEATURE_NOT_ENABLED`` — no worker-job dispatch is wired in this deployment, so the check
+      cannot run regardless of worker health (#484). Pointing at ``/livez``/``/readyz`` here is
+      misleading (it reads as a worker outage); the detail says the feature is not enabled.
+    """
+
+    WORKER_UNAVAILABLE = "worker_unavailable"
+    FEATURE_NOT_ENABLED = "feature_not_enabled"
+
+
+_SUBSTITUTION_DETAIL: dict[WorkerVantageSubstitution, str] = {
+    WorkerVantageSubstitution.WORKER_UNAVAILABLE: WORKER_UNAVAILABLE_DETAIL,
+    WorkerVantageSubstitution.FEATURE_NOT_ENABLED: FEATURE_NOT_ENABLED_DETAIL,
+}
+_SUBSTITUTION_CATEGORY: dict[WorkerVantageSubstitution, str] = {
+    WorkerVantageSubstitution.WORKER_UNAVAILABLE: _TRANSPORT_FAILURE,
+    WorkerVantageSubstitution.FEATURE_NOT_ENABLED: _NOT_IMPLEMENTED,
+}
 
 
 class _SecretBackendUnreachable(Exception):
     """The secret backend root is absent — a check-cannot-run condition, not a per-ref miss."""
 
 
-def worker_unavailable_results(checks: Sequence[Check]) -> list[CheckResult]:
-    """Return an ``error`` result per worker-vantage check when the worker is down.
+def worker_unavailable_results(
+    checks: Sequence[Check],
+    reason: WorkerVantageSubstitution = WorkerVantageSubstitution.WORKER_UNAVAILABLE,
+) -> list[CheckResult]:
+    """Return an ``error`` result per worker-vantage check that is substituted, not run.
 
-    The result points at the health endpoints (ADR-0090) rather than hanging on the job
-    queue — the diagnostic that explains breakage must not wedge on the breakage it exists
-    to explain (ADR-0091 §1). It is an ``error``, never a contract ``fail`` (no fix string).
+    The detail and ``failure_category`` attribute the substitution cause (ADR-0139): a genuine
+    worker outage points at the health endpoints (ADR-0090); an unwired feature says so instead
+    of misdirecting triage to ``/livez``/``/readyz``. Either way it is an ``error``, never a
+    contract ``fail`` (no fix string) — the diagnostic that explains breakage must not wedge on
+    the breakage it exists to explain (ADR-0091 §1).
     """
     return [
         CheckResult(
             check_id=check.id,
             status=CheckStatus.ERROR,
-            detail=WORKER_UNAVAILABLE_DETAIL,
+            detail=_SUBSTITUTION_DETAIL[reason],
+            failure_category=_SUBSTITUTION_CATEGORY[reason],
         )
         for check in checks
     ]
@@ -96,6 +140,9 @@ class DiagnosticsService:
         per_check_timeout: float,
         overall_timeout: float | None = None,
         worker_available: bool = True,
+        substitution_reason: WorkerVantageSubstitution = (
+            WorkerVantageSubstitution.WORKER_UNAVAILABLE
+        ),
     ) -> None:
         """Build the service.
 
@@ -108,13 +155,19 @@ class DiagnosticsService:
                 run, so used as a gate ``doctor`` reports a clean ``error`` rather than
                 hanging on a black-holed host. ``None`` bounds the run only per check.
             worker_available: Whether the worker can pick up worker-vantage jobs. When
-                ``False``, worker-vantage checks are not run — they surface as ``error``
-                pointing at the health endpoints (ADR-0091 §1).
+                ``False``, worker-vantage checks are not run — they surface as a substituted
+                ``error`` whose cause is named by ``substitution_reason`` (ADR-0091 §1).
+            substitution_reason: Why a worker-vantage check is substituted when
+                ``worker_available`` is ``False`` (ADR-0139). Defaults to ``WORKER_UNAVAILABLE``
+                (the health-endpoint detail), preserving the historical meaning of a bare
+                ``worker_available=False``; pass ``FEATURE_NOT_ENABLED`` when no worker-job
+                dispatch is wired so the detail does not misread as a worker outage.
         """
         self._checks = list(checks)
         self._timeout = per_check_timeout
         self._overall_timeout = overall_timeout
         self._worker_available = worker_available
+        self._substitution_reason = substitution_reason
 
     async def run(self) -> DiagnosticsReport:
         """Run every check and return the aggregated report.
@@ -127,7 +180,7 @@ class DiagnosticsService:
         runnable = [c for c in self._checks if self._can_run(c)]
         skipped = [c for c in self._checks if not self._can_run(c)]
         results = await self._run_within_budget(runnable)
-        results.extend(worker_unavailable_results(skipped))
+        results.extend(worker_unavailable_results(skipped, self._substitution_reason))
         return DiagnosticsReport(results=results)
 
     async def _run_within_budget(self, checks: Sequence[Check]) -> list[CheckResult]:
@@ -225,8 +278,9 @@ def _remote_libvirt_checks() -> list[Check]:
     The server-vantage ``remote_libvirt_reachability`` check is the concrete probe (ADR-0125); it
     resolves config lazily at run time. The worker-vantage ``provider_tls``/``gdbstub_acl`` checks
     are **named** but have no worker-job probe in this slice, so they are built with empty fields
-    and a never-called probe — the service substitutes them with the honest worker-unavailable
-    error (``worker_available=False``) rather than fabricating a "host unreachable" verdict.
+    and a never-called probe — the service substitutes them with the honest feature-not-enabled
+    error (``worker_available=False`` + ``FEATURE_NOT_ENABLED``) rather than fabricating a "host
+    unreachable" verdict or misreading the unwired feature as a worker outage (ADR-0139).
     """
     reachability_check = RemoteLibvirtReachabilityCheck(
         provider=_REMOTE_PROVIDER,
@@ -248,11 +302,13 @@ def default_service_factory(
     ``remote_libvirt_reachability`` check (ADR-0125, the qemu+tls reachability probe) and the
     worker-vantage ``provider_tls``/``gdbstub_acl`` checks.
 
-    The service is built with ``worker_available=False``: this slice wires no worker-job dispatch,
-    so the worker-vantage checks surface as an honest ``error`` ("worker could not pick up the
-    diagnostic job; check /livez and /readyz") rather than a fabricated probe verdict. The
-    server-vantage ``secret_ref`` and ``remote_libvirt_reachability`` checks are unaffected by the
-    flag and still run.
+    The service is built with ``worker_available=False`` and
+    ``substitution_reason=FEATURE_NOT_ENABLED``: this slice wires no worker-job dispatch, so the
+    worker-vantage checks surface as an honest ``error`` ("worker-vantage diagnostic checks ... are
+    not enabled in this deployment", ``failure_category=not_implemented``) rather than a fabricated
+    probe verdict or the worker-down ``/livez``/``/readyz`` detail — a running worker is not the
+    cause (ADR-0139, #484). The server-vantage ``secret_ref`` and ``remote_libvirt_reachability``
+    checks are unaffected by the flag and still run.
 
     ``with_egress`` opts into the heavy mutating ``guest_egress`` probe, which provisions a
     short-lived guest on the target provider. Its production probe-guest seam needs a bootable
@@ -278,9 +334,12 @@ def default_service_factory(
     # TLS/ACL checks with empty fields + never-called probes on the contract that they are
     # substituted (never run) here. A future flip to True must replace those placeholder
     # constructions with real probes (see ADR-0125's worker-job follow-up) — do not flip it alone.
+    # FEATURE_NOT_ENABLED makes the substituted detail say the feature is unwired here (not that a
+    # worker is down); the worker-job follow-up that flips the flag also drops this reason.
     return DiagnosticsService(
         checks=checks,
         per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,
         overall_timeout=_DEFAULT_OVERALL_TIMEOUT,
         worker_available=False,
+        substitution_reason=WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
     )

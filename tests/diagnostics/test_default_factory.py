@@ -24,7 +24,11 @@ from kdive.diagnostics.checks import (
     ReachabilityOutcome,
     SecretRefCheck,
 )
-from kdive.diagnostics.service import WORKER_UNAVAILABLE_DETAIL, default_service_factory
+from kdive.diagnostics.service import (
+    FEATURE_NOT_ENABLED_DETAIL,
+    WORKER_UNAVAILABLE_DETAIL,
+    default_service_factory,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _INSTANCE = """
@@ -143,17 +147,20 @@ def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
     report = asyncio.run(default_service_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
 
-    # Worker-vantage checks are substituted with the honest worker-unavailable error (no
-    # fabricated "host unreachable"), never a contract fail.
+    # Worker-vantage checks are substituted with the honest feature-not-enabled error — the
+    # dispatch is unwired in this deployment, NOT a worker outage, so the detail must not point
+    # at /livez//readyz (which reads as a worker down). Never a contract fail (#484, ADR-0139).
     for worker_id in (PROVIDER_TLS_ID, GDBSTUB_ACL_ID):
         assert by_id[worker_id].status is CheckStatus.ERROR
         assert by_id[worker_id].fix is None
-        assert WORKER_UNAVAILABLE_DETAIL in by_id[worker_id].detail
+        assert FEATURE_NOT_ENABLED_DETAIL in by_id[worker_id].detail
+        assert WORKER_UNAVAILABLE_DETAIL not in by_id[worker_id].detail
+        assert by_id[worker_id].failure_category == "not_implemented"
 
     # Server-vantage checks still RUN under worker_available=False.
     assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
     assert by_id[SECRET_REF_ID].status is CheckStatus.PASS
-    assert WORKER_UNAVAILABLE_DETAIL not in by_id[SECRET_REF_ID].detail
+    assert FEATURE_NOT_ENABLED_DETAIL not in by_id[SECRET_REF_ID].detail
 
 
 def test_run_reports_configuration_error_when_config_unresolvable_at_run_time(
