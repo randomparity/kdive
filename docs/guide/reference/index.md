@@ -56,7 +56,9 @@
 | [`investigations.close`](investigations.md#investigationsclose) | `implemented` |
 | [`investigations.get`](investigations.md#investigationsget) | `implemented` |
 | [`investigations.link`](investigations.md#investigationslink) | `implemented` |
+| [`investigations.list`](investigations.md#investigationslist) | `implemented` |
 | [`investigations.open`](investigations.md#investigationsopen) | `implemented` |
+| [`investigations.set`](investigations.md#investigationsset) | `implemented` |
 | [`investigations.unlink`](investigations.md#investigationsunlink) | `implemented` |
 | [`jobs.cancel`](jobs.md#jobscancel) | `implemented` |
 | [`jobs.get`](jobs.md#jobsget) | `implemented` |

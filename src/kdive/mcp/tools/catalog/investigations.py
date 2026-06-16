@@ -616,6 +616,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description='New description (<=4096); "" clears it; omit to leave unchanged.'),
         ] = None,
     ) -> ToolResponse:
+        """Edit a non-terminal Investigation's title and/or free-form description."""
         return await set_investigation(
             pool, current_context(), investigation_id, title=title, description=description
         )
@@ -635,4 +636,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Filter by state (open/active/closed/abandoned)."),
         ] = None,
     ) -> ToolResponse:
+        """List the Investigations you can view, newest-first, for reporting."""
         return await list_investigations(pool, current_context(), project=project, state=state)
