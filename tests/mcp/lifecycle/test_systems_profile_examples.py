@@ -207,10 +207,21 @@ def test_examples_never_leak_sensitive_inventory_fields(
     assert "secret-private" not in blob
 
 
-def test_collection_chains_into_define(tmp_path: Path) -> None:
+def test_collection_chains_full_discovery_lifecycle(tmp_path: Path) -> None:
+    # #474: the entry breadcrumb must walk a cold agent through discovery → provision so an agent
+    # that follows suggested_next_actions reaches a granted allocation on the first valid attempt.
     resp = build_profile_examples(None)
-    assert "systems.define" in resp.suggested_next_actions
-    assert "allocations.request" in resp.suggested_next_actions
+    actions = resp.suggested_next_actions
+    # The discovery tools that build a valid request appear, in order, before allocations.request.
+    discovery = ("resources.list", "shapes.list", "accounting.estimate")
+    for tool in discovery:
+        assert tool in actions, tool
+    discovery_order = [actions.index(t) for t in discovery]
+    assert discovery_order == sorted(discovery_order)
+    assert actions.index("accounting.estimate") < actions.index("allocations.request")
+    # The lifecycle continues into provision/get/teardown/release.
+    for tool in ("systems.provision", "systems.get", "systems.teardown", "allocations.release"):
+        assert tool in actions, tool
 
 
 def test_disk_image_example_emits_no_kernel_source_ref(tmp_path: Path) -> None:

@@ -26,7 +26,22 @@ from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
 
 _OBJECT_ID = "profile-examples"
-_NEXT_ACTIONS = ["systems.define", "allocations.request"]
+
+# The discovery→provision lifecycle a cold agent should follow (#474). Each is a registered tool
+# identifier; the order walks `resources.list` (resource kind/id) → `shapes.list` (sizing) →
+# `accounting.estimate` (cost) so the `allocations.request` is built from discovered context and
+# granted on the first valid attempt, then provisions and tears down. `systems.define` (the
+# two-step define-then-provision lane) stays directly callable but is not led to from here.
+_NEXT_ACTIONS = [
+    "resources.list",
+    "shapes.list",
+    "accounting.estimate",
+    "allocations.request",
+    "systems.provision",
+    "systems.get",
+    "systems.teardown",
+    "allocations.release",
+]
 
 # The three provider sections an example targets, keyed by the alias the profile schema uses.
 _LOCAL = "local-libvirt"
