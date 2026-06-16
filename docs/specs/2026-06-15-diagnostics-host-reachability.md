@@ -66,14 +66,18 @@ that *could not run* is `error`.
 
 ### Anti-amplification (ADR-0125)
 
-The probe targets a **single** `[[remote_libvirt]]` instance — the inventory's sole/default
-instance via `remote_config_from_inventory()`, which already fails closed with a
-`CONFIGURATION_ERROR` when zero or >1 instances are declared. One authz'd MCP call therefore
-cannot fan out into N TLS handshakes against remote hosts. No new `host` argument is added in this
-slice: the existing single-instance resolver is the selection, and a multi-instance deployment
-gets a legible `error` (which the reachability check surfaces as `configuration_error`) rather
-than silent fan-out. This matches the design's "with no argument it probes the default/sole
-instance".
+The probe targets a **single** `[[remote_libvirt]]` instance. Anti-amplification is enforced at two
+layers, both pre-existing:
+
+- The **inventory loader** rejects more than one `[[remote_libvirt]]` instance (per-op remote
+  selection is not wired), so `is_remote_libvirt_configured()` **degrades to `False`** on a
+  multi-instance inventory and the reachability check is **not assembled at all** — one authz'd MCP
+  call cannot fan out into N TLS handshakes against remote hosts.
+- For a single declared instance, `remote_config_from_inventory()` resolves exactly that one host;
+  the probe opens exactly one connection.
+
+No new `host` argument is added in this slice: the existing single-instance resolver is the
+selection. This matches the design's "with no argument it probes the default/sole instance".
 
 ### Inclusion gate and lazy config resolution (AC4 vs AC5)
 
@@ -86,13 +90,14 @@ and collapses the **entire** report to one generic "could not be assembled" erro
 drop `secret_ref`; calling the raising `remote_config_from_inventory()` at factory time would
 trigger exactly that collapse on a zero-instance deployment.
 
-Config resolution is therefore **deferred to `run()`**: the check holds a `config_factory`
-(defaulting to `remote_config_from_inventory`) and calls it inside `run()`. A
-`CategorizedError(CONFIGURATION_ERROR)` from the factory (a >1-instance race, or an inventory that
-became malformed after the gate passed) is caught and mapped to the check's own
-`error` + `configuration_error` (AC4) — it never collapses the sibling checks. This resolves the
-AC4/AC5 tension: **zero declared at assembly → no check** (AC5); **configured-but-unresolvable at
-run time → `error` + `configuration_error`** (AC4).
+Config resolution is therefore **deferred to `run()`** (inside the probe): the probe holds a
+`config_factory` (defaulting to `remote_config_from_inventory`) and calls it when run. A
+`CategorizedError(CONFIGURATION_ERROR)` from the factory — a single instance whose URI/cert/gdbstub
+range is malformed, or an inventory that became malformed/multi-instance after the gate passed — is
+caught and mapped to the check's own `error` + `configuration_error` (AC4); it never collapses the
+sibling checks. This resolves the AC4/AC5 tension: **zero (or >1) declared at assembly → no check**
+(AC5, since the gate degrades to `False`); **single-but-unresolvable at run time → `error` +
+`configuration_error`** (AC4).
 
 ### Scope of the claim
 
@@ -190,8 +195,11 @@ field — it does **not** touch `responses.py`, so #453 stays disjoint from conc
 3. **Bound + offload.** A hung `getInfo()`/open is bounded by the per-check timeout → `error` (via
    the service's `run_check` backstop), never a hang. The blocking libvirt call runs under
    `asyncio.to_thread` so the probe never stalls the event loop.
-4. **Anti-amplification.** With >1 declared instance, the check (config resolved lazily in `run()`)
-   reports `error` + `configuration_error` and makes **no** connection attempt — no fan-out.
+4. **Anti-amplification / run-time config error.** With >1 declared instance the gate degrades to
+   `False`, so no reachability check is assembled (no fan-out). With a single declared instance
+   whose config is unresolvable at run time (e.g. an inverted gdbstub range), the check reports
+   `error` + `configuration_error` and makes **no** connection attempt (config resolved before any
+   open).
 5. **No reachability check when remote-libvirt is not configured.** `default_service_factory`
    assembles only `secret_ref` (the worker-vantage TLS/ACL checks require a declared instance too)
    when no `[[remote_libvirt]]` instance is declared — no spurious `error` for a provider the
