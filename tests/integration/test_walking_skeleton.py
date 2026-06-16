@@ -122,23 +122,21 @@ class _SecretBearingCrash:
 
 
 @pytest.mark.parametrize(
-    ("scope_ok", "is_admin", "opt_in", "missing"),
+    ("is_admin", "opt_in", "missing"),
     [
-        (False, True, True, "capability_scope"),
-        (True, False, True, "admin_role"),
-        (True, True, False, "profile_opt_in"),
+        (False, True, "admin_role"),
+        (True, False, "profile_opt_in"),
     ],
 )
 def test_force_crash_refused_when_gate_check_absent(
-    migrated_url: str, scope_ok: bool, is_admin: bool, opt_in: bool, missing: str
+    migrated_url: str, is_admin: bool, opt_in: bool, missing: str
 ) -> None:
-    """#6: force_crash is refused (and audited, with no job) when any gate check is absent."""
+    """#6: force_crash is refused (and audited, with no job) when a gate check is absent."""
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
-            scope = {"destructive_ops": ["force_crash"]} if scope_ok else {}
             ops = ["force_crash"] if opt_in else []
-            alloc_id = await seed_granted_allocation(pool, capability_scope=scope)
+            alloc_id = await seed_granted_allocation(pool)
             sys_id = await seed_system(
                 pool, alloc_id, SystemState.READY, destructive_ops=ops, domain_name="kdive-x"
             )
@@ -164,13 +162,11 @@ def test_force_crash_refused_when_gate_check_absent(
 
 
 def test_force_crash_allowed_when_all_gate_checks_present(migrated_url: str) -> None:
-    """The gate's positive control: all three checks present admits a force_crash job."""
+    """The gate's positive control: both checks present (admin role + opt-in) admits a job."""
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
-            alloc_id = await seed_granted_allocation(
-                pool, capability_scope={"destructive_ops": ["force_crash"]}
-            )
+            alloc_id = await seed_granted_allocation(pool)
             sys_id = await seed_system(
                 pool,
                 alloc_id,

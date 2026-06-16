@@ -162,7 +162,6 @@ async def seed_granted_allocation(
     pool: AsyncConnectionPool,
     *,
     project: str = "proj",
-    capability_scope: dict[str, Any] | None = None,
 ) -> str:
     """Register the local-libvirt Resource and insert a `granted` Allocation; return its id."""
     disc = LocalLibvirtDiscovery(
@@ -184,7 +183,6 @@ async def seed_granted_allocation(
                 project=project,
                 resource_id=res.id,
                 state=AllocationState.GRANTED,
-                capability_scope=capability_scope or {},
             ),
         )
     return str(alloc.id)

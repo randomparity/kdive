@@ -458,7 +458,6 @@ async def _grant(
             requested_memory_gb=request.selector.memory_gb,
             requested_disk_gb=request.disk_gb,
             shape=request.shape,
-            capability_scope={},
             pcie_claim=claimed_devices,
         ),
     )
@@ -603,7 +602,6 @@ async def _enqueue(conn: AsyncConnection, request: AllocationRequest) -> Admissi
             requested_memory_gb=request.selector.memory_gb,
             requested_disk_gb=request.disk_gb,
             shape=request.shape,
-            capability_scope={},
             pcie_claim=[],
             requested_pcie_specs=list(request.pcie_specs),
             requested_kind=request.requested_kind,

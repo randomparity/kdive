@@ -94,6 +94,11 @@ type DestructiveJobKind = Literal[
     JobKind.POWER,
 ]
 
+DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH, JobKind.POWER}
+)
+"""Runtime set mirroring the ``DestructiveJobKind`` Literal (ADR-0130 token validation)."""
+
 
 class ImageVisibility(StrEnum):
     """Resolution scope of an image_catalog row (ADR-0092/0093).
@@ -257,7 +262,6 @@ class Allocation(DomainModel, _Attribution):
     resource_id: UUID | None = None
     state: AllocationState
     lease_expiry: datetime | None = None
-    capability_scope: dict[str, Any] = Field(default_factory=dict)
     requested_vcpus: int | None = None
     requested_memory_gb: int | None = None
     requested_disk_gb: int | None = None

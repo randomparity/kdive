@@ -1,9 +1,8 @@
-"""Tests for the three-check destructive-op gate (ADR-0006, ADR-0020)."""
+"""Tests for the two-check destructive-op gate (ADR-0130, refines ADR-0006/0020)."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -17,13 +16,13 @@ from kdive.security.authz.rbac import Role
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _ctx(role: Role = Role.ADMIN) -> RequestContext:
+def _ctx(role: Role) -> RequestContext:
     return RequestContext(
         principal="alice", agent_session=None, projects=("proj",), roles={"proj": role}
     )
 
 
-def _allocation(scope: dict[str, Any]) -> Allocation:
+def _allocation() -> Allocation:
     return Allocation.model_validate(
         dict(
             id=uuid4(),
@@ -33,7 +32,6 @@ def _allocation(scope: dict[str, Any]) -> Allocation:
             project="proj",
             resource_id=uuid4(),
             state=AllocationState.ACTIVE,
-            capability_scope=scope,
         )
     )
 
@@ -42,67 +40,42 @@ def _op(opt_in: bool = True) -> DestructiveOp:
     return DestructiveOp(kind=JobKind.FORCE_CRASH, profile_opt_in=opt_in)
 
 
-def test_all_three_present_is_allowed() -> None:
-    assert (
-        assert_destructive_allowed(
-            _ctx(Role.ADMIN), _allocation({"destructive_ops": ["force_crash"]}), _op(True)
-        )
-        is None
-    )
-
-
-def test_scope_absent_denied() -> None:
-    with pytest.raises(DestructiveOpDenied) as exc:
-        assert_destructive_allowed(_ctx(Role.ADMIN), _allocation({}), _op(True))
-    assert exc.value.missing == ["capability_scope"]
+def test_role_and_opt_in_present_is_allowed() -> None:
+    assert assert_destructive_allowed(_ctx(Role.ADMIN), _allocation(), _op(True)) is None
 
 
 def test_not_admin_denied() -> None:
     with pytest.raises(DestructiveOpDenied) as exc:
-        assert_destructive_allowed(
-            _ctx(Role.OPERATOR), _allocation({"destructive_ops": ["force_crash"]}), _op(True)
-        )
+        assert_destructive_allowed(_ctx(Role.OPERATOR), _allocation(), _op(True))
     assert exc.value.missing == ["admin_role"]
 
 
 def test_opt_in_false_denied() -> None:
     with pytest.raises(DestructiveOpDenied) as exc:
-        assert_destructive_allowed(
-            _ctx(Role.ADMIN), _allocation({"destructive_ops": ["force_crash"]}), _op(False)
-        )
+        assert_destructive_allowed(_ctx(Role.ADMIN), _allocation(), _op(False))
     assert exc.value.missing == ["profile_opt_in"]
 
 
 def test_opt_in_defaults_false() -> None:
     with pytest.raises(DestructiveOpDenied) as exc:
         assert_destructive_allowed(
-            _ctx(Role.ADMIN),
-            _allocation({"destructive_ops": ["force_crash"]}),
-            DestructiveOp(kind=JobKind.FORCE_CRASH),
+            _ctx(Role.ADMIN), _allocation(), DestructiveOp(kind=JobKind.FORCE_CRASH)
         )
     assert exc.value.missing == ["profile_opt_in"]
 
 
-def test_all_three_absent_lists_all() -> None:
+def test_both_absent_lists_role_then_opt_in() -> None:
     with pytest.raises(DestructiveOpDenied) as exc:
-        assert_destructive_allowed(_ctx(Role.OPERATOR), _allocation({}), _op(False))
-    assert exc.value.missing == ["capability_scope", "admin_role", "profile_opt_in"]
-
-
-def test_scope_with_non_list_value_fails_closed() -> None:
-    with pytest.raises(DestructiveOpDenied) as exc:
-        assert_destructive_allowed(
-            _ctx(Role.ADMIN), _allocation({"destructive_ops": "force_crash"}), _op(True)
-        )
-    assert exc.value.missing == ["capability_scope"]
+        assert_destructive_allowed(_ctx(Role.OPERATOR), _allocation(), _op(False))
+    assert exc.value.missing == ["admin_role", "profile_opt_in"]
 
 
 def test_operator_required_role_allows_operator() -> None:
-    # Reprovision's role factor is operator (ADR-0038): an operator with scope + opt-in passes.
+    # Reprovision's role factor is operator (ADR-0038): an operator with opt-in passes.
     assert (
         assert_destructive_allowed(
             _ctx(Role.OPERATOR),
-            _allocation({"destructive_ops": ["reprovision"]}),
+            _allocation(),
             DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True),
             required_role=Role.OPERATOR,
         )
@@ -114,7 +87,7 @@ def test_operator_required_role_still_denies_viewer() -> None:
     with pytest.raises(DestructiveOpDenied) as exc:
         assert_destructive_allowed(
             _ctx(Role.VIEWER),
-            _allocation({"destructive_ops": ["reprovision"]}),
+            _allocation(),
             DestructiveOp(kind=JobKind.REPROVISION, profile_opt_in=True),
             required_role=Role.OPERATOR,
         )
@@ -122,9 +95,6 @@ def test_operator_required_role_still_denies_viewer() -> None:
 
 
 def test_required_role_defaults_to_admin() -> None:
-    # The default required role is admin, so an operator is denied with the admin label.
     with pytest.raises(DestructiveOpDenied) as exc:
-        assert_destructive_allowed(
-            _ctx(Role.OPERATOR), _allocation({"destructive_ops": ["force_crash"]}), _op(True)
-        )
+        assert_destructive_allowed(_ctx(Role.OPERATOR), _allocation(), _op(True))
     assert exc.value.missing == ["admin_role"]

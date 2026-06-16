@@ -187,9 +187,7 @@ def test_roundtrip_every_object(migrated_url: str) -> None:
             res = await RESOURCES.insert(conn, _resource(capabilities={"kvm": True}))
             assert await RESOURCES.get(conn, res.id) == res
 
-            alloc = await ALLOCATIONS.insert(
-                conn, _allocation(res.id, capability_scope={"cpus": 4})
-            )
+            alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
             assert await ALLOCATIONS.get(conn, alloc.id) == alloc
 
             sysm = await SYSTEMS.insert(conn, _system(alloc.id))

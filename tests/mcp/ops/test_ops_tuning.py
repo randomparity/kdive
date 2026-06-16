@@ -110,7 +110,6 @@ async def _alloc(
             resource_id=resource_id,
             state=state,
             lease_expiry=None,
-            capability_scope={},
         ),
     )
     return alloc.id

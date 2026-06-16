@@ -201,6 +201,17 @@ class ProviderSection(_ProfileBase):
         raise AttributeError("profile has no provider section")
 
     @property
+    def destructive_ops(self) -> list[str]:
+        """Return the active provider section's declared destructive-op opt-in tokens."""
+        if self.local_libvirt_section is not None:
+            return list(self.local_libvirt_section.destructive_ops)
+        if self.remote_libvirt_section is not None:
+            return list(self.remote_libvirt_section.destructive_ops)
+        if self.fault_inject_section is not None:
+            return list(self.fault_inject_section.destructive_ops)
+        raise AttributeError("profile has no provider section")
+
+    @property
     def local_libvirt(self) -> LibvirtProfile:
         """Return the local-libvirt section for local-libvirt-specific callers."""
         if self.local_libvirt_section is None:
