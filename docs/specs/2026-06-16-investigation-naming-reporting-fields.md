@@ -66,9 +66,15 @@ up by the generic insert because it is a declared model field outside `_SERVER_G
 `open_investigation(...)` gains `description: str | None = None`, threaded into the
 `Investigation(...)` constructor. The tool wrapper advertises an optional `description` param.
 The boundary `_validate_text` check rejects a `title`/`description` over its bound with
-`configuration_error`. **Empty-string normalization (finding 2):** a `description` of `""` is
-normalized to `None` on `open` (and on `set`, below), so `description` is either a non-empty
-string or NULL everywhere — never a literal `""`. This keeps `open` and `set` consistent.
+`configuration_error`. **Empty-string normalization (finding 2) — `open` only:** on `open`, a
+`description` of `""` is normalized to `None` before the insert, so a freshly-created
+Investigation stores either a non-empty `description` or `NULL` — never a literal `""`.
+
+This normalization is scoped to `open`. On `set` it would be **wrong** to pre-normalize `""` to
+`None`, because `set` overloads `None` to mean "leave unchanged"; collapsing `""` into `None` there
+would destroy the clear-vs-omit distinction (iter-2 finding A). `set` branches on the raw value
+instead — see §3. The end state is still consistent: across both paths a stored `description` is
+either a non-empty string or `NULL`, never `""`.
 
 ### 3. `investigations.set` (new mutating tool, `operator`)
 
@@ -83,22 +89,27 @@ investigations.set(investigation_id, title?, description?)
   `_config_error(..., data={"current_status": state})`.
 - **At least one of `title`/`description` must be supplied** (both `None` → `_config_error`,
   before taking the lock).
-- **Omit vs. clear is value-based, not a Python sentinel (finding 2).** Over MCP/JSON an omitted
-  optional and an explicit `null` are indistinguishable at the FastMCP boundary — both arrive as
-  `None` — so `None` for either field means **leave unchanged**. `description=""` is the **clear**
-  signal: it normalizes to `NULL`. `title` cannot be cleared (it is `NOT NULL`); `title=""` (or
-  any title under the 1-char bound) is a `configuration_error`. So:
-  - `title=None` → leave `title` unchanged; a non-empty `title` (≤200 chars) → update.
-  - `description=None` → leave `description` unchanged; `description=""` → set NULL; a non-empty
-    `description` (≤4096 chars) → update.
+- **Omit vs. clear is value-based, and `set` branches on the RAW value — it does NOT pre-normalize
+  (iter-2 finding A).** Over MCP/JSON an omitted optional and an explicit `null` are
+  indistinguishable at the FastMCP boundary — both arrive as `None` — so `None` for either field
+  means **leave unchanged**. `description=""` is the **clear** signal. Because `set` overloads
+  `None` for "leave unchanged", it must decide each column's fate from the raw argument *before*
+  any normalization:
+  - `title`: `None` → leave unchanged; `""` (or any value under the 1-char bound) →
+    `configuration_error` (`title` is `NOT NULL`, cannot be cleared); non-empty (≤200 chars) →
+    `SET title = <value>`.
+  - `description`: `None` → leave unchanged (column omitted from the `UPDATE`); `""` →
+    `SET description = NULL`; non-empty (≤4096 chars) → `SET description = <value>`.
 - Validate supplied fields with the shared `_validate_text` boundary check → `configuration_error`
   on a bound violation. (Do **not** validate via whole-model `model_validate`: that would re-check
   the *existing* stored `title`, reintroducing finding 1's read hazard for a `set` that only
   edits `description`.)
-- Write with a single `UPDATE investigations SET title = %s, description = %s WHERE id = %s`
-  (only the changed columns), audited (`audit.record`, tool `investigations.set`,
-  `transition="set"`, args = the set of fields changed — **never the values**, to keep
-  free-form text out of the audit log).
+- Write a single `UPDATE` over **only the columns whose raw arg was non-`None`** (a column whose
+  arg was `None` is left out of the `SET` list entirely, so concurrent edits to the other column
+  are not clobbered). Audit (`audit.record`, tool `investigations.set`, `transition="set"`):
+  record the **new `title` value** when `title` changed (consistent with `investigations.open`,
+  which already logs `title`), and for `description` record only a flag
+  (`{"description": "set"|"cleared"}`) — never the free-form/large body (iter-2 finding B).
 - Render through `_envelope_for_investigation(updated)`.
 
 ### 4. Surface fields in the rendered envelope
@@ -164,8 +175,9 @@ investigations.list(project?, state?)
   before this change, since `title` was unbounded) is still readable by `get`/`list`/`set` — the
   bound lives at the write boundary, not on the model field. A unit test inserts such a row
   directly and asserts `get` succeeds.
-- `investigations.set` changes `title`; `get` reflects it; audit row recorded with field names
-  only.
+- `investigations.set` changes `title`; `get` reflects it; the audit row records the new `title`
+  value (consistent with `open`) and, for a `description` edit, a `"set"`/`"cleared"` flag rather
+  than the body.
 - `investigations.set` with `description=""` clears the column to `NULL`; with `description`
   omitted (or `None`) leaves it unchanged; with neither field → `configuration_error`; with a
   201-char `title` → `configuration_error`.

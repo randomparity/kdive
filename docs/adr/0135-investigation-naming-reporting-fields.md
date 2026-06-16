@@ -54,7 +54,11 @@ We will close all three gaps with one small surface, keeping the existing
    cannot be cleared (`NOT NULL`) and `title=""` is a `configuration_error`. At least one field
    must be supplied. A terminal (`closed`/`abandoned`) Investigation rejects with
    `configuration_error` carrying `current_status`, matching `link`/`unlink`. `title` thereby
-   becomes mutable while open.
+   becomes mutable while open. The handler decides each column's fate from the **raw** argument
+   before any normalization (`""→NULL` is a `set`-time clear, not a pre-normalization), so the
+   "leave unchanged" (`None`) and "clear" (`""`) signals stay distinct. The audit records the new
+   `title` value (as `open` already does) and only a `set`/`cleared` flag for `description`, never
+   the free-form body.
 
 3. **Surface the fields.** `investigations.get` (and the mutators' rendered envelope) return
    `title`, `description`, the full `external_refs` list, `state`, and `last_run_at` in
