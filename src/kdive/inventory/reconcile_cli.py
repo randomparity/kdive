@@ -63,6 +63,30 @@ async def reconcile_systems(
     return _EXIT_OK
 
 
+def validate_systems(path: Path | None) -> int:
+    """Parse + schema-validate ``systems.toml`` with no DB/S3 access; return the exit code.
+
+    The deploy-time fail-fast validator (ADR-0121): it touches neither Postgres nor the object
+    store. An absent **default** path is a quiet no-op (exit 0, the gitignored pre-config state);
+    a malformed/invalid file, or an explicit ``path`` to a missing file, is exit 1 with the
+    :class:`~kdive.inventory.InventoryError` message (``entry.field: msg``, which names the path)
+    on stderr.
+
+    Args:
+        path: An explicit ``systems.toml`` path, or ``None`` to use the default
+            ``KDIVE_SYSTEMS_TOML`` path.
+
+    Returns:
+        ``0`` on a valid file (or an absent default), ``1`` on an ``InventoryError``.
+    """
+    try:
+        _load_doc(path)
+    except InventoryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_INVENTORY_ERROR
+    return _EXIT_OK
+
+
 def _load_doc(path: Path | None) -> InventoryDoc | None:
     """Load the inventory doc, raising on a missing explicit ``--path``.
 

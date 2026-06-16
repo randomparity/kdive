@@ -92,9 +92,12 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
 
 
 def test_external_render_omits_post_install_migrate_hook() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    assert res.returncode == 0, res.stderr
-    assert "post-install" not in res.stdout
+    # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
+    # after the in-chart DB). The seed-build-configs hook is legitimately post-* on both paths, so
+    # assert on the migrate Job's phase, not a blanket output scan.
+    jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert "post-install" not in (jobs["migrate"]["phase"] or "")
+    assert "pre-install" in jobs["migrate"]["phase"]
 
 
 def test_bundled_path_wires_backends_into_config() -> None:
@@ -143,6 +146,78 @@ def _hooks_by_kind(*set_args: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _jobs_by_name(*set_args: str) -> dict[str, dict[str, Any]]:
+    """Index every rendered Job by its metadata.name suffix.
+
+    Returns ``{name_suffix: {"phase", "weight", "volumes", "args"}}``. Name-keyed because the
+    chart renders three Jobs (migrate, validate-systems, seed-build-configs) and the Kind-keyed
+    ``_hooks_by_kind`` cannot tell them apart.
+    """
+    res = _template(*set_args)
+    assert res.returncode == 0, res.stderr
+    jobs: dict[str, dict[str, Any]] = {}
+    for doc in yaml.safe_load_all(res.stdout):
+        if not (isinstance(doc, dict) and doc.get("kind") == "Job"):
+            continue
+        name = str(doc.get("metadata", {}).get("name", ""))
+        ann = doc.get("metadata", {}).get("annotations", {}) or {}
+        spec = doc["spec"]["template"]["spec"]
+        container = spec["containers"][0]
+        suffix = name.split("-kdive-", 1)[-1] if "-kdive-" in name else name
+        jobs[suffix] = {
+            "phase": ann.get("helm.sh/hook"),
+            "weight": int(ann.get("helm.sh/hook-weight", "0")),
+            "volumes": [v["name"] for v in spec.get("volumes", [])],
+            "args": container.get("args", []),
+            "backoff_limit": doc["spec"].get("backoffLimit"),
+            "env_names": [e["name"] for e in container.get("env", [])],
+        }
+    return jobs
+
+
+def test_seed_build_configs_is_post_hook_after_migrate() -> None:
+    jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    s = jobs["seed-build-configs"]
+    assert "post-install" in s["phase"] and "post-upgrade" in s["phase"]
+    assert s["weight"] > jobs["migrate"]["weight"]  # runs after migrate
+    assert s["args"] == ["seed-build-configs"]
+    assert "kdive-systems" not in s["volumes"]  # seed does not read systems.toml
+
+
+def test_validate_hook_rendered_only_with_systems_configmap() -> None:
+    without = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert "validate-systems" not in without
+    with_cm = _jobs_by_name(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
+    )
+    assert "validate-systems" in with_cm
+
+
+def test_validate_hook_is_pre_upgrade_weighted_before_migrate() -> None:
+    jobs = _jobs_by_name(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
+    )
+    v = jobs["validate-systems"]
+    assert "pre-install" in v["phase"] and "pre-upgrade" in v["phase"]
+    assert v["weight"] < jobs["migrate"]["weight"]  # runs before migrate
+    assert v["args"][:2] == ["reconcile-systems", "--check"]
+    assert "kdive-systems" in v["volumes"]
+    # Tolerate transient pod failures like migrate/seed (a bad file still re-fails fast).
+    assert v["backoff_limit"] == 3
+    # The explicit --path is authoritative; KDIVE_SYSTEMS_TOML must not be set (it would be dead).
+    assert "KDIVE_SYSTEMS_TOML" not in v["env_names"]
+
+
+def test_migrate_job_has_no_systems_volume() -> None:
+    # migrate() no longer reads systems.toml (ADR-0121), so the migrate Job must not mount the
+    # systems ConfigMap even when one is configured.
+    jobs = _jobs_by_name(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=my-systems"
+    )
+    assert "migrate" in jobs
+    assert "kdive-systems" not in jobs["migrate"]["volumes"]
+
+
 def test_external_configmap_is_a_pre_install_hook_before_migrate() -> None:
     # The migrate Job is a pre-install hook that envFroms the config ConfigMap. Helm
     # creates normal resources only AFTER pre-install hooks, so a normal-resource
@@ -150,11 +225,13 @@ def test_external_configmap_is_a_pre_install_hook_before_migrate() -> None:
     # timeout (issue #311). The ConfigMap must therefore be a pre-install hook too,
     # weighted strictly lower than the migrate Job so Helm creates it first.
     hooks = _hooks_by_kind("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    migrate_weight = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")["migrate"][
+        "weight"
+    ]
     assert "ConfigMap" in hooks, "external-path ConfigMap is not a hook; migrate cannot read it"
-    assert "Job" in hooks
     assert "pre-install" in hooks["ConfigMap"]["phase"]
     assert "pre-upgrade" in hooks["ConfigMap"]["phase"]
-    assert hooks["ConfigMap"]["weight"] < hooks["Job"]["weight"], (
+    assert hooks["ConfigMap"]["weight"] < migrate_weight, (
         "ConfigMap hook-weight must be strictly below the migrate Job's so it is created first"
     )
 
@@ -322,7 +399,7 @@ def test_systems_inventory_unset_mounts_nothing() -> None:
         assert "kdive-systems" not in volumes, proc
 
 
-def test_systems_inventory_configmap_mounts_on_components_and_migrate() -> None:
+def test_systems_inventory_configmap_mounts_on_components_not_migrate() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "systems.configMapName=inv")
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
@@ -346,12 +423,18 @@ def test_systems_inventory_configmap_mounts_on_components_and_migrate() -> None:
         assert volume["configMap"]["name"] == "inv"
         assert volume["configMap"]["items"] == [{"key": "systems.toml", "path": "systems.toml"}]
 
-    migrate = next(doc for doc in docs if doc.get("kind") == "Job")
-    container = migrate["spec"]["template"]["spec"]["containers"][0]
-    env = {e["name"]: e.get("value") for e in container["env"]}
-    assert env["KDIVE_SYSTEMS_TOML"] == "/etc/kdive/systems/systems.toml"
-    assert any(m["name"] == "kdive-systems" for m in container["volumeMounts"])
-    assert any(v["name"] == "kdive-systems" for v in migrate["spec"]["template"]["spec"]["volumes"])
+    # ADR-0121: migrate() no longer reads systems.toml, so the migrate Job does not mount the
+    # systems ConfigMap or set KDIVE_SYSTEMS_TOML (the validate-systems hook mounts it instead).
+    migrate = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Job" and doc["metadata"]["name"].endswith("-migrate")
+    )
+    spec = migrate["spec"]["template"]["spec"]
+    container = spec["containers"][0]
+    assert all(e["name"] != "KDIVE_SYSTEMS_TOML" for e in container.get("env", []))
+    assert not any(m["name"] == "kdive-systems" for m in container.get("volumeMounts", []))
+    assert not any(v["name"] == "kdive-systems" for v in spec.get("volumes", []))
 
 
 def test_fixtures_unset_mounts_nothing() -> None:

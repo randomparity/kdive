@@ -153,6 +153,15 @@ def _handle_migrate(
     migrate()
 
 
+def _handle_seed_build_configs(
+    args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
+) -> None:
+    del args, secret_registry, telemetry
+    from kdive.admin.bootstrap import seed_build_configs_step
+
+    seed_build_configs_step()
+
+
 def _handle_install_fixtures(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
@@ -198,13 +207,22 @@ def _add_reconcile_systems_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="path to systems.toml (default: KDIVE_SYSTEMS_TOML, then ./systems.toml)",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate systems.toml only (no DB/S3 writes); exit non-zero on a schema error",
+    )
 
 
 def _handle_reconcile_systems(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del secret_registry, telemetry
-    from kdive.inventory.reconcile_cli import reconcile_systems
+    from kdive.inventory.reconcile_cli import reconcile_systems, validate_systems
+
+    if args.check:
+        raise SystemExit(validate_systems(args.path))
+
     from kdive.store.objectstore import object_store_from_env
 
     store = _optional_reconciler_object_store(object_store_from_env)
@@ -232,6 +250,11 @@ _COMMANDS: tuple[_Command, ...] = (
         "reconciler", "run the drift-repair reconciler loop", _handle_reconciler, runnable=True
     ),
     _Command("migrate", "apply database migrations", _handle_migrate, runnable=True),
+    _Command(
+        "seed-build-configs",
+        "publish packaged build-config fragments to the object store",
+        _handle_seed_build_configs,
+    ),
     _Command(
         "install-fixtures",
         "install default fixture catalog",

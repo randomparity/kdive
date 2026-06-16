@@ -1,0 +1,45 @@
+{{- if .Values.systems.configMapName }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kdive.fullname" . }}-validate-systems
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+  annotations:
+    # Fail-fast deploy-time validation (ADR-0121): parse + schema-check the mounted systems.toml
+    # with no DB/S3 access, BEFORE migrate (weight -10 < migrate 0) and before app rollout. A
+    # malformed file aborts the upgrade with the precise field error in this pod's logs. The
+    # reconciler stays fail-open (keep-last-good) at runtime — this gates only the deploy.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  # Match the migrate/seed Jobs: a malformed file fails deterministically (each retry re-fails in
+  # seconds, so this still fails fast on the real case), while a transient image-pull/scheduling
+  # blip is retried instead of aborting the whole upgrade on the gating hook.
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "kdive.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: validate-systems
+          image: {{ include "kdive.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The explicit --path is the single source of truth; --check with an explicit path reads
+          # the file directly and never consults KDIVE_SYSTEMS_TOML, so no systemsEnv is set here.
+          args:
+            - reconcile-systems
+            - --check
+            - --path
+            - {{ printf "%s/%s" .Values.systems.mountPath .Values.systems.fileName | quote }}
+          volumeMounts:
+            {{- include "kdive.systemsVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "kdive.systemsVolume" . | nindent 8 }}
+{{- end }}
