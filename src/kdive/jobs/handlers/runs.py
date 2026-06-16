@@ -58,8 +58,9 @@ async def _fail_build(conn: AsyncConnection, job: Job, run: Run, category: Error
     try:
         async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
             await conn.execute(
-                "UPDATE runs SET state = %s, failure_category = %s WHERE id = %s AND state = %s",
-                (RunState.FAILED.value, category.value, run.id, RunState.RUNNING.value),
+                "UPDATE runs SET state = %s, failure_category = %s, failing_job_id = %s "
+                "WHERE id = %s AND state = %s",
+                (RunState.FAILED.value, category.value, job.id, run.id, RunState.RUNNING.value),
             )
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM runs WHERE id = %s", (run.id,))

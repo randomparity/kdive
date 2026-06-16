@@ -197,6 +197,15 @@ async def _run_state(pool: AsyncConnectionPool, run_id: str) -> str:
     return str(row["state"])
 
 
+async def _failing_job_id(pool: AsyncConnectionPool, run_id: str) -> str | None:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT failing_job_id FROM runs WHERE id = %s", (run_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    value = row["failing_job_id"]
+    return None if value is None else str(value)
+
+
 async def _lease_count(pool: AsyncConnectionPool, run_id: str) -> int:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute("SELECT count(*) FROM build_host_leases WHERE run_id = %s", (run_id,))
@@ -371,6 +380,8 @@ def test_ssh_host_build_failure_retains_lease(
                     )
             assert failing.calls == [UUID(run_id)]
             assert await _run_state(pool, run_id) == "failed"
+            # The failed Run links the job that carries its reason (ADR-0141, #486).
+            assert await _failing_job_id(pool, run_id) == str(job.id)
             assert await _lease_count(pool, run_id) == 1  # retained for the reconciler
 
     asyncio.run(_run())
