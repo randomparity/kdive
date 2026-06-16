@@ -60,7 +60,7 @@ Four findings, in priority order:
    no-leak invariant for `authorization_denied`/`not_found` (finding 2).
 3. A synchronous tool that stalls returns a `transport_failure` envelope, not a dropped socket;
    the request path holds no blocking call on the event loop (finding 3).
-4. `ops.diagnostics` reports per-host reachability for a remote-libvirt provider, distinguishing
+4. `ops.diagnostics` reports reachability for a selected remote-libvirt host, distinguishing
    "unreachable host" from "bad config" (finding 4).
 
 ## What already exists (verified in source)
@@ -245,7 +245,7 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
 | Structured error with >20 sub-errors | First 20 surfaced; bounded so the envelope stays small |
 | `systems.provision` stalls in the pre-mutation segment | `transport_failure` envelope, not a dropped socket |
 | Timeout would fire after a mutation began | Cannot — bound covers only the pre-mutation segment; the request completes and returns its real envelope |
-| Client retries a genuine transport drop | Idempotency ledger (ADR-0016) dedups; no duplicate System/allocation/job |
+| Client retries a genuine transport drop | Allocation lock resolves the existing System (key=`allocation_id`); retry returns success-for-existing, no duplicate System/job |
 | Remote-libvirt host down | reachability check reports `fail` + `transport_failure` (single targeted instance) |
 | Remote-libvirt misconfigured URI/cert | reachability check reports `error` + `configuration_error` |
 | Remote-libvirt reachable but not provision-ready (no storage pool) | reachability reports `pass`; failure surfaces at provision with a legible `detail` |
@@ -276,7 +276,8 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
 - **C:** a stall in the pre-mutation segment returns a `transport_failure` envelope rather than
   dropping; the provision request path runs no sync blocking call on the event loop (asserted by
   an injected slow DB/libvirt double not stalling a concurrent request); a retried identical
-  provision after a transport drop is deduped by the idempotency ledger (no second System).
+  provision after a transport drop takes the allocation-locked existing-System path — it returns
+  success-for-existing and does not re-enqueue the provision job (no second System).
 - **Wiring/guard:** `tests/mcp/core/test_tool_docs.py` tool→test map includes
   `systems.profile_examples`; the generated tool-reference doc lists it; no new migration.
 
