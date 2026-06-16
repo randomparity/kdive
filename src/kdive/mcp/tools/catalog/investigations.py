@@ -12,8 +12,9 @@ ErrorCategory).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
 
 from fastmcp import FastMCP
@@ -25,6 +26,7 @@ from pydantic import Field, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import ExternalRef, Investigation
 from kdive.domain.state import IllegalTransition, InvestigationState
 from kdive.log import bind_context
@@ -36,8 +38,10 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
-from kdive.security.authz.rbac import Role, require_role
+from kdive.security.authz.rbac import Role, projects_with_role, require_role
 from kdive.serialization import JsonValue
+
+_log = logging.getLogger(__name__)
 
 _TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 
@@ -453,6 +457,68 @@ async def set_investigation(
             )
 
 
+async def _fetch_investigation_rows(
+    conn: AsyncConnection, projects: tuple[str, ...], state: InvestigationState | None
+) -> list[dict[str, Any]]:
+    query = "SELECT * FROM investigations WHERE project = ANY(%s)"
+    params: list[object] = [list(projects)]
+    if state is not None:
+        query += " AND state = %s"
+        params.append(state.value)
+    query += " ORDER BY created_at DESC, id DESC"
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(query, params)
+        return await cur.fetchall()
+
+
+def _investigation_row_error(row: dict[str, Any]) -> ToolResponse:
+    """Degraded envelope for a row that violates the model invariant (matches resources.list)."""
+    object_id = row.get("id")
+    return ToolResponse.failure(
+        str(object_id) if object_id is not None else "investigations.list",
+        ErrorCategory.CONFIGURATION_ERROR,
+    )
+
+
+async def list_investigations(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    project: str | None = None,
+    state: str | None = None,
+) -> ToolResponse:
+    """List the caller's viewer-project Investigations, newest-first (ADR-0135)."""
+    resolved_state: InvestigationState | None = None
+    if state is not None:
+        try:
+            resolved_state = InvestigationState(state)
+        except ValueError:
+            return _config_error("investigations.list")
+    with bind_context(principal=ctx.principal):
+        viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
+        if project is not None:
+            viewer_projects = tuple(p for p in viewer_projects if p == project)
+        async with pool.connection() as conn:
+            rows = await _fetch_investigation_rows(conn, viewer_projects, resolved_state)
+        items: list[ToolResponse] = []
+        for row in rows:
+            try:
+                items.append(_envelope_for_investigation(Investigation.model_validate(row)))
+            except ValueError:
+                _log.warning(
+                    "investigation %s violates the response invariant; degraded",
+                    row.get("id", "<missing>"),
+                    exc_info=True,
+                )
+                items.append(_investigation_row_error(row))
+        return ToolResponse.collection(
+            "investigations",
+            "ok",
+            items,
+            suggested_next_actions=["investigations.get", "investigations.open"],
+        )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
 
@@ -553,3 +619,20 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         return await set_investigation(
             pool, current_context(), investigation_id, title=title, description=description
         )
+
+    @app.tool(
+        name="investigations.list",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_list(
+        project: Annotated[
+            str | None,
+            Field(description="Restrict to one project you can view; omit for all."),
+        ] = None,
+        state: Annotated[
+            str | None,
+            Field(description="Filter by state (open/active/closed/abandoned)."),
+        ] = None,
+    ) -> ToolResponse:
+        return await list_investigations(pool, current_context(), project=project, state=state)

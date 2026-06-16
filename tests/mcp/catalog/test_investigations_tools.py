@@ -623,3 +623,91 @@ def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
             assert resp.status == "open"  # read did not raise on the 300-char title
 
     asyncio.run(scenario())
+
+
+def test_list_scopes_to_viewer_projects(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="a")
+            await _open(pool, _ctx(), project="proj", title="b")
+            resp = await inv_tools.list_investigations(pool, _ctx())
+            assert resp.data["count"] == "2"
+            assert {i.data["title"] for i in resp.items} == {"a", "b"}
+
+    asyncio.run(scenario())
+
+
+def test_list_excludes_other_projects(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="mine")
+            # A viewer of only "other" sees none of proj's investigations.
+            resp = await inv_tools.list_investigations(pool, _ctx(projects=("other",)))
+            assert resp.data["count"] == "0"
+
+    asyncio.run(scenario())
+
+
+def test_list_state_filter(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="a")
+            await _open(pool, _ctx(), project="proj", title="b")
+            await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
+            resp = await inv_tools.list_investigations(pool, _ctx(), state="open")
+            assert {i.data["title"] for i in resp.items} == {"b"}
+
+    asyncio.run(scenario())
+
+
+def test_list_bad_state_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await inv_tools.list_investigations(pool, _ctx(), state="nonsense")
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_list_requires_viewer_role(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="a")
+            # A caller with no viewer role anywhere sees an empty collection.
+            resp = await inv_tools.list_investigations(pool, _ctx(role=None))
+            assert resp.data["count"] == "0"
+
+    asyncio.run(scenario())
+
+
+def test_investigation_row_error_envelope() -> None:
+    """The degraded-row helper yields a configuration_error envelope (no DB needed)."""
+    from uuid import uuid4 as _u  # local import; module-level imports include only UUID
+
+    resp = inv_tools._investigation_row_error({"id": _u()})
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+
+
+def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One row failing model_validate degrades to an error item; the rest still render."""
+
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            await _open(pool, _ctx(), project="proj", title="good-a")
+            await _open(pool, _ctx(), project="proj", title="good-b")
+            calls = {"n": 0}
+            real = inv_tools.Investigation.model_validate
+
+            def flaky(row: object) -> object:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise ValueError("synthetic invalid row")
+                return real(row)
+
+            monkeypatch.setattr(inv_tools.Investigation, "model_validate", staticmethod(flaky))
+            resp = await inv_tools.list_investigations(pool, _ctx())
+            assert resp.data["count"] == "2"
+            assert sorted(i.status for i in resp.items) == ["error", "open"]
+
+    asyncio.run(scenario())
