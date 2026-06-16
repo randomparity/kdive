@@ -15,6 +15,11 @@ from typing import cast
 import psycopg
 import pytest
 
+from kdive.build_configs.catalog import (
+    get_build_config,
+    upsert_operator_build_config,
+    upsert_seed_build_config,
+)
 from kdive.build_configs.seed import KDUMP_FRAGMENT_PATH, seed_build_configs
 from kdive.db import migrate
 from kdive.store.objectstore import ObjectStore
@@ -148,5 +153,56 @@ def test_seed_upserts_on_sha_change(migrated_url: str) -> None:
         with psycopg.connect(migrated_url, autocommit=True) as sync_conn:
             rows = sync_conn.execute("SELECT count(*) FROM build_config_catalog").fetchone()
         assert rows is not None and rows[0] == 1  # upsert, not insert-duplicate
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Source-aware upsert writers (ADR-0119)
+# ---------------------------------------------------------------------------
+
+
+def test_operator_upsert_then_seed_guard_preserves_operator(migrated_url: str) -> None:
+    """The DB-enforced seed guard refuses to overwrite an operator row."""
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await upsert_operator_build_config(conn, "kdump", "k/op", "shaop", "op desc")
+            # The source-guarded seed upsert must NOT overwrite an operator row.
+            await upsert_seed_build_config(conn, "kdump", "k/seed", "shaseed", "seed desc")
+            entry = await get_build_config(conn, "kdump")
+        assert entry is not None
+        assert entry.source == "operator"
+        assert entry.object_key == "k/op"
+        assert entry.sha256 == "shaop"
+        assert entry.description == "op desc"
+
+    asyncio.run(_run())
+
+
+def test_operator_upsert_empty_description_preserves_prior(migrated_url: str) -> None:
+    """Re-publishing bytes with an empty description keeps the prior description."""
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await upsert_seed_build_config(conn, "kdump", "k", "sha1", "kept desc")
+            await upsert_operator_build_config(conn, "kdump", "k", "sha2", "")
+            entry = await get_build_config(conn, "kdump")
+        assert entry is not None
+        assert entry.source == "operator"
+        assert entry.description == "kept desc"
+
+    asyncio.run(_run())
+
+
+def test_seed_upsert_fresh_row_is_seed_owned(migrated_url: str) -> None:
+    """A first seed upsert on an empty catalog creates a seed-owned row."""
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await upsert_seed_build_config(conn, "kdump", "k", "sha", "d")
+            entry = await get_build_config(conn, "kdump")
+        assert entry is not None
+        assert entry.source == "seed"
 
     asyncio.run(_run())

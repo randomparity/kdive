@@ -40,6 +40,7 @@ _EXPECTED_ENTRY = BuildConfigEntry(
     object_key=_OBJECT_KEY,
     sha256=_SHA,
     description=_DESCRIPTION,
+    source="seed",
 )
 
 
@@ -50,6 +51,7 @@ def test_parse_build_config_row_round_trips_fields() -> None:
             "object_key": "system/build-configs/kdump/kdump.config",
             "sha256": "abc",
             "description": "kdump options",
+            "source": "seed",
         }
     )
     assert entry == BuildConfigEntry(
@@ -57,6 +59,7 @@ def test_parse_build_config_row_round_trips_fields() -> None:
         object_key="system/build-configs/kdump/kdump.config",
         sha256="abc",
         description="kdump options",
+        source="seed",
     )
 
 
@@ -88,7 +91,7 @@ def test_parse_build_config_row_rejects_non_string_required_value() -> None:
 
 
 def test_verify_sha256_rejects_mismatch() -> None:
-    entry = BuildConfigEntry("kdump", "k", sha256="deadbeef", description="")
+    entry = BuildConfigEntry("kdump", "k", sha256="deadbeef", description="", source="seed")
     with pytest.raises(CategorizedError) as exc:
         entry.verify_bytes(b"the wrong bytes")
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -97,7 +100,7 @@ def test_verify_sha256_rejects_mismatch() -> None:
 def test_verify_sha256_accepts_match() -> None:
     data = b"CONFIG_CRASH_DUMP=y\n"
     digest = hashlib.sha256(data).hexdigest()
-    entry = BuildConfigEntry("kdump", "k", sha256=digest, description="")
+    entry = BuildConfigEntry("kdump", "k", sha256=digest, description="", source="seed")
     entry.verify_bytes(data)  # does not raise
 
 
