@@ -268,10 +268,15 @@ reconcile pass.
   contract would be violated). Otherwise PUT the bytes (when the sha256 changed; a
   description-only change needs no PUT but the spec keeps the publish path simple by
   re-PUTting idempotently to the deterministic key), upsert `source='config'`, and append
-  `created` (no prior row) or `updated`. Append `warned` + log the drift line **only** when a
-  prior row existed with `source != 'config'` or a different sha256 (the clobber-is-loud rule,
-  mirroring `reconcile_coefficients`; a benign description-only re-assert on an already-`config`
-  row is `updated`, not `warned`).
+  `created` (no prior row) or `updated`. Append `warned` + log the drift line **only** when
+  the pass clobbers a meaningful prior — `reconcile_coefficients` warns only on an actual
+  value change, never on a creation or no-op, so this mirrors it: warn iff the prior row's
+  `source == 'operator'` (a live `buildconfig.set` override being reverted) **or** the prior
+  row's `sha256`/`description` differs from the file. A benign adoption — `source='seed'`
+  (or absent) → `config` at **identical** content and description — is a `created`/`updated`,
+  **not** a `warned`: declaring the existing packaged default into the file clobbered nothing,
+  so it must not emit a false "overrode something" signal (which would otherwise inflate the
+  on-demand `warned`/audit count on every first-deploy declaration).
 - Pruning: none (Decision 2). The pass never deletes a row.
 
 `reconcile_pipeline.reconcile_all` appends `reconcile_build_configs(conn, doc, store)` after
@@ -306,10 +311,12 @@ Behavior-first, TDD. Tests mirror the package tree.
 - **Reconcile pass** (`tests/inventory/test_reconcile_build_configs.py`): create a new
   config fragment (publishes + row `source='config'`); change-detecting no-op on an identical
   re-assert; **description-only edit re-asserts** (catalog description updates, no `warned`);
-  re-assert over an `operator` row emits `warned` + flips to `config`; re-assert over a
-  `seed` row flips to `config`; over-cap content → per-fragment `warned` skip (row
-  untouched, a sibling in-cap fragment still publishes); store-cannot-publish degrades to
-  `warned` with rows untouched; removal-from-file leaves the row (no prune).
+  re-assert over an `operator` row emits `warned` + flips to `config`; **benign adoption** of
+  a `seed` row at identical content+description flips to `config` with **no** `warned`;
+  adoption of a `seed` row whose bytes differ from the file emits `warned`; over-cap content →
+  per-fragment `warned` skip (row untouched, a sibling in-cap fragment still publishes);
+  store-cannot-publish degrades to `warned` with rows untouched; removal-from-file leaves the
+  row (no prune).
 - **Adversarial** (`tests/adversarial/`): concurrent `buildconfig.set` and a reconcile pass
   on the same name serialize on `BUILD_CONFIG` and never commit a row sha256 that mismatches
   the object bytes (the row-vs-object invariant).
