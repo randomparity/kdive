@@ -180,6 +180,30 @@ name = "remote"
 coeff = "1.0"
 
 # ---------------------------------------------------------------------------------------------
+# BUILD-CONFIG FRAGMENTS — reconciled into build_config_catalog (ADR-0122).
+#
+# Each [[build_config]] declares a named kernel-config fragment inline. reconcile-systems
+# publishes the `content` bytes to the reserved object key and upserts the catalog row with
+# source='config'. The file is AUTHORITATIVE: a declared fragment overrides a live
+# `buildconfig.set` (which writes source='operator') and is re-asserted on every reconcile, so
+# edit this file to change a declared fragment — a buildconfig.set on a declared name is
+# transient (break-glass only). A name NOT declared here keeps buildconfig.set's durability.
+#
+# Removing a [[build_config]] block is a no-op: the catalog row persists at its last bytes
+# (upsert-only, never pruned). `content` is capped at KDIVE_MAX_BUILD_CONFIG_BYTES (256 KiB);
+# an over-cap fragment fails `reconcile-systems --check` at deploy.
+# ---------------------------------------------------------------------------------------------
+
+# [[build_config]]
+# name = "kdump"
+# description = "kdump/debuginfo kernel-config fragment"
+# content = """
+# CONFIG_KEXEC=y
+# CONFIG_CRASH_DUMP=y
+# CONFIG_DEBUG_INFO=y
+# """
+
+# ---------------------------------------------------------------------------------------------
 # COVERAGE-CAMPAIGN KNOBS — read ONLY by scripts/coverage_campaign/systems.py, ignored by the
 # app's inventory loader. These are the per-deployment facts the campaign needs that are not part
 # of the declarative inventory: workstation paths, the remote host's network/SSH/ACL facts, and
