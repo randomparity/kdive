@@ -116,6 +116,24 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
     asyncio.run(_run())
 
 
+def test_profile_binding_middleware_is_registered_innermost() -> None:
+    # ProfileBindingMiddleware must sit after Telemetry + DenialAudit so a binding ValidationError
+    # is converted to a returned envelope inside the telemetry span (#451, ADR-0124).
+    from kdive.mcp.middleware import (
+        DenialAuditMiddleware,
+        ProfileBindingMiddleware,
+        TelemetryMiddleware,
+    )
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+    order = [type(m).__name__ for m in app.middleware]
+    assert order.index(ProfileBindingMiddleware.__name__) > order.index(
+        DenialAuditMiddleware.__name__
+    )
+    assert order.index(DenialAuditMiddleware.__name__) > order.index(TelemetryMiddleware.__name__)
+
+
 def test_build_app_produces_a_streamable_http_asgi_app() -> None:
     # The server entrypoint serves build_app(...).http_app() over streamable HTTP;
     # assert the ASGI app assembles (no DB/network needed) so the run path is covered

@@ -129,6 +129,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "systems.define": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.get": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.list": ("tests/mcp/lifecycle/test_systems_list.py",),
+    "systems.profile_examples": ("tests/mcp/lifecycle/test_systems_profile_examples.py",),
     "systems.provision": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.provision_defined": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.reprovision": ("tests/mcp/lifecycle/test_systems_tools.py",),

@@ -19,6 +19,12 @@ from kdive.mcp.tools.lifecycle.systems.admin import (
 from kdive.mcp.tools.lifecycle.systems.admin import (
     teardown_system as _teardown_system,
 )
+from kdive.mcp.tools.lifecycle.systems.profile_examples import (
+    build_profile_examples as _build_profile_examples,
+)
+from kdive.mcp.tools.lifecycle.systems.profile_examples import (
+    load_inventory_for_examples as _load_inventory_for_examples,
+)
 from kdive.mcp.tools.lifecycle.systems.provision import (
     SystemProvisionHandlers as _SystemProvisionHandlers,
 )
@@ -31,7 +37,7 @@ from kdive.mcp.tools.lifecycle.systems.view import (
 from kdive.mcp.tools.lifecycle.systems.view import (
     list_systems as _list_systems,
 )
-from kdive.profiles.types import ProvisioningProfileInput
+from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 
@@ -43,6 +49,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_provision_defined(app, pool, resolver)
     _register_systems_get(app, pool)
     _register_systems_list(app, pool)
+    _register_systems_profile_examples(app)
     _register_systems_teardown(app, pool, resolver)
     _register_systems_reprovision(app, pool, resolver)
 
@@ -78,7 +85,7 @@ def _register_systems_define(
             str, Field(description="Granted Allocation to create a DEFINED System for.")
         ],
         profile: Annotated[
-            ProvisioningProfileInput,
+            ProvisioningProfile,
             Field(
                 description="Provisioning profile for the System; an 'upload' rootfs opens a "
                 "pre-provision rootfs-upload window."
@@ -94,7 +101,7 @@ def _register_systems_define(
                 pool,
                 current_context(),
                 allocation_id=allocation_id,
-                profile=profile,
+                profile=dump_profile(profile),
             ),
         )
 
@@ -112,7 +119,7 @@ def _register_systems_provision(
             str, Field(description="Granted Allocation to provision a System for.")
         ],
         profile: Annotated[
-            ProvisioningProfileInput,
+            ProvisioningProfile,
             Field(description="Provisioning profile for the System create lane."),
         ],
     ) -> ToolResponse:
@@ -125,7 +132,7 @@ def _register_systems_provision(
                 pool,
                 current_context(),
                 allocation_id=allocation_id,
-                profile=profile,
+                profile=dump_profile(profile),
             ),
         )
 
@@ -216,6 +223,21 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         )
 
 
+def _register_systems_profile_examples(app: FastMCP) -> None:
+    @app.tool(
+        name="systems.profile_examples",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def systems_profile_examples() -> ToolResponse:
+        """Return a ready-to-edit example profile per configured provider. Requires a token."""
+        # Auth-only (ADR-0117): the verifier already gated the transport; enforce token presence as
+        # defence-in-depth. No platform/project gate, no audit — the projection is non-sensitive
+        # inventory identifiers only (ADR-0124).
+        current_context()
+        return _build_profile_examples(_load_inventory_for_examples())
+
+
 def _register_systems_teardown(
     app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
 ) -> None:
@@ -242,7 +264,7 @@ def _register_systems_reprovision(
     async def systems_reprovision(
         system_id: Annotated[str, Field(description="The ready System to reprovision in place.")],
         profile: Annotated[
-            ProvisioningProfileInput,
+            ProvisioningProfile,
             Field(description="New provisioning profile; must opt in to reprovision."),
         ],
     ) -> ToolResponse:
@@ -255,6 +277,6 @@ def _register_systems_reprovision(
                 pool,
                 current_context(),
                 system_id=system_id,
-                profile=profile,
+                profile=dump_profile(profile),
             ),
         )

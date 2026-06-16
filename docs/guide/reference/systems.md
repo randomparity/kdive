@@ -37,6 +37,12 @@ List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires v
 | `shape` | `any` | no | Only Systems with this named shape, or '__custom__' for full-custom (no shape). |
 | `state` | `any` | no | Only Systems in this lifecycle state. |
 
+## `systems.profile_examples`
+
+`implemented` · `read-only`
+
+Return a ready-to-edit example profile per configured provider. Requires a token.
+
 ## `systems.provision`
 
 `partial`

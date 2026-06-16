@@ -101,6 +101,7 @@
 | [`systems.define`](systems.md#systemsdefine) | `implemented` |
 | [`systems.get`](systems.md#systemsget) | `implemented` |
 | [`systems.list`](systems.md#systemslist) | `implemented` |
+| [`systems.profile_examples`](systems.md#systemsprofile_examples) | `implemented` |
 | [`systems.provision`](systems.md#systemsprovision) | `partial` |
 | [`systems.provision_defined`](systems.md#systemsprovision_defined) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `partial` |

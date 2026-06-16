@@ -28,7 +28,11 @@ from kdive.domain.models import Job, JobKind
 from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.mcp.auth import build_verifier
-from kdive.mcp.middleware import DenialAuditMiddleware, TelemetryMiddleware
+from kdive.mcp.middleware import (
+    DenialAuditMiddleware,
+    ProfileBindingMiddleware,
+    TelemetryMiddleware,
+)
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
 from kdive.mcp.tools.accounting.reports import register as register_accounting_reports
@@ -471,6 +475,10 @@ def build_app(
         )
     )
     app.add_middleware(DenialAuditMiddleware(pool))
+    # Innermost (added last) so it sits adjacent to argument binding: it converts a typed-profile
+    # binding ValidationError into a returned envelope (ADR-0124), which the telemetry span above
+    # then sees as a normal completion rather than an error.
+    app.add_middleware(ProfileBindingMiddleware())
     composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
     assembly = AppAssembly(
         resolver=composition.build_provider_resolver(),

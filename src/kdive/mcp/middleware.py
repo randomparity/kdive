@@ -35,9 +35,11 @@ from math import isfinite
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools.base import ToolResult
 from opentelemetry.trace import SpanKind, Status, StatusCode
+from pydantic import ValidationError
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
@@ -173,6 +175,90 @@ class DenialAuditMiddleware(Middleware):
                     reason=str(denial),
                 ),
             )
+
+
+# The typed-profile tools (#451): FastMCP validates their ``ProvisioningProfile`` param at binding,
+# so a malformed profile raises before the tool body. Each maps to the call argument that names the
+# call's object, so the re-enveloped error carries the same object_id the body path would have.
+_PROFILE_TOOL_ID_ARG: dict[str, str] = {
+    "systems.define": "allocation_id",
+    "systems.provision": "allocation_id",
+    "systems.reprovision": "system_id",
+}
+
+
+def _is_profile_binding_error(exc: ValidationError) -> bool:
+    """Whether every error location is under the ``profile`` param (a binding failure).
+
+    FastMCP raises a binding ``ValidationError`` whose ``loc`` always starts with ``"profile"`` for
+    a malformed typed profile. Requiring *all* entries to start there distinguishes a profile-bind
+    failure from an unrelated ``ValidationError`` that might surface from the tool body, so only the
+    former is re-enveloped as ``invalid provisioning profile``.
+    """
+    errors = exc.errors()
+    return bool(errors) and all(
+        bool(err.get("loc")) and err["loc"][0] == "profile" for err in errors
+    )
+
+
+class ProfileBindingMiddleware(Middleware):
+    """Convert a binding-time profile ``ValidationError`` into the project envelope (ADR-0124).
+
+    The typed ``profile`` param is ``ProvisioningProfile`` (``extra="forbid"``), so FastMCP
+    validates and rejects a malformed profile at argument binding — before the tool body and before
+    the ``_runtime_resolution`` catch that builds the envelope. Without this seam the caller would
+    get a raw FastMCP ``ToolError`` instead of the uniform ``configuration_error`` envelope.
+
+    Registered **innermost** of the three middlewares (after ``TelemetryMiddleware`` and
+    ``DenialAuditMiddleware``), so it converts the binding error into a *returned* envelope inside
+    the telemetry span — counted as a normal completion, matching a body-rejected bad profile. It
+    acts only for the typed-profile tools (:data:`_PROFILE_TOOL_ID_ARG`); every other tool and every
+    non-``ValidationError`` exception propagates unchanged, so role/membership denials still route
+    through ``DenialAuditMiddleware``.
+    """
+
+    async def on_call_tool(
+        self,
+        context: Any,
+        call_next: Callable[[Any], Any],
+    ) -> Any:
+        """Dispatch one call; re-envelope a typed-profile binding ``ValidationError``."""
+        tool = context.message.name
+        id_arg = _PROFILE_TOOL_ID_ARG.get(tool)
+        if id_arg is None:
+            return await call_next(context)
+        try:
+            return await call_next(context)
+        except ValidationError as exc:
+            if not _is_profile_binding_error(exc):
+                # A ValidationError whose locations are not all under the ``profile`` param is not a
+                # profile-binding failure (the tool bodies convert their own parse() errors to
+                # CategorizedError, never a raw ValidationError) — let it propagate unchanged rather
+                # than mislabel it as an invalid profile.
+                raise
+            envelope = self._envelope(tool, id_arg, context, exc)
+            # The middleware short-circuits the tool body, so it must return the same ``ToolResult``
+            # FastMCP builds from a tool's ``ToolResponse`` return — a bare ``ToolResponse`` has no
+            # ``to_mcp_result`` and would raise at serialization. ``structured_content`` is the flat
+            # envelope dict (ADR-0113), matching the swept output schema.
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+    def _envelope(self, tool: str, id_arg: str, context: Any, exc: ValidationError) -> ToolResponse:
+        """Build the ``configuration_error`` envelope for a binding error (reuses ADR-0123)."""
+        arguments = getattr(context.message, "arguments", None)
+        object_id = tool
+        if isinstance(arguments, dict):
+            value = arguments.get(id_arg)
+            if isinstance(value, str):
+                object_id = value
+        error = CategorizedError(
+            "invalid provisioning profile",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "errors": exc.errors(include_url=False, include_input=False, include_context=False),
+            },
+        )
+        return ToolResponse.failure_from_error(object_id, error)
 
 
 class TelemetryMiddleware(Middleware):
