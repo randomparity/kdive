@@ -362,17 +362,14 @@ def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
     """Finding-1 regression: a title written before the bound stays readable/editable."""
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
-            async with _pool(migrated_url) as p2, p2.connection() as conn:
-                await conn.execute(
-                    "INSERT INTO investigations (id, title, state, principal, project) "
-                    "VALUES (%s, %s, 'open', 'p', 'proj')",
-                    (str(uuid4()), "y" * 300),
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                # No id given — the column defaults to gen_random_uuid(); no uuid4 needed.
+                await cur.execute(
+                    "INSERT INTO investigations (title, state, principal, project) "
+                    "VALUES (%s, 'open', 'p', 'proj') RETURNING id",
+                    ("y" * 300,),
                 )
-                inv_id = (
-                    await (await conn.execute(
-                        "SELECT id FROM investigations WHERE title = %s", ("y" * 300,)
-                    )).fetchone()
-                )[0]
+                inv_id = (await cur.fetchone())["id"]
             resp = await inv_tools.get_investigation(pool, _ctx(), str(inv_id))
             assert resp.status == "open"  # read did not raise on the 300-char title
     asyncio.run(scenario())
@@ -380,7 +377,8 @@ def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
 
 (The test file defines only `_open` as a wrapper; every other handler is called directly as
 `inv_tools.set_investigation(...)` / `inv_tools.close_investigation(...)`, matching the existing
-tests in the file. `uuid4` is already imported at the top of the test module.)
+tests in the file. The INSERT omits `id` so it relies on the DB default — no `uuid4` import is
+needed; the file imports only `UUID`.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -543,39 +541,42 @@ def test_list_bad_state_is_config_error(migrated_url: str) -> None:
     asyncio.run(scenario())
 
 
-def test_list_degrades_a_corrupt_row(migrated_url: str) -> None:
-    """A row that fails model_validate degrades to one error item, not a whole-list failure."""
+def test_investigation_row_error_envelope() -> None:
+    """The degraded-row helper yields a configuration_error envelope (no DB needed)."""
+    from uuid import uuid4 as _u  # local import; the module-level imports do not include uuid4
+
+    resp = inv_tools._investigation_row_error({"id": _u()})
+    assert resp.status == "error"
+    assert resp.error_category == "configuration_error"
+
+
+def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One row failing model_validate degrades to an error item; the rest still render."""
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
-            await _open(pool, _ctx(), project="proj", title="good")
-            # Force an invalid state directly past the app, bypassing the state machine.
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "INSERT INTO investigations (title, state, principal, project) "
-                    "VALUES ('bad', 'open', 'p', 'proj')"
-                )
-                await conn.execute(
-                    "UPDATE investigations SET state = 'open' WHERE title = 'bad'"
-                )
-                # Corrupt the enum at the DB layer (CHECK allows only valid values, so use a
-                # value the model rejects but the column permits is not possible — instead drop
-                # a NOT NULL projected field is also blocked). If no corruption is reachable,
-                # assert the happy-path count and rely on the resources.list precedent for the
-                # degrade branch; keep this test asserting both good rows are returned.
+            await _open(pool, _ctx(), project="proj", title="good-a")
+            await _open(pool, _ctx(), project="proj", title="good-b")
+            calls = {"n": 0}
+            real = inv_tools.Investigation.model_validate
+
+            def flaky(row: object) -> object:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise ValueError("synthetic invalid row")
+                return real(row)
+
+            monkeypatch.setattr(inv_tools.Investigation, "model_validate", staticmethod(flaky))
             resp = await inv_tools.list_investigations(pool, _ctx())
-            assert int(resp.data["count"]) >= 2
+            assert resp.data["count"] == "2"
+            statuses = sorted(i.status for i in resp.items)
+            assert statuses == ["error", "open"]  # one degraded, one healthy
     asyncio.run(scenario())
 ```
 
-> **Implementer note on the degrade test:** the DB `CHECK`/`NOT NULL` constraints make a
-> genuinely model-invalid row hard to insert through SQL, so the degrade branch is awkward to
-> trigger end-to-end. Prefer a focused unit test of `_investigation_row_error` (pass a dict with
-> `id` and assert a `configuration_error` envelope) plus a `list` test that monkeypatches
-> `Investigation.model_validate` to raise for one row and asserts the collection still returns
-> with a degraded item. This tests the branch directly without fighting the schema.
-
 All `list` tests call `inv_tools.list_investigations(...)` directly (the file convention — only
 `_open` has a wrapper). `_ctx()` defaults to `Role.OPERATOR` on `proj`, which includes `viewer`.
+The `monkeypatch` fixture is a built-in pytest fixture (no import). The unit test imports `uuid4`
+locally because the module-level test imports include only `UUID`.
 
 - [ ] **Step 2: Run to verify failure**
 
