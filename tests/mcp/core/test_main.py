@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kdive.__main__ import build_parser
+from kdive.__main__ import _HTTP_KEEPALIVE_S, _server_uvicorn_config, build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput
 from kdive.images.rootfs_command import run_build_fs
@@ -37,6 +37,17 @@ def test_worker_subcommand_parses_with_log_level() -> None:
 def test_no_subcommand_errors() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
+
+
+def test_server_uvicorn_config_sets_explicit_keepalive() -> None:
+    """The server passes an explicit uvicorn keepalive above the common 60s proxy idle default.
+
+    Asserts the pure helper directly (ADR-0138): ``_run_server`` awaits ``app.run_async`` which
+    blocks until the server stops, so the kwarg is built by this helper instead — testing the
+    real value, not a forever-blocking mock.
+    """
+    assert _HTTP_KEEPALIVE_S == 65.0
+    assert _server_uvicorn_config() == {"timeout_keep_alive": 65.0}
 
 
 def test_build_fs_subcommand_parses_with_defaults() -> None:

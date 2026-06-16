@@ -48,6 +48,11 @@ errors.
   new System.
 - **`transport_conflict`** — wait for the existing session to detach, then retry
   `debug.start_session`.
+- **`transport_failure`** — a console/debug transport or held long-poll stream failed; it is
+  `retryable=true`. Retry the same call. A *raw* `socket connection was closed unexpectedly`
+  (no envelope, so no `transport_failure` category) from a held `jobs.wait` is the same
+  transient class — see the transport-reset retry contract in
+  [async jobs](async-jobs.md#transport-resets-and-retries).
 - **`lease_expired`** — the allocation has expired; request a new allocation and
   provision a new System.
 - **`queue_timeout`** — the queued request never became placeable within the max-wait

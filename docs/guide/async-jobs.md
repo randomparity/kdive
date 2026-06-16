@@ -47,6 +47,27 @@ Fast operations — `debug.set_breakpoint`, `debug.read_memory`,
 without a job. Note that `control.power` is **not** fast: every power action
 (including `on`) enqueues a `power` job and returns a job handle.
 
+## Transport resets and retries
+
+A long `jobs.wait` holds one streamable-HTTP request open while it polls (up to the 300 s
+cap). An intermediary — a reverse proxy or load balancer in front of the server — may apply
+its own idle/read timeout and sever that held stream. When it does, the client sees a raw
+`socket connection was closed unexpectedly` transport error rather than a `ToolResponse`
+envelope: the connection that would carry the envelope is already gone, so the server cannot
+wrap that specific drop ([ADR-0138](../adr/0138-transport-reset-retry-contract.md)).
+
+**The contract:** a transport reset on `jobs.wait` (or any idempotent read such as `jobs.get`,
+`jobs.list`, `systems.get`, `runs.get`) is **transient and safe to retry unchanged**. Retry the
+same call.
+
+**The token-efficient pattern** is repeated **short** `jobs.wait` calls rather than one long
+hold. The default `timeout_s` is 30 s, well under any normal proxy timeout. A non-terminal
+`jobs.wait` returns the job's current (`running`/`queued`) envelope with `jobs.wait` in
+`suggested_next_actions` — that *is* the "still running, call again" signal; re-issue the wait
+while the returned envelope is non-terminal. Requesting a long explicit `timeout_s` (up to 300 s)
+holds the stream near the reset window and risks an intermediary cut; that drop is retryable, but
+short waits avoid it.
+
 ## Durability and retries
 
 Jobs carry a worker heartbeat/lease. If a worker dies mid-run, the job is
