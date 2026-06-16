@@ -29,6 +29,15 @@ systems:
   mountPath: /etc/kdive/systems
   fileName: systems.toml
 
+# Optional operator override for the local-libvirt fixture-profile catalog (ADR-0120). Create a
+# ConfigMap whose keys are manifest.yaml plus each profile YAML as a FLAT top-level key (a
+# ConfigMap key cannot contain '/'; the manifest must list bare filenames). Set configMapName to
+# mount it on server/worker/reconciler and point KDIVE_FIXTURE_CATALOG_PATH at it. Not mounted on
+# the migrate job (migrate does not read the fixture catalog).
+fixtures:
+  configMapName: ""
+  mountPath: /etc/kdive/fixtures
+
 # Project a pre-existing Kubernetes Secret as files under mountPath on the components that
 # resolve secret references by file (server, worker, reconciler — the worker/reconciler open
 # the remote-libvirt qemu+tls transport; the server resolves debug-session secrets). Leave
