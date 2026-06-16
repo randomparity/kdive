@@ -37,6 +37,7 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
 
 _TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 
@@ -77,11 +78,16 @@ def _envelope_for_investigation(inv: Investigation) -> ToolResponse:
         actions = ["investigations.get"]
     else:
         actions = ["investigations.get", "investigations.close", "runs.create"]
+    data: dict[str, JsonValue] = {
+        "project": inv.project,
+        "title": inv.title,
+        "description": inv.description,
+        "external_refs": [r.model_dump() for r in inv.external_refs],
+        "state": inv.state.value,
+        "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,
+    }
     return ToolResponse.success(
-        str(inv.id),
-        inv.state.value,
-        suggested_next_actions=actions,
-        data={"project": inv.project, "external_refs": str(len(inv.external_refs))},
+        str(inv.id), inv.state.value, suggested_next_actions=actions, data=data
     )
 
 
@@ -149,12 +155,7 @@ async def open_investigation(
                     project=project,
                 ),
             )
-        return ToolResponse.success(
-            str(inv.id),
-            "open",
-            suggested_next_actions=["investigations.get", "runs.create"],
-            data={"project": project},
-        )
+        return _envelope_for_investigation(inv)
 
 
 async def get_investigation(

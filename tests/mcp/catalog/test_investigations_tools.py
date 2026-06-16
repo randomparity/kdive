@@ -113,9 +113,23 @@ def test_get_own_investigation_renders_state(migrated_url: str) -> None:
             opened = await _open(pool, _ctx(), project="proj", title="t")
             resp = await inv_tools.get_investigation(pool, _ctx(), opened.object_id)
         assert resp.status == "open"
-        assert resp.data["external_refs"] == "0"
+        assert resp.data["external_refs"] == []
 
     asyncio.run(_run())
+
+
+def test_get_reports_title_and_description(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="xfs oops", description="hyp")
+            resp = await inv_tools.get_investigation(pool, _ctx(), opened.object_id)
+            assert resp.data["title"] == "xfs oops"
+            assert resp.data["description"] == "hyp"
+            assert resp.data["external_refs"] == []
+            assert resp.data["state"] == "open"
+            assert resp.data["last_run_at"] is None
+
+    asyncio.run(scenario())
 
 
 def test_get_investigation_requires_viewer_role(migrated_url: str) -> None:
