@@ -66,13 +66,23 @@ class ProviderResolver:
 
     Built per deployment by :func:`kdive.providers.assembly.composition.build_provider_resolver`.
     Selection is exhaustive and fail-closed: an unregistered kind raises
-    ``configuration_error`` at resolution.
+    ``configuration_error`` at resolution. The map may be empty (a deployment that disables
+    every provider, ADR-0131); resolution then fails closed for every kind and discovery
+    registration is a no-op.
     """
 
     def __init__(self, runtimes: Mapping[ResourceKind, ProviderRuntime]) -> None:
-        if not runtimes:
-            raise ValueError("ProviderResolver requires at least one registered runtime")
         self._runtimes: dict[ResourceKind, ProviderRuntime] = dict(runtimes)
+        if not self._runtimes:
+            # An empty resolver is a valid (ADR-0131) but degenerate state: every provider is
+            # disabled, so every resolution fails closed. Warn at the single construction
+            # chokepoint so the server and worker tiers (whose readiness probes do not inspect
+            # provider composition) surface a zero-provider deployment at startup, not only on
+            # the first request that finds no Resource.
+            _log.warning(
+                "ProviderResolver built with no registered runtimes: every provider is "
+                "disabled, so all resource resolution will fail with configuration_error"
+            )
 
     def resolve(self, kind: ResourceKind) -> ProviderRuntime:
         """Return the runtime registered for ``kind`` or fail closed."""
@@ -103,7 +113,14 @@ class ProviderResolver:
         worker-only host has no local libvirtd, but its remote-libvirt resource
         still has to register), so each registrar is isolated: the first
         failure is re-raised only after every runtime has been attempted.
+
+        Logs the composed kinds at ``INFO`` (ADR-0131): a deployment that disables
+        every provider now constructs an empty resolver instead of crashing, so the
+        zero-provider case must be visible in the log rather than surfacing only when
+        the first ``allocations.request`` finds no Resource.
         """
+        kinds = sorted(kind.value for kind in self._runtimes)
+        _log.info("registering discovery for %d provider runtime(s): %s", len(kinds), kinds)
         first_failure: Exception | None = None
         for kind, runtime in self._runtimes.items():
             try:

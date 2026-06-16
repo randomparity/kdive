@@ -48,9 +48,21 @@ def test_registered_kinds_reflects_the_map() -> None:
     assert resolver.registered_kinds() == frozenset({ResourceKind.LOCAL_LIBVIRT})
 
 
-def test_empty_resolver_is_rejected() -> None:
-    with pytest.raises(ValueError, match="at least one"):
-        ProviderResolver({})
+def test_empty_resolver_is_allowed_and_fails_closed_at_resolve(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # ADR-0131: with local-libvirt gateable, a fully-disabled deployment yields an empty
+    # runtime map. That must not crash startup with a ValueError — it fails closed at
+    # resolution instead, and discovery registration over an empty set is a no-op. The
+    # constructor warns so the request tiers surface a zero-provider deploy at startup.
+    with caplog.at_level("WARNING", logger="kdive.providers.core.resolver"):
+        resolver = ProviderResolver({})
+    assert any("no registered runtimes" in record.message for record in caplog.records)
+    assert resolver.registered_kinds() == frozenset()
+    asyncio.run(resolver.register_all_discovery(cast(AsyncConnectionPool, object())))
+    with pytest.raises(CategorizedError) as exc:
+        resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_register_all_discovery_fans_out_over_every_runtime() -> None:
