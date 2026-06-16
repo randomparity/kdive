@@ -235,6 +235,28 @@ def test_close_already_closed_is_idempotent_no_audit(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_close_surfaces_enriched_envelope(migrated_url: str) -> None:
+    """close renders the same enriched data as get (title/description/refs/state)."""
+
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="xfs oops", description="hyp")
+            resp = await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
+            assert resp.status == "closed"
+            assert resp.data["title"] == "xfs oops"
+            assert resp.data["description"] == "hyp"
+            assert resp.data["external_refs"] == []
+            assert resp.data["state"] == "closed"
+            assert resp.suggested_next_actions == ["investigations.get"]
+            # The idempotent already-closed path renders the same enriched envelope.
+            again = await inv_tools.close_investigation(pool, _ctx(), opened.object_id)
+            assert again.status == "closed"
+            assert again.data["title"] == "xfs oops"
+            assert again.data["description"] == "hyp"
+
+    asyncio.run(scenario())
+
+
 def test_close_abandoned_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
