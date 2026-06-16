@@ -36,8 +36,10 @@ class LockScope(StrEnum):
     (ADR-0027), and ``runs.build`` acquires ``BUILD_HOST`` inside an existing ``RUN``
     transaction — so every co-hold takes ``RUN`` before ``BUILD_HOST``.
 
-    ``PROJECT`` is keyed by the ``project`` string; every other scope is keyed by an
-    object :class:`~uuid.UUID`.
+    ``PROJECT`` is keyed by the ``project`` string; ``BUILD_CONFIG`` is keyed by the
+    build-config fragment **name** string and is always held alone (build-config set/seed
+    serialization, ADR-0119), so it sits outside the co-hold total order; every other scope
+    is keyed by an object :class:`~uuid.UUID`.
     """
 
     PROJECT = "project"
@@ -48,6 +50,7 @@ class LockScope(StrEnum):
     RUN = "run"
     BUILD_HOST = "build_host"
     INVENTORY = "inventory"
+    BUILD_CONFIG = "build_config"
 
 
 def _lock_key(scope: LockScope, key: UUID | str) -> int:
