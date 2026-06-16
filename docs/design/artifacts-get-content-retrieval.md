@@ -78,7 +78,10 @@ A store outage never turns a successful `get` into a tool failure.
   so its bytes are already redacted.
 - `presign_get` is called with the authorized `redacted` key only; the URL cannot
   address the `sensitive` sibling object. It is a bearer capability bounded by the
-  configured TTL.
+  configured TTL. The URI is minted **only after `head().sensitivity is REDACTED`**,
+  so the URI path enforces the same object-metadata redaction gate as the inline
+  path for every size (including oversized artifacts whose body is never fetched);
+  a DB-row/object sensitivity drift is not-found-shaped on both paths.
 - No new redaction pass is run on fetched bytes — the persisted object is already
   the redactor's output; the gate is the sensitivity re-check, identical to
   `search_text`.
@@ -103,7 +106,10 @@ Handler-level, injected store seam (mirrors the `search_text` tests):
   `content_omitted: artifact_too_large`, `download_uri` present, `get_artifact`
   never called (`store.got is False`).
 - fetched object `sensitivity != REDACTED` at a redacted row's key: not-found-shaped
-  `configuration_error` (the redaction gate).
+  `configuration_error` (the post-fetch redaction gate).
+- `head().sensitivity != REDACTED` at a redacted row's key (object/row drift): not-found-shaped
+  `configuration_error`, URI never minted, body never fetched — for both an
+  inline-eligible and an oversized object (the pre-URI redaction gate).
 - store factory raises: metadata envelope + `content_unavailable: store_unconfigured`,
   no URI.
 - `head`/`presign_get` raises: metadata envelope + `content_unavailable: store_error`.
