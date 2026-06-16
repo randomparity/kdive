@@ -32,19 +32,29 @@ gains:
    `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` (default 900). Present whenever the store
    is reachable.
 3. **`data["size_bytes"]`** — the object size from `head`.
-4. **`data["content"]`** — the UTF-8-decoded (`errors="replace"`) object bytes,
-   present iff `size_bytes <= _MAX_SEARCHABLE_ARTIFACT_BYTES` (1 MiB).
+4. **`data["content"]`** — the UTF-8-decoded (`errors="replace"`) object bytes, a
+   best-effort text view; present iff `size_bytes <= KDIVE_ARTIFACT_INLINE_MAX_BYTES`
+   (default 64 KiB). `download_uri` is authoritative for the exact bytes.
 5. **`data["content_truncated"]`** — `"false"` (the inline body is never a clip;
    oversized omits `content` entirely).
 
 ### Size handling
 
-- `size_bytes <= 1 MiB`: fetch via `get_artifact(key, head.etag)`, re-verify
-  `fetched.sensitivity is REDACTED` (reject to a not-found-shaped
-  `configuration_error` otherwise), and return the decoded bytes in
-  `data["content"]`.
-- `size_bytes > 1 MiB`: omit `content`; set `data["content_omitted"] =
-  "artifact_too_large"`. The presigned `download_uri` is the retrieval path.
+The inline cap is **deliberately distinct** from the `search_text` fetch/scan
+bound. `search_text` is willing to *fetch* up to `_MAX_SEARCHABLE_ARTIFACT_BYTES`
+(1 MiB) but caps what it *returns* at `MAX_MATCHES_JSON_CHARS` (64 KiB). Inlining a
+full 1 MiB object into one `ToolResponse.data` value would be far larger than any
+other read tool returns and a heavy token payload for an LLM consumer. So
+`artifacts.get` inlines only up to `KDIVE_ARTIFACT_INLINE_MAX_BYTES` (default 64 KiB,
+matching `search_text`'s return scale) and routes anything larger to the URI:
+
+- `size_bytes <= KDIVE_ARTIFACT_INLINE_MAX_BYTES`: fetch via
+  `get_artifact(key, head.etag)`, re-verify `fetched.sensitivity is REDACTED`
+  (reject to a not-found-shaped `configuration_error` otherwise), and return the
+  decoded bytes in `data["content"]`.
+- `size_bytes > KDIVE_ARTIFACT_INLINE_MAX_BYTES`: omit `content`; set
+  `data["content_omitted"] = "artifact_too_large"`; `get_artifact` is never called.
+  The presigned `download_uri` is the retrieval path for any size.
 
 ### Best-effort degradation
 
@@ -72,6 +82,10 @@ A store outage never turns a successful `get` into a tool failure.
 - No new redaction pass is run on fetched bytes — the persisted object is already
   the redactor's output; the gate is the sensitivity re-check, identical to
   `search_text`.
+- `data["content"]` is a best-effort UTF-8 text view (`errors="replace"`). Redacted
+  artifacts today are text (console / redacted dmesg); for exact bytes (or a future
+  non-text redacted artifact) `refs["download_uri"]` is authoritative. `content` is
+  never trusted as a byte-faithful copy.
 
 ## Out of scope
 
@@ -83,10 +97,11 @@ A store outage never turns a successful `get` into a tool failure.
 
 Handler-level, injected store seam (mirrors the `search_text` tests):
 
-- redacted ≤cap: `content` present and equals the decoded object, `size_bytes`
-  set, `download_uri` present.
-- redacted >cap: `content` absent, `content_omitted: artifact_too_large`,
-  `download_uri` present, `get_artifact` never called (`store.got is False`).
+- redacted ≤`KDIVE_ARTIFACT_INLINE_MAX_BYTES`: `content` present and equals the
+  decoded object, `size_bytes` set, `download_uri` present.
+- redacted >`KDIVE_ARTIFACT_INLINE_MAX_BYTES` (but small object): `content` absent,
+  `content_omitted: artifact_too_large`, `download_uri` present, `get_artifact`
+  never called (`store.got is False`).
 - fetched object `sensitivity != REDACTED` at a redacted row's key: not-found-shaped
   `configuration_error` (the redaction gate).
 - store factory raises: metadata envelope + `content_unavailable: store_unconfigured`,

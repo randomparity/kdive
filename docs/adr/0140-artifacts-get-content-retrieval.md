@@ -29,17 +29,23 @@ Extend `artifacts.get` to return the redacted artifact's content two ways, both
 preserving the existing authorization + sensitivity gate (`redacted`-only,
 viewer role, project-scoped, quarantined/sensitive ids are not-found-shaped):
 
-1. **Size-bounded inline content** in `data["content"]`. Reuse the `search_text`
-   pattern exactly: `head` for size, reject over `_MAX_SEARCHABLE_ARTIFACT_BYTES`
-   with `configuration_error` (`reason: artifact_too_large`) before any fetch,
-   then `get_artifact(key, head.etag)` and re-verify `fetched.sensitivity is
-   REDACTED` before the bytes reach the response (the same redaction gate
-   `search_text` applies — a `sensitive`/quarantined object at a `redacted`
-   row's key is rejected). Bytes are decoded UTF-8 with `errors="replace"` and
-   returned whole (the artifacts these serve — console logs, redacted dmesg — are
-   UTF-8 text). `data["content_truncated"]` is `"false"`; the size cap is a
-   hard reject, not a silent clip, so a caller never mistakes a prefix for the
-   whole object. `data["size_bytes"]` reports the object size.
+1. **Size-bounded inline content** in `data["content"]`. Follow the `search_text`
+   structure (`head` for size, then a guarded `get_artifact`), but bound the inline
+   body by a **dedicated, smaller cap** `KDIVE_ARTIFACT_INLINE_MAX_BYTES`
+   (default 64 KiB), not the 1 MiB `_MAX_SEARCHABLE_ARTIFACT_BYTES` fetch bound:
+   `search_text` is willing to *fetch* 1 MiB but caps what it *returns* at 64 KiB
+   (`MAX_MATCHES_JSON_CHARS`), so inlining a full 1 MiB object would be a far larger
+   response than any other read tool and a heavy token payload for an LLM consumer.
+   When `size_bytes` exceeds the inline cap, omit `content` (`content_omitted:
+   artifact_too_large`) before any fetch and rely on the URI. Within the cap, fetch
+   via `get_artifact(key, head.etag)` and re-verify `fetched.sensitivity is REDACTED`
+   before the bytes reach the response (the same redaction gate `search_text`
+   applies — a `sensitive`/quarantined object at a `redacted` row's key is
+   rejected). Bytes are decoded UTF-8 with `errors="replace"` (a best-effort text
+   view; the artifacts these serve — console logs, redacted dmesg — are UTF-8 text,
+   and `download_uri` is authoritative for exact bytes). `data["content_truncated"]`
+   is `"false"`; the size cap is a hard reject, not a silent clip, so a caller never
+   mistakes a prefix for the whole object. `data["size_bytes"]` reports the object size.
 
 2. **A presigned download URI** in `refs["download_uri"]`, minted via
    `store.presign_get(key, expires_in=KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS)` with a
@@ -56,7 +62,8 @@ still returns. A store failure on the content/URI path is surfaced as a
 `data["content_unavailable"]` reason, not a hard tool failure, so the metadata
 contract `artifacts.get` already honors is unchanged.
 
-`KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` is a new server-scoped config setting
+Two new server-scoped config settings: `KDIVE_ARTIFACT_INLINE_MAX_BYTES`
+(default 65536) bounding the inline body, and `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS`
 (default 900) bounding the presigned-GET expiry.
 
 ## Consequences
@@ -64,9 +71,9 @@ contract `artifacts.get` already honors is unchanged.
 - A caller retrieves a redacted artifact end-to-end: inline for objects ≤1 MiB,
   or via the presigned URI for any size. The acceptance criterion is met by either
   path; both ship.
-- The 1 MiB inline cap is shared with `search_text` (`_MAX_SEARCHABLE_ARTIFACT_BYTES`)
-  — one bound, one place. A larger console log returns metadata + URI, never a
-  truncated body.
+- The inline cap (`KDIVE_ARTIFACT_INLINE_MAX_BYTES`, 64 KiB) is set to
+  `search_text`'s *return* scale, not its 1 MiB *fetch* scale. A larger console log
+  returns metadata + URI, never a truncated body.
 - The presigned URL is the only content path that bypasses the in-process redaction
   gate at fetch time. It is safe because the object it addresses is the redacted
   derivative; the URL is never minted for a `sensitive` key (authorization resolves
@@ -75,7 +82,7 @@ contract `artifacts.get` already honors is unchanged.
   (ADR-0113); the generated tool reference description changes (new `data`/`refs`
   fields documented in prose), so the generated docs are regenerated.
 - No DB migration; no new object-store method (reuses `head`, `get_artifact`,
-  `presign_get`); one new env setting.
+  `presign_get`); two new env settings (inline cap, download TTL).
 
 ## Considered & rejected
 
@@ -88,6 +95,18 @@ contract `artifacts.get` already honors is unchanged.
   cannot distinguish a clipped prefix from the whole object, and a redacted log's
   meaning can hinge on its tail (the panic). Oversized is a hard reject that points
   the caller at the URI, mirroring `search_text`'s `artifact_too_large`.
+
+- **Reusing the 1 MiB `_MAX_SEARCHABLE_ARTIFACT_BYTES` as the inline cap.**
+  Rejected: that constant bounds how much `search_text` *fetches and scans*, not
+  what it *returns* (it caps its returned payload at 64 KiB). Inlining a full 1 MiB
+  object into one response would dwarf every other read tool's payload and be a
+  heavy token cost for an LLM consumer. The inline cap is a dedicated 64 KiB knob;
+  anything larger uses the URI.
+
+- **Treating `data["content"]` as a byte-faithful copy.** Rejected: it is a
+  best-effort UTF-8 text view (`errors="replace"`). Redacted artifacts are text
+  today, but the read surface is generic; `download_uri` serves the exact bytes, so
+  `content` is documented as advisory rather than guaranteed byte-equal.
 - **Re-running the redactor on fetched bytes here.** Rejected: the object at a
   `redacted` key is already the redactor's output (`_extract_redacted` at capture);
   re-redacting would be a no-op at best and risks diverging from the persisted
