@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from kdive.components.references import ROOTFS_COMPONENT
@@ -33,14 +34,21 @@ def validate_profile_for_provider(
     )
 
 
-def validate_rootfs_for_provider(
+async def validate_rootfs_for_provider(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
 ) -> None:
+    """Run the synchronous provider rootfs validator off the event loop (ADR-0126).
+
+    The validator can do blocking disk/network I/O (the ``local-libvirt`` validator
+    materializes a rootfs base), so it is offloaded to a worker thread; one provision
+    request can no longer stall the asyncio event loop for unrelated concurrent requests.
+    The ``None``/upload early returns do no I/O and stay synchronous.
+    """
     rootfs = profile_policy.rootfs_source(profile)
     if rootfs is None:
         return
     if isinstance(rootfs, _UploadRootfs):
         return
-    rootfs_validator(rootfs)
+    await asyncio.to_thread(rootfs_validator, rootfs)

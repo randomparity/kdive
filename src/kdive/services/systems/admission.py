@@ -9,18 +9,22 @@ in ``kdive.jobs.handlers.systems``.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from types import TracebackType
+from typing import Literal, Protocol, Self
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.config as config
 from kdive.components.validation import ComponentSourceCapabilities
+from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
@@ -59,6 +63,30 @@ _NON_TERMINAL_SYSTEM = (
 )
 type LockedAllocationSystem = tuple[AsyncConnection, Allocation, System | None]
 type CreateSystemMode = Literal["provision", "define"]
+
+
+class PreMutationTimeout(Protocol):
+    """The async-context-manager timeout handle bounding the pre-mutation segment (ADR-0126).
+
+    Structurally satisfied by :func:`asyncio.timeout`'s :class:`asyncio.Timeout`. The
+    create-response builders call :meth:`reschedule` with ``None`` immediately before the
+    first state-changing DB call, disabling the deadline so the mutation segment runs
+    unbounded (a timeout there could orphan a mutation Python cannot kill).
+    """
+
+    async def __aenter__(self) -> Self: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool | None: ...
+
+    def reschedule(self, when: float | None) -> None: ...
+
+
+type TimeoutFactory = Callable[[float], PreMutationTimeout]
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,11 +194,29 @@ def _stored_profile_for(
 
 @dataclass(frozen=True, slots=True)
 class SystemAdmission:
-    """Admission service with provider validation seams bound at construction."""
+    """Admission service with provider validation seams bound at construction.
+
+    ``premutation_timeout_s`` overrides the configured pre-mutation bound (ADR-0126); when
+    ``None`` the bound is read from ``KDIVE_PROVISION_PREMUTATION_TIMEOUT_S``.
+    ``timeout_factory`` overrides the timeout context-manager constructor (defaulting to
+    :func:`asyncio.timeout`); both exist as test seams and are ``None`` in production.
+    """
 
     profile_policy: ProfilePolicy
     component_sources: ComponentSourceCapabilities
     rootfs_validator: RootfsValidator
+    premutation_timeout_s: float | None = None
+    timeout_factory: TimeoutFactory | None = None
+
+    def _premutation_bound(self) -> float:
+        if self.premutation_timeout_s is not None:
+            return self.premutation_timeout_s
+        return config.get(PROVISION_PREMUTATION_TIMEOUT_S) or 30.0
+
+    def _timeout(self, bound: float) -> PreMutationTimeout:
+        if self.timeout_factory is not None:
+            return self.timeout_factory(bound)
+        return asyncio.timeout(bound)
 
     async def provision_defined(
         self,
@@ -202,31 +248,52 @@ class SystemAdmission:
         single create-insert point (:func:`_stored_profile_for`), so the stored profile is
         always concrete and admitted size equals booted size.
         """
+        bound = self._premutation_bound()
+        try:
+            async with self._timeout(bound) as timeout:
+                return await self._admit_within_bound(pool, ctx, request, timeout)
+        except TimeoutError:
+            # The pre-mutation segment exceeded the bound. The lock transaction rolled back on
+            # cancellation, so no System/job was written (ADR-0126); convert the would-be socket
+            # drop into a typed, retryable transport_failure. The retry is deduped by the
+            # allocation lock (existing-System path), so retryable does not double-provision.
+            return _failure(
+                request.allocation_id,
+                ErrorCategory.TRANSPORT_FAILURE,
+                detail=(
+                    f"provisioning admission exceeded the {bound:g}s pre-mutation bound; retry"
+                ),
+                suggested_next_actions=("systems.provision",),
+            )
+        except IllegalTransition:
+            async with pool.connection() as conn:
+                latest = await ALLOCATIONS.get(conn, request.allocation_id)
+            data: dict[str, object] = {"current_status": latest.state.value} if latest else {}
+            return _failure(request.allocation_id, data=data)
+
+    async def _admit_within_bound(
+        self,
+        pool: AsyncConnectionPool,
+        ctx: RequestContext,
+        request: CreateSystemRequest,
+        timeout: PreMutationTimeout,
+    ) -> AdmissionResult:
+        """Run the bounded pre-mutation segment; the mutation disables the deadline (ADR-0126)."""
         try:
             parsed = ProvisioningProfile.parse(request.profile)
             validate_profile_for_provider(parsed, self.profile_policy, self.component_sources)
         except CategorizedError as exc:
             return _failure_from_error(request.allocation_id, exc)
-        try:
-            async with _locked_allocation_system(pool, ctx, request.allocation_id) as locked:
-                if isinstance(locked, MissingAllocation):
-                    return _failure(locked.allocation_id)
-                conn, alloc, existing = locked
-                try:
-                    stored = _stored_profile_for(request.profile, alloc)
-                except CategorizedError as exc:
-                    return _failure_from_error(alloc.id, exc)
-                if request.mode == "provision":
-                    return await _provision_create_response(
-                        conn,
-                        ctx,
-                        alloc,
-                        existing,
-                        profile=stored,
-                        profile_policy=self.profile_policy,
-                        rootfs_validator=self.rootfs_validator,
-                    )
-                return await _define_create_response(
+        async with _locked_allocation_system(pool, ctx, request.allocation_id) as locked:
+            if isinstance(locked, MissingAllocation):
+                return _failure(locked.allocation_id)
+            conn, alloc, existing = locked
+            try:
+                stored = _stored_profile_for(request.profile, alloc)
+            except CategorizedError as exc:
+                return _failure_from_error(alloc.id, exc)
+            if request.mode == "provision":
+                return await _provision_create_response(
                     conn,
                     ctx,
                     alloc,
@@ -234,12 +301,18 @@ class SystemAdmission:
                     profile=stored,
                     profile_policy=self.profile_policy,
                     rootfs_validator=self.rootfs_validator,
+                    timeout=timeout,
                 )
-        except IllegalTransition:
-            async with pool.connection() as conn:
-                latest = await ALLOCATIONS.get(conn, request.allocation_id)
-            data: dict[str, object] = {"current_status": latest.state.value} if latest else {}
-            return _failure(request.allocation_id, data=data)
+            return await _define_create_response(
+                conn,
+                ctx,
+                alloc,
+                existing,
+                profile=stored,
+                profile_policy=self.profile_policy,
+                rootfs_validator=self.rootfs_validator,
+                timeout=timeout,
+            )
 
 
 async def _within_system_quota(conn: AsyncConnection, project: str) -> bool:
@@ -319,10 +392,11 @@ async def _provision_create_response(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    timeout: PreMutationTimeout,
 ) -> AdmissionResult:
     if existing is None:
         return await _insert_provisioning_system(
-            conn, ctx, alloc, profile, profile_policy, rootfs_validator
+            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout
         )
     if existing.state is SystemState.DEFINED:
         return _failure(
@@ -333,6 +407,7 @@ async def _provision_create_response(
             },
         )
     if existing.state is SystemState.PROVISIONING:
+        timeout.reschedule(None)  # mutation boundary: re-enqueue runs unbounded (ADR-0126)
         return await _enqueue_provision_job(
             conn,
             ctx,
@@ -352,10 +427,11 @@ async def _define_create_response(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    timeout: PreMutationTimeout,
 ) -> AdmissionResult:
     if existing is None:
         return await _insert_defined_system(
-            conn, ctx, alloc, profile, profile_policy, rootfs_validator
+            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout
         )
     if existing.state is SystemState.DEFINED:
         return DefinedSystemAdmitted(existing)  # idempotent re-define
@@ -476,7 +552,7 @@ async def _provision_defined_response(
     try:
         parsed = ProvisioningProfile.parse(system.provisioning_profile)
         validate_profile_for_provider(parsed, profile_policy, component_sources)
-        validate_rootfs_for_provider(parsed, profile_policy, rootfs_validator)
+        await validate_rootfs_for_provider(parsed, profile_policy, rootfs_validator)
     except CategorizedError as exc:
         return _failure_from_error(system.id, exc)
     if alloc.state is not AllocationState.ACTIVE:
@@ -503,7 +579,7 @@ async def _new_system_allowed(
             suggested_next_actions=("systems.get", "allocations.list"),
         )
     try:
-        validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
+        await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     return None
@@ -570,10 +646,12 @@ async def _insert_defined_system(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    timeout: PreMutationTimeout,
 ) -> AdmissionResult:
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
     if blocked is not None:
         return blocked
+    timeout.reschedule(None)  # mutation boundary: the insert+activate runs unbounded (ADR-0126)
     system = await _insert_system_and_activate(
         conn,
         ctx,
@@ -593,6 +671,7 @@ async def _insert_provisioning_system(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     rootfs_validator: RootfsValidator,
+    timeout: PreMutationTimeout,
 ) -> AdmissionResult:
     try:
         reject_rootfs_upload_without_window(profile_policy, profile)
@@ -601,6 +680,7 @@ async def _insert_provisioning_system(
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
     if blocked is not None:
         return blocked
+    timeout.reschedule(None)  # mutation boundary: the insert+enqueue runs unbounded (ADR-0126)
     system = await _insert_system_and_activate(
         conn,
         ctx,

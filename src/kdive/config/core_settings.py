@@ -41,6 +41,13 @@ def _ratio(raw: str) -> float:
     return value
 
 
+def _positive_float(raw: str) -> float:
+    value = float(raw)
+    if value <= 0.0:
+        raise ValueError(f"must be > 0, got {value}")
+    return value
+
+
 def _always(env: Mapping[str, str]) -> bool:
     return True
 
@@ -146,6 +153,21 @@ LEASE_MAX = Setting(
     group="lease",
     processes=_SERVER,
     help="Hard cap (hours) on a lease window / renewal (built-in 24).",
+)
+
+PROVISION_PREMUTATION_TIMEOUT_S = Setting(
+    name="KDIVE_PROVISION_PREMUTATION_TIMEOUT_S",
+    parse=_positive_float,
+    default="30.0",
+    group="lifecycle",
+    processes=_SERVER,
+    help=(
+        "Seconds to bound the synchronous pre-mutation segment of the systems create lane "
+        "(systems.provision / systems.define: validation, lock acquisition, rootfs check). "
+        "On exceed, the tool returns a transport_failure envelope instead of dropping the "
+        "socket (ADR-0126)."
+    ),
+    suggest="a positive number of seconds, e.g. 30",
 )
 
 UPLOAD_TTL_SECONDS = Setting(
@@ -428,6 +450,7 @@ SETTINGS = [
     S3_REGION,
     LEASE_DEFAULT,
     LEASE_MAX,
+    PROVISION_PREMUTATION_TIMEOUT_S,
     UPLOAD_TTL_SECONDS,
     MAX_UPLOAD_BYTES,
     MAX_BUILD_CONFIG_BYTES,
