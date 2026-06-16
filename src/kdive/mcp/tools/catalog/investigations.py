@@ -40,6 +40,21 @@ from kdive.security.authz.rbac import Role, require_role
 
 _TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 
+_TITLE_MAX = 200
+_DESCRIPTION_MAX = 4096
+
+
+def _validate_text(title: str | None, description: str | None) -> bool:
+    """Return whether supplied title/description are within their write-boundary bounds.
+
+    A ``None`` field is "not supplied" and is not checked. ``title`` (when supplied) must be
+    1..=200 chars; ``description`` (when supplied) must be 0..=4096 chars. Bounds live here, not on
+    the model, so reading a pre-existing out-of-bound row never raises (ADR-0135).
+    """
+    if title is not None and not (1 <= len(title) <= _TITLE_MAX):
+        return False
+    return description is None or len(description) <= _DESCRIPTION_MAX
+
 
 class ExternalRefInput(TypedDict):
     """Raw MCP input for a full external tracker reference."""
@@ -91,12 +106,16 @@ async def open_investigation(
     *,
     project: str,
     title: str,
+    description: str | None = None,
     external_refs: list[ExternalRefInput] | None = None,
 ) -> ToolResponse:
     """Mint an Investigation (`open`) for the caller's project."""
     require_project(ctx, project)
     require_role(ctx, project, Role.OPERATOR)
     with bind_context(principal=ctx.principal):
+        if not _validate_text(title, description):
+            return _config_error(project)
+        normalized_description = description or None  # "" -> None on open (ADR-0135 §2)
         try:
             refs = _parse_external_refs(external_refs)
         except (ValidationError, TypeError):
@@ -113,6 +132,7 @@ async def open_investigation(
                     agent_session=ctx.agent_session,
                     project=project,
                     title=title,
+                    description=normalized_description,
                     external_refs=refs,
                     state=InvestigationState.OPEN,
                 ),
@@ -370,14 +390,23 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def investigations_open(
         project: Annotated[str, Field(description="Project to create the Investigation under.")],
-        title: Annotated[str, Field(description="Human-readable title for the Investigation.")],
+        title: Annotated[str, Field(description="Human-readable title (1..=200 chars).")],
+        description: Annotated[
+            str | None,
+            Field(description="Optional free-form description for reporting (<=4096 chars)."),
+        ] = None,
         external_refs: Annotated[
             list[ExternalRefInput] | None,
             Field(description="Optional external tracker refs (each with tracker, id, url)."),
         ] = None,
     ) -> ToolResponse:
         return await open_investigation(
-            pool, current_context(), project=project, title=title, external_refs=external_refs
+            pool,
+            current_context(),
+            project=project,
+            title=title,
+            description=description,
+            external_refs=external_refs,
         )
 
     @app.tool(

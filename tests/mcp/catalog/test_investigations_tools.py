@@ -426,3 +426,49 @@ def test_link_acquires_investigation_lock(migrated_url: str) -> None:
             assert resp.status == "open"
 
     asyncio.run(_run())
+
+
+def test_open_persists_description(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="t", description="oops in xfs")
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT description FROM investigations WHERE id = %s", (resp.object_id,)
+                )
+                row = await cur.fetchone()
+            assert row is not None and row["description"] == "oops in xfs"
+
+    asyncio.run(scenario())
+
+
+def test_open_empty_description_stores_null(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="t", description="")
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT description FROM investigations WHERE id = %s", (resp.object_id,)
+                )
+                row = await cur.fetchone()
+            assert row is not None and row["description"] is None
+
+    asyncio.run(scenario())
+
+
+def test_open_overlong_description_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="t", description="x" * 4097)
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
+
+
+def test_open_overlong_title_is_config_error(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="x" * 201)
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(scenario())
