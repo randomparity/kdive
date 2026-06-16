@@ -134,6 +134,12 @@ async def wait_job(
 
     Each poll acquires and releases a pool connection (holds none while sleeping). A
     non-positive timeout means a single read.
+
+    On a non-terminal timeout this returns the job's current (``queued``/``running``)
+    envelope with ``jobs.wait`` in ``suggested_next_actions`` — the "still running, call
+    again" signal. That bounded re-poll is the retry contract (ADR-0138): an agent should
+    re-issue short waits (the 30s default) rather than hold one ``timeout_s``-near-``MAX_WAIT_S``
+    idle stream, which an intermediary proxy can sever as a raw transport drop.
     """
     uid = _as_uuid(job_id)
     if uid is None:

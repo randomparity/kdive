@@ -56,6 +56,11 @@ _HEARTBEAT_STALE_SECONDS = 10.0
 # while a wedged loop that misses two scheduled passes does.
 _RECONCILER_HEARTBEAT_STALE_SECONDS = 90.0
 _PROVIDER_DISCOVERY_TIMEOUT_SECONDS = 30.0
+# uvicorn idle keepalive between requests on a reused TCP connection (ADR-0138). Sized just
+# above the common 60s proxy idle default so a connection-reusing client's gap between rapid
+# short `jobs.wait` polls is not churned closed. It does NOT extend the in-flight lifetime of a
+# single long `jobs.wait` (no uvicorn knob does); the documented retry contract covers that.
+_HTTP_KEEPALIVE_S = 65.0
 
 _log = logging.getLogger(__name__)
 _S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
@@ -302,6 +307,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _server_uvicorn_config() -> dict[str, Any]:
+    """Return the extra uvicorn config the MCP server passes to ``run_async`` (ADR-0138).
+
+    Built by a pure helper, not inlined, because ``_run_server`` awaits ``app.run_async`` (which
+    blocks until the server stops) — a unit test asserts on this return value directly rather
+    than mocking a forever-blocking call. ``run_async`` forwards ``uvicorn_config`` to
+    ``run_http_async``, which merges it into ``uvicorn.Config`` (fastmcp-slim 3.4.0).
+    """
+    return {"timeout_keep_alive": _HTTP_KEEPALIVE_S}
+
+
 async def _run_server(
     host: str, port: int, secret_registry: SecretRegistry, telemetry: Telemetry
 ) -> None:
@@ -330,7 +346,9 @@ async def _run_server(
     aux_task = asyncio.create_task(serve_aux(aux_app, host=aux_host, port=aux_port))
     ticker = asyncio.create_task(_tick_heartbeat(heartbeat))
     try:
-        await app.run_async(transport="http", host=host, port=port)
+        await app.run_async(
+            transport="http", host=host, port=port, uvicorn_config=_server_uvicorn_config()
+        )
     finally:
         await _cancel(ticker, aux_task)
         secret_registry.clear()

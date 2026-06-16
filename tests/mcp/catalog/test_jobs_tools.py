@@ -224,6 +224,31 @@ def test_wait_caps_sleep_to_remaining_timeout(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_wait_nonterminal_returns_promptly_with_call_again_signal(migrated_url: str) -> None:
+    """A non-terminal wait returns at its clamped deadline (not held to MAX_WAIT_S) as a
+    "still running, call again" signal: the non-terminal envelope carries `jobs.wait` in
+    `suggested_next_actions` so an agent re-polls instead of holding one long idle stream
+    (ADR-0138). The injected sleep keeps this wall-clock-free; it asserts the loop never
+    sleeps past the tiny remaining timeout.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "d1")  # stays queued (no worker)
+
+            async def _sleep(delay: float) -> None:
+                assert delay <= 0.01, "the loop must cap its sleep to the tiny remaining timeout"
+                await asyncio.sleep(delay)
+
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0.01, sleep=_sleep)
+        # Returned the non-terminal envelope (did not hold open to MAX_WAIT_S = 300s)...
+        assert resp.status == "queued"
+        # ...and the envelope tells the agent to call jobs.wait again — the "call again" signal.
+        assert "jobs.wait" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("timeout_s", [float("nan"), float("inf"), float("-inf")])
 def test_wait_non_finite_timeout_is_configuration_error(
     migrated_url: str, timeout_s: float
