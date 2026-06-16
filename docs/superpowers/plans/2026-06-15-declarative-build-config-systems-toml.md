@@ -960,15 +960,7 @@ from kdive.inventory.reconcile_build_configs import reconcile_build_configs
     return merged
 ```
 
-The `store` parameter of `reconcile_all` is currently typed `ImageHeadStore`. Widen its annotation so a head-only store still type-checks (the build-config pass runtime-narrows via `isinstance(store, BuildConfigPublishStore)`):
-
-```python
-async def reconcile_all(
-    conn: AsyncConnection, doc: InventoryDoc, store: ImageHeadStore
-) -> ReconcileDiff:
-```
-
-stays as-is — `ImageHeadStore` is the common floor both callers satisfy, and `reconcile_build_configs(conn, doc, store)` takes `store: object` and narrows at runtime, so no call-site or caller type changes are needed. Confirm `just type` is green; if ty complains that `ImageHeadStore` is incompatible with `reconcile_build_configs`'s `object` param, it will not (any type is assignable to `object`).
+**Do NOT change `reconcile_all`'s signature.** It keeps `store: ImageHeadStore` exactly as it is — `ImageHeadStore` is the common floor both callers (`reconciler/inventory.py`, `mcp/tools/ops/reconcile_systems.py`) satisfy, and the new pass declares `store: object` and narrows at runtime via `isinstance(store, BuildConfigPublishStore)`. An `ImageHeadStore` value is assignable to an `object` parameter, so no caller, call-site, or type-annotation edits are needed anywhere. The only edits in this step are the new `import` line and the new `_extend(... reconcile_build_configs(conn, doc, store))` line. Run `just type` to confirm green.
 
 - [ ] **Step 5: Run the pass tests + pipeline tests**
 
@@ -977,14 +969,37 @@ Expected: PASS.
 
 - [ ] **Step 6: Add the adversarial serialization test**
 
-Extend `tests/adversarial/test_build_config_concurrency.py` with a test that runs `reconcile_build_configs` for a name concurrently with `buildconfig.set` for the same name and asserts the stored row's sha256 always matches the object bytes the row points at (no interleave). Follow the file's existing concurrency-harness pattern (it already exercises `buildconfig.set` concurrency on `BUILD_CONFIG`); add the reconcile path as the second contender. Keep it under the existing markers.
+Extend `tests/adversarial/test_build_config_concurrency.py` with a concrete race over the shared `BUILD_CONFIG` lock. `buildconfig.set`-vs-`set` concurrency is already covered in this file; this adds the reconcile path. To stay self-contained (no MCP `RequestContext`/`store_factory` plumbing), race two `reconcile_build_configs` calls publishing DIFFERENT bytes for the SAME name on two pooled connections, and assert the final catalog row's sha256 hashes the object's final bytes — the invariant the per-name lock protects (no interleave that commits a row sha describing the other writer's object). Confirm the `pool`/`object_store` fixture names against the file's existing fixtures; reuse them. The reserved object key is `system/build-configs/kdump/kdump.config`.
 
 ```python
-async def test_reconcile_and_set_serialize_on_name(pool, object_store) -> None:
-    # Run a reconcile (config bytes) and a buildconfig.set (operator bytes) for the SAME name
-    # concurrently; whichever lands last, the row sha256 must describe the object's bytes.
-    # (Mirror the existing harness in this file for spawning the two coroutines on the pool.)
-    ...
+import asyncio
+import hashlib
+
+from kdive.build_configs.catalog import read_build_config_provenance
+from kdive.inventory.model import InventoryDoc
+from kdive.inventory.reconcile_build_configs import reconcile_build_configs
+
+
+def _bc_doc(content: str) -> InventoryDoc:
+    return InventoryDoc.parse(
+        {"schema_version": 2, "build_config": [{"name": "kdump", "content": content}]}
+    )
+
+
+async def test_concurrent_reconciles_keep_row_and_object_consistent(pool, object_store) -> None:
+    async def _run(content: str) -> None:
+        async with pool.connection() as conn:
+            await reconcile_build_configs(conn, _bc_doc(content), object_store)
+
+    # Race two reconciles publishing different bytes for the same name; the BUILD_CONFIG lock
+    # serializes them, so the surviving row's sha256 must describe the object's final bytes.
+    await asyncio.gather(_run("CONFIG_A=y\n"), _run("CONFIG_B=y\n"))
+
+    async with pool.connection() as conn:
+        prov = await read_build_config_provenance(conn, "kdump")
+    fetched = object_store.get_artifact("system/build-configs/kdump/kdump.config", None)
+    assert prov is not None
+    assert prov[0] == hashlib.sha256(fetched.data).hexdigest()  # row sha == object bytes
 ```
 
 - [ ] **Step 7: Run the adversarial test**
@@ -1056,6 +1071,7 @@ git commit -m "docs(inventory): document the [[build_config]] section (#443)"
 ## Final verification (after all tasks)
 
 - [ ] **Full local gate.** Run `just ci` (lint, type, lint-shell, lint-workflows, check-mermaid, docs-*, config-*, test). Expected: green. If `just ci` invokes a recipe needing services you lack, run at minimum `just lint`, `just type`, and `just test`; note any locally-unrunnable gate in the PR body.
+- [ ] **M2 portability gate.** Run `just m2-gate` (or `python scripts/m2_portability_gate.py`). Expected: exit 0. This is NOT covered by `just ci` and is a separate CI check. The meta-test in Task 1 asserts `ALLOWED_FILES == expected` (the allowlist is correct); the gate asserts `touched-core-files ⊆ ALLOWED_FILES` (nothing unallowlisted was touched) — complementary checks, both must pass. This change should pass: the only gated-core files it touches are `db/schema/0035_*.sql` (newly allowlisted in Task 1) and `mcp/tools/catalog/build_configs.py` (already allowlisted); everything else lives under `inventory/` and `build_configs/`, which are outside the gate's `CORE_PREFIXES`.
 - [ ] **Behavior sweep.** Confirm an end-to-end `reconcile_all` over a doc containing a `[[build_config]]` publishes the fragment and `buildconfig.get` serves the bytes with `source='config'` (the integration test in `tests/integration/`, added if a suitable home exists, or asserted via the pass test + a `buildconfig.get` call).
 - [ ] **Self-check the warn semantics** against the spec: benign seed-adoption at identical bytes must NOT warn; an operator-override revert MUST warn.
 
