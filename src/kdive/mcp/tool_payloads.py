@@ -5,10 +5,16 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_core import PydanticCustomError
 
 from kdive.domain.models import ResourceKind
 
 _DEFAULT_COST_CLASS = "local"
+
+# Stable error type for the shape-XOR-custom violation. The binding middleware (ADR-0132)
+# keys on this to distinguish the XOR violation from a field-level error and to surface the
+# `both` context flag as the envelope `detail`.
+SHAPE_XOR_ERROR_TYPE = "shape_xor_custom"
 
 
 class ToolPayload(BaseModel):
@@ -54,7 +60,13 @@ class AllocationRequestPayload(SelectorPayload):
     silently disable the size unification.
     """
 
-    shape: str | None = None
+    shape: str | None = Field(
+        default=None,
+        description=(
+            "Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb "
+            "(supply exactly one sizing source)."
+        ),
+    )
     disk_gb: int | None = None
     resource: ResourceSelector = Field(default_factory=ResourceByKind, discriminator="mode")
     pcie_devices: list[str] = Field(
@@ -77,11 +89,17 @@ class AllocationRequestPayload(SelectorPayload):
         custom_set = [v is not None for v in custom]
         if self.shape is not None:
             if any(custom_set):
-                raise ValueError("supply a shape or a custom size, not both")
+                raise PydanticCustomError(
+                    SHAPE_XOR_ERROR_TYPE,
+                    "supply a shape or a custom size, not both",
+                    {"both": True},
+                )
             return self
         if not all(custom_set):
-            raise ValueError(
-                "supply a shape, or the full custom triple {vcpus, memory_gb, disk_gb}"
+            raise PydanticCustomError(
+                SHAPE_XOR_ERROR_TYPE,
+                "supply a shape, or the full custom triple {vcpus, memory_gb, disk_gb}",
+                {"both": False},
             )
         return self
 

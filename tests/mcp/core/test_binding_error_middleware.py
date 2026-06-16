@@ -1,11 +1,13 @@
-"""Boundary profile-binding middleware: re-envelope a binding ValidationError (#451, ADR-0124).
+"""Boundary binding middleware: re-envelope a binding ValidationError (ADR-0124, ADR-0132).
 
-``ProvisioningProfile`` is ``extra="forbid"``, so FastMCP validates the typed ``profile`` param at
-argument binding — *before* the tool body and before the ``_runtime_resolution`` catch that builds
-our envelope. ``ProfileBindingMiddleware`` catches that ``pydantic.ValidationError`` for the three
-typed-profile tools and returns the standard ``configuration_error`` envelope (reusing ADR-0123's
-``detail`` + sanitized ``errors`` surfacing), instead of letting a raw FastMCP ``ToolError`` reach
-the caller. Any other tool, or any other exception, passes through unchanged.
+FastMCP validates a tool's typed params at argument binding — *before* the tool body and before any
+in-body catch that builds our envelope. ``BindingErrorMiddleware`` catches that
+``pydantic.ValidationError`` for the tools that need it and returns the standard
+``configuration_error`` envelope (reusing ADR-0123's ``detail`` surfacing), instead of letting a raw
+FastMCP ``ToolError`` reach the caller: the three typed-profile tools (``ProvisioningProfile`` is
+``extra="forbid"``) and ``allocations.request`` (the shape-XOR-custom rule, ADR-0132). Any other
+tool, any non-recognised binding error (a field-level error on the same payload), or any other
+exception passes through unchanged.
 """
 
 from __future__ import annotations
@@ -19,8 +21,9 @@ from fastmcp.tools.base import ToolResult
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.middleware import ProfileBindingMiddleware
+from kdive.mcp.middleware import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.profiles.provisioning import ProvisioningProfile
 
 
@@ -78,7 +81,7 @@ def _non_profile_validation_error() -> ValidationError:
 
 
 def _drive(tool: str, arguments: dict[str, object] | None, exc: BaseException) -> Any:
-    mw = ProfileBindingMiddleware()
+    mw = BindingErrorMiddleware()
 
     async def _call_next(_ctx: Any) -> Any:
         raise exc
@@ -144,7 +147,7 @@ def test_non_profile_validation_error_on_typed_tool_is_reraised() -> None:
 
 
 def test_valid_call_passes_through_unchanged() -> None:
-    mw = ProfileBindingMiddleware()
+    mw = BindingErrorMiddleware()
     sentinel = ToolResponse.success("ok", "ok")
 
     async def _call_next(_ctx: Any) -> Any:
@@ -156,13 +159,58 @@ def test_valid_call_passes_through_unchanged() -> None:
     assert asyncio.run(_run()) is sentinel
 
 
+def _shape_xor_validation_error(payload: dict[str, object]) -> ValidationError:
+    """The shape-XOR ``ValidationError`` FastMCP raises binding ``AllocationRequestPayload``."""
+    try:
+        AllocationRequestPayload.model_validate(payload)
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+def test_shape_and_custom_together_becomes_configuration_error_naming_both() -> None:
+    envelope = _envelope(
+        _drive(
+            "allocations.request",
+            {"project": "demo"},
+            _shape_xor_validation_error(
+                {"shape": "medium", "vcpus": 2, "memory_gb": 4, "disk_gb": 20}
+            ),
+        )
+    )
+    assert envelope["status"] == "error"
+    assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert envelope["object_id"] == "demo"  # the call's project
+    assert "both" in envelope["detail"]
+    assert "exactly one sizing source" in envelope["detail"]
+
+
+def test_neither_shape_nor_custom_becomes_configuration_error_naming_neither() -> None:
+    envelope = _envelope(
+        _drive("allocations.request", {"project": "demo"}, _shape_xor_validation_error({}))
+    )
+    assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert "neither" in envelope["detail"]
+    assert "exactly one sizing source" in envelope["detail"]
+
+
+def test_field_level_error_on_allocations_request_is_reraised_not_collapsed() -> None:
+    # A non-XOR payload error (an unknown extra field under extra='forbid') must keep FastMCP's
+    # per-field detail — it must NOT be collapsed into the generic shape-XOR message (ADR-0132).
+    field_error = _shape_xor_validation_error({"shape": "medium", "bogus_field": 1})
+    # Sanity: this is a field-level error, not (only) the XOR error.
+    assert any(err["type"] != "shape_xor_custom" for err in field_error.errors())
+    with pytest.raises(ValidationError):
+        _drive("allocations.request", {"project": "demo"}, field_error)
+
+
 def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     # The integration proof: a typed-profile tool behind the middleware returns the envelope for a
     # malformed profile rather than raising a client-side ToolError.
     from kdive.mcp.app import _advertise_flat_output_schema
 
     app: FastMCP = FastMCP(name="probe")
-    app.add_middleware(ProfileBindingMiddleware())
+    app.add_middleware(BindingErrorMiddleware())
 
     @app.tool(name="systems.define")
     async def _define(allocation_id: str, profile: ProvisioningProfile) -> ToolResponse:

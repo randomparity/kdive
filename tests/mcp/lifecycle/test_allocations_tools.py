@@ -86,10 +86,11 @@ async def _request(
     shape: str | None = None,
     window: object | None = None,
     idempotency_key: str | None = None,
+    kind: str = "local-libvirt",
 ) -> ToolResponse:
     request: dict[str, object] = {
         "window": window,
-        "resource": {"mode": "kind", "kind": "local-libvirt"},
+        "resource": {"mode": "kind", "kind": kind},
     }
     if shape is not None:
         request["shape"] = shape
@@ -236,6 +237,89 @@ def test_request_no_resource_is_config_error(migrated_url: str) -> None:
             resp = await _request(pool, _ctx())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_request_no_resource_empty_fleet_detail_and_actions(migrated_url: str) -> None:
+    # #471: a by-kind denial on an empty fleet names the missing kind and points at discovery.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _request(pool, _ctx())
+        assert resp.error_category == "configuration_error"
+        assert resp.detail is not None
+        assert "local-libvirt" in resp.detail
+        assert "no resource kinds are registered" in resp.detail
+        assert "resources.list" in resp.suggested_next_actions
+        assert "shapes.list" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_request_unregistered_kind_lists_available_kinds(migrated_url: str) -> None:
+    # #471: with one kind registered, a denial for a DIFFERENT kind names the available kind.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)  # registers a local-libvirt host
+            resp = await _request(pool, _ctx(), kind="fault-inject")
+        assert resp.error_category == "configuration_error"
+        assert resp.detail is not None
+        assert "fault-inject" in resp.detail
+        assert "available kinds: local-libvirt" in resp.detail
+        assert "resources.list" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_request_unknown_id_detail_names_id_not_kinds(migrated_url: str) -> None:
+    # #471: a by-id denial names the id (caller-supplied) and does NOT enumerate kinds.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            missing = str(uuid4())
+            resp = await _request_by_id(pool, _ctx(), missing)
+        assert resp.error_category == "configuration_error"
+        assert resp.detail is not None
+        assert missing in resp.detail
+        assert "available kinds" not in resp.detail
+        assert "resources.list" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_denial_envelope_guides_agent_to_a_grant(migrated_url: str) -> None:
+    # #471 acceptance: a black-box agent following only the envelope reaches a grant. The first
+    # default request is denied with discovery actions; after the agent "discovers" the registered
+    # kind (resources.list would surface local-libvirt), it retries that kind and is granted.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            denied = await _request(pool, _ctx(), kind="fault-inject")
+            assert denied.error_category == "configuration_error"
+            assert "resources.list" in denied.suggested_next_actions
+            # The detail names the available kind; the agent retries with it.
+            assert "local-libvirt" in (denied.detail or "")
+            return await _request(pool, _ctx(), kind="local-libvirt")
+
+    granted = asyncio.run(_run())
+    assert granted.status == "granted"
+
+
+def test_capacity_denial_detail_is_prose_not_token(migrated_url: str) -> None:
+    # #471: a host-cap denial carries human prose (not the raw `at_capacity` token) and keeps
+    # its queue/wait recourse action.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=1)
+            await _request(pool, _ctx())
+            resp = await _request(pool, _ctx())
+        assert resp.error_category == "allocation_denied"
+        assert resp.detail is not None
+        assert "capacity" in resp.detail.lower()
+        assert resp.detail != "at_capacity"
+        assert resp.suggested_next_actions == ["allocations.list"]
+        # The structured reason token stays in `data` for machine consumers.
+        assert resp.data["reason"] == "at_capacity"
 
     asyncio.run(_run())
 

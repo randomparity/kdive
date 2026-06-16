@@ -42,7 +42,11 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.allocation.admission.core import AdmissionOutcome
+from kdive.services.allocation.admission.core import (
+    AFFINITY_DENIAL_REASON,
+    BUDGET_DENIAL_REASON,
+    AdmissionOutcome,
+)
 from kdive.services.allocation.admission.request import (
     AdmissionRequestSpec,
     RequestAdmissionResult,
@@ -192,21 +196,43 @@ async def request_allocation(
         return _request_response(result)
 
 
+_DISCOVERY_NEXT_ACTIONS = ["resources.list", "shapes.list"]
+
+
 def _request_response(result: RequestAdmissionResult) -> ToolResponse:
     """Map service-level request admission output to the MCP response envelope."""
     if result.error is not None:
         return ToolResponse.failure_from_error(result.object_id, result.error)
     if result.resource is None:
-        return ToolResponse.failure(
-            result.object_id,
-            result.category or ErrorCategory.CONFIGURATION_ERROR,
-            data={},
-        )
+        return _no_resource_response(result)
     if result.allocation is not None:
         return _grant_or_enqueue_response(result.resource, result.project, result.allocation)
     if result.denial is not None:
         return _denial_response(result.resource.id, result.project, result.denial)
     return ToolResponse.failure(result.object_id, ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+
+def _no_resource_response(result: RequestAdmissionResult) -> ToolResponse:
+    """Envelope a no-schedulable-resource denial with a cause+fix detail (#471, ADR-0132).
+
+    A by-kind denial (``available_kinds`` populated) names the selected kind and what kinds
+    *are* registered; a by-id denial (``available_kinds is None``) names the caller-supplied
+    id. Both point at the discovery tools so a black-box agent can recover from the envelope.
+    """
+    if result.available_kinds is not None:
+        if result.available_kinds:
+            available = f"available kinds: {', '.join(result.available_kinds)}"
+        else:
+            available = "no resource kinds are registered"
+        detail = f"no schedulable {result.object_id!r} resource is registered; {available}"
+    else:
+        detail = f"no schedulable resource {result.object_id!r} is registered"
+    return ToolResponse.failure(
+        result.object_id,
+        result.category or ErrorCategory.CONFIGURATION_ERROR,
+        detail=detail,
+        suggested_next_actions=list(_DISCOVERY_NEXT_ACTIONS),
+    )
 
 
 def _grant_or_enqueue_response(
@@ -237,9 +263,29 @@ def _denial_response(resource_id: UUID, project: str, outcome: AdmissionOutcome)
     return ToolResponse.failure(
         str(resource_id),
         category,
+        detail=_denial_detail(outcome),
         suggested_next_actions=["allocations.list"],
         data=data,
     )
+
+
+def _denial_detail(outcome: AdmissionOutcome) -> str:
+    """Author-controlled prose for a capacity/budget/quota denial (#471, ADR-0132).
+
+    Keyed off the internal ``outcome.reason`` token (never surfaced verbatim) so a new token
+    cannot leak as ``detail``; the host-cap case adds the cap/in-use counters.
+    """
+    if outcome.reason == BUDGET_DENIAL_REASON:
+        return "project budget exhausted for the requested window"
+    if outcome.reason == AFFINITY_DENIAL_REASON:
+        return "the project is not permitted to place on the selected resource"
+    if outcome.category is ErrorCategory.QUOTA_EXCEEDED:
+        return "project concurrency quota exhausted"
+    if outcome.reason == "at_capacity":
+        cap = "?" if outcome.cap is None else str(outcome.cap)
+        in_use = "?" if outcome.in_use is None else str(outcome.in_use)
+        return f"host capacity exhausted (cap {cap}, in use {in_use})"
+    return "allocation denied"
 
 
 async def get_allocation(
