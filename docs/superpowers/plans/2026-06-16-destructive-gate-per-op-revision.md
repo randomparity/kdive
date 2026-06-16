@@ -38,69 +38,64 @@
 - Modify: `src/kdive/domain/models.py` (after the `DestructiveJobKind` alias, ~line 95)
 - Modify: `src/kdive/profiles/provisioning.py` (`ProviderSection`, ~line 222)
 - Modify: `src/kdive/services/systems/validation.py:19-34`
-- Test: `tests/services/systems/test_validation.py` (create if absent) and `tests/mcp/lifecycle/test_systems_tools.py`
+- Test: add to the **existing** `tests/services/systems/test_system_validation.py` (reuse its `_VALID_PROFILE`, `_profile`, `_capabilities`, `_LOCAL_POLICY` helpers — do **not** create a new file or invent a `ComponentSourceCapabilities.none()`; that constructor does not exist — the real signature is `ComponentSourceCapabilities(provider=..., accepted_component_sources={...})`, wrapped by the file's `_capabilities(*sources)` helper).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
-Create `tests/services/systems/test_validation.py` (or add to the nearest existing validation test module — check `tests/services/systems/` first):
+The check runs first inside `validate_profile_for_provider`, before `profile_policy.validate_profile` and the rootfs component-source check. So the assertions must be **pinned to the token-specific signal** (`details["unknown_destructive_ops"]`), not the generic `CONFIGURATION_ERROR` category that the rootfs/policy checks also raise — otherwise a rootfs failure could make the test pass for the wrong reason. The most isolated test calls the private helper directly. Add to `tests/services/systems/test_system_validation.py`:
 
 ```python
-"""Tests for write-boundary profile validation (ADR-0130)."""
+import copy  # already imported at the top of the file
 
-from __future__ import annotations
-
-import pytest
-
-from kdive.components.validation import ComponentSourceCapabilities
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import ProvisioningProfile
-from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
-from kdive.services.systems.validation import validate_profile_for_provider
+from kdive.services.systems.validation import (
+    _reject_unknown_destructive_ops,  # private; imported deliberately for an isolated unit test
+)
 
 
-def _profile(destructive_ops: list[str]) -> ProvisioningProfile:
-    return ProvisioningProfile.parse(
-        {
-            "schema_version": 1,
-            "arch": "x86_64",
-            "vcpu": 2,
-            "memory_mb": 2048,
-            "disk_gb": 10,
-            "boot_method": "direct-kernel",
-            "kernel_source_ref": "build:abc",
-            "provider": {
-                "local-libvirt": {
-                    "rootfs": {"kind": "catalog", "name": "fedora-40"},
-                    "destructive_ops": destructive_ops,
-                }
-            },
-        }
+def _profile_with_ops(destructive_ops: list[str]) -> ProvisioningProfile:
+    data = copy.deepcopy(_VALID_PROFILE)
+    data["provider"]["local-libvirt"]["destructive_ops"] = destructive_ops
+    return ProvisioningProfile.parse(data)
+
+
+def test_reject_unknown_destructive_ops_flags_typo_directly() -> None:
+    # Isolated: drives only the token check, no rootfs/policy/capabilities involvement.
+    with pytest.raises(CategorizedError) as exc:
+        _reject_unknown_destructive_ops(_profile_with_ops(["force-crash"]))  # hyphen typo
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["unknown_destructive_ops"] == ["force-crash"]
+
+
+def test_reject_unknown_destructive_ops_accepts_known_directly() -> None:
+    # All four closed-set tokens; the helper must not raise.
+    _reject_unknown_destructive_ops(
+        _profile_with_ops(["force_crash", "power", "reprovision", "teardown"])
     )
 
 
-def test_unknown_destructive_op_token_rejected() -> None:
-    profile = _profile(["force-crash"])  # hyphen typo for force_crash
+def test_validate_profile_for_provider_rejects_unknown_token() -> None:
+    # Through the public seam: the token check fires first, so an otherwise-valid profile
+    # (local rootfs accepted) fails ONLY on the token — pinned via details, not category.
     with pytest.raises(CategorizedError) as exc:
         validate_profile_for_provider(
-            profile, LocalLibvirtProfilePolicy(), ComponentSourceCapabilities.none()
+            _profile_with_ops(["powercycle"]), _LOCAL_POLICY, _capabilities("local")
         )
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["unknown_destructive_ops"] == ["powercycle"]
 
 
-def test_known_destructive_op_tokens_accepted() -> None:
-    profile = _profile(["force_crash", "power", "reprovision", "teardown"])
-    # Should not raise on the token check (rootfs/source checks may apply separately).
+def test_validate_profile_for_provider_accepts_known_tokens() -> None:
+    # Fully valid profile (local rootfs + accepted source) with valid opt-in tokens: no raise.
     validate_profile_for_provider(
-        profile, LocalLibvirtProfilePolicy(), ComponentSourceCapabilities.none()
+        _profile_with_ops(["force_crash", "reprovision"]), _LOCAL_POLICY, _capabilities("local")
     )
 ```
 
-> Note: confirm `LocalLibvirtProfilePolicy` import path and `ComponentSourceCapabilities.none()` (or the equivalent permissive constructor) against the codebase; adjust the rootfs `catalog`/`name` to a value the local policy accepts, or use a profile whose rootfs check is a no-op. The assertion under test is the **token** rejection, so keep the rest of the profile valid for that policy.
+> Note: `_VALID_PROFILE` already uses `rootfs.kind == "local"`, which `_capabilities("local")` accepts (see the existing `test_validate_profile_for_provider_accepts_advertised_rootfs_source`), so the accept test's only variable is the token list. The `details["unknown_destructive_ops"]` key must match the key the implementation populates in Step 3c.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run python -m pytest tests/services/systems/test_validation.py -q`
-Expected: FAIL — `test_unknown_destructive_op_token_rejected` does not raise (no token check exists yet).
+Run: `uv run python -m pytest tests/services/systems/test_system_validation.py -q`
+Expected: FAIL — `_reject_unknown_destructive_ops` does not exist yet (ImportError), and the public-seam reject test does not raise on the token.
 
 - [ ] **Step 3a: Add the runtime token set to `domain/models.py`**
 
@@ -178,8 +173,8 @@ def validate_profile_for_provider(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run python -m pytest tests/services/systems/test_validation.py -q`
-Expected: PASS (both tests).
+Run: `uv run python -m pytest tests/services/systems/test_system_validation.py -q`
+Expected: PASS (all four new tests + the pre-existing ones).
 
 Then confirm no shipped profile regresses:
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_systems_tools.py tests/mcp/lifecycle/test_control_tools.py -q`
@@ -190,7 +185,7 @@ Expected: PASS (every shipped/test profile uses only valid tokens — verified i
 ```bash
 just lint && just type && just test
 git add src/kdive/domain/models.py src/kdive/profiles/provisioning.py \
-        src/kdive/services/systems/validation.py tests/services/systems/test_validation.py
+        src/kdive/services/systems/validation.py tests/services/systems/test_system_validation.py
 git commit -m "feat(systems): reject unknown destructive_ops tokens at write seam (#465)" \
   -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -491,7 +486,7 @@ git commit -m "refactor(db): drop dead allocations.capability_scope column (#465
 ## Self-review checklist (run before declaring the plan done)
 
 1. **Spec coverage:** AC1 (positive end-to-end revival) → Task B test updates + Task A leaving opt-in functional; AC2-4 (denial `missing_checks` + audit shape) → Task B gate tests; AC5 (field/column/helper removed) → Task C; AC6 (`_common` enum) → Task B Step 4; AC7 (no test constructs/seeds `capability_scope`) → Task C Step 6-7; AC8 (unknown-token rejection) → Task A; AC9 (teardown/power-on unchanged) → not modified, regression-covered by the existing suites in Task B/C. All covered.
-2. **Placeholder scan:** the rootfs `catalog` value in Task A Step 1 and the `ComponentSourceCapabilities.none()` constructor must be confirmed against the codebase — flagged inline, not a silent TODO.
+2. **Placeholder scan:** Task A Step 1 reuses the verified helpers in `tests/services/systems/test_system_validation.py` (`_VALID_PROFILE` local rootfs, `_capabilities("local")`, `_LOCAL_POLICY`) and pins assertions to `details["unknown_destructive_ops"]`, so no constructor is guessed and the token check cannot pass for a rootfs reason. No remaining placeholders.
 3. **Type consistency:** `DESTRUCTIVE_JOB_KINDS` (models) ↔ `_VALID_DESTRUCTIVE_OP_VALUES` (validation) ↔ `ProviderSection.destructive_ops` (provisioning) ↔ gate `missing` tokens (`admin_role`/`operator_role`/`profile_opt_in`) are consistent across tasks.
 
 ---
