@@ -104,9 +104,7 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
         await pool.close()
 
 
-async def _granted_allocation(
-    pool: AsyncConnectionPool, *, scope: dict[str, Any] | None = None
-) -> str:
+async def _granted_allocation(pool: AsyncConnectionPool) -> str:
     disc = LocalLibvirtDiscovery(
         host_uri="qemu:///system", connect=lambda: FakeLibvirtConn(), concurrent_allocation_cap=2
     )
@@ -124,7 +122,6 @@ async def _granted_allocation(
                 project="proj",
                 resource_id=res.id,
                 state=AllocationState.GRANTED,
-                capability_scope=scope or {},
             ),
         )
     return str(alloc.id)
@@ -229,7 +226,7 @@ def test_power_off_with_gate_checks_enqueues_job(migrated_url: str) -> None:
     # power off/cycle/reset are destructive-administration ops: gate + admin (ADR-0037 §2).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool, scope={"destructive_ops": ["power"]})
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(
                 pool, alloc_id, SystemState.READY, destructive_ops=["power"]
             )
@@ -263,7 +260,7 @@ def test_power_on_is_operator_and_enqueues_job(migrated_url: str) -> None:
 def test_power_destructive_action_refused_for_operator(migrated_url: str, action: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool, scope={"destructive_ops": ["power"]})
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(
                 pool, alloc_id, SystemState.READY, destructive_ops=["power"]
             )
@@ -298,7 +295,7 @@ def test_power_unknown_action_is_config_error(migrated_url: str) -> None:
 def test_power_non_started_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool, scope={"destructive_ops": ["power"]})
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(
                 pool, alloc_id, SystemState.DEFINED, destructive_ops=["power"]
             )
@@ -449,7 +446,7 @@ def test_force_crash_denied_returns_authorization_denied(
 def test_force_crash_allowed_enqueues_job(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool, scope={"destructive_ops": ["force_crash"]})
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(
                 pool, alloc_id, SystemState.READY, destructive_ops=["force_crash"]
             )
@@ -469,7 +466,7 @@ def test_force_crash_allowed_enqueues_job(migrated_url: str) -> None:
 def test_force_crash_non_ready_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool, scope={"destructive_ops": ["force_crash"]})
+            alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(
                 pool, alloc_id, SystemState.CRASHED, destructive_ops=["force_crash"]
             )

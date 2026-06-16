@@ -44,7 +44,6 @@ from tests.integration.live_stack.spine import (
     crash_to_crashed,
     db_now,
     drain_job,
-    grant_force_crash_scope,
     mint_role_token,
     ok,
     phase,
@@ -223,7 +222,6 @@ def test_remote_spine_over_the_wire() -> None:
                     "allocate",
                 )
                 allocation_id = env.object_id
-            await grant_force_crash_scope(db_url, allocation_id)
             async with phase("provision"):
                 env = ok(
                     await scalar(
@@ -383,7 +381,7 @@ def test_remote_four_method_capture_over_the_wire() -> None:
             # --- System A: host_dump (host-side core-dump; no in-guest kdump kernel needed) ---
             async with phase("alloc-A"):
                 alloc_a = await allocate_remote(
-                    op, db_url, project=_FOUR_METHOD_PROJECT, phase_name="alloc-A"
+                    op, project=_FOUR_METHOD_PROJECT, phase_name="alloc-A"
                 )
             async with phase("provision-A"):
                 system_a = await provision_to_ready(
@@ -433,7 +431,7 @@ def test_remote_four_method_capture_over_the_wire() -> None:
             # --- System B: full boot → gdbstub attach → console + kdump across the crash -----
             async with phase("alloc-B"):
                 alloc_b = await allocate_remote(
-                    op, db_url, project=_FOUR_METHOD_PROJECT, phase_name="alloc-B"
+                    op, project=_FOUR_METHOD_PROJECT, phase_name="alloc-B"
                 )
             async with phase("provision-B"):
                 system_b = await provision_to_ready(

@@ -88,7 +88,6 @@ def test_allocation_carries_attribution_and_optional_lease() -> None:
         **_attrib(),
         resource_id=_ID2,
         state=AllocationState.REQUESTED,
-        capability_scope={"transports": ["gdbstub"]},
     )
     assert allocation.state is AllocationState.REQUESTED
     assert allocation.principal == "alice"

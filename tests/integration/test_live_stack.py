@@ -44,7 +44,6 @@ from tests.integration.live_stack.spine import (
     assert_report,
     await_system_state,
     drain_job,
-    grant_force_crash_scope,
     mint_role_token,
     ok,
     phase,
@@ -226,8 +225,6 @@ def test_spine_over_the_wire() -> None:
                     "allocate",
                 )
                 allocation_id = env.object_id
-            # out-of-band: grant the destructive capability scope (ADR-0045 §1)
-            await grant_force_crash_scope(db_url, allocation_id)
             async with phase("provision"):
                 env = ok(
                     await scalar(

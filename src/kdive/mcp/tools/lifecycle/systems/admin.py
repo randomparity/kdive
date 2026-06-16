@@ -214,9 +214,9 @@ async def teardown_system(
     """Enqueue an idempotent teardown for a System the caller's project administers.
 
     Requires ``admin`` on the owning project (ADR-0129). Teardown is the normal lifecycle
-    terminus of a granted System, so it no longer runs the three-check destructive gate — the
-    un-grantable ``capability_scope`` layer and the no-op-for-teardown profile opt-in add no
-    safety here. ``RoleDenied`` is caught locally (not propagated to ``DenialAuditMiddleware``),
+    terminus of a granted System, so it does not run the destructive-op gate — the gate's role
+    and profile-opt-in factors add no safety for destroying your own System. ``RoleDenied`` is
+    caught locally (not propagated to ``DenialAuditMiddleware``),
     so the denial is audited once, keyed on ``system_id``, with ``data["missing_checks"]``. The
     admin check runs before the idempotent ``torn_down`` short-circuit, so a non-admin never
     learns a System's terminal state.

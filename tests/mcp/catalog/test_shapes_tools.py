@@ -144,7 +144,6 @@ async def _alloc(conn: psycopg.AsyncConnection, resource_id: UUID, project: str)
             resource_id=resource_id,
             state=AllocationState.ACTIVE,
             lease_expiry=None,
-            capability_scope={},
         ),
     )
     return alloc.id

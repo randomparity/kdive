@@ -262,7 +262,6 @@ class Allocation(DomainModel, _Attribution):
     resource_id: UUID | None = None
     state: AllocationState
     lease_expiry: datetime | None = None
-    capability_scope: dict[str, Any] = Field(default_factory=dict)
     requested_vcpus: int | None = None
     requested_memory_gb: int | None = None
     requested_disk_gb: int | None = None

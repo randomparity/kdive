@@ -938,10 +938,6 @@ def test_c6_operator_force_crash_returns_authorization_denied_envelope(migrated_
             sys_id = data_str(prov, "system_id")
             async with pool.connection() as conn:
                 await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (sys_id,))
-                await conn.execute(
-                    "UPDATE allocations SET capability_scope = %s WHERE id = %s",
-                    (Jsonb({"destructive_ops": ["force_crash"]}), grant.object_id),
-                )
             resp = await control_tools.force_crash_system(
                 pool, op, system_id=sys_id, resolver=_provider_resolver()
             )
@@ -987,10 +983,6 @@ def test_c6_admin_and_operator_succeed_on_their_surfaces(migrated_url: str) -> N
             sys_id = data_str(prov, "system_id")
             async with pool.connection() as conn:
                 await conn.execute("UPDATE systems SET state = 'ready' WHERE id = %s", (sys_id,))
-                await conn.execute(
-                    "UPDATE allocations SET capability_scope = %s WHERE id = %s",
-                    (Jsonb({"destructive_ops": ["reprovision"]}), grant.object_id),
-                )
             power_on = await control_tools.power_system(
                 pool, op, system_id=sys_id, action="on", resolver=_provider_resolver()
             )
@@ -1076,10 +1068,6 @@ def test_c7_reprovision_in_place_cycle(migrated_url: str) -> None:
                 await conn.execute(
                     "UPDATE systems SET state = 'ready', domain_name = %s WHERE id = %s",
                     (f"kdive-{sys_id}", sys_id),
-                )
-                await conn.execute(
-                    "UPDATE allocations SET capability_scope = %s WHERE id = %s",
-                    (Jsonb({"destructive_ops": ["reprovision"]}), grant.object_id),
                 )
             new_profile = provisioning_profile(destructive_ops=["reprovision"])
             new_profile["vcpu"] = 8

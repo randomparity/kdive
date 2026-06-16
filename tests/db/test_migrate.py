@@ -129,6 +129,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0033",
         "0034",
         "0035",
+        "0036",
     ]
     assert second == []
 
@@ -568,6 +569,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0033",
         "0034",
         "0035",
+        "0036",
     ]
 
 

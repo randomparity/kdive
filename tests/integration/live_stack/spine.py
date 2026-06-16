@@ -162,23 +162,7 @@ def mint_role_token(
     )
 
 
-# --- out-of-band capability grant + metering seed (ADR-0045 §1, ADR-0046 §0) ----------------
-
-
-async def grant_force_crash_scope(db_url: str, allocation_id: str) -> None:
-    """Grant the destructive capability scope on an allocation, out of band (ADR-0045 §1).
-
-    The wire ``allocations.request`` always grants an empty scope; granting a destructive
-    capability is a privileged platform action no operator tool exposes. This mirrors
-    ``seed_granted_allocation(capability_scope=…)`` — the platform-admin action stood in for.
-    """
-    scope = '{"destructive_ops": ["force_crash"]}'
-    async with await psycopg.AsyncConnection.connect(db_url) as conn:
-        await conn.execute(
-            "UPDATE allocations SET capability_scope = %s::jsonb WHERE id = %s",
-            (scope, allocation_id),
-        )
-        await conn.commit()
+# --- metering seed (ADR-0046 §0) -----------------------------------------------------------
 
 
 async def seed_metering(
@@ -217,15 +201,14 @@ async def seed_metering(
 
 async def allocate_remote(
     client: LiveStackClient,
-    db_url: str,
     *,
     project: str,
     phase_name: str,
 ) -> str:
-    """Request a remote-libvirt allocation and grant the force_crash scope; return its id.
+    """Request a remote-libvirt allocation; return its id.
 
-    Folds the wire ``allocations.request`` and the out-of-band capability grant the destructive
-    crash needs into one step a multi-System exercise can call once per System.
+    force_crash on the resulting System is gated by the System's profile opt-in
+    (``destructive_ops``) plus the caller's role — no out-of-band capability grant (ADR-0130).
     """
     env = ok(
         await scalar(
@@ -241,9 +224,7 @@ async def allocate_remote(
         ),
         phase_name,
     )
-    allocation_id = env.object_id
-    await grant_force_crash_scope(db_url, allocation_id)
-    return allocation_id
+    return env.object_id
 
 
 async def provision_to_ready(
