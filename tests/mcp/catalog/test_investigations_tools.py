@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
@@ -643,6 +644,136 @@ def test_set_reads_preexisting_overlong_title(migrated_url: str) -> None:
             inv_id = row["id"]
             resp = await inv_tools.get_investigation(pool, _ctx(), str(inv_id))
             assert resp.status == "open"  # read did not raise on the 300-char title
+
+    asyncio.run(scenario())
+
+
+_ATTACH_SEQ = itertools.count()
+
+
+async def _attach_run(
+    pool: AsyncConnectionPool,
+    inv_id: str,
+    *,
+    system_id: str | None = None,
+    project: str = "proj",
+) -> tuple[str, str]:
+    """Insert one Run on ``inv_id`` (minting an Allocation+System unless ``system_id`` given).
+
+    Returns ``(run_id, system_id)``. Created-at is advanced per call so the ``created_at, id``
+    ordering is deterministic across successive attaches.
+    """
+    from datetime import UTC, datetime
+    from uuid import UUID, uuid4
+
+    from kdive.db.repositories import RUNS
+    from kdive.domain.models import Run
+    from kdive.domain.state import RunState
+    from tests.mcp._seed import seed_crashed_system
+
+    n = next(_ATTACH_SEQ)
+    sid = system_id or await seed_crashed_system(pool, project=project)
+    async with pool.connection() as conn:
+        run = await RUNS.insert(
+            conn,
+            Run(
+                id=uuid4(),
+                created_at=datetime(2026, 1, 1, 0, 0, n, tzinfo=UTC),
+                updated_at=datetime(2026, 1, 1, 0, 0, n, tzinfo=UTC),
+                principal="user-1",
+                project=project,
+                investigation_id=UUID(inv_id),
+                system_id=UUID(sid),
+                state=RunState.RUNNING,
+                build_profile={},
+            ),
+        )
+    return str(run.id), sid
+
+
+def test_get_enumerates_attached_runs_and_systems(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
+            run1, sys1 = await _attach_run(pool, inv_id)
+            run2, sys2 = await _attach_run(pool, inv_id)
+            resp = await inv_tools.get_investigation(pool, _ctx(), inv_id)
+        assert resp.data["runs"] == [run1, run2]  # created_at, id order
+        assert resp.data["systems"] == [sys1, sys2]
+
+    asyncio.run(scenario())
+
+
+def test_get_with_no_runs_returns_empty_lists(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
+            resp = await inv_tools.get_investigation(pool, _ctx(), inv_id)
+        assert resp.data["runs"] == []
+        assert resp.data["systems"] == []
+
+    asyncio.run(scenario())
+
+
+def test_get_dedups_systems_across_runs(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
+            run1, sys1 = await _attach_run(pool, inv_id)
+            run2, _ = await _attach_run(pool, inv_id, system_id=sys1)  # same System
+            resp = await inv_tools.get_investigation(pool, _ctx(), inv_id)
+        assert resp.data["runs"] == [run1, run2]
+        assert resp.data["systems"] == [sys1]  # one distinct System
+
+    asyncio.run(scenario())
+
+
+def test_get_excludes_runs_of_another_investigation(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_a = (await _open(pool, _ctx(), project="proj", title="a")).object_id
+            inv_b = (await _open(pool, _ctx(), project="proj", title="b")).object_id
+            run_a, _ = await _attach_run(pool, inv_a)
+            await _attach_run(pool, inv_b)  # belongs to inv_b
+            resp = await inv_tools.get_investigation(pool, _ctx(), inv_a)
+        assert resp.data["runs"] == [run_a]  # only inv_a's run
+
+    asyncio.run(scenario())
+
+
+def test_open_envelope_carries_empty_runs(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _open(pool, _ctx(), project="proj", title="t")
+        assert resp.data["runs"] == []
+        assert resp.data["systems"] == []
+
+    asyncio.run(scenario())
+
+
+def test_close_envelope_enumerates_runs(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
+            run1, sys1 = await _attach_run(pool, inv_id)
+            resp = await inv_tools.close_investigation(pool, _ctx(), inv_id)
+        assert resp.status == "closed"
+        assert resp.data["runs"] == [run1]
+        assert resp.data["systems"] == [sys1]
+
+    asyncio.run(scenario())
+
+
+def test_list_item_enumerates_runs(migrated_url: str) -> None:
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = (await _open(pool, _ctx(), project="proj", title="only")).object_id
+            run1, sys1 = await _attach_run(pool, inv_id)
+            resp = await inv_tools.list_investigations(pool, _ctx())
+            assert len(resp.items) == 1
+            item = resp.items[0]
+        assert item.data["runs"] == [run1]
+        assert item.data["systems"] == [sys1]
 
     asyncio.run(scenario())
 
