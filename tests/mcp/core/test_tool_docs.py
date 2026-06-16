@@ -70,6 +70,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.set_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.start_session": ("tests/mcp/debug/test_debug_tools.py",),
     "fixtures.list": ("tests/mcp/catalog/test_fixtures_list.py",),
+    "fixtures.validate": ("tests/mcp/catalog/test_fixtures_validate.py",),
     "images.build": ("tests/mcp/ops/test_images_tools.py",),
     "images.delete": ("tests/mcp/ops/test_images_tools.py",),
     "images.extend": ("tests/mcp/ops/test_images_tools.py",),

@@ -354,6 +354,45 @@ def test_systems_inventory_configmap_mounts_on_components_and_migrate() -> None:
     assert any(v["name"] == "kdive-systems" for v in migrate["spec"]["template"]["spec"]["volumes"])
 
 
+def test_fixtures_unset_mounts_nothing() -> None:
+    for proc, deploy in _deployments_with().items():
+        container = _container(deploy)
+        env_names = {e["name"] for e in container["env"]}
+        assert "KDIVE_FIXTURE_CATALOG_PATH" not in env_names, proc
+        mounts = {m["name"] for m in container.get("volumeMounts", [])}
+        assert "kdive-fixtures" not in mounts, proc
+        volumes = {v["name"] for v in deploy["spec"]["template"]["spec"].get("volumes", [])}
+        assert "kdive-fixtures" not in volumes, proc
+
+
+def test_fixtures_configmap_mounts_on_components_not_migrate() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "fixtures.configMapName=fx")
+    assert res.returncode == 0, res.stderr
+    docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
+
+    deployments = {
+        doc["metadata"]["name"].removeprefix("kdive-kdive-"): doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"].startswith("kdive-kdive-")
+    }
+    for proc in ("server", "worker", "reconciler"):
+        deploy = deployments[proc]
+        container = _container(deploy)
+        env = {e["name"]: e.get("value") for e in container["env"]}
+        assert env["KDIVE_FIXTURE_CATALOG_PATH"] == "/etc/kdive/fixtures", proc
+        mount = next(m for m in container["volumeMounts"] if m["name"] == "kdive-fixtures")
+        assert mount["mountPath"] == "/etc/kdive/fixtures"
+        assert mount["readOnly"] is True
+        volumes = deploy["spec"]["template"]["spec"]["volumes"]
+        volume = next(v for v in volumes if v["name"] == "kdive-fixtures")
+        assert volume["configMap"]["name"] == "fx"
+        assert "items" not in volume["configMap"], "fixtures mount must be flat (no items)"
+
+    migrate = next(doc for doc in docs if doc.get("kind") == "Job")
+    mmounts = {m["name"] for m in _container(migrate).get("volumeMounts", [])}
+    assert "kdive-fixtures" not in mmounts, "migrate does not read the fixture catalog"
+
+
 def test_bundled_renders_demo_backends() -> None:
     res = _template("bundledBackends=true", "demoAcknowledged=true")
     assert res.returncode == 0, res.stderr

@@ -42,6 +42,7 @@
 | [`debug.set_breakpoint`](debug.md#debugset_breakpoint) | `partial` |
 | [`debug.start_session`](debug.md#debugstart_session) | `partial` |
 | [`fixtures.list`](fixtures.md#fixtureslist) | `implemented` |
+| [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |
 | [`images.build`](images.md#imagesbuild) | `implemented` |
 | [`images.delete`](images.md#imagesdelete) | `implemented` |
 | [`images.extend`](images.md#imagesextend) | `implemented` |

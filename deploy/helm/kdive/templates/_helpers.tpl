@@ -154,6 +154,34 @@ that does not opt in is unchanged. Call with the root context: `include "kdive.s
 {{- end -}}
 {{- end -}}
 
+{{- define "kdive.fixturesEnv" -}}
+{{- if .Values.fixtures.configMapName -}}
+- name: KDIVE_FIXTURE_CATALOG_PATH
+  value: {{ .Values.fixtures.mountPath | quote }}
+{{- end -}}
+{{- end -}}
+
+{{- define "kdive.fixturesVolumeMount" -}}
+{{- if .Values.fixtures.configMapName -}}
+- name: kdive-fixtures
+  mountPath: {{ .Values.fixtures.mountPath | quote }}
+  readOnly: true
+{{- end -}}
+{{- end -}}
+
+{{/*
+A plain configMap volume (no per-key `items`): the chart cannot enumerate an operator-authored
+ConfigMap's keys, and a plain mount writes every key as a flat file at mountPath — the required
+flat layout (manifest.yaml + each profile YAML as a top-level key; ADR-0120).
+*/}}
+{{- define "kdive.fixturesVolume" -}}
+{{- if .Values.fixtures.configMapName -}}
+- name: kdive-fixtures
+  configMap:
+    name: {{ .Values.fixtures.configMapName | quote }}
+{{- end -}}
+{{- end -}}
+
 {{- define "kdive.scrapeAnnotations" -}}
 prometheus.io/scrape: "true"
 prometheus.io/path: /metrics

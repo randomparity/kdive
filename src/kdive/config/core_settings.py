@@ -21,6 +21,9 @@ _SERVER = frozenset({"server"})
 _STORE_USERS = frozenset({"server", "worker", "reconciler"})
 _WORKER = frozenset({"worker"})
 _DISCOVERY = frozenset({"worker", "reconciler"})
+# Processes that read the on-disk provider fixture catalog: the worker/reconciler build paths
+# plus the server's fixtures.validate read (ADR-0120).
+_CATALOG_READERS = frozenset({"server", "worker", "reconciler"})
 
 
 def _int(raw: str) -> int:
@@ -254,8 +257,8 @@ FIXTURE_CATALOG_PATH = Setting(
     name="KDIVE_FIXTURE_CATALOG_PATH",
     parse=_str,
     group="catalog",
-    processes=_DISCOVERY,
-    help="Override path to the provider fixture catalog.",
+    processes=_CATALOG_READERS,
+    help="Override path to the provider fixture catalog (operator override, ADR-0120).",
 )
 
 IMAGE_PUBLISH_GRACE = Setting(

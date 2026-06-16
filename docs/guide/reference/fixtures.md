@@ -7,3 +7,9 @@
 `implemented` · `read-only`
 
 List rootfs fixture catalog entries (provider, name, arch). Requires a valid token.
+
+## `fixtures.validate`
+
+`implemented` · `read-only`
+
+Validate the resolved fixture catalog and list its profiles. Requires a valid token.
