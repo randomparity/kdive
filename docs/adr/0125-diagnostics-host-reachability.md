@@ -28,13 +28,30 @@ service factory and add a remote-libvirt reachability check that opens `remote_c
 calls `conn.getInfo()` under a bounded per-check timeout (reusing the `SshBuildHostProber`
 offload pattern), reporting `pass`/`fail`/`error` with the connection failure category
 (`transport_failure` for an unreachable host, `configuration_error` for a bad URI/cert). The
-probe targets a **single** `[[remote_libvirt]]` instance selected by an optional `host` argument
-(defaulting to the sole/default instance) and does **not** fan out across all configured
-instances on one call, so a single authz'd MCP call cannot amplify into N TLS handshakes against
-remote hosts. The check is server-side authz-gated like the other diagnostics checks (ADR-0091),
-and its claim is scoped to libvirt-reachability — a reachable-but-misconfigured host (no storage
-pool/network) reports `pass` and surfaces its config failure at provision time (now legible via
-ADR-0123's `detail`).
+probe targets a **single** `[[remote_libvirt]]` instance via the existing
+`remote_config_from_inventory()` resolver (no new `host` argument): the inventory loader already
+rejects more than one declared instance, so `is_remote_libvirt_configured()` degrades to `False`
+on a multi-instance inventory and the check is **not assembled** — a single authz'd MCP call
+cannot amplify into N TLS handshakes against remote hosts. The check is server-side authz-gated
+like the other diagnostics checks (ADR-0091), and its claim is scoped to libvirt-reachability — a
+reachable-but-misconfigured host (no storage pool/network) reports `pass` and surfaces its config
+failure at provision time (now legible via ADR-0123's `detail`).
+
+The reachability check is `Vantage.SERVER` (the server opens the libvirt client connection), so it
+runs even when the worker is down — exactly when an operator needs the signal. The wired
+`ProviderTlsCheck`/`GdbstubAclCheck` remain `Vantage.WORKER`; this slice does not build their
+worker-job probe dispatch, so the default factory constructs the service with
+`worker_available=False` and they surface via the existing worker-unavailable substitution as an
+honest `error` ("worker could not pick up the diagnostic job; check /livez and /readyz") rather
+than a fabricated "host unreachable" verdict. The failure category is carried on a new optional
+`CheckResult.failure_category` field (forbidden on `pass`), projected into the `ops.diagnostics`
+verdict.
+
+**Implementation note:** the reachability check resolves config lazily inside the probe (not at
+factory assembly), so a single declared instance that is unresolvable at run time (e.g. an inverted
+gdbstub range, an unsafe URI) reports the check's own `error` + `configuration_error` rather than
+collapsing the whole diagnostics report. A new `host`/`instance` selection argument is left to the
+future wave that wires per-op multi-instance remote selection.
 
 ## Consequences
 
