@@ -37,9 +37,16 @@ _FAULT = "fault-inject"
 _PLACEHOLDER_ROOTFS_PATH = "/REPLACE_ME/rootfs.img"
 _PLACEHOLDER_BASE_IMAGE = "REPLACE_ME-base-image-volume"
 
+# Placeholder kernel source for the direct-kernel (build-iterating) lane only. A disk-image
+# provision boots the base image's own kernel and never reads kernel_source_ref (#472), so the
+# disk-image example omits it entirely.
+_PLACEHOLDER_KERNEL_SOURCE = "git:REPLACE_ME-kernel-source"
+
 _REPLACE_NOTE = (
-    "Example shape only; replace every REPLACE_ME placeholder (kernel_source_ref, and any rootfs / "
-    "base_image_volume reference) with a real value for your host before provisioning."
+    "Example shape only; replace every REPLACE_ME placeholder (any rootfs / base_image_volume "
+    "reference, and kernel_source_ref on the direct-kernel examples) with a real value for your "
+    "host before provisioning. The disk-image example needs no kernel_source_ref: it boots the "
+    "operator-staged base image's own kernel."
 )
 
 # Sizing guidance (#461): the example carries concrete vcpu/memory_mb/disk_gb so it parses alone
@@ -54,13 +61,14 @@ _SIZING_NOTE = (
 )
 
 # The provider-agnostic core every example carries; sizing is concrete so the example parses alone.
+# kernel_source_ref is NOT here: it is required only on the direct-kernel lane (#472), so the
+# direct-kernel builders add it and the disk-image (remote-libvirt) example omits it.
 _CORE: dict[str, JsonValue] = {
     "schema_version": 1,
     "arch": "x86_64",
     "vcpu": 2,
     "memory_mb": 2048,
     "disk_gb": 20,
-    "kernel_source_ref": "git:REPLACE_ME-kernel-source",
 }
 
 
@@ -104,8 +112,10 @@ def _configured_providers(doc: InventoryDoc | None) -> list[str]:
 def _example_item(provider: str, doc: InventoryDoc | None) -> ToolResponse:
     """Build one example item for ``provider`` from the inventory (or placeholders).
 
-    Every example carries a ``note``: even when the rootfs/base-image reference is resolved to a
-    real inventory name, the ``kernel_source_ref`` is always a placeholder the caller must replace.
+    Every example carries a ``note``: a direct-kernel example carries a placeholder
+    ``kernel_source_ref`` the caller must replace, while the disk-image (remote-libvirt) example
+    omits it entirely (it boots the base image's own kernel, #472). Even when the rootfs/base-image
+    reference is resolved to a real inventory name, the direct-kernel source stays a placeholder.
     It also carries a ``sizing_note`` (#461) telling the caller the example's concrete
     ``vcpu``/``memory_mb``/``disk_gb`` must be omitted or matched when provisioning onto a
     shape-sized allocation. ``uses_real_reference`` reports whether the provider rootfs/base-image
@@ -150,6 +160,7 @@ def _local_profile(doc: InventoryDoc | None) -> tuple[dict[str, JsonValue], bool
     profile: dict[str, JsonValue] = {
         **_CORE,
         "boot_method": "direct-kernel",
+        "kernel_source_ref": _PLACEHOLDER_KERNEL_SOURCE,
         "provider": provider,
     }
     return profile, placeholder
@@ -175,6 +186,7 @@ def _fault_profile() -> dict[str, JsonValue]:
     return {
         **_CORE,
         "boot_method": "direct-kernel",
+        "kernel_source_ref": _PLACEHOLDER_KERNEL_SOURCE,
         "provider": provider,
     }
 

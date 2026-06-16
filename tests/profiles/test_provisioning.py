@@ -68,6 +68,7 @@ def test_valid_libvirt_profile_parses() -> None:
     assert profile.memory_mb == 4096
     assert profile.disk_gb == 20
     assert profile.boot_method is BootMethod.DIRECT_KERNEL
+    assert profile.kernel_source_ref is not None
     assert profile.kernel_source_ref.startswith("git+https://")
     assert profile.provider.local_libvirt.domain_xml_params == {"machine": "pc-q35-9.0"}
     rootfs = profile.provider.local_libvirt.rootfs
@@ -565,6 +566,38 @@ def test_valid_remote_profile_parses() -> None:
     section = profile.provider.remote_libvirt
     assert section.base_image_volume == "kdive-base-fedora-42.qcow2"
     assert section.crashkernel == "256M"
+
+
+def test_disk_image_profile_parses_without_kernel_source_ref() -> None:
+    # #472: a disk-image (remote-libvirt) provision boots the base image's own kernel and never
+    # reads kernel_source_ref, so it is optional on this lane — the VM-only flow must not be forced
+    # to invent a kernel source.
+    data = _valid_remote()
+    del data["kernel_source_ref"]
+
+    profile = ProvisioningProfile.parse(data)
+
+    assert profile.kernel_source_ref is None
+    assert profile.boot_method is BootMethod.DISK_IMAGE
+
+
+def test_disk_image_profile_still_accepts_kernel_source_ref() -> None:
+    # #472: relaxing the requirement is backward compatible — a present value is still accepted
+    # (and ignored downstream, as it always was).
+    profile = ProvisioningProfile.parse(_valid_remote())
+
+    assert profile.kernel_source_ref is not None
+
+
+def test_direct_kernel_profile_requires_kernel_source_ref() -> None:
+    # #472: direct-kernel stays the build-iterating lane; omitting the source is rejected.
+    data = _valid()
+    del data["kernel_source_ref"]
+
+    with pytest.raises(CategorizedError) as exc_info:
+        ProvisioningProfile.parse(data)
+
+    assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_remote_section_requires_disk_image_boot() -> None:

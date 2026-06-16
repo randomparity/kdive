@@ -213,6 +213,17 @@ def test_collection_chains_into_define(tmp_path: Path) -> None:
     assert "allocations.request" in resp.suggested_next_actions
 
 
+def test_disk_image_example_emits_no_kernel_source_ref(tmp_path: Path) -> None:
+    # #472: the remote-libvirt (disk-image) example must not instruct the agent to invent a kernel
+    # source for a VM-only provision.
+    examples = _examples(None)
+    remote = _profile_of(examples["remote-libvirt"])
+    assert "kernel_source_ref" not in remote
+    # The direct-kernel examples still carry the learnable build source.
+    for provider in ("local-libvirt", "fault-inject"):
+        assert "kernel_source_ref" in _profile_of(examples[provider]), provider
+
+
 def test_examples_carry_sizing_note_and_concrete_size() -> None:
     # #461: the example carries concrete sizing (so it parses alone and provisions a full-custom
     # allocation as-is) AND a sizing_note telling the caller to omit/match for a shape-sized
