@@ -30,7 +30,7 @@ from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
-from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target
+from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import DebugTransportKind, LiveIntrospector, VmcoreIntrospector
@@ -63,7 +63,7 @@ async def introspect_from_vmcore(
             try:
                 resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
             except CategorizedError as exc:
-                return ToolResponse.failure_from_error(run_id, exc)
+                return vmcore_target_failure(run_id, exc)
         try:
             output = await asyncio.to_thread(
                 introspector.from_vmcore,
