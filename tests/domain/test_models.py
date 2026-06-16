@@ -154,6 +154,21 @@ def test_run_join_point_and_failure_category() -> None:
     assert run.failure_category is ErrorCategory.BUILD_FAILURE
     assert run.kernel_ref is None
     assert run.debuginfo_ref is None
+    assert run.failing_job_id is None
+
+
+def test_run_carries_failing_job_id_link() -> None:
+    run = Run(
+        **_base(),
+        **_attrib(),
+        investigation_id=_ID2,
+        system_id=_ID,
+        state=RunState.FAILED,
+        build_profile={"config": "defconfig"},
+        failure_category=ErrorCategory.BUILD_FAILURE,
+        failing_job_id=_ID2,
+    )
+    assert run.failing_job_id == _ID2
 
 
 def test_expected_boot_failure_model_and_run_field() -> None:

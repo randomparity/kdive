@@ -131,6 +131,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0035",
         "0036",
         "0037",
+        "0038",
     ]
     assert second == []
 
@@ -271,6 +272,17 @@ def test_investigations_description_column(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     columns = _columns(pg_conn, "investigations")
     assert columns["description"] == "text"
+
+
+def test_runs_failing_job_id_column(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    columns = _columns(pg_conn, "runs")
+    assert columns["failing_job_id"] == "uuid"
+    row = pg_conn.execute(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'runs' AND column_name = 'failing_job_id'"
+    ).fetchone()
+    assert row is not None and row[0] == "YES"
 
 
 def test_investigations_description_length_check(pg_conn: psycopg.Connection) -> None:
@@ -588,6 +600,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0035",
         "0036",
         "0037",
+        "0038",
     ]
 
 

@@ -328,7 +328,14 @@ class ExpectedBootFailure(_DomainBase):
 
 
 class Run(DomainModel, _Attribution):
-    """One build/install/boot attempt — the join of a System and an Investigation."""
+    """One build/install/boot attempt — the join of a System and an Investigation.
+
+    ``failing_job_id`` links a ``failed`` Run to the job that carries its human-readable
+    reason (ADR-0141). It is set in ``_fail_build`` atomically with the ``running -> failed``
+    transition and is ``None`` for a non-failed Run or a failed path with no job (e.g. a Run
+    failed by the reconciler on a torn-down System). Not a foreign key: ``jobs`` rows are never
+    deleted, so the reference cannot dangle.
+    """
 
     investigation_id: UUID
     system_id: UUID
@@ -338,6 +345,7 @@ class Run(DomainModel, _Attribution):
     kernel_ref: str | None = None
     debuginfo_ref: str | None = None
     failure_category: ErrorCategory | None = None
+    failing_job_id: UUID | None = None
 
 
 class DebugSession(DomainModel, _Attribution):
