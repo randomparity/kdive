@@ -133,6 +133,14 @@ def seed_project_statements(
     max_concurrent_allocations: int,
     max_concurrent_systems: int,
 ) -> list[tuple[str, Sequence[Any]]]:
+    """Build the idempotent budget/quota upserts for a demo project (see :func:`seed_demo`).
+
+    These raw ``INSERT``s reproduce the row content the audited ``accounting.set_budget`` /
+    ``accounting.set_quota`` tools write, but deliberately bypass them: the seeder runs at
+    deploy time with no OIDC token or request context, so it cannot satisfy their
+    ``require_role(..., admin)`` gate. The production project-onboarding path is the admin
+    tools, not this seeder — see ``docs/operating/project-onboarding.md``.
+    """
     return [
         (
             "INSERT INTO budgets (project, limit_kcu, spent_kcu) "
@@ -158,7 +166,11 @@ async def seed_demo(
     max_concurrent_allocations: int,
     max_concurrent_systems: int,
 ) -> None:
-    """Seed budget/quota rows and register the local provider resource."""
+    """Seed budget/quota rows and register the local provider resource.
+
+    A bootstrap convenience for demos and local stacks, not the production onboarding path:
+    the writes bypass the audited admin tools (see :func:`seed_project_statements`).
+    """
     from kdive.db.pool import create_pool
 
     pool = create_pool()
