@@ -140,13 +140,48 @@ def test_request_admission_returns_configuration_error_when_no_target(
     async def placement(*_: object, **__: object) -> PlacementCandidates:
         return PlacementCandidates(resources=[])
 
+    async def registered_kinds(*_: object, **__: object) -> tuple[str, ...]:
+        return ("remote-libvirt",)
+
     monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
     monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "_registered_kinds", registered_kinds)
 
     async def _run() -> None:
-        result = await request_admission(_CONN, _ctx(), project="proj", spec=_spec())
+        # A by-kind no-target denial enumerates the available kinds for the transport (#471).
+        by_kind = await request_admission(_CONN, _ctx(), project="proj", spec=_spec())
+        assert by_kind.resource is None
+        assert by_kind.category is ErrorCategory.CONFIGURATION_ERROR
+        assert by_kind.available_kinds == ("remote-libvirt",)
+
+    asyncio.run(_run())
+
+
+def test_request_admission_by_id_no_target_omits_available_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A by-id no-target denial leaves available_kinds None (the caller named a host); the kind
+    # enumeration must not even be queried (#471, ADR-0132).
+    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+        return _sizing()
+
+    async def placement(*_: object, **__: object) -> PlacementCandidates:
+        return PlacementCandidates(resources=[])
+
+    async def registered_kinds(*_: object, **__: object) -> tuple[str, ...]:
+        raise AssertionError("a by-id denial must not enumerate kinds")
+
+    monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
+    monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "_registered_kinds", registered_kinds)
+
+    async def _run() -> None:
+        result = await request_admission(
+            _CONN, _ctx(), project="proj", spec=_spec(resource_id=_RESOURCE_ID)
+        )
         assert result.resource is None
         assert result.category is ErrorCategory.CONFIGURATION_ERROR
+        assert result.available_kinds is None
 
     asyncio.run(_run())
 

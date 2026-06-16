@@ -52,6 +52,10 @@ class RequestAdmissionResult:
     denial: AdmissionOutcome | None = None
     error: CategorizedError | None = None
     category: ErrorCategory | None = None
+    # The fleet's distinct registered resource kinds, populated only on a **by-kind**
+    # no-resource denial so the transport can name what *is* available (#471, ADR-0132).
+    # ``None`` on a by-id denial (the caller named a host; the kind list is irrelevant).
+    available_kinds: tuple[str, ...] | None = None
 
 
 async def request_admission(
@@ -78,10 +82,14 @@ async def request_admission(
 
     resource = await _select_target(conn, spec.resource_id, spec.kind, pcie_specs, project)
     if resource is None:
+        # A by-kind denial enumerates the available kinds for the transport detail (#471); a
+        # by-id denial leaves it None (the caller named a host, so the kind list adds nothing).
+        available_kinds = None if spec.resource_id is not None else await _registered_kinds(conn)
         return RequestAdmissionResult(
             object_id,
             project,
             category=ErrorCategory.CONFIGURATION_ERROR,
+            available_kinds=available_kinds,
         )
     outcome = await admit(
         conn,
@@ -115,6 +123,18 @@ def _compose_pcie_specs(spec: AdmissionRequestSpec, sizing: ResolvedSizing) -> t
     for pcie_spec in specs:
         parse_match_spec(pcie_spec)
     return specs
+
+
+async def _registered_kinds(conn: AsyncConnection) -> tuple[str, ...]:
+    """The fleet's distinct registered resource kinds, sorted (#471, ADR-0132).
+
+    Deployment topology, not project-scoped data — the same aggregate ``resources.list``
+    surfaces — so it is safe to name in a denial detail (no per-project existence leak).
+    """
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT DISTINCT kind FROM resources ORDER BY kind")
+        rows = await cur.fetchall()
+    return tuple(str(row[0]) for row in rows)
 
 
 async def _select_target(
