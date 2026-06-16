@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from collections.abc import Callable
 from typing import Annotated
 
@@ -25,6 +24,7 @@ from pydantic import Field
 import kdive.config as config
 from kdive.artifacts.storage import ArtifactWriteRequest
 from kdive.build_configs.catalog import get_build_config, upsert_operator_build_config
+from kdive.build_configs.rules import exceeds_build_config_cap, validate_build_config_name
 from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -42,7 +42,6 @@ from kdive.store.objectstore import ObjectStore
 _TOOL = "buildconfig.get"
 _SET_TOOL = "buildconfig.set"
 
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MAX_DESCRIPTION_BYTES = 1024
 
 _MERGE_RECIPE = (
@@ -135,7 +134,9 @@ async def set_build_config(
             name, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_SET_TOOL]
         )
     with bind_context(principal=ctx.principal):
-        if not _NAME_RE.match(name):
+        try:
+            validate_build_config_name(name)
+        except ValueError:
             return ToolResponse.failure(
                 name,
                 ErrorCategory.CONFIGURATION_ERROR,
@@ -144,7 +145,7 @@ async def set_build_config(
             )
         data = content.encode("utf-8")
         cap = int(config.require(MAX_BUILD_CONFIG_BYTES))
-        if not data or len(data) > cap:
+        if not data or exceeds_build_config_cap(data, cap):
             return ToolResponse.failure(
                 name,
                 ErrorCategory.CONFIGURATION_ERROR,
