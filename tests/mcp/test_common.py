@@ -17,5 +17,5 @@ def test_authz_denied_surfaces_missing_checks() -> None:
 
 
 def test_authz_denied_preserves_multiple_check_order() -> None:
-    resp = authz_denied("sys-9", ["capability_scope", "operator_role", "profile_opt_in"])
-    assert resp.data["missing_checks"] == ["capability_scope", "operator_role", "profile_opt_in"]
+    resp = authz_denied("sys-9", ["operator_role", "profile_opt_in"])
+    assert resp.data["missing_checks"] == ["operator_role", "profile_opt_in"]

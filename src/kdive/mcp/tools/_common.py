@@ -50,9 +50,9 @@ def authz_denied(object_id: str, missing_checks: list[str]) -> ToolResponse:
     """Build an ``authorization_denied`` envelope naming the failed gate checks (ADR-0129).
 
     ``missing_checks`` is the destructive-op gate's closed enum of policy-check tokens
-    (``capability_scope``, ``admin_role``/``operator_role``, ``profile_opt_in``) — never a
-    resource identifier — so it is safe to surface in ``data`` under the no-leak seam
-    (ADR-0123), which suppresses ``detail`` only, not ``data``.
+    (``admin_role``/``operator_role``, ``profile_opt_in``) — never a resource identifier — so
+    it is safe to surface in ``data`` under the no-leak seam (ADR-0123), which suppresses
+    ``detail`` only, not ``data``.
     """
     checks: list[JsonValue] = list(missing_checks)
     return ToolResponse.failure(

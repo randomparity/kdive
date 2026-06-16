@@ -1444,25 +1444,6 @@ def test_reprovision_viewer_denied_before_provider_rootfs_validation(
     assert calls == []
 
 
-def test_reprovision_without_scope_denied(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)  # no destructive_ops in scope
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE allocations SET state = 'active' WHERE id = %s", (alloc_id,)
-                )
-            sys_id = await _seed_ready_system(pool, alloc_id)
-            resp = await _reprovision(
-                pool, _ctx(Role.OPERATOR), sys_id, _active_allocation_profile()
-            )
-        assert resp.status == "error"
-        assert resp.error_category == "authorization_denied"
-        assert resp.data["missing_checks"] == ["capability_scope"]
-
-    asyncio.run(_run())
-
-
 def test_reprovision_without_profile_opt_in_denied(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

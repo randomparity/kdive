@@ -220,7 +220,7 @@ def test_destructive_op_denied_is_not_audited(migrated_url: str) -> None:
     # DestructiveOpDenied is an AuthorizationError subclass already audited by its own
     # handler — the RoleDenied-specific catch must NOT double-write it.
     rows = _drive(
-        migrated_url, DestructiveOpDenied(["capability_scope"]), expect_type=DestructiveOpDenied
+        migrated_url, DestructiveOpDenied(["admin_role"]), expect_type=DestructiveOpDenied
     )
     assert rows == []
 
