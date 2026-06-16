@@ -193,6 +193,32 @@ MAX_UPLOAD_BYTES = Setting(
     suggest="an integer number of bytes, e.g. 53687091200 (50 GiB)",
 )
 
+ARTIFACT_INLINE_MAX_BYTES = Setting(
+    name="KDIVE_ARTIFACT_INLINE_MAX_BYTES",
+    parse=_int,
+    default=str(64 * 1024),
+    group="artifacts",
+    processes=_SERVER,
+    help=(
+        "Maximum redacted-artifact size in bytes that `artifacts.get` returns inline in "
+        "`data.content`. A larger artifact omits inline content and is retrieved via the "
+        "presigned `refs.download_uri` (ADR-0140)."
+    ),
+    suggest="an integer number of bytes, e.g. 65536 (64 KiB)",
+)
+ARTIFACT_DOWNLOAD_TTL_SECONDS = Setting(
+    name="KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS",
+    parse=_int,
+    default="900",
+    group="artifacts",
+    processes=_SERVER,
+    help=(
+        "Expiry in seconds of the presigned download URL `artifacts.get` mints in "
+        "`refs.download_uri` for a redacted artifact (ADR-0140)."
+    ),
+    suggest="an integer number of seconds, e.g. 900",
+)
+
 MAX_BUILD_CONFIG_BYTES = Setting(
     name="KDIVE_MAX_BUILD_CONFIG_BYTES",
     parse=_int,
@@ -468,6 +494,8 @@ SETTINGS = [
     PROVISION_PREMUTATION_TIMEOUT_S,
     UPLOAD_TTL_SECONDS,
     MAX_UPLOAD_BYTES,
+    ARTIFACT_INLINE_MAX_BYTES,
+    ARTIFACT_DOWNLOAD_TTL_SECONDS,
     MAX_BUILD_CONFIG_BYTES,
     DEBUG_DIR,
     CRASH_DIR,

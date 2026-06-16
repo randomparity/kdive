@@ -2,6 +2,13 @@
 
 # Configuration reference (`KDIVE_*`)
 
+## artifacts
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS` | server | `900` | no | Expiry in seconds of the presigned download URL `artifacts.get` mints in `refs.download_uri` for a redacted artifact (ADR-0140). |
+| `KDIVE_ARTIFACT_INLINE_MAX_BYTES` | server | `65536` | no | Maximum redacted-artifact size in bytes that `artifacts.get` returns inline in `data.content`. A larger artifact omits inline content and is retrieved via the presigned `refs.download_uri` (ADR-0140). |
+
 ## build
 
 | Variable | Processes | Default | Required | Value |
