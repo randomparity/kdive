@@ -359,7 +359,7 @@ Apply the new helper at the three remaining gate-denial sites so a denied `repro
 This task changes **three** denial sites (reprovision, destructive `power`, `force_crash`), so it needs an assertion on each. The exact tests and their expected `missing_checks` (verified against the current tree):
 
 1. `test_power_destructive_action_denied_without_scope` — `tests/mcp/lifecycle/test_control_tools.py:288` (admin ctx, profile opts `power` in, unscoped allocation → only `capability_scope` missing). Asserts `missing=["capability_scope"]` in audit args at line 309.
-2. `test_force_crash_denied_returns_authorization_denied` — `tests/mcp/lifecycle/test_control_tools.py:451` — **parametrized** over which gate checks fail (e.g. line 446 `(False, True, True)  # missing capability_scope`). Assert the envelope's `missing_checks` equals the *same* expected-missing list the test already feeds its audit-args assertion, so it stays correct across every parametrized combination.
+2. `test_force_crash_denied_returns_authorization_denied` — `tests/mcp/lifecycle/test_control_tools.py:451` — **parametrized** over which gate checks fail (e.g. line 446 `(False, True, True)  # missing capability_scope`). This test feeds no expected-missing list today, so Step 1 adds a fourth parametrize column carrying each row's single expected token and asserts `missing_checks == [expected_missing]`.
 3. `test_reprovision_without_scope_denied` — `tests/mcp/lifecycle/test_systems_tools.py:1482` (operator/admin ctx, unscoped allocation → `capability_scope` missing). Expect `missing_checks=["capability_scope"]`.
 
 - [ ] **Step 1: Add a failing `missing_checks` envelope assertion to each of the three tests**
@@ -404,7 +404,8 @@ Before editing, confirm none of the three already assert `resp.data == {}` (they
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -k "denied or force_crash" tests/mcp/lifecycle/test_systems_tools.py -k reprovision_without_scope -q`
+Run (single `-k` expression — pytest keeps only the last `-k`, so do not pass two):
+`uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py tests/mcp/lifecycle/test_systems_tools.py -k "power_destructive_action_denied_without_scope or force_crash_denied or reprovision_without_scope" -q`
 Expected: FAIL — `resp.data` has no `missing_checks` key at any of the three sites.
 
 - [ ] **Step 3: Apply the helper at the denial sites**
@@ -429,10 +430,11 @@ In `src/kdive/mcp/tools/lifecycle/systems/admin.py`, change the reprovision deni
 
 - [ ] **Step 4: Verify**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py -k "denied or force_crash" -q`
-Expected: PASS (power-without-scope and force_crash denial envelopes carry `missing_checks`).
+Run (single `-k` expression over both files):
+`uv run python -m pytest tests/mcp/lifecycle/test_control_tools.py tests/mcp/lifecycle/test_systems_tools.py -k "power_destructive_action_denied_without_scope or force_crash_denied or reprovision_without_scope" -q`
+Expected: PASS (power-without-scope, force_crash, and reprovision-without-scope denial envelopes carry `missing_checks`).
 Run: `uv run python -m pytest tests/mcp/lifecycle/test_systems_tools.py -k reprovision -q`
-Expected: PASS (the reprovision denial envelope now also carries `missing_checks`; other reprovision tests unaffected).
+Expected: PASS (other reprovision tests unaffected by the new `data` key).
 Run: `just lint && just type`
 Expected: clean.
 
