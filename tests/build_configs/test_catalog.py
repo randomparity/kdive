@@ -13,6 +13,9 @@ from kdive.build_configs.catalog import (
     get_build_config,
     get_build_config_sync,
     parse_build_config_row,
+    read_build_config_provenance,
+    upsert_config_build_config,
+    upsert_operator_build_config,
 )
 from kdive.db import migrate
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -139,5 +142,42 @@ def test_get_build_config_returns_none_for_absent_name(migrated_url: str) -> Non
     async def _run() -> None:
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
             assert await get_build_config(conn, "nope") is None
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Config-source writer + provenance reader (ADR-0122; require Docker, skip otherwise)
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_config_writes_source_config(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await upsert_config_build_config(
+                conn, "kdump", "system/build-configs/kdump/kdump.config", "abc123", "desc"
+            )
+            prov = await read_build_config_provenance(conn, "kdump")
+        assert prov == ("abc123", "config", "desc")
+
+    asyncio.run(_run())
+
+
+def test_upsert_config_clobbers_operator(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await upsert_operator_build_config(conn, "kdump", "k", "op_sha", "op desc")
+            await upsert_config_build_config(conn, "kdump", "k2", "cfg_sha", "cfg desc")
+            prov = await read_build_config_provenance(conn, "kdump")
+        assert prov == ("cfg_sha", "config", "cfg desc")
+
+    asyncio.run(_run())
+
+
+def test_provenance_absent_returns_none(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            prov = await read_build_config_provenance(conn, "nope")
+        assert prov is None
 
     asyncio.run(_run())

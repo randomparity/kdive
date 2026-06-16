@@ -450,3 +450,49 @@ def test_duplicate_cost_class_name_rejected() -> None:
         InventoryDoc.parse(d)
     assert excinfo.value.entry == "cost_class"
     assert excinfo.value.field == "name"
+
+
+def test_build_config_valid() -> None:
+    doc = InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "build_config": [
+                {"name": "kdump", "content": "CONFIG_KEXEC=y\n", "description": "kdump frag"}
+            ],
+        }
+    )
+    assert len(doc.build_config) == 1
+    assert doc.build_config[0].name == "kdump"
+    assert doc.build_config[0].content == "CONFIG_KEXEC=y\n"
+    assert doc.build_config[0].description == "kdump frag"
+
+
+def test_build_config_absent_is_empty_list() -> None:
+    doc = InventoryDoc.parse({"schema_version": 2})
+    assert doc.build_config == []
+
+
+def test_build_config_duplicate_name_raises() -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(
+            {
+                "schema_version": 2,
+                "build_config": [
+                    {"name": "kdump", "content": "a"},
+                    {"name": "kdump", "content": "b"},
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize("name", ["", "Kdump", "kd/ump"])
+def test_build_config_bad_name_raises(name: str) -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse({"schema_version": 2, "build_config": [{"name": name, "content": "a"}]})
+
+
+def test_build_config_empty_content_raises() -> None:
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(
+            {"schema_version": 2, "build_config": [{"name": "kdump", "content": ""}]}
+        )

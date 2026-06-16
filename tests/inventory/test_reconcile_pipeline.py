@@ -29,6 +29,7 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_coefficients",
         "reconcile_resources",
         "reconcile_build_hosts",
+        "reconcile_build_configs",
     ):
         monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls))
 
@@ -49,4 +50,5 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_coefficients",
         "reconcile_resources",
         "reconcile_build_hosts",
+        "reconcile_build_configs",
     ]

@@ -17,6 +17,7 @@ import pytest
 
 from kdive.build_configs.catalog import (
     get_build_config,
+    upsert_config_build_config,
     upsert_operator_build_config,
     upsert_seed_build_config,
 )
@@ -228,3 +229,21 @@ def test_seed_skips_operator_override(migrated_url: str) -> None:
         assert entry.sha256 == "operatorsha"
 
     asyncio.run(_run())
+
+
+def test_seed_skips_config_owned_row(migrated_url: str) -> None:
+    """The seed leaves a config-declared (source='config') row untouched (ADR-0122)."""
+    store = _FakeStore()
+
+    async def _run() -> int:
+        async with await _connect(migrated_url) as conn:
+            await upsert_config_build_config(conn, "kdump", "k/cfg", "shacfg", "cfg desc")
+            published = await seed_build_configs(conn, cast(ObjectStore, store))
+            entry = await get_build_config(conn, "kdump")
+        assert entry is not None
+        assert entry.source == "config"
+        assert entry.object_key == "k/cfg"
+        assert store.put_keys == []  # nothing published over the config row
+        return published
+
+    assert asyncio.run(_run()) == 0

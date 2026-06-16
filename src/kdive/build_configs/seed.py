@@ -15,10 +15,9 @@ import hashlib
 from pathlib import Path
 
 from psycopg import AsyncConnection
-from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ArtifactWriteRequest
-from kdive.build_configs.catalog import upsert_seed_build_config
+from kdive.build_configs.catalog import read_build_config_provenance, upsert_seed_build_config
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.models import Sensitivity
 from kdive.store.objectstore import ObjectStore
@@ -31,17 +30,6 @@ _OWNER_KIND = "build-configs"
 _RETENTION_CLASS = "build-config"
 
 
-async def _stored_row(conn: AsyncConnection, name: str) -> tuple[str, str] | None:
-    """Return the row's ``(sha256, source)`` for ``name``, or ``None`` if absent."""
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT sha256, source FROM build_config_catalog WHERE name = %(name)s",
-            {"name": name},
-        )
-        row = await cur.fetchone()
-    return (row["sha256"], row["source"]) if row is not None else None
-
-
 async def seed_build_configs(conn: AsyncConnection, store: ObjectStore) -> int:
     """Publish the packaged kdump fragment + upsert its row, source-aware. Returns 0 or 1.
 
@@ -50,7 +38,8 @@ async def seed_build_configs(conn: AsyncConnection, store: ObjectStore) -> int:
     autocommit, and the advisory lock needs an open transaction), so a concurrent operator
     ``set`` cannot interleave with the read/PUT/upsert and the seed never PUTs over an operator
     override (ADR-0119). Idempotent: an unchanged seed-owned fragment writes nothing; an
-    operator-owned row is skipped. The ``WHERE source='seed'`` guard on
+    operator-owned **or config-owned** row is skipped (a declared ``[[build_config]]`` is
+    file-authoritative, ADR-0122). The ``WHERE source='seed'`` guard on
     :func:`upsert_seed_build_config` is defence in depth on the row.
 
     Args:
@@ -63,8 +52,10 @@ async def seed_build_configs(conn: AsyncConnection, store: ObjectStore) -> int:
     data = KDUMP_FRAGMENT_PATH.read_bytes()
     sha256 = hashlib.sha256(data).hexdigest()
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.BUILD_CONFIG, _KDUMP_NAME):
-        stored = await _stored_row(conn, _KDUMP_NAME)
-        if stored is not None and (stored == (sha256, "seed") or stored[1] == "operator"):
+        stored = await read_build_config_provenance(conn, _KDUMP_NAME)
+        if stored is not None and (
+            (stored[0] == sha256 and stored[1] == "seed") or stored[1] in {"operator", "config"}
+        ):
             return 0
         written = store.put_artifact(
             ArtifactWriteRequest(
