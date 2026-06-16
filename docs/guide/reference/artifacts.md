@@ -28,7 +28,12 @@ Mint a presigned PUT for a DEFINED System's rootfs. Requires operator.
 
 `partial` · `read-only`
 
-Fetch one redacted artifact by id. Requires viewer; sensitive ids are not-found.
+Fetch one redacted artifact's content by id.
+
+Returns the object ref plus, best-effort, the redacted bytes inline in
+`data.content` (capped at KDIVE_ARTIFACT_INLINE_MAX_BYTES; larger artifacts
+set `content_omitted` and are retrieved via `refs.download_uri`) and a
+presigned `refs.download_uri`. Requires viewer; sensitive ids are not-found.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
