@@ -52,9 +52,12 @@ The substitution detail attributes its cause. We introduce a closed
 `worker_available=False`). The default factory passes `FEATURE_NOT_ENABLED` explicitly. The
 substituted result stays a three-state `error` (never a contract `fail`, no `fix` string),
 satisfying ADR-0091 §1: the tool that explains breakage must not itself wedge or fabricate a
-verdict. The reason is also carried as the result's `failure_category` (`configuration_error`
-for `FEATURE_NOT_ENABLED`, `transport_failure` for `WORKER_UNAVAILABLE`) so a programmatic
-caller can branch without string-matching the detail.
+verdict. The reason is also carried as the result's `failure_category` (`not_implemented` for
+`FEATURE_NOT_ENABLED`, `transport_failure` for `WORKER_UNAVAILABLE`) so a programmatic caller
+can branch without string-matching the detail. `not_implemented` (mirroring
+`ErrorCategory.NOT_IMPLEMENTED`) is chosen over `configuration_error` deliberately: an unwired
+feature is not an operator-fixable misconfiguration, and `configuration_error` would point the
+operator at config they cannot change — a softer form of the very misdirection this ADR removes.
 
 `worker_available` keeps its safety contract intact: it still governs *whether* a worker-vantage
 check runs, and the load-bearing "do not flip alone" invariant is unchanged. The new field only
@@ -68,7 +71,7 @@ selects *which honest detail* is emitted when a check is substituted.
 - The `/livez`/`/readyz` detail is preserved for the genuine-outage path, so the ADR-0125
   worker-job follow-up can pass `WORKER_UNAVAILABLE` once a real worker-down condition can occur.
 - `failure_category` on the substituted result lets the MCP verdict and any gate distinguish
-  "not enabled here" (`configuration_error`) from "worker down" (`transport_failure`) without
+  "not enabled here" (`not_implemented`) from "worker down" (`transport_failure`) without
   parsing prose.
 - One new public symbol (`WorkerVantageSubstitution`) and one new optional constructor argument;
   no schema, migration, dependency, or entrypoint change.

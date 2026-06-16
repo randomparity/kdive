@@ -36,9 +36,16 @@ Attribute the substitution cause (ADR-0139). Introduce a closed reason enum
 `worker_available=False`). `worker_unavailable_results` becomes reason-driven, emitting:
 
 - `FEATURE_NOT_ENABLED` → `worker-vantage diagnostic checks (provider_tls, gdbstub_acl) are not
-  enabled in this deployment`, `failure_category="configuration_error"`.
+  enabled in this deployment`, `failure_category="not_implemented"`.
 - `WORKER_UNAVAILABLE` → the existing `/livez`/`/readyz` detail,
   `failure_category="transport_failure"`.
+
+`not_implemented` (mirroring `ErrorCategory.NOT_IMPLEMENTED`) is deliberate over
+`configuration_error`: the feature being unwired is **not** an operator-fixable
+misconfiguration (there is no config that enables it in this slice), so labeling it
+`configuration_error` would re-create a softer form of the misdirection #484 removes. The two
+reasons carry **distinct** `failure_category` values precisely so a programmatic caller can
+branch on the cause without string-matching the detail.
 
 Each substituted result stays `CheckStatus.ERROR` with `fix=None` (ADR-0091 §1 — never a
 contract `fail`, never a fix string). The default factory passes
@@ -50,7 +57,7 @@ governs whether a worker-vantage check runs, and "do not flip alone" stays true.
 
 | caller | `worker_available` | `substitution_reason` | substituted detail | `failure_category` |
 |---|---|---|---|---|
-| `default_service_factory` (today) | `False` | `FEATURE_NOT_ENABLED` | "...not enabled in this deployment" | `configuration_error` |
+| `default_service_factory` (today) | `False` | `FEATURE_NOT_ENABLED` | "...not enabled in this deployment" | `not_implemented` |
 | future genuine worker-down | `False` | `WORKER_UNAVAILABLE` | "...check /livez and /readyz" | `transport_failure` |
 | bare `DiagnosticsService(worker_available=False)` (no reason) | `False` | default `WORKER_UNAVAILABLE` | "...check /livez and /readyz" | `transport_failure` |
 
@@ -65,8 +72,10 @@ governs whether a worker-vantage check runs, and "do not flip alone" stays true.
 
 - A `default_service_factory` run with a remote-libvirt instance configured surfaces
   `provider_tls` and `gdbstub_acl` as `error` whose detail names "not enabled in this
-  deployment" (not `/livez`/`/readyz`) and whose `failure_category` is `configuration_error`.
+  deployment" (not `/livez`/`/readyz`) and whose `failure_category` is `not_implemented`.
 - A `DiagnosticsService` built with `substitution_reason=WORKER_UNAVAILABLE` (or none) still
   emits the `/livez`/`/readyz` detail with `failure_category=transport_failure`.
+- The two substitution reasons carry **distinct** `failure_category` values (`not_implemented`
+  vs `transport_failure`), so the cause is machine-distinguishable without parsing the detail.
 - The substituted result is `error` with `fix=None` in both cases; `has_failure` stays `False`.
 - Server-vantage `secret_ref`/`remote_libvirt_reachability` checks still run.
