@@ -206,3 +206,25 @@ def test_seed_upsert_fresh_row_is_seed_owned(migrated_url: str) -> None:
         assert entry.source == "seed"
 
     asyncio.run(_run())
+
+
+def test_seed_skips_operator_override(migrated_url: str) -> None:
+    """A later seed leaves an operator override untouched (the AC#3 migrate-clobber guard)."""
+    store = _FakeStore()
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            # First seed publishes the packaged kdump fragment (source='seed').
+            assert await seed_build_configs(conn, cast(ObjectStore, store)) == 1
+            # Operator overrides it with different bytes (source='operator').
+            await upsert_operator_build_config(
+                conn, "kdump", "system/build-configs/kdump/kdump.config", "operatorsha", "op"
+            )
+            # A later seed must skip and leave the operator row + source intact.
+            assert await seed_build_configs(conn, cast(ObjectStore, store)) == 0
+            entry = await get_build_config(conn, "kdump")
+        assert entry is not None
+        assert entry.source == "operator"
+        assert entry.sha256 == "operatorsha"
+
+    asyncio.run(_run())

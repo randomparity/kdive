@@ -18,6 +18,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ArtifactWriteRequest
+from kdive.build_configs.catalog import upsert_seed_build_config
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.models import Sensitivity
 from kdive.store.objectstore import ObjectStore
 
@@ -29,55 +31,51 @@ _OWNER_KIND = "build-configs"
 _RETENTION_CLASS = "build-config"
 
 
-async def _stored_sha(conn: AsyncConnection, name: str) -> str | None:
+async def _stored_row(conn: AsyncConnection, name: str) -> tuple[str, str] | None:
+    """Return the row's ``(sha256, source)`` for ``name``, or ``None`` if absent."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT sha256 FROM build_config_catalog WHERE name = %(name)s", {"name": name}
+            "SELECT sha256, source FROM build_config_catalog WHERE name = %(name)s",
+            {"name": name},
         )
         row = await cur.fetchone()
-    return row["sha256"] if row is not None else None
-
-
-async def _upsert(
-    conn: AsyncConnection, name: str, object_key: str, sha256: str, desc: str
-) -> None:
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "INSERT INTO build_config_catalog (name, object_key, sha256, description) "
-            "VALUES (%(name)s, %(object_key)s, %(sha256)s, %(description)s) "
-            "ON CONFLICT (name) DO UPDATE SET "
-            "object_key = EXCLUDED.object_key, sha256 = EXCLUDED.sha256, "
-            "description = EXCLUDED.description, updated_at = now()",
-            {"name": name, "object_key": object_key, "sha256": sha256, "description": desc},
-        )
+    return (row["sha256"], row["source"]) if row is not None else None
 
 
 async def seed_build_configs(conn: AsyncConnection, store: ObjectStore) -> int:
-    """Publish the packaged kdump fragment + upsert its row. Returns the count published (0 or 1).
+    """Publish the packaged kdump fragment + upsert its row, source-aware. Returns 0 or 1.
 
-    Idempotent: when the stored sha256 already matches the packaged bytes, nothing is written.
+    Serialized per fragment name on :attr:`LockScope.BUILD_CONFIG` — the same lock
+    ``buildconfig.set`` takes — inside an explicit transaction (the migrate connection is
+    autocommit, and the advisory lock needs an open transaction), so a concurrent operator
+    ``set`` cannot interleave with the read/PUT/upsert and the seed never PUTs over an operator
+    override (ADR-0119). Idempotent: an unchanged seed-owned fragment writes nothing; an
+    operator-owned row is skipped. The ``WHERE source='seed'`` guard on
+    :func:`upsert_seed_build_config` is defence in depth on the row.
 
     Args:
         conn: An open async psycopg connection (autocommit recommended).
         store: The object store to publish bytes into.
 
     Returns:
-        The number of fragments published (0 if idempotent skip, 1 if published/updated).
+        The number of fragments published (0 if skipped, 1 if published/updated).
     """
     data = KDUMP_FRAGMENT_PATH.read_bytes()
     sha256 = hashlib.sha256(data).hexdigest()
-    if await _stored_sha(conn, _KDUMP_NAME) == sha256:
-        return 0
-    stored = store.put_artifact(
-        ArtifactWriteRequest(
-            tenant=_TENANT,
-            owner_kind=_OWNER_KIND,
-            owner_id=_KDUMP_NAME,
-            name="kdump.config",
-            data=data,
-            sensitivity=Sensitivity.REDACTED,
-            retention_class=_RETENTION_CLASS,
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.BUILD_CONFIG, _KDUMP_NAME):
+        stored = await _stored_row(conn, _KDUMP_NAME)
+        if stored is not None and (stored == (sha256, "seed") or stored[1] == "operator"):
+            return 0
+        written = store.put_artifact(
+            ArtifactWriteRequest(
+                tenant=_TENANT,
+                owner_kind=_OWNER_KIND,
+                owner_id=_KDUMP_NAME,
+                name="kdump.config",
+                data=data,
+                sensitivity=Sensitivity.REDACTED,
+                retention_class=_RETENTION_CLASS,
+            )
         )
-    )
-    await _upsert(conn, _KDUMP_NAME, stored.key, sha256, _KDUMP_DESCRIPTION)
+        await upsert_seed_build_config(conn, _KDUMP_NAME, written.key, sha256, _KDUMP_DESCRIPTION)
     return 1
