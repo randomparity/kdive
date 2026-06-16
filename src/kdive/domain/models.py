@@ -94,6 +94,11 @@ type DestructiveJobKind = Literal[
     JobKind.POWER,
 ]
 
+DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH, JobKind.POWER}
+)
+"""Runtime set mirroring the ``DestructiveJobKind`` Literal (ADR-0130 token validation)."""
+
 
 class ImageVisibility(StrEnum):
     """Resolution scope of an image_catalog row (ADR-0092/0093).

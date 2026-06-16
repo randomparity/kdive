@@ -15,6 +15,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.services.systems.validation import (
+    _reject_unknown_destructive_ops,
     validate_profile_for_provider,
     validate_rootfs_for_provider,
 )
@@ -111,6 +112,39 @@ def test_validate_rootfs_for_provider_skips_upload_rootfs() -> None:
         validate_rootfs_for_provider(_profile({"kind": "upload"}), _LOCAL_POLICY, fail_on_call)
     )
     validate_profile_for_provider(_profile({"kind": "upload"}), _LOCAL_POLICY, _capabilities())
+
+
+def _profile_with_ops(destructive_ops: list[str]) -> ProvisioningProfile:
+    data = copy.deepcopy(_VALID_PROFILE)
+    data["provider"]["local-libvirt"]["destructive_ops"] = destructive_ops
+    return ProvisioningProfile.parse(data)
+
+
+def test_reject_unknown_destructive_ops_flags_typo_directly() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _reject_unknown_destructive_ops(_profile_with_ops(["force-crash"]))  # hyphen typo
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["unknown_destructive_ops"] == ["force-crash"]
+
+
+def test_reject_unknown_destructive_ops_accepts_known_directly() -> None:
+    _reject_unknown_destructive_ops(
+        _profile_with_ops(["force_crash", "power", "reprovision", "teardown"])
+    )
+
+
+def test_validate_profile_for_provider_rejects_unknown_token() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        validate_profile_for_provider(
+            _profile_with_ops(["powercycle"]), _LOCAL_POLICY, _capabilities("local")
+        )
+    assert exc.value.details["unknown_destructive_ops"] == ["powercycle"]
+
+
+def test_validate_profile_for_provider_accepts_known_tokens() -> None:
+    validate_profile_for_provider(
+        _profile_with_ops(["force_crash", "reprovision"]), _LOCAL_POLICY, _capabilities("local")
+    )
 
 
 def test_validate_rootfs_for_provider_propagates_validator_error() -> None:
