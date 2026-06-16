@@ -41,12 +41,15 @@ So this is **one tool + one provenance column**, not a new subsystem.
 
 ### Tool: `buildconfig.set`
 
-- **Gate:** `require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)`. The catalog is
-  system-scoped (no project column; `buildconfig.get` skips project RBAC), so a project role
-  has no project to gate on. On denial — *only* when the caller holds some platform role —
-  `audit_platform_denial` writes a `platform_audit_log` row and the tool returns
-  `AUTHORIZATION_DENIED`. A project-only token gets the same denial envelope with no audit row
-  (the routine non-grant case).
+- **Gate (before any infrastructure resolution):** `require_platform_role(ctx,
+  PlatformRole.PLATFORM_ADMIN)`. The catalog is system-scoped (no project column;
+  `buildconfig.get` skips project RBAC), so a project role has no project to gate on. On
+  denial — *only* when the caller holds some platform role — `audit_platform_denial` writes a
+  `platform_audit_log` row and the tool returns `AUTHORIZATION_DENIED`. A project-only token
+  gets the same denial envelope with no audit row (the routine non-grant case). The object
+  store is resolved through an injected `store_factory()` called **after** the gate and
+  validation, so a denied caller never triggers object-store resolution, never learns S3 is
+  unconfigured, and is always audited even on a no-S3 deployment.
 - **Audit on success:** `audit.record_platform` writes one `platform_audit_log` row
   (`tool="buildconfig.set"`, `scope=name`, `args={name, sha256, bytes}`,
   `platform_role=held_platform_roles(ctx)`, `actor=actor_for(ctx)`). Only the one-way

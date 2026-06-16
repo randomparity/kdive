@@ -73,10 +73,20 @@ def test_concurrent_set_converges_row_and_object(
         try:
             await asyncio.gather(
                 set_build_config(
-                    pool, minio_store, _ADMIN, name="kdump", content="AAAA\n", description="a"
+                    pool,
+                    lambda: minio_store,
+                    _ADMIN,
+                    name="kdump",
+                    content="AAAA\n",
+                    description="a",
                 ),
                 set_build_config(
-                    pool, minio_store, _ADMIN, name="kdump", content="BBBB\n", description="b"
+                    pool,
+                    lambda: minio_store,
+                    _ADMIN,
+                    name="kdump",
+                    content="BBBB\n",
+                    description="b",
                 ),
             )
             from kdive.mcp.tools.catalog.build_configs import read_build_config

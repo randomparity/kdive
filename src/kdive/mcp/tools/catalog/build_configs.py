@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+from collections.abc import Callable
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -95,7 +96,7 @@ async def read_build_config(
 
 async def set_build_config(
     pool: AsyncConnectionPool,
-    store: ObjectStore,
+    store_factory: Callable[[], ObjectStore],
     ctx: RequestContext,
     *,
     name: str,
@@ -107,11 +108,14 @@ async def set_build_config(
     Serialized per fragment ``name`` on :attr:`LockScope.BUILD_CONFIG` (the same lock the seed
     takes); the object PUT, the catalog upsert (``source='operator'``), and the
     ``platform_audit_log`` row commit together. A non-``platform_admin`` caller is denied and,
-    when it holds some platform role, the denial is audited.
+    when it holds some platform role, the denial is audited. The object store is resolved
+    (``store_factory``) **after** the authorization gate, so a denied caller never triggers — or
+    learns about — object-store configuration state and is always audited.
 
     Args:
         pool: The async connection pool.
-        store: The object store the fragment bytes are published to.
+        store_factory: Resolves the object store; called only after the authz gate passes, so a
+            store-resolution failure is reachable only by an authorized caller.
         ctx: The caller's request context.
         name: The fragment name (lowercase ``a-z0-9_-``; folds into the object key).
         content: The full kernel-config fragment text (UTF-8).
@@ -155,6 +159,7 @@ async def set_build_config(
                 data={"field": "description"},
             )
         sha256 = hashlib.sha256(data).hexdigest()
+        store = store_factory()  # resolved only after the authz gate + validation
         async with (
             pool.connection() as conn,
             conn.transaction(),
@@ -253,7 +258,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         try:
             return await set_build_config(
                 pool,
-                _resolved_store(),
+                _resolved_store,
                 current_context(),
                 name=name,
                 content=content,

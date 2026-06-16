@@ -165,7 +165,7 @@ def test_set_publishes_and_get_reports_operator_source(
         async with _pool(migrated_url) as pool:
             resp = await set_build_config(
                 pool,
-                minio_store,
+                lambda: minio_store,
                 _PLATFORM_ADMIN,
                 name="kdump",
                 content="CONFIG_X=y\n",
@@ -193,10 +193,20 @@ def test_set_replaces_bytes_on_second_call(migrated_url: str, minio_store: Objec
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await set_build_config(
-                pool, minio_store, _PLATFORM_ADMIN, name="kdump", content="A\n", description="d"
+                pool,
+                lambda: minio_store,
+                _PLATFORM_ADMIN,
+                name="kdump",
+                content="A\n",
+                description="d",
             )
             await set_build_config(
-                pool, minio_store, _PLATFORM_ADMIN, name="kdump", content="B\n", description=""
+                pool,
+                lambda: minio_store,
+                _PLATFORM_ADMIN,
+                name="kdump",
+                content="B\n",
+                description="",
             )
             async with pool.connection() as conn:
                 got = await read_build_config(conn, minio_store, name="kdump")
@@ -210,7 +220,12 @@ def test_set_requires_platform_admin(migrated_url: str, minio_store: ObjectStore
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await set_build_config(
-                pool, minio_store, _PLATFORM_OPERATOR, name="kdump", content="x\n", description=""
+                pool,
+                lambda: minio_store,
+                _PLATFORM_OPERATOR,
+                name="kdump",
+                content="x\n",
+                description="",
             )
             audited = await _platform_audit_rows(pool, "buildconfig.set")
         assert resp.status == "error"
@@ -228,10 +243,20 @@ def test_set_rejects_bad_name_and_empty_content(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             bad = await set_build_config(
-                pool, minio_store, _PLATFORM_ADMIN, name="../etc", content="x\n", description=""
+                pool,
+                lambda: minio_store,
+                _PLATFORM_ADMIN,
+                name="../etc",
+                content="x\n",
+                description="",
             )
             empty = await set_build_config(
-                pool, minio_store, _PLATFORM_ADMIN, name="kdump", content="", description=""
+                pool,
+                lambda: minio_store,
+                _PLATFORM_ADMIN,
+                name="kdump",
+                content="",
+                description="",
             )
             # No row was written for either rejected call.
             async with pool.connection() as conn:
@@ -254,7 +279,7 @@ def test_set_rejects_oversize_content(
         async with _pool(migrated_url) as pool:
             resp = await set_build_config(
                 pool,
-                minio_store,
+                lambda: minio_store,
                 _PLATFORM_ADMIN,
                 name="kdump",
                 content="123456789",
@@ -263,5 +288,36 @@ def test_set_rejects_oversize_content(
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
         assert resp.data["field"] == "content"
         assert resp.data["limit"] == 8
+
+    asyncio.run(_run())
+
+
+def test_set_denies_and_audits_before_resolving_store(migrated_url: str) -> None:
+    """A non-admin caller is denied + audited even when store resolution would fail.
+
+    The store factory raises (no S3); a denied caller must never reach it, so the result is
+    AUTHORIZATION_DENIED (not CONFIGURATION_ERROR) and a denial row is written.
+    """
+    store_calls: list[int] = []
+
+    def _raising_factory() -> ObjectStore:
+        store_calls.append(1)
+        raise CategorizedError("no s3", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await set_build_config(
+                pool,
+                _raising_factory,
+                _PLATFORM_OPERATOR,
+                name="kdump",
+                content="x\n",
+                description="",
+            )
+            audited = await _platform_audit_rows(pool, "buildconfig.set")
+        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert store_calls == []  # the gate short-circuited before store resolution
+        assert len(audited) == 1
+        assert audited[0]["scope"] == "denied:kdump"
 
     asyncio.run(_run())
