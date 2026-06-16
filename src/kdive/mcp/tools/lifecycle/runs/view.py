@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.repositories import RUNS, SYSTEMS
+from kdive.db.repositories import JOBS, RUNS, SYSTEMS
+from kdive.domain.state import RunState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -37,9 +38,14 @@ async def get_run(
             require_role(ctx, run.project, Role.VIEWER)
             system = await SYSTEMS.get(conn, run.system_id)
             runtime = await resolver.runtime_for_run(conn, run.id) if system is not None else None
+            failing_job = (
+                await JOBS.get(conn, run.failing_job_id)
+                if run.state is RunState.FAILED and run.failing_job_id is not None
+                else None
+            )
         required = (
             system_required_cmdline(_install_method_for(system, runtime.profile_policy))
             if system is not None and runtime is not None
             else None
         )
-        return envelope_for_run(run, required_cmdline=required)
+        return envelope_for_run(run, required_cmdline=required, failing_job=failing_job)
