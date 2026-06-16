@@ -204,16 +204,24 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
   request path (validation, admission checks, lock acquisition) — the segment that legitimately
   blocks the event loop and where a timeout is safe because no state has changed yet. Once the
   first mutation begins, the request runs to its own completion and returns its real envelope; it
-  is never abandoned by the dispatch timeout. (The fast mutation+enqueue itself is sub-second; the
-  observed stall was in the pre-mutation segment.)
-- **Idempotency backstop:** even with the segmented bound, a client that retries after a genuine
-  transport drop must not double-provision. `systems.provision`/`define` carry an idempotency key
-  (the existing idempotency ledger, ADR-0016) so a retried identical request is deduped rather
-  than minting a second System. If the ledger does not already cover this path, adding it is part
-  of work item C.
-- **Spike (gates the threshold and the segment boundary):** reproduce the stall to confirm *which*
-  call blocks and that it is in the pre-mutation segment, and set the timeout above the legitimate
-  worst case for that segment.
+  is never abandoned by the dispatch timeout. A stall *during* the mutation segment stays
+  unbounded (the segment carries no timeout), which is safe only because that segment is DB-only
+  and sub-second — provisioning's libvirt work is worker-owned, not synchronous in the request
+  path. The spike (below) confirms that residual holds.
+- **Retry is already deduped by the allocation lock — confirm, don't rebuild.** Admission resolves
+  an existing System under the allocation lock today: `create_for_allocation` →
+  `_locked_allocation_system` → `_find_system_for_allocation`
+  (`SELECT * FROM systems WHERE allocation_id = %s … LIMIT 1`,
+  `src/kdive/services/systems/admission.py:278`), feeding `existing` into the create response. The
+  dedup key is **allocation_id**: a retry for an already-provisioned allocation takes the
+  existing-System path under the lock rather than racing a second mint. Work item C's obligation is
+  therefore to **confirm** that path returns success-for-existing (not an error) on a transport
+  retry and does not re-enqueue the provision job for an already-provisioned allocation — not to
+  add a new idempotency ledger (the path already touches the existing ledger).
+- **Spike (gates the threshold, the segment boundary, and the residual):** reproduce the stall to
+  confirm *which* call blocks and that it is in the pre-mutation segment, confirm no slow/libvirt
+  call runs synchronously in the mutation segment, and set the timeout above the legitimate worst
+  case for the pre-mutation segment.
 
 ## Failure modes and edges
 

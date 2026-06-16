@@ -27,10 +27,15 @@ Python cannot kill a running thread — `asyncio.wait_for` over a `to_thread` fu
 future while the thread completes — so a timeout fired *after* a mutation began would let the
 mutation land while the caller is told it failed, and since `transport_failure` is
 `retryable=True` the caller would auto-retry and double-provision. Once the first mutation begins
-the request runs to its own completion and returns its real envelope. As a backstop for a genuine
-transport drop mid-request, `systems.provision`/`define` are made idempotent via the existing
-idempotency ledger (ADR-0016) so a retried identical request is deduped. The segment boundary and
-threshold are confirmed by a reproduction spike.
+the request runs to its own completion and returns its real envelope; a stall *within* the
+mutation segment stays unbounded, which is safe only because that segment is DB-only and
+sub-second (libvirt provisioning is worker-owned, not synchronous in the request path). A retried
+provision after a transport drop is already deduped by the allocation lock: admission resolves an
+existing System under `_locked_allocation_system`/`_find_system_for_allocation`
+(`src/kdive/services/systems/admission.py`), so the dedup key is `allocation_id` — work item C
+confirms that existing-System path returns success-for-existing on retry and does not re-enqueue
+the provision job, rather than adding a new idempotency mechanism. The segment boundary, the
+mutation-segment residual, and the threshold are confirmed by a reproduction spike.
 
 ## Consequences
 
@@ -38,11 +43,13 @@ threshold are confirmed by a reproduction spike.
   instead of an opaque socket error — without the timeout ever abandoning an in-flight mutation.
 - Offloading blocking calls removes head-of-line blocking, so a slow operation no longer stalls
   unrelated concurrent requests.
-- The retry path is safe: a `transport_failure` retry is deduped by the idempotency ledger, so the
-  retryable classification does not cause duplicate Systems/allocations/jobs.
+- The retry path is safe: a `transport_failure` retry for an already-provisioned allocation takes
+  the allocation-locked existing-System path, so the retryable classification does not cause
+  duplicate Systems/allocations.
 - New obligations: a reproduction spike to confirm the blocking call sits in the pre-mutation
-  segment and to choose a threshold that does not abort legitimate slow pre-mutation work; and, if
-  the idempotency ledger does not already cover the provision/define path, extending it.
+  segment, that no slow/libvirt call runs synchronously in the mutation segment, and a threshold
+  that does not abort legitimate slow pre-mutation work; plus a test that a retried provision
+  returns success-for-existing and does not re-enqueue the provision job.
 - This refines ADR-0010 (transport) and ADR-0019 (envelope completeness) without changing the
   job-enqueue model — fast tools stay synchronous.
 
@@ -50,8 +57,8 @@ threshold are confirmed by a reproduction spike.
 
 - **Wrap the whole tool body in the timeout**: simplest, but a timeout firing after the mutation
   began abandons a `to_thread` that completes anyway, so the caller sees `transport_failure`,
-  auto-retries (retryable), and double-provisions — rejected for the segmented bound + idempotency
-  backstop.
+  auto-retries (retryable), and double-provisions — rejected for the segmented bound (the
+  allocation lock already dedups the retry itself).
 - **Turn `systems.provision` into a polled async job**: it already enqueues and returns; the
   problem is event-loop blocking in the fast path, not long work in the handler — rejected as
   solving the wrong problem.
