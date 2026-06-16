@@ -86,11 +86,12 @@ is absent). A *configured-but-broken* object store (missing bucket, wrong creden
 the hook. This is intentional — a real object-store fault must surface, not be swallowed (the
 "no silent failures" rule). Because the hook is `post-*`, on the external path it runs *after*
 the app pods roll out, so a seed failure yields a Job named `*-seed-build-configs` failing while
-the server/worker/reconciler are already up. The operator recovers by fixing the object store
-and re-running the step (`kubectl create job --from=cronjob`-style, or
-`python -m kdive seed-build-configs`); build-config fragments are only consumed at build time,
-so a delayed seed never breaks a running control plane. This partial-failure state is documented
-in the k8s runbook (AC#3) so "release failed, pods healthy" is not surprising.
+the server/worker/reconciler are already up. The operator recovers by fixing the object store and
+either re-running `helm upgrade` (which re-fires the `post-upgrade` seed hook) or running
+`python -m kdive seed-build-configs` in a pod carrying the config ConfigMap env (the chart ships
+no CronJob to clone). Build-config fragments are only consumed at build time, so a delayed seed
+never breaks a running control plane. This partial-failure state is documented in the k8s runbook
+(AC#3) so "release failed, pods healthy" is not surprising.
 
 ### C. `reconcile-systems --check`
 
@@ -101,10 +102,14 @@ codes:
 
 - valid file, or absent **default** path → `0`
 - malformed/invalid file → `1` (the `InventoryError` message `entry.field: msg` to stderr)
-- explicit `--path` to a missing file → `1`. Because the validate hook always passes an explicit
-  `--path` to the mounted file, this is also the "ConfigMap mounted but the key did not match
-  `systems.fileName`" case; the message names the path and the configMapName/fileName-must-match
-  cause so the operator-facing error is actionable, rather than a bare "file not found".
+- explicit `--path` to a missing file → `1`, with the `InventoryError` `cannot read` message that
+  **names the path** (`<path>.file: cannot read: …`, from `load_inventory`). The validate hook
+  always passes an explicit `--path` to the mounted file, so this same path-naming message covers
+  the "ConfigMap mounted but its key did not match `systems.fileName`" case (the mount is then
+  empty). `validate_systems` cannot tell that case apart from a CLI typo — a bare path carries no
+  intent — so it does **not** synthesize a different message; the path-naming error is actionable
+  for both, and the configMapName-must-equal-`fileName` requirement is explained in the runbook
+  (see D / AC#3).
 
 The check path is implemented in `reconcile_cli.py` as `validate_systems(path) -> int` so the
 CLI handler stays thin and the logic is unit-testable without argparse.
@@ -136,11 +141,16 @@ migrate-job mount:
   the runbook as a checked precondition, not silently assumed.
 - *The ConfigMap key must equal `systems.fileName`.* `kdive.systemsVolume` projects
   `items: [{key: fileName, path: fileName}]`; a key/`fileName` mismatch yields an empty mount, so
-  `--check --path <mountPath>/<fileName>` hits a missing file. To keep that error actionable
-  rather than a generic "explicit `--path` missing", `validate_systems` distinguishes the
-  mounted-file-absent case with a message naming the mount path and the
-  configMapName/fileName-must-match cause (see C), instead of the bare exit-1 used for an operator
-  who typo'd an explicit `--path` on the CLI.
+  `--check --path <mountPath>/<fileName>` hits a missing file and exits 1 with the path-naming
+  `cannot read` message (see C). The validator cannot infer the configMapName/fileName cause from
+  a bare path, so the runbook documents this requirement as a checked precondition.
+
+**Where the error surfaces (AC#2 observability).** The `InventoryError` field message goes to the
+validate-hook pod's stderr. A failed Helm hook reports only "pre-upgrade hooks failed", not the
+pod logs, so the operator reads the precise error with
+`kubectl logs job/<release>-kdive-validate-systems`. They must read it **before** retrying the
+upgrade: the `before-hook-creation` delete policy reaps the failed pod when the next `helm
+upgrade` recreates the hook. The runbook states this as the AC#2 validation step.
 
 ## Edge / failure cases
 
