@@ -197,6 +197,7 @@ ALLOWED_FILES = frozenset(
         # None of these three is provider-specific; the catalog is keyed by name alone.
         "src/kdive/db/schema/0025_build_config_catalog.sql",
         "src/kdive/db/schema/0034_build_config_catalog_source.sql",
+        "src/kdive/db/schema/0035_build_config_catalog_source_config.sql",
         "src/kdive/mcp/tools/catalog/build_configs.py",
         "src/kdive/mcp/tools/lifecycle/runs/build.py",
     }
