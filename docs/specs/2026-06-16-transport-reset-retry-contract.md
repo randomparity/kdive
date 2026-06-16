@@ -33,19 +33,36 @@ axis only and does not touch the dispatch boundary.
 
 ## Decision (per ADR-0138)
 
-Three changes, all additive and confined to the transport-config + jobs long-poll + guide docs:
+Three changes, all additive and confined to the transport-config + jobs long-poll + guide docs.
+The **documented retry contract (change 3) is the primary mitigation** for the reported D3
+resets. Changes 1 and 2 are supporting, in-control adjustments; neither alone resolves the raw
+in-flight drop (which is physically unwrappable, per the Problem section).
 
 ### 1. Explicit uvicorn keepalive (`src/kdive/__main__.py`)
 
 `_run_server` passes `uvicorn_config={"timeout_keep_alive": _HTTP_KEEPALIVE_S}` to
 `app.run_async(transport="http", host=host, port=port, …)`. `_HTTP_KEEPALIVE_S = 65.0` — a module
-constant sized just above the common 60 s proxy idle default so the keepalive connection survives
-the gap between the rapid short-wait polls the contract recommends. It does **not** extend an
-in-flight hold; the spec and ADR say so explicitly.
+constant sized just above the common 60 s proxy idle default.
+
+`timeout_keep_alive` governs only how long the **server** holds an *idle keepalive TCP
+connection* open *between* requests on that same connection. Its benefit is therefore
+**conditional**: it helps only a client that **reuses the same TCP connection** across successive
+short polls (reducing reconnect churn between polls). It does **nothing** for a client that opens
+a fresh connection per `jobs.wait`, and it does **not** extend the in-flight lifetime of a single
+long hold (no uvicorn knob does). `_HTTP_KEEPALIVE_S` (65 s) intentionally sits *below*
+`MAX_WAIT_S` (300 s): it bounds the idle between-poll gap, not the in-flight hold, so there is no
+expectation that it protects a single 300 s wait. This is a best-effort churn reduction, not a fix
+for the raw drop — the contract (change 3) is the fix.
 
 `run_async(**transport_kwargs)` forwards to `run_http_async(..., uvicorn_config=...)`, which merges
 the dict into `uvicorn.Config` (verified against fastmcp-slim 3.4.0). No other `run_async`
 arguments change.
+
+**Test seam.** `_run_server` `await`s `app.run_async(...)`, which blocks until the server stops, so
+a test cannot call `_run_server` to assert the kwarg. The `uvicorn_config` dict is built by a small
+pure helper, `_server_uvicorn_config() -> dict[str, object]`, that the unit test calls directly and
+asserts equals `{"timeout_keep_alive": 65.0}` — testing the real value, not a stub. `_run_server`
+calls the helper, keeping its body trivial.
 
 ### 2. `jobs.wait` prompt non-terminal return (`src/kdive/mcp/tools/catalog/jobs.py`)
 
@@ -79,8 +96,9 @@ same contract (a server-observable recoverable stream error already returns
 
 ## Acceptance criteria (reviewer-checkable)
 
-- `_run_server` passes `uvicorn_config={"timeout_keep_alive": _HTTP_KEEPALIVE_S}` with
-  `_HTTP_KEEPALIVE_S == 65.0`; a unit test asserts the kwarg is forwarded to `run_async`.
+- `_server_uvicorn_config()` returns `{"timeout_keep_alive": 65.0}` and `_run_server` passes it as
+  `uvicorn_config=` to `app.run_async`; a unit test asserts on the helper's return value directly
+  (no forever-blocking `run_async` mock).
 - A `wait_job` test asserts a non-terminal job with a small `timeout_s` returns promptly (well
   before `MAX_WAIT_S`) with a non-terminal envelope carrying `jobs.wait` in
   `suggested_next_actions`.
