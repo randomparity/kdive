@@ -162,9 +162,10 @@ PROVISION_PREMUTATION_TIMEOUT_S = Setting(
     group="lifecycle",
     processes=_SERVER,
     help=(
-        "Seconds to bound the synchronous pre-mutation segment of systems.provision "
-        "(validation, lock acquisition, rootfs check). On exceed, the tool returns a "
-        "transport_failure envelope instead of dropping the socket (ADR-0126)."
+        "Seconds to bound the synchronous pre-mutation segment of the systems create lane "
+        "(systems.provision / systems.define: validation, lock acquisition, rootfs check). "
+        "On exceed, the tool returns a transport_failure envelope instead of dropping the "
+        "socket (ADR-0126)."
     ),
     suggest="a positive number of seconds, e.g. 30",
 )
