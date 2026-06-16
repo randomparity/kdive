@@ -35,10 +35,27 @@ row. A Run's project equals its Investigation's (enforced at `runs.create`), and
 Investigation row was already resolved under the caller's `viewer` scope, so no extra project
 predicate is needed.
 
-`_envelope_for_investigation` becomes `async def` and takes the open `conn`. Every call site
-already runs inside `async with pool.connection() as conn`, so each threads its connection
-through; the mutators call it after their own write commits (or on the idempotent read path),
-so the enumeration reflects the post-write state.
+`_envelope_for_investigation` becomes `async def` and takes the open `conn`. The connection
+lifecycle differs by call site and the change must respect it:
+
+- `get` renders the envelope while still inside the handler's `async with
+  pool.connection() as conn` — pass that `conn` through directly.
+- `list` currently fetches its rows inside `async with pool.connection() as conn` but builds
+  the `items` list *after* that block closes (the connection is already back in the pool when
+  each item renders). The item-rendering loop moves inside the connection block so the
+  envelope query runs on the live `conn`. The degraded-row branch
+  (`_investigation_row_error`, hit when `Investigation.model_validate` raises) does not query
+  runs and is unaffected.
+- `close`/`link`/`unlink`/`set` render from inside their `_*_locked` helper, which runs under
+  the caller's still-open `conn` (the inner `async with conn.transaction()` has committed but
+  `conn` itself is open) — pass that `conn`. The enumeration therefore reflects post-write
+  state, including a Run just created against the Investigation.
+- `open` is the one site whose current `return _envelope_for_investigation(inv)` sits *after*
+  the `async with pool.connection() as conn, conn.transaction()` block closes, so its
+  connection is already back in the pool. The envelope call moves inside that block (still
+  after the insert + audit) so it has a live connection. A newly-opened Investigation has no
+  runs, so this query returns empty — but it must still run on an open connection, not a
+  closed one.
 
 Ids only — light refs, not embedded `Run` objects (the "references, never log dumps"
 invariant). The caller follows up with `runs.get` for detail.
@@ -56,7 +73,9 @@ invariant). The caller follows up with `runs.get` for detail.
 - A standalone `runs.list(investigation_id=...)` scoped filter (a separate, additive surface;
   not a prerequisite for the issue's navigation acceptance).
 - Embedding full `Run` objects or any run detail beyond the id.
-- Any schema change or migration (FK + index already exist).
+- Any schema change or migration (the FK already exists; the query is an unindexed scan over
+  `runs`, the same shape `runs.create`'s `system_id` count already issues, so no index is
+  added — see ADR-0143).
 
 ## Testing
 
