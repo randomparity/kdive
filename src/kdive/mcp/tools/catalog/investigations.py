@@ -197,16 +197,11 @@ async def _close_locked(
         if current is None:
             return _not_found(str(uid))
         if current.state is InvestigationState.CLOSED:
-            return ToolResponse.success(
-                str(uid),
-                "closed",
-                suggested_next_actions=["investigations.get"],
-                data={"project": project},
-            )
+            return _envelope_for_investigation(current)  # idempotent: already closed
         if current.state is InvestigationState.ABANDONED:
             return _config_error(str(uid), data={"current_status": "abandoned"})
         old = current.state
-        await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)
+        updated = await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)
         await audit.record(
             conn,
             ctx,
@@ -219,9 +214,7 @@ async def _close_locked(
                 project=project,
             ),
         )
-    return ToolResponse.success(
-        str(uid), "closed", suggested_next_actions=["investigations.get"], data={"project": project}
-    )
+    return _envelope_for_investigation(updated)
 
 
 async def close_investigation(
