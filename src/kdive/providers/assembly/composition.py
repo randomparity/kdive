@@ -183,11 +183,12 @@ class ProviderComposition:
         *,
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
+        enable_local_libvirt: bool | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
         return (
             _RuntimeDescriptor(
                 kind=ResourceKind.LOCAL_LIBVIRT,
-                enabled=lambda: True,
+                enabled=lambda: _local_libvirt_enabled(enable_local_libvirt),
                 runtime_factory=lambda: local_composition.build_runtime(
                     secret_registry=self._secret_registry
                 ),
@@ -218,12 +219,14 @@ class ProviderComposition:
         *,
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
+        enable_local_libvirt: bool | None = None,
     ) -> tuple[_RuntimeDescriptor, ...]:
         return tuple(
             descriptor
             for descriptor in self._runtime_descriptors(
                 enable_fault_inject=enable_fault_inject,
                 enable_remote_libvirt=enable_remote_libvirt,
+                enable_local_libvirt=enable_local_libvirt,
             )
             if descriptor.enabled()
         )
@@ -307,13 +310,21 @@ class ProviderComposition:
         *,
         enable_fault_inject: bool | None = None,
         enable_remote_libvirt: bool | None = None,
+        enable_local_libvirt: bool | None = None,
     ) -> ProviderResolver:
-        """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry."""
+        """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry.
+
+        ``enable_local_libvirt`` gates the local-libvirt runtime the same way the reaper is
+        gated (ADR-0127/0131): when disabled, local-libvirt is not composed into the resolver,
+        so ``register_all_discovery`` never runs its discovery registrar against a missing
+        libvirt socket. An explicit flag wins, else ``KDIVE_LOCAL_LIBVIRT_ENABLED`` (default on).
+        """
         runtimes = {
             descriptor.kind: descriptor.build_runtime()
             for descriptor in self._enabled_runtime_descriptors(
                 enable_fault_inject=enable_fault_inject,
                 enable_remote_libvirt=enable_remote_libvirt,
+                enable_local_libvirt=enable_local_libvirt,
             )
         }
         return ProviderResolver(runtimes)
@@ -410,12 +421,14 @@ def build_provider_resolver(
     *,
     enable_fault_inject: bool | None = None,
     enable_remote_libvirt: bool | None = None,
+    enable_local_libvirt: bool | None = None,
     secret_registry: SecretRegistry | None = None,
 ) -> ProviderResolver:
     """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry."""
     return ProviderComposition(secret_registry=secret_registry).build_provider_resolver(
         enable_fault_inject=enable_fault_inject,
         enable_remote_libvirt=enable_remote_libvirt,
+        enable_local_libvirt=enable_local_libvirt,
     )
 
 
