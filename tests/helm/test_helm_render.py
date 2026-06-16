@@ -169,6 +169,8 @@ def _jobs_by_name(*set_args: str) -> dict[str, dict[str, Any]]:
             "weight": int(ann.get("helm.sh/hook-weight", "0")),
             "volumes": [v["name"] for v in spec.get("volumes", [])],
             "args": container.get("args", []),
+            "backoff_limit": doc["spec"].get("backoffLimit"),
+            "env_names": [e["name"] for e in container.get("env", [])],
         }
     return jobs
 
@@ -200,6 +202,10 @@ def test_validate_hook_is_pre_upgrade_weighted_before_migrate() -> None:
     assert v["weight"] < jobs["migrate"]["weight"]  # runs before migrate
     assert v["args"][:2] == ["reconcile-systems", "--check"]
     assert "kdive-systems" in v["volumes"]
+    # Tolerate transient pod failures like migrate/seed (a bad file still re-fails fast).
+    assert v["backoff_limit"] == 3
+    # The explicit --path is authoritative; KDIVE_SYSTEMS_TOML must not be set (it would be dead).
+    assert "KDIVE_SYSTEMS_TOML" not in v["env_names"]
 
 
 def test_migrate_job_has_no_systems_volume() -> None:

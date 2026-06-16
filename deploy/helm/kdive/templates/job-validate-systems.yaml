@@ -14,7 +14,10 @@ metadata:
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
-  backoffLimit: 0
+  # Match the migrate/seed Jobs: a malformed file fails deterministically (each retry re-fails in
+  # seconds, so this still fails fast on the real case), while a transient image-pull/scheduling
+  # blip is retried instead of aborting the whole upgrade on the gating hook.
+  backoffLimit: 3
   template:
     metadata:
       labels:
@@ -28,13 +31,13 @@ spec:
         - name: validate-systems
           image: {{ include "kdive.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The explicit --path is the single source of truth; --check with an explicit path reads
+          # the file directly and never consults KDIVE_SYSTEMS_TOML, so no systemsEnv is set here.
           args:
             - reconcile-systems
             - --check
             - --path
             - {{ printf "%s/%s" .Values.systems.mountPath .Values.systems.fileName | quote }}
-          env:
-            {{- include "kdive.systemsEnv" . | nindent 12 }}
           volumeMounts:
             {{- include "kdive.systemsVolumeMount" . | nindent 12 }}
       volumes:
