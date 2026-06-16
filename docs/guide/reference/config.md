@@ -90,6 +90,12 @@
 | `KDIVE_LEASE_DEFAULT` | server | — | no | Default lease window (hours) when a request omits one (built-in 4). |
 | `KDIVE_LEASE_MAX` | server | — | no | Hard cap (hours) on a lease window / renewal (built-in 24). |
 
+## lifecycle
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_PROVISION_PREMUTATION_TIMEOUT_S` | server | `30.0` | no | Seconds to bound the synchronous pre-mutation segment of systems.provision (validation, lock acquisition, rootfs check). On exceed, the tool returns a transport_failure envelope instead of dropping the socket (ADR-0126). |
+
 ## local-libvirt
 
 | Variable | Processes | Default | Required | Value |

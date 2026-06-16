@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from typing import Any
 
@@ -97,7 +98,7 @@ def test_validate_rootfs_for_provider_invokes_validator_for_regular_rootfs() -> 
     def validate(rootfs: RootfsSource) -> None:
         calls.append(rootfs)
 
-    validate_rootfs_for_provider(_profile(), _LOCAL_POLICY, validate)
+    asyncio.run(validate_rootfs_for_provider(_profile(), _LOCAL_POLICY, validate))
 
     assert [rootfs.kind for rootfs in calls] == ["local"]
 
@@ -106,7 +107,9 @@ def test_validate_rootfs_for_provider_skips_upload_rootfs() -> None:
     def fail_on_call(_: RootfsSource) -> None:
         raise AssertionError("upload-kind rootfs is system-owned and not provider-validated")
 
-    validate_rootfs_for_provider(_profile({"kind": "upload"}), _LOCAL_POLICY, fail_on_call)
+    asyncio.run(
+        validate_rootfs_for_provider(_profile({"kind": "upload"}), _LOCAL_POLICY, fail_on_call)
+    )
     validate_profile_for_provider(_profile({"kind": "upload"}), _LOCAL_POLICY, _capabilities())
 
 
@@ -119,7 +122,7 @@ def test_validate_rootfs_for_provider_propagates_validator_error() -> None:
         )
 
     with pytest.raises(CategorizedError) as exc_info:
-        validate_rootfs_for_provider(_profile(), _LOCAL_POLICY, reject)
+        asyncio.run(validate_rootfs_for_provider(_profile(), _LOCAL_POLICY, reject))
 
     assert exc_info.value.details == {"path": "/tmp/rootfs.qcow2"}
 
@@ -132,5 +135,5 @@ def test_validate_rootfs_for_provider_skips_providers_without_rootfs() -> None:
     def fail_on_call(_: RootfsSource) -> None:
         pytest.fail("fault-inject profiles do not expose a provider rootfs")
 
-    validate_rootfs_for_provider(profile, _FAULT_POLICY, fail_on_call)
+    asyncio.run(validate_rootfs_for_provider(profile, _FAULT_POLICY, fail_on_call))
     validate_profile_for_provider(profile, _FAULT_POLICY, _capabilities())

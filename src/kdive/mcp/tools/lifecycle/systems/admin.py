@@ -122,7 +122,7 @@ async def _reprovision_locked(
         if await _has_live_run(conn, system_id):
             return _stale_handle(str(system_id), current_status=system.state.value)
         try:
-            validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
+            await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(str(system_id), exc)
         return await _admit_reprovision(conn, ctx, system, profile, digest, dedup_key)
