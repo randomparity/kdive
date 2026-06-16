@@ -199,7 +199,7 @@ git commit -m "feat(systems): reject unknown destructive_ops tokens at write sea
 - Modify: `src/kdive/mcp/tools/_common.py:49-60` (docstring enum)
 - Test (rewrite): `tests/security/authz/test_gate.py`
 - Test (update): `tests/mcp/test_common.py:20-21`, `tests/mcp/core/test_denial_audit_middleware.py:223`
-- Test (update gate expectations): `tests/mcp/lifecycle/test_control_tools.py`, `tests/integration/test_walking_skeleton.py:120-175`
+- Test (update gate expectations + delete scope-absence denials): `tests/mcp/lifecycle/test_control_tools.py`, `tests/mcp/lifecycle/test_systems_tools.py`, `tests/integration/test_walking_skeleton.py:120-175`
 
 - [ ] **Step 1: Rewrite the gate unit test to the two-check model (failing)**
 
@@ -363,8 +363,11 @@ In `src/kdive/mcp/tools/_common.py:52-54`, drop `capability_scope` from the docu
 - [ ] **Step 6: Update tool/integration gate-test expectations**
 
 `tests/mcp/lifecycle/test_control_tools.py` — the gate tests previously required `capability_scope` (seeded via the local `_granted_allocation(scope=...)`) **and** profile opt-in **and** role. Now role + profile opt-in suffice. Concretely:
-  - Positive cases (e.g. lines 233/267/293/330, force_crash 483) already seed both `scope={"destructive_ops":[...]}` and `destructive_ops=[...]` on the profile + admin role → still pass (scope ignored).
-  - The `scope_ok` parametrization around line 457 (`scope = {"destructive_ops": ["force_crash"]} if scope_ok else {}`) loses its meaning: a `scope_ok=False` case that expected `capability_scope` in `missing_checks` must be rewritten to drive the **profile opt-in** axis instead (no profile opt-in → `missing_checks=["profile_opt_in"]`) and the role axis. Rewrite that parametrized test so its axes are (role_ok, opt_in_ok) and the expected `missing_checks` are drawn from `{admin_role, profile_opt_in}`. Drop the `scope` axis entirely.
+  - Positive cases (e.g. lines 233/267/330, force_crash 483) already seed both `scope={"destructive_ops":[...]}` and `destructive_ops=[...]` on the profile + admin role → still pass (scope ignored).
+  - **Delete `test_power_destructive_action_denied_without_scope` (lines 288-315).** It seeds `destructive_ops=["power"]` (opt-in present) + `_admin_ctx()` (admin) + `_granted_allocation(pool)` (no scope) and asserts `missing_checks == ["capability_scope"]` plus an audit `missing: ["capability_scope"]`. After this task scope is not a check, so admin + opt-in **succeed** (the op is queued) — the denial scenario no longer exists. Remove the whole test (a positive power-reset success case is already covered around lines 233/267). Do **not** leave it asserting `status == "error"`, which would fail.
+  - The `scope_ok` parametrization (the `@pytest.mark.parametrize` at ~line 444, with the `(False, True, True, "capability_scope")` row and `scope = {...} if scope_ok else {}` at ~line 458) loses the scope axis: drop the `(False, True, True, "capability_scope")` row and the `scope_ok` param + `scope`/`_granted_allocation(pool, scope=scope)` plumbing. Keep the `(False, True, "admin_role")` and `(True, False, "profile_opt_in")` rows recast as `(is_admin, opt_in, expected_missing)`; the expected `missing_checks` are drawn from `{admin_role, profile_opt_in}` only.
+
+`tests/mcp/lifecycle/test_systems_tools.py` — **delete `test_reprovision_without_scope_denied` (lines 1447-1463).** It seeds `_granted_allocation(pool)` (no scope), an opt-in profile (`_active_allocation_profile`), and `Role.OPERATOR`, then asserts `missing_checks == ["capability_scope"]`. After this task operator + opt-in **succeed** (reprovision is queued), so the test's premise is gone — remove it (`test_reprovision_without_profile_opt_in_denied` and the reprovision success tests still cover the live axes). The `_scoped_active_allocation` helper (raw-SQL `capability_scope` seeding, ~line 1199) still compiles here because the column survives until Task C; leave it for Task C.
 
 `tests/integration/test_walking_skeleton.py:120-175` — the parametrized gate test has a `(scope_ok, role_ok, opt_in_ok, expected_missing)` row including `(False, True, True, "capability_scope")` (line 127) and seeds `seed_granted_allocation(capability_scope=scope)` (line 141, 172). Rewrite to a two-axis `(role_ok, opt_in_ok, expected_missing)` table; delete the `capability_scope` row; the all-pass row now needs only role + profile opt-in. Drop the `capability_scope=` seeding argument (the `seed_granted_allocation` param is removed in Task C — for this task you may leave the call passing `capability_scope={}` if needed to compile, but prefer removing the arg now and removing the param in Task C; simplest is to stop passing it here and defer the param removal to Task C).
 
@@ -385,7 +388,7 @@ just lint && just type && just test
 git add src/kdive/security/authz/gate.py src/kdive/mcp/tools/_common.py \
         tests/security/authz/test_gate.py tests/mcp/test_common.py \
         tests/mcp/core/test_denial_audit_middleware.py tests/mcp/lifecycle/test_control_tools.py \
-        tests/integration/test_walking_skeleton.py
+        tests/mcp/lifecycle/test_systems_tools.py tests/integration/test_walking_skeleton.py
 git commit -m "feat(security): drop dead capability_scope check; two-check gate (#465)" \
   -m "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -398,8 +401,9 @@ git commit -m "feat(security): drop dead capability_scope check; two-check gate 
 - Modify: `src/kdive/domain/models.py:260` (remove field)
 - Modify: `src/kdive/db/repositories.py:261` (drop from `json_columns`)
 - Modify: `src/kdive/services/allocation/admission/core.py:461,606` (remove `capability_scope={}`)
+- Modify: `src/kdive/mcp/tools/lifecycle/systems/admin.py:~218` (reword the teardown docstring that names `capability_scope`)
 - Create: `src/kdive/db/schema/0036_drop_allocation_capability_scope.sql`
-- Test (update): `tests/db/test_migrate.py` (append `"0036"`), `tests/domain/test_models.py:91`, `tests/db/test_repositories.py:191`, `tests/mcp/ops/test_ops_tuning.py:113`, `tests/mcp/catalog/test_shapes_tools.py:147`, `tests/integration/_seed.py:161-187`, `tests/integration/test_m1_allocation_accounting.py:942,991,1081`, `tests/integration/live_stack/spine.py:170-180`, plus the local `_granted_allocation` in `tests/mcp/lifecycle/test_control_tools.py:107-134`.
+- Test (update): `tests/db/test_migrate.py` (append `"0036"`), `tests/domain/test_models.py:91`, `tests/db/test_repositories.py:191`, `tests/mcp/ops/test_ops_tuning.py:113`, `tests/mcp/catalog/test_shapes_tools.py:147`, `tests/integration/_seed.py:161-187`, `tests/integration/test_m1_allocation_accounting.py:942,991,1081`, `tests/integration/live_stack/spine.py:170-180`, the local `_granted_allocation` in `tests/mcp/lifecycle/test_control_tools.py:107-134`, and `_scoped_active_allocation` in `tests/mcp/lifecycle/test_systems_tools.py:1199-1207`.
 
 - [ ] **Step 1: Write the migration (the schema "test" is `test_migrate.py`)**
 
@@ -445,9 +449,22 @@ to:
 
 `src/kdive/services/allocation/admission/core.py` — delete the `capability_scope={},` line in **both** `Allocation(...)` constructors (lines 461 and 606).
 
+- [ ] **Step 5b: Reword the teardown docstring that names `capability_scope`**
+
+`src/kdive/mcp/tools/lifecycle/systems/admin.py:~218` — the `teardown_system` docstring (ADR-0129) says teardown "no longer runs the three-check destructive gate — the un-grantable `capability_scope` layer and the no-op-for-teardown profile opt-in add no safety here." After this task `capability_scope` no longer exists, so reword to drop the reference (Step 7's zero-match `rg` gate also requires it):
+
+```python
+    Requires ``admin`` on the owning project (ADR-0129). Teardown is the normal lifecycle
+    terminus of a granted System, so it does not run the destructive-op gate — the gate's
+    role and profile-opt-in factors add no safety for destroying your own System.
+```
+
+Keep the rest of the docstring (the `RoleDenied`-caught-locally and authz-before-`torn_down` sentences) unchanged.
+
 - [ ] **Step 6: Strip `capability_scope`/`scope` from the remaining test constructors and seeders**
 
-- `tests/mcp/lifecycle/test_control_tools.py:107-134` — remove the `scope` parameter from the local `_granted_allocation` and the `capability_scope=scope or {}` line; update its call sites to drop `scope=...`.
+- `tests/mcp/lifecycle/test_control_tools.py:107-134` — remove the `scope` parameter from the local `_granted_allocation` and the `capability_scope=scope or {}` line; update its call sites to drop `scope=...` (after Task B's parametrized-test rewrite the remaining call sites already pass no `scope`, so confirm none remain).
+- `tests/mcp/lifecycle/test_systems_tools.py:1199-1207` — in `_scoped_active_allocation`, drop the `capability_scope = '...'` clause from the raw-SQL `UPDATE allocations SET ...`, leaving only `SET state = 'active'` (the column is dropped this task, so the clause would raise). The helper then just activates the allocation; reprovision success now rests on the opt-in profile + operator role. Rename optional; leaving the name is acceptable.
 - `tests/domain/test_models.py:91` — remove the `capability_scope={"transports": ["gdbstub"]}` kwarg from the Allocation construction (and any assertion on it).
 - `tests/db/test_repositories.py:191` — drop `capability_scope={"cpus": 4}` from the `_allocation(...)` call and the `_allocation` helper's param if it has one; remove any round-trip assertion on the field.
 - `tests/mcp/ops/test_ops_tuning.py:113` and `tests/mcp/catalog/test_shapes_tools.py:147` — remove the `capability_scope={},` kwarg.
@@ -457,8 +474,8 @@ to:
 
 - [ ] **Step 7: Verify nothing references `capability_scope` anymore**
 
-Run: `rg -n 'capability_scope' src/ tests/`
-Expected: no matches (every reference removed).
+Run: `rg -n 'capability_scope' src/ tests/ -g '!src/kdive/db/schema/*.sql'`
+Expected: no matches. The schema directory is excluded on purpose — migrations are immutable and append-only: `0001_init.sql` legitimately keeps the original `CREATE` and `0036_drop_allocation_capability_scope.sql` names the column in its `DROP`. Both are correct and must not be edited; everything *outside* `schema/` must be clean.
 
 - [ ] **Step 8: Run the full suite + migration test**
 
@@ -471,10 +488,12 @@ Expected: PASS, including `tests/db/test_migrate.py` (0036 applies and re-run is
 just lint && just type && just test
 git add src/kdive/domain/models.py src/kdive/db/repositories.py \
         src/kdive/services/allocation/admission/core.py \
+        src/kdive/mcp/tools/lifecycle/systems/admin.py \
         src/kdive/db/schema/0036_drop_allocation_capability_scope.sql \
         tests/db/test_migrate.py tests/domain/test_models.py tests/db/test_repositories.py \
         tests/mcp/ops/test_ops_tuning.py tests/mcp/catalog/test_shapes_tools.py \
-        tests/mcp/lifecycle/test_control_tools.py tests/integration/_seed.py \
+        tests/mcp/lifecycle/test_control_tools.py tests/mcp/lifecycle/test_systems_tools.py \
+        tests/integration/_seed.py \
         tests/integration/test_m1_allocation_accounting.py tests/integration/live_stack/spine.py
 git commit -m "refactor(db): drop dead allocations.capability_scope column (#465)" \
   -m "Migration 0036 drops the column the two-check gate no longer reads (ADR-0130)." \
