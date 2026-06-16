@@ -370,13 +370,29 @@ In `test_power_destructive_action_denied_without_scope` (`test_control_tools.py:
         assert resp.data["missing_checks"] == ["capability_scope"]
 ```
 
-In `test_force_crash_denied_returns_authorization_denied` (`test_control_tools.py:451`), bind the expected-missing list the parametrization already uses (the same list passed to `args_digest({"system_id": sys_id, "missing": <expected>})`) and assert the envelope carries it:
+In `test_force_crash_denied_returns_authorization_denied` (`test_control_tools.py:451`), this test is parametrized over `(scope_ok, is_admin, opt_in)` and currently asserts only `error_category`, the audit-row count, and the job count — it computes **no** expected-missing list. Each row flips exactly one factor false, so add a fourth parametrize column carrying that row's single expected token and assert it. Change the decorator and signature:
 
 ```python
-        assert resp.data["missing_checks"] == expected_missing
+@pytest.mark.parametrize(
+    ("scope_ok", "is_admin", "opt_in", "expected_missing"),
+    [
+        (False, True, True, "capability_scope"),
+        (True, False, True, "admin_role"),
+        (True, True, False, "profile_opt_in"),
+    ],
+)
+def test_force_crash_denied_returns_authorization_denied(
+    migrated_url: str, scope_ok: bool, is_admin: bool, opt_in: bool, expected_missing: str
+) -> None:
 ```
 
-(Name `expected_missing` to match whatever the test already computes for its audit-args assertion; do not hardcode `["capability_scope"]` here — the test is parametrized.)
+and, after the existing `error_category` assertion (`test_control_tools.py:462`), add:
+
+```python
+            assert resp.data["missing_checks"] == [expected_missing]
+```
+
+(The gate appends missing checks in fixed order — `capability_scope`, `<role>_role`, `profile_opt_in` — and each row leaves exactly one missing, so the expected list is always single-element.)
 
 In `test_reprovision_without_scope_denied` (`test_systems_tools.py:1482`), after the `error_category` assertion add:
 
