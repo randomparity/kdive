@@ -1,0 +1,260 @@
+# Declarative `[[build_config]]` home in `systems.toml` (#443)
+
+- **Issue:** [#443](https://github.com/randomparity/kdive/issues/443)
+- **ADR:** [ADR-0122](../adr/0122-declarative-build-config-systems-toml.md)
+- **Status:** Draft
+- **Date:** 2026-06-15
+
+## Problem
+
+[#438](https://github.com/randomparity/kdive/issues/438) (ADR-0119) gave build-config
+fragments an **imperative** operator write-path (`buildconfig.set`, `platform_admin`-gated).
+A fragment now reaches `build_config_catalog` two ways: the packaged deploy-time seed
+(`source='seed'`) and `buildconfig.set` (`source='operator'`). There is **no declarative
+`systems.toml` home**.
+
+Today `systems.toml` (v2, ADR-0112) reconciles `[[image]]`, the provider-instance blocks,
+`[[build_host]]`, and `[[cost_class]]` (ADR-0115), but the inventory reconcile engine does
+not touch `build_config_catalog`. This is an asymmetry: `[[cost_class]]` is declarative
+policy in the operator's GitOps-managed file, but kernel-config policy (the `kdump` fragment
+and friends) is not. An operator who manages their fleet through `systems.toml` + GitOps
+cannot declare a build-config fragment there.
+
+## Goals
+
+- An operator declares a build-config fragment in `systems.toml` and `reconcile-systems`
+  publishes it to `build_config_catalog` + the reserved object key.
+- The config-vs-operator precedence is explicit, documented, and tested.
+- Removing a declared fragment has a defined, non-destructive outcome.
+
+## Non-goals
+
+- A `[[build_config]]` **export** tool (the sibling of [#429](https://github.com/randomparity/kdive/issues/429); not requested here).
+- A `buildconfig.delete` / `reset-to-seed` tool (out of scope, as in ADR-0119).
+- Path-reference or pre-published S3-ref content forms (the AC requires reconcile to
+  *publish* the bytes; see Decision 3).
+
+## The five settled decisions
+
+### 1. Source precedence — `config` beats `operator`, loudly
+
+A third provenance value `config` joins `seed`/`operator`. A fragment **name declared in
+the file** is file-owned: reconcile re-asserts the file bytes on every pass and writes the
+row with `source='config'`. A name **not** in the file is never touched by reconcile —
+`seed`/`operator` keep today's #438 behavior exactly.
+
+This is the cost_class §2 model (ADR-0115) applied verbatim: a class named in the file is
+file-owned and a runtime override on it is transient; a class not in the file is
+`ops`-owned and untouched. For build-config, a `buildconfig.set` on a **declared** name
+still writes `source='operator'`, but the next reconcile re-asserts the file value and
+flips it back to `source='config'`. That clobber is **loud**: a `ReconcileDiff.warned`
+entry, the drift log line, and (on the on-demand path) the existing `platform_audit_log`
+row `ops.reconcile_systems` writes.
+
+The #438 **seed-vs-operator** protection is untouched. The seed's `WHERE source='seed'`
+conflict guard already refuses to overwrite any non-`seed` row, so it refuses both
+`operator` and `config` rows. Seed-vs-operator (the packaged default must not win) and
+config-vs-operator (a deliberately-declared file value wins) are different questions with
+different answers, and this design preserves both.
+
+**Why not "operator wins" or "reject-and-warn":** either would make build-config the one
+`systems.toml` pass where the file is **not** authoritative, diverging from `[[image]]`,
+`[[cost_class]]`, `[[build_host]]`, and resources. "Reject-and-warn" additionally leaves
+the file declaring something that silently does not apply. The GitOps contract is that the
+version-controlled file is the source of truth; a declared value taking effect (and saying
+so when it overrode a live override) is the least-surprising behavior.
+
+### 2. Prune semantics — upsert-only, never prune
+
+Removing a `[[build_config]]` block from the file is a **no-op**: the catalog row persists
+at its last-asserted bytes, `source` stays `config`, and the object stays at the reserved
+key. No prune, no cordon.
+
+This is the cost_class §3 model (ADR-0115), chosen over the prune-if-idle/cordon-if-live
+contract the image/resource/build_host passes use. A build-config fragment is consumed
+**transiently** at build time (a build job fetches it by name); there is no persistent
+"live reference" row a reconcile could safely check the way an allocation references a
+resource. A reconcile-driven delete could strand an in-flight build's fetch. Upsert-only is
+the safest non-destructive default. Reverting a fragment to the packaged default or
+deleting it is an explicit operator act (`buildconfig.set` the packaged bytes), not a
+silent consequence of a file edit. A `buildconfig.delete` is a possible follow-up.
+
+### 3. Content representation — inline `content` string
+
+```toml
+[[build_config]]
+name = "kdump"
+description = "kdump/debuginfo kernel-config fragment"
+content = """
+CONFIG_KEXEC=y
+CONFIG_CRASH_DUMP=y
+CONFIG_DEBUG_INFO=y
+"""
+```
+
+The reconcile pass reads `content`, computes its sha256, and PUTs the bytes to the **same
+reserved object key the seed and `buildconfig.set` use** (`tenant=system`,
+`owner_kind=build-configs`, `owner_id=<name>`, `name=<name>.config`,
+`Sensitivity.REDACTED`, `retention_class=build-config`). The key is deterministic in
+`name`, so a re-asserted fragment overwrites in place — no orphaned object.
+
+Inline is chosen over a path reference (relative to the file) and over a pre-published S3
+ref:
+
+- **AC#1 requires reconcile to *publish* the bytes** to the reserved key, which rules out a
+  pre-uploaded `kind:s3` ref (where the operator uploads separately and reconcile only
+  HEADs).
+- **Inline keeps one version-controlled file** — GitOps-native, the same content model
+  `buildconfig.set` uses, and a single k8s ConfigMap. Fragments are a few KiB (cap
+  `KDIVE_MAX_BUILD_CONFIG_BYTES`, default 256 KiB), so ConfigMap bloat is negligible.
+- **A path reference** would keep the file lean but require the referenced fragment files to
+  ship alongside `systems.toml` (a second mount/ConfigMap in k8s; the file and its fragments
+  must travel together) — more moving parts for a marginal size saving on KiB content.
+
+### 4. Reconcile pass ordering and lock
+
+A new pass `inventory/reconcile_build_configs.py` is appended **last** in `reconcile_all`:
+`images → coefficients → resources → build_hosts → build_configs`. The build-config pass
+has no cross-entity dependency (reconcile does not validate the fragment↔System linkage),
+so its position is free; last keeps the merged diff stable.
+
+Each fragment is published under `advisory_xact_lock(LockScope.BUILD_CONFIG, name)` — the
+**same** per-name lock the seed and `buildconfig.set` take. This is mandatory by the
+ADR-0119 row-vs-object argument: the object PUT and the row upsert are separate writes, so
+reconcile, seed, and `set` must serialize per name or one can commit a row sha256 that
+describes another writer's bytes (which then trips `verify_bytes` on every read until a
+re-write). `BUILD_CONFIG` is always held alone (outside the cross-scope co-hold total
+order), so adding a third taker does not affect lock ordering.
+
+### 5. Interaction with the `migrate()` seed — layer, no seed-logic change
+
+Seed and config **layer**. The seed publishes the packaged default for any name **not**
+declared in config. For a **declared** name, the config reconcile flips the row to
+`source='config'`, and the seed's existing `WHERE source='seed'` guard then refuses to
+touch it on a later `migrate`. The only seed change is the skip condition in `seed.py`
+(skip when the stored `source` is `operator` **or** `config`, was `operator` only) and the
+migration's CHECK constraint gaining `'config'`. The seed's source-guarded upsert SQL is
+unchanged.
+
+## Architecture
+
+### Data model
+
+Migration `0035` widens the provenance CHECK:
+
+```sql
+ALTER TABLE build_config_catalog DROP CONSTRAINT build_config_catalog_source_check;
+ALTER TABLE build_config_catalog
+    ADD CONSTRAINT build_config_catalog_source_check
+        CHECK (source IN ('seed', 'operator', 'config'));
+```
+
+No new column. The migration is provider-agnostic core (`db/schema/`), so it is added to
+the M2 portability-gate `ALLOWED_FILES` (`scripts/m2_portability_gate.py`) and its meta-test
+frozenset (`tests/scripts/test_m2_portability_gate.py`), the same as migration `0034`
+(ADR-0119).
+
+### Shared validation rule
+
+`buildconfig.set` validates `name` (`^[a-z0-9][a-z0-9_-]{0,63}$`) and `content` (non-empty
+UTF-8 ≤ `KDIVE_MAX_BUILD_CONFIG_BYTES`) at its write boundary. These rules are extracted
+into a neutral `build_configs/rules.py` — mirroring `domain/cost_class_rules.py` — so the
+inventory model and the tool validate identically and cannot diverge. The helper raises a
+bare `ValueError`; each caller maps it (`InventoryError` at file load, `CONFIGURATION_ERROR`
+for the tool). The cap is read from config at the call site (the helper takes it as an
+argument; `rules.py` imports no config singleton).
+
+`inventory/` must not import `mcp/` (a core→tool layering inversion); `build_configs/` is
+neutral and importable by both, like `domain/cost_class_rules.py`.
+
+### Inventory model
+
+`InventoryDoc` gains `build_config: list[BuildConfigDecl]` (`name: str`,
+`content: str`, `description: str = ""`). Field validators delegate to `build_configs/rules.py`;
+a semantic check enforces name-uniqueness across the list (mirroring
+`_check_cost_class_uniqueness`). A malformed block raises `InventoryError` at parse, failing
+the whole reconcile pass for that iteration (the all-or-nothing file contract).
+
+### Catalog repository
+
+`build_configs/catalog.py` gains:
+
+- `upsert_config_build_config(conn, name, object_key, sha256, description)` — writes
+  `source='config'` unconditionally (the file is authoritative; it clobbers an `operator`
+  or `seed` row). Empty description preserves the prior one (the `COALESCE(NULLIF(...))`
+  pattern from `upsert_operator_build_config`).
+- a `(sha256, source)` reader the pass uses for change-detection and drift attribution
+  (the seed's `_stored_row` reads exactly this; it is promoted to the repository or
+  reused).
+
+### Reconcile pass
+
+`inventory/reconcile_build_configs.py::reconcile_build_configs(conn, doc, store)`:
+
+- Consumes the **same `store` object** the reconcile already threads. Publishing needs
+  `put_artifact`, which `ImageHeadStore`/`ImageSweepStore` does not declare but the concrete
+  `ObjectStore` the reconciler loop and the on-demand path (with S3 configured) pass does
+  have. The pass narrows the store via a `runtime_checkable` publish-capable protocol
+  (`head_present` + `put_artifact`): if the store can publish it does; if it cannot (the
+  on-demand `_AbsentImageStore` when no S3 is configured) the pass appends a `warned` record
+  and leaves every declared row untouched — the same store-down degrade the image pass uses.
+  This keeps `reconcile_all`'s call signature unchanged, so **the only M2-gated file the
+  change touches is the new migration** (the two `reconcile_all` callers,
+  `reconciler/inventory.py` and `mcp/tools/ops/reconcile_systems.py`, are not edited).
+- Per declared fragment, under `advisory_xact_lock(BUILD_CONFIG, name)` in its own
+  transaction: read `(sha256, source)` `FOR UPDATE`; if the row already has this sha256 and
+  `source='config'`, no-op (change-detecting — steady state writes nothing, no phantom
+  drift); otherwise PUT the bytes, upsert `source='config'`, append `created`/`updated`, and
+  append `warned` + log the drift line **only** when the prior row existed with a different
+  source or sha256 (the clobber-is-loud rule, mirroring `reconcile_coefficients`).
+- Pruning: none (Decision 2). The pass never deletes a row.
+
+`reconcile_pipeline.reconcile_all` appends `reconcile_build_configs(conn, doc, store)` after
+`reconcile_build_hosts` and folds its diff. The `store` parameter's type annotation in
+`reconcile_pipeline.py` (an `inventory/` file, not M2-gated) widens to the publish-capable
+union; the callers pass the objects they already pass.
+
+## Error handling
+
+| Condition | Outcome |
+|-----------|---------|
+| Malformed `[[build_config]]` (bad name / empty / over-cap) | `InventoryError` at parse → whole pass fails this iteration (loud, retried) |
+| Store cannot publish (no S3 / `_AbsentImageStore`) | `warned` record, rows untouched, pass still succeeds |
+| Store reachable but PUT raises | the per-fragment transaction rolls back; pass surfaces it like other reconcile failures (logged, retried next pass) |
+| PUT succeeds then process/DB crashes before row commit | object holds new bytes, row holds old sha256; `verify_bytes` on `buildconfig.get` / the build fetch raises `INFRASTRUCTURE_FAILURE`; a re-reconcile converges (the #438 fail-closed self-heal) |
+| `buildconfig.set` on a declared name | accepted (writes `operator`), then re-asserted to the file value + `warned` on the next reconcile (transient, by design) |
+
+## Testing
+
+Behavior-first, TDD. Tests mirror the package tree.
+
+- **Model** (`tests/inventory/test_model.py`): valid `[[build_config]]`; duplicate name →
+  `InventoryError`; bad name, empty content, over-cap → `InventoryError`; absent block →
+  empty list.
+- **Shared rule** (`tests/build_configs/test_rules.py`): the validator accepts/rejects the
+  same inputs as the `buildconfig.set` boundary; the tool is refactored to call it and its
+  existing tests stay green.
+- **Reconcile pass** (`tests/inventory/test_reconcile_build_configs.py`): create a new
+  config fragment (publishes + row `source='config'`); change-detecting no-op on a
+  re-assert; re-assert over an `operator` row emits `warned` + flips to `config`; re-assert
+  over a `seed` row flips to `config`; store-cannot-publish degrades to `warned` with rows
+  untouched; removal-from-file leaves the row (no prune).
+- **Adversarial** (`tests/adversarial/`): concurrent `buildconfig.set` and a reconcile pass
+  on the same name serialize on `BUILD_CONFIG` and never commit a row sha256 that mismatches
+  the object bytes (the row-vs-object invariant).
+- **Seed** (`tests/build_configs/test_seed.py`): a `config`-owned row is skipped by the seed
+  (the widened skip condition).
+- **Integration** (`tests/integration/`): a full `reconcile_all` over a doc with a
+  `[[build_config]]` publishes the fragment and `buildconfig.get` serves the config bytes
+  with `source='config'`.
+- **M2 gate** (`tests/scripts/test_m2_portability_gate.py`): the meta-test frozenset gains
+  `0035`.
+
+## Documentation
+
+- `systems.toml.example`: a commented `[[build_config]]` section explaining inline content,
+  the config-authoritative precedence (a declared fragment overrides a live `buildconfig.set`,
+  re-asserted on every reconcile), and the no-prune-on-removal contract.
+- The generated tool/config reference is regenerated if the change touches advertised
+  surfaces (it does not add an MCP tool, but `docs-check`/`config-docs-check` run in CI and
+  must stay green).
