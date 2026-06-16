@@ -43,15 +43,35 @@ class _FakeContext:
         self.message = _FakeMessage(tool, arguments)
 
 
-class _StubModel(BaseModel):
+class _CallModel(BaseModel):
+    """Mirrors the binding model FastMCP builds: a ``profile`` field of the real type."""
+
     model_config = ConfigDict(extra="forbid")
-    x: int
+    profile: ProvisioningProfile
 
 
 def _profile_validation_error() -> ValidationError:
-    """A raw pydantic ``ValidationError``, standing in for what FastMCP raises at binding."""
+    """A raw pydantic ``ValidationError`` whose locations are under ``profile``.
+
+    This is exactly the shape FastMCP raises at argument binding for a malformed typed profile —
+    every error ``loc`` starts with ``"profile"``.
+    """
     try:
-        _StubModel.model_validate({"bogus": 1})
+        _CallModel.model_validate({"profile": {"schema_version": 1}})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+def _non_profile_validation_error() -> ValidationError:
+    """A ValidationError whose locations are NOT under ``profile`` (must propagate unchanged)."""
+
+    class _Other(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        x: int
+
+    try:
+        _Other.model_validate({"bogus": 1})
     except ValidationError as exc:
         return exc
     raise AssertionError("expected a ValidationError")
@@ -114,6 +134,13 @@ def test_non_validation_error_is_reraised() -> None:
     boom = RuntimeError("boom")
     with pytest.raises(RuntimeError):
         _drive("systems.define", {"allocation_id": "a1"}, boom)
+
+
+def test_non_profile_validation_error_on_typed_tool_is_reraised() -> None:
+    # A ValidationError whose locations are not under `profile` is not a binding failure (the tool
+    # bodies never let a raw ValidationError escape) — it must propagate, not be mislabeled.
+    with pytest.raises(ValidationError):
+        _drive("systems.define", {"allocation_id": "a1"}, _non_profile_validation_error())
 
 
 def test_valid_call_passes_through_unchanged() -> None:

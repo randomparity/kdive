@@ -84,6 +84,12 @@ The `errors()` are extracted with `include_url=False, include_input=False, inclu
 (mirroring `provisioning.py:281`), so no submitted value echoes; `safe_error_details` bounds the
 list to 20 entries and strips to `{loc, msg, type}`.
 
+The catch is **narrowed to genuine profile-binding errors**: it re-envelopes only when every error
+`loc` starts with `"profile"` (the shape FastMCP raises at argument binding). A `ValidationError`
+with any other location propagates unchanged — the tool bodies convert their own `parse()` failures
+to `CategorizedError` (never a raw `ValidationError`), so this guards against a future body-raised
+`ValidationError` being mislabeled as an invalid profile.
+
 ### 3. Add `systems.profile_examples` (read-only, auth-only, no gate, no audit)
 
 Modeled on `projects.list` (ADR-0117): a plain authenticated read — `current_context()` enforces a

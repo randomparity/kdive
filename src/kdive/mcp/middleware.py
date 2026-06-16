@@ -187,6 +187,20 @@ _PROFILE_TOOL_ID_ARG: dict[str, str] = {
 }
 
 
+def _is_profile_binding_error(exc: ValidationError) -> bool:
+    """Whether every error location is under the ``profile`` param (a binding failure).
+
+    FastMCP raises a binding ``ValidationError`` whose ``loc`` always starts with ``"profile"`` for
+    a malformed typed profile. Requiring *all* entries to start there distinguishes a profile-bind
+    failure from an unrelated ``ValidationError`` that might surface from the tool body, so only the
+    former is re-enveloped as ``invalid provisioning profile``.
+    """
+    errors = exc.errors()
+    return bool(errors) and all(
+        bool(err.get("loc")) and err["loc"][0] == "profile" for err in errors
+    )
+
+
 class ProfileBindingMiddleware(Middleware):
     """Convert a binding-time profile ``ValidationError`` into the project envelope (ADR-0124).
 
@@ -216,6 +230,12 @@ class ProfileBindingMiddleware(Middleware):
         try:
             return await call_next(context)
         except ValidationError as exc:
+            if not _is_profile_binding_error(exc):
+                # A ValidationError whose locations are not all under the ``profile`` param is not a
+                # profile-binding failure (the tool bodies convert their own parse() errors to
+                # CategorizedError, never a raw ValidationError) — let it propagate unchanged rather
+                # than mislabel it as an invalid profile.
+                raise
             envelope = self._envelope(tool, id_arg, context, exc)
             # The middleware short-circuits the tool body, so it must return the same ``ToolResult``
             # FastMCP builds from a tool's ``ToolResponse`` return — a bare ``ToolResponse`` has no
