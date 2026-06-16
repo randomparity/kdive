@@ -29,6 +29,7 @@
 | [`build_hosts.register_ssh`](build_hosts.md#build_hostsregister_ssh) | `implemented` |
 | [`build_hosts.remove`](build_hosts.md#build_hostsremove) | `implemented` |
 | [`buildconfig.get`](buildconfig.md#buildconfigget) | `implemented` |
+| [`buildconfig.set`](buildconfig.md#buildconfigset) | `implemented` |
 | [`control.force_crash`](control.md#controlforce_crash) | `partial` |
 | [`control.power`](control.md#controlpower) | `partial` |
 | [`debug.clear_breakpoint`](debug.md#debugclear_breakpoint) | `partial` |

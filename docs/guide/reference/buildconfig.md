@@ -11,3 +11,15 @@ Fetch a seeded kernel-config fragment inline with sha256 and merge recipe. Auth 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | `string` | yes | The build-config fragment name to retrieve (e.g. kdump). |
+
+## `buildconfig.set`
+
+`implemented`
+
+Publish/replace a build-config fragment. Requires platform_admin; audited.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `content` | `string` | yes | The full kernel-config fragment text (UTF-8). |
+| `description` | `string` | no | Optional human label; empty keeps the prior description. |
+| `name` | `string` | yes | Fragment name (lowercase a-z0-9_-, e.g. kdump). |
