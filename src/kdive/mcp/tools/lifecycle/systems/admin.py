@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.domain.models import DestructiveJobKind, Job, JobKind, System
 from kdive.domain.state import IllegalTransition, RunState, SystemState
 from kdive.jobs import queue
@@ -22,18 +22,18 @@ from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import authorizing as job_authorizing
+from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._common import stale_handle as _stale_handle
 from kdive.profiles.provider_policy import reject_rootfs_upload_without_window
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
-from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
-from kdive.security.authz.rbac import Role
+from kdive.security.authz.rbac import Role, RoleDenied, require_role
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -109,7 +109,7 @@ async def _reprovision_locked(
             assert_destructive_allowed(ctx, allocation, op, required_role=Role.OPERATOR)
         except DestructiveOpDenied as denied:
             await _audit_destructive_denied(conn, ctx, system, _REPROVISION, denied.missing)
-            return ToolResponse.failure(str(system_id), ErrorCategory.AUTHORIZATION_DENIED)
+            return _authz_denied(str(system_id), denied.missing)
         digest = profile_digest(profile)
         dedup_key = f"{system_id}:reprovision:{digest}"
         if system.state is SystemState.REPROVISIONING:
@@ -131,10 +131,6 @@ async def _reprovision_locked(
 def _reprovision_opt_in(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> bool:
     """Resolve the gate's profile opt-in factor from the target profile."""
     return profile_policy.destructive_opt_in(profile, _REPROVISION)
-
-
-def _teardown_opt_in(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> bool:
-    return profile_policy.destructive_opt_in(profile, _TEARDOWN)
 
 
 async def _audit_destructive_denied(
@@ -214,10 +210,17 @@ async def teardown_system(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     system_id: str,
-    *,
-    resolver: ProviderResolver,
 ) -> ToolResponse:
-    """Enqueue an idempotent teardown for a System the caller's project owns."""
+    """Enqueue an idempotent teardown for a System the caller's project administers.
+
+    Requires ``admin`` on the owning project (ADR-0129). Teardown is the normal lifecycle
+    terminus of a granted System, so it no longer runs the three-check destructive gate — the
+    un-grantable ``capability_scope`` layer and the no-op-for-teardown profile opt-in add no
+    safety here. ``RoleDenied`` is caught locally (not propagated to ``DenialAuditMiddleware``),
+    so the denial is audited once, keyed on ``system_id``, with ``data["missing_checks"]``. The
+    admin check runs before the idempotent ``torn_down`` short-circuit, so a non-admin never
+    learns a System's terminal state.
+    """
     uid = _as_uuid(system_id)
     if uid is None:
         return _config_error(system_id)
@@ -234,19 +237,10 @@ async def teardown_system(
             if allocation is None or allocation.project not in ctx.projects:
                 return _config_error(system_id)
             try:
-                profile = ProvisioningProfile.parse(system.provisioning_profile)
-            except CategorizedError as exc:
-                return ToolResponse.failure_from_error(system_id, exc)
-            runtime = await resolver.runtime_for_system(conn, uid)
-            op = DestructiveOp(
-                kind=_TEARDOWN,
-                profile_opt_in=_teardown_opt_in(runtime.profile_policy, profile),
-            )
-            try:
-                assert_destructive_allowed(ctx, allocation, op, required_role=Role.ADMIN)
-            except DestructiveOpDenied as denied:
-                await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, denied.missing)
-                return ToolResponse.failure(system_id, ErrorCategory.AUTHORIZATION_DENIED)
+                require_role(ctx, allocation.project, Role.ADMIN)
+            except RoleDenied:
+                await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
+                return _authz_denied(system_id, ["admin_role"])
             if system.state is SystemState.TORN_DOWN:
                 return ToolResponse.success(
                     system_id,

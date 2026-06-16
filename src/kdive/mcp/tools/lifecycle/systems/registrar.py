@@ -50,7 +50,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_get(app, pool)
     _register_systems_list(app, pool)
     _register_systems_profile_examples(app)
-    _register_systems_teardown(app, pool, resolver)
+    _register_systems_teardown(app, pool)
     _register_systems_reprovision(app, pool, resolver)
 
 
@@ -238,9 +238,7 @@ def _register_systems_profile_examples(app: FastMCP) -> None:
         return _build_profile_examples(_load_inventory_for_examples())
 
 
-def _register_systems_teardown(
-    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
-) -> None:
+def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="systems.teardown",
         annotations=_docmeta.destructive(),
@@ -249,8 +247,8 @@ def _register_systems_teardown(
     async def systems_teardown(
         system_id: Annotated[str, Field(description="The System to tear down.")],
     ) -> ToolResponse:
-        """Enqueue teardown for a System. Requires admin and destructive-op opt-in."""
-        return await _teardown_system(pool, current_context(), system_id, resolver=resolver)
+        """Enqueue teardown for a System. Requires admin on the System's project."""
+        return await _teardown_system(pool, current_context(), system_id)
 
 
 def _register_systems_reprovision(
