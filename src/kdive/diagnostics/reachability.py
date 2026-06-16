@@ -30,6 +30,8 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
+import libvirt
+
 from kdive.diagnostics.checks import ReachabilityOutcome, ReachabilityProbe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
@@ -100,6 +102,14 @@ def _probe_sync(
             conn.getInfo()
     except CategorizedError as exc:
         return _outcome_for(exc, stage="connect")
+    except libvirt.libvirtError:
+        # remote_connection wraps a failed *open* into TRANSPORT_FAILURE, but a libvirtError from
+        # getInfo() after a successful open escapes raw — a host that accepted the TLS connection
+        # but then declined the RPC is still a transport-level fault, so report it as unreachable
+        # (and keep the transport_failure category) rather than letting it fall through to the
+        # generic backstop as an uncategorized error.
+        _log.warning("remote-libvirt reachability getInfo() failed after open", exc_info=True)
+        return ReachabilityOutcome.UNREACHABLE
     return ReachabilityOutcome.REACHABLE
 
 

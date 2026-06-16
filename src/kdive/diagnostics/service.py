@@ -274,6 +274,10 @@ def default_service_factory(
     checks: list[Check] = [_secret_ref_check()]
     if is_remote_libvirt_configured():
         checks.extend(_remote_libvirt_checks())
+    # worker_available=False is load-bearing: _remote_libvirt_checks builds the worker-vantage
+    # TLS/ACL checks with empty fields + never-called probes on the contract that they are
+    # substituted (never run) here. A future flip to True must replace those placeholder
+    # constructions with real probes (see ADR-0125's worker-job follow-up) — do not flip it alone.
     return DiagnosticsService(
         checks=checks,
         per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,

@@ -188,3 +188,41 @@ def test_adapter_misconfigured_when_secret_resolution_fails(tmp_path) -> None:
         pki_base_dir=tmp_path,
     )
     assert _run_probe(probe) is ReachabilityOutcome.MISCONFIGURED
+
+
+def test_adapter_unreachable_when_getinfo_fails_after_open(tmp_path) -> None:
+    class _DecliningConn(_FakeConn):
+        def getInfo(self) -> list[int]:  # noqa: N802 - libvirt binding name
+            raise libvirt.libvirtError("RPC declined after open")
+
+    # remote_connection wraps a failed *open* into TRANSPORT_FAILURE, but a libvirtError from
+    # getInfo() after a successful open escapes raw — the adapter maps it to UNREACHABLE rather
+    # than letting it fall through to the generic backstop as an uncategorized error.
+    probe = remote_libvirt_reachability_probe(
+        config_factory=_config,
+        open_connection=lambda uri: _DecliningConn(),
+        secret_backend_factory=_FakeBackend,
+        pki_base_dir=tmp_path,
+    )
+    assert _run_probe(probe) is ReachabilityOutcome.UNREACHABLE
+
+
+def test_adapter_uses_default_env_secret_backend(tmp_path, monkeypatch) -> None:
+    # Exercise the PRODUCTION default secret_backend_factory (fresh registry +
+    # KDIVE_SECRETS_ROOT-rooted file backend), faking only the libvirt opener so the
+    # secret-resolution -> materialized_pkipath -> connect seam runs end-to-end.
+    import kdive.config as config
+
+    secrets_root = tmp_path / "secrets"
+    (secrets_root / "remote").mkdir(parents=True)
+    for name in ("clientcert.pem", "clientkey.pem", "cacert.pem"):
+        (secrets_root / "remote" / name).write_text(f"-----material for {name}-----")
+    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(secrets_root))
+    config.load()
+
+    probe = remote_libvirt_reachability_probe(
+        config_factory=_config,
+        open_connection=lambda uri: _FakeConn(info=[0, 1, 2]),
+        pki_base_dir=tmp_path,
+    )
+    assert _run_probe(probe) is ReachabilityOutcome.REACHABLE
