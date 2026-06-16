@@ -40,10 +40,21 @@ construction.
 Ids only (light refs), not full `Run` objects: the caller follows up with `runs.get` for
 detail. This keeps the envelope small and avoids an N-object embed that would re-fail the
 "references, never log dumps" rule. `_envelope_for_investigation` becomes `async` because it
-now issues a query; every caller already runs inside an `async with pool.connection()` block,
-so each passes its open connection through.
+now issues a query, and each caller passes its open connection through. `get` and `list`
+items already render inside an open `async with pool.connection()`; the mutators render from
+inside their `_*_locked` helper, which still holds the caller's open connection (the inner
+transaction has committed but the connection has not been returned to the pool). The one
+exception is `open`, whose envelope call currently sits *after* its connection block closes —
+that call moves inside the block (still after the insert + audit) so it runs on a live
+connection.
 
-No schema change, no migration: the FK and index already exist. The advertised tool input
+No schema change, no migration: the FK already exists. There is no index on
+`runs.investigation_id` (Postgres does not auto-index FK columns), so the query is a
+sequential scan over `runs` filtered to one Investigation — the same read shape
+`runs.create` already issues (`SELECT count(*) FROM runs WHERE system_id = %s`, also
+unindexed). `runs` is small relative to a single Investigation's working set and these are
+cold read paths, so an index is not added here; if `runs` growth ever makes it matter, the
+index is a one-line additive migration in a later change. The advertised tool input
 schema is unchanged (the flat `{"type":"object"}` of ADR-0113); only the response `data`
 shape grows, which is additive and backward compatible for any existing reader.
 
@@ -52,8 +63,9 @@ shape grows, which is additive and backward compatible for any existing reader.
 - A reader of any Investigation envelope (`get`, `open`, `close`, `link`, `unlink`, `set`,
   and each `list` item) now sees `runs`/`systems`. `list` therefore issues one runs query per
   Investigation (N+1 over the page). Investigation pages are small and `list` is a cold
-  reporting path, so this is acceptable; if it ever matters, the per-item enumeration can move
-  behind a `get`-only flag in a later ADR.
+  reporting path, so this is acceptable; each query is itself an unindexed scan over `runs`
+  (see Decision), compounding the N+1, but the same cold-path reasoning applies and a
+  `get`-only fallback removes the N in a later ADR if it ever matters.
 - An Investigation with no runs yet returns `runs: []` / `systems: []` (the common
   freshly-`open`ed case), which is the honest empty answer, not an error.
 - The two lists are a point-in-time snapshot read under the same connection as the
