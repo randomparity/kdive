@@ -67,11 +67,17 @@ column, model field, admission writes, and gate helper.**
    is multi-step, role-conditional, and sometimes needs a different principal, it is documented in
    prose, not advertised as a single-tool affordance.
 
-5. Because `profile_opt_in` is now the load-bearing grant, profile parsing **validates each
-   `destructive_ops` token against the closed `DestructiveJobKind` value set** and rejects an
-   unknown token with `configuration_error` at `systems.provision`/`reprovision`. Previously the
-   dead `capability_scope` check masked a typo; now a typo would be a silent permanent denial
-   indistinguishable (via `missing_checks=["profile_opt_in"]`) from an intentional empty list.
+5. Because `profile_opt_in` is now the load-bearing grant, a submitted profile's
+   `destructive_ops` tokens are **validated against the closed `DestructiveJobKind` value set at
+   the write boundary** (`validate_profile_for_provider`, which `systems.provision`/`reprovision`
+   already wrap in a `CategorizedError`→envelope guard); an unknown token is rejected with
+   `configuration_error`. The check is deliberately **not** in `ProvisioningProfile.parse`, which
+   stays structural and is re-invoked unguarded on the `control.power`/`force_crash` read path
+   (`_op_opt_in`); validating there would make a stored bad token an unhandled exception. Previously
+   the dead `capability_scope` check masked a typo; now a typo would be a silent permanent denial
+   indistinguishable (via `missing_checks=["profile_opt_in"]`) from an intentional empty list, so
+   the write-boundary check catches it on submission while a pre-existing stored typo stays a
+   silent deny (no regression) until its System is re-provisioned.
 
 The role factors are unchanged: `admin` for `power`/`force_crash`, `operator` for `reprovision`
 (ADR-0037/0038). `systems.teardown` (ADR-0129), `control.power on`, and every non-destructive

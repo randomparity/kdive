@@ -73,10 +73,22 @@ typo (`force-crash` for `force_crash`) silently never matches. While `capability
 dead first check this was masked; once `profile_opt_in` is the load-bearing grant a typo becomes
 a **silent permanent denial** that returns the same `missing_checks=["profile_opt_in"]` as a
 deliberately-empty list — the operator cannot tell a misconfiguration from an intentional
-deny-by-default. So profile parsing validates each `destructive_ops` token against the closed
-`DestructiveJobKind` value set (`reprovision`/`force_crash`/`power`/`teardown`) and rejects an
-unknown token with `configuration_error` at `systems.provision`/`reprovision` time, before any
-op depends on it.
+deny-by-default. So a submitted profile's `destructive_ops` tokens are validated against the
+closed `DestructiveJobKind` value set (`reprovision`/`force_crash`/`power`/`teardown`) and an
+unknown token is rejected with `configuration_error`.
+
+**Validation point: the write boundary only.** The check is added to the provision/reprovision
+profile-validation seam (`validate_profile_for_provider`), which both `systems.provision` and
+`systems.reprovision` already invoke under a `try/except CategorizedError` that converts the
+failure to a clean envelope (`systems/admin.py:68-73`). It is **not** added to
+`ProvisioningProfile.parse`, which stays purely structural. This matters because `parse` is also
+re-invoked on the **read** path — `control.power`/`control.force_crash` resolve the opt-in by
+parsing the *stored* profile in `_op_opt_in` (`control.py:158`), and that call is **not** guarded
+against `CategorizedError` (`_authorize_destructive` catches only `DestructiveOpDenied`). Putting
+the new validation in `parse` would turn a stored bad token into an unhandled exception on a hot
+authz path. With write-boundary-only validation, every newly submitted profile is clean, and a
+pre-existing stored profile with a bad token stays a silent deny exactly as today (no regression,
+no crash) — and a re-`provision`/`reprovision` of it surfaces the typo at that point.
 
 ## Migration and deploy ordering
 
@@ -142,9 +154,12 @@ denials (consistent with ADR-0129):
    `Allocation(...)`/`model_validate(..., capability_scope=...)` (which would raise under
    `extra="forbid"` once the field is gone). The gate unit suite (`tests/security/authz/test_gate.py`)
    is rewritten from a three-check to a two-check model.
-8. A provisioning profile whose `destructive_ops` contains a token outside the
-   `DestructiveJobKind` value set is rejected with `configuration_error` at
-   `systems.provision`/`reprovision`, with a test for an unknown token (e.g. `force-crash`).
+8. A profile submitted to `systems.provision`/`systems.reprovision` whose `destructive_ops`
+   contains a token outside the `DestructiveJobKind` value set is rejected with
+   `configuration_error` at the `validate_profile_for_provider` write seam (a test for an unknown
+   token, e.g. `force-crash`). `ProvisioningProfile.parse` is unchanged, so the
+   `control.power`/`control.force_crash` read path that re-parses a stored profile
+   (`_op_opt_in`) cannot newly raise on a legacy bad token.
 9. `teardown`, `power on`, and every non-destructive path are behaviorally unchanged.
 
 ## Out of scope
