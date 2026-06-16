@@ -76,12 +76,45 @@ class ExternalRefKey(TypedDict, total=False):
     id: str
 
 
-def _envelope_for_investigation(inv: Investigation) -> ToolResponse:
-    """Render an Investigation; every state is a non-failure status (ADR-0026 §6)."""
+async def _attached_runs_and_systems(
+    conn: AsyncConnection, investigation_id: UUID
+) -> tuple[list[JsonValue], list[JsonValue]]:
+    """Return ``(run_ids, distinct_system_ids)`` for an Investigation's attached Runs (ADR-0143).
+
+    Runs are ordered ``created_at, id`` (oldest first, stable); systems are deduplicated in
+    first-seen order over that run set. No project predicate: a Run's project equals its
+    Investigation's (enforced at ``runs.create``) and the Investigation row was already resolved
+    under the caller's ``viewer`` scope, so its runs are in-scope by construction. Both lists are
+    typed ``JsonValue`` so they drop straight into the response ``data`` map (ADR-0143).
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, system_id FROM runs WHERE investigation_id = %s ORDER BY created_at, id",
+            (investigation_id,),
+        )
+        rows = await cur.fetchall()
+    run_ids: list[JsonValue] = [str(run_id) for run_id, _ in rows]
+    seen: set[str] = set()
+    system_ids: list[JsonValue] = []
+    for _, system_id in rows:
+        sid = str(system_id)
+        if sid not in seen:
+            seen.add(sid)
+            system_ids.append(sid)
+    return run_ids, system_ids
+
+
+async def _envelope_for_investigation(conn: AsyncConnection, inv: Investigation) -> ToolResponse:
+    """Render an Investigation; every state is a non-failure status (ADR-0026 §6).
+
+    Enumerates the Investigation's attached Runs and the distinct Systems they touched
+    (ADR-0143) on ``conn``, which the caller must keep open across this call.
+    """
     if inv.state in _TERMINAL_INVESTIGATION:
         actions = ["investigations.get"]
     else:
         actions = ["investigations.get", "investigations.close", "runs.create"]
+    run_ids, system_ids = await _attached_runs_and_systems(conn, inv.id)
     data: dict[str, JsonValue] = {
         "project": inv.project,
         "title": inv.title,
@@ -89,6 +122,8 @@ def _envelope_for_investigation(inv: Investigation) -> ToolResponse:
         "external_refs": [r.model_dump() for r in inv.external_refs],
         "state": inv.state.value,
         "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,
+        "runs": run_ids,
+        "systems": system_ids,
     }
     return ToolResponse.success(
         str(inv.id), inv.state.value, suggested_next_actions=actions, data=data
@@ -159,7 +194,7 @@ async def open_investigation(
                     project=project,
                 ),
             )
-        return _envelope_for_investigation(inv)
+            return await _envelope_for_investigation(conn, inv)
 
 
 async def get_investigation(
@@ -172,10 +207,10 @@ async def get_investigation(
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await INVESTIGATIONS.get(conn, uid)
-        if inv is None or inv.project not in ctx.projects:
-            return _not_found(investigation_id)
-        require_role(ctx, inv.project, Role.VIEWER)
-        return _envelope_for_investigation(inv)
+            if inv is None or inv.project not in ctx.projects:
+                return _not_found(investigation_id)
+            require_role(ctx, inv.project, Role.VIEWER)
+            return await _envelope_for_investigation(conn, inv)
 
 
 async def _resolve_operator_investigation(
@@ -197,7 +232,7 @@ async def _close_locked(
         if current is None:
             return _not_found(str(uid))
         if current.state is InvestigationState.CLOSED:
-            return _envelope_for_investigation(current)  # idempotent: already closed
+            return await _envelope_for_investigation(conn, current)  # idempotent: already closed
         if current.state is InvestigationState.ABANDONED:
             return _config_error(str(uid), data={"current_status": "abandoned"})
         old = current.state
@@ -214,7 +249,7 @@ async def _close_locked(
                 project=project,
             ),
         )
-    return _envelope_for_investigation(updated)
+    return await _envelope_for_investigation(conn, updated)
 
 
 async def close_investigation(
@@ -304,7 +339,7 @@ async def _link_locked(
             ),
         )
         updated = current.model_copy(update={"external_refs": kept})
-    return _envelope_for_investigation(updated)
+    return await _envelope_for_investigation(conn, updated)
 
 
 async def _unlink_locked(
@@ -338,7 +373,7 @@ async def _unlink_locked(
                 ),
             )
         updated = current.model_copy(update={"external_refs": kept})
-    return _envelope_for_investigation(updated)
+    return await _envelope_for_investigation(conn, updated)
 
 
 async def link_external_ref(
@@ -421,7 +456,7 @@ async def _set_locked(
             ),
         )
         updated = current.model_copy(update={"title": new_title, "description": new_description})
-    return _envelope_for_investigation(updated)
+    return await _envelope_for_investigation(conn, updated)
 
 
 async def set_investigation(
@@ -493,17 +528,19 @@ async def list_investigations(
             viewer_projects = tuple(p for p in viewer_projects if p == project)
         async with pool.connection() as conn:
             rows = await _fetch_investigation_rows(conn, viewer_projects, resolved_state)
-        items: list[ToolResponse] = []
-        for row in rows:
-            try:
-                items.append(_envelope_for_investigation(Investigation.model_validate(row)))
-            except ValueError:
-                _log.warning(
-                    "investigation %s violates the response invariant; degraded",
-                    row.get("id", "<missing>"),
-                    exc_info=True,
-                )
-                items.append(_investigation_row_error(row))
+            items: list[ToolResponse] = []
+            for row in rows:
+                try:
+                    inv = Investigation.model_validate(row)
+                except ValueError:
+                    _log.warning(
+                        "investigation %s violates the response invariant; degraded",
+                        row.get("id", "<missing>"),
+                        exc_info=True,
+                    )
+                    items.append(_investigation_row_error(row))
+                    continue
+                items.append(await _envelope_for_investigation(conn, inv))
         return ToolResponse.collection(
             "investigations",
             "ok",
