@@ -61,8 +61,17 @@ column, model field, admission writes, and gate helper.**
 
 4. `suggested_next_actions` stays empty for these denials (ADR-0129 precedent). A missing role is
    not caller-remediable; a missing opt-in is remediable only by re-provisioning with an updated
-   profile (multi-step, conditional), so it is documented in prose and the tool descriptions
-   rather than advertised as a single-tool affordance.
+   profile, and only when the caller can (an `operator` needs the profile to already opt
+   `reprovision` in, else an `admin` teardown is required — teardown is admin-only, ADR-0129). The
+   intended path is preventive — set `destructive_ops` at initial `systems.provision`. Because it
+   is multi-step, role-conditional, and sometimes needs a different principal, it is documented in
+   prose, not advertised as a single-tool affordance.
+
+5. Because `profile_opt_in` is now the load-bearing grant, profile parsing **validates each
+   `destructive_ops` token against the closed `DestructiveJobKind` value set** and rejects an
+   unknown token with `configuration_error` at `systems.provision`/`reprovision`. Previously the
+   dead `capability_scope` check masked a typo; now a typo would be a silent permanent denial
+   indistinguishable (via `missing_checks=["profile_opt_in"]`) from an intentional empty list.
 
 The role factors are unchanged: `admin` for `power`/`force_crash`, `operator` for `reprovision`
 (ADR-0037/0038). `systems.teardown` (ADR-0129), `control.power on`, and every non-destructive
@@ -77,9 +86,18 @@ path are untouched.
   and tests that asserted a three-check model are revised to two.
 - The denial enum loses `capability_scope`; tests asserting it appears in `missing_checks` are
   updated, and the `_common.py` docstring enum is corrected.
-- Migration `0036` drops `allocations.capability_scope` (forward-only, ADR-0015). The dropped
-  data is always `{}` in production, so no data is lost. Tests that seeded `destructive_ops` via
-  raw SQL no longer compile against the column and are rewritten to drive the live opt-in path.
+- Migration `0036` drops `allocations.capability_scope` (forward-only, ADR-0015) — the project's
+  first **contracting** migration (all prior ones are additive). The dropped data is always `{}`
+  in production, so no data is lost. It is not backward-compatible with the prior release, whose
+  admission INSERT names the column and whose `Allocation` model is `extra="forbid"`: an old
+  pod's `allocations.request` INSERT fails once the column is dropped (`SELECT` is safe — the
+  absent column falls back to the model default). The migration and the code that stops writing
+  the column ship in the same release, applied as a one-shot before the new pods serve
+  (ADR-0088/0121); the only exposure is the rolling-upgrade window where an old pod still serves
+  `allocations.request`. KDIVE does not promise zero-downtime upgrades, so that window is accepted
+  rather than split into an expand/contract pair. Tests that seeded or constructed
+  `capability_scope` (raw SQL and in-Python) no longer compile and are rewritten to drive the live
+  role + opt-in path.
 - The deferred ADR-0020 allocation-grant layer is now explicitly **not** built; the typed
   interior of `capability_scope` is removed rather than populated. A future externally-granted
   capability model, if ever needed, starts from a clean slate with a new ADR.

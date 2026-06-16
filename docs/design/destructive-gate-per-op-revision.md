@@ -66,6 +66,38 @@ at lease time" question ADR-0129 already flagged. Rejected; see ADR-0130.
 (`profile.provider.<runtime>.destructive_ops`, a list the agent supplies at `systems.provision`
 time — ADR-0028 §2). It is deny-by-default: an absent or empty list refuses the op.
 
+### Validate the opt-in tokens (no silent typo)
+
+Today `destructive_ops` is typed `list[NonEmptyStr]` with no check against the op set, so a
+typo (`force-crash` for `force_crash`) silently never matches. While `capability_scope` was the
+dead first check this was masked; once `profile_opt_in` is the load-bearing grant a typo becomes
+a **silent permanent denial** that returns the same `missing_checks=["profile_opt_in"]` as a
+deliberately-empty list — the operator cannot tell a misconfiguration from an intentional
+deny-by-default. So profile parsing validates each `destructive_ops` token against the closed
+`DestructiveJobKind` value set (`reprovision`/`force_crash`/`power`/`teardown`) and rejects an
+unknown token with `configuration_error` at `systems.provision`/`reprovision` time, before any
+op depends on it.
+
+## Migration and deploy ordering
+
+Migration `0036` `ALTER TABLE allocations DROP COLUMN capability_scope` is the project's first
+**contracting** schema change — every prior migration is additive (add column, widen a CHECK).
+The dropped data is always `{}` in production so none is lost, but the column drop is not
+backward-compatible with the prior release: that release's admission INSERT
+(`admission/core.py:461,606`) names `capability_scope`, and the `Allocation` model uses
+`ConfigDict(extra="forbid")`. A `SELECT` by old code is safe (the absent column falls back to the
+model default), but an `allocation.request` INSERT by an *old* server pod after the column is
+dropped fails.
+
+The deploy applies migrations as a discrete one-shot before the new pods serve (ADR-0088/0121),
+and the same release removes the code that writes the column, so the new code and new schema are
+consistent. The only exposure is the rolling-upgrade window where an old pod is still serving
+`allocations.request` after migrate has dropped the column. KDIVE does not promise zero-downtime
+rolling upgrades, so this brief window is accepted rather than designed around; the migration and
+the code removal ship in the same release. (An expand/contract split — stop writing the column in
+release N, drop it in N+1 — is the zero-downtime alternative, not adopted because the deploy is
+not zero-downtime and the user chose to remove the dead column now.)
+
 ## Denial envelope and remediation
 
 A denied op returns `authorization_denied` with `data["missing_checks"]` naming the failed
@@ -78,11 +110,15 @@ denials (consistent with ADR-0129):
 
 - A missing `admin_role`/`operator_role` offers no caller-actionable next step — the caller
   lacks the role and cannot grant it to itself.
-- A missing `profile_opt_in` is remediable, but only by re-provisioning the System with a
-  profile whose `destructive_ops` lists the op (via `systems.reprovision` if reprovision is
-  itself opted in, else teardown + fresh `systems.provision`). That is multi-step and
-  conditional, not a single literal next tool, so it is documented in prose and the tool
-  descriptions rather than advertised as an affordance.
+- A missing `profile_opt_in` has no single-tool fix. The intended path is **preventive**: set
+  `destructive_ops` correctly in the profile at initial `systems.provision`. Recovery after the
+  fact is conditional and not always self-service: an `operator` can `systems.reprovision` with a
+  corrected profile **only if** the current profile already opted `reprovision` in; otherwise the
+  sole path is an `admin` tearing the System down (teardown is `admin`-only, ADR-0129) and
+  re-provisioning. So an operator-tier caller whose profile opted in neither the target op nor
+  `reprovision` cannot self-remediate and needs an admin. This is why the remediation is
+  documented in prose and the tool descriptions rather than advertised as a `suggested_next_actions`
+  affordance — it is multi-step, role-conditional, and sometimes requires a different principal.
 
 ## Acceptance criteria
 
@@ -102,8 +138,14 @@ denials (consistent with ADR-0129):
    gate's `_scope_permits` helper and `_DESTRUCTIVE_OPS_KEY` are gone.
 6. The `missing_checks` closed enum documented in `mcp/tools/_common.py` no longer lists
    `capability_scope`.
-7. No test seeds `capability_scope` via raw SQL; tests drive the two live checks directly.
-8. `teardown`, `power on`, and every non-destructive path are behaviorally unchanged.
+7. No test **constructs or seeds** `capability_scope` — neither raw-SQL `UPDATE` nor in-Python
+   `Allocation(...)`/`model_validate(..., capability_scope=...)` (which would raise under
+   `extra="forbid"` once the field is gone). The gate unit suite (`tests/security/authz/test_gate.py`)
+   is rewritten from a three-check to a two-check model.
+8. A provisioning profile whose `destructive_ops` contains a token outside the
+   `DestructiveJobKind` value set is rejected with `configuration_error` at
+   `systems.provision`/`reprovision`, with a test for an unknown token (e.g. `force-crash`).
+9. `teardown`, `power on`, and every non-destructive path are behaviorally unchanged.
 
 ## Out of scope
 
