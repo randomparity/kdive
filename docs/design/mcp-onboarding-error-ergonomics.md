@@ -155,12 +155,22 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
   advertise the schema by attaching `ProvisioningProfile.model_json_schema()` to the param via
   FastMCP `json_schema_extra` — schema discoverability *without* moving validation to the
   boundary. The discovery tool below ships regardless, so finding 1 is closed either way.
-- **Discovery tool `systems.profile_examples`** (modeled on `projects.list`, ADR-0117):
-  read-only, auth-only, no project gate, no audit. Returns one item per configured provider with
-  a ready-to-edit example profile dict. Where the `systems.toml` inventory supplies a usable
-  reference, the example uses the real name (e.g. a remote-libvirt `base_image_volume`, a
-  local-libvirt `catalog` image declared in inventory); where it does not, the example carries a
-  clearly-marked placeholder reference (and a `note`) the caller must replace. **The examples are
+- **Discovery tool `systems.profile_examples`** (read-only, auth-only, no audit). Returns one item
+  per configured provider with a ready-to-edit example profile dict. Where the `systems.toml`
+  inventory supplies a usable reference, the example uses the real name (e.g. a remote-libvirt
+  `base_image_volume`, a local-libvirt `catalog` image declared in inventory); where it does not,
+  the example carries a clearly-marked placeholder reference (and a `note`) the caller must replace.
+- **Data contract (this tool is *not* `projects.list`).** `projects.list` (ADR-0117) returns the
+  caller's own token claims; this tool projects the shared inventory, which holds
+  infrastructure-sensitive fields — `[[remote_libvirt]]` `uri` (internal FQDN), `gdb_addr`
+  (internal IP), and `client_cert_ref`/`ca_cert_ref` secret-ref names (`systems.toml:38-43`).
+  The projection includes **only** non-sensitive catalog identifiers (provider name, a public
+  image/volume name) and **never** the connection URI, `gdb_addr`, or any secret-ref name.
+  Catalog images are filtered to `PUBLIC_VISIBILITY` (reusing the existing catalog filter,
+  `src/kdive/components/catalog.py:90,99`); a private, project-owned image
+  (`visibility=PRIVATE, owner=project`, `src/kdive/services/images/upload.py:271`) is surfaced only
+  to a caller in its owning project, otherwise omitted — so the tool's lack of a project gate
+  cannot leak one tenant's private image names to another. **The examples are
   schema-and-policy valid, not necessarily provisionable as-is:** a placeholder rootfs path won't
   exist on a host, `kind:"upload"` is only accepted by `systems.define` (it opens an upload
   window) and rejected by `systems.provision`, and a `catalog` ref must name a real inventory
@@ -241,6 +251,7 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
 | Remote-libvirt reachable but not provision-ready (no storage pool) | reachability reports `pass`; failure surfaces at provision with a legible `detail` |
 | `ops.diagnostics` called with no host arg, multiple instances configured | Probes the default/sole instance only; no fan-out |
 | `systems.profile_examples` with no usable inventory ref | Example carries a marked placeholder + `note`; still schema-and-policy valid, not provisionable as-is |
+| `systems.profile_examples` and a private image / sensitive inventory field | Private image shown only to its owning project (else omitted); `uri`/`gdb_addr`/secret-ref names never emitted (leak test) |
 
 ## Test plan (behavior, not implementation)
 
@@ -256,7 +267,8 @@ Two cooperating changes; the discovery tool is the guaranteed-working half.
   `systems.profile_examples` example, with its placeholders resolved to inventory references,
   passes `ProvisioningProfile.parse()` + `validate_profile_for_provider()`** (the schema+policy
   layer — not the full allocation-scoped admission path, which also enforces sizing/upload-window
-  and so cannot isolate schema validity).
+  and so cannot isolate schema validity); a leak test asserts no example contains a `uri`,
+  `gdb_addr`, or secret-ref name, and that a private image from another project is absent.
 - **D:** the default diagnostics factory now includes the TLS/ACL checks; against a single
   targeted instance, a reachable host reports `pass`, an unreachable host reports `fail` +
   `transport_failure`, a bad URI reports `error` + `configuration_error`; a no-host call with

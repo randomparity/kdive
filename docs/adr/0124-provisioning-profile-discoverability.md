@@ -27,10 +27,14 @@ handling of a `$defs`/`discriminator` *input* schema is unverified.
 We will type the `profile` parameter as `ProvisioningProfile` (advertising its JSON schema) and
 convert the `pydantic.ValidationError` it raises during input binding into the standard
 `configuration_error` envelope using ADR-0123's `detail` + `errors` surfacing, and we will add a
-read-only discovery tool `systems.profile_examples` (modeled on `projects.list`, ADR-0117:
-auth-only, no project gate, no audit) returning one ready-to-edit example profile per configured
-provider — using real inventory references where available and a marked placeholder otherwise —
-chained via `suggested_next_actions`. The typed-param half is gated on **two** spikes: (1) that a
+read-only discovery tool `systems.profile_examples` (auth-only, no audit) returning one
+ready-to-edit example profile per configured provider — using real inventory references where
+available and a marked placeholder otherwise — chained via `suggested_next_actions`. Unlike
+`projects.list` (which returns the caller's own token claims), this tool projects the shared
+inventory, so its data contract is restricted: it surfaces only non-sensitive catalog identifiers
+(provider name, a public image/volume name) and never the `[[remote_libvirt]]` `uri`, `gdb_addr`,
+or secret-ref names; catalog images are filtered to `PUBLIC_VISIBILITY` and a private,
+project-owned image is shown only to a caller in its owning project. The typed-param half is gated on **two** spikes: (1) that a
 binding-time `ValidationError` can be intercepted and re-enveloped (the candidate seam is FastMCP
 middleware/error-hook; load-bearing because `ProvisioningProfile` is `extra="forbid"`, so FastMCP
 rejects bad input *before* the tool body and before `_runtime_resolution`'s catch), and (2) that
@@ -52,8 +56,9 @@ in our `parse()`→envelope path, unchanged) with the schema advertised via
   so it is not a surprise.
 - New obligations: the two gating spikes (interception, client rendering); an example-validity
   test driving `ProvisioningProfile.parse()` + `validate_profile_for_provider()` directly (not the
-  allocation-scoped admission path) so the advertised examples cannot rot; tool-docs/reference
-  wiring for the new tool.
+  allocation-scoped admission path) so the advertised examples cannot rot; a leak test asserting
+  the tool never emits a `uri`/`gdb_addr`/secret-ref and never surfaces another tenant's private
+  image; tool-docs/reference wiring for the new tool.
 - This refines ADR-0011/0024 (the schema is now advertised, not just enforced) and depends on
   ADR-0123 landing first.
 
