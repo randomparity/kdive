@@ -31,7 +31,7 @@ from kdive.mcp.tools.lifecycle.systems.view import (
 from kdive.mcp.tools.lifecycle.systems.view import (
     list_systems as _list_systems,
 )
-from kdive.profiles.types import ProvisioningProfileInput
+from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 
@@ -78,7 +78,7 @@ def _register_systems_define(
             str, Field(description="Granted Allocation to create a DEFINED System for.")
         ],
         profile: Annotated[
-            ProvisioningProfileInput,
+            ProvisioningProfile,
             Field(
                 description="Provisioning profile for the System; an 'upload' rootfs opens a "
                 "pre-provision rootfs-upload window."
@@ -94,7 +94,7 @@ def _register_systems_define(
                 pool,
                 current_context(),
                 allocation_id=allocation_id,
-                profile=profile,
+                profile=dump_profile(profile),
             ),
         )
 
@@ -112,7 +112,7 @@ def _register_systems_provision(
             str, Field(description="Granted Allocation to provision a System for.")
         ],
         profile: Annotated[
-            ProvisioningProfileInput,
+            ProvisioningProfile,
             Field(description="Provisioning profile for the System create lane."),
         ],
     ) -> ToolResponse:
@@ -125,7 +125,7 @@ def _register_systems_provision(
                 pool,
                 current_context(),
                 allocation_id=allocation_id,
-                profile=profile,
+                profile=dump_profile(profile),
             ),
         )
 
@@ -242,7 +242,7 @@ def _register_systems_reprovision(
     async def systems_reprovision(
         system_id: Annotated[str, Field(description="The ready System to reprovision in place.")],
         profile: Annotated[
-            ProvisioningProfileInput,
+            ProvisioningProfile,
             Field(description="New provisioning profile; must opt in to reprovision."),
         ],
     ) -> ToolResponse:
@@ -255,6 +255,6 @@ def _register_systems_reprovision(
                 pool,
                 current_context(),
                 system_id=system_id,
-                profile=profile,
+                profile=dump_profile(profile),
             ),
         )

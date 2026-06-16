@@ -100,18 +100,29 @@ kind) with marked placeholders.
 
 **Reference resolution per provider:**
 
-| Provider | Example shape | Real reference used | Placeholder when absent |
+| Provider | Example shape | When a real ref exists | When it does not |
 |---|---|---|---|
-| `local-libvirt` | `boot_method: direct-kernel`; `local-libvirt` section with `rootfs` = a `catalog` ref | name of a `PUBLIC` `local-libvirt` `[[image]]` | `"REPLACE_ME-local-libvirt-image"` + `note` |
-| `remote-libvirt` | `boot_method: disk-image`; `remote-libvirt` section with `base_image_volume` | the instance's `base_image` (a declared `[[image]]` name) | `"REPLACE_ME-base-image-volume"` + `note` |
-| `fault-inject` | `boot_method: direct-kernel`; `fault-inject` section (**no rootfs**) | — (the section carries only `destructive_ops`/`capture_method`) | n/a (no reference to fill) |
+| `local-libvirt` | `boot_method: direct-kernel`; `local-libvirt` section with a `rootfs` | `catalog` ref naming a `PUBLIC` `local-libvirt` `[[image]]` | **`local` ref** with placeholder absolute path (`/REPLACE_ME/rootfs.img`) + `note` |
+| `remote-libvirt` | `boot_method: disk-image`; `remote-libvirt` section with `base_image_volume` | the instance's `base_image` (a declared `[[image]]` name) | placeholder string `"REPLACE_ME-base-image-volume"` + `note` |
+| `fault-inject` | `boot_method: direct-kernel`; `fault-inject` section (**no rootfs**) | — (section carries only `destructive_ops`/`capture_method`) | n/a (no reference to fill) |
 
 The shapes are dictated by the model: `LibvirtProfile` requires a discriminated `rootfs`;
 `FaultInjectProfile` has **no** `rootfs` field (`provisioning.py:127`), so a fault-inject example
 must omit it or it fails `extra="forbid"`; `RemoteLibvirtProfile` has no rootfs and pairs with
 `boot_method: disk-image` (the pairing validator, `provisioning.py:248`). `direct-kernel` is the
-only legal `boot_method` for the two non-remote providers (disk-image forces remote). A `catalog`
-rootfs is an accepted local-libvirt component source (`composition.py:50`).
+only legal `boot_method` for the two non-remote providers (disk-image forces remote).
+
+**Why local-libvirt falls back to a `local` rootfs, not a placeholder `catalog` name (load-bearing
+for the "policy-valid" guarantee).** `validate_profile_for_provider` → the local policy →
+`validate_rootfs_reference` rejects a `catalog` name **not declared** in `systems.toml` when an
+inventory file is present (`provisioning.py:393` / `_catalog_name_declared` returns `False` and
+raises). So a placeholder `catalog` name would *fail* provider policy in exactly the case it is used
+(a configured local-libvirt provider with no public image). A `local` rootfs ref is **not**
+inventory-checked (`validate_rootfs_reference` only validates `catalog` kinds) and `local` is an
+accepted source (`composition.py:50`); its only constraint is an absolute `path`
+(`references.py:50`), which the placeholder satisfies. So every emitted example — real-ref or
+placeholder — passes `parse()` + `validate_profile_for_provider()` unconditionally. When a `catalog`
+ref *is* used, it names a real declared image, so it passes too.
 
 **Data contract / no-leak invariant (this tool is *not* `projects.list`).** The projection reads
 **only** non-sensitive inventory identifiers: provider name, and a `PUBLIC`-visibility `[[image]]`
@@ -140,10 +151,19 @@ reviewer sees it as chosen, not missed.
 (matching the body-path `_config_error(allocation_id)` shape so the same bad call has a consistent
 `object_id` whether the profile is rejected at the boundary or in the body), else the tool name.
 
-**Validity obligation.** Every emitted example, with placeholders resolved to a real reference, must
-pass `ProvisioningProfile.parse()` + `validate_profile_for_provider()` (the schema+policy layer, not
-the allocation-scoped admission path). A test drives this directly so the advertised examples cannot
-rot. The examples carry concrete sizing (`vcpu`/`memory_mb`/`disk_gb`) so they parse standalone.
+**Validity obligation.** Every emitted example — real-ref **or** placeholder — must pass
+`ProvisioningProfile.parse()` + `validate_profile_for_provider()` (the schema+policy layer, not the
+allocation-scoped admission path), with **no further edits**. (The remote-libvirt placeholder
+`base_image_volume` is a plain non-empty string the model accepts as-is; it is not provisionable
+until the operator stages that volume, but it parses and passes policy.) The examples carry concrete
+sizing (`vcpu`/`memory_mb`/`disk_gb`) so they parse standalone.
+
+The validity test must reckon with a file-vs-doc coupling: `validate_rootfs_reference` re-loads the
+inventory from the `KDIVE_SYSTEMS_TOML` path via `config.get`, **not** from the in-memory `doc` the
+builder used. So the test writes one temp `systems.toml`, points `KDIVE_SYSTEMS_TOML` at it, and
+drives **both** the builder and the validator off that same file — otherwise a `catalog` example
+built from the file's image would be re-validated against a *different* (or absent) inventory and
+the test would not exercise the real path.
 
 ## Acceptance (each has a test)
 
