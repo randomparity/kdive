@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from fastmcp import Client, FastMCP
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.app import ENVELOPE_OUTPUT_SCHEMA, _advertise_flat_output_schema
 from kdive.mcp.responses import ToolResponse
 
@@ -72,6 +73,39 @@ def test_sweep_advertises_flat_object_schema() -> None:
 
     schemas = asyncio.run(_run())
     assert schemas == [ENVELOPE_OUTPUT_SCHEMA, ENVELOPE_OUTPUT_SCHEMA]
+
+
+def test_detail_field_is_not_an_advertised_output_property() -> None:
+    # AC#4 (#450, ADR-0123): adding the `detail` envelope field must not surface it as a distinct
+    # advertised output property; the schema stays the flat untyped object.
+    app = _probe_app()
+    _advertise_flat_output_schema(app)
+
+    async def _run() -> list[dict[str, object] | None]:
+        async with Client(app) as client:
+            return [t.outputSchema for t in await client.list_tools()]
+
+    for schema in asyncio.run(_run()):
+        assert schema is not None
+        assert "properties" not in schema
+
+
+def test_failure_detail_round_trips_through_client() -> None:
+    # AC#1 surface: the new `detail` field rides the structured-content payload unchanged.
+    app: FastMCP = FastMCP(name="detail-probe")
+
+    @app.tool(name="fail.one")
+    def fail_one() -> ToolResponse:
+        exc = CategorizedError(
+            "invalid provisioning profile", category=ErrorCategory.CONFIGURATION_ERROR
+        )
+        return ToolResponse.failure_from_error("obj-1", exc)
+
+    _advertise_flat_output_schema(app)
+    data, errors = _call_and_capture(app, "fail.one")
+    assert isinstance(data, dict)
+    assert data["detail"] == "invalid provisioning profile"
+    assert errors == []
 
 
 def test_sweep_restores_data_and_logs_no_parse_error() -> None:

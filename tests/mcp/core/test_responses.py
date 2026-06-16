@@ -188,6 +188,147 @@ def test_failure_from_error_rejects_non_finite_float_detail() -> None:
     assert resp.data == {}
 
 
+# ---------------------------------------------------------------------------
+# Task: human-readable detail + structured errors (#450, ADR-0123)
+# ---------------------------------------------------------------------------
+
+
+def test_detail_is_none_on_success() -> None:
+    resp = ToolResponse.success("id", "ok", data={"x": 1})
+    assert resp.detail is None
+
+
+def test_failure_carries_detail_kwarg() -> None:
+    resp = ToolResponse.failure(
+        "res-1", ErrorCategory.CONFIGURATION_ERROR, detail="bad field 'rootfs'"
+    )
+    assert resp.detail == "bad field 'rootfs'"
+
+
+def test_failure_from_error_populates_detail_from_message() -> None:
+    exc = CategorizedError(
+        "invalid provisioning profile", category=ErrorCategory.CONFIGURATION_ERROR
+    )
+    resp = ToolResponse.failure_from_error("profile", exc)
+    assert resp.detail == "invalid provisioning profile"
+
+
+def test_seam_suppresses_not_found_detail_and_name() -> None:
+    exc = CategorizedError(
+        "system 11111111-2222-3333-4444-555555555555 was not found",
+        category=ErrorCategory.NOT_FOUND,
+        details={"object_id": "11111111-2222-3333-4444-555555555555"},
+    )
+    resp = ToolResponse.failure_from_error("11111111-2222-3333-4444-555555555555", exc)
+    assert resp.detail == "not found"
+    # The seam must collapse the message; the embedded id must not ride in detail/data.
+    assert "was not found" not in resp.model_dump_json()
+
+
+def test_seam_suppresses_authorization_denied_detail() -> None:
+    exc = CategorizedError(
+        "project 'tenant-a' is not granted to 'p'",
+        category=ErrorCategory.AUTHORIZATION_DENIED,
+    )
+    resp = ToolResponse.failure_from_error("systems.provision", exc)
+    assert resp.detail == "access denied"
+    assert "tenant-a" not in resp.model_dump_json()
+
+
+def test_failure_kwarg_detail_ignored_for_suppressed_category() -> None:
+    resp = ToolResponse.failure("obj", ErrorCategory.NOT_FOUND, detail="leak me secret-name")
+    assert resp.detail == "not found"
+    assert "secret-name" not in resp.model_dump_json()
+
+
+def test_failure_from_error_preserves_structured_errors() -> None:
+    exc = CategorizedError(
+        "invalid provisioning profile",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "errors": [
+                {
+                    "loc": ("provider", "kind"),
+                    "msg": "field required",
+                    "type": "missing",
+                    "input": "SECRET_SUBMITTED_VALUE",
+                    "ctx": {"internal": "noise"},
+                }
+            ]
+        },
+    )
+    resp = ToolResponse.failure_from_error("profile", exc)
+    assert resp.data["errors"] == [
+        {"loc": ["provider", "kind"], "msg": "field required", "type": "missing"}
+    ]
+    assert "SECRET_SUBMITTED_VALUE" not in resp.model_dump_json()
+
+
+def test_errors_list_bounded_to_20() -> None:
+    entries = [{"loc": (f"field_{i}",), "msg": "bad", "type": "value_error"} for i in range(25)]
+    exc = CategorizedError(
+        "many errors", category=ErrorCategory.CONFIGURATION_ERROR, details={"errors": entries}
+    )
+    resp = ToolResponse.failure_from_error("profile", exc)
+    errors = resp.data["errors"]
+    assert isinstance(errors, list)
+    assert len(errors) == 20
+
+
+def test_errors_entries_keep_only_reserved_subkeys() -> None:
+    exc = CategorizedError(
+        "one error",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "errors": [
+                {
+                    "loc": ("a",),
+                    "msg": "bad",
+                    "type": "value_error",
+                    "url": "https://errors.pydantic.dev/x",
+                    "ctx": {"nested": {"deep": 1}},
+                }
+            ]
+        },
+    )
+    resp = ToolResponse.failure_from_error("profile", exc)
+    assert resp.data["errors"] == [{"loc": ["a"], "msg": "bad", "type": "value_error"}]
+
+
+def test_errors_loc_may_carry_caller_key_name() -> None:
+    # An extra-key rejection puts the caller's key name in loc; for the profile surface this is a
+    # field path, not secret material — the no-leak invariant is "no submitted value echoes".
+    exc = CategorizedError(
+        "extra key",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"errors": [{"loc": ("MY_EXTRA_KEY",), "msg": "extra", "type": "extra_forbidden"}]},
+    )
+    resp = ToolResponse.failure_from_error("profile", exc)
+    assert resp.data["errors"] == [
+        {"loc": ["MY_EXTRA_KEY"], "msg": "extra", "type": "extra_forbidden"}
+    ]
+
+
+def test_errors_loc_int_segments_preserved_as_ints() -> None:
+    exc = CategorizedError(
+        "list index error",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"errors": [{"loc": ("items", 3, "name"), "msg": "bad", "type": "missing"}]},
+    )
+    resp = ToolResponse.failure_from_error("profile", exc)
+    assert resp.data["errors"] == [{"loc": ["items", 3, "name"], "msg": "bad", "type": "missing"}]
+
+
+def test_non_errors_list_keys_still_dropped() -> None:
+    exc = CategorizedError(
+        "scalar only",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"field": "rootfs", "items": ["a", "b"], "nested": {"x": 1}},
+    )
+    resp = ToolResponse.failure_from_error("profile", exc)
+    assert resp.data == {"field": "rootfs"}
+
+
 def test_collection_factory_wraps_item_envelopes() -> None:
     first = ToolResponse.success("a", "available", refs={"object": "tenant/a"})
     second = ToolResponse.failure("b", ErrorCategory.INFRASTRUCTURE_FAILURE)
@@ -225,6 +366,13 @@ def test_common_failure_helpers_build_expected_error_envelopes() -> None:
     assert stale.status == "error"
     assert stale.error_category == "stale_handle"
     assert stale.data == {"current_status": "released"}
+
+
+def test_common_not_found_carries_generic_constant_detail() -> None:
+    # The by-id miss helper (ADR-0097) inherits the seam constant; the object id never rides detail.
+    resp = _common.not_found("11111111-2222-3333-4444-555555555555")
+    assert resp.error_category == "not_found"
+    assert resp.detail == "not found"
 
 
 def test_common_job_envelope_preserves_job_fields_and_adds_object_key() -> None:
