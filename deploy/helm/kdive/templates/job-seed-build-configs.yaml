@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kdive.fullname" . }}-seed-build-configs
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+  annotations:
+    # Re-homed out of migrate (ADR-0121): seed the packaged build-config fragments AFTER the
+    # schema migration. Its own Job name keeps a seed/object-store fault from masquerading as a
+    # "migrate" failure. Runs post-* (after the DB exists and migrate ran), weighted after migrate.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "kdive.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      {{- if .Values.bundledBackends }}
+      initContainers:
+        - name: wait-for-db
+          image: {{ include "kdive.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -c
+            - |
+              import socket, time, sys
+              host = "{{ include "kdive.fullname" . }}-postgres"
+              for _ in range(60):
+                  try:
+                      socket.create_connection((host, 5432), timeout=2).close()
+                      sys.exit(0)
+                  except OSError:
+                      time.sleep(2)
+              sys.exit("timed out waiting for %s:5432" % host)
+      {{- end }}
+      containers:
+        - name: seed-build-configs
+          image: {{ include "kdive.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["seed-build-configs"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "kdive.fullname" . }}-config

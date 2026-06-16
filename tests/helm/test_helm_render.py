@@ -92,9 +92,12 @@ def test_bundled_with_ack_uses_post_install_migrate() -> None:
 
 
 def test_external_render_omits_post_install_migrate_hook() -> None:
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    assert res.returncode == 0, res.stderr
-    assert "post-install" not in res.stdout
+    # The migrate Job must stay pre-* on the external path (the bundled path runs it post-install
+    # after the in-chart DB). The seed-build-configs hook is legitimately post-* on both paths, so
+    # assert on the migrate Job's phase, not a blanket output scan.
+    jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert "post-install" not in (jobs["migrate"]["phase"] or "")
+    assert "pre-install" in jobs["migrate"]["phase"]
 
 
 def test_bundled_path_wires_backends_into_config() -> None:
@@ -170,6 +173,15 @@ def _jobs_by_name(*set_args: str) -> dict[str, dict[str, Any]]:
     return jobs
 
 
+def test_seed_build_configs_is_post_hook_after_migrate() -> None:
+    jobs = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    s = jobs["seed-build-configs"]
+    assert "post-install" in s["phase"] and "post-upgrade" in s["phase"]
+    assert s["weight"] > jobs["migrate"]["weight"]  # runs after migrate
+    assert s["args"] == ["seed-build-configs"]
+    assert "kdive-systems" not in s["volumes"]  # seed does not read systems.toml
+
+
 def test_validate_hook_rendered_only_with_systems_configmap() -> None:
     without = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert "validate-systems" not in without
@@ -207,11 +219,13 @@ def test_external_configmap_is_a_pre_install_hook_before_migrate() -> None:
     # timeout (issue #311). The ConfigMap must therefore be a pre-install hook too,
     # weighted strictly lower than the migrate Job so Helm creates it first.
     hooks = _hooks_by_kind("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    migrate_weight = _jobs_by_name("config.KDIVE_DATABASE_URL=postgresql://x/y")["migrate"][
+        "weight"
+    ]
     assert "ConfigMap" in hooks, "external-path ConfigMap is not a hook; migrate cannot read it"
-    assert "Job" in hooks
     assert "pre-install" in hooks["ConfigMap"]["phase"]
     assert "pre-upgrade" in hooks["ConfigMap"]["phase"]
-    assert hooks["ConfigMap"]["weight"] < hooks["Job"]["weight"], (
+    assert hooks["ConfigMap"]["weight"] < migrate_weight, (
         "ConfigMap hook-weight must be strictly below the migrate Job's so it is created first"
     )
 
