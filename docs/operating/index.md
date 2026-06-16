@@ -22,6 +22,12 @@ runbooks.
 | [Local libvirt](providers/local-libvirt.md) | Single-host libvirt provider prerequisites |
 | [Remote libvirt](providers/remote-libvirt.md) | Remote libvirt host wiring and prerequisites |
 
+## Tenancy
+
+| Page | What it covers |
+|---|---|
+| [Project onboarding](project-onboarding.md) | Establishing a project's budget and quota in production via the audited admin tools |
+
 ## Runbooks
 
 Step-by-step procedures for live runs and operational tasks.
