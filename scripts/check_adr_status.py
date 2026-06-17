@@ -69,15 +69,32 @@ def _index_statuses() -> dict[str, str]:
     return out
 
 
-def _cited_in_src() -> set[str]:
+def _relative_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _format_read_error(path: Path, exc: UnicodeDecodeError | OSError) -> str:
+    return f"{_relative_path(path)}: could not read file ({type(exc).__name__}: {exc})"
+
+
+def _is_scannable_source(path: Path) -> bool:
+    return "__pycache__" not in path.parts and path.suffix != ".pyc"
+
+
+def _cited_in_src(read_errors: list[str] | None = None) -> set[str]:
     """ADR numbers cited anywhere under src/ (production code)."""
     cited: set[str] = set()
     for path in _SRC.rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or not _is_scannable_source(path):
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        except (UnicodeDecodeError, OSError) as exc:
+            if read_errors is not None:
+                read_errors.append(_format_read_error(path, exc))
             continue
         cited.update(_CITATION.findall(text))
     return cited
@@ -85,6 +102,7 @@ def _cited_in_src() -> set[str]:
 
 def main() -> int:
     errors: list[str] = []
+    read_errors: list[str] = []
 
     file_status: dict[str, str] = {}
     for path in sorted(_ADR_DIR.glob("[0-9]*.md")):
@@ -118,7 +136,7 @@ def main() -> int:
                 f"index says {index_status[num]!r}. Flip both in the same PR."
             )
 
-    cited = _cited_in_src()
+    cited = _cited_in_src(read_errors)
     for num in sorted(file_status):
         if file_status[num] == "Proposed" and num in cited:
             errors.append(
@@ -131,6 +149,11 @@ def main() -> int:
         for e in errors:
             print(f"  - {e}")
         print("\nSee docs/adr/README.md for the ratification rule.")
+    if read_errors:
+        print("ADR status guard could not read scanned files:\n", file=sys.stderr)
+        for e in read_errors:
+            print(f"  - {e}", file=sys.stderr)
+    if errors or read_errors:
         return 1
 
     print(

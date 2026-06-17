@@ -45,6 +45,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.build_hosts import BuildHostKind
+from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import BuildHostInstance, InventoryDoc
 from kdive.inventory.reconcile import (
     CONFIG_MANAGED_BY,
@@ -232,37 +233,58 @@ def _record(name: str, detail: str = "") -> ReconcileRecord:
 
 
 def _upsert_row(row: dict[str, Any]) -> _UpsertBuildHostRow:
-    row_id = row["id"]
-    kind = row["kind"]
-    base_image_volume = row["base_image_volume"]
-    workspace_root = row["workspace_root"]
-    max_concurrent = row["max_concurrent"]
-    enabled = row["enabled"]
-    managed_by = row["managed_by"]
-    assert isinstance(row_id, UUID)
-    assert isinstance(kind, str)
-    assert base_image_volume is None or isinstance(base_image_volume, str)
-    assert isinstance(workspace_root, str)
-    assert isinstance(max_concurrent, int) and not isinstance(max_concurrent, bool)
-    assert isinstance(enabled, bool)
-    assert isinstance(managed_by, str)
     return {
-        "id": row_id,
-        "kind": kind,
-        "base_image_volume": base_image_volume,
-        "workspace_root": workspace_root,
-        "max_concurrent": max_concurrent,
-        "enabled": enabled,
-        "managed_by": managed_by,
+        "id": _expect_uuid(row, "id"),
+        "kind": _expect_str(row, "kind"),
+        "base_image_volume": _expect_optional_str(row, "base_image_volume"),
+        "workspace_root": _expect_str(row, "workspace_root"),
+        "max_concurrent": _expect_int(row, "max_concurrent"),
+        "enabled": _expect_bool(row, "enabled"),
+        "managed_by": _expect_str(row, "managed_by"),
     }
 
 
 def _prune_row(row: dict[str, Any]) -> _PruneBuildHostRow:
-    row_id = row["id"]
-    name = row["name"]
-    assert isinstance(row_id, UUID)
-    assert isinstance(name, str)
-    return {"id": row_id, "name": name}
+    return {"id": _expect_uuid(row, "id"), "name": _expect_str(row, "name")}
+
+
+def _expect_uuid(row: dict[str, Any], field: str) -> UUID:
+    value = row[field]
+    if not isinstance(value, UUID):
+        raise _row_error(field, "uuid")
+    return value
+
+
+def _expect_str(row: dict[str, Any], field: str) -> str:
+    value = row[field]
+    if not isinstance(value, str):
+        raise _row_error(field, "str")
+    return value
+
+
+def _expect_optional_str(row: dict[str, Any], field: str) -> str | None:
+    value = row[field]
+    if value is not None and not isinstance(value, str):
+        raise _row_error(field, "str or null")
+    return value
+
+
+def _expect_int(row: dict[str, Any], field: str) -> int:
+    value = row[field]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise _row_error(field, "int")
+    return value
+
+
+def _expect_bool(row: dict[str, Any], field: str) -> bool:
+    value = row[field]
+    if not isinstance(value, bool):
+        raise _row_error(field, "bool")
+    return value
+
+
+def _row_error(field: str, expected: str) -> InventoryError:
+    return InventoryError("build_hosts", field, f"database row expected {expected}")
 
 
 __all__ = ["reconcile_build_hosts"]

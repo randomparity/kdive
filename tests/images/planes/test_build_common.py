@@ -169,6 +169,19 @@ def test_digest_file_returns_sha256_uri_for_file_content(tmp_path: Path) -> None
     assert digest_file(path) == f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
+def test_digest_file_maps_read_failure_to_infrastructure_failure(tmp_path: Path) -> None:
+    path = tmp_path / "missing.qcow2"
+
+    with pytest.raises(CategorizedError) as caught:
+        digest_file(path)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {
+        "path": str(path),
+        "error": "FileNotFoundError",
+    }
+
+
 def test_publish_qcow2_replaces_destination_with_scratch(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -75,7 +75,15 @@ def register(
     upload_store: UploadObjectStore | None = None,
 ) -> None:
     """Register the ``images.*`` operator/admin tools on ``app``, bound to ``pool``."""
+    _register_images_build(app, pool)
+    _register_images_publish(app, pool)
+    _register_images_upload(app, pool, upload_store)
+    _register_images_delete(app, pool)
+    _register_images_prune_expired(app, pool, image_store)
+    _register_images_extend(app, pool)
 
+
+def _register_images_build(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=BUILD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_build(
         request: Annotated[
@@ -83,8 +91,11 @@ def register(
             Field(description="Public image build request."),
         ],
     ) -> ToolResponse:
+        """Enqueue an image build job."""
         return await build(pool, current_context(), payload=request.to_payload())
 
+
+def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=PUBLISH_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_publish(
         request: Annotated[
@@ -92,8 +103,13 @@ def register(
             Field(description="Public image publish request."),
         ],
     ) -> ToolResponse:
+        """Publish a built image into the catalog."""
         return await publish(pool, current_context(), payload=request.to_payload())
 
+
+def _register_images_upload(
+    app: FastMCP, pool: AsyncConnectionPool, upload_store: UploadObjectStore | None
+) -> None:
     @app.tool(name=UPLOAD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_upload(
         request: Annotated[
@@ -101,26 +117,37 @@ def register(
             Field(description="Private image upload registration request."),
         ],
     ) -> ToolResponse:
+        """Create an image upload request."""
         return await upload(pool, current_context(), upload_store, request)
 
+
+def _register_images_delete(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name=DELETE_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"}
     )
     async def images_delete(
         image_id: Annotated[str, Field(description="The private catalog image to delete.")],
     ) -> ToolResponse:
+        """Delete an image catalog entry."""
         return await delete(pool, current_context(), image_id=image_id)
 
+
+def _register_images_prune_expired(
+    app: FastMCP, pool: AsyncConnectionPool, image_store: ImageSweepStore | None
+) -> None:
     @app.tool(name=PRUNE_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"})
     async def images_prune_expired(
         reason: Annotated[
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
+        """Prune expired image catalog entries."""
         if image_store is None:
             return _config_error(PRUNE_OBJECT_ID)
         return await prune_expired(pool, current_context(), reason=reason, image_store=image_store)
 
+
+def _register_images_extend(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name=EXTEND_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"}
     )
@@ -131,6 +158,7 @@ def register(
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
+        """Extend an image catalog entry lease."""
         return await extend(
             pool, current_context(), image_id=image_id, seconds=seconds, reason=reason
         )

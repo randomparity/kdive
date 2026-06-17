@@ -317,7 +317,7 @@ def _register_image_build_handler(
         return
     image_build.register_handlers(
         registry,
-        provider_resolver=resolver,
+        resolver=resolver,
         store=store,
     )
 
@@ -326,7 +326,9 @@ def _unconfigured_image_build_handler(
     error: CategorizedError,
 ) -> JobHandler:
     async def _handler(_conn: AsyncConnection, _job: Job) -> str | None:
-        raise CategorizedError(str(error), category=error.category, details=error.details)
+        raise CategorizedError(
+            str(error), category=error.category, details=error.details
+        ) from error
 
     return _handler
 
@@ -353,60 +355,6 @@ _HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
 # `Tool.output_schema` and because a JSON schema nests non-str values.
 ENVELOPE_OUTPUT_SCHEMA: dict[str, Any] = {"type": "object"}
 
-_TOOL_DESCRIPTION_OVERRIDES = {
-    "accounting.report_all_projects": "Return platform-wide accounting usage for all projects.",
-    "accounting.report_granted_set": "Return accounting usage for the caller's granted projects.",
-    "accounting.usage_investigation": "Return usage totals for one investigation.",
-    "accounting.usage_project": "Return usage totals for one project.",
-    "allocations.get": "Return one allocation visible to the caller.",
-    "allocations.list": "List allocations visible in a project.",
-    "allocations.release": "Release an active allocation.",
-    "allocations.renew": "Extend an allocation lease window.",
-    "allocations.request": "Request capacity and create an allocation grant.",
-    "build_hosts.disable": "Disable a registered build host.",
-    "build_hosts.list": "List registered build hosts.",
-    "build_hosts.register_ephemeral_libvirt": "Register an ephemeral-libvirt build host.",
-    "build_hosts.register_ssh": "Register an SSH build host.",
-    "build_hosts.remove": "Remove a registered build host.",
-    "images.build": "Enqueue an image build job.",
-    "images.delete": "Delete an image catalog entry.",
-    "images.extend": "Extend an image catalog entry lease.",
-    "images.list": "List published image catalog entries.",
-    "images.prune_expired": "Prune expired image catalog entries.",
-    "images.publish": "Publish a built image into the catalog.",
-    "images.upload": "Create an image upload request.",
-    "investigations.close": "Close an investigation.",
-    "investigations.get": "Return one investigation.",
-    "investigations.link": "Link a run to an investigation.",
-    "investigations.open": "Open an investigation.",
-    "investigations.unlink": "Unlink a run from an investigation.",
-    "jobs.cancel": "Cancel a queued or running job.",
-    "jobs.get": "Return one durable job.",
-    "jobs.list": "List jobs visible to the caller.",
-    "jobs.wait": "Poll one durable job until it is terminal or the timeout elapses.",
-    "ops.reconcile_now": "Run reconciler cleanup once.",
-    "postmortem.crash": "Run crash postmortem commands for a captured vmcore.",
-    "postmortem.triage": "Run the default crash triage for a captured vmcore.",
-    "resources.deregister": "Deregister a runtime resource.",
-    "resources.describe": "Return one runtime resource.",
-    "resources.list": "List runtime resources.",
-    "resources.register_fault_inject": "Register a fault-inject runtime resource.",
-    "resources.register_local_libvirt": "Register a local-libvirt runtime resource.",
-    "resources.register_remote_libvirt": "Register a remote-libvirt runtime resource.",
-    "resources.renew": "Renew a runtime resource lease.",
-    "runs.boot": "Boot an installed run.",
-    "runs.build": "Enqueue a kernel build for a run.",
-    "runs.complete_build": "Complete an externally built run.",
-    "runs.create": "Create a run under a system.",
-    "runs.get": "Return one run.",
-    "runs.install": "Install a built run onto its system.",
-    "shapes.delete": "Delete a system shape.",
-    "shapes.list": "List system shapes.",
-    "shapes.set": "Create or update a system shape.",
-    "vmcore.fetch": "Capture and persist a vmcore.",
-    "vmcore.list": "List vmcore artifacts for one system.",
-}
-
 
 def _advertise_flat_output_schema(app: FastMCP) -> int:
     """Override every registered tool's advertised `outputSchema` with the flat envelope schema.
@@ -429,22 +377,6 @@ def _advertise_flat_output_schema(app: FastMCP) -> int:
             "no tools found to advertise a flat outputSchema for; the FastMCP registry accessor "
             "(app.local_provider._components) may have changed (ADR-0113)"
         )
-    return swept
-
-
-def _fill_missing_tool_descriptions(app: FastMCP) -> int:
-    """Backfill reviewed descriptions for decorator wrappers that do not carry docstrings."""
-    swept = 0
-    for component in app.local_provider._components.values():
-        if not isinstance(component, Tool):
-            continue
-        if component.description:
-            continue
-        description = _TOOL_DESCRIPTION_OVERRIDES.get(component.name)
-        if description is None:
-            continue
-        component.description = description
-        swept += 1
     return swept
 
 
@@ -490,7 +422,6 @@ def build_app(
     )
     for register in _PLANE_REGISTRARS:
         register(app, pool, assembly)
-    _fill_missing_tool_descriptions(app)
     _advertise_flat_output_schema(app)
     return app
 

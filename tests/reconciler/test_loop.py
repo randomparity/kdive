@@ -68,6 +68,7 @@ def test_reconcile_report_holds_counts_and_failures() -> None:
     assert report.expired_allocations == 5
     assert report.orphaned_systems == 1
     assert report.idempotency_keys_gc_count == 6
+    assert report.reconciled_inventory == 0
     assert report.failures == ("abandoned_jobs",)
 
 

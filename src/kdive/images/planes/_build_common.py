@@ -90,7 +90,14 @@ def publish_qcow2(workspace: Path, *, image_name: str, scratch: Path) -> Path:
 def digest_file(path: Path) -> str:
     """Return the ``sha256:<hex>`` content digest of ``path``."""
     hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_DIGEST_CHUNK), b""):
-            hasher.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(_DIGEST_CHUNK), b""):
+                hasher.update(chunk)
+    except OSError as exc:
+        raise CategorizedError(
+            "failed to read artifact for digest",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"path": str(path), "error": type(exc).__name__},
+        ) from exc
     return f"sha256:{hasher.hexdigest()}"

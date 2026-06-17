@@ -54,7 +54,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     render_volume_xml,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import (
-    disk_pool as _disk_pool,
+    disk_pool_strict as _disk_pool_strict,
 )
 from kdive.providers.remote_libvirt.transport import (
     RemoteLibvirtConnections,
@@ -322,7 +322,9 @@ class RemoteLibvirtProvisioning:
                 return None
             raise _infra("looking up", domain=domain_name) from exc
         try:
-            recorded_pool = _disk_pool(domain.XMLDesc())
+            recorded_pool = _disk_pool_strict(
+                domain.XMLDesc(), operation="teardown", domain=domain_name
+            )
         except libvirt.libvirtError:
             recorded_pool = None
         try:

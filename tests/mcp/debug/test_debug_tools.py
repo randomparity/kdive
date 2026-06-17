@@ -410,9 +410,14 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                 await SYSTEMS.update_state(conn, system.id, SystemState.CRASHED)
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                resp = await debug_tools._insert_session_locked(
-                    conn, _ctx(), run, system, handle, conn_fake, "gdbstub", uuid4()
+                request = debug_tools._AttachRequest(
+                    run=run,
+                    system=system,
+                    session_id=uuid4(),
+                    transport="gdbstub",
+                    connector=conn_fake,
                 )
+                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "crashed"
@@ -438,9 +443,14 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
                 assert run is not None and system is not None
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                resp = await debug_tools._insert_session_locked(
-                    conn, _ctx(), run, system, handle, conn_fake, "gdbstub", uuid4()
+                request = debug_tools._AttachRequest(
+                    run=run,
+                    system=system,
+                    session_id=uuid4(),
+                    transport="gdbstub",
+                    connector=conn_fake,
                 )
+                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "transport_conflict"
         assert count == 1  # only the race winner's row
@@ -846,6 +856,44 @@ def test_start_session_ssh_resolves_connector_before_credential(migrated_url: st
         assert count == 0
         assert backend.refs == []
         assert log == []
+        assert "guest-ssh-secret" not in registry.snapshot()
+
+    asyncio.run(_run())
+
+
+def test_start_session_cleans_up_open_transport_and_secret_on_insert_failure(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_ssh_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            log: list[str] = []
+            registry = SecretRegistry()
+            connector = _OrderRecordingConnector(log)
+
+            def _backend_factory(session_id: UUID) -> _OrderRecordingBackend:
+                return _OrderRecordingBackend(
+                    log, registry=registry, scope=f"debug-session:{session_id}"
+                )
+
+            async def _raise_after_open(*_args: object, **_kwargs: object) -> None:
+                raise RuntimeError("insert failed")
+
+            monkeypatch.setattr(debug_tools, "_insert_session_locked", _raise_after_open)
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
+                provider_resolver(connector=connector, profile_policy=_PROFILE_POLICY),
+                runtime_resolver=None,
+                secret_backend_factory=_backend_factory,
+                secret_registry=registry,
+            )
+
+            with pytest.raises(RuntimeError, match="insert failed"):
+                await handlers.start_session(pool, _ctx(), run_id=run_id, transport="drgn-live")
+
+        assert log == ["resolve:ssh/guest-key", "open:drgn-live"]
+        assert connector.closed == ["drgn-live://127.0.0.1:22"]
         assert "guest-ssh-secret" not in registry.snapshot()
 
     asyncio.run(_run())

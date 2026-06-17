@@ -901,6 +901,40 @@ def test_resolve_config_bytes_rejects_local_outside_allowed_roots(tmp_path: Path
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_resolve_config_bytes_maps_local_read_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "components"
+    root.mkdir()
+    config = root / "x.config"
+    config.write_text("CONFIG_FROM_REF=y\n")
+
+    monkeypatch.setattr(
+        build_host_config,
+        "validate_local_component_path",
+        lambda *_args, **_kwargs: config,
+    )
+
+    def _read_bytes(_path: Path) -> bytes:
+        raise PermissionError("config disappeared")
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_config.resolve_config_bytes(
+            LocalComponentRef(kind="local", path=str(config)),
+            allowed_component_roots=[root],
+            catalog_fetch=lambda _name: b"unused",
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {
+        "kind": "config",
+        "path": str(config),
+        "error": "PermissionError",
+    }
+
+
 def test_resolve_config_bytes_returns_injected_catalog_bytes() -> None:
     data = build_host_config.resolve_config_bytes(
         CatalogComponentRef(kind="catalog", provider="system", name="kdump"),
@@ -987,6 +1021,25 @@ def _workspace_with_target(tmp_path: Path) -> Path:
     return workspace
 
 
+def test_merge_config_fragment_write_failure_is_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *_args: 0)
+
+    def _write_bytes(_path: Path, _data: bytes) -> int:
+        raise PermissionError("workspace is unwritable")
+
+    monkeypatch.setattr(Path, "write_bytes", _write_bytes)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.merge_config(b"CONFIG_CRASH_DUMP=y\n", workspace, _RUN)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"op": "write", "path": "kdump.config.fragment"}
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
 def test_apply_patch_applies_clean_diff(tmp_path: Path) -> None:
     workspace = _workspace_with_target(tmp_path)
@@ -1025,6 +1078,38 @@ def test_apply_patch_missing_git_is_missing_dependency(
     with pytest.raises(CategorizedError) as caught:
         build_host_workspace.apply_patch(str(patch), workspace)
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_apply_patch_read_failure_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    original_read_text = Path.read_text
+
+    def _read_text(
+        self: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        if self == patch:
+            raise PermissionError("patch disappeared")
+        return original_read_text(self, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {
+        "kind": "patch_ref",
+        "path": str(patch),
+        "error": "PermissionError",
+    }
 
 
 def test_apply_patch_timeout_is_configuration_error(

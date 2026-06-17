@@ -26,7 +26,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ManagedBy
 from kdive.domain.state import AllocationState
 from kdive.log import bind_context
@@ -81,25 +81,28 @@ async def deregister_resource(
         return config_error(resource_id, "resource_id is not a valid UUID")
 
     with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn, conn.transaction():
-            row = await _locked_runtime_row(conn, uid)
-            if row is None:
-                return await _classify_absent(conn, uid, resource_id)
-            live = await _live_count(conn, uid)
-            if live and not force:
-                return ToolResponse.failure(
-                    resource_id,
-                    ErrorCategory.CONFLICT,
-                    data={
-                        "reason": f"{live} live allocation(s); pass force=true to deregister",
-                        "live_allocations": str(live),
-                    },
-                    suggested_next_actions=["resources.drain", DEREGISTER_TOOL],
+        try:
+            async with pool.connection() as conn, conn.transaction():
+                row = await _locked_runtime_row(conn, uid)
+                if row is None:
+                    return await _classify_absent(conn, uid, resource_id)
+                live = await _live_count(conn, uid)
+                if live and not force:
+                    return ToolResponse.failure(
+                        resource_id,
+                        ErrorCategory.CONFLICT,
+                        data={
+                            "reason": f"{live} live allocation(s); pass force=true to deregister",
+                            "live_allocations": str(live),
+                        },
+                        suggested_next_actions=["resources.drain", DEREGISTER_TOOL],
+                    )
+                disposition = await _remove(conn, uid)
+                await _audit_deregister(
+                    conn, ctx, resource_id=uid, force=force, live=live, disposition=disposition
                 )
-            disposition = await _remove(conn, uid)
-            await _audit_deregister(
-                conn, ctx, resource_id=uid, force=force, live=live, disposition=disposition
-            )
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(resource_id, exc)
 
     _log.info(
         "runtime resource %s deregistered (%s) by %s (force=%s)",
@@ -158,7 +161,12 @@ async def _live_count(conn: AsyncConnection, uid: UUID) -> int:
             (uid, [s.value for s in _LIVE]),
         )
         row = await cur.fetchone()
-    assert row is not None
+    if row is None:
+        raise CategorizedError(
+            "live allocation count query returned no row",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": "deregistering runtime resource", "field": "live_count"},
+        )
     return int(row[0])
 
 

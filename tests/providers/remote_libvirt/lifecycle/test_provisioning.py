@@ -27,7 +27,11 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import (
     render_volume_xml,
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import wait_for_agent
-from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected, disk_pool
+from kdive.providers.remote_libvirt.lifecycle.xml import (
+    agent_channel_connected,
+    disk_pool,
+    recorded_gdb_port_strict,
+)
 from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
@@ -374,6 +378,14 @@ def test_used_gdb_ports_maps_malformed_domain_xml_to_infrastructure_failure() ->
         "domain": "kdive-malformed",
         "operation": "enumerating gdbstub ports",
     }
+
+
+def test_strict_domain_xml_parse_error_preserves_cause() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        recorded_gdb_port_strict("<domain", operation="testing strict parser", domain="kdive-bad")
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert isinstance(excinfo.value.__cause__, ET.ParseError)
 
 
 def test_wait_for_agent_returns_when_live_xml_reports_connected() -> None:
@@ -1021,6 +1033,28 @@ def test_teardown_reads_pool_from_domain_xml_on_config_drift(tmp_path: Path) -> 
     drifted.teardown(DOMAIN_NAME)
 
     assert overlay_volume_name(SYSTEM_ID) not in old_pool.volumes
+
+
+def test_teardown_malformed_domain_xml_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old_pool = FakePool({_BASE_VOLUME: FakeVolume(_BASE_VOLUME)})
+    fallback_pool = FakePool()
+    conn = FakeProvisionConn({"default": fallback_pool, "old-pool": old_pool})
+    provisioner, _ = _provisioner(conn, tmp_path, config=_config(storage_pool="old-pool"))
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+    monkeypatch.setattr(conn.domains[DOMAIN_NAME], "XMLDesc", lambda flags=0: "not xml at all")
+    drifted, _ = _provisioner(conn, tmp_path, config=_config(storage_pool="default"))
+
+    with pytest.raises(CategorizedError) as excinfo:
+        drifted.teardown(DOMAIN_NAME)
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details == {
+        "domain": DOMAIN_NAME,
+        "operation": "teardown",
+    }
+    assert fallback_pool.deleted == []
 
 
 def test_teardown_swallows_not_running_destroy(tmp_path: Path) -> None:

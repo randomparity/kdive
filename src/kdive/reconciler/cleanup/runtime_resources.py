@@ -31,6 +31,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.models import ManagedBy
 from kdive.inventory.reconcile import PruneOutcome
@@ -173,7 +174,12 @@ async def _log_reachability(probe: ResourceProbe, row_id: UUID, host_uri: str) -
 
 def _row_id(row: dict[str, Any]) -> UUID:
     value = row["id"]
-    assert isinstance(value, UUID)
+    if not isinstance(value, UUID):
+        raise CategorizedError(
+            "runtime resource candidate row has invalid id",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"field": "id", "expected": "uuid"},
+        )
     return value
 
 

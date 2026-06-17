@@ -31,6 +31,7 @@ live allocation is **cordoned**, not deleted (the reaper-style refuse-if-live co
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypedDict, cast
 from uuid import UUID
@@ -45,6 +46,7 @@ from kdive.domain.resource_capabilities import (
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
+from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
 from kdive.inventory.reconcile import (
     CONFIG_MANAGED_BY,
@@ -104,6 +106,15 @@ class _PruneResourceRow(TypedDict):
     name: str
 
 
+@dataclass(frozen=True)
+class _DeclaredResource:
+    kind: ResourceKind
+    name: str
+    host_uri: str
+    cost_class: str
+    caps: ResourceCaps
+
+
 async def reconcile_resources(conn: AsyncConnection, doc: InventoryDoc) -> ReconcileDiff:
     """Apply ``doc``'s provider instances onto ``resources`` and prune departed config rows.
 
@@ -145,15 +156,18 @@ async def _create_config_resources(
                 MEMORY_MB_KEY: inst.memory_mb,
                 CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
             }
+            declared = _DeclaredResource(
+                kind=ResourceKind.FAULT_INJECT,
+                name=inst.name,
+                host_uri=_FAULT_INJECT_HOST_URI,
+                cost_class=inst.cost_class,
+                caps=caps,
+            )
             async with resource_identity_lock(conn, ResourceKind.FAULT_INJECT, inst.name):
                 await _upsert_config_resource(
                     cur,
                     diff,
-                    kind=ResourceKind.FAULT_INJECT,
-                    name=inst.name,
-                    host_uri=_FAULT_INJECT_HOST_URI,
-                    cost_class=inst.cost_class,
-                    caps=caps,
+                    declared=declared,
                     adopt_by_host=False,
                 )
         for inst in doc.remote_libvirt:
@@ -162,15 +176,18 @@ async def _create_config_resources(
                 MEMORY_MB_KEY: inst.memory_mb,
                 CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
             }
+            declared = _DeclaredResource(
+                kind=ResourceKind.REMOTE_LIBVIRT,
+                name=inst.name,
+                host_uri=inst.uri,
+                cost_class=inst.cost_class,
+                caps=caps,
+            )
             async with resource_identity_lock(conn, ResourceKind.REMOTE_LIBVIRT, inst.name):
                 await _upsert_config_resource(
                     cur,
                     diff,
-                    kind=ResourceKind.REMOTE_LIBVIRT,
-                    name=inst.name,
-                    host_uri=inst.uri,
-                    cost_class=inst.cost_class,
-                    caps=caps,
+                    declared=declared,
                     adopt_by_host=True,
                     discovery_owned_keys=(VCPUS_KEY, MEMORY_MB_KEY),
                 )
@@ -180,11 +197,7 @@ async def _upsert_config_resource(
     cur: Any,
     diff: ReconcileDiff,
     *,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
-    caps: ResourceCaps,
+    declared: _DeclaredResource,
     adopt_by_host: bool,
     discovery_owned_keys: tuple[str, ...] = (),
 ) -> None:
@@ -205,21 +218,21 @@ async def _upsert_config_resource(
     discovered size.
     """
     row = await _find_existing(
-        cur, kind=kind, name=name, host_uri=host_uri, adopt_by_host=adopt_by_host
+        cur,
+        kind=declared.kind,
+        name=declared.name,
+        host_uri=declared.host_uri,
+        adopt_by_host=adopt_by_host,
     )
     if row is None:
         await _insert_config_resource(
             cur,
             diff,
-            kind=kind,
-            name=name,
-            host_uri=host_uri,
-            cost_class=cost_class,
-            caps=caps,
+            declared=declared,
         )
         return
     existing = _caps(row)
-    merged = {**existing, **caps}
+    merged = {**existing, **declared.caps}
     for key in discovery_owned_keys:
         if key in existing:
             merged[key] = existing[key]
@@ -228,10 +241,7 @@ async def _upsert_config_resource(
             cur,
             diff,
             row=row,
-            kind=kind,
-            name=name,
-            host_uri=host_uri,
-            cost_class=cost_class,
+            declared=declared,
             caps=merged,
         )
         return
@@ -239,10 +249,7 @@ async def _upsert_config_resource(
         cur,
         diff,
         row=row,
-        kind=kind,
-        name=name,
-        host_uri=host_uri,
-        cost_class=cost_class,
+        declared=declared,
         caps=merged,
     )
 
@@ -251,19 +258,22 @@ async def _insert_config_resource(
     cur: Any,
     diff: ReconcileDiff,
     *,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
-    caps: ResourceCaps,
+    declared: _DeclaredResource,
 ) -> None:
     await cur.execute(
         "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, "
         " host_uri, managed_by) "
         "VALUES (%s, %s, %s, 'default', %s, 'available', %s, %s)",
-        (kind.value, name, Jsonb(caps), cost_class, host_uri, CONFIG_MANAGED_BY),
+        (
+            declared.kind.value,
+            declared.name,
+            Jsonb(declared.caps),
+            declared.cost_class,
+            declared.host_uri,
+            CONFIG_MANAGED_BY,
+        ),
     )
-    diff.created.append(_record(kind, name))
+    diff.created.append(_record(declared.kind, declared.name))
 
 
 async def _adopt_config_resource(
@@ -271,10 +281,7 @@ async def _adopt_config_resource(
     diff: ReconcileDiff,
     *,
     row: _UpsertResourceRow,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
+    declared: _DeclaredResource,
     caps: ResourceCaps,
 ) -> None:
     """Convert a non-config or scoped resource row into the declared config identity."""
@@ -282,9 +289,16 @@ async def _adopt_config_resource(
         "UPDATE resources SET name = %s, host_uri = %s, cost_class = %s, capabilities = %s, "
         "managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
         "affinity_allowlist = '{}' WHERE id = %s",
-        (name, host_uri, cost_class, Jsonb(caps), CONFIG_MANAGED_BY, row["id"]),
+        (
+            declared.name,
+            declared.host_uri,
+            declared.cost_class,
+            Jsonb(caps),
+            CONFIG_MANAGED_BY,
+            row["id"],
+        ),
     )
-    diff.updated.append(_record(kind, name))
+    diff.updated.append(_record(declared.kind, declared.name))
 
 
 async def _update_config_resource(
@@ -292,20 +306,21 @@ async def _update_config_resource(
     diff: ReconcileDiff,
     *,
     row: _UpsertResourceRow,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
+    declared: _DeclaredResource,
     caps: ResourceCaps,
 ) -> None:
     """Apply ordinary config field changes to an already config-managed row."""
-    if row["host_uri"] == host_uri and row["cost_class"] == cost_class and _caps(row) == caps:
+    if (
+        row["host_uri"] == declared.host_uri
+        and row["cost_class"] == declared.cost_class
+        and _caps(row) == caps
+    ):
         return
     await cur.execute(
         "UPDATE resources SET host_uri = %s, cost_class = %s, capabilities = %s WHERE id = %s",
-        (host_uri, cost_class, Jsonb(caps), row["id"]),
+        (declared.host_uri, declared.cost_class, Jsonb(caps), row["id"]),
     )
-    diff.updated.append(_record(kind, name))
+    diff.updated.append(_record(declared.kind, declared.name))
 
 
 def _needs_config_adoption(row: _UpsertResourceRow) -> bool:
@@ -450,49 +465,87 @@ def _caps(row: _CapsRow) -> ResourceCaps:
 
 
 def _resource_caps(value: object) -> ResourceCaps:
-    assert isinstance(value, dict)
+    if not isinstance(value, dict):
+        raise InventoryError("resources", "capabilities", "database row is not a JSON object")
     return cast("ResourceCaps", value)
 
 
 def _upsert_row(row: dict[str, Any]) -> _UpsertResourceRow:
-    assert isinstance(row["id"], UUID)
-    assert row["name"] is None or isinstance(row["name"], str)
-    assert isinstance(row["host_uri"], str)
-    assert isinstance(row["cost_class"], str)
-    assert isinstance(row["managed_by"], str)
-    assert row["lease_expires_at"] is None or isinstance(row["lease_expires_at"], datetime)
-    assert row["owner_project"] is None or isinstance(row["owner_project"], str)
-    assert isinstance(row["affinity_allowlist"], list)
+    row_id = _expect_uuid(row, "id")
+    name = _expect_optional_str(row, "name")
+    host_uri = _expect_str(row, "host_uri")
+    cost_class = _expect_str(row, "cost_class")
+    managed_by = _expect_str(row, "managed_by")
+    lease_expires_at = _expect_optional_datetime(row, "lease_expires_at")
+    owner_project = _expect_optional_str(row, "owner_project")
+    affinity_allowlist = _expect_str_list(row, "affinity_allowlist")
     return {
-        "id": row["id"],
-        "name": row["name"],
-        "host_uri": row["host_uri"],
-        "cost_class": row["cost_class"],
-        "managed_by": row["managed_by"],
-        "lease_expires_at": row["lease_expires_at"],
-        "owner_project": row["owner_project"],
-        "affinity_allowlist": cast("list[str]", row["affinity_allowlist"]),
+        "id": row_id,
+        "name": name,
+        "host_uri": host_uri,
+        "cost_class": cost_class,
+        "managed_by": managed_by,
+        "lease_expires_at": lease_expires_at,
+        "owner_project": owner_project,
+        "affinity_allowlist": affinity_allowlist,
         "capabilities": _resource_caps(row["capabilities"]),
     }
 
 
 def _local_row(row: dict[str, Any]) -> _LocalResourceRow:
-    assert isinstance(row["id"], UUID)
-    assert row["name"] is None or isinstance(row["name"], str)
-    assert isinstance(row["cost_class"], str)
     return {
-        "id": row["id"],
-        "name": row["name"],
-        "cost_class": row["cost_class"],
+        "id": _expect_uuid(row, "id"),
+        "name": _expect_optional_str(row, "name"),
+        "cost_class": _expect_str(row, "cost_class"),
         "capabilities": _resource_caps(row["capabilities"]),
     }
 
 
 def _prune_row(row: dict[str, Any]) -> _PruneResourceRow:
-    assert isinstance(row["id"], UUID)
-    assert isinstance(row["kind"], str)
-    assert isinstance(row["name"], str)
-    return {"id": row["id"], "kind": row["kind"], "name": row["name"]}
+    return {
+        "id": _expect_uuid(row, "id"),
+        "kind": _expect_str(row, "kind"),
+        "name": _expect_str(row, "name"),
+    }
+
+
+def _expect_uuid(row: dict[str, Any], field: str) -> UUID:
+    value = row[field]
+    if not isinstance(value, UUID):
+        raise _row_error(field, "uuid")
+    return value
+
+
+def _expect_str(row: dict[str, Any], field: str) -> str:
+    value = row[field]
+    if not isinstance(value, str):
+        raise _row_error(field, "str")
+    return value
+
+
+def _expect_optional_str(row: dict[str, Any], field: str) -> str | None:
+    value = row[field]
+    if value is not None and not isinstance(value, str):
+        raise _row_error(field, "str or null")
+    return value
+
+
+def _expect_optional_datetime(row: dict[str, Any], field: str) -> datetime | None:
+    value = row[field]
+    if value is not None and not isinstance(value, datetime):
+        raise _row_error(field, "datetime or null")
+    return value
+
+
+def _expect_str_list(row: dict[str, Any], field: str) -> list[str]:
+    value = row[field]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise _row_error(field, "list[str]")
+    return value
+
+
+def _row_error(field: str, expected: str) -> InventoryError:
+    return InventoryError("resources", field, f"database row expected {expected}")
 
 
 def _record(kind: ResourceKind, name: str, detail: str = "") -> ReconcileRecord:

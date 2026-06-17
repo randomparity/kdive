@@ -23,9 +23,9 @@ that nesting — and knowing that a lower layer outlives its dependents — is t
 foundation for driving the tools correctly. See [concepts](concepts.md).
 
 Destructive operations are protected at two tiers: `control.force_crash`,
-`control.power` off/cycle/reset, and `systems.reprovision` pass a three-factor
-gate (capability scope + RBAC role + provisioning-profile opt-in), while
-`systems.teardown` requires the `admin` role directly. See
+`control.power` off/cycle/reset, and `systems.reprovision` pass a two-check
+gate (RBAC role + provisioning-profile opt-in), while `systems.teardown`
+requires the `admin` role directly. See
 [safety and RBAC](safety-and-rbac.md).
 
 When a tool reports a failure, the `error_category` field carries a stable string

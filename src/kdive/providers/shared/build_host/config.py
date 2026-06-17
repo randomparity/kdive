@@ -89,7 +89,14 @@ def resolve_config_bytes(
         path = validate_local_component_path(
             ref.path, allowed_roots=allowed_component_roots, sha256=ref.sha256
         )
-        return path.read_bytes()
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise CategorizedError(
+                "config component ref could not be read",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"kind": "config", "path": str(path), "error": type(exc).__name__},
+            ) from exc
     if isinstance(ref, CatalogComponentRef):
         return catalog_fetch(ref.name)
     raise ref_error("config", "config component ref must be local or catalog for builds")

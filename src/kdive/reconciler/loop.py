@@ -166,6 +166,7 @@ class ReconcileReport:
     idempotency_keys_gc_count: int
     failures: tuple[str, ...]
     abandoned_uploads: int = 0
+    reconciled_inventory: int = 0
     reaped_active_allocations: int = 0
     promoted_allocations: int = 0
     queue_timeouts: int = 0
@@ -342,6 +343,7 @@ async def reconcile_once(
         idempotency_keys_gc_count=counts["idempotency_keys_gc_count"],
         failures=tuple(failures),
         abandoned_uploads=counts["abandoned_uploads"],
+        reconciled_inventory=counts.get("reconcile_inventory", 0),
         reaped_active_allocations=counts["reaped_active_allocations"],
         promoted_allocations=counts["promoted_allocations"],
         queue_timeouts=counts["queue_timeouts"],

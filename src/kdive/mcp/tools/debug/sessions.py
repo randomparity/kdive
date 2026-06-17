@@ -292,16 +292,17 @@ class DebugSessionHandlers:
             if isinstance(opened, ToolResponse):
                 return opened
             async with pool.connection() as conn:
-                response = await _insert_session_locked(
-                    conn,
-                    ctx,
-                    request.run,
-                    request.system,
-                    opened,
-                    request.connector,
-                    request.transport,
-                    request.session_id,
-                )
+                try:
+                    response = await _insert_session_locked(
+                        conn,
+                        ctx,
+                        request,
+                        opened,
+                    )
+                except Exception:
+                    await _close(request.connector, str(opened))
+                    self._secret_registry.release(secret_scope)
+                    raise
             _release_failed_attach_secret(self._secret_registry, secret_scope, response)
             return response
 
@@ -472,12 +473,8 @@ async def _attach_preconditions(
 async def _insert_session_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
-    run: Run,
-    system: System,
+    request: _AttachRequest,
     handle: TransportHandle,
-    connector: Connector,
-    transport: DebugTransportKind,
-    session_id: UUID,
 ) -> ToolResponse:
     """Re-check conflict + ready under the per-System lock, then insert + drive `-> live`.
 
@@ -485,28 +482,28 @@ async def _insert_session_locked(
     transport and returns the categorized error — no `live` row escapes the lock. The
     conflict re-check is scoped to ``transport`` (per-transport single-attach, ADR-0039 §4).
     """
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
-        current = await SYSTEMS.get(conn, system.id)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, request.system.id):
+        current = await SYSTEMS.get(conn, request.system.id)
         if current is None or current.state is not SystemState.READY:
-            await _close(connector, str(handle))
+            await _close(request.connector, str(handle))
             status = current.state.value if current else "torn_down"
-            return _config_error(str(run.id), data={"current_status": status})
-        if await _system_occupied(conn, system.id, transport):
-            await _close(connector, str(handle))
-            return ToolResponse.failure(str(run.id), ErrorCategory.TRANSPORT_CONFLICT)
+            return _config_error(str(request.run.id), data={"current_status": status})
+        if await _system_occupied(conn, request.system.id, request.transport):
+            await _close(request.connector, str(handle))
+            return ToolResponse.failure(str(request.run.id), ErrorCategory.TRANSPORT_CONFLICT)
         now = datetime.now(UTC)  # placeholder; the DB owns created_at/updated_at
         session = await DEBUG_SESSIONS.insert(
             conn,
             DebugSession(
-                id=session_id,
+                id=request.session_id,
                 created_at=now,
                 updated_at=now,
                 principal=ctx.principal,
                 agent_session=ctx.agent_session,
-                project=run.project,
-                run_id=run.id,
+                project=request.run.project,
+                run_id=request.run.id,
                 state=DebugSessionState.ATTACH,
-                transport=transport,
+                transport=request.transport,
                 transport_handle=str(handle),
                 worker_heartbeat_at=now,
             ),
@@ -519,8 +516,8 @@ async def _insert_session_locked(
                 object_kind="debug_sessions",
                 object_id=session.id,
                 transition="->attach",
-                args={"run_id": str(run.id)},
-                project=run.project,
+                args={"run_id": str(request.run.id)},
+                project=request.run.project,
             ),
         )
         await DEBUG_SESSIONS.update_state(conn, session.id, DebugSessionState.LIVE)
@@ -532,15 +529,15 @@ async def _insert_session_locked(
                 object_kind="debug_sessions",
                 object_id=session.id,
                 transition="attach->live",
-                args={"run_id": str(run.id)},
-                project=run.project,
+                args={"run_id": str(request.run.id)},
+                project=request.run.project,
             ),
         )
     return ToolResponse.success(
         str(session.id),
         "live",
         suggested_next_actions=["debug.end_session"],
-        data={"project": run.project},
+        data={"project": request.run.project},
     )
 
 

@@ -12,10 +12,12 @@ import base64
 import hashlib
 import os
 import stat
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
 
+import libvirt
 import pytest
 
 from kdive.artifacts.storage import (
@@ -37,10 +39,11 @@ from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     HostDumpOptions,
     _SpoolSink,
     host_dump_volume_name,
+    pool_type_and_target_strict,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.providers.remote_libvirt.conftest import RecordingBackend
+from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 
 _SID = UUID("00000000-0000-0000-0000-0000000000cc")
 _POOL = "default"
@@ -67,6 +70,18 @@ _POOL_BOMB = f"""<?xml version="1.0"?>
   <target><path>&path;</path></target>
 </pool>
 """
+
+
+def test_strict_pool_xml_parse_error_preserves_cause() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        pool_type_and_target_strict(
+            "<pool",
+            operation="checking host_dump pool",
+            storage_pool=_POOL,
+        )
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert isinstance(excinfo.value.__cause__, ET.ParseError)
 
 
 def _domain_name() -> str:
@@ -110,6 +125,13 @@ class FakeVolume:
         return 0
 
 
+class FakeInfoFailingVolume(FakeVolume):
+    """A volume whose metadata lookup fails during host_dump ceiling preflight."""
+
+    def info(self) -> list[int]:
+        raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+
 class FakeFailingVolume(FakeVolume):
     """A volume whose download raises, to exercise the cleanup finally."""
 
@@ -140,15 +162,24 @@ class FakeStream:
 
 
 class FakePool:
-    def __init__(self, *, xml: str, volume: FakeVolume | None) -> None:
+    def __init__(
+        self,
+        *,
+        xml: str,
+        volume: FakeVolume | None,
+        xml_error: libvirt.libvirtError | None = None,
+    ) -> None:
         self._xml = xml
         self._volume = volume
+        self._xml_error = xml_error
         self.refreshed = False
         self.looked_up: list[str] = []
         self.xml_desc_calls = 0
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - binding name
         self.xml_desc_calls += 1
+        if self._xml_error is not None:
+            raise self._xml_error
         return self._xml
 
     def refresh(self, flags: int = 0) -> int:
@@ -417,6 +448,47 @@ def test_host_dump_deletes_a_stale_volume_before_dumping(tmp_path: Path) -> None
     assert conn.domain.core_dumps  # the dump still ran afterward
 
 
+def test_host_dump_stale_volume_lookup_failure_is_infrastructure_failure(
+    tmp_path: Path,
+) -> None:
+    fresh = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML,
+        fresh=fresh,
+        error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR),
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "operation": "deleting stale host_dump volume",
+        "volume": host_dump_volume_name(_SID),
+        "error": "libvirtError",
+    }
+    assert not conn.domain.core_dumps
+
+
+def test_host_dump_absent_stale_volume_still_allows_capture(tmp_path: Path) -> None:
+    fresh = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML,
+        fresh=fresh,
+        error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL),
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    out = _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert out.vmcore_build_id == "deadbeef"
+    assert conn.domain.core_dumps
+    assert fresh.deleted
+
+
 class _StalePool(FakePool):
     """A pool whose first lookup yields a stale volume and whose post-refresh lookup the fresh."""
 
@@ -429,6 +501,21 @@ class _StalePool(FakePool):
         self.looked_up.append(name)
         if not self.refreshed:
             return self._stale
+        return self._fresh
+
+
+class _FailingStaleLookupPool(FakePool):
+    """A pool whose pre-dump stale-volume lookup raises a configured libvirt error."""
+
+    def __init__(self, *, xml: str, fresh: FakeVolume, error: libvirt.libvirtError) -> None:
+        super().__init__(xml=xml, volume=fresh)
+        self._fresh = fresh
+        self._error = error
+
+    def storageVolLookupByName(self, name: str) -> FakeVolume:  # noqa: N802 - binding name
+        self.looked_up.append(name)
+        if not self.refreshed:
+            raise self._error
         return self._fresh
 
 
@@ -466,6 +553,30 @@ def test_host_dump_forbidden_pool_xml_is_infrastructure_failure_before_dump(
     assert pool.xml_desc_calls == 1
 
 
+def test_host_dump_pool_xml_lookup_failure_is_infrastructure_failure_before_dump(
+    tmp_path: Path,
+) -> None:
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(
+        xml=_DIR_POOL_XML,
+        volume=vol,
+        xml_error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR),
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=None)
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "operation": "preflighting host_dump storage pool",
+        "storage_pool": _POOL,
+        "error": "libvirtError",
+    }
+    assert not conn.domain.core_dumps
+
+
 def test_host_dump_over_ceiling_volume_is_configuration_error_before_download(
     tmp_path: Path,
 ) -> None:
@@ -482,6 +593,27 @@ def test_host_dump_over_ceiling_volume_is_configuration_error_before_download(
     assert huge.delete_calls == 1  # cleanup is owned by _stream_and_store's finally block
 
 
+def test_host_dump_volume_info_failure_is_infrastructure_failure_before_download(
+    tmp_path: Path,
+) -> None:
+    vol = FakeInfoFailingVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=None)
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "system_id": str(_SID),
+        "volume": host_dump_volume_name(_SID),
+        "error": "libvirtError",
+    }
+    assert not vol.download_called
+    assert vol.deleted
+
+
 def test_host_dump_missing_vmcoreinfo_build_id_is_configuration_error(tmp_path: Path) -> None:
     vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
     pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
@@ -494,6 +626,35 @@ def test_host_dump_missing_vmcoreinfo_build_id_is_configuration_error(tmp_path: 
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert vol.deleted  # AC6 + AC7: a no-build-id core still cleans up its volume
+
+
+def test_host_dump_digest_read_failure_is_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vol = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = FakePool(xml=_DIR_POOL_XML, volume=vol)
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    def fail_digest(path: Path) -> str:
+        raise PermissionError(f"cannot read {path.name}")
+
+    monkeypatch.setattr(
+        "kdive.providers.remote_libvirt.retrieve.host_dump_capture.file_sha256_b64",
+        fail_digest,
+    )
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details["system_id"] == str(_SID)
+    path = exc.value.details["path"]
+    assert isinstance(path, str)
+    assert Path(path).name == host_dump_volume_name(_SID)
+    assert exc.value.details["error"] == "PermissionError"
+    assert not store.stream_requests
+    assert vol.deleted
 
 
 def test_host_dump_download_failure_still_cleans_up(tmp_path: Path) -> None:

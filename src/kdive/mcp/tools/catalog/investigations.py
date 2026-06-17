@@ -76,6 +76,11 @@ class ExternalRefKey(TypedDict, total=False):
     id: str
 
 
+class _InvestigationAttachments(TypedDict):
+    runs: list[JsonValue]
+    systems: list[JsonValue]
+
+
 async def _attached_runs_and_systems(
     conn: AsyncConnection, investigation_id: UUID
 ) -> tuple[list[JsonValue], list[JsonValue]]:
@@ -104,17 +109,42 @@ async def _attached_runs_and_systems(
     return run_ids, system_ids
 
 
-async def _envelope_for_investigation(conn: AsyncConnection, inv: Investigation) -> ToolResponse:
-    """Render an Investigation; every state is a non-failure status (ADR-0026 §6).
+async def _attachments_for_investigations(
+    conn: AsyncConnection, investigation_ids: list[UUID]
+) -> dict[UUID, _InvestigationAttachments]:
+    """Batch-load attached Runs and distinct Systems for Investigation envelopes."""
+    attachments: dict[UUID, _InvestigationAttachments] = {
+        uid: {"runs": [], "systems": []} for uid in investigation_ids
+    }
+    if not investigation_ids:
+        return attachments
+    seen_systems: dict[UUID, set[str]] = {uid: set() for uid in investigation_ids}
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT investigation_id, id, system_id FROM runs "
+            "WHERE investigation_id = ANY(%s) ORDER BY investigation_id, created_at, id",
+            (investigation_ids,),
+        )
+        rows = await cur.fetchall()
+    for raw_investigation_id, run_id, system_id in rows:
+        investigation_id = UUID(str(raw_investigation_id))
+        attached = attachments[investigation_id]
+        attached["runs"].append(str(run_id))
+        sid = str(system_id)
+        if sid not in seen_systems[investigation_id]:
+            seen_systems[investigation_id].add(sid)
+            attached["systems"].append(sid)
+    return attachments
 
-    Enumerates the Investigation's attached Runs and the distinct Systems they touched
-    (ADR-0143) on ``conn``, which the caller must keep open across this call.
-    """
+
+def _investigation_envelope(
+    inv: Investigation, attachments: _InvestigationAttachments
+) -> ToolResponse:
+    """Render an Investigation; every state is a non-failure status (ADR-0026 §6)."""
     if inv.state in _TERMINAL_INVESTIGATION:
         actions = ["investigations.get"]
     else:
         actions = ["investigations.get", "investigations.close", "runs.create"]
-    run_ids, system_ids = await _attached_runs_and_systems(conn, inv.id)
     data: dict[str, JsonValue] = {
         "project": inv.project,
         "title": inv.title,
@@ -122,12 +152,18 @@ async def _envelope_for_investigation(conn: AsyncConnection, inv: Investigation)
         "external_refs": [r.model_dump() for r in inv.external_refs],
         "state": inv.state.value,
         "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,
-        "runs": run_ids,
-        "systems": system_ids,
+        "runs": attachments["runs"],
+        "systems": attachments["systems"],
     }
     return ToolResponse.success(
         str(inv.id), inv.state.value, suggested_next_actions=actions, data=data
     )
+
+
+async def _envelope_for_investigation(conn: AsyncConnection, inv: Investigation) -> ToolResponse:
+    """Load attachments and render a single Investigation envelope."""
+    run_ids, system_ids = await _attached_runs_and_systems(conn, inv.id)
+    return _investigation_envelope(inv, {"runs": run_ids, "systems": system_ids})
 
 
 def _parse_external_refs(raw: list[ExternalRefInput] | None) -> list[ExternalRef]:
@@ -528,7 +564,8 @@ async def list_investigations(
             viewer_projects = tuple(p for p in viewer_projects if p == project)
         async with pool.connection() as conn:
             rows = await _fetch_investigation_rows(conn, viewer_projects, resolved_state)
-            items: list[ToolResponse] = []
+            render_queue: list[ToolResponse | Investigation] = []
+            valid_investigations: list[Investigation] = []
             for row in rows:
                 try:
                     inv = Investigation.model_validate(row)
@@ -538,9 +575,19 @@ async def list_investigations(
                         row.get("id", "<missing>"),
                         exc_info=True,
                     )
-                    items.append(_investigation_row_error(row))
+                    render_queue.append(_investigation_row_error(row))
                     continue
-                items.append(await _envelope_for_investigation(conn, inv))
+                valid_investigations.append(inv)
+                render_queue.append(inv)
+            attachments = await _attachments_for_investigations(
+                conn, [inv.id for inv in valid_investigations]
+            )
+            items = [
+                item
+                if isinstance(item, ToolResponse)
+                else _investigation_envelope(item, attachments[item.id])
+                for item in render_queue
+            ]
         return ToolResponse.collection(
             "investigations",
             "ok",
@@ -551,7 +598,16 @@ async def list_investigations(
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
+    _register_investigations_open(app, pool)
+    _register_investigations_get(app, pool)
+    _register_investigations_close(app, pool)
+    _register_investigations_link(app, pool)
+    _register_investigations_unlink(app, pool)
+    _register_investigations_set(app, pool)
+    _register_investigations_list(app, pool)
 
+
+def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.open",
         annotations=_docmeta.mutating(),
@@ -569,6 +625,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Optional external tracker refs (each with tracker, id, url)."),
         ] = None,
     ) -> ToolResponse:
+        """Open an investigation."""
         return await open_investigation(
             pool,
             current_context(),
@@ -578,6 +635,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             external_refs=external_refs,
         )
 
+
+def _register_investigations_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.get",
         annotations=_docmeta.read_only(),
@@ -586,8 +645,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def investigations_get(
         investigation_id: Annotated[str, Field(description="The Investigation to render.")],
     ) -> ToolResponse:
+        """Return one investigation."""
         return await get_investigation(pool, current_context(), investigation_id)
 
+
+def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.close",
         annotations=_docmeta.mutating(),
@@ -598,8 +660,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="The Investigation to drive to closed.")
         ],
     ) -> ToolResponse:
+        """Close an investigation."""
         return await close_investigation(pool, current_context(), investigation_id)
 
+
+def _register_investigations_link(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.link",
         annotations=_docmeta.mutating(),
@@ -612,8 +677,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="External ref to upsert, with tracker, id, and url."),
         ],
     ) -> ToolResponse:
+        """Link a run to an investigation."""
         return await link_external_ref(pool, current_context(), investigation_id, ref)
 
+
+def _register_investigations_unlink(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.unlink",
         annotations=_docmeta.mutating(),
@@ -628,8 +696,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Ref to remove; only tracker and id are used as the key."),
         ],
     ) -> ToolResponse:
+        """Unlink a run from an investigation."""
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)
 
+
+def _register_investigations_set(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.set",
         annotations=_docmeta.mutating(),
@@ -651,6 +722,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             pool, current_context(), investigation_id, title=title, description=description
         )
 
+
+def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.list",
         annotations=_docmeta.read_only(),

@@ -138,7 +138,7 @@ def test_handler_builds_validates_publishes_registered(migrated_url: str, tmp_pa
             ref = await image_build_handler(
                 conn,
                 job,
-                provider_resolver=_resolver_with_plane(plane),
+                resolver=_resolver_with_plane(plane),
                 store=store,
                 inspect=_all_present,
             )
@@ -170,7 +170,7 @@ def test_handler_resolves_build_plane_from_provider_runtime(
                 conn, JobKind.IMAGE_BUILD, _payload(), _AUTHORIZING, "dedup-resolver"
             )
             ref = await image_build_handler(
-                conn, job, provider_resolver=resolver, store=store, inspect=_all_present
+                conn, job, resolver=resolver, store=store, inspect=_all_present
             )
 
             assert ref == "images/local-libvirt/base/x86_64.qcow2"
@@ -188,7 +188,7 @@ def test_handler_dead_letters_validation_failure_with_named_category(
     registry = HandlerRegistry()
     register_handlers(
         registry,
-        provider_resolver=_resolver_with_plane(plane),
+        resolver=_resolver_with_plane(plane),
         store=store,
         inspect=_none_present,
     )
@@ -233,7 +233,7 @@ def test_handler_propagates_validation_category_when_called_directly(
                 await image_build_handler(
                     conn,
                     job,
-                    provider_resolver=_resolver_with_plane(plane),
+                    resolver=_resolver_with_plane(plane),
                     store=store,
                     inspect=_none_present,
                 )
@@ -247,7 +247,7 @@ def test_register_handlers_binds_image_build_kind(tmp_path: Path) -> None:
     registry = HandlerRegistry()
     register_handlers(
         registry,
-        provider_resolver=_resolver_with_plane(_FakePlane(tmp_path)),
+        resolver=_resolver_with_plane(_FakePlane(tmp_path)),
         store=_FakeStore(),
         inspect=_all_present,
     )

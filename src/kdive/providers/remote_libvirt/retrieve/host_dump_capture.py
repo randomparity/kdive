@@ -169,7 +169,7 @@ class HostDumpCapturer:
     ) -> CaptureOutput:
         pool.refresh(0)
         volume = self._resolve_volume(pool, vol_name, system_id)
-        self._enforce_ceiling(volume, system_id)
+        self._enforce_ceiling(volume, vol_name, system_id)
         spool = Path(tempfile.mkdtemp(prefix="kdive-host-dump-")) / vol_name
         try:
             self._download_to_file(conn, volume, spool, system_id)
@@ -194,7 +194,18 @@ class HostDumpCapturer:
     @staticmethod
     def _preflight_pool_dir(pool: Any, pool_name: str) -> Path:
         """Return the pool's target directory, or fail on a non-dir/filesystem pool."""
-        pool_xml = pool.XMLDesc(0)
+        try:
+            pool_xml = pool.XMLDesc(0)
+        except libvirt.libvirtError as exc:
+            raise CategorizedError(
+                "remote storage-pool XML lookup failed for host_dump",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "preflighting host_dump storage pool",
+                    "storage_pool": pool_name,
+                    "error": type(exc).__name__,
+                },
+            ) from exc
         pool_type, target = pool_type_and_target_strict(
             pool_xml,
             operation="preflighting host_dump storage pool",
@@ -212,8 +223,18 @@ class HostDumpCapturer:
         """Delete a prior orphaned dump volume of the same deterministic name, if present."""
         try:
             stale = pool.storageVolLookupByName(vol_name)
-        except libvirt.libvirtError:
-            return
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return
+            raise CategorizedError(
+                "host_dump stale volume lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "deleting stale host_dump volume",
+                    "volume": vol_name,
+                    "error": type(exc).__name__,
+                },
+            ) from exc
         self._delete_volume(stale)
 
     def _core_dump(self, domain: Any, path: str, system_id: UUID) -> None:
@@ -238,9 +259,20 @@ class HostDumpCapturer:
                 details={"system_id": str(system_id), "volume": vol_name},
             ) from exc
 
-    def _enforce_ceiling(self, volume: Any, system_id: UUID) -> None:
+    def _enforce_ceiling(self, volume: Any, vol_name: str, system_id: UUID) -> None:
         """Reject an over-ceiling volume before any download."""
-        capacity = int(volume.info()[1])
+        try:
+            capacity = int(volume.info()[1])
+        except (libvirt.libvirtError, TypeError, IndexError, ValueError) as exc:
+            raise CategorizedError(
+                "host_dump volume capacity lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "system_id": str(system_id),
+                    "volume": vol_name,
+                    "error": type(exc).__name__,
+                },
+            ) from exc
         if capacity > self._options.max_core_bytes:
             raise CategorizedError(
                 "host_dump core exceeds the single-PUT 5 GiB ceiling",
@@ -286,7 +318,18 @@ class HostDumpCapturer:
                 },
             ) from exc
         dmesg = self._dmesg_best_effort(spool, system_id)
-        sha256_b64 = file_sha256_b64(spool)
+        try:
+            sha256_b64 = file_sha256_b64(spool)
+        except OSError as exc:
+            raise CategorizedError(
+                "host_dump core digest read failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "system_id": str(system_id),
+                    "path": str(spool),
+                    "error": type(exc).__name__,
+                },
+            ) from exc
         raw = self._stream_put(system_id, spool, sha256_b64)
         self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = persist_redacted(
@@ -371,12 +414,12 @@ def pool_type_and_target_strict(
     """Return storage-pool type and target; malformed XML is an infrastructure fault."""
     try:
         root: ET.Element = _safe_fromstring(pool_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except (ET.ParseError, DefusedXmlException) as exc:
         raise CategorizedError(
             "malformed remote-libvirt storage-pool XML",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"operation": operation, "storage_pool": storage_pool},
-        ) from None
+        ) from exc
     target = root.findtext("./target/path")
     return root.get("type"), target
 

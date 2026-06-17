@@ -28,6 +28,7 @@ from kdive.build_configs.rules import exceeds_build_config_cap
 from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.models import Sensitivity
+from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import BuildConfigDecl, InventoryDoc
 from kdive.inventory.reconcile import ReconcileDiff, ReconcileRecord
 
@@ -129,5 +130,10 @@ async def _reconcile_one(
 def _key_of(written: object) -> str:
     """Read the object key off the ``put_artifact`` result (``.key``)."""
     key = getattr(written, "key", None)
-    assert isinstance(key, str)
+    if not isinstance(key, str):
+        raise InventoryError(
+            "build_config",
+            "object_key",
+            "object store returned an artifact without a string key",
+        )
     return key

@@ -743,6 +743,7 @@ def test_loop_inventory_pass_reconciles_a_present_file(
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             report = await reconcile_once(pool, NullReaper(), config=_config_with_inventory_spec())
         assert "reconcile_inventory" not in report.failures
+        assert report.reconciled_inventory == 1
         async with await _connect(migrated_url) as check:
             row = await _one(check, "loop-base")
         assert row["state"] == "registered"

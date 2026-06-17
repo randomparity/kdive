@@ -9,6 +9,7 @@ from typing import Protocol
 from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.validation import verify_chunks
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
 
 _log = logging.getLogger(__name__)
@@ -46,7 +47,12 @@ def reassemble_chunked(
         CategorizedError: a chunk fails its HEAD verification (before any multipart call) or a
             multipart operation fails (after which the upload is aborted).
     """
-    assert entry.chunks is not None
+    if entry.chunks is None:
+        raise CategorizedError(
+            "artifact is not declared as chunked",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"name": entry.name},
+        )
     verify_chunks(store, prefix, entry)
     upload_id = store.create_multipart_upload(
         final_key, sensitivity=Sensitivity.SENSITIVE, retention_class="build"

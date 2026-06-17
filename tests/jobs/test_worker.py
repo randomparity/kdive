@@ -17,14 +17,19 @@ from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.db.repositories import JOBS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job, JobKind
-from kdive.domain.state import JobState
+from kdive.domain.state import JobState, RunState, SystemState
 from kdive.health.heartbeat import Heartbeat
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import Authorizing, BuildPayload, load_payload
+from kdive.jobs.payloads import Authorizing, BuildPayload, RunPayload, load_payload
 from kdive.jobs.worker import Worker, WorkerConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.integration._seed import (
+    seed_granted_allocation,
+    seed_running_run,
+    seed_system,
+)
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
@@ -46,6 +51,30 @@ async def _final_state(url: str, job_id: UUID) -> Job:
         job = await JOBS.get(conn, job_id)
     assert job is not None
     return job
+
+
+async def _seed_worker_run(pool: AsyncConnectionPool) -> str:
+    allocation_id = await seed_granted_allocation(pool)
+    system_id = await seed_system(pool, allocation_id, SystemState.READY)
+    return await seed_running_run(pool, system_id)
+
+
+async def _run_failure_row(
+    pool: AsyncConnectionPool, run_id: str
+) -> tuple[str, str | None, str | None]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT state, failure_category, failing_job_id FROM runs WHERE id = %s",
+            (run_id,),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    failing_job_id = row[2]
+    return (
+        str(row[0]),
+        None if row[1] is None else str(row[1]),
+        None if failing_job_id is None else str(failing_job_id),
+    )
 
 
 def _unopened_pool(max_size: int = 4) -> AsyncConnectionPool:
@@ -232,6 +261,47 @@ def test_run_once_terminal_error_dead_letters_at_once(migrated_url: str) -> None
             assert final.attempt == 1  # terminal: not requeued despite max_attempts=3
             assert final.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
             assert await worker.run_once() is None  # dead-lettered: not re-dequeued
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("kind", [JobKind.BUILD, JobKind.INSTALL])
+def test_terminal_run_job_failure_marks_owning_run_failed(migrated_url: str, kind: JobKind) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+            run_id = await _seed_worker_run(pool)
+
+            async def raises_uncategorized(conn: psycopg.AsyncConnection, job: Job) -> str:
+                raise RuntimeError("uncategorized provider failure")
+
+            reg = HandlerRegistry()
+            reg.register(kind, raises_uncategorized)
+            worker = _worker(pool, reg, worker_id="w1")
+            payload = (
+                BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID))
+                if kind is JobKind.BUILD
+                else RunPayload(run_id=run_id)
+            )
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    kind,
+                    payload,
+                    _AUTHORIZING,
+                    f"{run_id}:{kind.value}:uncategorized",
+                    max_attempts=1,
+                )
+
+            await worker.run_once()
+
+            final = await _final_state(migrated_url, job.id)
+            assert final.state is JobState.FAILED
+            assert final.error_category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            assert await _run_failure_row(pool, run_id) == (
+                RunState.FAILED.value,
+                ErrorCategory.INFRASTRUCTURE_FAILURE.value,
+                str(job.id),
+            )
 
     asyncio.run(_run())
 

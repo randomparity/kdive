@@ -89,8 +89,12 @@ class DebugEngineRuntime:
         with self._locks_guard:
             return self._locks.setdefault(session_id, asyncio.Lock())
 
-    def get_or_attach(self, session: DebugSession) -> GdbMiAttachment:
-        """Return the live attachment for ``session``, attaching once on a registry miss."""
+    def attach_or_reuse(self, session: DebugSession) -> GdbMiAttachment:
+        """Return the live attachment for ``session``.
+
+        A registry miss opens the provider attachment and registers it for later ops on the same
+        debug session.
+        """
         session_id = str(session.id)
         existing = self._registry.get(session_id)
         if existing is not None:
@@ -216,7 +220,7 @@ async def _runtime_for_op(
 def _attach_and_run(
     runtime: DebugEngineRuntime, session: DebugSession, op: _EngineOp
 ) -> ToolResponse:
-    return op(runtime.engine, runtime.get_or_attach(session))
+    return op(runtime.engine, runtime.attach_or_reuse(session))
 
 
 def _set_breakpoint_op(session_id: str, location: str) -> _EngineOp:
@@ -328,7 +332,18 @@ def _register_debug_ops(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
 ) -> None:
     """Register the seven gdb-MI `debug.*` tools on ``app``, sharing ``runtime`` (ADR-0034 §5)."""
+    _register_debug_set_breakpoint(app, pool, runtime)
+    _register_debug_clear_breakpoint(app, pool, runtime)
+    _register_debug_list_breakpoints(app, pool, runtime)
+    _register_debug_read_memory(app, pool, runtime)
+    _register_debug_read_registers(app, pool, runtime)
+    _register_debug_continue(app, pool, runtime)
+    _register_debug_interrupt(app, pool, runtime)
 
+
+def _register_debug_set_breakpoint(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
     @app.tool(
         name="debug.set_breakpoint",
         annotations=_docmeta.mutating(),
@@ -349,6 +364,10 @@ def _register_debug_ops(
             _set_breakpoint_op(session_id, location),
         )
 
+
+def _register_debug_clear_breakpoint(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
     @app.tool(
         name="debug.clear_breakpoint",
         annotations=_docmeta.mutating(),
@@ -372,6 +391,10 @@ def _register_debug_ops(
             _clear_breakpoint_op(session_id, number),
         )
 
+
+def _register_debug_list_breakpoints(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
     @app.tool(
         name="debug.list_breakpoints",
         annotations=_docmeta.read_only(),
@@ -387,6 +410,10 @@ def _register_debug_ops(
             pool, current_context(), session_id, runtime, _list_breakpoints_op(session_id)
         )
 
+
+def _register_debug_read_memory(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
     @app.tool(
         name="debug.read_memory",
         annotations=_docmeta.read_only(),
@@ -406,6 +433,10 @@ def _register_debug_ops(
             _read_memory_op(session_id, address, byte_count),
         )
 
+
+def _register_debug_read_registers(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
     @app.tool(
         name="debug.read_registers",
         annotations=_docmeta.read_only(),
@@ -429,6 +460,10 @@ def _register_debug_ops(
             _read_registers_op(session_id, registers),
         )
 
+
+def _register_debug_continue(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
     @app.tool(
         name="debug.continue",
         annotations=_docmeta.mutating(),
@@ -455,6 +490,10 @@ def _register_debug_ops(
             _continue_op(session_id, timeout_sec),
         )
 
+
+def _register_debug_interrupt(
+    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugEngineRuntime | DebugRuntimeResolver
+) -> None:
     @app.tool(
         name="debug.interrupt",
         annotations=_docmeta.mutating(),

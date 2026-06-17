@@ -143,6 +143,7 @@ def _reconcile_response(report: ReconcileReport) -> ToolResponse:
             "leaked_domains": str(report.leaked_domains),
             "idempotency_keys_gc_count": str(report.idempotency_keys_gc_count),
             "abandoned_uploads": str(report.abandoned_uploads),
+            "reconciled_inventory": str(report.reconciled_inventory),
             "leaked_images": str(report.leaked_images),
             "dangling_images": str(report.dangling_images),
             "expired_private_images": str(report.expired_private_images),
@@ -206,6 +207,7 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def ops_reconcile_now() -> ToolResponse:
+        """Run reconciler cleanup once."""
         return await reconcile_now(
             pool,
             current_context(),

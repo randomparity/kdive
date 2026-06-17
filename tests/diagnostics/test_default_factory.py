@@ -117,12 +117,17 @@ def test_with_egress_fails_fast_when_no_probe_image_is_wired(monkeypatch, tmp_pa
 # ---- remote-libvirt reachability + TLS/ACL wiring (ADR-0125, #453) -------------------
 
 
-def test_factory_includes_reachability_and_tls_acl_when_remote_configured(
+def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configured(
     monkeypatch, tmp_path: Path
 ) -> None:
     _with_remote_instance(monkeypatch, tmp_path)
-    ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
-    assert {SECRET_REF_ID, PROVIDER_TLS_ID, GDBSTUB_ACL_ID, REACHABILITY_ID} <= ids
+    service = default_service_factory(None)
+    runnable_ids = {c.id for c in service._checks}  # noqa: SLF001
+    unavailable_ids = {c.id for c in service._unavailable_worker_checks}  # noqa: SLF001
+    assert {SECRET_REF_ID, REACHABILITY_ID} <= runnable_ids
+    assert {PROVIDER_TLS_ID, GDBSTUB_ACL_ID} == unavailable_ids
+    assert PROVIDER_TLS_ID not in runnable_ids
+    assert GDBSTUB_ACL_ID not in runnable_ids
 
 
 def test_factory_service_is_worker_unavailable_when_remote_configured(
@@ -153,6 +158,7 @@ def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
     for worker_id in (PROVIDER_TLS_ID, GDBSTUB_ACL_ID):
         assert by_id[worker_id].status is CheckStatus.ERROR
         assert by_id[worker_id].fix is None
+        assert by_id[worker_id].provider == "remote-libvirt"
         assert FEATURE_NOT_ENABLED_DETAIL in by_id[worker_id].detail
         assert WORKER_UNAVAILABLE_DETAIL not in by_id[worker_id].detail
         assert by_id[worker_id].failure_category == "not_implemented"

@@ -102,12 +102,12 @@ def render_domain_xml(
 def _parse_domain_xml_strict(domain_xml: str, *, operation: str, domain: str) -> ET.Element:
     try:
         return _safe_fromstring(domain_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except (ET.ParseError, DefusedXmlException) as exc:
         raise CategorizedError(
             "malformed remote-libvirt domain XML",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"domain": domain, "operation": operation},
-        ) from None
+        ) from exc
 
 
 def _recorded_gdb_port(root: ET.Element) -> int | None:
@@ -166,6 +166,16 @@ def disk_pool(domain_xml: str) -> str | None:
         root: ET.Element = _safe_fromstring(domain_xml)
     except (ET.ParseError, DefusedXmlException):
         return None
+    return _disk_pool(root)
+
+
+def disk_pool_strict(domain_xml: str, *, operation: str, domain: str) -> str | None:
+    """The storage pool the domain's disk records; malformed XML is infrastructure failure."""
+    root = _parse_domain_xml_strict(domain_xml, operation=operation, domain=domain)
+    return _disk_pool(root)
+
+
+def _disk_pool(root: ET.Element) -> str | None:
     source = root.find("./devices/disk/source")
     if source is None:
         return None

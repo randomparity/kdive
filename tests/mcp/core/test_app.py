@@ -315,5 +315,6 @@ def test_image_build_handler_preserves_store_config_error(
             await handler(cast(Any, None), cast(Any, None))
         assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
         assert caught.value.details == {"setting": "KDIVE_S3_ENDPOINT"}
+        assert caught.value.__cause__ is error
 
     asyncio.run(_run())

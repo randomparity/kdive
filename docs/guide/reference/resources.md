@@ -40,7 +40,7 @@ Deregister a runtime resource.
 
 `implemented` · `read-only`
 
-Return one runtime resource.
+Return one runtime resource visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -62,7 +62,7 @@ Cordon a host, then report or force-release its allocations.
 
 `implemented` · `read-only`
 
-List runtime resources.
+List runtime resources visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

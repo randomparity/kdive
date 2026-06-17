@@ -289,36 +289,58 @@ class RunBuildHandlers:
                 prepared = await self._prepare_external_build_completion(conn, ctx, uid, run_id)
                 if isinstance(prepared, ToolResponse):
                     return prepared
-                if prepared.store is not None:
-                    guard = await _reassemble_chunked_artifacts(
-                        conn, uid, run_id, prepared.manifest_row, prepared.store
-                    )
-                    if guard is not None:
-                        return guard
-
-                try:
-                    validated = await asyncio.to_thread(
-                        self._validate_complete_build,
-                        list(prepared.manifest_row.entries),
-                        prepared.keys,
-                        build_id,
-                        prepared.requirements,
-                    )
-                except CategorizedError as exc:
-                    return ToolResponse.failure_from_error(run_id, exc)
-
-                finalization = _ExternalBuildFinalization(
-                    prepared.run,
-                    output=validated.output,
+                finalization = await self._validate_external_build_upload(
+                    conn,
+                    uid,
+                    run_id,
+                    prepared,
+                    build_id=build_id,
                     cmdline=cmdline,
-                    keys=prepared.keys,
-                    heads=validated.heads,
-                    store=prepared.store,
-                    entries=prepared.manifest_row.entries,
-                    prefix=prepared.manifest_row.prefix,
-                    chunked=prepared.has_chunks,
                 )
+                if isinstance(finalization, ToolResponse):
+                    return finalization
                 return await _finalize_external_build(conn, ctx, finalization)
+
+    async def _validate_external_build_upload(
+        self,
+        conn: AsyncConnection,
+        uid: UUID,
+        run_id: str,
+        prepared: _ExternalBuildCompletion,
+        *,
+        build_id: str | None,
+        cmdline: str,
+    ) -> _ExternalBuildFinalization | ToolResponse:
+        """Reassemble chunked uploads and validate the external-build artifact set."""
+        if prepared.store is not None:
+            guard = await _reassemble_chunked_artifacts(
+                conn, uid, run_id, prepared.manifest_row, prepared.store
+            )
+            if guard is not None:
+                return guard
+
+        try:
+            validated = await asyncio.to_thread(
+                self._validate_complete_build,
+                list(prepared.manifest_row.entries),
+                prepared.keys,
+                build_id,
+                prepared.requirements,
+            )
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(run_id, exc)
+
+        return _ExternalBuildFinalization(
+            prepared.run,
+            output=validated.output,
+            cmdline=cmdline,
+            keys=prepared.keys,
+            heads=validated.heads,
+            store=prepared.store,
+            entries=prepared.manifest_row.entries,
+            prefix=prepared.manifest_row.prefix,
+            chunked=prepared.has_chunks,
+        )
 
     async def _prepare_external_build_completion(
         self,

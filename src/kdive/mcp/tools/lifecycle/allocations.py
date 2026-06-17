@@ -483,7 +483,15 @@ async def list_allocations(
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `allocations.*` tools on ``app``, bound to ``pool``."""
+    _register_allocations_request(app, pool)
+    _register_allocations_get(app, pool)
+    _register_allocations_release(app, pool)
+    _register_allocations_renew(app, pool)
+    _register_allocations_list(app, pool)
+    _register_allocations_wait(app, pool)
 
+
+def _register_allocations_request(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.request",
         annotations=_docmeta.mutating(),
@@ -500,6 +508,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior grant."),
         ] = None,
     ) -> ToolResponse:
+        """Request capacity and create an allocation grant."""
         return await request_allocation(
             pool,
             current_context(),
@@ -508,6 +517,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             idempotency_key=idempotency_key,
         )
 
+
+def _register_allocations_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.get",
         annotations=_docmeta.read_only(),
@@ -516,8 +527,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_get(
         allocation_id: Annotated[str, Field(description="The Allocation to render.")],
     ) -> ToolResponse:
+        """Return one allocation visible to the caller."""
         return await get_allocation(pool, current_context(), allocation_id)
 
+
+def _register_allocations_release(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.release",
         annotations=_docmeta.mutating(),
@@ -526,8 +540,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_release(
         allocation_id: Annotated[str, Field(description="The Allocation to release.")],
     ) -> ToolResponse:
+        """Release an active allocation."""
         return await release_allocation(pool, current_context(), allocation_id)
 
+
+def _register_allocations_renew(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.renew",
         annotations=_docmeta.mutating(),
@@ -544,6 +561,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior renewal."),
         ] = None,
     ) -> ToolResponse:
+        """Extend an allocation lease window."""
         return await renew_allocation(
             pool,
             current_context(),
@@ -552,6 +570,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             idempotency_key=idempotency_key,
         )
 
+
+def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.list",
         annotations=_docmeta.read_only(),
@@ -563,8 +583,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
+        """List allocations visible in a project."""
         return await list_allocations(pool, current_context(), project=project, limit=limit)
 
+
+def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.wait",
         annotations=_docmeta.read_only(),

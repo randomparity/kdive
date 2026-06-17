@@ -72,8 +72,7 @@ def _validate_url(url: str) -> None:
 def _extract_etag_from_headers(header_dump: str) -> str:
     """Parse the ETag value from a curl ``-D -`` header dump.
 
-    Returns an empty string if the ETag header is absent (caller strips quotes and stores
-    as-is; the worker HEADs the object afterward for verification).
+    Returns an empty string if the ETag header is absent.
     """
     for line in header_dump.splitlines():
         if line.lower().startswith("etag:"):
@@ -223,7 +222,8 @@ class ShellBuildTransport:
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the URL contains control characters;
-                ``INFRASTRUCTURE_FAILURE`` when curl exits non-zero.
+                ``INFRASTRUCTURE_FAILURE`` when curl exits non-zero or the upload response
+                omits an ETag.
         """
         _validate_url(presigned.url)
         curl_argv = ["curl", "-fsS", "-X", "PUT", "--upload-file", path]
@@ -238,10 +238,21 @@ class ShellBuildTransport:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"url": self._upload_url_detail(presigned.url)},
             )
-        return _extract_etag_from_headers(result.stdout).strip('"')
+        etag = _extract_etag_from_headers(result.stdout).strip('"')
+        if not etag:
+            raise CategorizedError(
+                "remote curl PUT response did not include an ETag",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"url": self._upload_url_detail(presigned.url)},
+            )
+        return etag
 
     def cleanup(self, path: str) -> None:
         """Remove *path* on the host (``rm -rf``); best-effort, logs on failure."""
-        result = self._run_remote(["rm", "-rf", path], cwd="/", timeout_s=60)
+        try:
+            result = self._run_remote(["rm", "-rf", path], cwd="/", timeout_s=60)
+        except Exception:
+            _log.warning("remote cleanup of %r failed before completion", path, exc_info=True)
+            return
         if result.returncode != 0:
             _log.warning("remote cleanup of %r failed (exit %d)", path, result.returncode)

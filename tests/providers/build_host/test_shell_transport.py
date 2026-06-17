@@ -24,7 +24,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 class _RecordingTransport(ShellBuildTransport):
     """A ShellBuildTransport whose ``_run_remote`` records calls and returns canned results."""
 
-    def __init__(self, results: list[CommandResult] | None = None) -> None:
+    def __init__(self, results: list[CommandResult | Exception] | None = None) -> None:
         self._secret_registry = SecretRegistry()
         self.calls: list[tuple[list[str], str, int]] = []
         self._results = results or []
@@ -32,7 +32,10 @@ class _RecordingTransport(ShellBuildTransport):
     def _run_remote(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
         self.calls.append((argv, cwd, timeout_s))
         if self._results:
-            return self._results.pop(0)
+            result = self._results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def write_bytes(self, path: str, data: bytes) -> None:  # pragma: no cover - not under test
@@ -165,9 +168,43 @@ def test_upload_file_non_zero_is_infrastructure_failure() -> None:
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_upload_file_missing_etag_is_infrastructure_failure() -> None:
+    t = _RecordingTransport([_ok(stdout="HTTP/1.1 200 OK\r\n\r\n")])
+    with pytest.raises(CategorizedError) as exc:
+        t.upload_file(
+            "/build/bzImage",
+            PresignedUpload(url="https://s3.example/put?sig=secret", required_headers={}),
+        )
+    assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"url": "https://s3.example/put?sig=secret"}
+
+
 def test_cleanup_issues_rm_rf() -> None:
     t = _RecordingTransport([_ok()])
     t.cleanup("/build/scratch")
+    assert t.calls[0][0] == ["rm", "-rf", "/build/scratch"]
+
+
+def test_cleanup_suppresses_non_zero_rm() -> None:
+    t = _RecordingTransport([_ok(returncode=1, stderr="permission denied")])
+
+    t.cleanup("/build/scratch")
+
+    assert t.calls[0][0] == ["rm", "-rf", "/build/scratch"]
+
+
+def test_cleanup_suppresses_transport_error() -> None:
+    t = _RecordingTransport(
+        [
+            CategorizedError(
+                "remote command failed",
+                category=ErrorCategory.TRANSPORT_FAILURE,
+            )
+        ]
+    )
+
+    t.cleanup("/build/scratch")
+
     assert t.calls[0][0] == ["rm", "-rf", "/build/scratch"]
 
 

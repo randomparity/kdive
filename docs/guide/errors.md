@@ -37,7 +37,7 @@ errors.
 | `install_failure` | The kernel install step failed. |
 | `transport_failure` | A console or debug transport failed during an active session. |
 | `control_failure` | A power or crash control operation failed. |
-| `authorization_denied` | The caller's role or the allocation's capability scope does not permit the requested operation. |
+| `authorization_denied` | The caller's role or required provisioning-profile opt-in does not permit the requested operation. |
 
 ## Recovery patterns
 

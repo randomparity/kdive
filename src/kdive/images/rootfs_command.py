@@ -117,6 +117,24 @@ def _ensure_workspace_writable(workspace: Path) -> None:
         ) from exc
 
 
+def _publish_rootfs(output: RootfsBuildOutput, dest: Path) -> None:
+    """Move the built image to ``dest`` and map destination I/O failures."""
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(output.qcow2_path), str(dest))
+        dest.chmod(0o644)
+    except OSError as exc:
+        raise CategorizedError(
+            f"build-fs could not publish rootfs to {dest}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "dest": str(dest),
+                "operation": "publish",
+                "error": type(exc).__name__,
+            },
+        ) from exc
+
+
 def run_build_fs(args: argparse.Namespace) -> None:
     """Build a kdive-ready filesystem qcow2 via the local plane and move it to ``--dest``."""
     kind = _FS_KINDS[args.kind]
@@ -137,9 +155,7 @@ def run_build_fs(args: argparse.Namespace) -> None:
     plane = _build_local_rootfs_plane(workspace)
     output: RootfsBuildOutput = plane.build(spec)
     dest = Path(args.dest).resolve()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(output.qcow2_path), str(dest))
-    dest.chmod(0o644)
+    _publish_rootfs(output, dest)
     _log.info(
         "built %s rootfs %s digest=%s; set KDIVE_GUEST_IMAGE to this path",
         args.kind,
