@@ -225,7 +225,12 @@ def verify_chunks(store: HeadStore, prefix: str, entry: ManifestEntry) -> None:
             (:attr:`ErrorCategory.CONFIGURATION_ERROR`) or disagrees with its manifest entry
             (:attr:`ErrorCategory.BUILD_FAILURE`).
     """
-    assert entry.chunks is not None
+    if entry.chunks is None:
+        raise CategorizedError(
+            "artifact is not declared as chunked",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"name": entry.name},
+        )
     for part_number, chunk in enumerate(entry.chunks, start=1):
         key = chunk_key(prefix, entry.name, part_number)
         head = store.head(key)

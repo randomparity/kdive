@@ -102,3 +102,15 @@ def test_reassemble_fails_before_mpu_on_chunk_mismatch() -> None:
     with pytest.raises(CategorizedError):
         reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=bad)
     assert store.events == []  # no multipart calls happened
+
+
+def test_reassemble_rejects_non_chunked_entry_before_mpu() -> None:
+    store = _FakeStore()
+    entry = ManifestEntry("vmlinux", "whole", 10)
+
+    with pytest.raises(CategorizedError) as exc:
+        reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=entry)
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"name": "vmlinux"}
+    assert store.events == []

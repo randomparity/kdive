@@ -448,6 +448,17 @@ def test_verify_chunks_missing_chunk_is_configuration_error() -> None:
     assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_verify_chunks_non_chunked_entry_is_configuration_error() -> None:
+    store = _FakeStore({}, {})
+    entry = ManifestEntry("vmlinux", "whole", 10)
+
+    with pytest.raises(CategorizedError) as exc:
+        verify_chunks(store, _PREFIX, entry)
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"name": "vmlinux"}
+
+
 def test_verify_chunks_checksum_mismatch_is_build_failure() -> None:
     store = _FakeStore(
         {},
