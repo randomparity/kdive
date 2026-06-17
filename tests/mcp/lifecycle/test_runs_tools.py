@@ -292,12 +292,37 @@ def test_envelope_for_run_failed_links_job_even_without_message() -> None:
     assert resp.data["failing_job_id"] == str(job.id)
 
 
-def test_envelope_for_run_failed_no_link_when_job_absent() -> None:
+def test_envelope_for_run_failed_no_link_derives_detail_from_category() -> None:
+    # No linked job (e.g. a reconciler-driven failure on a torn-down System): the failed Run is
+    # never a bare category — `detail` is derived from `failure_category` (#516).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.LEASE_EXPIRED)
+    )
+
+    assert resp.detail == runs_common.no_job_failure_detail(ErrorCategory.LEASE_EXPIRED)
+    assert resp.detail
+    assert "failing_job_id" not in resp.data
+
+
+def test_envelope_for_run_failed_no_link_unmapped_category_has_generic_detail() -> None:
+    # Any diagnostic category without a specific reason still gets a non-empty fallback so a
+    # failed Run is never category-only (#516).
     resp = runs_common.envelope_for_run(
         _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE)
     )
 
-    assert resp.detail is None
+    assert resp.detail
+    assert "failing_job_id" not in resp.data
+
+
+def test_envelope_for_run_failed_no_link_no_leak_category_stays_suppressed() -> None:
+    # A no-leak category with no job must still surface only the seam constant — the derived
+    # detail must not bypass the no-leak seam (ADR-0123, #516).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.NOT_FOUND)
+    )
+
+    assert resp.detail == "not found"
     assert "failing_job_id" not in resp.data
 
 
@@ -467,6 +492,22 @@ def test_get_failed_run_null_category_defaults_infra(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.FAILED, failure=None)
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.status == "error" and resp.error_category == "infrastructure_failure"
+        # A no-job failure (here a NULL category defaulting to infra) is never bare (#516).
+        assert resp.detail
+
+    asyncio.run(_run())
+
+
+def test_get_failed_run_no_job_reconciler_failure_has_detail(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(
+                pool, state=RunState.FAILED, failure=ErrorCategory.LEASE_EXPIRED
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.status == "error" and resp.error_category == "lease_expired"
+        assert resp.detail == runs_common.no_job_failure_detail(ErrorCategory.LEASE_EXPIRED)
+        assert "failing_job_id" not in resp.data
 
     asyncio.run(_run())
 

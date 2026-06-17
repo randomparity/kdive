@@ -76,14 +76,22 @@ def _exit_status(payload: dict[str, Any]) -> int:
     qemu-guest-agent reports ``exitcode`` for a normal exit but, when the process was
     **killed** (OOM, timeout-kill, SIGSEGV), omits ``exitcode`` and sets ``signal``. A
     signaled kill must not read as success, so it maps to ``128 + signal`` (the shell
-    convention); a payload with neither field is treated as a clean exit (0).
+    convention).
+
+    A reaped (``exited: true``) process reply that carries **neither** field is abnormal
+    — the agent normally reports exactly one — so its real outcome is unknown. Treating it
+    as a clean exit (0) would mask a failed in-guest command as success (ADR-0153), so it
+    raises ``INFRASTRUCTURE_FAILURE`` instead.
     """
     if "exitcode" in payload:
         return int(payload["exitcode"])
     signal = payload.get("signal")
     if signal is not None:
         return 128 + int(signal)
-    return 0
+    raise CategorizedError(
+        "guest agent reported a process exit without an exit code or signal",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
 
 
 def _decode_capture(payload: dict[str, Any], field: str) -> bytes:
