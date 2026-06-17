@@ -3,8 +3,8 @@
 - **Status:** Accepted
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
-- **Builds on (does not supersede):** [ADR-0029](0029-build-profile-schema.md) (the
-  `kernel_source_ref` provenance forms), [ADR-0101](0101-local-libvirt-remote-build.md)
+- **Builds on (does not supersede):** [ADR-0029](0029-build-plane-local-make.md) (the
+  `kernel_source_ref` provenance forms), [ADR-0101](0101-local-libvirt-remote-build-host.md)
   (the local builder and its checkout seam), [ADR-0154](0154-clone-verify-fetch-head.md)
   (the `git init` + shallow fetch + `FETCH_HEAD` verify + checkout recipe reused here),
   [ADR-0019](0019-tool-response-envelope.md) (the response envelope / error taxonomy).

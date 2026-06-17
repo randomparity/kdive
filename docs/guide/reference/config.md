@@ -16,6 +16,7 @@
 | `KDIVE_BUILD_COMPONENT_ROOTS` | worker | — | no | Colon-separated extra component roots merged into a build. |
 | `KDIVE_BUILD_WORKSPACE` | worker | `/var/lib/kdive/build` | no | Worker scratch root for kernel builds. |
 | `KDIVE_KERNEL_SRC` | worker | `` | no | Kernel source tree the worker builds from. |
+| `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` | worker | — | no | Comma-separated allowlist of git remotes the local (worker-local) build host may clone for a git kernel_source_ref. Each entry is a host (github.com) or host/path prefix (github.com/myorg). Empty/unset disables local git builds (deny by default). |
 
 ## catalog
 

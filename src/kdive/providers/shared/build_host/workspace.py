@@ -53,15 +53,16 @@ _GIT_HARDENED_ENV = {
 
 # A warm-tree build resolves its source from the worker-process ``KDIVE_KERNEL_SRC``
 # env, which the server cannot see at admission time, so a misconfigured source can
-# only surface here. Both failure strings name the two ways forward — the operator
-# warm-tree staging step (and its doc) and the git build lane (a structured
-# ``kernel_source_ref`` against a registered remote build host) — so the caller can
-# self-correct from the error alone rather than hitting a generic, lane-blind message.
+# only surface here. The failure strings name the three ways forward — the operator
+# warm-tree staging step (and its doc), the local git lane (a structured
+# ``kernel_source_ref`` whose remote the operator allowlists), and the git lane on a
+# registered remote build host — so the caller can self-correct from the error alone.
 _BUILD_LANE_GUIDANCE = (
     "Either stage a kernel source tree on the build worker and set KDIVE_KERNEL_SRC to "
     "its absolute path (see docs/operating/build-source-staging.md), or submit a git "
     'build profile instead — a structured kernel_source_ref {"git": {"remote": ..., '
-    '"ref": ...}} routed to a registered remote build host '
+    '"ref": ...}} either on the local host once the operator allowlists its remote via '
+    "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST, or on a registered remote build host "
     "(build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)."
 )
 KERNEL_SRC_UNSET_DETAIL = (

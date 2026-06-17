@@ -1,19 +1,21 @@
 # Staging kernel source for `runs.build`
 
 The server-build lane (`runs.build` on a Run whose `build_profile` has
-`source="server"`) needs a kernel source tree to build from. There are two lanes, and which
-one a Run takes is decided by the **provenance form** of its `kernel_source_ref`. Picking
-the wrong form is the most common reason a first build fails, so this page covers both.
+`source="server"`) needs a kernel source tree to build from. The lane a Run takes is decided
+by the **provenance form** of its `kernel_source_ref` (a bare string vs a structured git
+object) and the build host it runs on. Picking the wrong combination is the most common
+reason a first build fails, so this page covers each lane.
 
-This is an **operator** prerequisite: a caller cannot stage a warm tree or register a remote
-build host over the MCP surface alone. The error messages from `runs.create`/`runs.build`
-name the step that is missing and point here.
+This is an **operator** prerequisite: a caller cannot stage a warm tree, allowlist a local
+git remote, or register a remote build host over the MCP surface alone. The error messages
+from `runs.create`/`runs.build` name the step that is missing and point here.
 
-## The two lanes
+## The build lanes
 
 | Lane | `kernel_source_ref` form | Build host | Operator prerequisite |
 |---|---|---|---|
 | Warm-tree (local) | a bare string label/path, e.g. `linux-6.9` or `/srv/linux` | the seeded `worker-local` host | stage `KDIVE_KERNEL_SRC` on the worker |
+| Git-clone (local) | the structured object `{"git": {"remote": "…", "ref": "…"}}` | the seeded `worker-local` host | allowlist the remote in `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` |
 | Git-clone (remote) | the structured object `{"git": {"remote": "…", "ref": "…"}}` | a registered **remote** build host | register the host with `build_hosts.register_ssh` (or `…_ephemeral_libvirt`) |
 
 A **bare string is always warm-tree provenance metadata**, never git-clone provenance —
@@ -52,9 +54,43 @@ tree.
 For the full local provider prerequisites (toolchain, disk space, fixtures) see
 [Local libvirt](providers/local-libvirt.md).
 
-## Git-clone lane: structured ref + a remote build host
+## Git-clone lane (local): structured ref + an allowlisted remote
 
-For a build that clones a git ref instead of mirroring a warm tree:
+The `worker-local` host can clone an agent-supplied git remote directly, so a developer can
+build a fork's branch on the default worker without standing up a remote build host. Because
+the worker runs in the control plane, the remotes it may clone are **deny-by-default** and
+gated by an operator allowlist.
+
+1. Submit the structured provenance object in the Run's build profile (same form as the
+   remote lane), leaving `build_host` unset (or naming `worker-local`):
+
+   ```json
+   "kernel_source_ref": {"git": {"remote": "https://github.com/myorg/linux", "ref": "v6.9"}}
+   ```
+
+2. Set `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` on the worker to the remotes you trust it to
+   clone. It is a comma-separated list; each entry is a **host** (`github.com`) or a
+   **host/path-prefix** (`github.com/myorg`). A host entry admits any path on that host; a
+   path-prefix entry matches only at a `/` boundary (`github.com/myorg` does not admit
+   `github.com/myorg-evil`). Only `https`, `ssh`, and `git` remotes are eligible; `file://`
+   and `http://` are rejected. Restart the worker after changing it.
+
+   ```
+   KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST=github.com/myorg,git.example.com
+   ```
+
+3. `ref` must be a server-advertised tag or branch. A bare commit SHA is not guaranteed
+   fetchable by the shallow clone and surfaces as a `git fetch` failure.
+
+If the allowlist is empty or unset, the local git lane is **off**: a git build on the local
+host fails at build time with a `configuration_error` that says local git builds are disabled.
+A remote whose host/path is not on a non-empty allowlist fails with a distinct
+`configuration_error` that the remote is not allowlisted. Neither message echoes the submitted
+remote URL.
+
+## Git-clone lane (remote): structured ref + a remote build host
+
+For a build that clones a git ref on a dedicated build host instead of the worker:
 
 1. Submit the structured provenance object in the Run's build profile:
 
@@ -62,10 +98,8 @@ For a build that clones a git ref instead of mirroring a warm tree:
    "kernel_source_ref": {"git": {"remote": "https://github.com/torvalds/linux", "ref": "v6.9"}}
    ```
 
-2. Register a **remote** build host so the clone-and-build has somewhere to run. A git ref
-   cannot build on the local `worker-local` host (it requires a warm tree); host selection
-   rejects that combination. Register an SSH or ephemeral-libvirt host with the operator
-   tools:
+2. Register a **remote** build host so the clone-and-build runs off the worker. Register an
+   SSH or ephemeral-libvirt host with the operator tools:
 
    - `build_hosts.register_ssh` — an SSH-reachable build host.
    - `build_hosts.register_ephemeral_libvirt` — a per-build throwaway libvirt VM.
