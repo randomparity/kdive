@@ -59,8 +59,9 @@ See ADR-0157 for the decision and rejected alternatives. In summary:
    envelope `detail`.
 
 3. **`details` gains two auditable keys on both branches:** `libvirt_error` = the libvirt
-   error string (`str(exc)`), `libvirt_error_code` = `exc.get_error_code()` (an `int`).
-   `domain` stays. The guest-exec seam runs only on the build/install **worker** path
+   error string (`str(exc)`), `libvirt_error_code` = `exc.get_error_code()` (an `int` for a
+   coded error, `None` for a bare no-`.err` libvirtError — both are scalar and `_safe_detail`
+   admits them). `domain` stays. The guest-exec seam runs only on the build/install **worker** path
    (`GuestExecBuildTransport` → `run_build_on_host` → the worker job handler), so the
    surfaced `details` flow through the worker's redaction seam, not the synchronous
    `safe_error_details` path: `worker._failure_context` builds the persisted
