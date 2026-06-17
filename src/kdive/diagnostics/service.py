@@ -25,14 +25,13 @@ import kdive.config as config
 import kdive.diagnostics.reachability as reachability
 from kdive.config.core_settings import SECRETS_ROOT
 from kdive.diagnostics.checks import (
+    GDBSTUB_ACL_ID,
+    PROVIDER_TLS_ID,
     Check,
     CheckResult,
     CheckStatus,
-    GdbstubAclCheck,
-    ProviderTlsCheck,
     RemoteLibvirtReachabilityCheck,
     SecretRefCheck,
-    TlsProbeOutcome,
     Vantage,
     run_check,
 )
@@ -90,8 +89,16 @@ class _SecretBackendUnreachable(Exception):
     """The secret backend root is absent — a check-cannot-run condition, not a per-ref miss."""
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerVantageCheck:
+    """A worker-vantage diagnostic that is reported as unavailable, not run."""
+
+    id: str
+    provider: str | None = None
+
+
 def worker_unavailable_results(
-    checks: Sequence[Check],
+    checks: Sequence[Check | WorkerVantageCheck],
     reason: WorkerVantageSubstitution = WorkerVantageSubstitution.WORKER_UNAVAILABLE,
 ) -> list[CheckResult]:
     """Return an ``error`` result per worker-vantage check that is substituted, not run.
@@ -107,6 +114,7 @@ def worker_unavailable_results(
             check_id=check.id,
             status=CheckStatus.ERROR,
             detail=_SUBSTITUTION_DETAIL[reason],
+            provider=check.provider if isinstance(check, WorkerVantageCheck) else None,
             failure_category=_SUBSTITUTION_CATEGORY[reason],
         )
         for check in checks
@@ -143,6 +151,7 @@ class DiagnosticsService:
         substitution_reason: WorkerVantageSubstitution = (
             WorkerVantageSubstitution.WORKER_UNAVAILABLE
         ),
+        unavailable_worker_checks: Sequence[WorkerVantageCheck] = (),
     ) -> None:
         """Build the service.
 
@@ -162,12 +171,15 @@ class DiagnosticsService:
                 (the health-endpoint detail), preserving the historical meaning of a bare
                 ``worker_available=False``; pass ``FEATURE_NOT_ENABLED`` when no worker-job
                 dispatch is wired so the detail does not misread as a worker outage.
+            unavailable_worker_checks: Worker-vantage diagnostics that this deployment cannot
+                run at all. They are explicit result metadata, not runnable ``Check`` objects.
         """
         self._checks = list(checks)
         self._timeout = per_check_timeout
         self._overall_timeout = overall_timeout
         self._worker_available = worker_available
         self._substitution_reason = substitution_reason
+        self._unavailable_worker_checks = list(unavailable_worker_checks)
 
     async def run(self) -> DiagnosticsReport:
         """Run every check and return the aggregated report.
@@ -181,6 +193,12 @@ class DiagnosticsService:
         skipped = [c for c in self._checks if not self._can_run(c)]
         results = await self._run_within_budget(runnable)
         results.extend(worker_unavailable_results(skipped, self._substitution_reason))
+        results.extend(
+            worker_unavailable_results(
+                self._unavailable_worker_checks,
+                self._substitution_reason,
+            )
+        )
         return DiagnosticsReport(results=results)
 
     async def _run_within_budget(self, checks: Sequence[Check]) -> list[CheckResult]:
@@ -262,33 +280,27 @@ def _secret_ref_check() -> SecretRefCheck:
     )
 
 
-async def _never_tls(_ca_path: str) -> TlsProbeOutcome:
-    # Never invoked: the check is substituted under worker_available=False. The raise guards a
-    # future wiring mistake (running a worker-vantage check without a real probe).
-    raise NotImplementedError("provider_tls has no worker-job probe in this deployment")
-
-
-async def _never_acl(_host: str, _range: str) -> bool | None:
-    raise NotImplementedError("gdbstub_acl has no worker-job probe in this deployment")
-
-
 def _remote_libvirt_checks() -> list[Check]:
     """Assemble the remote-libvirt diagnostic checks when an instance is declared.
 
     The server-vantage ``remote_libvirt_reachability`` check is the concrete probe (ADR-0125); it
-    resolves config lazily at run time. The worker-vantage ``provider_tls``/``gdbstub_acl`` checks
-    are **named** but have no worker-job probe in this slice, so they are built with empty fields
-    and a never-called probe — the service substitutes them with the honest feature-not-enabled
-    error (``worker_available=False`` + ``FEATURE_NOT_ENABLED``) rather than fabricating a "host
-    unreachable" verdict or misreading the unwired feature as a worker outage (ADR-0139).
+    resolves config lazily at run time. Worker-vantage checks are reported separately as explicit
+    unavailable metadata until worker-job dispatch is wired for them (ADR-0139).
     """
-    reachability_check = RemoteLibvirtReachabilityCheck(
-        provider=_REMOTE_PROVIDER,
-        probe=reachability.remote_libvirt_reachability_probe(),
-    )
-    tls_check = ProviderTlsCheck(provider=_REMOTE_PROVIDER, ca_path="", probe=_never_tls)
-    acl_check = GdbstubAclCheck(provider=_REMOTE_PROVIDER, host="", port_range="", probe=_never_acl)
-    return [reachability_check, tls_check, acl_check]
+    return [
+        RemoteLibvirtReachabilityCheck(
+            provider=_REMOTE_PROVIDER,
+            probe=reachability.remote_libvirt_reachability_probe(),
+        )
+    ]
+
+
+def _remote_libvirt_unavailable_worker_checks() -> list[WorkerVantageCheck]:
+    """Name worker-vantage remote-libvirt diagnostics that this deployment cannot run."""
+    return [
+        WorkerVantageCheck(id=PROVIDER_TLS_ID, provider=_REMOTE_PROVIDER),
+        WorkerVantageCheck(id=GDBSTUB_ACL_ID, provider=_REMOTE_PROVIDER),
+    ]
 
 
 def default_service_factory(
@@ -300,7 +312,7 @@ def default_service_factory(
     against the file-ref backend under ``KDIVE_SECRETS_ROOT``. When a ``[[remote_libvirt]]``
     instance is declared (``is_remote_libvirt_configured()``), it also assembles the server-vantage
     ``remote_libvirt_reachability`` check (ADR-0125, the qemu+tls reachability probe) and the
-    worker-vantage ``provider_tls``/``gdbstub_acl`` checks.
+    explicit unavailable-worker metadata for ``provider_tls``/``gdbstub_acl``.
 
     The service is built with ``worker_available=False`` and
     ``substitution_reason=FEATURE_NOT_ENABLED``: this slice wires no worker-job dispatch, so the
@@ -328,18 +340,18 @@ def default_service_factory(
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     checks: list[Check] = [_secret_ref_check()]
+    unavailable_worker_checks: list[WorkerVantageCheck] = []
     if is_remote_libvirt_configured():
         checks.extend(_remote_libvirt_checks())
-    # worker_available=False is load-bearing: _remote_libvirt_checks builds the worker-vantage
-    # TLS/ACL checks with empty fields + never-called probes on the contract that they are
-    # substituted (never run) here. A future flip to True must replace those placeholder
-    # constructions with real probes (see ADR-0125's worker-job follow-up) — do not flip it alone.
-    # FEATURE_NOT_ENABLED makes the substituted detail say the feature is unwired here (not that a
-    # worker is down); the worker-job follow-up that flips the flag also drops this reason.
+        unavailable_worker_checks.extend(_remote_libvirt_unavailable_worker_checks())
+    # FEATURE_NOT_ENABLED makes the substituted detail say provider_tls/gdbstub_acl are unwired
+    # here, not that a worker is down. The worker-job follow-up replaces
+    # unavailable_worker_checks with concrete worker-vantage checks and drops this reason.
     return DiagnosticsService(
         checks=checks,
         per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,
         overall_timeout=_DEFAULT_OVERALL_TIMEOUT,
         worker_available=False,
         substitution_reason=WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
+        unavailable_worker_checks=unavailable_worker_checks,
     )

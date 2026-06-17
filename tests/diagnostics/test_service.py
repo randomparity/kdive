@@ -15,6 +15,7 @@ from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
     WORKER_UNAVAILABLE_DETAIL,
     DiagnosticsService,
+    WorkerVantageCheck,
     WorkerVantageSubstitution,
     worker_unavailable_results,
 )
@@ -140,6 +141,24 @@ def test_feature_not_enabled_and_worker_down_are_category_distinguishable() -> N
         reason=WorkerVantageSubstitution.WORKER_UNAVAILABLE,
     )[0]
     assert enabled.failure_category != down.failure_category
+
+
+def test_unavailable_worker_metadata_yields_error_without_runnable_check() -> None:
+    service = DiagnosticsService(
+        checks=[],
+        per_check_timeout=1.0,
+        substitution_reason=WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
+        unavailable_worker_checks=[
+            WorkerVantageCheck(id="provider_tls", provider="remote-libvirt")
+        ],
+    )
+    report = asyncio.run(service.run())
+    result = report.results[0]
+    assert result.check_id == "provider_tls"
+    assert result.provider == "remote-libvirt"
+    assert result.status is CheckStatus.ERROR
+    assert FEATURE_NOT_ENABLED_DETAIL in result.detail
+    assert result.failure_category == "not_implemented"
 
 
 def test_service_substitutes_worker_results_when_worker_down() -> None:
