@@ -6,7 +6,7 @@
 
 **Architecture:** Factor `sync_tree`'s leading emptiness/usability guard into a shared pure predicate in `providers/shared/build_host/workspace.py`. Add a thin admission helper in `services/runs/build_host_selection.py` (beside ADR-0157's `check_source_kind_compatibility`) that raises the existing messages for a `LOCAL` host. The worker BUILD handler reads `config.get(KERNEL_SRC)` once and threads it through `_run_build` → `run_build_on_host`, which calls the helper at the top of its `if host.kind is BuildHostKind.LOCAL` branch. `sync_tree` keeps its own check as a backstop (it now calls the shared predicate). Demo path is a doc section + commented compose stanza — no kernel bytes committed.
 
-**Tech Stack:** Python 3.13, `uv`/`ruff`/`ty`/`pytest`, `just` recipes. Conventions: `AGENTS.md`, `CLAUDE.md`. ADR-0160, spec `docs/specs/2026-06-17-local-warm-tree-build-admission.md`.
+**Tech Stack:** Python 3.13, `uv`/`ruff`/`ty`/`pytest`, `just` recipes. Conventions: `AGENTS.md`, `CLAUDE.md`. ADR-0161, spec `docs/specs/2026-06-17-local-warm-tree-build-admission.md`.
 
 ---
 
@@ -209,7 +209,7 @@ def check_warm_tree_source_admission(
     A no-op for any non-``LOCAL`` host kind (git/remote lanes never read
     ``KDIVE_KERNEL_SRC``). For a ``LOCAL`` host this applies the same predicate
     ``sync_tree`` applies (``warm_tree_source_error``) and raises the identical
-    ``KERNEL_SRC_UNSET_DETAIL`` / ``KERNEL_SRC_INVALID_DETAIL`` (ADR-0160), so an
+    ``KERNEL_SRC_UNSET_DETAIL`` / ``KERNEL_SRC_INVALID_DETAIL`` (ADR-0161), so an
     admission rejection is byte-identical to the build-time backstop. The worker BUILD
     handler calls this at the dispatch ``LOCAL`` branch before any workspace side
     effect; ``sync_tree`` keeps its own check as defense-in-depth.
@@ -381,7 +381,7 @@ async def run_build_on_host(
     """Run ``builder`` on the selected build host.
 
     For a ``LOCAL`` host the warm-tree ``KDIVE_KERNEL_SRC`` (``kernel_src``, resolved by
-    the worker BUILD handler) is admitted before the build runs (ADR-0160), so an
+    the worker BUILD handler) is admitted before the build runs (ADR-0161), so an
     unset/invalid tree fails before any workspace side effect; ``sync_tree`` keeps the
     backstop. ``kernel_src`` is ignored for non-``LOCAL`` (git/remote) hosts.
     """
@@ -407,7 +407,7 @@ git add src/kdive/providers/shared/build_host/dispatch.py tests/providers/build_
 git commit -m "feat(build): admit local warm-tree build at the dispatch LOCAL branch
 
 run_build_on_host now takes kernel_src and rejects an unset/invalid
-KDIVE_KERNEL_SRC for a LOCAL host before builder.build runs (ADR-0160).
+KDIVE_KERNEL_SRC for a LOCAL host before builder.build runs (ADR-0161).
 
 Refs #532
 
@@ -591,7 +591,7 @@ git commit -m "feat(jobs): read KDIVE_KERNEL_SRC once and pass to build dispatch
 
 The worker BUILD handler resolves KDIVE_KERNEL_SRC and threads it into
 run_build_on_host so the LOCAL admission check fires before the build job
-materializes a workspace (ADR-0160). dispatch/workspace stay config-free.
+materializes a workspace (ADR-0161). dispatch/workspace stay config-free.
 
 Refs #532
 
@@ -636,7 +636,7 @@ and point `KDIVE_KERNEL_SRC` at the mount:
 With an empty/unset `KDIVE_KERNEL_SRC`, a warm-tree `runs.build` against `worker-local`
 is now rejected at admission (before the build job materializes a workspace) with the
 `KDIVE_KERNEL_SRC is not set on the build worker` configuration error, rather than
-failing deep in the build (ADR-0160).
+failing deep in the build (ADR-0161).
 ```
 
 - [ ] **Step 2: Add the commented compose stanza**
@@ -672,7 +672,7 @@ git commit -m "docs: document the demo warm-tree build bootstrap
 
 Add a one-step compose bootstrap (bind-mount a kernel tree + set
 KDIVE_KERNEL_SRC) and a commented worker stanza, so worker-local is
-buildable on a fresh demo without bundling a kernel tree (ADR-0160).
+buildable on a fresh demo without bundling a kernel tree (ADR-0161).
 
 Refs #532
 
@@ -681,17 +681,17 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 6: Ratify ADR-0160 and full-suite verification
+## Task 6: Ratify ADR-0161 and full-suite verification
 
 **Files:**
-- Modify: `docs/adr/0160-local-warm-tree-build-admission.md` (Status → Accepted)
+- Modify: `docs/adr/0161-local-warm-tree-build-admission.md` (Status → Accepted)
 - Modify: `docs/adr/README.md` (0160 row → Accepted)
 
 - [ ] **Step 1: Flip ADR status to Accepted**
 
-ADR-0160 is now cited in `src/` (the helper docstring references it), so the
+ADR-0161 is now cited in `src/` (the helper docstring references it), so the
 `adr-status-check` "no shipped-but-Proposed drift" invariant requires Accepted. In
-`docs/adr/0160-local-warm-tree-build-admission.md` change `- **Status:** Proposed` to
+`docs/adr/0161-local-warm-tree-build-admission.md` change `- **Status:** Proposed` to
 `- **Status:** Accepted`. In `docs/adr/README.md` change the trailing `| Proposed |`
 on the 0160 row to `| Accepted |`.
 
@@ -709,8 +709,8 @@ Expected: all green (or only Docker-gated skips).
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/adr/0160-local-warm-tree-build-admission.md docs/adr/README.md
-git commit -m "docs: ratify ADR-0160 as Accepted on implementation
+git add docs/adr/0161-local-warm-tree-build-admission.md docs/adr/README.md
+git commit -m "docs: ratify ADR-0161 as Accepted on implementation
 
 Refs #532
 
