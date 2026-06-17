@@ -247,7 +247,7 @@ def _register_runs_profile_examples(app: FastMCP, pool: AsyncConnectionPool) -> 
         """Return a ready-to-edit build profile per registered build host. Requires a token."""
         # Auth-only (ADR-0117): the verifier already gated the transport; enforce token
         # presence as defence-in-depth. No platform/project gate, no audit — the projection
-        # is the public host-kind/source-kind rule only (ADR-0159).
+        # is the public host-kind/source-kind rule only (ADR-0160).
         current_context()
         async with pool.connection() as conn:
             hosts = await list_all_hosts(conn)

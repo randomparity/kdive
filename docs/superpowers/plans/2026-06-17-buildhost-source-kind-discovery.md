@@ -1,7 +1,7 @@
 # Implementation plan — Build-host source-kind discovery (#536)
 
 - **Spec:** [`../../specs/2026-06-17-buildhost-source-kind-discovery.md`](../../specs/2026-06-17-buildhost-source-kind-discovery.md)
-- **ADR:** [`../../adr/0159-buildhost-source-kind-discovery.md`](../../adr/0159-buildhost-source-kind-discovery.md)
+- **ADR:** [`../../adr/0160-buildhost-source-kind-discovery.md`](../../adr/0160-buildhost-source-kind-discovery.md)
 - **Issue:** #536
 - **Branch:** `feat/buildhost-source-kind-discovery-536` (worktree already created)
 
@@ -280,7 +280,7 @@ reverting the registration.
 
 - Run the **full** `just ci` once (not just focused tests): lint, type (whole tree),
   lint-shell, lint-workflows, check-mermaid, test.
-- Run `python3 scripts/check_adr_status.py` (ADR index in sync — already added 0159).
+- Run `python3 scripts/check_adr_status.py` (ADR index in sync — already added 0160).
 - Confirm `just docs-check` green.
 - Commits stay small and logically scoped (one per task where practical); do not
   squash.

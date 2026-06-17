@@ -34,7 +34,7 @@ class SourceKind(StrEnum):
 
     ``WARM_TREE`` is a bare string (warm-tree / URI provenance); ``GIT`` is a
     ``{"git": {"remote": ..., "ref": ...}}`` object. The string values are the public
-    tokens surfaced on ``build_hosts.list`` and ``runs.profile_examples`` (ADR-0159).
+    tokens surfaced on ``build_hosts.list`` and ``runs.profile_examples`` (ADR-0160).
     """
 
     WARM_TREE = "warm-tree"
@@ -47,7 +47,7 @@ def accepted_source_kinds(host_kind: BuildHostKind) -> tuple[SourceKind, ...]:
     Single source of truth for the ADR-0099 §5 fail-closed matrix: ``LOCAL`` accepts a
     warm-tree string only; ``SSH`` / ``EPHEMERAL_LIBVIRT`` accept a git ref only. Both
     the create/build compatibility check (:func:`check_source_kind_compatibility`) and
-    the ``build_hosts.list`` / ``runs.profile_examples`` discovery surfaces (ADR-0159)
+    the ``build_hosts.list`` / ``runs.profile_examples`` discovery surfaces (ADR-0160)
     derive from this one function, so the advertised lane can never drift from the
     enforced one.
 
