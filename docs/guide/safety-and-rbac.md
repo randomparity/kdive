@@ -22,31 +22,30 @@ maps a denial to `error_category: authorization_denied` on the wire.
 
 Destructive operations are protected at two tiers
 ([ADR-0020](../adr/0020-rbac-audit-gate-implementation.md),
-[ADR-0028](../adr/0028-control-plane-power-force-crash.md)).
+[ADR-0028](../adr/0028-control-plane-power-force-crash.md),
+[ADR-0130](../adr/0130-destructive-gate-per-op-revision.md)).
 
-### The three-factor gate
+### The two-check gate
 
 `control.force_crash`, `control.power` (`off`/`cycle`/`reset`), and
 `systems.reprovision` pass through the full `assert_destructive_allowed` gate,
-which evaluates three independent checks that must all pass (deny-by-default):
+which evaluates two independent checks that must both pass (deny-by-default):
 
-1. **Capability scope** — the operation kind is listed in the allocation's granted
-   `capability_scope.destructive_ops`.
-2. **RBAC role** — `force_crash` and destructive `power` actions require
+1. **RBAC role** — `force_crash` and destructive `power` actions require
    `admin`; `reprovision` requires `operator` (reprovisioning your own granted
    System is iterating, not administering).
-3. **Provisioning-profile opt-in** — the controlling provisioning profile
+2. **Provisioning-profile opt-in** — the controlling provisioning profile
    explicitly opts in to the operation (e.g. `destructive_ops: ["force_crash"]`).
    The default is an empty list; an unmodified profile cannot force-crash.
 
-All three checks are evaluated and any missing check is reported. A denied
+Both checks are evaluated and any missing check is reported. A denied
 attempt is audited with `transition="<op>:denied"`, so a refusal leaves a trail.
 
 ### Admin-only destructive administration
 
 `systems.teardown` enforces a direct `require_role(..., admin)` check: no
-capability-scope or profile-opt-in factor applies. The reversible
-`control.power on` requires only `operator`.
+profile-opt-in factor applies. The reversible `control.power on` requires only
+`operator`.
 
 ## Secrets by reference
 
