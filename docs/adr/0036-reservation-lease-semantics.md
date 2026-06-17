@@ -1,6 +1,6 @@
 # ADR 0036 — Reservation / lease semantics (M1)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** M1 — Allocation/accounting depth (lease/reservation)
 - **Depends on:** [ADR-0007](0007-metering-budgets-admission.md) (the reserved

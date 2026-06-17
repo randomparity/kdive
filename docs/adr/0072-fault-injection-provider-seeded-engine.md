@@ -1,6 +1,6 @@
 # ADR 0072 — Fault-injection provider + seeded decision-keyed fault engine (M1.5)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0071](0071-per-kind-provider-runtime-registry.md)

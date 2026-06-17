@@ -1,6 +1,6 @@
 # ADR 0134 — Chart upgrade correctness: config-checksum rollout + config-default drift
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

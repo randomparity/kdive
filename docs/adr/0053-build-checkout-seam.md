@@ -1,6 +1,6 @@
 # ADR 0053 — Build checkout seam: warm-tree rsync + local config/patch refs
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Deciders:** David Christensen
 - **Depends on:** [ADR-0029](0029-build-plane-local-make.md) (the build plane, the

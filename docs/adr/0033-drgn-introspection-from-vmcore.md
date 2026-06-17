@@ -1,6 +1,6 @@
 # ADR 0033 — Debug plane: drgn introspection from vmcore (offline) (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #22 (M0: Debug plane — drgn introspection from vmcore, offline)
 - **Depends on:** [ADR-0031](0031-retrieve-plane-vmcore-postmortem.md) (the captured raw

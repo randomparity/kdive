@@ -1,6 +1,6 @@
 # ADR 0085 — Generalize the live-drgn transport off the ssh model (`drgn-live`) (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Amends (does not supersede):** [ADR-0039](0039-ssh-transport-live-introspection.md) (the

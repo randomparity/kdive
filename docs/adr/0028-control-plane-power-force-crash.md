@@ -1,6 +1,6 @@
 # ADR 0028 — Control plane: power + force_crash on local libvirt (M0)
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-04
 - **Deciders:** kdive maintainers
 - **Refines:** [ADR-0020](0020-rbac-audit-gate-implementation.md) (destructive-op gate),

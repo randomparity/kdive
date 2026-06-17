@@ -1,6 +1,6 @@
 # ADR 0038 — System reprovision-in-place (M1)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** M1 — Allocation/accounting depth (reprovision-in-place)
 - **Depends on:** [ADR-0025](0025-provisioning-plane-libvirt.md) (the M0 provisioning

@@ -1,6 +1,6 @@
 # ADR 0017 — Object-store client interface & failure contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Deciders:** core-platform
 - **Implements:** issue #8; builds on [0005](0005-postgres-object-store-state.md)

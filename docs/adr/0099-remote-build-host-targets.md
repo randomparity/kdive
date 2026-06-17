@@ -1,6 +1,6 @@
 # ADR 0099 — Remote build-host targets via a `BuildTransport` seam + `build_hosts` inventory
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0029](0029-build-plane-local-make.md)

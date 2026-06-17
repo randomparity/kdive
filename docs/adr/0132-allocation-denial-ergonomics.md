@@ -1,6 +1,6 @@
 # ADR 0132 — Allocation-request denial ergonomics and sizing-source discoverability
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

@@ -1,6 +1,6 @@
 # ADR 0024 — Provisioning-profile model shape (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #15 (M0: Provisioning-profile schema)
 - **Depends on:** [ADR-0011](0011-provisioning-profile-schema.md) (the declarative

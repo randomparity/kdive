@@ -1,6 +1,6 @@
 # ADR 0019 — Uniform tool-response envelope
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Refines:** [0010](0010-fastmcp-framework-auth.md) ("every tool must return
   structured JSON with object id, status, `suggested_next_actions`, and artifact

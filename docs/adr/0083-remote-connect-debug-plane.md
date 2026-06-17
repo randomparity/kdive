@@ -1,6 +1,6 @@
 # ADR 0083 — Remote connect/debug plane: shared gdb-MI/drgn infra + ACL'd direct-TCP gdbstub (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0079](0079-remote-live-debug-transport.md) (the

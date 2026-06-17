@@ -1,6 +1,6 @@
 # ADR 0076 — Independent remote-libvirt provider package + portability diff gate (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0071](0071-per-kind-provider-runtime-registry.md)

@@ -1,6 +1,6 @@
 # ADR 0012 — Secret backend (file-ref for M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Refines:** the spec's "Cross-cutting concerns" (Secrets by reference) and open
   follow-up "Secret backend (file refs for M0; manager integration later)".

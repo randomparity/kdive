@@ -1,6 +1,6 @@
 # ADR 0020 — RBAC roles, audit record, and the destructive-op gate (M0 shapes)
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-03
 - **Deciders:** kdive maintainers
 - **Refines:** [ADR-0006](0006-oidc-rbac-attribution.md) (OIDC/RBAC + attribution)

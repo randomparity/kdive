@@ -1,6 +1,6 @@
 # ADR 0100 — Ephemeral remote-libvirt build VM (`kind='ephemeral_libvirt'`)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0099](0099-remote-build-host-targets.md)

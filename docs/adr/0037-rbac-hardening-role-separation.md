@@ -1,6 +1,6 @@
 # ADR 0037 — RBAC hardening: real operator/admin separation (M1)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** M1 — Allocation/accounting depth (RBAC hardening)
 - **Depends on:** [ADR-0006](0006-oidc-rbac-attribution.md) (the three-role model),

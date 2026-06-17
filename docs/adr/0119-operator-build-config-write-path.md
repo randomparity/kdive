@@ -1,6 +1,6 @@
 # ADR 0119 — Operator write-path for build-config fragments: `buildconfig.set` (#438)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0096](0096-kdump-config-fragment-build-input.md)

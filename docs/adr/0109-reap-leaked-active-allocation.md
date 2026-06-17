@@ -1,6 +1,6 @@
 # ADR 0109 — Reap leaked `active` allocations
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Depends on:** [ADR-0036](0036-reservation-lease-semantics.md) (the `→expired` lease sweep
   this one is the symmetric complement of), [ADR-0007](0007-metering-budgets-admission.md) (the

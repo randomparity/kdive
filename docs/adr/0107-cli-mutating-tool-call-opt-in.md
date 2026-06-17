@@ -1,6 +1,6 @@
 # ADR 0107 — `kdivectl tool call` reaches mutating/destructive tools by explicit opt-in (#368)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0089](0089-operator-cli-mcp-client.md) (the

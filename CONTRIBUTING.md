@@ -82,8 +82,12 @@ mergeable.
 
 ## Architecture decisions and releases
 
-- Architecture decisions are recorded as ADRs under `docs/adr/`. Don't change an
-  accepted decision in place — write a new ADR that supersedes it.
+- Architecture decisions are recorded as ADRs under `docs/adr/`. An ADR opens as
+  **Proposed** and becomes **Accepted** when the PR implementing its decision
+  merges — flip its `Status` line and index row in that same PR. Don't change an
+  accepted decision in place — write a new ADR that supersedes it. See
+  [`docs/adr/README.md`](docs/adr/README.md) for the full lifecycle (including the
+  partial-supersession strikethrough convention).
 - Read [`docs/design/top-level-design.md`](docs/design/top-level-design.md) for
   the authoritative architecture, summarized in [ARCHITECTURE.md](ARCHITECTURE.md).
 - The release process is documented in

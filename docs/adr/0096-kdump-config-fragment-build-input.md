@@ -1,6 +1,6 @@
 # ADR 0096 — Kdump kernel-config fragment as a seeded build-config catalog input
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-11
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0092](0092-image-rootfs-lifecycle.md)

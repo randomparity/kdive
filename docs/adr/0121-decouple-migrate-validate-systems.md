@@ -1,6 +1,6 @@
 # ADR 0121 — Decouple `migrate()` to SQL-only + deploy-time `systems.toml` validation (#440)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0112](0112-systems-inventory-config.md) (the

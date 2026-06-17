@@ -1,6 +1,6 @@
 # ADR 0098 — Envelope project-membership denials as `authorization_denied`
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-12
 - **Deciders:** kdive maintainers
 - **Supersedes (in part):** [ADR-0020](0020-rbac-audit-gate-implementation.md) §4 — "authorization

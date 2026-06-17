@@ -1,6 +1,6 @@
 # ADR 0097 — `not_found` / `conflict` error categories for object lookups (S1)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-12
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0001](0001-greenfield-rewrite.md) (the stable

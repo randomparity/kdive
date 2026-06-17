@@ -1,6 +1,6 @@
 # ADR 0086 — Dead-worker gdbstub reconciler reset (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Amends (does not supersede):** [ADR-0079](0079-remote-live-debug-transport.md) (whose

@@ -1,6 +1,6 @@
 # ADR 0084 — Remote control + two-phase vmcore retrieve (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0078](0078-object-store-in-target-install-seam.md)

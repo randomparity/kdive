@@ -1,6 +1,6 @@
 # ADR 0069 — Reservation / FIFO pending-queue scheduler (M1.4)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Deciders:** platform maintainers
 - **Builds on (does not supersede):** [ADR-0023](0023-discovery-allocation-admission.md)

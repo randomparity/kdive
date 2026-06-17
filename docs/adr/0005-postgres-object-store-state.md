@@ -1,6 +1,6 @@
 # ADR 0005 — Postgres + object store for state; advisory locks replace flock
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Implements core decision:** #5 in [`../specs/top-level-design.md`](../design/top-level-design.md)
 

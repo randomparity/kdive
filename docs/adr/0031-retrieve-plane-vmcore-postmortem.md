@@ -1,6 +1,6 @@
 # ADR 0031 — Retrieve plane: vmcore capture/fetch + crash postmortem (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #24 (M0: Retrieve plane — vmcore capture/fetch + crash postmortem)
 - **Depends on:** [ADR-0028](0028-control-plane-power-force-crash.md) (the `crashed`

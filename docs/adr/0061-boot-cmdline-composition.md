@@ -1,6 +1,6 @@
 # ADR 0061 — Boot cmdline composition: platform-required base + appended debug args
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Supersedes:** ADR-0056 (removed superseded live-demo driver notes; the build-ledger
   cmdline source stands, and its *replace* semantics are replaced by *append* here).

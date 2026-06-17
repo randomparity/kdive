@@ -1,6 +1,6 @@
 # ADR 0080 — Remote provisioning: disk-image base-OS profile, domain-XML gdbstub port registry, storage-pool overlay (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0076](0076-remote-libvirt-provider-package.md) (the

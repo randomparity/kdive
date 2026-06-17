@@ -1,6 +1,6 @@
 # ADR 0039 — SSH transport + live drgn introspection (M1)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** M1 — Allocation/accounting depth (live `introspect.run`)
 - **Depends on:** [ADR-0032](0032-connect-plane-gdbstub-debugsession.md) (the Connect

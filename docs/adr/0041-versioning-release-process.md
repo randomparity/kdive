@@ -1,6 +1,6 @@
 # ADR 0041 — Versioning policy & release process
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Realized by:** [`../superpowers/specs/2026-06-04-versioning-release-process-design.md`](../archive/superpowers/specs/2026-06-04-versioning-release-process-design.md)
   (the implementation surface — `version.py`, `cliff.toml`, the justfile recipes,

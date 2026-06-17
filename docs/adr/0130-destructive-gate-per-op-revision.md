@@ -1,6 +1,6 @@
 # ADR 0130 — destructive gate drops the un-grantable `capability_scope` check
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

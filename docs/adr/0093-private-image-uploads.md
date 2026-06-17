@@ -1,6 +1,6 @@
 # ADR 0093 — Private image uploads: owner-scoped, TTL'd, reconciler-pruned (M2.4)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0092](0092-image-rootfs-lifecycle.md) (the

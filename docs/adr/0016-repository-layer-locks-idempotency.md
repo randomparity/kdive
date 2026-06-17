@@ -1,6 +1,6 @@
 # ADR 0016 — Repository layer, advisory-lock helper, idempotency ledger
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Deciders:** core-platform
 - **Implements:** issue #7; builds on [0005](0005-postgres-object-store-state.md)

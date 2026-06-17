@@ -1,6 +1,6 @@
 # ADR 0054 — Object-store unconditional read for system-produced keys (G2, closes #126)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Issue:** #126 (G2 — install fetch seam), part of #123 (live-seam demo).
 - **Refines:** [ADR-0017 §3](0017-object-store-client-interface.md) (etag consistency

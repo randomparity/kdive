@@ -1,6 +1,6 @@
 # ADR 0065 — Provider component references and profile requirements
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-07
 - **Depends on:** [ADR-0029](0029-build-plane-local-make.md) (local build plane),
   [ADR-0048](0048-external-build-artifact-ingestion.md) (artifact ingestion),

@@ -1,6 +1,6 @@
 # ADR 0045 — Spine driver: out-of-band capability grant + phase-failure naming contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Deciders:** kdive maintainers
 - **Refines:** [ADR-0042](0042-live-stack-e2e-mcp-http.md) §4 (phase-structured spine) and

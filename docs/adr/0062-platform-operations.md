@@ -1,6 +1,6 @@
 # ADR 0062 — Platform operations (M1.3)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Deciders:** platform maintainers
 - **Builds on (does not supersede):** [ADR-0043](0043-platform-scoped-rbac-tier.md) — which

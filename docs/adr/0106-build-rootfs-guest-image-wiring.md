@@ -1,6 +1,6 @@
 # ADR 0106 — `build-rootfs` emits its `KDIVE_GUEST_IMAGE` wiring on stdout
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0092](0092-image-rootfs-lifecycle.md)

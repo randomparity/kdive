@@ -1,6 +1,6 @@
 # ADR 0059 — First-run local-libvirt host registration at reconciler startup
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Depends on:** [ADR-0021](0021-reconciler-loop-drift-repair.md) (the reconciler process this
   hooks), [ADR-0023](0023-discovery-allocation-admission.md) (`register_local_libvirt_resource`, the

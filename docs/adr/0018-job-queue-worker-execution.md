@@ -1,6 +1,6 @@
 # ADR 0018 — Job-queue enqueue/dequeue + worker execution contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Deciders:** core-platform
 - **Implements:** issue #9; refines [0008](0008-async-worker-tier-job-queue.md)

@@ -1,6 +1,6 @@
 # ADR 0104 — Chunked external-build uploads with server-side reassembly
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Depends on:** [ADR-0048](0048-external-build-artifact-ingestion.md) (the external-build
   lane: `create_upload` presigned PUTs, the persisted upload manifest, the synchronous

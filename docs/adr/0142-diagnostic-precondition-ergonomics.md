@@ -1,6 +1,6 @@
 # ADR 0142 — Diagnostic-tool precondition ergonomics
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

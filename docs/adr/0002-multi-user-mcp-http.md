@@ -1,6 +1,6 @@
 # ADR 0002 — Multi-user service over MCP streamable HTTP
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Implements core decision:** #2 in [`../specs/top-level-design.md`](../design/top-level-design.md)
 

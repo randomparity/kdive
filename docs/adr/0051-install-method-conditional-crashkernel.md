@@ -1,6 +1,6 @@
 # ADR 0051 — Install-time capture-method resolution + method-conditional crashkernel gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Depends on:** [ADR-0049](0049-crash-capture-tiers.md) (the provider-agnostic capture-method
   vocabulary, the `crashkernel ⇔ kdump` coupling in Decision 5, and the typed

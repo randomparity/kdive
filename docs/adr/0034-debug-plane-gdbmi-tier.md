@@ -1,6 +1,6 @@
 # ADR 0034 — Debug plane: gdb-MI tier (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #21 (M0: Debug plane: port gdb-MI tier)
 - **Depends on:** [ADR-0032](0032-connect-plane-gdbstub-debugsession.md) (the

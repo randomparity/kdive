@@ -1,6 +1,6 @@
 # ADR 0145 — Console-hosting tolerates a not-yet-migrated schema at startup
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0095](0095-reconciler-remote-console-collector.md)

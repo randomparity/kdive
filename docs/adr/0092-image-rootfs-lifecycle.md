@@ -1,6 +1,6 @@
 # ADR 0092 — Image & rootfs lifecycle: managed subsystem, build-plane port, DB catalog (M2.4)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0052](0052-bootable-rootfs-image-builder.md)

@@ -1,6 +1,6 @@
 # ADR 0118 — Wait-on-resource mechanisms: `allocations.wait`, queue position, derived `retryable` (#430)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0019](0019-tool-response-envelope.md) (the

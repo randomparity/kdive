@@ -1,6 +1,6 @@
 # ADR 0078 — Object-store + presigned-URL in-target install/retrieve seam (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0076](0076-remote-libvirt-provider-package.md) (the

@@ -1,6 +1,6 @@
 # ADR 0023 — Discovery registration & per-host allocation admission (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #14 (M0: Discovery + Allocation (admission))
 - **Depends on:** [ADR-0007](0007-metering-budgets-admission.md) (admission control),

@@ -1,6 +1,6 @@
 # ADR 0055 — Install readiness + kdump-check seam: console classifier, host initrd gate (G4)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Issue:** [#127](https://github.com/randomparity/kdive/issues/127) (gap **G4** of
   [#123](https://github.com/randomparity/kdive/issues/123)).

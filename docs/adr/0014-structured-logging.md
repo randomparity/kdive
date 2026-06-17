@@ -1,6 +1,6 @@
 # ADR 0014 — Structured logging via stdlib `logging` + `contextvars`
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-03
 - **Deciders:** D. Christensen (core platform)
 

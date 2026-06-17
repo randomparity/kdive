@@ -1,6 +1,6 @@
 # ADR 0136 — `runs.build` reachability: sharpen the warm-tree build error + name both lanes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

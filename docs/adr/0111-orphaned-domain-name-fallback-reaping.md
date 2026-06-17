@@ -1,6 +1,6 @@
 # ADR 0111 — Reap name-orphaned libvirt domains via the kdive naming convention
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Depends on:** [ADR-0021](0021-reconciler-loop-drift-repair.md) (the reconciler drift-repair
   loop and its leaked-domain sweep), the provider `InfraReaper` /`OwnedDomain` port

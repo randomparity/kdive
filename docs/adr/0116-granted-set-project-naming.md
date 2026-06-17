@@ -1,6 +1,6 @@
 # ADR 0116 — Name authorized projects in the granted-set accounting report (#426)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0043](0043-platform-scoped-rbac-tier.md)

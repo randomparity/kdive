@@ -1,6 +1,6 @@
 # ADR 0032 — Connect plane (gdbstub) + DebugSession lifecycle (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #20 (M0: Connect plane (gdbstub) + DebugSession lifecycle)
 - **Depends on:** [ADR-0028](0028-control-plane-power-force-crash.md) (the `force_crash`

@@ -1,6 +1,6 @@
 # ADR 0129 — `systems.teardown` requires project admin only
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

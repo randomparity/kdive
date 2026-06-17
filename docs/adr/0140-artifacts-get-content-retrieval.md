@@ -1,6 +1,6 @@
 # ADR-0140: End-to-end artifact retrieval through `artifacts.get` (#485)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-16
 
 ## Context

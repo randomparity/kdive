@@ -1,6 +1,6 @@
 # ADR 0138 — Transport-reset retry contract for long-polls
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

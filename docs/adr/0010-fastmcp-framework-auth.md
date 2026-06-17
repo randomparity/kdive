@@ -1,6 +1,6 @@
 # ADR 0010 — FastMCP server framework + streamable-HTTP auth integration
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Refines:** [0002](0002-multi-user-mcp-http.md) (MCP-HTTP transport + bearer
   model) and the spec's open follow-up "MCP Python server framework and

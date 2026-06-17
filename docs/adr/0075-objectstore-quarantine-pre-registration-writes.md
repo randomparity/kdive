@@ -1,6 +1,6 @@
 # ADR 0075 — Object-store quarantine for pre-registration writes (M1.5)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0073](0073-forced-secret-resolution-redaction.md)
