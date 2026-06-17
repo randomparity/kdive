@@ -7,8 +7,17 @@ import stat
 import subprocess
 from pathlib import Path
 
+import scripts.kdive_set_accounting as acct
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "setup-local-libvirt.sh"
 BASH = shutil.which("bash")
+
+
+def _helper_argv(logged: str) -> list[str]:
+    """Extract the argv the script handed the helper from the stub's `echo "$@"` log."""
+    line = next(line for line in logged.splitlines() if "scripts.kdive_set_accounting" in line)
+    tokens = line.split()
+    return tokens[tokens.index("scripts.kdive_set_accounting") + 1 :]
 
 
 def _stub(bindir: Path, name: str, body: str) -> None:
@@ -61,6 +70,25 @@ def test_audited_path_runs_mcp_helper_not_seed_demo(tmp_path: Path) -> None:
     logged = calllog.read_text()
     assert "kdive_set_accounting" in logged
     assert "seed-demo" not in logged
+
+
+def test_audited_path_emits_argv_the_helper_accepts(tmp_path: Path) -> None:
+    # Close the shell->argparse seam: the exact argv the script emits must parse with the
+    # real helper (the script tests stub python3, so argparse never runs there otherwise).
+    _bindir, env, calllog = _healthy_local(tmp_path)
+    env |= {
+        "KDIVE_SETUP_AUDITED": "1",
+        "KDIVE_MCP_BASE": "http://localhost:8000/mcp",
+        "KDIVE_TOKEN": "T",
+    }
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    ns = acct.parse(_helper_argv(calllog.read_text()))
+    assert ns.base == "http://localhost:8000/mcp"
+    assert ns.project == "demo"
+    assert ns.limit_kcu == "1000000"
+    assert ns.max_alloc == 4
+    assert ns.max_sys == 4
 
 
 def test_audited_path_requires_token(tmp_path: Path) -> None:

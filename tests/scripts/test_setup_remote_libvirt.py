@@ -7,8 +7,17 @@ import stat
 import subprocess
 from pathlib import Path
 
+import scripts.kdive_set_accounting as acct
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "setup-remote-libvirt.sh"
 BASH = shutil.which("bash")
+
+
+def _helper_argv(logged: str) -> list[str]:
+    """Extract the argv the script handed the helper from the stub's `echo "$@"` log."""
+    line = next(line for line in logged.splitlines() if "scripts.kdive_set_accounting" in line)
+    tokens = line.split()
+    return tokens[tokens.index("scripts.kdive_set_accounting") + 1 :]
 
 
 def _stub(bindir: Path, name: str, body: str) -> None:
@@ -56,6 +65,20 @@ def test_onboards_via_mcp_helper(tmp_path: Path) -> None:
     logged = calllog.read_text()
     assert "kdive_set_accounting" in logged
     assert "--base http://127.0.0.1:8000/mcp" in logged
+
+
+def test_emits_argv_the_helper_accepts(tmp_path: Path) -> None:
+    # Close the shell->argparse seam: the exact argv the script emits must parse with the
+    # real helper (the script tests stub python3, so argparse never runs there otherwise).
+    env, calllog = _healthy_remote(tmp_path)
+    result = _run(env, "target.example", "root")
+    assert result.returncode == 0, result.stderr
+    ns = acct.parse(_helper_argv(calllog.read_text()))
+    assert ns.base == "http://127.0.0.1:8000/mcp"
+    assert ns.project == "demo"
+    assert ns.limit_kcu == "1000000"
+    assert ns.max_alloc == 4
+    assert ns.max_sys == 4
 
 
 def test_missing_host_arg_fails(tmp_path: Path) -> None:

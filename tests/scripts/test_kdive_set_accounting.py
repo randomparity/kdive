@@ -51,6 +51,36 @@ def test_build_calls_uses_flat_quota_params_and_defaults() -> None:
     assert dict(calls)["accounting.set_budget"] == {"project": "demo", "limit_kcu": "1000000"}
 
 
+def test_parse_accepts_full_long_form_argv_from_setup_scripts() -> None:
+    # setup-{local,remote}-libvirt.sh emit exactly these long-form flags. A helper-side
+    # rename/removal must break here rather than at an operator's first run, where it would
+    # surface as "unrecognized arguments" (exit 2) and re-create the quota_exceeded dead-end.
+    ns = acct.parse(
+        [
+            "--base",
+            "http://h/mcp",
+            "--project",
+            "demo",
+            "--limit-kcu",
+            "1000000",
+            "--max-concurrent-allocations",
+            "4",
+            "--max-concurrent-systems",
+            "4",
+        ]
+    )
+    assert ns.base == "http://h/mcp"
+    assert ns.project == "demo"
+    assert ns.limit_kcu == "1000000"
+    assert ns.max_alloc == 4
+    assert ns.max_sys == 4
+    assert [n for n, _ in acct.build_calls(ns)] == [
+        "accounting.set_quota",
+        "accounting.set_budget",
+        "accounting.usage_project",
+    ]
+
+
 def test_run_invokes_three_tools_with_bearer(monkeypatch) -> None:
     _FakeClient.calls = []
     monkeypatch.setattr(acct, "Client", _FakeClient)
