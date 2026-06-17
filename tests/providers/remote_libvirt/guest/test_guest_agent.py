@@ -25,7 +25,7 @@ _ALLOWED = frozenset({"/usr/bin/curl", "/usr/bin/kdive-install"})
 
 # libvirt error codes that name a deterministic, non-retryable guest-agent condition
 # (agent not configured / permission denied / unsupported); subcategorized to
-# CONFIGURATION_ERROR at the raise site (ADR-0158, #531).
+# CONFIGURATION_ERROR at the raise site (ADR-0159, #531).
 _DETERMINISTIC_CODES = (
     libvirt.VIR_ERR_ARGUMENT_UNSUPPORTED,
     libvirt.VIR_ERR_ACCESS_DENIED,
@@ -161,7 +161,7 @@ def test_agent_unreachable_maps_to_transport_failure() -> None:
 def test_deterministic_libvirt_error_maps_to_configuration_error(code: int) -> None:
     # An agent that is not configured, denies the command, or cannot run it is a permanent
     # build-host condition; classify it CONFIGURATION_ERROR (retryable=false) so an agent does
-    # not burn retry cycles on a failure that can never clear (#531, ADR-0158).
+    # not burn retry cycles on a failure that can never clear (#531, ADR-0159).
     with pytest.raises(CategorizedError) as excinfo:
         _exec_raising(libvirt_error(code)).run(object(), ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
