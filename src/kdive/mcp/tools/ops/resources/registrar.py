@@ -57,6 +57,7 @@ def _register_resources_register_remote_libvirt(app: FastMCP, pool: AsyncConnect
             Field(description="Remote-libvirt runtime resource registration request."),
         ],
     ) -> ToolResponse:
+        """Register a remote-libvirt runtime resource."""
         return await register_remote_libvirt_resource(pool, current_context(), request)
 
 
@@ -72,6 +73,7 @@ def _register_resources_register_local_libvirt(app: FastMCP, pool: AsyncConnecti
             Field(description="Local-libvirt runtime resource registration request."),
         ],
     ) -> ToolResponse:
+        """Register a local-libvirt runtime resource."""
         return await register_local_libvirt_resource(pool, current_context(), request)
 
 
@@ -87,6 +89,7 @@ def _register_resources_register_fault_inject(app: FastMCP, pool: AsyncConnectio
             Field(description="Fault-inject runtime resource registration request."),
         ],
     ) -> ToolResponse:
+        """Register a fault-inject runtime resource."""
         return await register_fault_inject_resource(pool, current_context(), request)
 
 
@@ -106,6 +109,7 @@ def _register_resources_deregister(app: FastMCP, pool: AsyncConnectionPool) -> N
             ),
         ] = False,
     ) -> ToolResponse:
+        """Deregister a runtime resource."""
         return await deregister_resource(
             pool, current_context(), resource_id=resource_id, force=force
         )
@@ -118,6 +122,7 @@ def _register_resources_renew(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="The runtime Resource UUID whose lease to renew.")
         ],
     ) -> ToolResponse:
+        """Renew a runtime resource lease."""
         return await renew_resource(pool, current_context(), resource_id=resource_id)
 
 

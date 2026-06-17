@@ -78,4 +78,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def images_list() -> ToolResponse:
+        """List published image catalog entries."""
         return await list_images(pool, current_context())

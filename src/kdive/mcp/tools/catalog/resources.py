@@ -132,6 +132,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Filter by resource kind (e.g. 'local-libvirt'); omit for all."),
         ] = None,
     ) -> ToolResponse:
+        """List runtime resources visible to the caller."""
         return await list_resources_tool(pool, current_context(), kind=kind)
 
     @app.tool(
@@ -142,4 +143,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def resources_describe(
         resource_id: Annotated[str, Field(description="The Resource UUID to describe.")],
     ) -> ToolResponse:
+        """Return one runtime resource visible to the caller."""
         return await describe_resource(pool, current_context(), resource_id)

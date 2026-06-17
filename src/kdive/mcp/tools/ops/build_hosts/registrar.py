@@ -59,6 +59,7 @@ def _register_build_hosts_register_ssh(app: FastMCP, pool: AsyncConnectionPool) 
             Field(description="SSH build-host registration request."),
         ],
     ) -> ToolResponse:
+        """Register an SSH build host."""
         return await register_ssh_build_host(pool, current_context(), request)
 
 
@@ -76,12 +77,14 @@ def _register_build_hosts_register_ephemeral_libvirt(
             Field(description="Ephemeral-libvirt build-host registration request."),
         ],
     ) -> ToolResponse:
+        """Register an ephemeral-libvirt build host."""
         return await register_ephemeral_libvirt_build_host(pool, current_context(), request)
 
 
 def _register_build_hosts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=LIST_TOOL, annotations=_docmeta.read_only(), meta={"maturity": "implemented"})
     async def build_hosts_list() -> ToolResponse:
+        """List registered build hosts."""
         return await list_build_hosts(pool, current_context())
 
 
@@ -90,6 +93,7 @@ def _register_build_hosts_disable(app: FastMCP, pool: AsyncConnectionPool) -> No
     async def build_hosts_disable(
         name: Annotated[str, Field(description="The build host name to disable.")],
     ) -> ToolResponse:
+        """Disable a registered build host."""
         return await disable_build_host(pool, current_context(), name=name)
 
 
@@ -98,6 +102,7 @@ def _register_build_hosts_remove(app: FastMCP, pool: AsyncConnectionPool) -> Non
     async def build_hosts_remove(
         name: Annotated[str, Field(description="The build host name to remove.")],
     ) -> ToolResponse:
+        """Remove a registered build host."""
         return await remove_build_host(pool, current_context(), name=name)
 
 

@@ -625,6 +625,7 @@ def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> No
             Field(description="Optional external tracker refs (each with tracker, id, url)."),
         ] = None,
     ) -> ToolResponse:
+        """Open an investigation."""
         return await open_investigation(
             pool,
             current_context(),
@@ -644,6 +645,7 @@ def _register_investigations_get(app: FastMCP, pool: AsyncConnectionPool) -> Non
     async def investigations_get(
         investigation_id: Annotated[str, Field(description="The Investigation to render.")],
     ) -> ToolResponse:
+        """Return one investigation."""
         return await get_investigation(pool, current_context(), investigation_id)
 
 
@@ -658,6 +660,7 @@ def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> N
             str, Field(description="The Investigation to drive to closed.")
         ],
     ) -> ToolResponse:
+        """Close an investigation."""
         return await close_investigation(pool, current_context(), investigation_id)
 
 
@@ -674,6 +677,7 @@ def _register_investigations_link(app: FastMCP, pool: AsyncConnectionPool) -> No
             Field(description="External ref to upsert, with tracker, id, and url."),
         ],
     ) -> ToolResponse:
+        """Link a run to an investigation."""
         return await link_external_ref(pool, current_context(), investigation_id, ref)
 
 
@@ -692,6 +696,7 @@ def _register_investigations_unlink(app: FastMCP, pool: AsyncConnectionPool) -> 
             Field(description="Ref to remove; only tracker and id are used as the key."),
         ],
     ) -> ToolResponse:
+        """Unlink a run from an investigation."""
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)
 
 

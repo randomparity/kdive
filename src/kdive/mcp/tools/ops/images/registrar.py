@@ -91,6 +91,7 @@ def _register_images_build(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Public image build request."),
         ],
     ) -> ToolResponse:
+        """Enqueue an image build job."""
         return await build(pool, current_context(), payload=request.to_payload())
 
 
@@ -102,6 +103,7 @@ def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Public image publish request."),
         ],
     ) -> ToolResponse:
+        """Publish a built image into the catalog."""
         return await publish(pool, current_context(), payload=request.to_payload())
 
 
@@ -115,6 +117,7 @@ def _register_images_upload(
             Field(description="Private image upload registration request."),
         ],
     ) -> ToolResponse:
+        """Create an image upload request."""
         return await upload(pool, current_context(), upload_store, request)
 
 
@@ -125,6 +128,7 @@ def _register_images_delete(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def images_delete(
         image_id: Annotated[str, Field(description="The private catalog image to delete.")],
     ) -> ToolResponse:
+        """Delete an image catalog entry."""
         return await delete(pool, current_context(), image_id=image_id)
 
 
@@ -137,6 +141,7 @@ def _register_images_prune_expired(
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
+        """Prune expired image catalog entries."""
         if image_store is None:
             return _config_error(PRUNE_OBJECT_ID)
         return await prune_expired(pool, current_context(), reason=reason, image_store=image_store)
@@ -153,6 +158,7 @@ def _register_images_extend(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
+        """Extend an image catalog entry lease."""
         return await extend(
             pool, current_context(), image_id=image_id, seconds=seconds, reason=reason
         )

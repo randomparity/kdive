@@ -64,6 +64,7 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
     async def runs_get(
         run_id: Annotated[str, Field(description="The Run to render.")],
     ) -> ToolResponse:
+        """Return one run."""
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 
 
@@ -109,6 +110,7 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
+        """Create a run under a system."""
         request = _RunCreateRequest(
             investigation_id=investigation_id,
             system_id=system_id,
@@ -138,6 +140,7 @@ def _register_runs_build(
             ),
         ] = None,
     ) -> ToolResponse:
+        """Enqueue a kernel build for a run."""
         return await with_runtime_for_run(
             pool,
             resolver,
@@ -177,6 +180,7 @@ def _register_runs_complete_build(
             ),
         ] = None,
     ) -> ToolResponse:
+        """Complete an externally built run."""
         return await with_runtime_for_run(
             pool,
             resolver,
@@ -196,6 +200,7 @@ def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def runs_install(
         run_id: Annotated[str, Field(description="The Run whose built kernel to install.")],
     ) -> ToolResponse:
+        """Install a built run onto its system."""
         return await _install_run(pool, current_context(), run_id)
 
 
@@ -208,4 +213,5 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def runs_boot(
         run_id: Annotated[str, Field(description="The Run whose installed kernel to boot.")],
     ) -> ToolResponse:
+        """Boot an installed run."""
         return await _boot_run(pool, current_context(), run_id)

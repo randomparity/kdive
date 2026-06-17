@@ -244,6 +244,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def shapes_list() -> ToolResponse:
+        """List system shapes."""
         return await list_shapes(pool, current_context())
 
     @app.tool(
@@ -265,6 +266,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
+        """Create or update a system shape."""
         return await set_shape(
             pool,
             current_context(),
@@ -285,4 +287,5 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def shapes_delete(
         name: Annotated[str, Field(description="Shape name to remove.")],
     ) -> ToolResponse:
+        """Delete a system shape."""
         return await delete_shape(pool, current_context(), name=name)
