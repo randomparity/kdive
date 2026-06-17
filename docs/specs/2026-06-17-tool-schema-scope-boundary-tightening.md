@@ -70,18 +70,26 @@ two sentences each, each naming the alternative tool:
 ### Guard tests (extend `tests/mcp/core/test_tool_docs.py`)
 
 - `test_systems_list_state_filter_is_enum_constrained`: the `state` param schema
-  exposes exactly the `SystemState` values; `shape` and `pcie` expose no `enum`
+  exposes exactly the `SystemState` values (read from the `enum` branch of the
+  rendered `anyOf`); `shape` and `pcie` expose no `enum` anywhere in their schema
   (plain string), pinning the open-vs-closed decision.
 - `test_confusable_systems_tools_name_their_alternative`: each of the four
-  descriptions contains the alternative tool name (substring assertion, mirroring
-  `test_run_cmdline_docs_describe_debug_args_only`).
+  descriptions names its specific alternative tool **and** carries a
+  negative-guidance cue. To avoid a vacuous substring match — `systems.provision` is
+  a prefix of `systems.provision_defined`, so a bare `"systems.provision" in desc`
+  would be satisfied by a `provision_defined` mention — the assertion matches the
+  alternative on a token boundary (regex `\bsystems\.provision\b(?!_)`, i.e. the tool
+  name not immediately followed by `_`), not a plain substring. It also asserts each
+  description contains a negative-guidance token (one of `not`, `instead`, `rather`)
+  so the "when not to use" intent is actually measured, not assumed.
 
 ## Acceptance criteria
 
 - `systems.list`'s `state` filter rejects an invalid value at the schema layer (enum in
   the advertised input schema); `shape` / `pcie` remain bare strings.
-- The four confusable `systems.*` tool descriptions state when not to use them and name
-  the alternative.
+- The four confusable `systems.*` tool descriptions name their specific alternative tool
+  (token-precise) and carry a negative-guidance cue stating when not to use them; the
+  guard measures both, not just inspection.
 - `test_tool_docs` guards both and the full `just ci` suite is green.
 
 ## Verification
