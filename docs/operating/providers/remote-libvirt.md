@@ -3,6 +3,8 @@
 The remote-libvirt provider drives QEMU/KVM guests on a separate target host over a
 TLS-secured libvirt connection, so the worker and the guests run on different machines.
 
+> Setting up from scratch? See the [remote-libvirt walkthrough](remote-libvirt-walkthrough.md).
+
 ## What it needs
 
 - **TLS PKI.** libvirt's TLS transport authenticates both ends with X.509 certificates. The
