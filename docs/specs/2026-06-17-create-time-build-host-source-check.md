@@ -71,8 +71,20 @@ def check_source_kind_compatibility(
   path and the build path resolve the name identically (`profile.build_host or
   "worker-local"`) but hold it in different locals.
 - The error messages and `category`/`details` are byte-identical to today's inline
-  checks, so the build-time behavior is unchanged and the create-time rejection is
-  indistinguishable from a (now-unreachable in normal flow) build-time rejection.
+  checks, so the build-time behavior is unchanged. For an **enabled, reachable** host
+  the create-time rejection is byte-identical to the (now usually unreachable)
+  build-time rejection. For a **disabled or unreachable** host the two diverge by
+  design: the build path checks availability *first*
+  (`build_host_selection.py:70` → "build host '<name>' is not available") and only
+  then compatibility, whereas the create path deliberately skips availability (it is
+  mutable between create and build) and reports the compatibility mismatch. Both
+  failures share the `configuration_error` category — only the `detail` string and
+  `details` keys differ. This divergence is an accepted consequence: create rejects
+  the one thing that is wrong *regardless of when the run is built* (the pairing),
+  and a host that is disabled now may be re-enabled before build, so availability is
+  not create's to assert. An operator who sees a clean `runs.create` followed by a
+  "not available" `runs.build` is seeing the host's availability change between the
+  two vantages — the intended division of labor, not a regression.
 - `resolve_and_admit` replaces its inline `if host.kind ...` block with a call to
   this helper, computing `is_git = is_git_source(parsed_profile)` as before. No
   behavior change at build time; the build-time check remains the defense-in-depth
@@ -80,9 +92,23 @@ def check_source_kind_compatibility(
 
 ### The create-time call site (`mcp/tools/lifecycle/runs/create.py`)
 
-After the three unconditional preconditions pass and before the Run is inserted
-(inside `_create_locked`, under the held ALLOCATION/SYSTEM/INVESTIGATION locks), the
-create path:
+`_create_locked` runs, in order under the held ALLOCATION/SYSTEM/INVESTIGATION
+locks: (a) the three unconditional preconditions (`_preconditions_block_response`:
+System reachable, allocation live, single project, one-run-per-System), (b) the
+optional reuse-requirement snapshot assertion (`_assertion_block_response`), (c) the
+`INVESTIGATION_OPEN_FOR_RUN` state check, then (d) `_insert_run`. The compatibility
+check is inserted **between (c) and (d)** — after the investigation-state check and
+immediately before `_insert_run`. This placement is load-bearing:
+
+- It runs **after** every existing precondition and assertion, so a stale/conflicting
+  System (`transport_conflict`), an unmet reuse requirement, or a non-open
+  investigation each surfaces its own error first; the compatibility error never
+  pre-empts or leaks past a more fundamental block.
+- It runs **before** `_insert_run`, so a mismatch inserts no Run and performs no audit
+  write or investigation flip (those happen in `_insert_run` /
+  `_flip_investigation_if_open`).
+
+At that point the create path:
 
 1. Skips the check entirely when the parsed profile is **not** a server-build
    profile (external-build lane has no `kernel_source_ref` and no `build_host`).
@@ -96,10 +122,6 @@ create path:
    build-time concerns — they are mutable and time-of-build is the correct vantage.)
 4. If the host exists, calls `check_source_kind_compatibility(...)`. A mismatch
    returns the identical `configuration_error` envelope and inserts **no** run.
-
-The check runs after the live-run precondition so an already-occupied System still
-returns its `transport_conflict` first (precondition order is load-bearing — a stale
-System must not leak a compatibility error before its own block fires).
 
 `runs.create` already imports nothing from `build_host_selection`; it gains an import
 of the new helper and of `get_by_name`/`BuildHostKind`.
@@ -125,6 +147,15 @@ of the new helper and of `get_by_name`/`BuildHostKind`.
   against an `ssh` host with a git ref, then the host's kind flipped to `local`
   before build) — `runs.build` returns the same `configuration_error`, no job
   enqueued.
+- **Precondition order preserved:** a System that already has a live run, paired with
+  an incompatible profile, returns `transport_conflict` (the live-run block), **not**
+  the compatibility error — the compatibility check runs after every existing
+  precondition/assertion.
+- **Disabled-host divergence is intended:** an incompatible profile against a
+  disabled/unreachable host returns the **compatibility** `configuration_error` at
+  create (availability is not asserted at create), while build returns the
+  **availability** `configuration_error` ("not available"). Both are
+  `configuration_error`; the detail strings differ by design.
 - **Single rule:** the compatibility matrix and its two error strings are defined
   once (`check_source_kind_compatibility`) and both call sites invoke it.
 
