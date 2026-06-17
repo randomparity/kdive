@@ -2,7 +2,7 @@
 
 - **Status:** Draft
 - **Date:** 2026-06-17
-- **ADR:** [0157](../adr/0157-guest-agent-deterministic-failure-classification.md)
+- **ADR:** [0158](../adr/0158-guest-agent-deterministic-failure-classification.md)
 - **Issue:** [#531](https://github.com/randomparity/kdive/issues/531)
 
 ## Problem
@@ -36,7 +36,7 @@ permission denied) is therefore indistinguishable from a transient channel drop.
 
 ## Design
 
-See ADR-0157 for the decision and rejected alternatives. In summary:
+See ADR-0158 for the decision and rejected alternatives. In summary:
 
 1. **Classify by `get_error_code()` at the `_agent` raise site.** The existing
    `except libvirt.libvirtError as exc` branch reads `exc.get_error_code()` and routes:
