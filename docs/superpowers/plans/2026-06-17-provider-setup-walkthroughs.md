@@ -20,6 +20,7 @@
 - MCP endpoint base URL **must end in `/mcp`** (FastMCP serves there; a bare host 307s).
 - Docs: link-don't-restate; every relative link must resolve (`scripts/check-doc-links.sh`); any `docs/<path>` token in a script/doc must point at a real file (`scripts/check-doc-paths.sh`).
 - Local-libvirt deployment = KDIVE app processes as **host services** (`deploy/systemd/`) where the worker has native `/dev/kvm` + libvirt; **not** the app-tier-only docker-compose worker. Remote-libvirt = Helm/k8s control plane driving a separate TLS target host.
+- **Interpreter:** `kdive` and `fastmcp` live in the project venv (the systemd unit runs `/opt/kdive/.venv/bin/python`), not the system `python3`. Scripts select the interpreter via `PY="${KDIVE_PYTHON:-python3}"` and run the `scripts.*` helper from the repo root (`REPO_ROOT="$(dirname "${SCRIPT_DIR}")"`) so the package resolves. Run the setup scripts from the repo checkout with the venv active, or set `KDIVE_PYTHON=/opt/kdive/.venv/bin/python`.
 
 ---
 
@@ -44,7 +45,6 @@ A standalone fastmcp client that onboards a project through the audited admin to
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from typing import Any
 
 import scripts.kdive_set_accounting as acct
@@ -64,7 +64,7 @@ class _FakeClient:
     def __init__(self, transport: Any) -> None:
         self.transport = transport
 
-    async def __aenter__(self) -> "_FakeClient":
+    async def __aenter__(self) -> _FakeClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -263,7 +263,9 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     kvm.write_text("")
     calllog = tmp_path / "python.log"
     _stub(bindir, "python3", f'echo "$@" >> "{calllog}"\nexit 0')
-    env = {"PATH": str(bindir), "HOME": str(tmp_path), "KDIVE_KVM_NODE": str(kvm)}
+    # Stub bin first so it shadows real python3/virsh/etc.; system bins follow so the
+    # scripts' `dirname` (and other coreutils) resolve.
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "KDIVE_KVM_NODE": str(kvm)}
     return bindir, env, calllog
 
 
@@ -299,10 +301,9 @@ def test_preflight_failure_aborts(tmp_path: Path) -> None:
     _stub(bindir, "id", "echo kvm libvirt")
     _stub(bindir, "qemu-system-x86_64", "exit 0")
     _stub(bindir, "qemu-img", "exit 0")
-    _stub(bindir, "python3", "exit 0")
     calllog = tmp_path / "python.log"
     _stub(bindir, "python3", f'echo "$@" >> "{calllog}"\nexit 0')
-    env = {"PATH": str(bindir), "HOME": str(tmp_path),
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path),
            "KDIVE_KVM_NODE": str(tmp_path / "absent")}  # unreadable -> preflight fails
     result = _run(env)
     assert result.returncode != 0
@@ -337,7 +338,11 @@ Expected: FAIL — script does not exist (bash exits non-zero / no such file).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
+# kdive/fastmcp live in the project venv, not the system python3. Override with KDIVE_PYTHON
+# (e.g. /opt/kdive/.venv/bin/python) on a host-services deployment.
+readonly PY="${KDIVE_PYTHON:-python3}"
 readonly PROJECT="${KDIVE_PROJECT:-demo}"
 readonly LIMIT_KCU="${KDIVE_LIMIT_KCU:-1000000}"
 readonly MAX_ALLOC="${KDIVE_MAX_ALLOC:-4}"
@@ -348,17 +353,17 @@ main() {
 
   if [[ "${KDIVE_SETUP_AUDITED:-0}" == "1" ]]; then
     : "${KDIVE_MCP_BASE:?set KDIVE_MCP_BASE (…/mcp) for the audited path}"
-    python3 -m scripts.kdive_set_accounting \
+    (cd "${REPO_ROOT}" && "${PY}" -m scripts.kdive_set_accounting \
       --base "${KDIVE_MCP_BASE}" \
       --project "${PROJECT}" \
       --limit-kcu "${LIMIT_KCU}" \
       --max-concurrent-allocations "${MAX_ALLOC}" \
-      --max-concurrent-systems "${MAX_SYS}"
+      --max-concurrent-systems "${MAX_SYS}")
     printf "onboarded project %s via audited admin tools\n" "${PROJECT}"
     return 0
   fi
 
-  python3 -m kdive seed-demo \
+  "${PY}" -m kdive seed-demo \
     --project "${PROJECT}" \
     --limit-kcu "${LIMIT_KCU}" \
     --max-concurrent-allocations "${MAX_ALLOC}" \
@@ -454,7 +459,8 @@ def _healthy_remote(tmp_path: Path) -> tuple[dict[str, str], Path]:
     helpers.mkdir()
     (helpers / "kdive-agent").write_text("x")
     env = {
-        "PATH": str(bindir),
+        # Stub bin first (shadows ssh/virsh/python3); system bins follow so `dirname` resolves.
+        "PATH": f"{bindir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
         "KDIVE_REMOTE_PKI_DIR": str(pki),
         "KDIVE_GUEST_HELPERS_DIR": str(helpers),
@@ -517,7 +523,11 @@ Expected: FAIL — script does not exist.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
+# fastmcp lives in the project venv, not the system python3. Override with KDIVE_PYTHON
+# (e.g. /opt/kdive/.venv/bin/python) if you are not running inside the venv.
+readonly PY="${KDIVE_PYTHON:-python3}"
 readonly PROJECT="${KDIVE_PROJECT:-demo}"
 readonly LIMIT_KCU="${KDIVE_LIMIT_KCU:-1000000}"
 readonly MAX_ALLOC="${KDIVE_MAX_ALLOC:-4}"
@@ -541,12 +551,12 @@ main() {
     token="$("${SCRIPT_DIR}/demo-token.sh")"
   fi
 
-  KDIVE_TOKEN="${token}" python3 -m scripts.kdive_set_accounting \
+  (cd "${REPO_ROOT}" && KDIVE_TOKEN="${token}" "${PY}" -m scripts.kdive_set_accounting \
     --base "${KDIVE_MCP_BASE}" \
     --project "${PROJECT}" \
     --limit-kcu "${LIMIT_KCU}" \
     --max-concurrent-allocations "${MAX_ALLOC}" \
-    --max-concurrent-systems "${MAX_SYS}"
+    --max-concurrent-systems "${MAX_SYS}")
   printf "onboarded project %s via audited admin tools\n" "${PROJECT}"
 }
 
@@ -584,6 +594,93 @@ Expected: no findings, no diff.
 ```bash
 git add scripts/setup-remote-libvirt.sh tests/scripts/test_setup_remote_libvirt.py justfile
 git commit -m "feat(scripts): remote-libvirt onboarding wrapper for #497"
+```
+
+---
+
+### Task 3b: Catalogue the new env vars and regenerate the config reference
+
+The setup scripts introduce seven new `KDIVE_*` tokens. The repo guard `scripts/check_env_documented.py` sweeps `src/ tests/ scripts/ deploy/` and fails on any `KDIVE_*` that is neither a registry setting nor catalogued in `kdive.config.external_env`; that guard runs in the full suite (`tests/scripts/test_check_env_documented.py`). The catalogue also feeds `scripts/gen_config_reference.py`, and `just config-docs-check` fails if `docs/guide/reference/config.md` is stale. This task closes both gates.
+
+**Files:**
+- Modify: `src/kdive/config/external_env.py` (append to `EXTERNAL_ENV_VARS`)
+- Modify: `docs/guide/reference/config.md` (regenerated, not hand-edited)
+
+**Interfaces:**
+- Consumes: the `ExternalEnvVar(name, category, default, help)` dataclass already defined in `external_env.py`.
+- Produces: catalogue coverage for `KDIVE_PYTHON`, `KDIVE_SETUP_AUDITED`, `KDIVE_MCP_BASE`, `KDIVE_PROJECT`, `KDIVE_LIMIT_KCU`, `KDIVE_MAX_ALLOC`, `KDIVE_MAX_SYS`.
+
+- [ ] **Step 1: Show the guard fails first**
+
+Run: `uv run python scripts/check_env_documented.py`
+Expected: FAIL — lists the seven new tokens as undocumented (run this after Tasks 2–3 have added the scripts).
+
+- [ ] **Step 2: Append the catalogue entries**
+
+In `src/kdive/config/external_env.py`, add to the `EXTERNAL_ENV_VARS` tuple, in the `# --- operator shell scripts ---` block:
+
+```python
+    ExternalEnvVar(
+        "KDIVE_PYTHON",
+        "script",
+        "python3",
+        "Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, "
+        "e.g. /opt/kdive/.venv/bin/python, when not running inside the venv).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SETUP_AUDITED",
+        "script",
+        "0",
+        "When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of "
+        "seed-demo (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_MCP_BASE",
+        "script",
+        None,
+        "Server MCP endpoint (must end in /mcp) the setup-*-libvirt.sh onboarding calls target.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_PROJECT",
+        "script",
+        "demo",
+        "Project the setup-*-libvirt.sh scripts onboard.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIMIT_KCU",
+        "script",
+        "1000000",
+        "Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_MAX_ALLOC",
+        "script",
+        "4",
+        "max_concurrent_allocations quota the setup-*-libvirt.sh scripts set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_MAX_SYS",
+        "script",
+        "4",
+        "max_concurrent_systems quota the setup-*-libvirt.sh scripts set.",
+    ),
+```
+
+- [ ] **Step 3: Verify the env guard passes**
+
+Run: `uv run python scripts/check_env_documented.py`
+Expected: exit 0, no undocumented tokens.
+
+- [ ] **Step 4: Regenerate the config reference and confirm it is current**
+
+Run: `uv run python scripts/gen_config_reference.py && just config-docs-check`
+Expected: `config.md` updated with the seven new variables; `config-docs-check` passes (no diff).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/kdive/config/external_env.py docs/guide/reference/config.md
+git commit -m "feat(config): catalogue setup-script env vars for #497"
 ```
 
 ---
@@ -640,7 +737,9 @@ for the package-on-host layout.
 ## 3. Onboard the project
 
 A fresh database has no quota or budget, so the first `allocations.request` would dead-end on
-`quota_exceeded`. Seed the demo project's budget and quota:
+`quota_exceeded`. Seed the demo project's budget and quota. Run this from the repo checkout
+with the project venv active (or set `KDIVE_PYTHON=/opt/kdive/.venv/bin/python`), so `kdive`
+resolves:
 
 ```bash
 just setup-local-libvirt
@@ -648,11 +747,15 @@ just setup-local-libvirt
 
 By default this runs `python -m kdive seed-demo`, which writes the budget/quota rows with no
 token. To onboard through the audited, role-gated admin tools instead (the production-style
-path — it needs an OIDC issuer configured to assert the project-`admin` claims and a
-`KDIVE_TOKEN`), run:
+path), set `KDIVE_SETUP_AUDITED=1` and supply a project-`admin` token in `KDIVE_TOKEN` — this
+path needs an OIDC issuer configured to assert the project-`admin` claims, and the local
+script does **not** mint a token for you (unlike the remote one):
 
 ```bash
-KDIVE_SETUP_AUDITED=1 KDIVE_MCP_BASE=http://localhost:8000/mcp just setup-local-libvirt
+KDIVE_SETUP_AUDITED=1 \
+  KDIVE_MCP_BASE=http://localhost:8000/mcp \
+  KDIVE_TOKEN="$(your-issuer-mint-command)" \
+  just setup-local-libvirt
 ```
 
 See [Project onboarding](../project-onboarding.md) for the audited-onboarding rationale and
@@ -675,7 +778,7 @@ build→boot→debug steps and the canonical dcache `dhash_entries` verification
 
 - [ ] **Step 2: Add the pointer to the reference doc**
 
-In `docs/operating/providers/local-libvirt.md`, after the opening paragraph (after line 5, before `## What it needs`), add:
+In `docs/operating/providers/local-libvirt.md`, insert the following as its own paragraph between the opening paragraph and `## What it needs`, with a blank line both before and after it:
 
 ```markdown
 > Setting up from scratch? See the [local-libvirt walkthrough](local-libvirt-walkthrough.md).
@@ -683,7 +786,7 @@ In `docs/operating/providers/local-libvirt.md`, after the opening paragraph (aft
 
 - [ ] **Step 3: Add the index row**
 
-In `docs/operating/index.md`, in the Providers table, add a row immediately after the `Local libvirt` row:
+In `docs/operating/index.md`, in the Providers table, add this as a new table row directly below the existing `Local libvirt` row — no blank line between rows (a blank line splits the table):
 
 ```markdown
 | [Local libvirt walkthrough](providers/local-libvirt-walkthrough.md) | End-to-end local-libvirt setup: prepare, install, onboard, test |
@@ -758,6 +861,9 @@ dead-ends on `quota_exceeded` (this is issue #497). Onboard the demo project thr
 audited admin tools. The in-cluster server is ClusterIP-only, so port-forward its MCP
 endpoint first:
 
+Run this from the repo checkout with the project venv active (or set
+`KDIVE_PYTHON=/opt/kdive/.venv/bin/python`), so `fastmcp` resolves:
+
 ```bash
 kubectl port-forward -n kdive-demo svc/kdive-kdive-server 8000:8000 &
 export KDIVE_MCP_BASE=http://127.0.0.1:8000/mcp
@@ -787,7 +893,7 @@ System via `provision`.
 
 - [ ] **Step 2: Add the pointer to the reference doc**
 
-In `docs/operating/providers/remote-libvirt.md`, after the opening paragraph (after line 4, before `## What it needs`), add:
+In `docs/operating/providers/remote-libvirt.md`, insert the following as its own paragraph between the opening paragraph and `## What it needs`, with a blank line both before and after it:
 
 ```markdown
 > Setting up from scratch? See the [remote-libvirt walkthrough](remote-libvirt-walkthrough.md).
@@ -795,7 +901,7 @@ In `docs/operating/providers/remote-libvirt.md`, after the opening paragraph (af
 
 - [ ] **Step 3: Add the index row**
 
-In `docs/operating/index.md`, in the Providers table, add a row immediately after the `Remote libvirt` row:
+In `docs/operating/index.md`, in the Providers table, add this as a new table row directly below the existing `Remote libvirt` row — no blank line between rows (a blank line splits the table):
 
 ```markdown
 | [Remote libvirt walkthrough](providers/remote-libvirt-walkthrough.md) | End-to-end remote-libvirt setup: prepare, install, onboard, test |
@@ -820,6 +926,8 @@ git commit -m "docs: remote-libvirt setup walkthrough for #497"
 - [ ] Run the full new-file test set: `uv run pytest tests/scripts/test_kdive_set_accounting.py tests/scripts/test_setup_local_libvirt.py tests/scripts/test_setup_remote_libvirt.py -q` — all pass.
 - [ ] Run `shellcheck scripts/setup-local-libvirt.sh scripts/setup-remote-libvirt.sh` and `shfmt -i 2 -d scripts/setup-*-libvirt.sh` — clean.
 - [ ] Run `uv run ruff check scripts/ tests/scripts/ && uv run ty check scripts/kdive_set_accounting.py` — clean.
+- [ ] Run `uv run python scripts/check_env_documented.py` — exit 0 (the seven new `KDIVE_*` tokens are catalogued, Task 3b).
+- [ ] Run `just config-docs-check` — passes (the regenerated `config.md` matches the committed copy).
 - [ ] Run `./scripts/check-doc-links.sh && ./scripts/check-doc-paths.sh` — exit 0.
 - [ ] Run the full suite once before pushing (boundary/arch tests live outside touched dirs): `just test` (or `uv run pytest -q`).
 - [ ] **Manual acceptance (per the spec's Verification):** on a live local host deployment, `just setup-local-libvirt` followed by an `allocations.request` returns granted (not `quota_exceeded`) and reaches a ready System via `provision`. Record what was executed; the remote full build→boot→verify needs real target hardware.
