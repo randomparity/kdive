@@ -133,7 +133,9 @@ Expected: FAIL (`ModuleNotFoundError`).
 
 - [ ] **Step 3: Create `git_source.py` with the relocated validator**
 
-Move the `_UNSAFE_CHARS` frozenset and the `_validate_git_arg` body from `shell_transport.py` into `git_source.py` as public `validate_git_arg`. In `shell_transport.py`, delete the local copy and `from kdive.providers.shared.build_host.git_source import validate_git_arg`; replace internal `_validate_git_arg(...)` calls with `validate_git_arg(...)` (the `clone` method, lines ~193-194). Leave `_validate_url` where it is (URL/curl-specific, single use).
+Move the `_UNSAFE_CHARS` frozenset and the `_validate_git_arg` body from `shell_transport.py` into `git_source.py` as public `validate_git_arg`. **`shell_transport.py`'s `_validate_url` (lines 63-69) also uses `_UNSAFE_CHARS`**, so `shell_transport.py` must import *both* names back: `from kdive.providers.shared.build_host.git_source import validate_git_arg, _UNSAFE_CHARS`. Delete the local `_UNSAFE_CHARS`/`_validate_git_arg` definitions, replace internal `_validate_git_arg(...)` calls with `validate_git_arg(...)` (the `clone` method, lines ~193-194), and leave `_validate_url` in place (it now reads the imported `_UNSAFE_CHARS`).
+
+Add a regression assertion in the existing shell_transport test (or the new git_source test) that `_validate_url` still rejects a control char, so the relocation cannot silently break it.
 
 ```python
 """Git-source validation and the local-build remote allowlist (ADR-0157)."""
@@ -355,7 +357,9 @@ def test_clone_tree_rejects_disallowed_remote(tmp_path) -> None:
             run_id=__import__("uuid").uuid4(), secret_registry=SecretRegistry(),
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "gitlab.com" not in str(exc.value.details)   # no URL echo
+    # No URL echo into either the message or the details (details may be None).
+    assert "gitlab.com" not in str(exc.value)
+    assert "gitlab.com" not in repr(exc.value.details)
 
 def test_clone_tree_empty_allowlist_reports_lane_disabled(tmp_path) -> None:
     source = GitSourceRef(remote="https://github.com/myorg/linux", ref="v6.9")
@@ -367,7 +371,10 @@ def test_clone_tree_empty_allowlist_reports_lane_disabled(tmp_path) -> None:
     assert "disabled" in str(exc.value).lower()
 ```
 
-Add a hardened-env/clean-workspace test driving an injected `_run_git` seam (see Step 3 for the seam name): assert (a) a pre-existing `stale.txt` in the workspace is gone after `clone_tree`, and (b) every captured argv contains `-c http.followRedirects=false` and the captured env has `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`.
+Split the remaining tests by seam — the hardened flags live *inside* `_run_git`, so an injected `_run_git` fake cannot observe them:
+
+- **Orchestration / clean-workspace** — monkeypatch `build_host_workspace._run_git` with a fake returning a successful `subprocess.CompletedProcess` (and writing nothing). Plant a `stale.txt` in the workspace beforehand and assert it is gone after `clone_tree` (the `rmtree` before `git init`). Assert the fake `_run_git` was called with the `init` / `fetch --depth 1 <remote> <ref>` / `rev-parse … FETCH_HEAD` / `checkout FETCH_HEAD` arg sequences (the inner args, without the hardened flags).
+- **`_run_git` hardening (dedicated test)** — monkeypatch `subprocess.run` to capture its `args`/`env`, call `build_host_workspace._run_git(["init", str(tmp)], cwd=None, run_id=…)`, and assert the captured argv contains `-c http.followRedirects=false` (and the `protocol.*` flags) and the captured env has `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. No network runs.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
