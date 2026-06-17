@@ -97,11 +97,21 @@ async def _terminal_response(conn: AsyncConnection, run: Run) -> ToolResponse:
 
 
 async def _cancel_build_job_best_effort(conn: AsyncConnection, run_id: UUID) -> None:
-    """Cancel the Run's in-flight build job if one is non-terminal; a no-op otherwise."""
+    """Cancel the Run's in-flight build job if one is non-terminal; a no-op otherwise.
+
+    Truly best-effort: the worker completes a build job via fenced raw SQL
+    (``queue.complete``/``queue.fail``) that holds no per-Run lock, so a job read here as
+    ``running`` can turn terminal before this ``FOR UPDATE`` acquires it. ``IllegalTransition``
+    from that race is swallowed — a finished build job's result is moot once the Run is
+    canceling, and the Run's own ``canceled`` transition must not roll back over it.
+    """
     job = await queue.get_by_dedup_key(conn, f"{run_id}:build")
     if job is None or job.state in _TERMINAL_JOB:
         return
-    await JOBS.update_state(conn, job.id, JobState.CANCELED)
+    try:
+        await JOBS.update_state(conn, job.id, JobState.CANCELED)
+    except IllegalTransition:
+        return
 
 
 def _canceled_response(run: Run) -> ToolResponse:
