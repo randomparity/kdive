@@ -12,6 +12,7 @@ import base64
 import hashlib
 import os
 import stat
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -38,6 +39,7 @@ from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     HostDumpOptions,
     _SpoolSink,
     host_dump_volume_name,
+    pool_type_and_target_strict,
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -68,6 +70,18 @@ _POOL_BOMB = f"""<?xml version="1.0"?>
   <target><path>&path;</path></target>
 </pool>
 """
+
+
+def test_strict_pool_xml_parse_error_preserves_cause() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        pool_type_and_target_strict(
+            "<pool",
+            operation="checking host_dump pool",
+            storage_pool=_POOL,
+        )
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert isinstance(excinfo.value.__cause__, ET.ParseError)
 
 
 def _domain_name() -> str:

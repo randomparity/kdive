@@ -27,7 +27,11 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import (
     render_volume_xml,
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import wait_for_agent
-from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected, disk_pool
+from kdive.providers.remote_libvirt.lifecycle.xml import (
+    agent_channel_connected,
+    disk_pool,
+    recorded_gdb_port_strict,
+)
 from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
@@ -374,6 +378,14 @@ def test_used_gdb_ports_maps_malformed_domain_xml_to_infrastructure_failure() ->
         "domain": "kdive-malformed",
         "operation": "enumerating gdbstub ports",
     }
+
+
+def test_strict_domain_xml_parse_error_preserves_cause() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        recorded_gdb_port_strict("<domain", operation="testing strict parser", domain="kdive-bad")
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert isinstance(excinfo.value.__cause__, ET.ParseError)
 
 
 def test_wait_for_agent_returns_when_live_xml_reports_connected() -> None:

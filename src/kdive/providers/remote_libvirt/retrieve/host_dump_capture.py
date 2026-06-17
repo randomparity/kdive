@@ -414,12 +414,12 @@ def pool_type_and_target_strict(
     """Return storage-pool type and target; malformed XML is an infrastructure fault."""
     try:
         root: ET.Element = _safe_fromstring(pool_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except (ET.ParseError, DefusedXmlException) as exc:
         raise CategorizedError(
             "malformed remote-libvirt storage-pool XML",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"operation": operation, "storage_pool": storage_pool},
-        ) from None
+        ) from exc
     target = root.findtext("./target/path")
     return root.get("type"), target
 

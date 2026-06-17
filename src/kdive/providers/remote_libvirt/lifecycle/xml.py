@@ -102,12 +102,12 @@ def render_domain_xml(
 def _parse_domain_xml_strict(domain_xml: str, *, operation: str, domain: str) -> ET.Element:
     try:
         return _safe_fromstring(domain_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except (ET.ParseError, DefusedXmlException) as exc:
         raise CategorizedError(
             "malformed remote-libvirt domain XML",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"domain": domain, "operation": operation},
-        ) from None
+        ) from exc
 
 
 def _recorded_gdb_port(root: ET.Element) -> int | None:
