@@ -77,6 +77,19 @@ async def enqueue(
     return Job.model_validate(row)
 
 
+async def get_by_dedup_key(conn: AsyncConnection, dedup_key: str) -> Job | None:
+    """Return the job for ``dedup_key`` (the unique natural key), or ``None``.
+
+    A read-only lookup on the ``jobs_dedup_key_key`` UNIQUE column — at most one row.
+    Used to reach a System's terminal ``provision`` job (``f"{allocation_id}:provision"``)
+    from the admission path so a retry can surface the original redacted reason (ADR-0149).
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
+        row = await cur.fetchone()
+    return None if row is None else Job.model_validate(row)
+
+
 async def dequeue(
     conn: AsyncConnection, worker_id: str, *, lease: timedelta = DEFAULT_LEASE
 ) -> Job | None:
