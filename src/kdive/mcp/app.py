@@ -326,7 +326,9 @@ def _unconfigured_image_build_handler(
     error: CategorizedError,
 ) -> JobHandler:
     async def _handler(_conn: AsyncConnection, _job: Job) -> str | None:
-        raise CategorizedError(str(error), category=error.category, details=error.details)
+        raise CategorizedError(
+            str(error), category=error.category, details=error.details
+        ) from error
 
     return _handler
 
