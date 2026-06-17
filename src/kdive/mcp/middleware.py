@@ -30,18 +30,20 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING, Any
 
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import Tool
 from fastmcp.tools.base import ToolResult
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import ValidationError
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
+from kdive.mcp.exposure import visible_tool_names
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import SHAPE_XOR_ERROR_TYPE
 from kdive.security import audit
@@ -334,6 +336,36 @@ def _binding_object_id(context: Any, id_arg: str) -> str:
         if isinstance(value, str):
             return value
     return str(context.message.name)
+
+
+class ToolExposureMiddleware(Middleware):
+    """Filter `list_tools` to the tools the connection's grants could invoke (ADR-0148, #506).
+
+    Reads the connection's verified-token :class:`RequestContext` and drops any tool the
+    caller could not invoke under any of its grants (the union of project roles + platform
+    roles; any-of for dual-gated tools), shrinking the catalog the model must select from.
+
+    Advisory and **fail-open**: list filtering is an accuracy aid, not a security control —
+    execution-time RBAC remains the boundary. On a missing/invalid context or any internal
+    error it returns the unfiltered catalog and logs, so tool discovery never breaks. (The
+    token resolves in ``on_list_tools`` over the real HTTP transport; the in-memory
+    transport carries none, so the end-to-end proof is the live-tier wire test.)
+    """
+
+    async def on_list_tools(
+        self,
+        context: Any,
+        call_next: Callable[[Any], Any],
+    ) -> Sequence[Tool]:
+        """Return only the advertised tools the in-flight connection may invoke."""
+        tools: Sequence[Tool] = await call_next(context)
+        try:
+            ctx = current_context()
+            visible = visible_tool_names(ctx, (tool.name for tool in tools))
+        except Exception:
+            _log.warning("tool-exposure filter failed; advertising the full catalog", exc_info=True)
+            return tools
+        return [tool for tool in tools if tool.name in visible]
 
 
 class TelemetryMiddleware(Middleware):
