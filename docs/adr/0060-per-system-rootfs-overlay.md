@@ -1,6 +1,6 @@
 # ADR 0060 — Per-System rootfs overlay (a writable qcow2 layer over the shared base)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Depends on:** [ADR-0025](0025-provisioning-plane-libvirt.md) (the provisioning plane this extends),
   [ADR-0030](0030-install-boot-plane.md) (the direct-kernel `root=/dev/vda` boot the overlay

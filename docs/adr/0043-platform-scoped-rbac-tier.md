@@ -1,6 +1,6 @@
 # ADR 0043 — Platform-scoped RBAC tier (`platform_roles`)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Extends (does not supersede):** [ADR-0006](0006-oidc-rbac-attribution.md) — which
   ratified per-project roles and explicitly deferred a cross-project role as "a separate

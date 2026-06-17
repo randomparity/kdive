@@ -1,6 +1,6 @@
 # ADR 0046 — Spine `report` phase: accounting assertions + report artifact (M1.2, refines 0042 §6)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-05
 - **Refines:** [ADR-0042](0042-live-stack-e2e-mcp-http.md) §4 (the spine's phase ordering ends
   at `report`) and §6 (`accounting.report`'s all-projects form is gated `platform_auditor`).

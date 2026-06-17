@@ -1,6 +1,6 @@
 # ADR 0049 — Crash-capture tiers: provider-agnostic method, local-libvirt realizations
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-05
 - **Depends on:** [ADR-0031](0031-retrieve-plane-vmcore-postmortem.md) (the `Retriever.capture`
   port, `vmcore.fetch` admission, `postmortem.*` reads this extends),

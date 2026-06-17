@@ -1,6 +1,6 @@
 # ADR 0122 — Declarative `[[build_config]]` home in `systems.toml` (#443)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):**

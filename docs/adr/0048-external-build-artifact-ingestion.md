@@ -1,6 +1,6 @@
 # ADR 0048 — External-build artifact ingestion: agent uploads, no server-side make
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-05
 - **Depends on:** [ADR-0029](0029-build-plane-local-make.md) (the `BuildProfile`,
   `BuildOutput`, `runs.*` surface, and `run_steps` ledger this reuses),

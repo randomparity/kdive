@@ -38,8 +38,11 @@ dispatch.
   provider implementations.
 - MCP tools and worker handlers request typed ports from `ProviderRuntime`; they do not ask
   `CapabilityRegistry` for `BoundOp`s.
-- The original decision to keep `src/kdive/providers/capability.py` as a quarantined prototype
-  was superseded by ADR-0066; the prototype is no longer production source.
+- ~~`src/kdive/providers/capability.py` remains in the tree as a quarantined prototype and test
+  fixture for future multi-provider dispatch. It is not production runtime infrastructure until a
+  later ADR reactivates it and wires runtime assembly through it.~~ *Superseded by
+  [ADR-0066](0066-remove-capability-registry-prototype-from-src.md) — the prototype was removed
+  from production source and is no longer in the tree.*
 - Documentation and source docstrings must describe this split explicitly: typed runtime ports
   are current behavior; capability dispatch is a future option.
 

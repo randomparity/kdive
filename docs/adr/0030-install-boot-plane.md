@@ -1,6 +1,6 @@
 # ADR 0030 — Install + boot plane (local libvirt): runs.install, runs.boot, install/boot handlers (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #19 (M0: Install + boot plane)
 - **Depends on:** [ADR-0029](0029-build-plane-local-make.md) (the realized-port +

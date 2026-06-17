@@ -1,6 +1,6 @@
 # ADR 0110 — Remote install/capture preflight the S3 endpoint as guest-routable
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0082](0082-remote-install-in-guest-kernel.md)

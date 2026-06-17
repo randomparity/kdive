@@ -1,6 +1,6 @@
 # ADR 0117 — Add a read-only `projects.list` (whoami) discovery tool (#427)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0006](0006-oidc-rbac-attribution.md) /

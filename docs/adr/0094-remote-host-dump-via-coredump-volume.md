@@ -1,6 +1,6 @@
 # ADR 0094 — Remote host_dump via core-dump-to-volume + stream download (M2.5)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-11
 - **Deciders:** kdive maintainers
 - **Supersedes (in part):** [ADR-0084](0084-remote-control-two-phase-vmcore-retrieve.md) — its

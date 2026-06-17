@@ -1,6 +1,6 @@
 # ADR 0089 — Operator CLI (`kdivectl`) as an authenticated MCP client (M2.2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0010](0010-fastmcp-framework-auth.md) (the FastMCP

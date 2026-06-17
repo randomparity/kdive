@@ -1,6 +1,6 @@
 # ADR 0006 — OIDC/SSO + RBAC with (principal, agent_session) attribution
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Implements core decision:** #6 in [`../specs/top-level-design.md`](../design/top-level-design.md)
 

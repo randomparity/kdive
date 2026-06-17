@@ -1,6 +1,6 @@
 # ADR 0013 — Object-store layout & retention
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Refines:** [0005](0005-postgres-object-store-state.md) (object store for bulk
   artifacts) and the spec's open follow-up "Object-store layout and retention

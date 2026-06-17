@@ -1,6 +1,6 @@
 # ADR 0126 — Synchronous-tool transport bound
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 

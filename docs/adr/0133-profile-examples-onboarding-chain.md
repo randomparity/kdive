@@ -1,6 +1,6 @@
 # ADR 0133 — Profile-examples onboarding: optional disk-image kernel source + discovery chain
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

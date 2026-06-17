@@ -1,6 +1,6 @@
 # ADR 0042 — Live-stack end-to-end functional test over MCP HTTP (M1.2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Supersedes:** the **gated full-path tier** of
   [ADR-0035](0035-walking-skeleton-e2e-harness.md) (§1, gated portion) and amends its §3

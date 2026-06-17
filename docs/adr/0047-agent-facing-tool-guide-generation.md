@@ -1,6 +1,6 @@
 # ADR 0047 — Agent-facing tool guide generated from the registry
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-05
 - **Deciders:** David Christensen
 - **Spec:** [`../superpowers/specs/2026-06-05-agent-facing-tool-guide-design.md`](../archive/superpowers/specs/2026-06-05-agent-facing-tool-guide-design.md)

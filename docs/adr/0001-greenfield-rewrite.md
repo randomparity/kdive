@@ -1,6 +1,6 @@
 # ADR 0001 — Greenfield rewrite, in Python
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Deciders:** KDIVE architecture
 - **Implements core decision:** #1 in [`../specs/top-level-design.md`](../design/top-level-design.md)

@@ -1,6 +1,6 @@
 # ADR 0064 — Expected boot failures + bounded redacted artifact search
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-07
 - **Depends on:** [ADR-0019](0019-tool-response-envelope.md) (uniform envelopes and
   references, not raw logs), [ADR-0030](0030-install-boot-plane.md) (the `runs.boot`

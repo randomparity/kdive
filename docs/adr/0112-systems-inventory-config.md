@@ -1,6 +1,6 @@
 # ADR 0112 — Declarative systems inventory config (`systems.toml`)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-14
 - **Depends on:** [ADR-0087](0087-config-registry.md) (the `KDIVE_*` operational-config
   registry — this ADR draws the boundary: env owns operational/secret runtime config,

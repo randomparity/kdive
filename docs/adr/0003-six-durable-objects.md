@@ -1,6 +1,6 @@
 # ADR 0003 — Six durable objects replace the run-centric model
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Implements core decision:** #3 in [`../specs/top-level-design.md`](../design/top-level-design.md)
 

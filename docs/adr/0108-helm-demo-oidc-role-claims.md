@@ -1,6 +1,6 @@
 # ADR 0108 — Helm demo OIDC role claims (RBAC-testable bundled issuer)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Depends on:** [ADR-0088](0088-deployment-packaging.md) (the Helm chart, the
   `bundledBackends` demo path, the mock-OIDC Deployment),

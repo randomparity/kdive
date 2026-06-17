@@ -1,6 +1,6 @@
 # ADR 0035 — Walking-skeleton end-to-end integration-test harness (M0)
 
-- **Status:** Proposed — the **gated full-path tier** (§1, gated portion) is superseded, and
+- **Status:** Accepted — the **gated full-path tier** (§1, gated portion) is superseded, and
   §3 is **amended for the live tier**, by [ADR-0042](0042-live-stack-e2e-mcp-http.md). The
   **non-gated** criterion tier (§1 non-gated portion: #3/#4/#6), its in-process
   `RequestContext` construction (§3), the teardown-via-`Discovery.list_owned` assertion

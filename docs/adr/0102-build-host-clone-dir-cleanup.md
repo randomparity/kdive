@@ -1,6 +1,6 @@
 # ADR 0102 — Clean up the per-run build workspace after a terminal build
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-13
 - **Deciders:** build-install area
 

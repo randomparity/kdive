@@ -1,6 +1,6 @@
 # ADR 0120 — Operator override for local-libvirt fixture profiles via file/ConfigMap (#439)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0065](0065-provider-component-references.md)

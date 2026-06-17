@@ -1,6 +1,6 @@
 # ADR 0067 — System shapes catalog + selector unification (M1.4)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Deciders:** platform maintainers
 - **Builds on (does not supersede):** [ADR-0007](0007-metering-budgets-admission.md) (the

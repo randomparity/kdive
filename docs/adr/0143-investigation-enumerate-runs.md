@@ -1,6 +1,6 @@
 # ADR 0143 — Investigation enumerates its attached runs/systems
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-16
 - **Deciders:** KDIVE maintainers
 

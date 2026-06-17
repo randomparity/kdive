@@ -1,6 +1,6 @@
 # ADR 0021 — Reconciler loop: drift-repair seam, leaked-domain reaping, lease-expiry compensation (M0 subset)
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-03
 - **Deciders:** kdive maintainers
 - **Refines:** [ADR-0008](0008-async-worker-tier-job-queue.md) (worker tier / job queue),

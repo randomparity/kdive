@@ -1,6 +1,6 @@
 # ADR 0123 — Tool-error detail surfacing on the response envelope
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 

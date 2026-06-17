@@ -1,6 +1,6 @@
 # ADR 0124 — Provisioning-profile discoverability
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 

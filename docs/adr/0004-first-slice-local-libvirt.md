@@ -1,6 +1,6 @@
 # ADR 0004 — First slice targets local libvirt/QEMU
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Implements core decision:** #4 in [`../specs/top-level-design.md`](../design/top-level-design.md)
 

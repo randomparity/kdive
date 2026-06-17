@@ -1,6 +1,6 @@
 # ADR 0011 — Provisioning-profile schema
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Refines:** the spec's "Provisioning plane" and open follow-up
   "Provisioning-profile schema (how libvirt XML / kickstart / ansible / QCOW2 are

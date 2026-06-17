@@ -1,6 +1,6 @@
 # ADR 0090 — OpenTelemetry adoption, log-signal migration & service health (M2.3)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** kdive maintainers
 - **Amends (does not discard):** [ADR-0014](0014-structured-logging.md) (the JSON-on-stdout

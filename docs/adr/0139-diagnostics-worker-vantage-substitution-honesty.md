@@ -1,6 +1,6 @@
 # ADR 0139 — Diagnostics worker-vantage substitution attributes its cause
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

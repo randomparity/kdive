@@ -1,6 +1,6 @@
 # ADR 0137 — Build-profile schema discoverability at the MCP boundary
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

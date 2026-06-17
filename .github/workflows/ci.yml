@@ -92,6 +92,12 @@ jobs:
       - name: Doc paths resolve
         run: just docs-paths
 
+      - name: ADR status in sync
+        # An ADR's Status must match its index row, and no Proposed ADR may be cited in
+        # src/ (docs/adr ratification rule). Listed here because CI invokes recipes
+        # individually, so adding it only to `just ci` would not gate PRs.
+        run: just adr-status-check
+
       - name: Docs reference up to date
         # The generated tool reference (docs/guide/reference/) must match a fresh
         # generation from the registry (ADR-0047). `just docs-check` diffs the committed

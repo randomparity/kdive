@@ -1,6 +1,6 @@
 # ADR 0070 — Fleet availability + system reuse (M1.4)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Deciders:** platform maintainers
 - **Builds on (does not supersede):** [ADR-0067](0067-system-shapes-catalog.md) (the shapes

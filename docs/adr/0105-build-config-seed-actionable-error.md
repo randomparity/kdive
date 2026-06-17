@@ -1,6 +1,6 @@
 # ADR-0105: Actionable error when the kdump build-config catalog entry is unseeded
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0091 — `doctor` / diagnostics model (M2.3)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0089](0089-operator-cli-mcp-client.md) (`kdivectl`

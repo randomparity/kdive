@@ -1,6 +1,6 @@
 # ADR 0028 — Control plane: power + force_crash on local libvirt (M0)
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-04
 - **Deciders:** kdive maintainers
 - **Refines:** [ADR-0020](0020-rbac-audit-gate-implementation.md) (destructive-op gate),
@@ -49,8 +49,8 @@ stable surface.
 
 3. **`power` is not gated; `force_crash` is.** The destructive-op gate guards
    `force_crash` only. `power` actions are reversible operational controls (the
-   walking-skeleton's lifecycle moves), authorized at `operator` like
-   `systems.teardown`, not at `admin`. `power off`/`reset`/`cycle` are state-machine
+   walking-skeleton's lifecycle moves), ~~authorized at `operator` like
+   `systems.teardown`, not at `admin`~~. `power off`/`reset`/`cycle` are state-machine
    no-transition ops in M0 (they do not move the System lifecycle — a libvirt domain
    restart does not re-provision); they act on the domain and audit the action.
 

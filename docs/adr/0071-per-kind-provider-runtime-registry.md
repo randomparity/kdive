@@ -1,6 +1,6 @@
 # ADR 0071 — Per-kind ProviderRuntime registry (M1.5)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0063](0063-typed-provider-runtime.md) (the typed

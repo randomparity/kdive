@@ -1,6 +1,6 @@
 # ADR 0052 — Bootable kdive-ready rootfs builder: whole-disk-ext4 layout + managed SSH key
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Deciders:** David Christensen
 - **Depends on:** [ADR-0030](0030-install-boot-plane.md) (the direct-kernel `<os>` /

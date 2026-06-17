@@ -1,6 +1,6 @@
 # ADR 0008 — Async worker tier + durable job queue
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-03
 - **Implements core decision:** #8 in [`../specs/top-level-design.md`](../design/top-level-design.md)
 

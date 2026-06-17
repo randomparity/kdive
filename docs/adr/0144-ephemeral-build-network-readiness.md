@@ -1,6 +1,6 @@
 # ADR 0144 — Ephemeral build-VM network-readiness gate + surface `git fetch`'s return code
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
 

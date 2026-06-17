@@ -1,6 +1,6 @@
 # ADR 0081 — Remote build publishes a single vmlinuz+modules install bundle (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0076](0076-remote-libvirt-provider-package.md) (the

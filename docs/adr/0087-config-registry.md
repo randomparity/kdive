@@ -1,6 +1,6 @@
 # ADR 0087 — Central typed configuration registry (M2.1)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0012](0012-secret-backend.md) (secrets are

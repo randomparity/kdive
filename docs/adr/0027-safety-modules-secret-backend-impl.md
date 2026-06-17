@@ -1,6 +1,6 @@
 # ADR 0027 — Safety modules & file-ref secret backend (implementation shapes, refines 0012)
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-04
 - **Deciders:** kdive maintainers
 - **Refines:** [ADR-0012](0012-secret-backend.md) (secret backend — file-ref for M0)

@@ -1,6 +1,6 @@
 # ADR 0088 — Deployment & packaging: one multi-process image, compose + Helm reference (M2.1)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0035](0035-walking-skeleton-e2e-harness.md) (the

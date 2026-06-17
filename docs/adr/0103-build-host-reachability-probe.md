@@ -1,6 +1,6 @@
 # ADR 0103 — Reconciler reachability probe for SSH build hosts
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0099](0099-remote-build-host-targets.md)

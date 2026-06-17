@@ -1,6 +1,6 @@
 # ADR 0040 — M1 admission & lifecycle concurrency: lock hierarchy, request idempotency, atomic reconciliation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** M1 — Allocation/accounting depth (concurrency & idempotency)
 - **Depends on:** [ADR-0016](0016-repository-layer-locks-idempotency.md) (the M0

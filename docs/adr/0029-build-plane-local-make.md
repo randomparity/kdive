@@ -1,6 +1,6 @@
 # ADR 0029 — Build plane (local make): runs.build, BuildProfile, build handler (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #18 (M0: Build plane — local make)
 - **Depends on:** [ADR-0011](0011-provisioning-profile-schema.md) /

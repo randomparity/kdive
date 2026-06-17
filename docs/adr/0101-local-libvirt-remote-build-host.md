@@ -1,6 +1,6 @@
 # ADR 0101 — Local-libvirt builds on a remote build host (transport-capable local builder)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-13
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0099](0099-remote-build-host-targets.md)

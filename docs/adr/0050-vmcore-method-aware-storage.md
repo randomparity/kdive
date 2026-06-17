@@ -1,6 +1,6 @@
 # ADR 0050 — Method-aware vmcore storage: first-method-wins per System
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-06
 - **Depends on:** [ADR-0049](0049-crash-capture-tiers.md) (the provider-agnostic capture method
   vocabulary, the method-aware admission dedup key, and the `host_dump`/`kdump` split this

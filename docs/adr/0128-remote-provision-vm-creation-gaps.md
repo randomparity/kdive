@@ -1,6 +1,6 @@
 # ADR 0128 — Remote-libvirt VM creation: discoverable base volume + non-masking provision failures
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

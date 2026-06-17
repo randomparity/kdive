@@ -1,6 +1,6 @@
 # ADR 0082 — Remote install: in-guest kernel install + boot-id readiness (M2)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-09
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0078](0078-object-store-in-target-install-seam.md)

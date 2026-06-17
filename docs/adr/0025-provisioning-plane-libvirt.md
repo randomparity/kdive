@@ -1,6 +1,6 @@
 # ADR 0025 — Provisioning plane: System creation & teardown on local libvirt (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #16 (M0: Provisioning plane (libvirt))
 - **Depends on:** [ADR-0009](0009-capability-provider-dispatch.md) (provider seam /

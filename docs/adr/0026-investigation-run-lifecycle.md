@@ -1,6 +1,6 @@
 # ADR 0026 — Investigation + Run lifecycle & tools (M0)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Issue:** #17 (M0: Investigation + Run lifecycle & tools)
 - **Depends on:** [ADR-0016](0016-repository-layer-locks-idempotency.md) (repository

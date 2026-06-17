@@ -1,6 +1,6 @@
 # ADR 0115 — Declarative cost-class coefficients in `systems.toml`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Designed by:** [`../design/declarative-cost-class-coefficients.md`](../design/declarative-cost-class-coefficients.md)
 - **Extends:** [ADR-0007](0007-metering-budgets-admission.md) §1 (the kcu cost model — `rate = coeff(cost_class) × (W_CPU·vcpus + W_MEM·memory_gb)`)

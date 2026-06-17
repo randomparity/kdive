@@ -1,6 +1,6 @@
 # ADR 0074 — Wiring the seeded fault engine into the fault-inject ports (M1.5)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0072](0072-fault-injection-provider-seeded-engine.md)

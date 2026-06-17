@@ -153,6 +153,11 @@ docs-links:
 docs-paths:
     ./scripts/check-doc-paths.sh
 
+# Guard the ADR status lifecycle: valid status, index in sync, no shipped-but-Proposed
+# drift (docs/adr/README.md ratification rule). Stdlib-only (plain python3, no uv sync).
+adr-status-check:
+    python3 scripts/check_adr_status.py
+
 # M2 portability gate: cumulative core-touch measurement vs the pre-M2 tag (ADR-0076).
 # Stdlib-only (plain python3, no uv sync); needs the pre-M2 tag fetched.
 m2-gate:
@@ -273,4 +278,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-links docs-paths docs-check config-docs-check config-guard env-docs-check chart-version-check test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check chart-version-check test

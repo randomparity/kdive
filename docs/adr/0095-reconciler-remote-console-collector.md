@@ -1,6 +1,6 @@
 # ADR 0095 — Reconciler-supervised remote console collector (M2.5)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-11
 - **Deciders:** kdive maintainers
 - **Builds on:** [ADR-0076](0076-remote-libvirt-provider-package.md) (the `remote_libvirt`

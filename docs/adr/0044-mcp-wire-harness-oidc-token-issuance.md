@@ -1,6 +1,6 @@
 # ADR 0044 — MCP-over-HTTP wire harness + OIDC token issuance (M1.2 sub-issue A)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04
 - **Realizes:** [ADR-0042](0042-live-stack-e2e-mcp-http.md) §1 (wire client) and §3 (real
   tokens via the issuer's JWKS/`JWTVerifier` path) for the M1.2 epic's sub-issue A. This is

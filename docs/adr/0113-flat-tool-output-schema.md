@@ -1,6 +1,6 @@
 # ADR 0113 — Advertise a flat tool `outputSchema` to stop the recursive-schema client error (#404)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-14
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0019](0019-tool-response-envelope.md) (the uniform

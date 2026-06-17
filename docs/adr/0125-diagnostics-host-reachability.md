@@ -1,6 +1,6 @@
 # ADR 0125 — Diagnostics host-reachability probe
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Deciders:** kdive maintainers
 

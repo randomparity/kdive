@@ -1,6 +1,6 @@
 # ADR 0127 — Local-libvirt reconciler reaper opt-out
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 

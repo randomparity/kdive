@@ -1,6 +1,6 @@
 # ADR 0007 — Metering + budgets/quotas with an admission-control gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-04 (filled for M1; stub dated 2026-06-03)
 - **Implements core decision:** #7 in [`../specs/top-level-design.md`](../design/top-level-design.md)
 - **Refined by M1:** [`../specs/m1-allocation-accounting.md`](../design/m1-allocation-accounting.md)

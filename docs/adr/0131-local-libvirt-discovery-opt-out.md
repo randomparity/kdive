@@ -1,6 +1,6 @@
 # ADR 0131 — Local-libvirt startup discovery opt-out
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-16
 - **Deciders:** kdive maintainers
 
