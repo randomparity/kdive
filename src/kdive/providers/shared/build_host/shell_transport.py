@@ -242,6 +242,10 @@ class ShellBuildTransport:
 
     def cleanup(self, path: str) -> None:
         """Remove *path* on the host (``rm -rf``); best-effort, logs on failure."""
-        result = self._run_remote(["rm", "-rf", path], cwd="/", timeout_s=60)
+        try:
+            result = self._run_remote(["rm", "-rf", path], cwd="/", timeout_s=60)
+        except Exception:
+            _log.warning("remote cleanup of %r failed before completion", path, exc_info=True)
+            return
         if result.returncode != 0:
             _log.warning("remote cleanup of %r failed (exit %d)", path, result.returncode)
