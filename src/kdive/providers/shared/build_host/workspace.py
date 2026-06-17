@@ -49,6 +49,31 @@ KERNEL_SRC_INVALID_DETAIL = (
     f"existing kernel source tree. {_BUILD_LANE_GUIDANCE}"
 )
 
+
+def warm_tree_source_error(kernel_src: str) -> str | None:
+    """Return the offending message for an unusable warm-tree source, or ``None``.
+
+    The single definition of the warm-tree ``KDIVE_KERNEL_SRC`` rule, shared by
+    :func:`sync_tree` (the build-time backstop) and the admission helper
+    (``check_warm_tree_source_admission``, ADR-0158). Empty/whitespace reads as "unset";
+    a present value that is not an absolute path to an existing directory reads as
+    "invalid".
+
+    Args:
+        kernel_src: The resolved ``KDIVE_KERNEL_SRC`` value.
+
+    Returns:
+        :data:`KERNEL_SRC_UNSET_DETAIL`, :data:`KERNEL_SRC_INVALID_DETAIL`, or ``None``
+        when the value is a usable absolute directory.
+    """
+    if not kernel_src.strip():
+        return KERNEL_SRC_UNSET_DETAIL
+    source = Path(kernel_src)
+    if not source.is_absolute() or source == source.parent or not source.is_dir():
+        return KERNEL_SRC_INVALID_DETAIL
+    return None
+
+
 type Checkout = Callable[[UUID, ServerBuildProfile, Path, bytes], None]
 
 
@@ -184,17 +209,10 @@ def sync_tree(
     kernel_src: str, workspace: Path, secret_registry: SecretRegistry | None = None
 ) -> None:
     """Mirror the warm kernel source tree into ``workspace`` with ``rsync -a --delete``."""
-    if not kernel_src.strip():
-        raise CategorizedError(
-            KERNEL_SRC_UNSET_DETAIL,
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
+    detail = warm_tree_source_error(kernel_src)
+    if detail is not None:
+        raise CategorizedError(detail, category=ErrorCategory.CONFIGURATION_ERROR)
     source = Path(kernel_src)
-    if not source.is_absolute() or source == source.parent or not source.is_dir():
-        raise CategorizedError(
-            KERNEL_SRC_INVALID_DETAIL,
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
     if shutil.which("rsync") is None:
         raise CategorizedError(
             "rsync is required to materialize the warm kernel tree",
