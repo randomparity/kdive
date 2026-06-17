@@ -176,10 +176,18 @@ class ShellBuildTransport:
         FETCH_HEAD`` to minimize data transferred (resolves an arbitrary ref/sha, which a plain
         ``clone --depth 1`` cannot).
 
+        After the fetch — regardless of its reported exit status — ``FETCH_HEAD`` is verified
+        to resolve before ``checkout`` runs. A fetch whose real failure is masked to exit 0 (a
+        transport that does not propagate the remote command's status) leaves no ``FETCH_HEAD``;
+        without this guard the next ``checkout FETCH_HEAD`` fails with an unrelated-looking
+        ``pathspec 'FETCH_HEAD' did not match`` and the actionable network error in the fetch's
+        own stderr is lost. The guard surfaces the fetch's stderr instead.
+
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an unsafe remote/ref, a failed
-                ``git fetch``, or a failed ``git checkout FETCH_HEAD`` (the fetch's own stderr is
-                surfaced, not masked behind a later FETCH_HEAD pathspec error);
+                ``git fetch``, or a failed ``git checkout FETCH_HEAD``; ``TRANSPORT_FAILURE``
+                when the fetch reported success but produced no ``FETCH_HEAD`` (the fetch's own
+                stderr is surfaced, not masked behind a later FETCH_HEAD pathspec error);
                 ``INFRASTRUCTURE_FAILURE`` for a failed ``git init`` (an environment fault).
         """
         _validate_git_arg(remote, "remote")
@@ -201,6 +209,20 @@ class ShellBuildTransport:
             raise CategorizedError(
                 "git fetch failed on remote",
                 category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"stderr": redacted_tail(fetch.stderr, self._secret_registry)},
+            )
+        # ADR-0154: verify FETCH_HEAD regardless of the fetch's reported rc — a transport that
+        # masks the remote command's status to 0 (e.g. the guest-agent exec channel) would
+        # otherwise fall through to a checkout that fails with a misleading pathspec error.
+        verify = self._run_remote(
+            ["git", "-C", dest, "rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
+            cwd="/",
+            timeout_s=_CLONE_TIMEOUT_S,
+        )
+        if verify.returncode != 0:
+            raise CategorizedError(
+                "git fetch produced no FETCH_HEAD on remote (the fetch did not complete)",
+                category=ErrorCategory.TRANSPORT_FAILURE,
                 details={"stderr": redacted_tail(fetch.stderr, self._secret_registry)},
             )
         result = self._run_remote(
