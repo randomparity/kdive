@@ -97,6 +97,7 @@
 | [`runs.create`](runs.md#runscreate) | `implemented` |
 | [`runs.get`](runs.md#runsget) | `implemented` |
 | [`runs.install`](runs.md#runsinstall) | `partial` |
+| [`runs.profile_examples`](runs.md#runsprofile_examples) | `implemented` |
 | [`secrets.list`](secrets.md#secretslist) | `implemented` |
 | [`shapes.delete`](shapes.md#shapesdelete) | `implemented` |
 | [`shapes.list`](shapes.md#shapeslist) | `implemented` |

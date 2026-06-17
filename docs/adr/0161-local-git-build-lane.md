@@ -7,7 +7,13 @@
   `kernel_source_ref` provenance forms), [ADR-0101](0101-local-libvirt-remote-build-host.md)
   (the local builder and its checkout seam), [ADR-0154](0154-clone-verify-fetch-head.md)
   (the `git init` + shallow fetch + `FETCH_HEAD` verify + checkout recipe reused here),
-  [ADR-0019](0019-tool-response-envelope.md) (the response envelope / error taxonomy).
+  [ADR-0157](0157-create-time-build-host-source-check.md) /
+  [ADR-0160](0160-buildhost-source-kind-discovery.md) (the shared `accepted_source_kinds`
+  host-kind/source-kind matrix this extends — the local host now accepts `git` as well as
+  `warm-tree`, so the create-time check, the build-time backstop, and the
+  `build_hosts.list` / `runs.profile_examples` discovery surfaces all advertise the local
+  git lane from that one mapping), [ADR-0019](0019-tool-response-envelope.md) (the response
+  envelope / error taxonomy).
 - **Spec:** [`../design/local-git-build-lane.md`](../design/local-git-build-lane.md)
 
 ## Context

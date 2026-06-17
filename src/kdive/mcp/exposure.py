@@ -201,6 +201,7 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
         "resources.availability",
         "resources.describe",
         "resources.list",
+        "runs.profile_examples",
         "shapes.list",
         "systems.profile_examples",
     }

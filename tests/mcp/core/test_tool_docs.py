@@ -127,6 +127,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "runs.create": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.get": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.install": ("tests/mcp/lifecycle/test_runs_tools.py",),
+    "runs.profile_examples": ("tests/mcp/lifecycle/test_runs_profile_examples.py",),
     "secrets.list": ("tests/mcp/ops/test_secrets_list.py",),
     "shapes.delete": ("tests/mcp/catalog/test_shapes_tools.py",),
     "shapes.list": ("tests/mcp/catalog/test_shapes_tools.py",),

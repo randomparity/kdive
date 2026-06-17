@@ -78,3 +78,9 @@ Install a built run onto its system.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `run_id` | `string` | yes | The Run whose built kernel to install. |
+
+## `runs.profile_examples`
+
+`implemented` · `read-only`
+
+Return a ready-to-edit build profile per registered build host. Requires a token.
