@@ -1,6 +1,6 @@
 # Design: RBAC-scoped tool exposure + usage tracking (#506)
 
-Status: proposed (decided by ADR-0148; moves to accepted when the implementing PR merges)
+Status: accepted (implemented by ADR-0148)
 
 ## Problem
 

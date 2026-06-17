@@ -48,7 +48,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import SHAPE_XOR_ERROR_TYPE
 from kdive.mcp.tools._platform_auth import actor_for
 from kdive.security import audit
-from kdive.security.authz.errors import ProjectMembershipDenied
+from kdive.security.authz.errors import AuthError, ProjectMembershipDenied
 from kdive.security.authz.rbac import AuthorizationError, RoleDenied
 from kdive.security.usage import UsageEvent, record_usage
 
@@ -364,6 +364,11 @@ class ToolExposureMiddleware(Middleware):
         try:
             ctx = current_context()
             visible = visible_tool_names(ctx, (tool.name for tool in tools))
+        except AuthError:
+            # Expected when list_tools runs without a verified token (doc generation, an
+            # unauthenticated discovery probe). Advisory filter: advertise everything.
+            _log.debug("no verified token in on_list_tools; advertising the full catalog")
+            return tools
         except Exception:
             _log.warning("tool-exposure filter failed; advertising the full catalog", exc_info=True)
             return tools

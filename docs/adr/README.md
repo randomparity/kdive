@@ -190,4 +190,4 @@ sentence; do not paste the abstract.
 | [0145](0145-reconciler-tolerate-premigrate-schema.md) | Console-hosting tolerates a not-yet-migrated schema at startup. | Accepted |
 | [0146](0146-worker-build-toolchain.md) | Worker image ships the kernel-build toolchain (`flex`/`bison`/`bc`/`git`/`rsync`/`xz`/`-dev` headers) + dual regression guard. | Accepted |
 | [0147](0147-tool-schema-and-scope-boundary-tightening.md) | Tighten `systems.list` `state` to the `SystemState` enum + scope-boundary docstrings for the confusable `systems.*` lifecycle tools. | Accepted |
-| [0148](0148-rbac-scoped-tool-exposure.md) | RBAC-scoped `list_tools` exposure (advisory, fail-open) + append-only `tool_invocation` usage tracking. | Proposed |
+| [0148](0148-rbac-scoped-tool-exposure.md) | RBAC-scoped `list_tools` exposure (advisory, fail-open) + append-only `tool_invocation` usage tracking. | Accepted |

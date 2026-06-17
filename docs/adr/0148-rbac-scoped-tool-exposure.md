@@ -1,6 +1,6 @@
 # ADR 0148 — RBAC-scoped tool exposure in `list_tools` + usage tracking
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
 
