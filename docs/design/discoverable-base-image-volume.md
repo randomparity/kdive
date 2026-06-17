@@ -102,6 +102,13 @@ When the described resource is `kind == remote-libvirt`, `describe_resource`:
 3. Merges a structured `staged_base_images` list into the envelope `data`: an ordered list of
    `{ "name": <catalog name>, "volume": <volume token>, "staged": <status> }`.
 
+**The DB connection is released before the probe runs.** The row lookup (step 0, existing) and the
+staged-image catalog query (step 1) are fast; they complete and return the pooled Postgres
+connection **before** the up-to-5s libvirt probe (step 2) is awaited. The probe holds no DB
+connection while it waits on libvirt, so a slow or black-holing host cannot pin a pool slot and
+stall unrelated tool calls. (`describe_resource` today wraps the row read in
+`async with pool.connection()`; the probe await must sit outside that block.)
+
 **Pool source — `config.storage_pool`, not `resource.pool`.** The probe verifies the pool
 provisioning actually uses, which is `config.storage_pool` (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`,
 read at op time): provisioning creates the overlay there
@@ -137,10 +144,13 @@ same `CONFIGURATION_ERROR`-vs-`TRANSPORT_FAILURE` split #513 keeps
   = 5.0` — snappier than the diagnostics sweep's 10s per-check bound, because describe is an
   interactive read) so a black-holing host cannot stall the read. The blocking libvirt work runs in
   a thread, so the event loop is never blocked.
-- **`unknown`** — `CategorizedError(CONFIGURATION_ERROR)` from config resolution (no
-  `[[remote_libvirt]]` instance, malformed inventory, base image not `staged`). The
-  inventory/config is the problem, not the host; the probe never opened a connection. The operator's
-  action is to fix `systems.toml`, so it must not read as "host down".
+- **`unknown`** — `CategorizedError(CONFIGURATION_ERROR)` from `remote_config_from_inventory()`
+  (zero or multiple `[[remote_libvirt]]` instances, malformed inventory, an unsafe URI, or a
+  malformed gdbstub range). This probe takes its volume names from the catalog query, **not** from
+  `resolve_base_image_staged_volume()`, so the "base image not staged" config-error #513's
+  `volume_factory` raises is not a cause here. The inventory/config is the problem, not the host;
+  the probe never opened a connection. The operator's action is to fix `systems.toml`, so it must
+  not read as "host down".
 
 Either degraded outcome applies to **every** requested volume (one resolution/connection serves the
 whole batch). The describe envelope still returns `ok` in all cases — the staged status is advisory
@@ -179,6 +189,7 @@ The existing `pool` / `cost_class` / `host_uri` keys on `describe_resource` are 
   - no staged remote images visible → empty list, probe not invoked.
   - probe raises (transport) / times out → `unreachable` for all requested volumes, describe `ok`.
   - probe raises config-error → `unknown` for all requested volumes, describe `ok`.
+  - the probe is awaited with no DB pool connection held (a probe that blocks does not pin a slot).
   - RBAC: a private staged image owned by another project is not listed.
 - `resources_describe` (local-libvirt / fault-inject): no `staged_base_images`, probe never called.
 - The production probe (provider-level): probes `config.storage_pool` (not `resource.pool`);
