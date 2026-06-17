@@ -1,6 +1,6 @@
 # ADR 0158 — `runs.cancel` drives a non-terminal Run to `canceled` without teardown
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-17
 - **Deciders:** KDIVE maintainers
 

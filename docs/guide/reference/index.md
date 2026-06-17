@@ -92,6 +92,7 @@
 | [`resources.uncordon`](resources.md#resourcesuncordon) | `implemented` |
 | [`runs.boot`](runs.md#runsboot) | `partial` |
 | [`runs.build`](runs.md#runsbuild) | `partial` |
+| [`runs.cancel`](runs.md#runscancel) | `implemented` |
 | [`runs.complete_build`](runs.md#runscomplete_build) | `implemented` |
 | [`runs.create`](runs.md#runscreate) | `implemented` |
 | [`runs.get`](runs.md#runsget) | `implemented` |
