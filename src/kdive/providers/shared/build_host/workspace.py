@@ -91,7 +91,10 @@ def merge_config(fragment_bytes: bytes, workspace: Path, run_id: UUID) -> None: 
     if run_make_target(workspace, ["defconfig"], "make defconfig") != 0:
         raise build_failure("make defconfig exited non-zero", run_id)
     fragment_path = workspace / "kdump.config.fragment"
-    fragment_path.write_bytes(fragment_bytes)
+    try:
+        fragment_path.write_bytes(fragment_bytes)
+    except OSError as exc:
+        raise workspace_failure("write", "kdump.config.fragment", exc) from exc
     try:
         merge = subprocess.run(
             ["scripts/kconfig/merge_config.sh", "-m", ".config", str(fragment_path)],
@@ -127,7 +130,15 @@ def apply_patch(
             "git is required to apply a build patch",
             category=ErrorCategory.MISSING_DEPENDENCY,
         )
-    targets = patch_target_paths(patch.read_text(errors="replace"), strip=1)
+    try:
+        patch_text = patch.read_text(errors="replace")
+    except OSError as exc:
+        raise CategorizedError(
+            "patch_ref could not be read",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"kind": "patch_ref", "path": str(patch), "error": type(exc).__name__},
+        ) from exc
+    targets = patch_target_paths(patch_text, strip=1)
     before = {rel: snapshot_file_bytes(workspace / rel) for rel in targets}
     try:
         result = subprocess.run(
