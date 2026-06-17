@@ -202,10 +202,17 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_KERNEL_REF` | `v6.9` | Kernel ref (tag/branch/sha) `fetch-kernel-tree.sh` checks out. |
 | `KDIVE_KERNEL_REPO` | `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git` | Kernel git remote `fetch-kernel-tree.sh` clones. |
 | `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node `check-local-libvirt.sh` probes for hardware virtualization. |
+| `KDIVE_LIMIT_KCU` | `1000000` | Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project. |
 | `KDIVE_LIVE_SSH_PORT` | `22` | SSH port `check-ssh-reachable.sh` probes. |
+| `KDIVE_MAX_ALLOC` | `4` | max_concurrent_allocations quota the setup-*-libvirt.sh scripts set. |
+| `KDIVE_MAX_SYS` | `4` | max_concurrent_systems quota the setup-*-libvirt.sh scripts set. |
+| `KDIVE_MCP_BASE` | — | Server MCP endpoint (must end in /mcp) the setup-*-libvirt.sh onboarding calls target. |
 | `KDIVE_OS_RELEASE` | `/etc/os-release` | os-release file `check-setup-deps.sh` reads to detect the host distro. |
+| `KDIVE_PROJECT` | `demo` | Project the setup-*-libvirt.sh scripts onboard. |
+| `KDIVE_PYTHON` | `python3` | Python interpreter the setup-*-libvirt.sh scripts invoke (set to the project venv, e.g. /opt/kdive/.venv/bin/python, when not running inside the venv). |
 | `KDIVE_REMOTE_PKI_DIR` | `/etc/pki/libvirt` | TLS PKI directory `check-remote-libvirt.sh` validates. |
 | `KDIVE_REMOTE_SSH_PORT` | `22` | SSH port `check-remote-libvirt.sh` connects on. |
+| `KDIVE_SETUP_AUDITED` | `0` | When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of seed-demo (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN). |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory the live-stack `start.sh` script writes process logs to. |
 | `KDIVE_STACK_PID_FILE` | `<repo>/.live-stack.pid` | PID file the live-stack `start.sh`/`stop.sh` scripts manage. |
 

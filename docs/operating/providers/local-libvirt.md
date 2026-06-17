@@ -3,6 +3,8 @@
 The local-libvirt provider runs KDIVE's build, boot, debug, and crash-capture work on the
 same host as the worker, driving QEMU/KVM guests through libvirt.
 
+> Setting up from scratch? See the [local-libvirt walkthrough](local-libvirt-walkthrough.md).
+
 ## What it needs
 
 - A working libvirt with the QEMU/KVM stack and an accessible socket (the worker connects

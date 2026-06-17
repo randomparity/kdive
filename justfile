@@ -19,9 +19,17 @@ check-deps:
 check-local-libvirt:
     ./scripts/check-local-libvirt.sh
 
+# Onboard the local-libvirt demo project (preflight + seed budget/quota). See #497.
+setup-local-libvirt:
+    ./scripts/setup-local-libvirt.sh
+
 # Preflight: can the remote-libvirt provider reach a target host? (report-only)
 check-remote-libvirt host user="root" uri="":
     ./scripts/check-remote-libvirt.sh {{host}} {{user}} {{uri}}
+
+# Onboard the remote-libvirt demo project (preflight + token + audited budget/quota). See #497.
+setup-remote-libvirt host user="root" uri="":
+    ./scripts/setup-remote-libvirt.sh {{host}} {{user}} {{uri}}
 
 # Create the venv and install pinned dependencies from the lockfile.
 sync:
