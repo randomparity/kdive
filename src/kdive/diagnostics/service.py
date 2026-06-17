@@ -22,11 +22,13 @@ from enum import StrEnum
 from pathlib import Path
 
 import kdive.config as config
+import kdive.diagnostics.base_image_staging as base_image_staging
 import kdive.diagnostics.reachability as reachability
 from kdive.config.core_settings import SECRETS_ROOT
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
     PROVIDER_TLS_ID,
+    BaseImageStagingCheck,
     Check,
     CheckResult,
     CheckStatus,
@@ -283,15 +285,20 @@ def _secret_ref_check() -> SecretRefCheck:
 def _remote_libvirt_checks() -> list[Check]:
     """Assemble the remote-libvirt diagnostic checks when an instance is declared.
 
-    The server-vantage ``remote_libvirt_reachability`` check is the concrete probe (ADR-0125); it
-    resolves config lazily at run time. Worker-vantage checks are reported separately as explicit
-    unavailable metadata until worker-job dispatch is wired for them (ADR-0139).
+    The server-vantage ``remote_libvirt_reachability`` check is the concrete probe (ADR-0125) and
+    the ``remote_libvirt_base_image_staging`` check probes the operator-staged base-image volume
+    (ADR-0150); both resolve config lazily at run time. Worker-vantage checks are reported
+    separately as explicit unavailable metadata until worker-job dispatch is wired (ADR-0139).
     """
     return [
         RemoteLibvirtReachabilityCheck(
             provider=_REMOTE_PROVIDER,
             probe=reachability.remote_libvirt_reachability_probe(),
-        )
+        ),
+        BaseImageStagingCheck(
+            provider=_REMOTE_PROVIDER,
+            probe=base_image_staging.base_image_staging_probe(),
+        ),
     ]
 
 
