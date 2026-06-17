@@ -22,6 +22,7 @@ from kdive.db.pool import create_pool, database_url
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ResourceKind
+from kdive.profiles.build import GitSourceRef
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,
@@ -107,7 +108,10 @@ def build_ephemeral_build_transport_factory(
     """Build the remote-libvirt factory for ephemeral build-VM transports."""
 
     def _factory(
-        host: BuildHost, _registry: SecretRegistry, run_id: UUID
+        host: BuildHost,
+        _registry: SecretRegistry,
+        run_id: UUID,
+        source: GitSourceRef | None,
     ) -> AbstractContextManager[BuildTransport]:
         if host.base_image_volume is None:
             raise CategorizedError(
@@ -115,7 +119,9 @@ def build_ephemeral_build_transport_factory(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"run_id": str(run_id), "build_host": host.name},
             )
-        return ephemeral_build_session(host.base_image_volume, secret_registry, run_id=run_id)
+        return ephemeral_build_session(
+            host.base_image_volume, secret_registry, run_id=run_id, source=source
+        )
 
     return _factory
 
