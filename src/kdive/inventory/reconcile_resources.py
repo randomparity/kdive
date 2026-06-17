@@ -31,6 +31,7 @@ live allocation is **cordoned**, not deleted (the reaper-style refuse-if-live co
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypedDict, cast
 from uuid import UUID
@@ -104,6 +105,15 @@ class _PruneResourceRow(TypedDict):
     name: str
 
 
+@dataclass(frozen=True)
+class _DeclaredResource:
+    kind: ResourceKind
+    name: str
+    host_uri: str
+    cost_class: str
+    caps: ResourceCaps
+
+
 async def reconcile_resources(conn: AsyncConnection, doc: InventoryDoc) -> ReconcileDiff:
     """Apply ``doc``'s provider instances onto ``resources`` and prune departed config rows.
 
@@ -145,15 +155,18 @@ async def _create_config_resources(
                 MEMORY_MB_KEY: inst.memory_mb,
                 CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
             }
+            declared = _DeclaredResource(
+                kind=ResourceKind.FAULT_INJECT,
+                name=inst.name,
+                host_uri=_FAULT_INJECT_HOST_URI,
+                cost_class=inst.cost_class,
+                caps=caps,
+            )
             async with resource_identity_lock(conn, ResourceKind.FAULT_INJECT, inst.name):
                 await _upsert_config_resource(
                     cur,
                     diff,
-                    kind=ResourceKind.FAULT_INJECT,
-                    name=inst.name,
-                    host_uri=_FAULT_INJECT_HOST_URI,
-                    cost_class=inst.cost_class,
-                    caps=caps,
+                    declared=declared,
                     adopt_by_host=False,
                 )
         for inst in doc.remote_libvirt:
@@ -162,15 +175,18 @@ async def _create_config_resources(
                 MEMORY_MB_KEY: inst.memory_mb,
                 CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
             }
+            declared = _DeclaredResource(
+                kind=ResourceKind.REMOTE_LIBVIRT,
+                name=inst.name,
+                host_uri=inst.uri,
+                cost_class=inst.cost_class,
+                caps=caps,
+            )
             async with resource_identity_lock(conn, ResourceKind.REMOTE_LIBVIRT, inst.name):
                 await _upsert_config_resource(
                     cur,
                     diff,
-                    kind=ResourceKind.REMOTE_LIBVIRT,
-                    name=inst.name,
-                    host_uri=inst.uri,
-                    cost_class=inst.cost_class,
-                    caps=caps,
+                    declared=declared,
                     adopt_by_host=True,
                     discovery_owned_keys=(VCPUS_KEY, MEMORY_MB_KEY),
                 )
@@ -180,11 +196,7 @@ async def _upsert_config_resource(
     cur: Any,
     diff: ReconcileDiff,
     *,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
-    caps: ResourceCaps,
+    declared: _DeclaredResource,
     adopt_by_host: bool,
     discovery_owned_keys: tuple[str, ...] = (),
 ) -> None:
@@ -205,21 +217,21 @@ async def _upsert_config_resource(
     discovered size.
     """
     row = await _find_existing(
-        cur, kind=kind, name=name, host_uri=host_uri, adopt_by_host=adopt_by_host
+        cur,
+        kind=declared.kind,
+        name=declared.name,
+        host_uri=declared.host_uri,
+        adopt_by_host=adopt_by_host,
     )
     if row is None:
         await _insert_config_resource(
             cur,
             diff,
-            kind=kind,
-            name=name,
-            host_uri=host_uri,
-            cost_class=cost_class,
-            caps=caps,
+            declared=declared,
         )
         return
     existing = _caps(row)
-    merged = {**existing, **caps}
+    merged = {**existing, **declared.caps}
     for key in discovery_owned_keys:
         if key in existing:
             merged[key] = existing[key]
@@ -228,10 +240,7 @@ async def _upsert_config_resource(
             cur,
             diff,
             row=row,
-            kind=kind,
-            name=name,
-            host_uri=host_uri,
-            cost_class=cost_class,
+            declared=declared,
             caps=merged,
         )
         return
@@ -239,10 +248,7 @@ async def _upsert_config_resource(
         cur,
         diff,
         row=row,
-        kind=kind,
-        name=name,
-        host_uri=host_uri,
-        cost_class=cost_class,
+        declared=declared,
         caps=merged,
     )
 
@@ -251,19 +257,22 @@ async def _insert_config_resource(
     cur: Any,
     diff: ReconcileDiff,
     *,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
-    caps: ResourceCaps,
+    declared: _DeclaredResource,
 ) -> None:
     await cur.execute(
         "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, "
         " host_uri, managed_by) "
         "VALUES (%s, %s, %s, 'default', %s, 'available', %s, %s)",
-        (kind.value, name, Jsonb(caps), cost_class, host_uri, CONFIG_MANAGED_BY),
+        (
+            declared.kind.value,
+            declared.name,
+            Jsonb(declared.caps),
+            declared.cost_class,
+            declared.host_uri,
+            CONFIG_MANAGED_BY,
+        ),
     )
-    diff.created.append(_record(kind, name))
+    diff.created.append(_record(declared.kind, declared.name))
 
 
 async def _adopt_config_resource(
@@ -271,10 +280,7 @@ async def _adopt_config_resource(
     diff: ReconcileDiff,
     *,
     row: _UpsertResourceRow,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
+    declared: _DeclaredResource,
     caps: ResourceCaps,
 ) -> None:
     """Convert a non-config or scoped resource row into the declared config identity."""
@@ -282,9 +288,16 @@ async def _adopt_config_resource(
         "UPDATE resources SET name = %s, host_uri = %s, cost_class = %s, capabilities = %s, "
         "managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
         "affinity_allowlist = '{}' WHERE id = %s",
-        (name, host_uri, cost_class, Jsonb(caps), CONFIG_MANAGED_BY, row["id"]),
+        (
+            declared.name,
+            declared.host_uri,
+            declared.cost_class,
+            Jsonb(caps),
+            CONFIG_MANAGED_BY,
+            row["id"],
+        ),
     )
-    diff.updated.append(_record(kind, name))
+    diff.updated.append(_record(declared.kind, declared.name))
 
 
 async def _update_config_resource(
@@ -292,20 +305,21 @@ async def _update_config_resource(
     diff: ReconcileDiff,
     *,
     row: _UpsertResourceRow,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    cost_class: str,
+    declared: _DeclaredResource,
     caps: ResourceCaps,
 ) -> None:
     """Apply ordinary config field changes to an already config-managed row."""
-    if row["host_uri"] == host_uri and row["cost_class"] == cost_class and _caps(row) == caps:
+    if (
+        row["host_uri"] == declared.host_uri
+        and row["cost_class"] == declared.cost_class
+        and _caps(row) == caps
+    ):
         return
     await cur.execute(
         "UPDATE resources SET host_uri = %s, cost_class = %s, capabilities = %s WHERE id = %s",
-        (host_uri, cost_class, Jsonb(caps), row["id"]),
+        (declared.host_uri, declared.cost_class, Jsonb(caps), row["id"]),
     )
-    diff.updated.append(_record(kind, name))
+    diff.updated.append(_record(declared.kind, declared.name))
 
 
 def _needs_config_adoption(row: _UpsertResourceRow) -> bool:
