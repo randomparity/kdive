@@ -18,16 +18,11 @@ import logging
 from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.git_source import _UNSAFE_CHARS, validate_git_arg
 from kdive.providers.shared.build_host.workspace import redacted_tail
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
-
-# Characters git/ssh/curl would mis-parse as options or that could split an argv.
-_UNSAFE_CHARS = frozenset(
-    "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
-    "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
-)
 
 # read_bytes/read_text base64-capture a whole remote file into memory. These reads are small
 # (.config, the build-id note) — cap the captured (base64) output well above any legitimate
@@ -37,27 +32,6 @@ _MAX_REMOTE_READ_B64_BYTES = 8 * 1024 * 1024
 # Clone operations get a longer budget than the small reads.
 _CLONE_TIMEOUT_S = 10 * 60
 _UPLOAD_TIMEOUT_S = 5 * 60
-
-
-def _validate_git_arg(value: str, field: str) -> None:
-    """Reject a git remote or ref that could be parsed as an option or inject a command.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the value starts with ``-`` or
-            contains a control character or newline.
-    """
-    if value.startswith("-"):
-        raise CategorizedError(
-            f"{field} must not start with '-' (would be parsed as a git option)",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"field": field},
-        )
-    if any(c in _UNSAFE_CHARS for c in value):
-        raise CategorizedError(
-            f"{field} contains a control character or newline",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"field": field},
-        )
 
 
 def _validate_url(url: str) -> None:
@@ -190,8 +164,8 @@ class ShellBuildTransport:
                 stderr is surfaced, not masked behind a later FETCH_HEAD pathspec error);
                 ``INFRASTRUCTURE_FAILURE`` for a failed ``git init`` (an environment fault).
         """
-        _validate_git_arg(remote, "remote")
-        _validate_git_arg(ref, "ref")
+        validate_git_arg(remote, "remote")
+        validate_git_arg(ref, "ref")
 
         init = self._run_remote(["git", "init", dest], cwd="/", timeout_s=_CLONE_TIMEOUT_S)
         if init.returncode != 0:
