@@ -2,7 +2,7 @@
 
 - **Status:** Draft
 - **Date:** 2026-06-17
-- **ADR:** [0158](../adr/0158-buildhost-source-kind-discovery.md)
+- **ADR:** [0159](../adr/0159-buildhost-source-kind-discovery.md)
 - **Issue:** #536
 - **Builds on (does not supersede):** [ADR-0157](../adr/0157-create-time-build-host-source-check.md)
   (the shared `check_source_kind_compatibility` helper this reuses), [ADR-0099](../adr/0099-remote-build-host-targets.md)

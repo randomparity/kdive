@@ -1,4 +1,4 @@
-# ADR 0158 — Surface build-host accepted source kinds at the MCP boundary
+# ADR 0159 — Surface build-host accepted source kinds at the MCP boundary
 
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-17

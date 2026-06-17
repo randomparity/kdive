@@ -1,4 +1,4 @@
-"""``runs.profile_examples`` — discoverable example build profiles (#536, ADR-0158).
+"""``runs.profile_examples`` — discoverable example build profiles (#536, ADR-0159).
 
 A read-only, auth-only discovery tool (modeled on ``systems.profile_examples``, ADR-0124;
 auth posture per ADR-0117: a valid token gates the transport as defence-in-depth, but there
