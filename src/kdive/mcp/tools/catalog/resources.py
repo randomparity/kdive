@@ -10,6 +10,7 @@ projected to a flat `dict[str, str]` for the response envelope (ADR-0019 `data` 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -21,17 +22,50 @@ from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Resource, ResourceKind
+from kdive.domain.models import ImageVisibility, Resource, ResourceKind
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
+from kdive.providers.remote_libvirt.staged_volumes import probe_staged_volumes
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects
 
 _log = logging.getLogger(__name__)
+
+# A probe of `{volume: status}` for the caller-visible staged remote-libvirt base-image volumes
+# (ADR-0156). Injected so handler tests need no libvirt; the production default opens one
+# `qemu+tls://` connection and never raises.
+StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
+
+_STAGED_IMAGES_SQL = """
+    SELECT name, volume
+    FROM image_catalog
+    WHERE provider = %(provider)s
+      AND volume IS NOT NULL
+      AND (visibility = %(public)s
+           OR (visibility = %(private)s AND owner = ANY(%(projects)s)))
+    ORDER BY name, arch
+"""
+
+
+async def _staged_remote_images(
+    conn: AsyncConnection, ctx: RequestContext
+) -> list[tuple[str, str]]:
+    """Caller-visible staged remote-libvirt catalog images as ``(name, volume)``."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _STAGED_IMAGES_SQL,
+            {
+                "provider": ResourceKind.REMOTE_LIBVIRT.value,
+                "public": ImageVisibility.PUBLIC.value,
+                "private": ImageVisibility.PRIVATE.value,
+                "projects": projects_with_role(ctx, Role.VIEWER),
+            },
+        )
+        return [(row["name"], row["volume"]) for row in await cur.fetchall()]
 
 
 async def _fetch_resource_rows(
@@ -98,9 +132,19 @@ async def list_resources_tool(
 
 
 async def describe_resource(
-    pool: AsyncConnectionPool, ctx: RequestContext, resource_id: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    resource_id: str,
+    *,
+    staged_probe: StagedVolumeProbe | None = None,
 ) -> ToolResponse:
-    """Return one resource's envelope with pool/cost_class/host_uri, or an error."""
+    """Return one resource's envelope with pool/cost_class/host_uri, or an error.
+
+    For a remote-libvirt resource, also report ``staged_base_images``: each caller-visible staged
+    base-image volume and whether it is staged on the host's pool (ADR-0156). The live probe runs
+    only after the DB connection is released, and degrades to a per-volume status — it never fails
+    the describe.
+    """
     try:
         uid = UUID(resource_id)
     except ValueError:
@@ -109,12 +153,23 @@ async def describe_resource(
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
             resource = await RESOURCES.get(conn, uid)
-        if resource is None or not resource_visible_to_projects(resource, viewer_projects):
-            return resource_config_error(resource_id)
+            if resource is None or not resource_visible_to_projects(resource, viewer_projects):
+                return resource_config_error(resource_id)
+            staged_images: list[tuple[str, str]] = []
+            if resource.kind is ResourceKind.REMOTE_LIBVIRT:
+                staged_images = await _staged_remote_images(conn, ctx)
         envelope = resource_envelope(resource, next_actions=["allocations.request"])
         envelope.data["pool"] = resource.pool
         envelope.data["cost_class"] = resource.cost_class
         envelope.data["host_uri"] = resource.host_uri
+        if resource.kind is ResourceKind.REMOTE_LIBVIRT:
+            probe = staged_probe or probe_staged_volumes
+            statuses = await probe([volume for _, volume in staged_images]) if staged_images else {}
+            staged_base_images: list[JsonValue] = [
+                {"name": name, "volume": volume, "staged": statuses.get(volume, "unknown")}
+                for name, volume in staged_images
+            ]
+            envelope.data["staged_base_images"] = staged_base_images
         return envelope
 
 
