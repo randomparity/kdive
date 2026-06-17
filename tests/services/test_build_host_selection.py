@@ -154,6 +154,62 @@ def test_remote_host_at_capacity_is_capacity_exhausted(
     asyncio.run(_run())
 
 
+def test_compat_local_with_git_raises_config_error() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        build_host_selection.check_source_kind_compatibility(
+            host_kind=BuildHostKind.LOCAL, is_git=True, build_host="worker-local"
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == (
+        "a local build host requires a warm-tree kernel_source_ref, not a git ref"
+    )
+    assert exc.value.details == {"build_host": "worker-local", "host_kind": "local"}
+
+
+def test_compat_remote_with_warm_tree_raises_config_error() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        build_host_selection.check_source_kind_compatibility(
+            host_kind=BuildHostKind.SSH, is_git=False, build_host="builder"
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "a remote build host requires a git kernel_source_ref"
+    assert exc.value.details == {"build_host": "builder", "host_kind": "ssh"}
+
+
+def test_compat_ephemeral_with_warm_tree_raises() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        build_host_selection.check_source_kind_compatibility(
+            host_kind=BuildHostKind.EPHEMERAL_LIBVIRT, is_git=False, build_host="builders-a"
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "a remote build host requires a git kernel_source_ref"
+    assert exc.value.details == {"build_host": "builders-a", "host_kind": "ephemeral_libvirt"}
+
+
+def test_compat_local_with_warm_tree_ok() -> None:
+    assert (
+        build_host_selection.check_source_kind_compatibility(
+            host_kind=BuildHostKind.LOCAL, is_git=False, build_host="worker-local"
+        )
+        is None
+    )
+
+
+def test_compat_remote_with_git_ok() -> None:
+    assert (
+        build_host_selection.check_source_kind_compatibility(
+            host_kind=BuildHostKind.SSH, is_git=True, build_host="builder"
+        )
+        is None
+    )
+    assert (
+        build_host_selection.check_source_kind_compatibility(
+            host_kind=BuildHostKind.EPHEMERAL_LIBVIRT, is_git=True, build_host="builders-a"
+        )
+        is None
+    )
+
+
 async def _async[T](value: T) -> T:
     return value
 
