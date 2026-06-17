@@ -91,11 +91,23 @@ ssh+enabled).
 - `src/kdive/db/build_hosts.py` (add `list_all_hosts`).
 - `tests/db/test_build_hosts_repo.py` (the existing repository test module).
 
+**Fixture note (CHECK constraint — migration 0029):** the `build_hosts` table
+constrains rows by kind: an `ssh` row needs `address`/`ssh_credential_ref` NOT NULL
+and `base_image_volume` NULL; an `ephemeral_libvirt` row needs `base_image_volume`
+NOT NULL and `address`/`ssh_credential_ref` NULL. So an ephemeral fixture **cannot**
+reuse an ssh-shaped insert. Build the ephemeral row either via the existing
+`register_ephemeral_libvirt_build_host(pool, _admin_ctx(), _ephemeral_request(...))`
+handler (and `_ephemeral_request` helper) already used in `test_build_hosts.py`, or a
+raw insert with the ephemeral column shape
+`(name, kind='ephemeral_libvirt', base_image_volume=..., workspace_root, max_concurrent)`
+and NULL `address`/`ssh_credential_ref`. The seeded `worker-local` is `kind='local'`.
+
 **TDD steps:**
 1. Write a failing test: seed (via the migrated DB) `worker-local` plus an inserted
-   `ssh` host and an `ephemeral_libvirt` host; assert `list_all_hosts(conn)` returns
-   all three as `BuildHost` objects ordered by name. Assert the empty-of-operator-hosts
-   case still returns `worker-local` (the seed is always present).
+   `ssh` host and an `ephemeral_libvirt` host (built per the fixture note above);
+   assert `list_all_hosts(conn)` returns all three as `BuildHost` objects ordered by
+   name. Assert the empty-of-operator-hosts case still returns `worker-local` (the
+   seed is always present).
 2. Confirm it fails (no such function).
 3. Implement `async def list_all_hosts(conn: AsyncConnection) -> list[BuildHost]` —
    `SELECT * FROM build_hosts ORDER BY name`, mapping each row via `_row_to_host`
@@ -120,11 +132,15 @@ in `db/build_hosts.py`, distinct module + distinct name).
 - `tests/mcp/ops/test_build_hosts.py` (extend the existing list test).
 
 **TDD steps:**
-1. Extend the existing happy-path list test (or add a new one): register/insert an
-   `ssh` host and an `ephemeral_libvirt` host; call `list_build_hosts`; assert the
-   `ssh` item's `data["supported_source_kinds"] == ["git"]`, the ephemeral item's
-   `== ["git"]`, and the seeded `worker-local` item's `== ["warm-tree"]`. Assert the
-   field is present on **every** item.
+1. Extend the existing happy-path list test (or add a new one): insert an `ssh` host
+   (the existing `_insert_host` helper, or `register_ssh_build_host`) and an
+   `ephemeral_libvirt` host (per the Task 2 fixture note — the ssh-shaped `_insert_host`
+   helper will violate the migration-0029 CHECK for an ephemeral row, so use
+   `register_ephemeral_libvirt_build_host`/`_ephemeral_request` or a raw ephemeral-shape
+   insert); call `list_build_hosts`; assert the `ssh` item's
+   `data["supported_source_kinds"] == ["git"]`, the ephemeral item's `== ["git"]`, and
+   the seeded `worker-local` item's `== ["warm-tree"]`. Assert the field is present on
+   **every** item.
 2. Confirm it fails (field absent).
 3. Implement: in the item comprehension, add
    `"supported_source_kinds": [k.value for k in accepted_source_kinds(BuildHostKind(row["kind"]))]`.
