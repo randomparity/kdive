@@ -608,35 +608,30 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ### Task 7: Docs — staging guide, config reference, lane-guidance string
 
 **Files:**
-- Modify: `src/kdive/mcp/resources/_content/build-source-staging.md`
+- Modify: `docs/operating/build-source-staging.md` — **canonical** source. The `src/kdive/mcp/resources/_content/build-source-staging.md` copy is a generated snapshot; regenerate it with `just resources-docs` (do NOT hand-edit the snapshot — `resources-docs-check` gates it).
 - Modify: `src/kdive/providers/shared/build_host/workspace.py` (the `_BUILD_LANE_GUIDANCE` string, lines 36-42)
-- Modify: the config reference doc (`docs/guide/reference/config.md` — confirm path; it is referenced from `build-source-staging.md`).
-- Test: the generated-doc / config-manifest drift test if one exists (grep `tests/` for a test asserting every `Setting` is documented; if present it will fail until the reference is updated).
+- Regenerate: `docs/guide/reference/config.md` via `just config-docs` (generated from the registry; `config-docs-check` gates it — do NOT hand-edit).
 
-- [ ] **Step 1: Run the doc-drift test to see the gap (if one exists)**
+**CI gates this touches (all run individually in CI):** `config-docs-check`, `resources-docs-check`, `env-docs-check` (satisfied by the registry entry from Task 1), `adr-status-check` (ADR-0157 is Accepted + the README row matches).
 
-Run: `uv run python -m pytest tests -k "config_reference or doc and setting" -q` (find the actual selector by grepping `tests/` for `core_settings` / `config.md`).
-Expected: FAIL if a drift test requires the new setting to be documented; otherwise note there is no such gate and proceed.
+- [ ] **Step 1: Update the canonical `docs/operating/build-source-staging.md`**
 
-- [ ] **Step 2: Update `build-source-staging.md`**
+In the two-lane table, add a third lane row: **Git on local host (allowlisted)** | `{"git": {"remote": …, "ref": …}}` | the seeded `worker-local` host | operator sets `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST`. Add a subsection describing the allowlist format (host or host/path-prefix, comma-separated, deny-by-default), the lane-disabled vs not-allowlisted rejection, and that `ref` must be a server-advertised tag/branch (not an arbitrary SHA). Keep the existing "a bare string never overrides `KDIVE_KERNEL_SRC`" caveat. **Anchor the table-row Edit on the last existing table row, not on the prose after the table, to avoid splitting the table with a blank line.**
 
-In the two-lane table, add a third lane row: **Git on local host (allowlisted)** | `{"git": {"remote": …, "ref": …}}` | the seeded `worker-local` host | operator sets `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST`. Add a subsection describing the allowlist format (host or host/path-prefix, comma-separated, deny-by-default) and the lane-disabled vs not-allowlisted rejection. Keep the existing "a bare string never overrides `KDIVE_KERNEL_SRC`" caveat. **Anchor any table-row Edit on the last existing row, not on the prose after the table, to avoid splitting the table with a blank line.**
+- [ ] **Step 2: Update `_BUILD_LANE_GUIDANCE`**
 
-- [ ] **Step 3: Update `_BUILD_LANE_GUIDANCE`**
+Append a third option to the guidance string in `workspace.py`: a git `kernel_source_ref` can also build on the local host when the operator allowlists its remote via `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST`.
 
-Append a third option to the guidance string: a git `kernel_source_ref` can also build on the local host when the operator allowlists its remote via `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST`.
+- [ ] **Step 3: Regenerate the generated docs and run the doc gates**
 
-- [ ] **Step 4: Update the config reference + run doc guardrails**
+Run: `just config-docs && just resources-docs && just check-mermaid && just config-docs-check && just resources-docs-check && just env-docs-check && just adr-status-check`
+Expected: all clean (config.md picks up the new setting; the resource snapshot picks up the staging-doc edit).
 
-Add the `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` row to `config.md`. Then:
-
-Run: `just check-mermaid && uv run python -m pytest tests -k "doc or config_reference" -q`
-Expected: PASS / clean.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/kdive/mcp/resources/_content/build-source-staging.md src/kdive/providers/shared/build_host/workspace.py docs/guide/reference/config.md
+git add docs/operating/build-source-staging.md src/kdive/mcp/resources/_content/build-source-staging.md \
+        src/kdive/providers/shared/build_host/workspace.py docs/guide/reference/config.md
 git commit -m "docs: document the local git-clone build lane and its allowlist
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"

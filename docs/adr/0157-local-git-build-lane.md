@@ -1,6 +1,6 @@
 # ADR 0157 — Local git-clone build lane with operator remote allowlist
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0029](0029-build-profile-schema.md) (the

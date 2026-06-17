@@ -1,6 +1,6 @@
 # Local git-clone build lane (#530)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-17
 - **ADR:** [ADR-0157](../adr/0157-local-git-build-lane.md)
 - **Issue:** [#530](https://github.com/randomparity/kdive/issues/530) — "Support Multiple Kernel
