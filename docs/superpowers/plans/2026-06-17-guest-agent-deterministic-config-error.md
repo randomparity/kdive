@@ -1,7 +1,7 @@
 # Plan — Guest-agent deterministic failure classified as configuration_error (#531)
 
 - **Spec:** [../../specs/2026-06-17-guest-agent-deterministic-config-error.md](../../specs/2026-06-17-guest-agent-deterministic-config-error.md)
-- **ADR:** [../../adr/0158-guest-agent-deterministic-failure-classification.md](../../adr/0158-guest-agent-deterministic-failure-classification.md)
+- **ADR:** [../../adr/0159-guest-agent-deterministic-failure-classification.md](../../adr/0159-guest-agent-deterministic-failure-classification.md)
 - **Issue:** [#531](https://github.com/randomparity/kdive/issues/531)
 - **Branch:** `fix/guest-agent-deterministic-config-error-531`
 
@@ -102,7 +102,7 @@ omits the new `details` keys).
        libvirt.VIR_ERR_CONFIG_UNSUPPORTED,
    })
    ```
-   Add a short comment citing ADR-0158 and naming the "agent not configured / permission
+   Add a short comment citing ADR-0159 and naming the "agent not configured / permission
    denied / unsupported" intent.
 2. In the `except` body, read `code = exc.get_error_code()` and build a shared `details` dict:
    `{"domain": _domain_name(domain), "libvirt_error": str(exc), "libvirt_error_code": code}`.
