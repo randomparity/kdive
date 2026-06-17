@@ -372,11 +372,12 @@ In `tests/providers/remote_libvirt/lifecycle/test_build_vm.py`, add a controllab
 two tests. Place near the top, after the existing `_agent_ok`:
 
 ```python
-def _agent_route_after(polls: int) -> Any:
+def _agent_route_after(polls: int) -> tuple[Any, dict[str, int]]:
     """A guest-agent fake whose route probe reports rc!=0 for the first `polls` checks then rc 0.
 
     The probe is the only guest-exec issued in these tests, so each guest-exec/guest-exec-status
-    pair is one probe. Returns rc 1 (no route) until `polls` checks have happened, then rc 0.
+    pair is one probe. Returns rc 1 (no route) until `polls` checks have happened, then rc 0. The
+    returned `state` dict exposes `checks` so a test can assert the gate actually polled.
     """
     state = {"checks": 0}
 
@@ -388,10 +389,13 @@ def _agent_route_after(polls: int) -> Any:
         rc = 0 if state["checks"] > polls else 1
         return json.dumps({"return": {"exited": True, "exitcode": rc}})
 
-    return _agent
+    return _agent, state
 ```
 
-Then the tests (use a fast `BuildVmTiming` so the never-ready case does not need ~120 ticks):
+Then the tests (use a fast `BuildVmTiming` so the never-ready case does not need ~120 ticks). The
+happy-path test asserts `state["checks"]` reached the route-appears count, proving the gate
+*polled until ready* rather than yielding immediately (a pre-gate session never issues the probe,
+so `checks` would stay 0):
 
 ```python
 def _build_vm_with_agent(conn: FakeProvisionConn, tmp_path: Any, agent: Any, **timing: Any):
@@ -411,18 +415,22 @@ def _build_vm_with_agent(conn: FakeProvisionConn, tmp_path: Any, agent: Any, **t
 
 def test_session_yields_only_after_route_appears(tmp_path: Any) -> None:
     conn = _conn_with_base()
-    vm = _build_vm_with_agent(conn, tmp_path, _agent_route_after(2))
+    agent, state = _agent_route_after(2)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
     with vm.session(_BASE_VOLUME, run_id=RUN_ID) as transport:
         assert isinstance(transport, GuestExecBuildTransport)
         assert conn.domains[DOMAIN_NAME].active
+        # The gate polled until the route appeared (rc1, rc1, rc0) — not a vacuous immediate yield.
+        assert state["checks"] == 3
     assert DOMAIN_NAME not in conn.domains
 
 
 def test_session_network_never_ready_raises_and_tears_down(tmp_path: Any) -> None:
     conn = _conn_with_base()
+    agent, _state = _agent_route_after(10_000)
     # Route never appears; small network timeout so the fake clock reaches the deadline quickly.
     vm = _build_vm_with_agent(
-        conn, tmp_path, _agent_route_after(10_000), network_timeout_s=5.0, network_poll_s=1.0
+        conn, tmp_path, agent, network_timeout_s=5.0, network_poll_s=1.0
     )
     with pytest.raises(CategorizedError) as exc, vm.session(_BASE_VOLUME, run_id=RUN_ID):
         pass
@@ -438,10 +446,10 @@ Add the imports the new tests need at the top of the test file:
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_build_vm.py -q`
-Expected: `test_session_yields_only_after_route_appears` may pass vacuously (no gate yet, but the
-agent fake answers); `test_session_network_never_ready_raises_and_tears_down` FAILS — no
-`PROVISIONING_FAILURE` is raised because the gate does not exist yet. (If the first test also
-passes pre-implementation, that is fine; the never-ready test is the gating one.)
+Expected: BOTH new tests FAIL — without the gate the session never issues the probe, so
+`test_session_yields_only_after_route_appears` fails its `state["checks"] == 3` assertion (checks
+stays 0), and `test_session_network_never_ready_raises_and_tears_down` fails because no
+`PROVISIONING_FAILURE` is raised.
 
 - [ ] **Step 3: Implement the constants, timing fields, and gate**
 
