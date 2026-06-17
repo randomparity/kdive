@@ -53,7 +53,7 @@ class BaseImageStagingOutcome(StrEnum):
 
 - `STAGED` → `pass`, detail "base image volume is staged on the remote host's storage pool".
 - `NOT_STAGED` → `fail`, `failure_category=configuration_error`, `fix` = the verbatim
-  `storage.py` operator-staging remediation (see §3 for the shared constant).
+  `storage.py` operator-staging remediation (see §4 for the shared constant).
 - `UNREACHABLE` → `error`, detail "remote-libvirt host unreachable; cannot verify base-image
   staging", `failure_category=transport_failure`.
 - `INDETERMINATE` → `error`, detail "base-image staging could not be probed; check the
@@ -66,36 +66,74 @@ inventory config (not tenant data), so naming it in `detail`/`fix` is safe and m
 `storage.py` already surfaces at provision time. The existing `CheckResult.__post_init__`
 invariants enforce fix-only-on-fail and no-category-on-pass.
 
-### 2. The production probe adapter `diagnostics/base_image_staging.py`
+### 2. The (pool, volume) resolver — one public seam in `config.py`
+
+The probe needs **two** facts from `systems.toml`: the storage pool (a config knob) and the
+base-image **staged volume name** (the instance's `base_image` → `[[image]]` `.volume`).
+`remote_config_from_inventory()` returns the pool but **not** `base_image` or the `[[image]]`
+entries, and `_resolve_instance`/`_load_remote_instances` are private. To avoid loading the
+inventory twice and re-implementing the zero/multi-instance guard a second time (a drift hazard),
+add **one public resolver** in `config.py`:
+
+```
+def resolve_base_image_staged_volume() -> str:
+    """Return the staged base-image volume name for the single [[remote_libvirt]] instance.
+
+    Raises CONFIGURATION_ERROR for zero/multi instances (reusing _resolve_instance, the same
+    guard remote_config_from_inventory uses), a base_image whose [[image]] is absent, or an
+    [[image]] whose source is not `staged` (build/S3 images have no operator-staged volume).
+    """
+```
+
+It reuses `_resolve_instance()` (so the zero/multi-instance guard has exactly one home) and the
+loaded `InventoryDoc.image` list. The probe calls `remote_config_from_inventory()` for the pool +
+TLS material and `resolve_base_image_staged_volume()` for the volume. Both raise only
+`CategorizedError(CONFIGURATION_ERROR)`; both loads hit the same on-disk `systems.toml` and are
+cheap, and keeping them as two narrow public calls is clearer than threading a shared doc through
+the seam. (If the double parse ever matters, a later refactor can add a combined resolver; it is
+not worth a wider seam now.)
+
+### 3. The production probe adapter `diagnostics/base_image_staging.py`
 
 `base_image_staging_probe(*, config_factory=remote_config_from_inventory,
-inventory_factory=..., open_connection=open_libvirt, secret_backend_factory=...,
-pki_base_dir=None) -> BaseImageStagingProbe`, structured exactly like
+volume_factory=resolve_base_image_staged_volume, open_connection=open_libvirt,
+secret_backend_factory=..., pki_base_dir=None) -> BaseImageStagingProbe`, structured exactly like
 `reachability.remote_libvirt_reachability_probe`:
 
-1. Resolve config (`remote_config_from_inventory`) for the storage pool + TLS refs + URI.
-   A `CategorizedError(CONFIGURATION_ERROR)` → `INDETERMINATE`; `TRANSPORT_FAILURE` is not
-   raised by config resolution.
-2. Resolve the **base volume name**: load the inventory, take the single `[[remote_libvirt]]`
-   instance's `base_image`, find the matching `[[image]]`, and require `source.kind == "staged"`
-   to read `.volume`. Zero/many instances, a missing image cross-ref (the loader validates this,
-   but probe-time drift is possible), or a non-staged source → `INDETERMINATE`. (Config
-   resolution already rejects zero/multi-instance; this step reuses the loaded doc.)
-3. Open the connection through the shared `remote_connection(config, backend,
-   open_connection=..., pki_base_dir=...)` with a connection slice typed to the storage methods,
-   offloaded via `asyncio.to_thread`. `CategorizedError(TRANSPORT_FAILURE)` from connect →
-   `UNREACHABLE`; `CONFIGURATION_ERROR` (unresolvable cert refs) → `INDETERMINATE`.
-4. Call `lookup_volume_staged(conn, pool, volume)` (§3) and map `STAGED`→`STAGED`,
+1. Resolve config (`config_factory`) for the storage pool + TLS refs + URI, and the staged volume
+   name (`volume_factory`). A `CategorizedError(CONFIGURATION_ERROR)` from either →
+   `INDETERMINATE` (the opener is never called). `TRANSPORT_FAILURE` is not raised by either.
+2. Open the connection through the shared `remote_connection(config, backend,
+   open_connection=..., pki_base_dir=...)`, offloaded via `asyncio.to_thread`.
+   `CategorizedError(TRANSPORT_FAILURE)` from connect → `UNREACHABLE`; `CONFIGURATION_ERROR`
+   (unresolvable cert refs) → `INDETERMINATE`.
+3. Call `lookup_volume_staged(conn, pool, volume)` (§4) and map `STAGED`→`STAGED`,
    `ABSENT`→`NOT_STAGED`, `POOL_ABSENT`→`INDETERMINATE` (a missing pool is a different
-   misconfiguration than a missing volume — no staging fix). A raw `libvirtError` escaping the
-   helper (an infra fault, not a clean not-found) → `INDETERMINATE` (logged), never a confident
-   `NOT_STAGED`.
+   misconfiguration than a missing volume — no staging fix).
 
-Config resolution is deferred to probe time (factory-time resolution would collapse the whole
-report on inventory drift), matching `reachability.py`. A fresh per-probe `SecretRegistry`-backed
-backend (short-lived, read-only) is the default, mirroring the reachability default.
+**Storage-RPC libvirtError classification.** `remote_connection` wraps a failed *open* into
+`TRANSPORT_FAILURE`, but a `libvirtError` raised by the storage RPC *after* a successful open
+escapes raw (reachability.py:105-112 hits the same shape with `getInfo()`). `lookup_volume_staged`
+maps only the two clean not-found codes (`VIR_ERR_NO_STORAGE_POOL`/`VIR_ERR_NO_STORAGE_VOL`) and
+**re-raises** every other `libvirtError`. The probe catches that re-raised error and maps it to
+`INDETERMINATE` (logged), **not** `NOT_STAGED`: at this layer a transport drop mid-RPC and a
+malformed pool name are indistinguishable, and host-down reachability is already covered by the
+sibling `remote_libvirt_reachability` check, so emitting a stage-the-volume `fail` (or a confident
+`transport_failure`) here would be a wrong-fix. An `INDETERMINATE` "could not probe" verdict is the
+honest floor.
 
-### 3. Shared `lookup_volume_staged` helper (`providers/remote_libvirt/lifecycle/storage.py`)
+**Connection slice typing.** `remote_connection[C: ClosableConn]` is generic over the slice, but
+`StorageConn` (storage.py:33) carries only `storagePoolLookupByName`, not `close()`. The probe
+defines a `_StorageProbeConn(Protocol)` that is `StorageConn` + `close()` and types the opener to
+it; the production `open_libvirt`-style opener returns it via the same narrowing cast
+`open_libvirt_protocol` already uses at the host seam, so `remote_connection[_StorageProbeConn]`
+type-checks and `ty` stays green.
+
+Config/volume resolution is deferred to probe time (factory-time resolution would collapse the
+whole report on inventory drift), matching `reachability.py`. A fresh per-probe
+`SecretRegistry`-backed backend (short-lived, read-only) is the default, mirroring reachability.
+
+### 4. Shared `lookup_volume_staged` helper (`providers/remote_libvirt/lifecycle/storage.py`)
 
 A new pure function over an already-open connection, the single "is volume X staged?" path #511
 reuses:
@@ -122,7 +160,7 @@ string is lifted into a module constant `BASE_VOLUME_NOT_STAGED_FIX` so `ensure_
 provision-time error and the diagnostic `fail` fix share one literal (no drift between doctor and
 provision).
 
-### 4. Wiring (`service.py`)
+### 5. Wiring (`service.py`)
 
 `_remote_libvirt_checks()` appends `BaseImageStagingCheck(provider=_REMOTE_PROVIDER,
 probe=base_image_staging.base_image_staging_probe())` after the reachability check. The default
