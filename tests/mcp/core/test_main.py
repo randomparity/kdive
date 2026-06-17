@@ -294,3 +294,38 @@ def test_run_build_fs_writes_nothing_to_stdout_on_build_failure(
     with pytest.raises(CategorizedError):
         run_build_fs(args)
     assert capsys.readouterr().out == "", "no export line is printed when the build fails"
+
+
+def test_run_build_fs_destination_publish_failure_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Destination publish I/O failures use the CLI error taxonomy."""
+    produced = tmp_path / "plane-workspace" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+
+    class _FakePlane:
+        def build(self, spec: object) -> RootfsBuildOutput:
+            del spec
+            return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
+
+    def _move(_src: str, _dest: str) -> str:
+        raise PermissionError("destination unwritable")
+
+    _patch_plane(monkeypatch, _FakePlane())
+    monkeypatch.setattr("kdive.images.rootfs_command.shutil.move", _move)
+    dest = tmp_path / "rootfs" / "out.qcow2"
+    args = build_parser().parse_args(
+        ["build-fs", "--workspace", str(tmp_path / "ws"), "--dest", str(dest)]
+    )
+    with pytest.raises(CategorizedError) as caught:
+        run_build_fs(args)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {
+        "dest": str(dest.resolve()),
+        "operation": "publish",
+        "error": "PermissionError",
+    }
+    assert "could not publish" in str(caught.value)
+    assert capsys.readouterr().out == ""
