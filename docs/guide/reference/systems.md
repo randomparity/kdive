@@ -6,7 +6,9 @@
 
 `implemented`
 
-Create a System in 'defined' for a granted Allocation (upload window). Operator only.
+Create a System in 'defined' for a granted Allocation, opening a pre-provision
+rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
+Use `systems.provision` instead when the profile needs no upload window. Operator only.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -47,7 +49,9 @@ Return a ready-to-edit example profile per configured provider. Requires a token
 
 `partial`
 
-Mint a System for a granted Allocation and enqueue provision. Operator only.
+Mint a System for a granted Allocation and enqueue provision directly (no upload
+window). Use `systems.define` then `systems.provision_defined` instead when the rootfs
+must be uploaded before provisioning. Operator only.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -58,7 +62,9 @@ Mint a System for a granted Allocation and enqueue provision. Operator only.
 
 `implemented`
 
-Admit a DEFINED System after its upload window is complete. Requires operator.
+Admit a DEFINED System after its upload window is complete; not for a fresh System —
+create it with `systems.define` first (this is the second step of that lane).
+Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -68,7 +74,8 @@ Admit a DEFINED System after its upload window is complete. Requires operator.
 
 `partial` · `destructive`
 
-Enqueue in-place reprovision for a ready System. Requires operator and opt-in.
+Enqueue in-place reprovision for a ready System; not for creating a new System —
+use `systems.provision` instead. Requires operator and opt-in.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

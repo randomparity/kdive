@@ -8,6 +8,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.domain.state import SystemState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
@@ -92,7 +93,10 @@ def _register_systems_define(
             ),
         ],
     ) -> ToolResponse:
-        """Create a System in 'defined' for a granted Allocation (upload window). Operator only."""
+        """Create a System in 'defined' for a granted Allocation, opening a pre-provision
+        rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
+        Use `systems.provision` instead when the profile needs no upload window. Operator only.
+        """
         return await with_runtime_for_allocation(
             pool,
             resolver,
@@ -123,7 +127,10 @@ def _register_systems_provision(
             Field(description="Provisioning profile for the System create lane."),
         ],
     ) -> ToolResponse:
-        """Mint a System for a granted Allocation and enqueue provision. Operator only."""
+        """Mint a System for a granted Allocation and enqueue provision directly (no upload
+        window). Use `systems.define` then `systems.provision_defined` instead when the rootfs
+        must be uploaded before provisioning. Operator only.
+        """
         return await with_runtime_for_allocation(
             pool,
             resolver,
@@ -151,7 +158,10 @@ def _register_systems_provision_defined(
             Field(description="Defined System whose stored profile should be provisioned."),
         ],
     ) -> ToolResponse:
-        """Admit a DEFINED System after its upload window is complete. Requires operator."""
+        """Admit a DEFINED System after its upload window is complete; not for a fresh System —
+        create it with `systems.define` first (this is the second step of that lane).
+        Requires operator.
+        """
         return await with_runtime_for_system(
             pool,
             resolver,
@@ -188,7 +198,7 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str | None, Field(description="Only Systems under this Allocation id.")
         ] = None,
         state: Annotated[
-            str | None, Field(description="Only Systems in this lifecycle state.")
+            SystemState | None, Field(description="Only Systems in this lifecycle state.")
         ] = None,
         shape: Annotated[
             str | None,
@@ -266,7 +276,9 @@ def _register_systems_reprovision(
             Field(description="New provisioning profile; must opt in to reprovision."),
         ],
     ) -> ToolResponse:
-        """Enqueue in-place reprovision for a ready System. Requires operator and opt-in."""
+        """Enqueue in-place reprovision for a ready System; not for creating a new System —
+        use `systems.provision` instead. Requires operator and opt-in.
+        """
         return await with_runtime_for_system(
             pool,
             resolver,
