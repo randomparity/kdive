@@ -156,12 +156,17 @@ The collection's `suggested_next_actions` point at the build lane: `runs.create`
 then `runs.build` (the cold-agent path: edit an example → `runs.create` → `runs.build`).
 
 The pool-bound registrar wrapper resolves the configured pool, lists hosts via a new
-`list_build_hosts` repository read (`db/build_hosts.py`, ordered by name — mirrors
-`list_probeable_ssh_hosts`), and calls the pure handler. When **no** hosts are
-registered the repository read still returns at least the seeded `worker-local` row
-(it is never deleted — `build_hosts.remove` rejects it), so the collection is never
-empty in a migrated database; a defensive empty-list path still returns a valid
-empty collection.
+`list_all_hosts` repository read (`db/build_hosts.py`, ordered by name — mirrors
+`list_probeable_ssh_hosts`). The name is deliberately distinct from the existing
+`list_build_hosts` *handler* in `mcp/tools/ops/build_hosts/lifecycle.py` (a tool
+handler, not a row reader); the new read follows the repository's verb-noun
+convention (`get_by_name`, `list_probeable_ssh_hosts`) so the two names cannot be
+confused or imported in place of each other. The wrapper then calls the pure handler.
+When **no** operator hosts are registered the repository read still returns at least
+the seeded `worker-local` row (`kind='local'`, so its advertised
+`supported_source_kinds` is `["warm-tree"]`; it is never deleted — `build_hosts.remove`
+rejects it), so the collection is never empty in a migrated database; a defensive
+empty-list path still returns a valid empty collection.
 
 The emitted example is **schema-valid as emitted**: each `data.profile` parses via
 `BuildProfile.parse` and is compatible with its host (`check_source_kind_compatibility`
