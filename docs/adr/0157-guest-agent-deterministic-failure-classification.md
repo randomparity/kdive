@@ -55,9 +55,12 @@ misclassification at the exec seam is the in-scope defect.
 We will **subcategorize the libvirt error at the `_agent` raise site by its
 `get_error_code()`**: a code that names a **deterministic** condition (agent not configured,
 permission denied, operation/config unsupported) raises `CONFIGURATION_ERROR`
-(`retryable=false`); every other libvirt error — including an error with no live code
-(`get_error_code() == VIR_ERR_OK`) — keeps `TRANSPORT_FAILURE` (`retryable=true`), preserving
-the existing behavior for a genuinely transient channel drop.
+(`retryable=false`); every other libvirt error — including a bare error with no live error
+code (`get_error_code()` returns `None` when the libvirtError has no `.err` tuple) — keeps
+`TRANSPORT_FAILURE` (`retryable=true`), preserving the existing behavior for a genuinely
+transient channel drop. The classifier is a single membership test against the deterministic
+code set, so `None` and any unlisted code fall through to `TRANSPORT_FAILURE` with no special
+case.
 
 The deterministic set is:
 
@@ -66,7 +69,7 @@ The deterministic set is:
 | `ARGUMENT_UNSUPPORTED` | "QEMU guest agent is not configured" (channel absent) | `CONFIGURATION_ERROR` |
 | `ACCESS_DENIED`, `OPERATION_DENIED` | permission denied | `CONFIGURATION_ERROR` |
 | `NO_SUPPORT`, `OPERATION_UNSUPPORTED`, `CONFIG_UNSUPPORTED` | host/op cannot run the agent command | `CONFIGURATION_ERROR` |
-| anything else (incl. `AGENT_UNRESPONSIVE`, `AGENT_COMMAND_TIMEOUT`, `AGENT_UNSYNCED`, no code) | transient/unknown | `TRANSPORT_FAILURE` |
+| anything else (incl. `AGENT_UNRESPONSIVE`, `AGENT_COMMAND_TIMEOUT`, `AGENT_UNSYNCED`, or `None`/no `.err`) | transient/unknown | `TRANSPORT_FAILURE` |
 
 `AGENT_UNRESPONSIVE` stays `TRANSPORT_FAILURE` **on purpose**: it covers "configured but
 mid-reconnect/died", which a bare retry can clear; ADR-0118's documented bias is terminal
