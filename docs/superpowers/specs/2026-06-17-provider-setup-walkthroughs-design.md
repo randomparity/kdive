@@ -100,7 +100,8 @@ Each follows the same four-stage skeleton:
 
 The existing `providers/local-libvirt.md` and `providers/remote-libvirt.md` reference docs
 each gain a one-line pointer near the top: *"Setting up from scratch? See the
-[walkthrough](...)."*
+[local-libvirt walkthrough](../../operating/providers/local-libvirt-walkthrough.md) or
+[remote-libvirt walkthrough](../../operating/providers/remote-libvirt-walkthrough.md)."*
 
 ## Component 2 — Reference helper scripts
 
