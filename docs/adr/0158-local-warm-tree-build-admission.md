@@ -71,11 +71,16 @@ for non-`LOCAL` hosts (the transport/git path is a different branch and never re
 are deliberately **not** the call site: they hold only the `builder` object, never
 `kernel_src`, and do not branch on `host.kind`.
 
-`KDIVE_KERNEL_SRC` is read once at the admission check via `config.get`. We do not widen
-the `Builder` port to expose the closure-captured value, and we add no second read: in a
-live worker `config.load()` snapshots the env once at startup and is not reset during
-operation, so the admission read and the composition read resolve against the same
-worker snapshot, making the rejection byte-identical to the backstop by construction.
+`KDIVE_KERNEL_SRC` is read once, by the worker BUILD handler (`jobs/handlers/runs.py`,
+which already runs in the worker process and imports config), via `config.get`; the
+handler threads the value through `_run_build` into `run_build_on_host`, which forwards
+it to the admission helper. We do not read config inside `dispatch.py`/`workspace.py`
+(that package follows a "value passed in, never read from config" convention, which this
+preserves), and we do not widen the `Builder` port to expose the closure-captured value.
+In a live worker `config.load()` snapshots the env once at startup and is not reset
+during operation, so the handler's read and the composition-time read resolve against the
+same worker snapshot, making the rejection byte-identical to the backstop by
+construction.
 
 `sync_tree`'s in-place check **stays** as a defense-in-depth backstop, exactly as
 ADR-0157 kept its build-time check: the staged tree can be unmounted, deleted, or made
