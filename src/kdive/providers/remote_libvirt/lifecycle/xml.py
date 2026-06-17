@@ -166,6 +166,16 @@ def disk_pool(domain_xml: str) -> str | None:
         root: ET.Element = _safe_fromstring(domain_xml)
     except (ET.ParseError, DefusedXmlException):
         return None
+    return _disk_pool(root)
+
+
+def disk_pool_strict(domain_xml: str, *, operation: str, domain: str) -> str | None:
+    """The storage pool the domain's disk records; malformed XML is infrastructure failure."""
+    root = _parse_domain_xml_strict(domain_xml, operation=operation, domain=domain)
+    return _disk_pool(root)
+
+
+def _disk_pool(root: ET.Element) -> str | None:
     source = root.find("./devices/disk/source")
     if source is None:
         return None
