@@ -134,11 +134,23 @@ _DETERMINISTIC_CONFIG_CODES`, which keeps the same behavior.
 ## Task 3 — Full guardrails before push
 
 1. `just lint`, `just type` clean.
-2. `just test` (full non-live suite) green — confirms no other caller asserted the old
-   `transport_failure` category for these codes (search first:
-   `rg "TRANSPORT_FAILURE" tests/ src/kdive/providers/remote_libvirt/` and check none pin the
-   guest-agent deterministic path).
-3. The bash-backed doc guards (`docs-links`, `docs-paths`, `docs-check`, `check-mermaid`,
+2. **Regression check for coded-error tests (do this before implementing Task 2).** The only
+   way an existing test breaks is if it raises a *coded* `libvirt_error(code)` through the real
+   `GuestAgentExec._agent` path (install / build-VM / artifact-channel wrappers) and asserts
+   `TRANSPORT_FAILURE` for a code that now lands in the deterministic set. Run:
+   ```
+   rg -n "libvirt_error\(libvirt\.VIR_ERR_(ARGUMENT_UNSUPPORTED|ACCESS_DENIED|OPERATION_DENIED|NO_SUPPORT|OPERATION_UNSUPPORTED|CONFIG_UNSUPPORTED)\)" tests/
+   ```
+   At the current `HEAD` this returns **no matches**: existing coded guest-agent tests use
+   `VIR_ERR_AGENT_UNRESPONSIVE` (86), `VIR_ERR_OPERATION_FAILED` (55), and
+   `VIR_ERR_INTERNAL_ERROR` (1) — all outside the deterministic set, so they keep
+   `TRANSPORT_FAILURE` and stay green (verified: `test_install.py:286,329,335,367`,
+   `test_build_vm.py:345`). If a future rebase introduces a match, that test must be reasoned
+   about explicitly, not auto-updated. `OPERATION_FAILED` and `OPERATION_INVALID` are
+   deliberately **not** deterministic (transient/idempotency codes); only `OPERATION_DENIED`
+   (permission) is.
+3. `just test` (full non-live suite) green — final confirmation across all callers.
+4. The bash-backed doc guards (`docs-links`, `docs-paths`, `docs-check`, `check-mermaid`,
    `config-*`) require bash ≥4 and node deps; they may not run on a bash-3.2 host. Verify the
    new relative doc links resolve by hand and confirm `just adr-status-check` passes locally;
    CI runs the full set on Ubuntu.
