@@ -12,6 +12,8 @@ from kdive.providers.remote_libvirt.lifecycle.xml import agent_channel_connected
 
 type Sleep = Callable[[float], None]
 type Monotonic = Callable[[], float]
+type NetworkProbe = Callable[[], bool]
+type TimeoutDetail = Callable[[], dict[str, object]]
 
 
 class Domain(Protocol):
@@ -62,6 +64,39 @@ def wait_for_agent(
                 f"guest agent did not connect within {timeout_s:g}s",
                 category=ErrorCategory.PROVISIONING_FAILURE,
                 details={"domain": domain_name, "timeout_s": timeout_s},
+            )
+        sleep(poll_s)
+
+
+def wait_for_network(
+    probe: NetworkProbe,
+    domain_name: str,
+    *,
+    monotonic: Monotonic,
+    sleep: Sleep,
+    timeout_s: float,
+    poll_s: float,
+    timeout_detail: TimeoutDetail | None = None,
+) -> None:
+    """Poll an in-guest network-readiness probe until it succeeds or the deadline passes.
+
+    A ``False`` from *probe* means "not ready, keep polling"; a ``CategorizedError`` raised by
+    *probe* (the agent dropped) propagates unchanged. On deadline, raise ``PROVISIONING_FAILURE``
+    merged with ``timeout_detail()`` (the last probe output) so a broken probe is diagnosable
+    rather than a bare timeout (ADR-0144).
+    """
+    deadline = monotonic() + timeout_s
+    while True:
+        if probe():
+            return
+        if monotonic() >= deadline:
+            details: dict[str, object] = {"domain": domain_name, "timeout_s": timeout_s}
+            if timeout_detail is not None:
+                details.update(timeout_detail())
+            raise CategorizedError(
+                f"guest network did not come up within {timeout_s:g}s",
+                category=ErrorCategory.PROVISIONING_FAILURE,
+                details=details,
             )
         sleep(poll_s)
 
