@@ -210,6 +210,45 @@ def test_compat_remote_with_git_ok() -> None:
     )
 
 
+def test_accepted_source_kinds_matrix() -> None:
+    from kdive.services.runs.build_host_selection import SourceKind, accepted_source_kinds
+
+    assert accepted_source_kinds(BuildHostKind.LOCAL) == (SourceKind.WARM_TREE,)
+    assert accepted_source_kinds(BuildHostKind.SSH) == (SourceKind.GIT,)
+    assert accepted_source_kinds(BuildHostKind.EPHEMERAL_LIBVIRT) == (SourceKind.GIT,)
+
+
+@pytest.mark.parametrize("host_kind", list(BuildHostKind))
+@pytest.mark.parametrize("is_git", [True, False])
+def test_validator_agrees_with_accepted_source_kinds(
+    host_kind: BuildHostKind, is_git: bool
+) -> None:
+    """The validator raises iff the submitted source kind is absent from the advertised set.
+
+    This pins that ``check_source_kind_compatibility`` and ``accepted_source_kinds`` share
+    one source of truth: the lane the read surfaces advertise is exactly the lane the
+    validator enforces, for every ``BuildHostKind``.
+    """
+    from kdive.services.runs.build_host_selection import SourceKind, accepted_source_kinds
+
+    submitted = SourceKind.GIT if is_git else SourceKind.WARM_TREE
+    compatible = submitted in accepted_source_kinds(host_kind)
+
+    if compatible:
+        assert (
+            build_host_selection.check_source_kind_compatibility(
+                host_kind=host_kind, is_git=is_git, build_host="h"
+            )
+            is None
+        )
+    else:
+        with pytest.raises(CategorizedError) as exc:
+            build_host_selection.check_source_kind_compatibility(
+                host_kind=host_kind, is_git=is_git, build_host="h"
+            )
+        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 async def _async[T](value: T) -> T:
     return value
 

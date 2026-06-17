@@ -13,6 +13,7 @@ the global lock order).
 
 from __future__ import annotations
 
+from enum import StrEnum
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -28,15 +29,49 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile, is_git_source
 
 
+class SourceKind(StrEnum):
+    """The two ``kernel_source_ref`` provenances a build host can accept (ADR-0099 §5).
+
+    ``WARM_TREE`` is a bare string (warm-tree / URI provenance); ``GIT`` is a
+    ``{"git": {"remote": ..., "ref": ...}}`` object. The string values are the public
+    tokens surfaced on ``build_hosts.list`` and ``runs.profile_examples`` (ADR-0158).
+    """
+
+    WARM_TREE = "warm-tree"
+    GIT = "git"
+
+
+def accepted_source_kinds(host_kind: BuildHostKind) -> tuple[SourceKind, ...]:
+    """Return the ``kernel_source_ref`` kinds a build host of this kind accepts.
+
+    Single source of truth for the ADR-0099 §5 fail-closed matrix: ``LOCAL`` accepts a
+    warm-tree string only; ``SSH`` / ``EPHEMERAL_LIBVIRT`` accept a git ref only. Both
+    the create/build compatibility check (:func:`check_source_kind_compatibility`) and
+    the ``build_hosts.list`` / ``runs.profile_examples`` discovery surfaces (ADR-0158)
+    derive from this one function, so the advertised lane can never drift from the
+    enforced one.
+
+    Args:
+        host_kind: The build host's transport kind.
+
+    Returns:
+        The accepted :class:`SourceKind` values for ``host_kind``.
+    """
+    if host_kind is BuildHostKind.LOCAL:
+        return (SourceKind.WARM_TREE,)
+    return (SourceKind.GIT,)
+
+
 def check_source_kind_compatibility(
     *, host_kind: BuildHostKind, is_git: bool, build_host: str
 ) -> None:
     """Reject a build host whose transport kind is incompatible with the source provenance.
 
-    Single source of truth for the ADR-0099 §5 fail-closed matrix, shared by the
-    ``runs.create`` create-time check and the ``runs.build`` admission backstop
-    (``resolve_and_admit``): a ``local`` host accepts a warm-tree string only; an
-    ``ssh`` / ``ephemeral_libvirt`` host accepts a git ref only.
+    Consumes :func:`accepted_source_kinds` (the single source of truth for the
+    ADR-0099 §5 matrix), shared by the ``runs.create`` create-time check and the
+    ``runs.build`` admission backstop (``resolve_and_admit``): a ``local`` host accepts
+    a warm-tree string only; an ``ssh`` / ``ephemeral_libvirt`` host accepts a git ref
+    only.
 
     Args:
         host_kind: The resolved build host's transport kind.
@@ -49,18 +84,20 @@ def check_source_kind_compatibility(
             incompatible. The message and ``details`` are stable across both call sites,
             so a create-time and a build-time rejection match for the same host.
     """
-    if host_kind is BuildHostKind.LOCAL and is_git:
+    submitted = SourceKind.GIT if is_git else SourceKind.WARM_TREE
+    if submitted in accepted_source_kinds(host_kind):
+        return
+    if host_kind is BuildHostKind.LOCAL:
         raise CategorizedError(
             "a local build host requires a warm-tree kernel_source_ref, not a git ref",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"build_host": build_host, "host_kind": host_kind.value},
         )
-    if host_kind is not BuildHostKind.LOCAL and not is_git:
-        raise CategorizedError(
-            "a remote build host requires a git kernel_source_ref",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"build_host": build_host, "host_kind": host_kind.value},
-        )
+    raise CategorizedError(
+        "a remote build host requires a git kernel_source_ref",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"build_host": build_host, "host_kind": host_kind.value},
+    )
 
 
 async def resolve_and_admit(
