@@ -254,7 +254,9 @@ def _probe(
         if transport_exc:
             raise libvirt.libvirtError("connect refused")
         if block:
-            time.sleep(10.0)  # exceed the injected timeout; the wait_for must fire first
+            # Exceed the injected timeout so wait_for fires first, but stay small: a to_thread
+            # worker is not cancellable, so keep the orphaned sleep short to not stall teardown.
+            time.sleep(1.0)
         return conn
 
     return asyncio.run(
