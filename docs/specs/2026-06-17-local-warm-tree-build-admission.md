@@ -2,7 +2,7 @@
 
 - **Status:** Draft
 - **Date:** 2026-06-17
-- **ADR:** [0158](../adr/0158-local-warm-tree-build-admission.md)
+- **ADR:** [0160](../adr/0160-local-warm-tree-build-admission.md)
 - **Issue:** #532
 - **Related:** #534 / [ADR-0157](../adr/0157-create-time-build-host-source-check.md)
   (sibling source-kind check), #533 (diagnostics surfacing — out of scope here)
@@ -46,7 +46,7 @@ sites are `providers/local_libvirt/build.py:127` and
 `environment:` blocks**; the server's env does not carry `KDIVE_KERNEL_SRC`, and by the
 ADR-0087 process-scoping contract should not. A server-side read is therefore either
 unavailable or a false pass. The earliest boundary that holds the authoritative value
-is the **worker BUILD job entry**. See ADR-0158 "Considered & rejected" for the full
+is the **worker BUILD job entry**. See ADR-0160 "Considered & rejected" for the full
 disposition (also: worker-startup `required_when`, create-time, and dropping the
 backstop — all rejected).
 
@@ -144,7 +144,7 @@ nothing. The admission rejection therefore changes *when* the same failure happe
   `worker` service (a `# KDIVE_KERNEL_SRC: /srv/linux` env line and a
   `# - /path/to/linux:/srv/linux:ro` volume line), so the bootstrap is discoverable
   where the operator already looks.
-- No kernel bytes are committed and no auto-download is added (ADR-0158 rationale).
+- No kernel bytes are committed and no auto-download is added (ADR-0160 rationale).
 
 ## Acceptance criteria (falsifiable)
 

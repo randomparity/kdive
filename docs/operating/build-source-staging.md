@@ -45,7 +45,7 @@ To stage it:
 relative path, a non-existent path, or a filesystem root is rejected when the worker admits the
 build job — before it materializes a workspace — with the
 `KDIVE_KERNEL_SRC is not set on the build worker` / `not an absolute path to an existing kernel
-source tree` configuration error (the worker also re-checks at sync as a backstop; ADR-0158).
+source tree` configuration error (the worker also re-checks at sync as a backstop; ADR-0160).
 
 A bare `kernel_source_ref` in the Run's profile is provenance metadata only — it labels the
 build, it does **not** override `KDIVE_KERNEL_SRC`. The worker always builds from the staged

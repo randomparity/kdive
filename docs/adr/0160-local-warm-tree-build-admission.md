@@ -1,4 +1,4 @@
-# ADR 0158 — Admit a local warm-tree build only when `KDIVE_KERNEL_SRC` is usable
+# ADR 0160 — Admit a local warm-tree build only when `KDIVE_KERNEL_SRC` is usable
 
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-17
