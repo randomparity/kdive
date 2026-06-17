@@ -122,6 +122,12 @@ jobs:
         # adding it only to `just ci` would not gate PRs.
         run: just env-docs-check
 
+      - name: Doc-resource snapshot guard
+        # The packaged MCP doc-resource snapshots (src/kdive/mcp/resources/_content) must
+        # match the canonical docs/ they mirror (ADR-0151). Listed here because CI invokes
+        # recipes individually, so adding it only to `just ci` would not gate PRs.
+        run: just resources-docs-check
+
       - name: Chart appVersion guard
         # Chart.yaml appVersion must equal the pyproject version (spec A3) so a cut
         # release publishes an image at exactly the chart's default tag. Listed here

@@ -193,6 +193,7 @@ sentence; do not paste the abstract.
 | [0148](0148-rbac-scoped-tool-exposure.md) | RBAC-scoped `list_tools` exposure (advisory, fail-open) + append-only `tool_invocation` usage tracking. | Accepted |
 | [0149](0149-failed-system-provision-retry-ergonomics.md) | Actionable retry against a failed System on `systems.provision`: surface the original redacted reason + release/re-request next actions, no re-mint. | Accepted |
 | [0150](0150-diagnostics-base-image-staging-check.md) | Server-vantage `remote_libvirt_base_image_staging` diagnostic + shared `lookup_volume_staged` pool-volume helper. | Accepted |
+| [0151](0151-mcp-doc-resources.md) | Expose operator docs + cited ADRs as MCP resources (fixed allowlist, packaged snapshots, drift guard). | Accepted |
 | [0153](0153-guest-agent-abnormal-exit-not-success.md) | A guest-agent `exited:true` reply with neither exitcode nor signal raises `INFRASTRUCTURE_FAILURE` instead of reading as success. | Accepted |
 | [0154](0154-clone-verify-fetch-head.md) | Verify `FETCH_HEAD` resolves after the remote build fetch (any rc) before checkout; surface the fetch's stderr as `TRANSPORT_FAILURE`, not a misleading checkout pathspec error. | Accepted |
 | [0155](0155-build-vm-egress-preflight.md) | Build-VM egress preflight (`git ls-remote`) to the configured source before the clone, beyond ADR-0144's default-route gate. | Accepted |

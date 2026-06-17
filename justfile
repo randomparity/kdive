@@ -262,6 +262,14 @@ config-docs-check:
         exit 1
     fi
 
+# Regenerate the packaged MCP doc-resource snapshots from canonical docs/ (ADR-0151).
+resources-docs:
+    uv run python scripts/gen_doc_resources.py
+
+# Verify the committed doc-resource snapshots match canonical docs/ (CI gate, ADR-0151).
+resources-docs-check:
+    uv run python scripts/gen_doc_resources.py --check
+
 # Structural guard: no KDIVE_* env read outside kdive.config (ADR-0087). Stdlib-only.
 config-guard:
     uv run python scripts/config_env_guard.py
@@ -286,4 +294,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check chart-version-check test
+ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check resources-docs-check chart-version-check test
