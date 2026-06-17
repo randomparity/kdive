@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 
 import libvirt
+import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt import staged_volumes
@@ -128,10 +130,12 @@ def test_transport_failure_is_unreachable(tmp_path: Path) -> None:
     assert out == {"a.qcow2": "unreachable"}
 
 
-def test_config_error_is_unknown(tmp_path: Path) -> None:
+def test_config_error_is_unknown_and_logs(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     exc = CategorizedError("no instance", category=ErrorCategory.CONFIGURATION_ERROR)
-    out = _probe(["a.qcow2"], config_exc=exc, tmp_path=tmp_path)
+    with caplog.at_level(logging.WARNING, logger=staged_volumes.__name__):
+        out = _probe(["a.qcow2"], config_exc=exc, tmp_path=tmp_path)
     assert out == {"a.qcow2": "unknown"}
+    assert any("could not resolve remote config" in r.message for r in caplog.records)
 
 
 def test_timeout_is_unreachable(tmp_path: Path) -> None:

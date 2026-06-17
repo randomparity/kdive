@@ -93,6 +93,7 @@ async def probe_staged_volumes(
     try:
         config = config_factory()
     except CategorizedError:
+        _log.warning("staged-volume probe could not resolve remote config", exc_info=True)
         return dict.fromkeys(volumes, "unknown")
     try:
         return await asyncio.wait_for(
