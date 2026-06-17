@@ -58,8 +58,9 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
 
 async def _cancel_locked(conn: AsyncConnection, ctx: RequestContext, run: Run) -> ToolResponse:
     """Transition the Run + best-effort cancel its build job under the per-Run lock."""
-    prior = run.state
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+        locked = await RUNS.get(conn, run.id)
+        prior = locked.state if locked is not None else run.state
         try:
             canceled = await RUNS.update_state(conn, run.id, RunState.CANCELED)
         except IllegalTransition:
