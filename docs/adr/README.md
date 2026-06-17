@@ -197,3 +197,4 @@ sentence; do not paste the abstract.
 | [0153](0153-guest-agent-abnormal-exit-not-success.md) | A guest-agent `exited:true` reply with neither exitcode nor signal raises `INFRASTRUCTURE_FAILURE` instead of reading as success. | Accepted |
 | [0154](0154-clone-verify-fetch-head.md) | Verify `FETCH_HEAD` resolves after the remote build fetch (any rc) before checkout; surface the fetch's stderr as `TRANSPORT_FAILURE`, not a misleading checkout pathspec error. | Accepted |
 | [0155](0155-build-vm-egress-preflight.md) | Build-VM egress preflight (`git ls-remote`) to the configured source before the clone, beyond ADR-0144's default-route gate. | Accepted |
+| [0156](0156-discoverable-base-image-volume.md) | Surface the staged base-image `volume` token on `images_list`/`fixtures_list` and a per-resource live staged-volume probe on `resources_describe` (best-effort, reuses ADR-0150's `lookup_volume_staged`). | Accepted |

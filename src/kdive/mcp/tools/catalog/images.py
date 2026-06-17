@@ -46,6 +46,7 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
             "visibility": entry.visibility.value,
             "owner": entry.owner or "",
             "state": entry.state.value,
+            "volume": entry.volume or "",
         },
     )
 

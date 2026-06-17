@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Allocation, System
+from kdive.domain.models import Allocation, ResourceKind, System
 from kdive.domain.state import AllocationState, SystemState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
@@ -26,6 +26,7 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
 from kdive.services.resources.discovery import register_discovered_resource
+from tests.mcp.json_data import data_sequence, json_mapping
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 CTX = RequestContext(principal="user-1", agent_session="s", projects=("proj",))
@@ -209,6 +210,137 @@ def test_describe_malformed_id_is_error(migrated_url: str) -> None:
         assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
+
+
+async def _register_remote(
+    pool: AsyncConnectionPool, *, host_uri: str = "qemu+tls://h/system"
+) -> str:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO resources (kind, capabilities, pool, cost_class, status, host_uri) "
+            "VALUES (%s, '{}', 'default', 'remote', 'available', %s) RETURNING id",
+            (ResourceKind.REMOTE_LIBVIRT.value, host_uri),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def _insert_remote_image(
+    pool: AsyncConnectionPool,
+    *,
+    name: str,
+    volume: str,
+    visibility: str = "public",
+    owner: str | None = None,
+) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO image_catalog "
+            "(provider, name, arch, format, root_device, volume, visibility, owner, "
+            " expires_at, state, pending_since) "
+            "VALUES ('remote-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(volume)s, "
+            " %(vis)s, %(owner)s, "
+            " CASE WHEN %(vis)s = 'private' THEN now() + interval '1 hour' ELSE NULL END, "
+            " 'registered', now())",
+            {"name": name, "volume": volume, "vis": visibility, "owner": owner},
+        )
+
+
+def test_describe_remote_reports_staged_base_images(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool)
+            await _insert_remote_image(pool, name="fedora", volume="fedora.qcow2")
+            await _insert_remote_image(pool, name="dbg", volume="dbg.qcow2")
+
+            async def fake_probe(volumes: list[str]) -> dict[str, str]:
+                return {"fedora.qcow2": "staged", "dbg.qcow2": "absent"}
+
+            return await catalog_resources_tools.describe_resource(
+                pool, CTX, res_id, staged_probe=fake_probe
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "available"
+    staged = [json_mapping(r) for r in data_sequence(resp, "staged_base_images")]
+    assert {(r["name"], r["volume"], r["staged"]) for r in staged} == {
+        ("dbg", "dbg.qcow2", "absent"),
+        ("fedora", "fedora.qcow2", "staged"),
+    }
+
+
+def test_describe_remote_probe_degraded_does_not_fail_describe(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool)
+            await _insert_remote_image(pool, name="fedora", volume="fedora.qcow2")
+
+            # The handler trusts the probe's returned map; a probe that degraded internally
+            # returns 'unreachable' for every volume. The describe must still succeed.
+            async def degraded(volumes: list[str]) -> dict[str, str]:
+                return dict.fromkeys(volumes, "unreachable")
+
+            return await catalog_resources_tools.describe_resource(
+                pool, CTX, res_id, staged_probe=degraded
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "available"
+    staged = [json_mapping(r) for r in data_sequence(resp, "staged_base_images")]
+    assert staged[0]["staged"] == "unreachable"
+
+
+def test_describe_no_staged_images_empty_list_probe_not_called(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool)
+
+            async def fail(volumes: list[str]) -> dict[str, str]:
+                raise AssertionError("probe must not be called when there are no staged images")
+
+            return await catalog_resources_tools.describe_resource(
+                pool, CTX, res_id, staged_probe=fail
+            )
+
+    resp = asyncio.run(_run())
+    assert list(data_sequence(resp, "staged_base_images")) == []
+
+
+def test_describe_local_resource_has_no_staged_base_images(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+
+            async def fail(volumes: list[str]) -> dict[str, str]:
+                raise AssertionError("probe must not be called for a local resource")
+
+            return await catalog_resources_tools.describe_resource(
+                pool, CTX, res_id, staged_probe=fail
+            )
+
+    resp = asyncio.run(_run())
+    assert "staged_base_images" not in resp.data
+
+
+def test_describe_remote_excludes_other_projects_private_image(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool)
+            await _insert_remote_image(
+                pool, name="theirs", volume="theirs.qcow2", visibility="private", owner="proj-b"
+            )
+
+            async def probe(volumes: list[str]) -> dict[str, str]:
+                return dict.fromkeys(volumes, "staged")
+
+            # VIEWER_CTX is a viewer on 'proj', not on the owning 'proj-b'.
+            return await catalog_resources_tools.describe_resource(
+                pool, VIEWER_CTX, res_id, staged_probe=probe
+            )
+
+    resp = asyncio.run(_run())
+    assert list(data_sequence(resp, "staged_base_images")) == []
 
 
 _OPERATOR = RequestContext(

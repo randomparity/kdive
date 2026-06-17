@@ -48,6 +48,30 @@ async def _insert_image(
     )
 
 
+async def _insert_staged(conn: AsyncConnection, *, name: str, volume: str) -> None:
+    await conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, volume, capabilities, provenance, "
+        " visibility, owner, state, managed_by) "
+        "VALUES ('remote-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', %s, '{}', '{}', "
+        " 'public', NULL, 'registered', 'config')",
+        (name, volume),
+    )
+
+
+def test_fixtures_carry_staged_volume(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _insert_staged(conn, name="fedora-remote", volume="fedora-remote.qcow2")
+            resp = await fixtures.list_fixtures_tool(pool)
+        rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
+        match = next(row for row in rows if row["name"] == "fedora-remote")
+        assert match["volume"] == "fedora-remote.qcow2"
+
+    asyncio.run(_run())
+
+
 def test_lists_public_catalog_entries(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

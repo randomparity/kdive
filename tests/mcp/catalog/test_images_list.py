@@ -80,9 +80,40 @@ async def _insert(
         )
 
 
+async def _insert_staged(pool: AsyncConnectionPool, *, name: str, volume: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO image_catalog "
+            "(provider, name, arch, format, root_device, volume, visibility, owner, "
+            " state, pending_since) "
+            "VALUES ('remote-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(volume)s, "
+            " 'public', NULL, 'registered', now())",
+            {"name": name, "volume": volume},
+        )
+
+
 def _names(resp: object) -> set[str]:
     items = getattr(resp, "items", [])
     return {str(item.data["name"]) for item in items}
+
+
+def _volume_of(resp: object, name: str) -> str:
+    for item in getattr(resp, "items", []):
+        if item.data["name"] == name:
+            return str(item.data["volume"])
+    raise AssertionError(f"{name} not in listing")
+
+
+def test_list_carries_staged_volume_token(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_staged(pool, name="fedora-remote", volume="fedora-remote.qcow2")
+            await _insert(pool, name="local-s3", visibility="public", owner=None)
+            resp = await catalog_images.list_images(pool, _ctx())
+        assert _volume_of(resp, "fedora-remote") == "fedora-remote.qcow2"
+        assert _volume_of(resp, "local-s3") == ""  # no staged volume -> empty string
+
+    asyncio.run(_run())
 
 
 def test_list_returns_public_and_own_private_only(migrated_url: str) -> None:

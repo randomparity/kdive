@@ -39,13 +39,21 @@ async def _public_rows(pool: AsyncConnectionPool) -> list[JsonValue]:
     """
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT provider, name, arch FROM image_catalog "
+            "SELECT provider, name, arch, volume FROM image_catalog "
             "WHERE visibility = %s AND owner IS NULL "
             "ORDER BY provider, name, arch",
             (ImageVisibility.PUBLIC.value,),
         )
         rows = await cur.fetchall()
-    return [{"provider": row["provider"], "name": row["name"], "arch": row["arch"]} for row in rows]
+    return [
+        {
+            "provider": row["provider"],
+            "name": row["name"],
+            "arch": row["arch"],
+            "volume": row["volume"] or "",
+        }
+        for row in rows
+    ]
 
 
 async def list_fixtures_tool(pool: AsyncConnectionPool) -> ToolResponse:
