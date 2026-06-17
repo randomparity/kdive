@@ -1,6 +1,6 @@
 # ADR 0157 — Validate build-host ↔ kernel-source compatibility at `runs.create`
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0099](0099-remote-build-host-targets.md)
