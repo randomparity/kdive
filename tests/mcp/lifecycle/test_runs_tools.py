@@ -1721,18 +1721,20 @@ def test_build_host_provenance_mismatch_ssh_with_warm_tree_is_config_error(
     asyncio.run(_run())
 
 
-def test_build_host_provenance_mismatch_local_with_git_ref_is_config_error(
-    migrated_url: str,
-) -> None:
-    # worker-local (local kind) + git kernel_source_ref → configuration_error.
+def test_build_host_local_with_git_ref_is_admitted(migrated_url: str) -> None:
+    # ADR-0157: worker-local (local kind) + git kernel_source_ref is now admitted (the remote
+    # allowlist is enforced at build time on the worker, not at admission). The build job is
+    # enqueued and no capacity lease is taken for a local host.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             profile = copy.deepcopy(_GIT_BUILD)  # no build_host → resolves worker-local
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
             resp = await _build(pool, _ctx(), run_id)
             njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert njobs == 0
+            nleases = await _count(pool, "SELECT count(*) AS n FROM build_host_leases", ())
+        assert resp.status == "queued"
+        assert njobs == 1
+        assert nleases == 0  # local builds take no capacity lease
 
     asyncio.run(_run())
 
