@@ -178,18 +178,32 @@ class ShellBuildTransport:
         ``clone --depth 1`` cannot).
 
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for an unsafe remote/ref, or when
-                ``git checkout FETCH_HEAD`` exits non-zero.
+            CategorizedError: ``CONFIGURATION_ERROR`` for an unsafe remote/ref, a failed
+                ``git fetch``, or a failed ``git checkout FETCH_HEAD`` (the fetch's own stderr is
+                surfaced, not masked behind a later FETCH_HEAD pathspec error);
+                ``INFRASTRUCTURE_FAILURE`` for a failed ``git init`` (an environment fault).
         """
         _validate_git_arg(remote, "remote")
         _validate_git_arg(ref, "ref")
 
-        self._run_remote(["git", "init", dest], cwd="/", timeout_s=_CLONE_TIMEOUT_S)
-        self._run_remote(
+        init = self._run_remote(["git", "init", dest], cwd="/", timeout_s=_CLONE_TIMEOUT_S)
+        if init.returncode != 0:
+            raise CategorizedError(
+                "git init failed on remote",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"stderr": redacted_tail(init.stderr, self._secret_registry)},
+            )
+        fetch = self._run_remote(
             ["git", "-C", dest, "fetch", "--depth", "1", remote, ref],
             cwd="/",
             timeout_s=_CLONE_TIMEOUT_S,
         )
+        if fetch.returncode != 0:
+            raise CategorizedError(
+                "git fetch failed on remote",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"stderr": redacted_tail(fetch.stderr, self._secret_registry)},
+            )
         result = self._run_remote(
             ["git", "-C", dest, "checkout", "FETCH_HEAD"], cwd="/", timeout_s=_CLONE_TIMEOUT_S
         )
