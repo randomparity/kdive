@@ -89,8 +89,12 @@ class DebugEngineRuntime:
         with self._locks_guard:
             return self._locks.setdefault(session_id, asyncio.Lock())
 
-    def get_or_attach(self, session: DebugSession) -> GdbMiAttachment:
-        """Return the live attachment for ``session``, attaching once on a registry miss."""
+    def attach_or_reuse(self, session: DebugSession) -> GdbMiAttachment:
+        """Return the live attachment for ``session``.
+
+        A registry miss opens the provider attachment and registers it for later ops on the same
+        debug session.
+        """
         session_id = str(session.id)
         existing = self._registry.get(session_id)
         if existing is not None:
@@ -216,7 +220,7 @@ async def _runtime_for_op(
 def _attach_and_run(
     runtime: DebugEngineRuntime, session: DebugSession, op: _EngineOp
 ) -> ToolResponse:
-    return op(runtime.engine, runtime.get_or_attach(session))
+    return op(runtime.engine, runtime.attach_or_reuse(session))
 
 
 def _set_breakpoint_op(session_id: str, location: str) -> _EngineOp:
