@@ -385,6 +385,33 @@ def test_build_workspace_patch_unchanged_targets_raises_configuration_error(
     assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_build_workspace_patch_read_failure_raises_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A local patch read race stays inside the build config error taxonomy."""
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(_GOOD_PATCH)
+
+    def _read_bytes(_path: Path) -> bytes:
+        raise PermissionError("patch disappeared")
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+
+    transport = FakeBuildTransport(apply_changes_file=True)
+    orch = _orchestrator(transport, tmp_path)
+    profile = _profile({"patch_ref": str(patch_file)})
+
+    with pytest.raises(CategorizedError) as exc_info:
+        orch.build_workspace(_RUN, profile)
+
+    assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc_info.value.details == {
+        "kind": "patch_ref",
+        "path": str(patch_file),
+        "error": "PermissionError",
+    }
+
+
 def test_build_workspace_patch_skipped_patch_stderr_raises_configuration_error(
     tmp_path: Path,
 ) -> None:

@@ -200,7 +200,14 @@ def _transport_apply_patch(
             silently skipped by ``git apply``, or leaves the tree unchanged.
     """
     patch_path = resolve_local_ref(patch_ref, kind="patch_ref")
-    patch_bytes = patch_path.read_bytes()
+    try:
+        patch_bytes = patch_path.read_bytes()
+    except OSError as exc:
+        raise CategorizedError(
+            "patch_ref could not be read",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"kind": "patch_ref", "path": str(patch_path), "error": type(exc).__name__},
+        ) from exc
     patch_text = patch_bytes.decode(errors="replace")
 
     targets = patch_target_paths(patch_text, strip=1)

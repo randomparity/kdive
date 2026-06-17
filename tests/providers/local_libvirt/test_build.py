@@ -901,6 +901,40 @@ def test_resolve_config_bytes_rejects_local_outside_allowed_roots(tmp_path: Path
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_resolve_config_bytes_maps_local_read_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "components"
+    root.mkdir()
+    config = root / "x.config"
+    config.write_text("CONFIG_FROM_REF=y\n")
+
+    monkeypatch.setattr(
+        build_host_config,
+        "validate_local_component_path",
+        lambda *_args, **_kwargs: config,
+    )
+
+    def _read_bytes(_path: Path) -> bytes:
+        raise PermissionError("config disappeared")
+
+    monkeypatch.setattr(Path, "read_bytes", _read_bytes)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_config.resolve_config_bytes(
+            LocalComponentRef(kind="local", path=str(config)),
+            allowed_component_roots=[root],
+            catalog_fetch=lambda _name: b"unused",
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {
+        "kind": "config",
+        "path": str(config),
+        "error": "PermissionError",
+    }
+
+
 def test_resolve_config_bytes_returns_injected_catalog_bytes() -> None:
     data = build_host_config.resolve_config_bytes(
         CatalogComponentRef(kind="catalog", provider="system", name="kdump"),
