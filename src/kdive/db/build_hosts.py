@@ -119,7 +119,7 @@ async def get_by_id(conn: AsyncConnection, host_id: UUID) -> BuildHost | None:
 
 
 async def list_all_hosts(conn: AsyncConnection) -> list[BuildHost]:
-    """Return every build host row, ordered by name (ADR-0158).
+    """Return every build host row, ordered by name (ADR-0159).
 
     Distinct from the ``list_build_hosts`` MCP *handler*
     (``mcp/tools/ops/build_hosts/lifecycle.py``): this is the repository row reader the
