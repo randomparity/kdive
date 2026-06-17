@@ -32,6 +32,8 @@ from kdive.mcp.middleware import (
     BindingErrorMiddleware,
     DenialAuditMiddleware,
     TelemetryMiddleware,
+    ToolExposureMiddleware,
+    UsageTrackingMiddleware,
 )
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
@@ -406,6 +408,13 @@ def build_app(
             tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")
         )
     )
+    # Added just inside telemetry: UsageTrackingMiddleware observes the final outcome after
+    # DenialAuditMiddleware (added below, so inner) converts a denial to an envelope; it
+    # records one best-effort tool_invocation row per call (ADR-0148). ToolExposureMiddleware
+    # hooks only on_list_tools (filtering the advertised catalog), so its on_call_tool
+    # position is immaterial.
+    app.add_middleware(UsageTrackingMiddleware(pool))
+    app.add_middleware(ToolExposureMiddleware())
     app.add_middleware(DenialAuditMiddleware(pool))
     # Innermost (added last) so it sits adjacent to argument binding: it converts a recognised
     # binding ValidationError (a typed profile, ADR-0124; the allocations.request shape-XOR rule,
