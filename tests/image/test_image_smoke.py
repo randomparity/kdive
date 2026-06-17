@@ -25,6 +25,11 @@ pytestmark = pytest.mark.skipif(
 
 _COMMANDS = ("server", "worker", "reconciler", "migrate")
 
+# The kernel-build toolchain the worker's Build plane invokes (ADR-0146): a Linux `make`
+# hard-requires flex/bison/bc, and the warm-tree lane also shells out to git (patch_ref +
+# clone), rsync (warm-tree mirror), and xz. Each resolves on PATH and answers `--version`.
+_BUILD_TOOLS = ("flex", "bison", "bc", "git", "rsync", "xz")
+
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -64,5 +69,14 @@ def test_each_command_dispatches_past_argparse() -> None:
 def test_worker_toolchain_on_path() -> None:
     img = _image()
     for tool in ("drgn", "gdb", "virsh"):
+        res = _run("--entrypoint", tool, img, "--version")
+        assert res.returncode == 0, f"{tool} missing: {res.stderr}"
+
+
+def test_kernel_build_toolchain_on_path() -> None:
+    # ADR-0146: the Build plane's `make` lane needs the full kernel-build toolchain in the
+    # image. Without it the warm-tree/server build lane cannot compile on any shipped image.
+    img = _image()
+    for tool in _BUILD_TOOLS:
         res = _run("--entrypoint", tool, img, "--version")
         assert res.returncode == 0, f"{tool} missing: {res.stderr}"
