@@ -63,6 +63,16 @@ def test_audited_path_runs_mcp_helper_not_seed_demo(tmp_path: Path) -> None:
     assert "seed-demo" not in logged
 
 
+def test_audited_path_requires_token(tmp_path: Path) -> None:
+    _bindir, env, calllog = _healthy_local(tmp_path)
+    env |= {"KDIVE_SETUP_AUDITED": "1", "KDIVE_MCP_BASE": "http://localhost:8000/mcp"}
+    # KDIVE_TOKEN intentionally unset: the audited path must fail up front.
+    result = _run(env)
+    assert result.returncode != 0
+    # The helper must never run when the token guard fires.
+    assert not calllog.exists()
+
+
 def test_preflight_failure_aborts(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
