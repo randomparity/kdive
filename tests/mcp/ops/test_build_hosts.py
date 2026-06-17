@@ -384,6 +384,33 @@ def test_register_creates_ssh_row_list_shows_ref_only(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+def test_list_advertises_supported_source_kinds_per_kind(migrated_url: str) -> None:
+    """Every list item carries supported_source_kinds derived from its kind (ADR-0158)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_host(pool, name="ssh-host")
+            await register_ephemeral_libvirt_build_host(
+                pool,
+                _admin_ctx(),
+                _ephemeral_request(name="eph-host"),
+            )
+            list_resp = await list_build_hosts(pool, _auditor_ctx())
+
+        assert list_resp.status == "ok"
+        by_name = {item.data.get("name"): item.data for item in list_resp.items}
+        # the seeded local fallback advertises the warm-tree lane
+        assert by_name["worker-local"]["supported_source_kinds"] == ["warm-tree"]
+        # ssh and ephemeral_libvirt advertise the git lane
+        assert by_name["ssh-host"]["supported_source_kinds"] == ["git"]
+        assert by_name["eph-host"]["supported_source_kinds"] == ["git"]
+        # the field is present on every item
+        for item in list_resp.items:
+            assert "supported_source_kinds" in item.data
+
+    asyncio.run(_run())
+
+
 def test_register_audit_row_written_no_secret_bytes(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
