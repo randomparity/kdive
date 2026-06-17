@@ -51,7 +51,7 @@ fails the gate with a message naming the source, *before* the clone runs.
 
 **1. The preflight is `git ls-remote`, run in-guest over the existing transport.**
 
-- The session runs `git ls-remote --quiet --exit-code <remote> HEAD` via the same
+- The session runs `git ls-remote --quiet --exit-code -- <remote> HEAD` via the same
   `GuestExecBuildTransport` (allowlist `{'/bin/sh'}`, unchanged) the clone uses, with a bounded
   per-call timeout. Success (`rc 0`) means the guest resolved DNS, completed the TCP/TLS or SSH
   handshake, and reached the repository — the egress preconditions the immediately-following

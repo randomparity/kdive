@@ -369,3 +369,17 @@ def test_session_egress_probe_targets_head_not_pinned_sha(tmp_path: Any) -> None
     [probe] = agent.ls_remote_commands
     assert "HEAD" in probe
     assert _SHA not in probe
+
+
+def test_session_egress_probe_guards_leading_dash_remote(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_rc=0)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+    dashed = GitSourceRef(remote="--upload-pack=evil", ref="v6.9")
+
+    # A remote starting with '-' must reach git as a positional operand (after '--'), not an
+    # option — the preflight runs before the clone's own leading-dash guard.
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID, source=dashed) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+    [probe] = agent.ls_remote_commands
+    assert "-- --upload-pack=evil HEAD" in probe

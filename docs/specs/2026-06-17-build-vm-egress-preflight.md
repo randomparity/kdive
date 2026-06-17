@@ -67,9 +67,12 @@ local factories accept and ignore it; the ephemeral factory forwards it to
 After `wait_for_agent` + the existing `_wait_for_network` route gate, and only when
 `source is not None`:
 
-- Run `git ls-remote --quiet --exit-code <remote> HEAD` once via the bound
+- Run `git ls-remote --quiet --exit-code -- <remote> HEAD` once via the bound
   `GuestExecBuildTransport.run` (allowlist `{'/bin/sh'}`, unchanged), bounded by a per-call
-  timeout (`_EGRESS_PROBE_CALL_TIMEOUT_S`, a constructor-default on `BuildVmTiming`).
+  timeout (`_EGRESS_PROBE_CALL_TIMEOUT_S`, a constructor-default on `BuildVmTiming`). The `--`
+  end-of-options separator forces the remote to be the repository operand, so a remote starting
+  with `-` cannot be smuggled in as a git option — this preflight runs before the clone's own
+  leading-dash guard (`_validate_git_arg`).
   The probe targets **`HEAD`, not the configured `ref`**: it tests egress (DNS + connect +
   protocol handshake + repo access) to the source, *not* whether the configured ref exists. The
   clone resolves an arbitrary ref/sha (`ShellBuildTransport.clone` does

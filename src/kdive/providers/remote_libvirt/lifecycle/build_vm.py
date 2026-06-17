@@ -261,16 +261,20 @@ class EphemeralBuildVm:
     def _preflight_egress(self, transport: GuestExecBuildTransport, source: GitSourceRef) -> None:
         """Confirm the build guest can reach the configured source before the clone (ADR-0155).
 
-        Runs one bounded in-guest ``git ls-remote --quiet --exit-code <remote> HEAD`` over the
+        Runs one bounded in-guest ``git ls-remote --quiet --exit-code -- <remote> HEAD`` over the
         guest agent. ``rc 0`` means the guest resolved DNS, completed the handshake, and reached
         the repo — the egress the clone needs. A non-zero rc raises ``CONFIGURATION_ERROR`` naming
         the redacted remote with the git stderr surfaced (``git ls-remote`` returns 128 for both
         unreachable-host and repo-not-found, indistinguishable from the exit code, so the stderr
         carries the specific cause). A raised ``CategorizedError`` (agent dropped) propagates
         unchanged — ``wait_for_agent`` already confirmed the channel.
+
+        The ``--`` end-of-options separator forces the remote to be parsed as the repository
+        operand, so a remote that starts with ``-`` cannot be smuggled in as a git option — this
+        preflight runs before the clone's own leading-dash guard (``_validate_git_arg``).
         """
         result = transport.run(
-            ["git", "ls-remote", "--quiet", "--exit-code", source.remote, "HEAD"],
+            ["git", "ls-remote", "--quiet", "--exit-code", "--", source.remote, "HEAD"],
             cwd="/",
             timeout_s=self._timing.egress_probe_timeout_s,
         )
