@@ -77,12 +77,17 @@ than abstracted, matching the deliberate fake-duplication the remote test suite 
 
 ### 2. `RemoteLibvirtRetrieve.capture()` — two-phase, KDUMP-only
 
-`supported_capture_methods` widens from `frozenset()` to `frozenset({CaptureMethod.KDUMP})`.
+*Superseded in part by [ADR-0094](0094-remote-host-dump-via-coredump-volume.md) — remote now
+also supports `HOST_DUMP` (via `virDomainCoreDumpWithFormat` into the storage pool +
+`virStorageVolDownload`), so `supported_capture_methods` is `{KDUMP, HOST_DUMP}`. The two-phase
+KDUMP capture described below stands.*
+
+~~`supported_capture_methods` widens from `frozenset()` to `frozenset({CaptureMethod.KDUMP})`.
 **`HOST_DUMP` is not supported on remote**: a host-dump reads QEMU guest memory through a
 host-side path the worker would have to share, which is exactly the filesystem coupling the
 remote provider does not have. `capture()` rejects a non-KDUMP method with
 `CONFIGURATION_ERROR` defensively (the empty-set → `{KDUMP}` widening already blocks it at
-`vmcore.fetch`).
+`vmcore.fetch`).~~
 
 `capture(system_id, KDUMP)` runs **after** a crash, against a System whose control-plane state is
 `crashed` but whose guest must have completed its kdump-triggered reboot back to the normal kernel
@@ -193,9 +198,10 @@ NMI/curl/upload/`crash` mechanics run only under the `live_vm` gate.
 - **The two-phase model is the M3–M5 carry-forward.** A target that pulls its kernel and pushes
   its vmcore through bounded presigned URLs is the cloud/bare-metal model; only the in-target
   execution transport (guest-agent → cloud-init/SSH) changes behind the same Retriever contract.
-- **Remote captures KDUMP only.** Host-dump is a host-coupled capability; advertising only KDUMP
+- ~~**Remote captures KDUMP only.** Host-dump is a host-coupled capability; advertising only KDUMP
   keeps `vmcore.fetch` from admitting a method that cannot work remotely, rather than failing it
-  in a stub. Local keeps both.
+  in a stub. Local keeps both.~~ *Superseded by
+  [ADR-0094](0094-remote-host-dump-via-coredump-volume.md): remote captures `{KDUMP, HOST_DUMP}`.*
 - **The PUT side of the in-target seam is now exercised.** Issue 3 proved registered-URL
   redaction on a GET (install); issue 7 proves it on a PUT (vmcore upload) — the same
   one-object-capability, register-before-exec, release-after-persist contract on the write

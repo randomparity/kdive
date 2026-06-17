@@ -21,7 +21,12 @@ coverage until a later ADR wires it into runtime dispatch.
 
 ## Decision
 
-Providers register **capabilities** keyed by `(plane, operation, resource_kind)`,
+*Superseded for runtime assembly by [ADR-0063](0063-typed-provider-runtime.md) — the active
+M0/M1 provider seam is typed `ProviderRuntime` ports, not capability dispatch. The decision
+below is retained as design rationale (the extension-seam hypothesis tested at M2), not the
+shipping mechanism.*
+
+~~Providers register **capabilities** keyed by `(plane, operation, resource_kind)`,
 and the core **dispatches by matching a requested operation to an advertised
 capability — never by provider name**. **When more than one provider matches a
 requested `(plane, operation, resource_kind)`, selection is deterministic** — an
@@ -32,7 +37,7 @@ it supports; capabilities advertise that partial surface. Each plane operation
 declares contract flags — idempotent, destructive, cancelable, long-running (job)
 vs synchronous, and its **cancel/abandon cleanup guarantee**
 (clean-rollback / best-effort / orphan-flagged) — which drive job routing, the
-destructive-op gate, and the reconciler.
+destructive-op gate, and the reconciler.~~
 
 ## Consequences
 

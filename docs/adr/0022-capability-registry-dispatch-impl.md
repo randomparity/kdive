@@ -48,7 +48,11 @@ types remain prototype coverage, but production server and worker paths use type
 
 ## Decision
 
-**Representation.** `OpContract`, `Capability`, and the dispatch result `BoundOp` are
+*Superseded for runtime assembly by [ADR-0063](0063-typed-provider-runtime.md) — production
+server and worker paths use typed `ProviderRuntime` ports; the registry/dispatch implementation
+shapes below are retained prototype coverage, not the shipping seam.*
+
+~~**Representation.** `OpContract`, `Capability`, and the dispatch result `BoundOp` are
 **frozen, slotted dataclasses** (`@dataclass(frozen=True, slots=True)`) — immutable,
 hashable, usable as / within registry keys, and `__post_init__`-validated. `Plane`
 and `CleanupGuarantee` are `StrEnum`s (closed sets — the eight planes, the three
@@ -56,9 +60,9 @@ cleanup guarantees), matching the repository's lifecycle-enum convention
 (`ResourceKind`, `JobKind`). `operation` stays a `str` (open per plane);
 `resource_kind` reuses the existing `domain.models.ResourceKind` enum. We do **not**
 use Pydantic here: these are in-memory value types with no persistence/serialization
-need, and a frozen dataclass is the lighter hashable carrier.
+need, and a frozen dataclass is the lighter hashable carrier.~~
 
-**Registry binding.** `register(provider, capabilities, *, provider_id, health,
+~~**Registry binding.** `register(provider, capabilities, *, provider_id, health,
 cost_class)` records, per advertised `Capability`, a candidate registration bundling
 the provider object and its selection metadata. `health` reuses
 `domain.state.ResourceStatus` (`available`/`degraded`/`offline` — already an ordered
@@ -76,24 +80,24 @@ is a `ValueError`). The contract-equality rule keeps the dispatched `contract`
 independent of which provider wins, so an ordering policy can never flip an op's
 `destructive`/`long_running` flags. The M0 registry is built once at startup and is
 **immutable thereafter**; there is no update/replace path (re-registering an existing
-`provider_id` is the duplicate-id error, not a refresh).
+`provider_id` is the duplicate-id error, not a refresh).~~
 
-**Deterministic ordering.** `dispatch(plane, operation, resource_kind, *, pin=None)
--> BoundOp`. Candidate selection:
+~~**Deterministic ordering.** `dispatch(plane, operation, resource_kind, *, pin=None)
+-> BoundOp`. Candidate selection:~~
 
-1. if `pin` (a `provider_id`) is given, the candidate with that `provider_id` wins
+1. ~~if `pin` (a `provider_id`) is given, the candidate with that `provider_id` wins
    outright; if none matches the pin, dispatch raises `not_implemented` (a pin to a
-   provider that does not advertise the op is a denied request, not a fall-through);
-2. else order candidates by `health` (`available` ≺ `degraded` ≺ `offline`),
-3. then by `cost_class` **ascending lexicographically**,
-4. then by `provider_id` ascending (stable tiebreak),
+   provider that does not advertise the op is a denied request, not a fall-through);~~
+2. ~~else order candidates by `health` (`available` ≺ `degraded` ≺ `offline`),~~
+3. ~~then by `cost_class` **ascending lexicographically**,~~
+4. ~~then by `provider_id` ascending (stable tiebreak),~~
 
-and bind the first. The lexicographic `cost_class` order is a **documented
+~~and bind the first. The lexicographic `cost_class` order is a **documented
 placeholder**: `cost_class` is an unstructured `str` in M0, so any total order is
 arbitrary; a structured cost rank arrives when M1+ gives `cost_class` meaning. The
-order is total and deterministic regardless, which is what the acceptance test pins.
+order is total and deterministic regardless, which is what the acceptance test pins.~~
 
-**Advertised-but-unhonored.** A capability is *honored* iff the provider exposes a
+~~**Advertised-but-unhonored.** A capability is *honored* iff the provider exposes a
 callable attribute named for its `operation` — where `operation` is the plane
 Protocol method name (`capture_vmcore`, `force_crash`, `list_resources`), not the MCP
 tool verb (`vmcore.fetch`, `control.power`). This is checked **twice**: at `register`
@@ -101,13 +105,13 @@ tool verb (`vmcore.fetch`, `control.power`). This is checked **twice**: at `regi
 error) and again at `dispatch` (defence in depth) — both raise
 `CategorizedError(ErrorCategory.NOT_IMPLEMENTED)`. The deeper ADR-0009 check
 (advertised claims reconciled against a `list_owned`/`reconcile` surface) is M2; M0
-checks method presence only.
+checks method presence only.~~
 
-**Dispatch result.** `dispatch` returns a `BoundOp` frozen dataclass carrying
+~~**Dispatch result.** `dispatch` returns a `BoundOp` frozen dataclass carrying
 `(provider_id, operation, contract, call)` where `call` is the bound provider method.
 Callers read `contract` for job routing (`long_running`), the destructive-op gate
 (`destructive`), and cancel/reconcile (`cancelable`, `cleanup`) without re-deriving
-it.
+it.~~
 
 ## Consequences
 
