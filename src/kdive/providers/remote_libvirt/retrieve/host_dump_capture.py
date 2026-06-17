@@ -223,8 +223,18 @@ class HostDumpCapturer:
         """Delete a prior orphaned dump volume of the same deterministic name, if present."""
         try:
             stale = pool.storageVolLookupByName(vol_name)
-        except libvirt.libvirtError:
-            return
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return
+            raise CategorizedError(
+                "host_dump stale volume lookup failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={
+                    "operation": "deleting stale host_dump volume",
+                    "volume": vol_name,
+                    "error": type(exc).__name__,
+                },
+            ) from exc
         self._delete_volume(stale)
 
     def _core_dump(self, domain: Any, path: str, system_id: UUID) -> None:

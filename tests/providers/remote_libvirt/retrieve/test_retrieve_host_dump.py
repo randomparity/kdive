@@ -434,6 +434,47 @@ def test_host_dump_deletes_a_stale_volume_before_dumping(tmp_path: Path) -> None
     assert conn.domain.core_dumps  # the dump still ran afterward
 
 
+def test_host_dump_stale_volume_lookup_failure_is_infrastructure_failure(
+    tmp_path: Path,
+) -> None:
+    fresh = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML,
+        fresh=fresh,
+        error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR),
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    with pytest.raises(CategorizedError) as exc:
+        _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {
+        "operation": "deleting stale host_dump volume",
+        "volume": host_dump_volume_name(_SID),
+        "error": "libvirtError",
+    }
+    assert not conn.domain.core_dumps
+
+
+def test_host_dump_absent_stale_volume_still_allows_capture(tmp_path: Path) -> None:
+    fresh = FakeVolume(host_dump_volume_name(_SID), capacity=4096)
+    pool = _FailingStaleLookupPool(
+        xml=_DIR_POOL_XML,
+        fresh=fresh,
+        error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL),
+    )
+    conn = FakeHostDumpConn(pool=pool)
+    store = FakeStore(head=_head_ok())
+
+    out = _retrieve(conn, store, tmp_path).capture(_SID, CaptureMethod.HOST_DUMP)
+
+    assert out.vmcore_build_id == "deadbeef"
+    assert conn.domain.core_dumps
+    assert fresh.deleted
+
+
 class _StalePool(FakePool):
     """A pool whose first lookup yields a stale volume and whose post-refresh lookup the fresh."""
 
@@ -446,6 +487,21 @@ class _StalePool(FakePool):
         self.looked_up.append(name)
         if not self.refreshed:
             return self._stale
+        return self._fresh
+
+
+class _FailingStaleLookupPool(FakePool):
+    """A pool whose pre-dump stale-volume lookup raises a configured libvirt error."""
+
+    def __init__(self, *, xml: str, fresh: FakeVolume, error: libvirt.libvirtError) -> None:
+        super().__init__(xml=xml, volume=fresh)
+        self._fresh = fresh
+        self._error = error
+
+    def storageVolLookupByName(self, name: str) -> FakeVolume:  # noqa: N802 - binding name
+        self.looked_up.append(name)
+        if not self.refreshed:
+            raise self._error
         return self._fresh
 
 
