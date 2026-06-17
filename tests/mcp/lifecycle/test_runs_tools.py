@@ -3948,6 +3948,39 @@ def test_cancel_running_run_with_running_build_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_cancel_swallows_build_job_race_to_terminal(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The worker completes a build job via fenced raw SQL holding no per-Run lock, so a job
+    # read as `running` can turn terminal before cancel's FOR UPDATE acquires it. Simulate
+    # that race: the real row is `succeeded`, but get_by_dedup_key (as cancel sees it) returns
+    # a stale `running` snapshot, so JOBS.update_state hits the terminal row and raises
+    # IllegalTransition. The cancel must swallow it and still drive the Run to canceled.
+    from kdive.mcp.tools.lifecycle.runs import cancel as cancel_mod
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_running_run(pool)
+            job = await _enqueue_build_job(pool, run_id)
+            async with pool.connection() as conn:
+                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                await JOBS.update_state(conn, job.id, JobState.SUCCEEDED)
+            stale = job.model_copy(update={"state": JobState.RUNNING})
+
+            async def _stale_get(conn: AsyncConnection, dedup_key: str) -> Job:
+                return stale
+
+            monkeypatch.setattr(cancel_mod.queue, "get_by_dedup_key", _stale_get)
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "canceled"
+            assert await _run_state(pool, run_id) == "canceled"
+            async with pool.connection() as conn:
+                refreshed = await _build_job_for(conn, run_id)
+            assert refreshed.state is JobState.SUCCEEDED
+
+    asyncio.run(_run())
+
+
 def test_finalize_build_after_cancel_does_not_resurrect_run(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
