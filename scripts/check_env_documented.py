@@ -78,6 +78,21 @@ class Undocumented:
     token: str
 
 
+def _relative_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _format_read_error(path: Path, exc: UnicodeDecodeError | OSError) -> str:
+    return f"{_relative_path(path)}: could not read file ({type(exc).__name__}: {exc})"
+
+
+def _is_scannable_file(path: Path) -> bool:
+    return "__pycache__" not in path.parts and path.suffix != ".pyc"
+
+
 def documented_names() -> frozenset[str]:
     """The full documented set: registry settings ∪ catalogued non-registry variables."""
     return frozenset(s.name for s in all_settings()) | external_env_names()
@@ -87,17 +102,23 @@ def _scan_files() -> list[Path]:
     files: list[Path] = []
     for sub in _SCAN_DIRS:
         files.extend(sorted((_ROOT / sub).rglob("*")))
-    return [f for f in files if f.is_file() and f not in _EXCLUDE_FILES]
+    return [f for f in files if f.is_file() and _is_scannable_file(f) and f not in _EXCLUDE_FILES]
 
 
-def find_undocumented(files: list[Path], documented: frozenset[str]) -> list[Undocumented]:
+def find_undocumented(
+    files: list[Path],
+    documented: frozenset[str],
+    read_errors: list[str] | None = None,
+) -> list[Undocumented]:
     """Return every undocumented ``KDIVE_*`` token occurrence across ``files``."""
     out: list[Undocumented] = []
     allowed = documented | _NOT_ENV
     for path in files:
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        except (UnicodeDecodeError, OSError) as exc:
+            if read_errors is not None:
+                read_errors.append(_format_read_error(path, exc))
             continue
         for lineno, line in enumerate(text.splitlines(), start=1):
             for match in _TOKEN.finditer(line):
@@ -110,7 +131,8 @@ def find_undocumented(files: list[Path], documented: frozenset[str]) -> list[Und
 
 def main() -> int:
     documented = documented_names()
-    undocumented = find_undocumented(_scan_files(), documented)
+    read_errors: list[str] = []
+    undocumented = find_undocumented(_scan_files(), documented, read_errors)
     seen: set[str] = set()
     for item in undocumented:
         rel = item.file.relative_to(_ROOT)
@@ -122,6 +144,11 @@ def main() -> int:
             "external_env.py entry, or an explicit _NOT_ENV ignore",
             file=sys.stderr,
         )
+    for error in read_errors:
+        print(error, file=sys.stderr)
+    if read_errors:
+        print(f"{len(read_errors)} scanned file(s) could not be read", file=sys.stderr)
+    if undocumented or read_errors:
         return 1
     return 0
 

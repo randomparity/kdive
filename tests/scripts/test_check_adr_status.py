@@ -93,3 +93,29 @@ def test_proposed_adr_cited_in_source_fails(
 
     assert guard.main() == 1
     assert "status is Proposed but it is cited in src/" in capsys.readouterr().out
+
+
+def test_unreadable_source_file_fails_with_path_and_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _point_guard_at(monkeypatch, tmp_path)
+    _write_repo(tmp_path, file_status="Proposed", index_status="Proposed")
+    source = tmp_path / "src" / "kdive" / "module.py"
+    original_read_text = Path.read_text
+
+    def fail_for_source(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        if path == source:
+            raise PermissionError("denied")
+        return original_read_text(path, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "read_text", fail_for_source)
+
+    assert guard.main() == 1
+    captured = capsys.readouterr()
+    assert "src/kdive/module.py" in captured.err
+    assert "PermissionError" in captured.err

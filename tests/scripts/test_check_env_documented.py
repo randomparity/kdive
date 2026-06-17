@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts.check_env_documented import (
     _NOT_ENV,
     documented_names,
     find_undocumented,
+    main,
 )
 
 
@@ -57,3 +60,31 @@ def test_not_env_token_is_ignored(tmp_path: Path) -> None:
 
     assert "KDIVE_METADATA_NS" in _NOT_ENV
     assert find_undocumented([probe], documented_names()) == []
+
+
+def test_unreadable_scanned_file_fails_with_path_and_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe = tmp_path / "src" / "probe.py"
+    probe.parent.mkdir()
+    probe.write_text('os.getenv("KDIVE_DATABASE_URL")\n', encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def fail_for_probe(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        if path == probe:
+            raise PermissionError("denied")
+        return original_read_text(path, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr("scripts.check_env_documented._ROOT", tmp_path)
+    monkeypatch.setattr("scripts.check_env_documented._SCAN_DIRS", ("src",))
+    monkeypatch.setattr(Path, "read_text", fail_for_probe)
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    assert "src/probe.py" in captured.err
+    assert "PermissionError" in captured.err
