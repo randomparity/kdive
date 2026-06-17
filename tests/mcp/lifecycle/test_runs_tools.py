@@ -1724,7 +1724,7 @@ def test_build_host_provenance_mismatch_ssh_with_warm_tree_is_config_error(
 
 
 def test_build_host_local_with_git_ref_is_admitted(migrated_url: str) -> None:
-    # ADR-0160: worker-local (local kind) + git kernel_source_ref is now admitted (the remote
+    # ADR-0161: worker-local (local kind) + git kernel_source_ref is now admitted (the remote
     # allowlist is enforced at build time on the worker, not at admission). The build job is
     # enqueued and no capacity lease is taken for a local host.
     async def _run() -> None:
@@ -1894,7 +1894,7 @@ def test_create_ephemeral_host_with_warm_tree_is_config_error_no_run(migrated_ur
 
 
 def test_create_local_host_with_git_ref_succeeds(migrated_url: str) -> None:
-    # ADR-0160: default worker-local (kind local) + git kernel_source_ref is now compatible at
+    # ADR-0161: default worker-local (kind local) + git kernel_source_ref is now compatible at
     # create (the remote is gated by the build-time allowlist); the run is created.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -1994,7 +1994,7 @@ def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
 def test_build_backstop_rejects_when_host_kind_flips_after_create(migrated_url: str) -> None:
     # Create-valid (local + warm-tree) then flip the host to ssh before build: the build-time
     # check is the defense-in-depth backstop and still rejects an ssh+warm-tree pairing, with
-    # no build job. (ADR-0160 makes local+git valid, so the still-incompatible direction is a
+    # no build job. (ADR-0161 makes local+git valid, so the still-incompatible direction is a
     # non-local host with a warm-tree source.)
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

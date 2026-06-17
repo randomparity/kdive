@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13, `uv`, `pytest`, `ruff`, `ty`; git/rsync subprocesses on the worker.
 
-**Spec:** `docs/design/local-git-build-lane.md` · **ADR:** `docs/adr/0160-local-git-build-lane.md`
+**Spec:** `docs/design/local-git-build-lane.md` · **ADR:** `docs/adr/0161-local-git-build-lane.md`
 
 ## Global Constraints
 
@@ -19,7 +19,7 @@
 - Redact secrets/external output before it reaches an error detail or persistence (`security/`).
 - Doc prose: plain/factual; never "Sprint"/"critical"/"robust"/"comprehensive"/"elegant".
 - Commit trailer required: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
-- ADR number is **0160**; already created. Do not pick a new one.
+- ADR number is **0161**; already created. Do not pick a new one.
 
 ## File Structure
 
@@ -138,7 +138,7 @@ Move the `_UNSAFE_CHARS` frozenset and the `_validate_git_arg` body from `shell_
 Add a regression assertion in the existing shell_transport test (or the new git_source test) that `_validate_url` still rejects a control char, so the relocation cannot silently break it.
 
 ```python
-"""Git-source validation and the local-build remote allowlist (ADR-0160)."""
+"""Git-source validation and the local-build remote allowlist (ADR-0161)."""
 from __future__ import annotations
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
@@ -388,7 +388,7 @@ Add imports: `from collections.abc import Sequence`, `from kdive.profiles.build 
 ```python
 GIT_CLONE_TIMEOUT_S = 10 * 60
 
-# Closed ambient escape hatches so the allowlist bounds the actual connection (ADR-0160).
+# Closed ambient escape hatches so the allowlist bounds the actual connection (ADR-0161).
 _GIT_HARDENED_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
                      "GIT_PROTOCOL_FROM_USER": "0", "GIT_TERMINAL_PROMPT": "0"}
 _GIT_HARDENED_FLAGS = ["-c", "http.followRedirects=false", "-c", "protocol.allow=never",
@@ -414,7 +414,7 @@ def clone_tree(
     source: GitSourceRef, workspace: Path, allowlist: Sequence[str],
     *, run_id: UUID, secret_registry: SecretRegistry,
 ) -> None:
-    """Clone `source.remote` at `source.ref` into `workspace` (ADR-0160), allowlist-gated."""
+    """Clone `source.remote` at `source.ref` into `workspace` (ADR-0161), allowlist-gated."""
     validate_git_arg(source.remote, "remote")
     validate_git_arg(source.ref, "ref")
     if not allowlist:
@@ -612,7 +612,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `src/kdive/providers/shared/build_host/workspace.py` (the `_BUILD_LANE_GUIDANCE` string, lines 36-42)
 - Regenerate: `docs/guide/reference/config.md` via `just config-docs` (generated from the registry; `config-docs-check` gates it — do NOT hand-edit).
 
-**CI gates this touches (all run individually in CI):** `config-docs-check`, `resources-docs-check`, `env-docs-check` (satisfied by the registry entry from Task 1), `adr-status-check` (ADR-0160 is Accepted + the README row matches).
+**CI gates this touches (all run individually in CI):** `config-docs-check`, `resources-docs-check`, `env-docs-check` (satisfied by the registry entry from Task 1), `adr-status-check` (ADR-0161 is Accepted + the README row matches).
 
 - [ ] **Step 1: Update the canonical `docs/operating/build-source-staging.md`**
 
