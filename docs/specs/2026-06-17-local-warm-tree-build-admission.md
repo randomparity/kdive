@@ -80,23 +80,49 @@ def check_warm_tree_source_admission(
   offending message or `None`) that **both** `sync_tree` and the new helper call. No
   message string is copied; `sync_tree`'s observable behavior is unchanged.
 
-### Call site (worker BUILD handler)
+### Call site (the dispatch LOCAL branch)
 
-`jobs/handlers/runs.py` `_build_handler_autocommit` already resolves the host and the
-profile before building. Insert the admission check immediately before the build runs,
-inside `_build_and_record` after `_resolve_build_host` returns the host and before
-`builder.build(...)` is invoked, using the worker-composed `KDIVE_KERNEL_SRC`.
+The check goes in `run_build_on_host` (`providers/shared/build_host/dispatch.py:45`),
+**not** in `jobs/handlers/runs.py`. That function is the single seam that already
+discriminates LOCAL from transport:
 
-The worker reads `KDIVE_KERNEL_SRC` once (it is worker-scoped and already required at
-composition); the handler passes that same value (or re-reads via `config.get`) into
-the helper together with `host.kind`. Concretely: the value flows from the resolved
-runtime/builder or a direct `config.get(KERNEL_SRC)` read in the handler — whichever
-keeps the value's single read-point honest (the implementer chooses the lower-coupling
-option; both read the same worker env snapshot).
+```python
+async def run_build_on_host(builder, host, run_id, parsed, *, secret_registry, ...):
+    if host.kind is BuildHostKind.LOCAL:
+        return await asyncio.to_thread(builder.build, run_id, parsed)
+    ...  # transport (git/remote) path — KDIVE_KERNEL_SRC is never read here
+```
 
-The `over_transport` (remote git on a `LOCAL`-tenant transport) path does not apply:
-that path is taken only for git source on a remote host, where `host_kind` is not
-`LOCAL`, so the no-op branch covers it.
+Insert the admission check at the top of the `LOCAL` branch, before
+`asyncio.to_thread(builder.build, ...)`. This is the earliest point that (a) knows the
+host is LOCAL and (b) is about to run the warm-tree build, so it fails before any
+workspace side effect (`build()` → `build_workspace` → per-run `mkdir` → rsync). The
+`_build_and_record`/`_run_build` handler frames are **not** the call site: they hold
+only the `builder` object, never `kernel_src` (the value is sealed in the builder's
+checkout closure at composition, `make_checkout(kernel_src,...)`), and they do not
+branch on `host.kind`. Putting the check upstream would force a redundant `host.kind`
+re-derivation away from the one branch that already owns it.
+
+**Single read-point for `KDIVE_KERNEL_SRC`.** The admission check reads the value once,
+via `config.get(KERNEL_SRC)` at the dispatch LOCAL branch. We do **not** thread the
+closure-captured value out of the builder (that would widen the `Builder` port across
+all providers for one provider's concern) and we do **not** add a second read elsewhere.
+In a live worker `config.load()` snapshots the env once at startup
+(`__main__.py`) and is not reset during operation (reset is the test-only autouse
+fixture), so this admission read and the composition read resolve against the **same
+worker snapshot** — the rejection is byte-identical to the build-time backstop by
+construction, not by coincidence. The check is a no-op for any non-`LOCAL` host kind
+because it lives inside the `LOCAL` branch; the `over_transport`/git path never reaches
+it and never reads `KDIVE_KERNEL_SRC`.
+
+Because the check raises `CONFIGURATION_ERROR` from inside the `builder.build` dispatch,
+it propagates up through `_run_build` → `_build_and_record`'s `except CategorizedError`
+exactly as a build-time `sync_tree` rejection does today: same `_fail_build` path, same
+terminal-after-retries behavior. A LOCAL host holds **no** build-host lease
+(`_release_build_lease` is a no-op DELETE for local; leases are inserted only for
+non-LOCAL hosts in `resolve_and_admit`), so the retain-on-failure semantics strand
+nothing. The admission rejection therefore changes *when* the same failure happens
+(before workspace materialization instead of inside it), not the lease/retry contract.
 
 ### Demo path (part 2): documented one-step bootstrap + commented compose stanza
 
@@ -112,8 +138,9 @@ that path is taken only for git source on a remote host, where `host_kind` is no
 ## Acceptance criteria (falsifiable)
 
 1. A warm-tree profile on a `LOCAL` host (`worker-local`) with empty `KDIVE_KERNEL_SRC`
-   is rejected at the worker BUILD handler **before** `build()`/`build_workspace` runs,
-   with `CONFIGURATION_ERROR` and the exact `KERNEL_SRC_UNSET_DETAIL` string. (test)
+   is rejected at the dispatch `LOCAL` branch **before** `builder.build`/`build_workspace`
+   runs (asserted via a `builder.build` that records whether it was called), with
+   `CONFIGURATION_ERROR` and the exact `KERNEL_SRC_UNSET_DETAIL` string. (test)
 2. A whitespace-only `KDIVE_KERNEL_SRC` is rejected identically (the `.strip()` edge).
    (test)
 3. A non-empty-but-unusable `KDIVE_KERNEL_SRC` (relative path, non-existent path, or
@@ -126,9 +153,14 @@ that path is taken only for git source on a remote host, where `host_kind` is no
 6. `sync_tree`'s existing checks remain and still raise the same two messages when
    reached directly (the backstop is intact and its tests still pass). (test)
 7. The two message constants and the emptiness/usability predicate have exactly one
-   definition; no string is duplicated between `workspace.py` and
-   `build_host_selection.py`. (test/grep + review)
-8. `docs/operating/build-source-staging.md` documents the demo compose bootstrap and
+   definition in `providers/shared/build_host/workspace.py`; the admission helper and
+   `sync_tree` both call the shared predicate, and no message string is duplicated in
+   `build_host_selection.py` or `dispatch.py`. (test/grep + review)
+8. A `LOCAL` warm-tree build rejected at admission for empty/invalid `KDIVE_KERNEL_SRC`
+   strands no build-host lease and follows the same terminal-after-`max_attempts`
+   contract as a build-time `sync_tree` rejection (LOCAL holds no lease; the rejection
+   flows through `_build_and_record`'s existing `except CategorizedError`). (test)
+9. `docs/operating/build-source-staging.md` documents the demo compose bootstrap and
    `docker-compose.yml` carries the commented stanza; doc guardrails
    (`docs-links`, `docs-paths`, doc-style) pass. (guardrail)
 

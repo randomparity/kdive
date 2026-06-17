@@ -51,30 +51,45 @@ homes:
 
 ## Decision
 
-**(1) Validate the warm-tree source at the worker's build admission, reusing the
-existing message.** Add one pure helper beside ADR-0157's,
-`check_warm_tree_source_admission(kernel_src, *, host_kind)` in
-`services/runs/build_host_selection.py`, that — for a `LOCAL` host only — applies the
-exact same emptiness/usability predicate `sync_tree` already applies and raises the
-existing `KERNEL_SRC_UNSET_DETAIL` / `KERNEL_SRC_INVALID_DETAIL`
-(`CONFIGURATION_ERROR`). The worker BUILD handler calls it at job entry, after it has
-the resolved host and the worker-composed `KDIVE_KERNEL_SRC`, **before** the builder
-runs `build_workspace`/`sync_tree`. The check is a no-op for non-`LOCAL` hosts (git
-lanes do not read `KDIVE_KERNEL_SRC`) and for the transport (`over_transport`) path.
+**(1) Validate the warm-tree source at the dispatch `LOCAL` branch, reusing the
+existing message.** Factor `sync_tree`'s leading emptiness/usability guard into a small
+pure predicate in `providers/shared/build_host/workspace.py` (where the two message
+constants already live), so both `sync_tree` and a new admission helper call it with no
+string duplicated. Add the admission helper beside ADR-0157's in
+`services/runs/build_host_selection.py`; it raises the existing
+`KERNEL_SRC_UNSET_DETAIL` / `KERNEL_SRC_INVALID_DETAIL` (`CONFIGURATION_ERROR`) when the
+predicate reports an offending value.
 
-The two messages and the predicate stay single-sourced in
-`providers/shared/build_host/workspace.py` (where `sync_tree` already owns them); the
-new helper imports and reuses them. `sync_tree`'s in-place check **stays** as a
-defense-in-depth backstop, exactly as ADR-0157 kept its build-time check: the staged
-tree can be unmounted, deleted, or made non-absolute between admission and the rsync,
-and `sync_tree` remains the authority on the bytes it is about to mirror. Two checks,
-one rule.
+Call it from `run_build_on_host` (`providers/shared/build_host/dispatch.py`) at the top
+of its existing `if host.kind is BuildHostKind.LOCAL:` branch, before
+`asyncio.to_thread(builder.build, ...)`. That branch is the single seam that already
+discriminates LOCAL from transport and is the earliest point that both knows the host is
+LOCAL and is about to run the warm-tree build — so the check fires before any workspace
+side effect (`build_workspace` → per-run `mkdir` → rsync). It is structurally a no-op
+for non-`LOCAL` hosts (the transport/git path is a different branch and never reads
+`KDIVE_KERNEL_SRC`). The worker BUILD handler frames (`_build_and_record`/`_run_build`)
+are deliberately **not** the call site: they hold only the `builder` object, never
+`kernel_src`, and do not branch on `host.kind`.
 
-The admission boundary for *this value* is the **worker BUILD job entry**, not
+`KDIVE_KERNEL_SRC` is read once at the admission check via `config.get`. We do not widen
+the `Builder` port to expose the closure-captured value, and we add no second read: in a
+live worker `config.load()` snapshots the env once at startup and is not reset during
+operation, so the admission read and the composition read resolve against the same
+worker snapshot, making the rejection byte-identical to the backstop by construction.
+
+`sync_tree`'s in-place check **stays** as a defense-in-depth backstop, exactly as
+ADR-0157 kept its build-time check: the staged tree can be unmounted, deleted, or made
+non-absolute between admission and the rsync, and `sync_tree` remains the authority on
+the bytes it is about to mirror. Two checks, one predicate, one pair of messages.
+
+The admission boundary for *this value* is the **worker dispatch LOCAL branch**, not
 `runs.build` server admission, because that is the earliest point at which the
 authoritative value (`KDIVE_KERNEL_SRC` in the worker's own environment) is in scope.
 This is consistent with ADR-0157's principle — validate at the earliest boundary that
-*holds the inputs* — applied honestly to a worker-scoped input.
+*holds the inputs* — applied honestly to a worker-scoped input. Because the rejection
+propagates through `_build_and_record`'s existing `except CategorizedError` and a LOCAL
+host holds no build-host lease, the lease/retry contract is unchanged; only the timing
+of the identical failure moves earlier.
 
 **(2) Give the demo a documented one-step bootstrap, not a bundled tree.** Extend
 `docs/operating/build-source-staging.md` with an explicit demo/compose bootstrap: a
@@ -87,8 +102,8 @@ diagnostics surfacing of this gap and is out of scope here.
 
 ## Consequences
 
-- A warm-tree local build with empty/invalid `KDIVE_KERNEL_SRC` fails at the worker's
-  job admission with the existing `CONFIGURATION_ERROR` message, before the per-run
+- A warm-tree local build with empty/invalid `KDIVE_KERNEL_SRC` fails at the dispatch
+  `LOCAL` branch with the existing `CONFIGURATION_ERROR` message, before the per-run
   workspace is created or rsync runs — fast, local, and byte-identical to the old
   build-time error. No new message, no new error category.
 - The fix lives where the authoritative value lives (the worker), so it is honest
