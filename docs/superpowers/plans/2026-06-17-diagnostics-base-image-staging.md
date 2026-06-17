@@ -23,12 +23,14 @@ companion #511 read both reuse; also de-duplicates the ADR-0080 staging-remediat
    generic code), plus a present-volume case. Assert `lookup_volume_staged` returns
    `VolumeStaging.POOL_ABSENT` / `ABSENT` / `STAGED`, and **re-raises** for the generic code.
 2. Add `class VolumeStaging(StrEnum)` (`STAGED`/`ABSENT`/`POOL_ABSENT`).
-3. Lift the verbatim "base image volume … is not staged on the remote host's storage pool (an
-   operator prerequisite, ADR-0080)" message body into a module constant the existing
-   `ensure_named_overlay` `CategorizedError` and the new diagnostic both use, so the
-   provision-time error and the diagnostic `fail` fix cannot drift. Keep the existing error's
-   `{base_image_volume: ...}` detail. Add a `BASE_VOLUME_NOT_STAGED_FIX` constant (the operator
-   remediation sentence the diagnostic surfaces as `fix`).
+3. Extract the verbatim "base image volume … is not staged on the remote host's storage pool (an
+   operator prerequisite, ADR-0080)" message body into a **`storage.py`-local** constant that
+   `ensure_named_overlay`'s `CategorizedError` uses (a refactor with no observable change; keep
+   the `{base_image_volume: ...}` detail). Do **not** export it for cross-module reuse — the
+   diagnostic `fix` constant lives in `checks.py` per Task 3 step 3 (the
+   `diagnostics → providers` dependency direction forbids `storage.py` importing diagnostics, and
+   the reverse import is unnecessary). The two remediation sentences are independent literals,
+   each test-asserted.
 4. Implement `lookup_volume_staged(conn, pool_name, volume_name) -> VolumeStaging`: lookup pool
    (map `NO_STORAGE_POOL`→`POOL_ABSENT`, re-raise others), lookup volume (map
    `NO_STORAGE_VOL`→`ABSENT`, re-raise others), else `STAGED`. No connection open/close.
@@ -82,16 +84,19 @@ multi-instance guard. Do not make the guard live in two places.
    `BaseImageStagingProbe = Callable[[], Awaitable[BaseImageStagingOutcome]]`,
    `class BaseImageStagingCheck(Check)`. Map outcomes per spec §1. Reuse `_CONFIGURATION_ERROR`/
    `_TRANSPORT_FAILURE` module constants.
-3. **Import boundary:** `checks.py` is currently free of provider imports (per its design). The
-   `BASE_VOLUME_NOT_STAGED_FIX` literal lives in `storage.py`. To avoid a provider import in
-   `checks.py`, pass the fix string into `BaseImageStagingCheck.__init__` (like `ProviderTlsCheck`
-   takes its `ca_path`), or define the fix as a `checks.py` constant the storage module imports.
-   **Decision:** define the fix sentence in `checks.py` and have the probe/service not need it;
-   keep `storage.py`'s provision error message as-is BUT share the operator-remediation sentence
-   via a constant in a neutral location. If a neutral home is awkward, prefer `checks.py` owning
-   the diagnostic `fix` constant and `storage.py` owning its own provision message (they describe
-   the same remediation; the test asserts the diagnostic fix text). Re-evaluate at implementation:
-   the hard rule is `checks.py` gains **no** `libvirt`/provider import.
+3. **Import boundary (settled):** `checks.py` is free of provider/`libvirt` imports by design,
+   and `diagnostics` → `providers` is the only legal direction (a provider importing diagnostics
+   would be an upward dependency). Therefore the diagnostic `fix` constant
+   `BASE_VOLUME_NOT_STAGED_FIX` is **owned by `checks.py`** (it is diagnostic-output policy, not
+   storage logic). `storage.py` keeps its own provision-time `CategorizedError` message unchanged
+   (Task 1 only extracts that message into a `storage.py`-local constant for its own reuse, not a
+   cross-module shared literal). The two sentences describe the same operator remediation but are
+   independent literals, each asserted by its own test — this accepts a small, low-risk
+   duplication (two short fixed strings) in exchange for keeping the dependency direction clean.
+   The Task 1 reference to "share one literal" is **superseded by this**: do not introduce a
+   neutral shared-constant module just to dedupe two sentences; the import-direction rule wins.
+   `checks.py` gains **no** new import. Update Task 1 step 3 accordingly (a `storage.py`-local
+   constant for the provision message; no cross-module export of the fix text).
 4. `just lint && just type` + focused test green.
 
 **Acceptance:** all four outcomes map correctly; `checks.py` has no new provider/libvirt import;

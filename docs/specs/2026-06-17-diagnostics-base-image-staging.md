@@ -23,7 +23,7 @@ base-image volume on the host's storage pool and reports three-state:
 | Outcome | Status | failure_category | fix |
 |---|---|---|---|
 | pool exists, volume staged | `pass` | — | — |
-| pool exists, volume absent | `fail` | `configuration_error` | ADR-0080 staging text (from `storage.py`) |
+| pool exists, volume absent | `fail` | `configuration_error` | ADR-0080 staging text (`checks.py` `BASE_VOLUME_NOT_STAGED_FIX`) |
 | host unreachable | `error` | `transport_failure` | — |
 | pool absent / inventory unresolvable / multi-instance / cert refs unresolvable / base image not `staged` | `error` | `configuration_error` | — |
 
@@ -52,8 +52,9 @@ class BaseImageStagingOutcome(StrEnum):
 (a new `BASE_IMAGE_STAGING_ID` module constant), `vantage = Vantage.SERVER`. `run()` maps:
 
 - `STAGED` → `pass`, detail "base image volume is staged on the remote host's storage pool".
-- `NOT_STAGED` → `fail`, `failure_category=configuration_error`, `fix` = the verbatim
-  `storage.py` operator-staging remediation (see §4 for the shared constant).
+- `NOT_STAGED` → `fail`, `failure_category=configuration_error`, `fix` = the
+  `BASE_VOLUME_NOT_STAGED_FIX` constant owned by `checks.py` (the operator-staging remediation;
+  see §4 for why it lives in `checks.py`, not `storage.py`).
 - `UNREACHABLE` → `error`, detail "remote-libvirt host unreachable; cannot verify base-image
   staging", `failure_category=transport_failure`.
 - `INDETERMINATE` → `error`, detail "base-image staging could not be probed; check the
@@ -155,10 +156,16 @@ def lookup_volume_staged(conn: StorageConn, pool_name: str, volume_name: str) ->
   own error envelope). The helper does not swallow infra faults into a clean state.
 
 It does **not** open or close the connection; the caller owns the TLS lifecycle. It reuses the
-existing `StorageConn`/`Pool`/`Volume` protocols. The verbatim ADR-0080 staging-remediation
-string is lifted into a module constant `BASE_VOLUME_NOT_STAGED_FIX` so `ensure_named_overlay`'s
-provision-time error and the diagnostic `fail` fix share one literal (no drift between doctor and
-provision).
+existing `StorageConn`/`Pool`/`Volume` protocols.
+
+**Where the `fix` text lives (dependency direction).** `diagnostics → providers` is the only legal
+import direction (a provider importing diagnostics would be an upward dependency). So the
+diagnostic `fix` constant `BASE_VOLUME_NOT_STAGED_FIX` is owned by **`checks.py`** (it is
+diagnostic-output policy). `storage.py` keeps its own provision-time `CategorizedError` message
+(optionally extracted into a `storage.py`-local constant for its own reuse, with no observable
+change). The two remediation sentences describe the same operator action but are independent
+literals, each test-asserted — a small, low-risk duplication kept in exchange for a clean
+dependency direction. There is no neutral shared-constant module.
 
 ### 5. Wiring (`service.py`)
 
