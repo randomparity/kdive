@@ -1989,6 +1989,34 @@ def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_build_backstop_rejects_when_host_kind_flips_after_create(migrated_url: str) -> None:
+    # Create-valid (ssh + git) then flip the host to local before build: the build-time
+    # check is the defense-in-depth backstop and still rejects, with no build job.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_ssh_host(pool, name="ssh-flip")
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "ssh-flip"}
+            created = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            assert created.status == "created"
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE build_hosts SET kind = 'local', address = NULL, "
+                    "ssh_credential_ref = NULL WHERE name = %s",
+                    ("ssh-flip",),
+                )
+            resp = await _build(pool, _ctx(), created.object_id)
+            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.detail == (
+            "a local build host requires a warm-tree kernel_source_ref, not a git ref"
+        )
+        assert njobs == 0
+
+    asyncio.run(_run())
+
+
 # --- build_handler (the worker) ------------------------------------------------------
 
 from kdive.build_artifacts.results import BuildOutput  # noqa: E402
