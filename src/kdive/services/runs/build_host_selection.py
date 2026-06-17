@@ -28,6 +28,37 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile, is_git_source
 
 
+def check_source_kind_compatibility(
+    *, host_kind: BuildHostKind, is_git: bool, build_host: str
+) -> None:
+    """Reject a build host whose transport kind is incompatible with the source provenance.
+
+    Single source of truth for the host-kind/source-kind matrix (ADR-0099 §5), shared by the
+    ``runs.create`` create-time check and the ``runs.build`` admission backstop
+    (``resolve_and_admit``). A ``local`` host accepts **either** a warm-tree string or a git
+    ref — ADR-0158 added the local git-clone lane, whose remote is gated by the worker's
+    build-time allowlist, so local+git is no longer rejected here. An
+    ``ssh`` / ``ephemeral_libvirt`` host still accepts a git ref only (it has no warm tree).
+
+    Args:
+        host_kind: The resolved build host's transport kind.
+        is_git: Whether the profile's ``kernel_source_ref`` is git provenance
+            (``is_git_source(profile)``).
+        build_host: The resolved host name, carried into the error details.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when a non-local host is given a warm-tree
+            source. The message and ``details`` are stable across both call sites, so a
+            create-time and a build-time rejection match for the same host.
+    """
+    if host_kind is not BuildHostKind.LOCAL and not is_git:
+        raise CategorizedError(
+            "a remote build host requires a git kernel_source_ref",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"build_host": build_host, "host_kind": host_kind.value},
+        )
+
+
 async def resolve_and_admit(
     conn: AsyncConnection,
     parsed_profile: ServerBuildProfile,
@@ -74,16 +105,9 @@ async def resolve_and_admit(
             details={"build_host": name, "enabled": host.enabled, "state": host.state.value},
         )
 
-    git = is_git_source(parsed_profile)
-    # A local host accepts either provenance: warm-tree (bare string) or a git source whose
-    # remote is enforced against the worker's allowlist at build time (ADR-0157). A remote host
-    # still requires a git source — it has no warm tree to mirror.
-    if host.kind is not BuildHostKind.LOCAL and not git:
-        raise CategorizedError(
-            "a remote build host requires a git kernel_source_ref",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"build_host": name, "host_kind": host.kind.value},
-        )
+    check_source_kind_compatibility(
+        host_kind=host.kind, is_git=is_git_source(parsed_profile), build_host=name
+    )
 
     if host.kind is not BuildHostKind.LOCAL:
         ok = await try_acquire_lease(conn, host, run_id)

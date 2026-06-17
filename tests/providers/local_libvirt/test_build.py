@@ -1535,7 +1535,7 @@ def test_from_env_threads_remote_allowlist(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured["allow"] == ("github.com/myorg", "git.example.com")
 
 
-# --- clone_tree (local git lane) + provenance dispatch (ADR-0157) -------------------
+# --- clone_tree (local git lane) + provenance dispatch (ADR-0158) -------------------
 
 
 def _git_profile() -> ServerBuildProfile:

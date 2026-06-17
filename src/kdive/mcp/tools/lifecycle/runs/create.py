@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import ValidationError
 
+from kdive.db.build_hosts import get_by_name
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -31,11 +32,18 @@ from kdive.mcp.tools.lifecycle.runs.common import (
     RUN_NON_TERMINAL,
     SYSTEM_GONE,
 )
-from kdive.profiles.build import BuildProfile, ParsedBuildProfile, dump_build_profile
+from kdive.profiles.build import (
+    BuildProfile,
+    ParsedBuildProfile,
+    ServerBuildProfile,
+    dump_build_profile,
+    is_git_source,
+)
 from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.runs.build_host_selection import check_source_kind_compatibility
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +291,34 @@ def _assertion_block_response(
     return None
 
 
+async def _compat_block_response(
+    conn: AsyncConnection, build_profile: ParsedBuildProfile, system_id: UUID
+) -> ToolResponse | None:
+    """Reject an incompatible build-host ↔ kernel-source pairing at create time (ADR-0157).
+
+    Returns a ``configuration_error`` envelope when the named (and registered) build host's
+    transport kind is incompatible with the profile's source provenance, else ``None`` to
+    proceed. The external-build lane (no ``kernel_source_ref``) is skipped. An **absent**
+    named host is not rejected here — host existence is re-validated at ``runs.build`` and
+    the host may be registered between create and build; create only rejects a definitively
+    incompatible pair. The shared :func:`check_source_kind_compatibility` keeps this
+    rejection identical to the build-time one for an enabled, reachable host.
+    """
+    if not isinstance(build_profile, ServerBuildProfile):
+        return None
+    name = build_profile.build_host or "worker-local"
+    host = await get_by_name(conn, name)
+    if host is None:
+        return None
+    try:
+        check_source_kind_compatibility(
+            host_kind=host.kind, is_git=is_git_source(build_profile), build_host=name
+        )
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(str(system_id), exc)
+    return None
+
+
 async def _create_locked(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -318,6 +354,9 @@ async def _create_locked(
             return _config_error(
                 str(targets.investigation_id), data={"current_status": inv.state.value}
             )
+        compat_block = await _compat_block_response(conn, build_profile, targets.system_id)
+        if compat_block is not None:
+            return compat_block
         run = await _insert_run(conn, ctx, targets, build_profile, expected_boot_failure, project)
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
     return _created_response(run, targets, expected_boot_failure, project)

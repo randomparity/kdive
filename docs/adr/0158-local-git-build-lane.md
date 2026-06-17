@@ -1,4 +1,4 @@
-# ADR 0157 — Local git-clone build lane with operator remote allowlist
+# ADR 0158 — Local git-clone build lane with operator remote allowlist
 
 - **Status:** Accepted
 - **Date:** 2026-06-17
