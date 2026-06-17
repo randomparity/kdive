@@ -422,16 +422,106 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `src/kdive/jobs/handlers/runs.py:127-147` (`_run_build`), `:248-289` (`_build_and_record`)
 - Test: `tests/jobs/handlers/test_build_handler_transport.py` (extend)
 
-- [ ] **Step 1: Write the failing test**
+> **Coverage note (read first).** This handler test is **DB/Docker-gated** (`migrated_url` →
+> testcontainers Postgres; skips without Docker — AGENTS.md). It is **not** the primary fast
+> guard for the "rejected before `builder.build` runs" behavior — **Task 3's**
+> `test_dispatch_admission.py` is (no DB, asserts `builder.called is False`). This task adds the
+> end-to-end handler evidence (run reaches FAILED, `CONFIGURATION_ERROR` recorded) plus a
+> **non-DB** lease-absence assertion (Step 1b) so spec AC#8 is partly provable without Docker.
+> When claiming AC#8 fully, run this task's test under Docker (or `KDIVE_REQUIRE_DOCKER=1`).
 
-Append to `tests/jobs/handlers/test_build_handler_transport.py` a test that seeds a worker-local running run and asserts an empty `KDIVE_KERNEL_SRC` fails the BUILD job with `CONFIGURATION_ERROR` and `KERNEL_SRC_UNSET_DETAIL`, without the builder producing artifacts. Mirror the existing local-dispatch test in this file (it already seeds `build_hosts`/run rows and substitutes the runtime builder via `provider_resolver`); set the env with `monkeypatch.setenv("KDIVE_KERNEL_SRC", "")` and `config.reset()` so the handler's `config.get` re-reads it. Reuse the file's existing `_WARM`/local-profile seed helper if present; otherwise seed a `ServerBuildProfile` warm profile (`kernel_source_ref="linux-6.9"`). Assert the run reaches `FAILED` and the recorded reason category is `CONFIGURATION_ERROR`.
+- [ ] **Step 1a: Write the failing handler test (Docker-gated)**
 
-> The exact fixture wiring lives in this file already (see its local-host dispatch test). Match its `provider_resolver`, `seed_running_run`, and `BuildPayload` usage; do not introduce a new harness.
+Append to `tests/jobs/handlers/test_build_handler_transport.py`. Use this **explicit warm
+profile** — do NOT reuse `_seed_run(pool)`'s default `BUILD_PROFILE` (it carries a git-looking
+`kernel_source_ref="git+https://..."` string from `tests/integration/_seed.py:68`, which is the
+wrong lane for this test):
 
-- [ ] **Step 2: Run test to verify it fails**
+```python
+from kdive.providers.shared.build_host.workspace import KERNEL_SRC_UNSET_DETAIL
 
-Run: `uv run python -m pytest tests/jobs/handlers/test_build_handler_transport.py -k kernel_src -q`
-Expected: FAIL — currently the empty value is caught later (in `sync_tree`) or the call errors because `run_build_on_host` is invoked without `kernel_src`.
+_WARM_PROFILE: dict[str, Any] = {
+    "schema_version": 1,
+    "kernel_source_ref": "linux-6.9",
+    "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+}
+
+
+def test_local_empty_kernel_src_fails_admission(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty KDIVE_KERNEL_SRC on a worker-local warm build fails the BUILD job at
+    admission with CONFIGURATION_ERROR, and the builder never runs."""
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "")  # autouse reset_config re-snapshots on next get
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, _WARM_PROFILE)
+            # Guard: the seed really is a warm-tree LOCAL lane (not git).
+            parsed = BuildProfile.parse(_WARM_PROFILE)
+            assert isinstance(parsed, ServerBuildProfile)
+            host = await _worker_local_host(pool)
+            job = await _enqueue(pool, run_id, str(host.id))
+            builder = _RecordingBuilder()
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as excinfo:
+                    await runs_handlers.build_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(builder=builder),
+                        secret_registry=SecretRegistry(),
+                    )
+            assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert str(excinfo.value) == KERNEL_SRC_UNSET_DETAIL
+            assert builder.calls == []  # builder.build never ran
+            assert await _run_state(pool, run_id) == "failed"
+
+    asyncio.run(_run())
+```
+
+> The autouse `reset_config` fixture (`tests/conftest.py`) clears the config snapshot around
+> every test, so `monkeypatch.setenv` before the handler call is sufficient — the registry
+> re-snapshots on the handler's `config.get`. Do **not** add a manual `config.reset()`.
+> Match the file's existing `_seed_run`, `_worker_local_host`, `_enqueue`, `_run_state`,
+> `provider_resolver`, `_RecordingBuilder` helpers; introduce no new harness. If `build_handler`
+> records the failure and returns rather than re-raising, assert on `_run_state == "failed"` and
+> the recorded run-step reason category instead of `pytest.raises` — check the file's
+> `_FailingBuilder` test (`test_*` around line 311+) for the established failure-assertion shape
+> and mirror it.
+
+- [ ] **Step 1b: Add the non-DB lease-absence assertion for AC#8**
+
+Append to `tests/services/test_build_host_selection.py` a test proving a LOCAL host takes no
+lease (so an admission rejection strands nothing) — no Docker needed:
+
+```python
+def test_local_host_admits_without_lease() -> None:
+    """resolve_and_admit inserts no build_host_lease for a LOCAL host (AC#8: a later
+    admission rejection on a LOCAL host can strand no lease)."""
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.lease_attempts = 0
+
+    # Drive check_source_kind_compatibility's LOCAL branch + assert the lease path is skipped.
+    # If resolve_and_admit is not unit-drivable without a real conn, assert the invariant at the
+    # source instead: BuildHostKind.LOCAL is the only kind for which resolve_and_admit's
+    # `if host.kind is not BuildHostKind.LOCAL: try_acquire_lease(...)` guard is False.
+```
+
+> If `resolve_and_admit` cannot be exercised without a live connection, drop the fake and make
+> this a focused assertion that the LOCAL branch in `build_host_selection.resolve_and_admit`
+> (`build_host_selection.py:116`) skips `try_acquire_lease` — e.g. via the existing
+> `test_build_host_selection.py` patterns that already cast a fake conn. Keep it Docker-free.
+> The DB-backed proof remains the existing `test_local_host_uses_runtime_builder_no_transport`
+> (asserts `lease` untouched for local) — reference it in the commit body.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `uv run python -m pytest tests/jobs/handlers/test_build_handler_transport.py -k kernel_src tests/services/test_build_host_selection.py -k lease -q`
+Expected: the handler test FAILs (empty value caught later in `sync_tree`, or `run_build_on_host`
+invoked without `kernel_src`); run the handler test under Docker, else it SKIPs — that is
+acceptable for this step as long as the non-DB lease test is exercised.
 
 - [ ] **Step 3: Read and forward `kernel_src`**
 
@@ -631,7 +721,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ## Self-review checklist (run before handing to executor)
 
-- Spec AC#1 → Task 3 (recording builder asserts `called is False`). AC#2/#3 → Task 1 + Task 2 (whitespace/invalid). AC#4 → Task 2/3 (usable admits). AC#5 → Task 2 (non-LOCAL no-op). AC#6 → Task 1 Step 4 (existing `sync_tree` tests stay green). AC#7 → Task 1 (single predicate) + grep that `dispatch.py`/`workspace.py` import no config registry. AC#8 → Task 4 (handler test asserts FAILED + no stranded lease; LOCAL holds none). AC#9 → Task 5.
-- No placeholders except the Task 4 test body, which is intentionally described-not-coded because it must match an existing in-file harness (`provider_resolver`/`seed_running_run`); the executor copies the file's existing local-dispatch test and changes the env + assertion. Flagged explicitly.
+- Spec AC#1 → Task 3 (recording builder asserts `called is False`; the **fast, non-DB** guard) + Task 4 Step 1a (handler-level, Docker-gated). AC#2/#3 → Task 1 + Task 2 (whitespace/invalid). AC#4 → Task 2/3 (usable admits). AC#5 → Task 2 (non-LOCAL no-op). AC#6 → Task 1 Step 4 (existing `sync_tree` tests stay green). AC#7 → Task 1 (single predicate) + grep that `dispatch.py`/`workspace.py` import no config registry. AC#8 → Task 4 Step 1b (**non-DB** lease-absence assertion) + the existing DB-backed `test_local_host_uses_runtime_builder_no_transport` (LOCAL holds no lease). AC#9 → Task 5.
+- Task 4 Step 1a is fully coded with an explicit `_WARM_PROFILE` (the only literal that mattered — the default seed profile is a git-looking string and must not be reused). Step 1b is intentionally a guarded sketch because whether `resolve_and_admit` is unit-drivable without a conn depends on the existing fake-conn patterns in `test_build_host_selection.py`; the fallback (assert the LOCAL branch skips `try_acquire_lease`) is spelled out and Docker-free either way. Both are flagged inline.
 - Type consistency: `check_warm_tree_source_admission(kernel_src, *, host_kind)`, `warm_tree_source_error(kernel_src) -> str | None`, `run_build_on_host(..., kernel_src: str, ...)`, `_run_build(..., kernel_src: str, ...)` — names match across tasks.
 - Circular-import risk (dispatch importing build_host_selection, which imports workspace) is flagged in Task 3 Step 3 with a function-local-import fallback.
