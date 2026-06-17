@@ -27,6 +27,7 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.profiles.build import GitSourceRef
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.guest.agent import AgentCommand, qemu_agent_command
@@ -51,6 +52,7 @@ from kdive.providers.remote_libvirt.transport import (
 )
 from kdive.providers.shared.build_host.workspace import redacted_tail
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
+from kdive.security.secrets.redaction import redact_url_credentials
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 __all__ = [
@@ -85,6 +87,16 @@ _NETWORK_PROBE_CALL_TIMEOUT_S = 10
 _NETWORK_TIMEOUT_S = 120.0
 _NETWORK_POLL_S = 2.0
 
+# A default route is necessary but not sufficient for egress to a specific source (ADR-0155): DNS
+# may be broken, the guest-subnet->internet hop may be policy-dropped while the route still exists,
+# or the remote may be unreachable from the guest's vantage. After the route gate, one bounded
+# in-guest `git ls-remote` to the configured source confirms the egress the clone needs — using
+# the remote's own protocol (https/ssh/git), so it cannot drift from how the clone dials it. It
+# probes HEAD, NOT the configured ref: the clone resolves an arbitrary ref/sha (a bare commit is
+# not an advertised ref, so `ls-remote <remote> <sha>` would fail a reachable host); ref existence
+# stays the clone's contract.
+_EGRESS_PROBE_CALL_TIMEOUT_S = 30
+
 
 @dataclass(frozen=True)
 class BuildVmTiming:
@@ -96,6 +108,7 @@ class BuildVmTiming:
     agent_poll_s: float = _AGENT_POLL_S
     network_timeout_s: float = _NETWORK_TIMEOUT_S
     network_poll_s: float = _NETWORK_POLL_S
+    egress_probe_timeout_s: int = _EGRESS_PROBE_CALL_TIMEOUT_S
 
 
 _DEFAULT_BUILD_VM_TIMING = BuildVmTiming()
@@ -194,20 +207,29 @@ class EphemeralBuildVm:
         self._timing = timing
 
     @contextmanager
-    def session(self, base_image_volume: str, *, run_id: UUID) -> Iterator[GuestExecBuildTransport]:
+    def session(
+        self, base_image_volume: str, *, run_id: UUID, source: GitSourceRef | None = None
+    ) -> Iterator[GuestExecBuildTransport]:
         """Provision the build VM, yield a transport bound to it, tear it down on exit.
 
         Args:
             base_image_volume: The operator-staged base build-image volume to overlay.
             run_id: The owning Run; names the domain/overlay and is the reaper marker.
+            source: The configured git build source. When supplied, the session runs a bounded
+                in-guest egress preflight (`git ls-remote`) to it after the route gate and before
+                yielding, so an unreachable source fails the gate naming the source rather than the
+                clone (ADR-0155). ``None`` (a warm-tree source, or a caller that supplies none)
+                keeps the route-only behavior.
 
         Yields:
             A :class:`GuestExecBuildTransport` bound to the live build VM's domain.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for missing operator config / absent
-                pool/base volume; ``PROVISIONING_FAILURE`` for overlay/define/start or an agent
-                that never connects; ``TRANSPORT_FAILURE`` when the TLS connect fails.
+                pool/base volume / a source the build VM cannot reach; ``PROVISIONING_FAILURE``
+                for overlay/define/start, an agent that never connects, or a guest network that
+                never comes up; ``TRANSPORT_FAILURE`` when the TLS connect fails or the agent
+                drops mid-probe.
         """
         config = self._connections.config()
         domain_name = build_domain_name(run_id)
@@ -230,9 +252,37 @@ class EphemeralBuildVm:
                     secret_registry=self._secret_registry,
                 )
                 self._wait_for_network(transport, domain_name)
+                if source is not None:
+                    self._preflight_egress(transport, source)
                 yield transport
             finally:
                 self._teardown(conn, run_id, config)
+
+    def _preflight_egress(self, transport: GuestExecBuildTransport, source: GitSourceRef) -> None:
+        """Confirm the build guest can reach the configured source before the clone (ADR-0155).
+
+        Runs one bounded in-guest ``git ls-remote --quiet --exit-code <remote> HEAD`` over the
+        guest agent. ``rc 0`` means the guest resolved DNS, completed the handshake, and reached
+        the repo — the egress the clone needs. A non-zero rc raises ``CONFIGURATION_ERROR`` naming
+        the redacted remote with the git stderr surfaced (``git ls-remote`` returns 128 for both
+        unreachable-host and repo-not-found, indistinguishable from the exit code, so the stderr
+        carries the specific cause). A raised ``CategorizedError`` (agent dropped) propagates
+        unchanged — ``wait_for_agent`` already confirmed the channel.
+        """
+        result = transport.run(
+            ["git", "ls-remote", "--quiet", "--exit-code", source.remote, "HEAD"],
+            cwd="/",
+            timeout_s=self._timing.egress_probe_timeout_s,
+        )
+        if result.returncode != 0:
+            raise CategorizedError(
+                f"build VM cannot reach build source {redact_url_credentials(source.remote)}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "remote": redact_url_credentials(source.remote),
+                    "stderr": redacted_tail(result.stderr, self._secret_registry),
+                },
+            )
 
     def _wait_for_network(self, transport: GuestExecBuildTransport, domain_name: str) -> None:
         """Block until the build guest has a default route, so the clone sees working network.
@@ -335,13 +385,19 @@ class EphemeralBuildVm:
 
 @contextmanager
 def ephemeral_build_session(
-    base_image_volume: str, secret_registry: SecretRegistry, *, run_id: UUID
+    base_image_volume: str,
+    secret_registry: SecretRegistry,
+    *,
+    run_id: UUID,
+    source: GitSourceRef | None = None,
 ) -> Iterator[GuestExecBuildTransport]:
     """Module-level seam: build a default :class:`EphemeralBuildVm` and run its session.
 
     The BUILD handler imports this so a test can substitute a fake session without a libvirt
-    host; production delegates to a default-seam :class:`EphemeralBuildVm`.
+    host; production delegates to a default-seam :class:`EphemeralBuildVm`. ``source`` is the
+    configured git build source for the pre-clone egress preflight (ADR-0155); ``None`` keeps the
+    route-only readiness behavior.
     """
     vm = EphemeralBuildVm(secret_registry=secret_registry)
-    with vm.session(base_image_volume, run_id=run_id) as transport:
+    with vm.session(base_image_volume, run_id=run_id, source=source) as transport:
         yield transport
