@@ -97,23 +97,34 @@ Insert the admission check at the top of the `LOCAL` branch, before
 `asyncio.to_thread(builder.build, ...)`. This is the earliest point that (a) knows the
 host is LOCAL and (b) is about to run the warm-tree build, so it fails before any
 workspace side effect (`build()` → `build_workspace` → per-run `mkdir` → rsync). The
-`_build_and_record`/`_run_build` handler frames are **not** the call site: they hold
-only the `builder` object, never `kernel_src` (the value is sealed in the builder's
-checkout closure at composition, `make_checkout(kernel_src,...)`), and they do not
-branch on `host.kind`. Putting the check upstream would force a redundant `host.kind`
-re-derivation away from the one branch that already owns it.
+check is a no-op for any non-`LOCAL` host kind because it lives inside the `LOCAL`
+branch; the `over_transport`/git path is a different branch, never reaches it, and never
+reads `KDIVE_KERNEL_SRC`.
 
-**Single read-point for `KDIVE_KERNEL_SRC`.** The admission check reads the value once,
-via `config.get(KERNEL_SRC)` at the dispatch LOCAL branch. We do **not** thread the
-closure-captured value out of the builder (that would widen the `Builder` port across
-all providers for one provider's concern) and we do **not** add a second read elsewhere.
-In a live worker `config.load()` snapshots the env once at startup
-(`__main__.py`) and is not reset during operation (reset is the test-only autouse
-fixture), so this admission read and the composition read resolve against the **same
-worker snapshot** — the rejection is byte-identical to the build-time backstop by
-construction, not by coincidence. The check is a no-op for any non-`LOCAL` host kind
-because it lives inside the `LOCAL` branch; the `over_transport`/git path never reaches
-it and never reads `KDIVE_KERNEL_SRC`.
+**Where the value is read, and why not in `dispatch.py`.** `run_build_on_host` and its
+package (`providers/shared/build_host/*`, including `workspace.py`) follow a
+"caller resolves the value, we receive it" convention — none of them import the config
+registry; `kernel_src` is always *passed in*. To preserve that layering and keep
+`run_build_on_host` unit-testable on a plain string, the **worker BUILD handler**
+(`jobs/handlers/runs.py`, which already runs in the worker process and already deals
+with config) reads `config.get(KERNEL_SRC)` **once** and threads it as a new keyword
+argument through `_run_build` into `run_build_on_host`, which forwards it to the
+admission helper in the `LOCAL` branch. So:
+
+- One read-point: a single `config.get(KERNEL_SRC)` in the handler. We do **not** widen
+  the `Builder` port to expose the closure-captured value (that would push one
+  provider's concern onto every provider), and we do **not** read config inside
+  `dispatch.py`/`workspace.py` (keeping the package config-free as it is today).
+- Byte-identical to the backstop by construction: in a live worker `config.load()`
+  snapshots the env once at startup (`__main__.py`) and is not reset during operation
+  (reset is the test-only autouse fixture), so the handler's read and the builder's
+  composition-time read resolve against the **same** worker snapshot.
+
+The `_build_and_record`/`_run_build` handler frames cannot host the *check* itself — they
+do not branch on `host.kind`, and the `LOCAL`/transport discrimination lives only in
+`run_build_on_host`. They are, however, the right place to *read* the value, because the
+builder seals `kernel_src` in its checkout closure at composition
+(`make_checkout(kernel_src,...)`) and never re-exposes it.
 
 Because the check raises `CONFIGURATION_ERROR` from inside the `builder.build` dispatch,
 it propagates up through `_run_build` → `_build_and_record`'s `except CategorizedError`
@@ -155,7 +166,9 @@ nothing. The admission rejection therefore changes *when* the same failure happe
 7. The two message constants and the emptiness/usability predicate have exactly one
    definition in `providers/shared/build_host/workspace.py`; the admission helper and
    `sync_tree` both call the shared predicate, and no message string is duplicated in
-   `build_host_selection.py` or `dispatch.py`. (test/grep + review)
+   `build_host_selection.py` or `dispatch.py`. `dispatch.py` and `workspace.py` import
+   no config registry (the `kernel_src` value is passed in by the handler, preserving
+   the package's pass-in convention). (test/grep + review)
 8. A `LOCAL` warm-tree build rejected at admission for empty/invalid `KDIVE_KERNEL_SRC`
    strands no build-host lease and follows the same terminal-after-`max_attempts`
    contract as a build-time `sync_tree` rejection (LOCAL holds no lease; the rejection
