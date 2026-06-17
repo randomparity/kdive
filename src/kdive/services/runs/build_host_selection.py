@@ -36,7 +36,7 @@ def check_source_kind_compatibility(
     Single source of truth for the host-kind/source-kind matrix (ADR-0099 §5), shared by the
     ``runs.create`` create-time check and the ``runs.build`` admission backstop
     (``resolve_and_admit``). A ``local`` host accepts **either** a warm-tree string or a git
-    ref — ADR-0159 added the local git-clone lane, whose remote is gated by the worker's
+    ref — ADR-0160 added the local git-clone lane, whose remote is gated by the worker's
     build-time allowlist, so local+git is no longer rejected here. An
     ``ssh`` / ``ephemeral_libvirt`` host still accepts a git ref only (it has no warm tree).
 

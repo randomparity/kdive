@@ -37,7 +37,7 @@ def test_artifact_get_retrieval_settings_present() -> None:
 
 
 def test_local_build_remote_allowlist_setting_registered() -> None:
-    # Local git-clone build lane allowlist (#530, ADR-0159): worker-scoped, build group.
+    # Local git-clone build lane allowlist (#530, ADR-0160): worker-scoped, build group.
     from kdive.config.core_settings import LOCAL_BUILD_REMOTE_ALLOWLIST, SETTINGS
 
     assert LOCAL_BUILD_REMOTE_ALLOWLIST in SETTINGS

@@ -30,7 +30,7 @@ GIT_CLONE_TIMEOUT_S = 10 * 60
 RSYNC_TIMEOUT_S = 10 * 60
 
 # Closed ambient escape hatches so the local-build allowlist bounds the actual connection,
-# not just the submitted URL string (ADR-0159): no redirect-follow off the allowlisted host,
+# not just the submitted URL string (ADR-0160): no redirect-follow off the allowlisted host,
 # no system/global gitconfig insteadOf rewrite, and only the three vetted transports.
 _GIT_HARDENED_FLAGS = [
     "-c",
@@ -85,7 +85,7 @@ def make_checkout(
     Args:
         kernel_src: The warm kernel source tree path for the warm-tree lane.
         secret_registry: Registry used to redact secrets out of error details.
-        allowlist: Remotes the local git-clone lane may clone (ADR-0159); empty disables it.
+        allowlist: Remotes the local git-clone lane may clone (ADR-0160); empty disables it.
     """
 
     def _checkout(
@@ -117,7 +117,7 @@ def real_checkout(
     """Materialize a per-run workspace, merge config, and apply an optional patch.
 
     Dispatches on the profile's source provenance: a git ``kernel_source_ref`` clones the
-    allowlisted remote (ADR-0159), a bare string mirrors the warm tree.
+    allowlisted remote (ADR-0160), a bare string mirrors the warm tree.
     """
     git_source = git_source_of(profile)
     if git_source is not None:
@@ -163,7 +163,7 @@ def clone_tree(
     run_id: UUID,
     secret_registry: SecretRegistry,
 ) -> None:
-    """Clone ``source.remote`` at ``source.ref`` into a clean ``workspace`` (ADR-0159).
+    """Clone ``source.remote`` at ``source.ref`` into a clean ``workspace`` (ADR-0160).
 
     The remote is allowlist-gated (deny by default) and the clone uses the same
     init+shallow-fetch+verify+checkout recipe as the remote transport (ADR-0154). ``ref`` must
