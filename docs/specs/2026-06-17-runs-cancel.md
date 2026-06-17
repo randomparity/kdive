@@ -64,6 +64,38 @@ re-request.
 
 Cases 5–6 are reached by catching `IllegalTransition` from `update_state` and re-reading the
 Run's state under the same lock to disambiguate (already-`canceled` vs other-terminal).
+`RUNS.update_state` opens its own inner `conn.transaction()` (a savepoint), so the
+`IllegalTransition` rolls back only that savepoint; the outer cancel transaction and its
+held `LockScope.RUN` survive, and the disambiguating re-read is a fresh `RUNS.get` on the
+same connection after the savepoint unwinds. The `conflict` envelope's
+`data["current_status"]` is populated from that re-read — a test asserts it is present (not
+empty), which proves the post-`IllegalTransition` read actually executed rather than the
+catch merely firing.
+
+## Concurrency
+
+The whole operation runs under `advisory_xact_lock(conn, LockScope.RUN, run.id)` — the same
+per-Run lock that `runs.build` (`build.py:148`), the worker's success path
+(`finalize_build`, `runs_shared.py:21`), and the worker's failure path (`_fail_build`,
+`jobs/handlers/runs.py:59`) all take. That shared lock is the load-bearing safety property
+and must not be removed or narrowed:
+
+- **Cancel races a worker mid-build.** If the worker holds the lock first, cancel blocks
+  until the worker's `running->succeeded`/`running->failed` transaction commits, then reads
+  the now-terminal state and returns the idempotent (`canceled`) or `conflict`
+  (`succeeded`/`failed`) envelope. If cancel holds the lock first, it sets the Run
+  `canceled`; the worker then observes the non-`RUNNING` state on its own `FOR UPDATE`
+  re-read and no-ops — `finalize_build` returns early when the Run is not `RUNNING`
+  (`runs_shared.py:30`), and `_fail_build` catches the resulting `IllegalTransition`
+  ("a concurrent cancel won", `jobs/handlers/runs.py:82-88`). Neither path resurrects a
+  canceled Run.
+- **Why the build-job cancel is atomic with the Run transition.** Both happen inside the one
+  locked transaction, so a `runs.build` concurrently enqueuing a fresh build job cannot
+  leave an uncanceled job behind a `canceled` Run: the enqueue serializes on the same lock.
+
+An implementer must not "simplify" away either worker guard (`finalize_build`'s
+`RunState.RUNNING` re-check or `_fail_build`'s `IllegalTransition` catch) — they are what
+makes the cooperative build-job cancel safe.
 
 ## Success criteria (falsifiable)
 
@@ -82,11 +114,19 @@ injected pool + `ctx`, the file's existing pattern):
 5. **Best-effort build-job cancellation** → seed a `running` Run, enqueue its build job
    (`f"{run_id}:build"`, `queued`); after `runs.cancel`, that job's state is `canceled` and
    the Run is `canceled`. A second variant: an already-`succeeded` build job is left
-   untouched and the cancel still succeeds (best-effort, no error).
+   untouched and the cancel still succeeds (best-effort, no error). A third variant: the
+   build job is `running` (a worker holds its lease) — `runs.cancel` still drives the Run to
+   `canceled` and the job to `canceled`, and a subsequent `runs.create` on the same System
+   succeeds.
+5a. **A worker that finishes after a cancel does not resurrect the Run** → seed a `running`
+   Run, `runs.cancel` it, then invoke `finalize_build` (the worker success path) on that
+   Run; the Run stays `canceled` (`finalize_build` no-ops on a non-`RUNNING` Run,
+   `runs_shared.py:30`), it is not driven back to `succeeded`.
 6. **Unknown `run_id`** (valid UUID, no row) → `not_found`. **Malformed `run_id`** →
    `configuration_error`.
 7. **`succeeded`/`failed` Run** → `conflict` with `data["current_status"]` equal to the
-   actual terminal state; the row is unchanged (still `succeeded`/`failed`).
+   actual terminal state **and present/non-empty** (proving the post-`IllegalTransition`
+   re-read ran); the row is unchanged (still `succeeded`/`failed`).
 8. **Authz** → a `viewer`-only ctx on the Run's project raises on cancel (no mutation); a
    ctx whose `projects` omits the Run's project gets `not_found`.
 
