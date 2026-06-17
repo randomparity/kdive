@@ -162,6 +162,9 @@ services:
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
+      # Demo warm-tree build bootstrap (see docs/operating/build-source-staging.md):
+      # uncomment and set to the in-container mount path of a buildable kernel tree.
+      # KDIVE_KERNEL_SRC: /srv/linux
     healthcheck:
       <<: *readyz_cadence
       test:
@@ -178,6 +181,8 @@ services:
     volumes:
       - kdive-build:/var/lib/kdive/build
       - kdive-install:/var/lib/kdive/install
+      # Demo warm-tree build bootstrap: bind-mount a host kernel tree read-only.
+      # - ~/src/linux:/srv/linux:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

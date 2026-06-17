@@ -41,9 +41,11 @@ To stage it:
    `environment:`, or Helm `config.*`).
 3. Restart the worker so it reads the new value.
 
-`KDIVE_KERNEL_SRC` must be an absolute path to an existing directory. A relative path, a
-non-existent path, or a filesystem root is rejected at build time with a distinct
-"not a usable absolute path to an existing tree" error.
+`KDIVE_KERNEL_SRC` must be an absolute path to an existing directory. An unset/empty value, a
+relative path, a non-existent path, or a filesystem root is rejected when the worker admits the
+build job — before it materializes a workspace — with the
+`KDIVE_KERNEL_SRC is not set on the build worker` / `not an absolute path to an existing kernel
+source tree` configuration error (the worker also re-checks at sync as a backstop; ADR-0158).
 
 A bare `kernel_source_ref` in the Run's profile is provenance metadata only — it labels the
 build, it does **not** override `KDIVE_KERNEL_SRC`. The worker always builds from the staged
@@ -51,6 +53,31 @@ tree.
 
 For the full local provider prerequisites (toolchain, disk space, fixtures) see
 [Local libvirt](providers/local-libvirt.md).
+
+### Demo / compose bootstrap (one step)
+
+The bundled `docker-compose.yml` does not stage a kernel tree (none is shipped — a buildable
+tree is hundreds of MB and version/licence-coupled). To make `worker-local` buildable in the
+compose demo, bind-mount a buildable tree into the `worker` service and point
+`KDIVE_KERNEL_SRC` at the mount:
+
+1. Have a buildable kernel tree on the host, e.g. `~/src/linux` (a git checkout or an unpacked
+   tarball — not a bare repo).
+2. In `docker-compose.yml`'s `worker` service, uncomment the two lines the file marks for this
+   (a `KDIVE_KERNEL_SRC` env entry and a read-only bind-mount), and set the host path to your
+   tree:
+
+   ```yaml
+   worker:
+     environment:
+       KDIVE_KERNEL_SRC: /srv/linux
+     volumes:
+       - ~/src/linux:/srv/linux:ro
+   ```
+3. `docker compose up -d worker` (or restart it) so it reads the value.
+
+Until then, a warm-tree `runs.build` against `worker-local` is rejected when the worker admits
+the build job (before any workspace is materialized), rather than failing deep in the build.
 
 ## Git-clone lane: structured ref + a remote build host
 
