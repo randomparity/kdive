@@ -6,10 +6,15 @@ import asyncio
 import logging
 from uuid import uuid4
 
+from psycopg_pool import AsyncConnectionPool
+
 from kdive.providers.infra.console_hosting import (
     CollectorRegistry,
     ConsoleHostingLoop,
+    DbRunningRemoteSystems,
 )
+
+_HOSTING_LOGGER = "kdive.providers.infra.console_hosting"
 
 
 class FakeCollector:
@@ -357,6 +362,110 @@ def test_tick_survives_a_running_systems_query_error() -> None:
     )
     # Must not raise: a transient query failure is logged and retried next tick.
     asyncio.run(loop.tick())
+
+
+def test_list_running_returns_empty_when_schema_absent(
+    pg_conn,  # noqa: ANN001 - empties the schema (drops + recreates public) before we connect
+    postgres_url: str,
+    caplog,  # noqa: ANN001
+) -> None:
+    """A not-yet-migrated schema (post-install window) is benign: empty set, DEBUG only.
+
+    ``pg_conn`` leaves ``public`` empty (no ``systems`` table), so the query raises
+    ``UndefinedTable`` (sqlstate 42P01). ``list_running`` must absorb that as "none
+    running" — no WARNING/ERROR, a DEBUG breadcrumb — so the hosting tick stays quiet
+    while the migrate hook catches up (ADR-0145, #498).
+    """
+
+    async def go() -> set:
+        async with AsyncConnectionPool(postgres_url, min_size=1, max_size=2) as pool:
+            return await DbRunningRemoteSystems(pool).list_running()
+
+    with caplog.at_level(logging.DEBUG, logger=_HOSTING_LOGGER):
+        running = asyncio.run(go())
+
+    assert running == set()
+    records = [r for r in caplog.records if r.name == _HOSTING_LOGGER]
+    assert [r for r in records if r.levelno >= logging.WARNING] == []
+    assert any(r.levelno == logging.DEBUG and "pre-migration" in r.getMessage() for r in records)
+
+
+def test_list_running_reuses_pooled_connection_after_schema_absent(
+    pg_conn,  # noqa: ANN001 - empties the schema before we connect
+    postgres_url: str,
+) -> None:
+    """The pooled connection is not wedged by the aborted transaction.
+
+    With a single connection in the pool, a second call must reuse the same connection
+    the first call left after its ``UndefinedTable``. Wrapping the whole
+    ``pool.connection()`` context manager lets the error exit via rollback, so the
+    connection returns clean; a misplaced ``try`` (catching inside the ``with`` and
+    returning) would commit an aborted transaction and could wedge reuse.
+    """
+
+    async def go() -> tuple[set, set]:
+        async with AsyncConnectionPool(postgres_url, min_size=1, max_size=1) as pool:
+            running = DbRunningRemoteSystems(pool)
+            first = await running.list_running()
+            second = await running.list_running()
+            return first, second
+
+    first, second = asyncio.run(go())
+    assert first == set()
+    assert second == set()
+
+
+def test_list_running_empty_when_migrated_but_no_systems(
+    migrated_url: str,
+    caplog,  # noqa: ANN001
+) -> None:
+    """A migrated-but-empty schema also returns empty — but via a successful query.
+
+    Guards that the ``UndefinedTable`` catch is scoped to the schema-absent case only:
+    when the table exists the query runs normally and emits no "pre-migration" breadcrumb,
+    so a misplaced ``try`` cannot silently swallow real rows.
+    """
+
+    async def go() -> set:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            return await DbRunningRemoteSystems(pool).list_running()
+
+    with caplog.at_level(logging.DEBUG, logger=_HOSTING_LOGGER):
+        running = asyncio.run(go())
+
+    assert running == set()
+    messages = [r.getMessage() for r in caplog.records if r.name == _HOSTING_LOGGER]
+    assert not any("pre-migration" in m for m in messages)
+
+
+def test_tick_is_quiet_when_schema_absent(
+    pg_conn,  # noqa: ANN001 - empties the schema before we connect
+    postgres_url: str,
+    caplog,  # noqa: ANN001
+) -> None:
+    """The deploy-window outcome: a real schema-absent tick emits no WARNING record.
+
+    This is the ADR-0145 falsifiable success criterion — not "the tick does not raise"
+    (already pinned) but "the tick is silent at WARNING+" while the schema is missing.
+    """
+
+    async def go() -> None:
+        async with AsyncConnectionPool(postgres_url, min_size=1, max_size=2) as pool:
+            loop = ConsoleHostingLoop(
+                leader_lock=FakeLeaderLock(),
+                running_systems=DbRunningRemoteSystems(pool),
+                collector_factory=lambda s: FakeCollector(s),
+                registry=CollectorRegistry(),
+            )
+            await loop.tick()
+
+    with caplog.at_level(logging.DEBUG, logger=_HOSTING_LOGGER):
+        asyncio.run(go())
+
+    warnings = [
+        r for r in caplog.records if r.name == _HOSTING_LOGGER and r.levelno >= logging.WARNING
+    ]
+    assert warnings == []
 
 
 def test_registry_finalize_and_drop_persists_then_forgets() -> None:

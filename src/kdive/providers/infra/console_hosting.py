@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 import psycopg
+from psycopg.errors import UndefinedTable
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.models import ResourceKind
@@ -63,15 +64,25 @@ class DbRunningRemoteSystems:
         self._pool = pool
 
     async def list_running(self) -> set[UUID]:
-        async with self._pool.connection() as conn, conn.cursor() as cur:
-            await cur.execute(
-                "SELECT s.id FROM systems s "
-                "JOIN allocations a ON a.id = s.allocation_id "
-                "JOIN resources r ON r.id = a.resource_id "
-                "WHERE r.kind = %s AND s.state = ANY(%s) AND s.domain_name IS NOT NULL",
-                (_REMOTE_KIND_VALUE, list(_RUNNING_SYSTEM_STATE_VALUES)),
+        # A clean `helm install` starts the reconciler before the post-install migrate hook
+        # creates the schema (ADR-0145, #498). Treat the precise "schema absent" error as a
+        # benign "nothing running yet" rather than letting it reach the hosting tick's loud
+        # retry handler — the migrate hook self-heals it within seconds, no operator action.
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT s.id FROM systems s "
+                    "JOIN allocations a ON a.id = s.allocation_id "
+                    "JOIN resources r ON r.id = a.resource_id "
+                    "WHERE r.kind = %s AND s.state = ANY(%s) AND s.domain_name IS NOT NULL",
+                    (_REMOTE_KIND_VALUE, list(_RUNNING_SYSTEM_STATE_VALUES)),
+                )
+                return {row[0] for row in await cur.fetchall()}
+        except UndefinedTable:
+            _log.debug(
+                "running-systems query found no schema yet (pre-migration); treating as none"
             )
-            return {row[0] for row in await cur.fetchall()}
+            return set()
 
 
 class CollectorFactory(Protocol):
