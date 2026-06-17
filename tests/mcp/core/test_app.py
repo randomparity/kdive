@@ -56,6 +56,7 @@ def test_build_app_registers_jobs_tools() -> None:
             "runs.complete_build",
             "runs.install",
             "runs.boot",
+            "runs.cancel",
         } <= names
         assert {"control.power", "control.force_crash"} <= names
         assert {

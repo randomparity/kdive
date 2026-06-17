@@ -165,6 +165,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # runs
     "runs.get": _VIEWER,
     "runs.create": _OPERATOR,
+    "runs.cancel": _OPERATOR,
     "runs.build": _OPERATOR,
     "runs.complete_build": _OPERATOR,
     "runs.install": _OPERATOR,
