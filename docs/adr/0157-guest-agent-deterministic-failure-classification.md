@@ -75,11 +75,14 @@ favor of transient.
 
 The underlying libvirt error string is included in the raised error's `details` under
 `libvirt_error`, and the numeric code under `libvirt_error_code`, so the
-configuration-vs-transport distinction is auditable from the envelope. The libvirt error
-string is a hypervisor-side diagnostic (no kdive secret material flows into it; the TLS
-client cert is consumed by the transport layer and never reaches this seam, per ADR-0078), so
-it passes through the seam's existing `safe_error_details` redaction on the response boundary
-unchanged.
+configuration-vs-transport distinction is auditable from the failure surface. This seam runs
+only on the build/install **worker** path, so those `details` reach a client through the
+worker's redaction seam (`worker._failure_context` runs every scalar detail value through the
+`Redactor`, then `jobs.get`/`ToolResponse.from_job` surfaces the redacted
+`job.failure_context`), not the synchronous `safe_error_details` path. The libvirt error
+string is a hypervisor-side diagnostic carrying no kdive secret material at this seam (the TLS
+client cert is consumed by the transport layer and never reaches the exec seam, per ADR-0078),
+and the worker `Redactor` scrubs it on the way to persistence regardless.
 
 ## Consequences
 
@@ -91,8 +94,10 @@ unchanged.
   `retryable=true`. An agent that honored the old flag and retried a permanently-broken
   builder now correctly stops. A genuinely transient drop is unaffected.
 - **`details` now carries the libvirt error string.** This is new surfaced text. It is a
-  hypervisor diagnostic, not request/secret data, and is bounded by the same redaction the
-  envelope already applies; it makes the classification auditable, which the issue asks for.
+  hypervisor diagnostic, not request/secret data; on the build/install worker path it is keyed
+  into `job.failure_context` as `failure_detail_libvirt_error` only after the worker `Redactor`
+  scrubs it, so it makes the classification auditable (which the issue asks for) without a new
+  leak channel.
 - **Conservative default preserves safety.** Any libvirt error this ADR does not name as
   deterministic — including a future code, a bare drop, or `AGENT_UNRESPONSIVE` — stays
   `TRANSPORT_FAILURE`. The change can only *narrow* retry on the specific deterministic codes,
