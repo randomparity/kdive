@@ -21,6 +21,7 @@ from kdive.db.build_hosts import (
     get_by_id,
     get_by_name,
     lease_count,
+    list_all_hosts,
     list_probeable_ssh_hosts,
     mark_state,
     release_lease,
@@ -46,6 +47,24 @@ async def _insert_ssh_host(conn: psycopg.AsyncConnection, *, max_concurrent: int
         (host_id, f"test-ssh-{host_id}", max_concurrent),
     )
     host = await get_by_name(conn, f"test-ssh-{host_id}")
+    assert host is not None
+    return host
+
+
+async def _insert_ephemeral_host(conn: psycopg.AsyncConnection) -> BuildHost:
+    """Insert a minimal ephemeral_libvirt build host (migration-0029 column shape).
+
+    The CHECK constraint requires ``base_image_volume`` NOT NULL and NULL
+    ``address``/``ssh_credential_ref`` for ``kind='ephemeral_libvirt'``.
+    """
+    host_id = uuid4()
+    await conn.execute(
+        "INSERT INTO build_hosts (id, name, kind, base_image_volume, "
+        "workspace_root, max_concurrent) VALUES (%s, %s, 'ephemeral_libvirt', "
+        "'base.qcow2', '/build', 2)",
+        (host_id, f"test-eph-{host_id}"),
+    )
+    host = await get_by_name(conn, f"test-eph-{host_id}")
     assert host is not None
     return host
 
@@ -274,6 +293,47 @@ def test_list_probeable_ssh_hosts_only_enabled_ssh(migrated_url: str) -> None:
         # the seeded worker-local row is kind='local' and must be excluded
         assert "worker-local" not in names
         assert all(h.kind is BuildHostKind.SSH and h.enabled for h in probeable)
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Test: list_all_hosts returns every row ordered by name (ADR-0158)
+# ---------------------------------------------------------------------------
+
+
+def test_list_all_hosts_returns_every_row_ordered(migrated_url: str) -> None:
+    """``list_all_hosts`` returns the seed plus an ssh and an ephemeral row, name-ordered."""
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            ssh = await _insert_ssh_host(conn)
+            eph = await _insert_ephemeral_host(conn)
+
+            hosts = await list_all_hosts(conn)
+
+        names = [h.name for h in hosts]
+        assert "worker-local" in names
+        assert ssh.name in names
+        assert eph.name in names
+        assert names == sorted(names)
+        by_name = {h.name: h for h in hosts}
+        assert by_name["worker-local"].kind is BuildHostKind.LOCAL
+        assert by_name[ssh.name].kind is BuildHostKind.SSH
+        assert by_name[eph.name].kind is BuildHostKind.EPHEMERAL_LIBVIRT
+
+    asyncio.run(_run())
+
+
+def test_list_all_hosts_seed_only_returns_worker_local(migrated_url: str) -> None:
+    """With no operator hosts registered, ``list_all_hosts`` still returns ``worker-local``."""
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            hosts = await list_all_hosts(conn)
+
+        names = [h.name for h in hosts]
+        assert "worker-local" in names
 
     asyncio.run(_run())
 

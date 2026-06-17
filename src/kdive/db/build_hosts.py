@@ -118,6 +118,27 @@ async def get_by_id(conn: AsyncConnection, host_id: UUID) -> BuildHost | None:
     return None if row is None else _row_to_host(row)
 
 
+async def list_all_hosts(conn: AsyncConnection) -> list[BuildHost]:
+    """Return every build host row, ordered by name (ADR-0158).
+
+    Distinct from the ``list_build_hosts`` MCP *handler*
+    (``mcp/tools/ops/build_hosts/lifecycle.py``): this is the repository row reader the
+    ``runs.profile_examples`` tool projects into one build-profile example per
+    registered host. A migrated database always contains at least the seeded
+    ``worker-local`` row, so the result is never empty.
+
+    Args:
+        conn: An async psycopg connection (autocommit or inside a transaction).
+
+    Returns:
+        Every :class:`BuildHost` row, ordered by name.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM build_hosts ORDER BY name")
+        rows = await cur.fetchall()
+    return [_row_to_host(row) for row in rows]
+
+
 async def list_probeable_ssh_hosts(conn: AsyncConnection) -> list[BuildHost]:
     """Return the SSH build hosts a reachability probe should check (ADR-0103).
 
