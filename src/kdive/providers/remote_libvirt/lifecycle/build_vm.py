@@ -27,13 +27,19 @@ from uuid import UUID
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.guest.agent import AgentCommand, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.provisioning import (
     open_libvirt_provision,
 )
-from kdive.providers.remote_libvirt.lifecycle.readiness import Monotonic, Sleep, wait_for_agent
+from kdive.providers.remote_libvirt.lifecycle.readiness import (
+    Monotonic,
+    Sleep,
+    wait_for_agent,
+    wait_for_network,
+)
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     delete_volume,
     ensure_named_overlay,
@@ -43,6 +49,7 @@ from kdive.providers.remote_libvirt.transport import (
     RemoteLibvirtConnections,
     remote_libvirt_connections,
 )
+from kdive.providers.shared.build_host.workspace import redacted_tail
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -70,15 +77,25 @@ _BUILD_ARCH = "x86_64"
 _AGENT_TIMEOUT_S = 180.0
 _AGENT_POLL_S = 2.0
 
+# A default route is installed exactly when the guest's DHCP lease lands, so its presence is the
+# precise "network is up" signal. /proc/net/route is kernel truth; cut+grep avoid an iproute2 dep.
+_DEFAULT_ROUTE_PROBE = "cut -f2 /proc/net/route | grep -qx 00000000"
+_NETWORK_PROBE_ARGV = ["/bin/sh", "-c", _DEFAULT_ROUTE_PROBE]
+_NETWORK_PROBE_CALL_TIMEOUT_S = 10
+_NETWORK_TIMEOUT_S = 120.0
+_NETWORK_POLL_S = 2.0
+
 
 @dataclass(frozen=True)
 class BuildVmTiming:
-    """Clock and timeout seams for build-VM guest-agent readiness."""
+    """Clock and timeout seams for build-VM guest-agent + network readiness."""
 
     sleep: Sleep = time.sleep
     monotonic: Monotonic = time.monotonic
     agent_timeout_s: float = _AGENT_TIMEOUT_S
     agent_poll_s: float = _AGENT_POLL_S
+    network_timeout_s: float = _NETWORK_TIMEOUT_S
+    network_poll_s: float = _NETWORK_POLL_S
 
 
 _DEFAULT_BUILD_VM_TIMING = BuildVmTiming()
@@ -212,9 +229,44 @@ class EphemeralBuildVm:
                     agent_command=self._agent_command,
                     secret_registry=self._secret_registry,
                 )
+                self._wait_for_network(transport, domain_name)
                 yield transport
             finally:
                 self._teardown(conn, run_id, config)
+
+    def _wait_for_network(self, transport: GuestExecBuildTransport, domain_name: str) -> None:
+        """Block until the build guest has a default route, so the clone sees working network.
+
+        A non-zero probe rc means "no route yet, keep polling"; a raised CategorizedError (the
+        agent dropped) propagates. On the deadline, the last probe output is surfaced so a broken
+        probe (missing cut/grep) is diagnosable rather than a bare timeout (ADR-0144).
+        """
+        last: list[CommandResult] = []
+
+        def probe() -> bool:
+            result = transport.run(
+                _NETWORK_PROBE_ARGV, cwd="/", timeout_s=_NETWORK_PROBE_CALL_TIMEOUT_S
+            )
+            last.append(result)
+            return result.returncode == 0
+
+        def timeout_detail() -> dict[str, object]:
+            if not last:
+                return {}
+            return {
+                "probe_stderr": redacted_tail(last[-1].stderr, self._secret_registry),
+                "probe_stdout": last[-1].stdout[-200:],
+            }
+
+        wait_for_network(
+            probe,
+            domain_name,
+            monotonic=self._timing.monotonic,
+            sleep=self._timing.sleep,
+            timeout_s=self._timing.network_timeout_s,
+            poll_s=self._timing.network_poll_s,
+            timeout_detail=timeout_detail,
+        )
 
     def _connection(self, config: RemoteLibvirtConfig) -> Any:
         return self._connections.connection(config)
