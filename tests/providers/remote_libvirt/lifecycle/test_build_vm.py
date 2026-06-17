@@ -7,6 +7,7 @@ order, teardown-on-exception, and overlay creation over the base image.
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
 from uuid import UUID
@@ -15,6 +16,7 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.profiles.build import GitSourceRef
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BuildVmTiming,
@@ -67,6 +69,58 @@ def _agent_route_after(polls: int) -> tuple[Any, dict[str, int]]:
         return json.dumps({"return": {"exited": True, "exitcode": rc}})
 
     return _agent, state
+
+
+_ROUTE_MARKER = "/proc/net/route"
+_LS_REMOTE_MARKER = "ls-remote"
+
+
+class _EgressAgent:
+    """Guest-agent fake that distinguishes the route probe from the egress (`ls-remote`) probe.
+
+    `guest-exec` carries the argv (so the command kind is known at spawn); `guest-exec-status`
+    carries only the pid. This fake remembers the kind per spawned pid and returns the configured
+    rc on status, so a test can fail just the egress probe while the route probe succeeds. It
+    records each issued `ls-remote` command string so a test can assert the probe targets `HEAD`.
+    """
+
+    def __init__(
+        self,
+        *,
+        route_rc: int = 0,
+        egress_rc: int = 0,
+        egress_stderr: str = "",
+        egress_raises: BaseException | None = None,
+    ) -> None:
+        self.route_rc = route_rc
+        self.egress_rc = egress_rc
+        self.egress_stderr = egress_stderr
+        self.egress_raises = egress_raises
+        self.ls_remote_commands: list[str] = []
+        self._kind_by_pid: dict[int, str] = {}
+        self._next_pid = 1
+
+    def __call__(self, domain: Any, command: str, timeout: int, flags: int) -> str:
+        msg = json.loads(command)
+        if msg["execute"] == "guest-exec":
+            argv = " ".join([msg["arguments"]["path"], *msg["arguments"].get("arg", [])])
+            kind = "egress" if _LS_REMOTE_MARKER in argv else "route"
+            if kind == "egress":
+                if self.egress_raises is not None:
+                    raise self.egress_raises
+                self.ls_remote_commands.append(argv)
+            pid = self._next_pid
+            self._next_pid += 1
+            self._kind_by_pid[pid] = kind
+            return json.dumps({"return": {"pid": pid}})
+        pid = msg["arguments"]["pid"]
+        kind = self._kind_by_pid.get(pid, "route")
+        if kind == "egress":
+            stderr = base64.b64encode(self.egress_stderr.encode()).decode()
+            return json.dumps(
+                {"return": {"exited": True, "exitcode": self.egress_rc, "err-data": stderr}}
+            )
+        return json.dumps({"return": {"exited": True, "exitcode": self.route_rc}})
 
 
 def _conn_with_base() -> FakeProvisionConn:
@@ -214,3 +268,118 @@ def test_session_network_never_ready_raises_and_tears_down(tmp_path: Any) -> Non
     # Teardown still ran.
     assert DOMAIN_NAME not in conn.domains
     assert OVERLAY in conn.pools["default"].deleted
+
+
+# --- egress preflight to the configured source (ADR-0155) ----------------------------
+
+_REMOTE = "https://git.example/linux.git"
+_SOURCE = GitSourceRef(remote=_REMOTE, ref="v6.9")
+_SHA = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret - fake commit sha
+
+
+def test_session_fails_when_source_unreachable_naming_source(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_rc=128, egress_stderr="fatal: unable to access")
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+
+    with (
+        pytest.raises(CategorizedError) as exc,
+        vm.session(_BASE_VOLUME, run_id=RUN_ID, source=_SOURCE),
+    ):
+        pass
+
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    # The unreachable source is named (host present), and the git stderr is surfaced.
+    assert "git.example/linux.git" in str(exc.value.details["remote"])
+    assert "unable to access" in str(exc.value.details["stderr"])
+    # The egress probe ran and was the last guest-exec (no clone followed).
+    assert len(agent.ls_remote_commands) == 1
+    # Teardown still ran: VM torn down, overlay reclaimed.
+    assert DOMAIN_NAME not in conn.domains
+    assert OVERLAY in conn.pools["default"].deleted
+
+
+def test_session_yields_when_egress_works(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_rc=0)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID, source=_SOURCE) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+        assert len(agent.ls_remote_commands) == 1
+    assert DOMAIN_NAME not in conn.domains
+
+
+def test_session_skips_preflight_when_no_source(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_rc=128)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+
+    # No source supplied: route-only behavior, no ls-remote probe issued.
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+    assert agent.ls_remote_commands == []
+    assert DOMAIN_NAME not in conn.domains
+
+
+def test_session_redacts_credential_in_unreachable_source(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_rc=128)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+    credentialed = GitSourceRef(remote="https://alice:hunter2@git.example/linux.git", ref="v6.9")
+
+    with (
+        pytest.raises(CategorizedError) as exc,
+        vm.session(_BASE_VOLUME, run_id=RUN_ID, source=credentialed),
+    ):
+        pass
+
+    rendered = f"{exc.value}{exc.value.details}"
+    assert "git.example/linux.git" in str(exc.value.details["remote"])
+    assert "hunter2" not in rendered
+    assert "alice:hunter2" not in rendered
+
+
+def test_session_propagates_agent_drop_during_preflight(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_raises=libvirt_error(libvirt.VIR_ERR_OPERATION_FAILED))
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+
+    with (
+        pytest.raises(CategorizedError) as exc,
+        vm.session(_BASE_VOLUME, run_id=RUN_ID, source=_SOURCE),
+    ):
+        pass
+
+    # An agent drop is a transport_failure that propagates unchanged (not a not-ready signal).
+    assert exc.value.category == ErrorCategory.TRANSPORT_FAILURE
+    assert DOMAIN_NAME not in conn.domains
+
+
+def test_session_egress_probe_targets_head_not_pinned_sha(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_rc=0)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+    sha_pinned = GitSourceRef(remote=_REMOTE, ref=_SHA)
+
+    # A reachable host with a SHA-pinned ref must NOT be falsely failed: the probe targets HEAD,
+    # not the bare SHA (which is not an advertised ref).
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID, source=sha_pinned) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+    [probe] = agent.ls_remote_commands
+    assert "HEAD" in probe
+    assert _SHA not in probe
+
+
+def test_session_egress_probe_guards_leading_dash_remote(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent = _EgressAgent(route_rc=0, egress_rc=0)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+    dashed = GitSourceRef(remote="--upload-pack=evil", ref="v6.9")
+
+    # A remote starting with '-' must reach git as a positional operand (after '--'), not an
+    # option — the preflight runs before the clone's own leading-dash guard.
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID, source=dashed) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+    [probe] = agent.ls_remote_commands
+    assert "-- --upload-pack=evil HEAD" in probe

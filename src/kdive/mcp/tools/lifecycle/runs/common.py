@@ -19,6 +19,39 @@ RUN_BUILD_TERMINAL = frozenset({RunState.FAILED, RunState.CANCELED})
 RUN_NON_TERMINAL = frozenset({RunState.CREATED, RunState.RUNNING})
 # A Run holds its System until terminal; at most one non-terminal Run per System.
 
+# A failed Run with no linked job (e.g. a reconciler-driven failure on a torn-down System,
+# ADR-0141) would otherwise surface only its `failure_category` with no actionable reason. Each
+# diagnostic category the no-job path can carry maps to a fixed, resource-free reason so the
+# failed Run is never bare (#516). Strings name the failing condition, not any project/host/id,
+# so they carry no resource-existence signal. No-leak categories (ADR-0123) are absent here —
+# they stay routed through the seam constant; `_NO_JOB_FALLBACK` covers any unmapped diagnostic
+# category so the surface never regresses to category-only.
+_NO_JOB_FALLBACK = "Run failed before a job recorded a reason"
+_NO_JOB_DETAIL: dict[ErrorCategory, str] = {
+    ErrorCategory.LEASE_EXPIRED: (
+        "Run failed: its lease expired and the reconciler reclaimed the System"
+    ),
+    ErrorCategory.INFRASTRUCTURE_FAILURE: (
+        "Run failed for an infrastructure reason with no job to record details"
+    ),
+    ErrorCategory.PROVISIONING_FAILURE: "Run failed while provisioning the System",
+    ErrorCategory.ALLOCATION_DENIED: "Run failed: the System's allocation was reclaimed",
+    ErrorCategory.QUEUE_TIMEOUT: "Run failed: it timed out waiting in the queue",
+}
+
+
+def no_job_failure_detail(category: ErrorCategory) -> str:
+    """Return the fixed, resource-free reason for a failed Run with no linked job (#516).
+
+    Args:
+        category: The Run's `failure_category` (the default-applied one, never `None`).
+
+    Returns:
+        A specific reason for a mapped diagnostic category, else a generic fallback, so a
+        failed Run is never surfaced as a bare category.
+    """
+    return _NO_JOB_DETAIL.get(category, _NO_JOB_FALLBACK)
+
 
 def envelope_for_run(
     run: Run, *, required_cmdline: str | None = None, failing_job: Job | None = None
@@ -60,6 +93,11 @@ def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None)
     suppresses `detail`, but the `data` extras bypass that seam, so they are gated here on the
     same rule. `suppressed_detail(category, None) is not None` is true exactly for a suppressed
     category (it returns the fixed constant even when `raw` is `None`).
+
+    When there is no linked job (a reconciler-driven failure on a torn-down System, ADR-0141),
+    `detail` is derived from the category so the failed Run is never category-only (#516). That
+    derived `detail` is still routed through `ToolResponse.failure`, so a no-leak category
+    surfaces the seam constant, never the derived reason.
     """
     data: dict[str, JsonValue] = {"current_status": run.state.value}
     detail: str | None = None
@@ -71,6 +109,8 @@ def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None)
         for key, value in context.items():
             if key.startswith("failure_detail_"):
                 data[key] = value
+    elif failing_job is None:
+        detail = no_job_failure_detail(category)
     return ToolResponse.failure(str(run.id), category, detail=detail, data=data)
 
 

@@ -90,8 +90,8 @@ def test_read_bytes_malformed_base64_is_infrastructure_failure() -> None:
     assert exc.value.details == {"path": "/corrupt"}
 
 
-def test_clone_issues_init_fetch_checkout_in_order() -> None:
-    t = _RecordingTransport([_ok(), _ok(), _ok()])
+def test_clone_issues_init_fetch_verify_checkout_in_order() -> None:
+    t = _RecordingTransport([_ok(), _ok(), _ok(stdout="deadbeef\n"), _ok()])
     t.clone("https://git.example/linux.git", "v6.9", "/src")
     argvs = [c[0] for c in t.calls]
     assert argvs[0] == ["git", "init", "/src"]
@@ -105,7 +105,8 @@ def test_clone_issues_init_fetch_checkout_in_order() -> None:
         "https://git.example/linux.git",
         "v6.9",
     ]
-    assert argvs[2] == ["git", "-C", "/src", "checkout", "FETCH_HEAD"]
+    assert argvs[2] == ["git", "-C", "/src", "rev-parse", "--verify", "--quiet", "FETCH_HEAD"]
+    assert argvs[3] == ["git", "-C", "/src", "checkout", "FETCH_HEAD"]
 
 
 def test_clone_init_non_zero_is_infrastructure_failure() -> None:
@@ -128,10 +129,36 @@ def test_clone_fetch_non_zero_is_configuration_error_with_fetch_stderr() -> None
 
 
 def test_clone_checkout_non_zero_is_configuration_error() -> None:
-    t = _RecordingTransport([_ok(), _ok(), _ok(returncode=1, stderr="pathspec")])
+    # init ok, fetch ok, FETCH_HEAD resolves, but the checkout itself fails.
+    t = _RecordingTransport(
+        [_ok(), _ok(), _ok(stdout="deadbeef\n"), _ok(returncode=1, stderr="checkout boom")]
+    )
     with pytest.raises(CategorizedError) as exc:
         t.clone("https://git.example/linux.git", "v6.9", "/src")
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert "checkout boom" in str(exc.value.details["stderr"])
+
+
+def test_clone_masked_fetch_without_fetch_head_surfaces_fetch_stderr() -> None:
+    # The masked-cause regression: fetch's rc is masked to 0 (companion guest-agent bug),
+    # but it produced no FETCH_HEAD. The error must carry the fetch's own stderr and be a
+    # transport failure, NOT a downstream checkout pathspec message.
+    fetch_stderr = "fatal: unable to access 'https://git.example/': Could not resolve host"
+    t = _RecordingTransport(
+        [
+            _ok(),  # init
+            _ok(returncode=0, stderr=fetch_stderr),  # fetch masked to rc 0
+            _ok(returncode=1, stderr=""),  # rev-parse --verify FETCH_HEAD fails (no FETCH_HEAD)
+        ]
+    )
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("https://git.example/linux.git", "v6.9", "/src")
+    assert exc.value.category == ErrorCategory.TRANSPORT_FAILURE
+    assert "Could not resolve host" in str(exc.value.details["stderr"])
+    assert "pathspec" not in str(exc.value.details["stderr"])
+    # init + fetch + rev-parse ran; checkout was never reached.
+    assert [c[0][:2] for c in t.calls] == [["git", "init"], ["git", "-C"], ["git", "-C"]]
+    assert t.calls[2][0] == ["git", "-C", "/src", "rev-parse", "--verify", "--quiet", "FETCH_HEAD"]
 
 
 @pytest.mark.parametrize(

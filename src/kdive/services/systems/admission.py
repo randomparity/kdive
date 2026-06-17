@@ -30,7 +30,7 @@ from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
 from kdive.domain.models import Allocation, Job, JobKind, System
 from kdive.domain.sizing import MB_PER_GB, AllocationSizing
-from kdive.domain.state import AllocationState, IllegalTransition, SystemState
+from kdive.domain.state import AllocationState, IllegalTransition, JobState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
 from kdive.jobs.payloads import SystemPayload
@@ -383,6 +383,47 @@ async def _locked_allocation_system(
         yield conn, alloc, existing
 
 
+# The intended recycle path for a spent Allocation: release it, then request a fresh one
+# (a fresh Allocation yields a fresh System — one System per Allocation, ADR-0149).
+_RECYCLE_ALLOCATION_ACTIONS = ("allocations.release", "allocations.request")
+_FAILED_SYSTEM_GUIDANCE = (
+    "this allocation's system is in 'failed' and cannot be re-provisioned; "
+    "release this allocation and request a fresh one for a new system"
+)
+
+
+async def _failed_system_retry_failure(
+    conn: AsyncConnection, alloc: Allocation, existing: System
+) -> AdmissionFailure:
+    """Build the actionable retry failure for a ``failed`` System (ADR-0149).
+
+    Surfaces the original, already-worker-redacted provision reason (read from the failed
+    provision job by its deterministic ``dedup_key``) alongside fixed recycle guidance, and
+    names the release/re-request next actions. No re-mint: one System per Allocation. No new
+    redaction — the worker already redacted ``failure_context``; this echoes those same bytes.
+    """
+    detail = _FAILED_SYSTEM_GUIDANCE
+    data: dict[str, object] = {"current_status": existing.state.value}
+    job = await queue.get_by_dedup_key(conn, f"{alloc.id}:provision")
+    # Only a *failed* provision job carries the reason. A System can also reach `failed` via
+    # `reprovisioning->failed`, leaving the original provision job `succeeded`; never advertise a
+    # non-failed job as the failing one.
+    if job is not None and job.state is JobState.FAILED:
+        data["failing_job_id"] = str(job.id)
+        reason = job.failure_context.get("failure_message")
+        if reason:
+            detail = f"{_FAILED_SYSTEM_GUIDANCE} (original reason: {reason})"
+        for key, value in job.failure_context.items():
+            if key.startswith("failure_detail_"):
+                data[key] = value
+    return _failure(
+        existing.id,
+        data=data,
+        detail=detail,
+        suggested_next_actions=_RECYCLE_ALLOCATION_ACTIONS,
+    )
+
+
 async def _provision_create_response(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -415,7 +456,13 @@ async def _provision_create_response(
             allocation_id=alloc.id,
             system_id=existing.id,
         )
-    return _failure(existing.id, data={"current_status": existing.state.value})
+    if existing.state is SystemState.FAILED:
+        return await _failed_system_retry_failure(conn, alloc, existing)
+    return _failure(
+        existing.id,
+        data={"current_status": existing.state.value},
+        suggested_next_actions=_RECYCLE_ALLOCATION_ACTIONS,
+    )
 
 
 async def _define_create_response(

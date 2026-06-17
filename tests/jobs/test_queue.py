@@ -89,6 +89,28 @@ def test_enqueue_distinct_dedup_keys_make_distinct_jobs(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_get_by_dedup_key_returns_the_enqueued_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            enqueued = await queue.enqueue(
+                conn, JobKind.PROVISION, _system_payload(), _AUTHORIZING, "alloc:provision"
+            )
+            found = await queue.get_by_dedup_key(conn, "alloc:provision")
+            assert found is not None
+            assert found.id == enqueued.id
+            assert found.dedup_key == "alloc:provision"
+
+    asyncio.run(_run())
+
+
+def test_get_by_dedup_key_returns_none_for_unknown_key(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            assert await queue.get_by_dedup_key(conn, "nope:provision") is None
+
+    asyncio.run(_run())
+
+
 def test_enqueue_rejects_max_attempts_below_one(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:

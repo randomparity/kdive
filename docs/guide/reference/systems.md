@@ -51,7 +51,10 @@ Return a ready-to-edit example profile per configured provider. Requires a token
 
 Mint a System for a granted Allocation and enqueue provision directly (no upload
 window). Use `systems.define` then `systems.provision_defined` instead when the rootfs
-must be uploaded before provisioning. Operator only.
+must be uploaded before provisioning. One System per Allocation: if this Allocation's
+System already failed, retrying does not mint a new one — release this Allocation and
+request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
+System. Operator only.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

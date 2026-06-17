@@ -217,6 +217,17 @@ def test_signal_killed_command_is_not_reported_as_success() -> None:
     assert result.exit_status == 128 + 9
 
 
+def test_exited_with_neither_exitcode_nor_signal_is_not_success() -> None:
+    # A `guest-exec-status` reply that reports `exited: true` but carries neither
+    # `exitcode` nor `signal` is abnormal — the agent normally reports exactly one for
+    # a reaped process. Defaulting it to 0 masks a command of unknown outcome as a pass
+    # (issue #517), so it must raise INFRASTRUCTURE_FAILURE rather than return success.
+    agent = _FakeAgent(exitcode=None, signal=None, out=b"partial")
+    with pytest.raises(CategorizedError) as excinfo:
+        _exec(agent).run(object(), ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 def test_run_times_out_when_the_command_never_exits() -> None:
     agent = _FakeAgent(status_sequence=[False] * 50)
     exc = GuestAgentExec(
