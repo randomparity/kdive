@@ -20,13 +20,24 @@ registered host (ADR-0158). The pure handler is driven directly with hand-built
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
+
+import pytest
+from fastmcp import FastMCP
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.lifecycle.runs import registrar as runs_registrar
 from kdive.mcp.tools.lifecycle.runs.profile_examples import build_host_profile_examples
 from kdive.profiles.build import BuildProfile, ServerBuildProfile, is_git_source
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
 from kdive.services.runs.build_host_selection import (
     accepted_source_kinds,
     check_source_kind_compatibility,
@@ -133,3 +144,82 @@ def test_empty_host_list_is_valid_empty_collection() -> None:
     assert resp.status == "ok"
     assert resp.items == []
     assert resp.data["count"] == "0"
+
+
+# --- registrar boundary + pool-backed behavior ---
+
+
+@asynccontextmanager
+async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+    pool = AsyncConnectionPool(url, min_size=1, max_size=3, open=False)
+    await pool.open()
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
+def _ctx() -> RequestContext:
+    return RequestContext(
+        principal="examples-user",
+        agent_session="examples-session",
+        projects=("proj",),
+        roles={"proj": Role.VIEWER},
+        platform_roles=frozenset(),
+    )
+
+
+def _read_only_hint(tool: object) -> bool | None:
+    annotations = getattr(tool, "annotations", None)
+    value = getattr(annotations, "readOnlyHint", None)
+    return value if isinstance(value, bool) else None
+
+
+async def _insert_ssh_host(pool: AsyncConnectionPool, name: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO build_hosts (id, name, kind, address, ssh_credential_ref, "
+            "workspace_root, max_concurrent) VALUES (%s, %s, 'ssh', '10.0.0.1', "
+            "'cred-ref', '/build', 2)",
+            (uuid4(), name),
+        )
+
+
+def test_runs_profile_examples_registered_read_only_and_auth_only(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool is exposed read_only and invokes current_context() (auth-only)."""
+
+    seen: list[bool] = []
+
+    def fake_current_context() -> RequestContext:
+        seen.append(True)
+        return _ctx()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            monkeypatch.setattr(runs_registrar, "current_context", fake_current_context)
+            await _insert_ssh_host(pool, "examples-ssh")
+            app = FastMCP("runs-profile-examples-test")
+            runs_registrar.register(app, pool, resolver=cast(ProviderResolver, object()))
+            tools = {tool.name: tool for tool in await app.list_tools()}
+
+            assert "runs.profile_examples" in tools
+            assert _read_only_hint(tools["runs.profile_examples"]) is True
+
+            fn = cast(Any, tools["runs.profile_examples"]).fn
+            resp = await fn()
+
+        assert isinstance(resp, ToolResponse)
+        assert resp.status == "ok"
+        names = {item.object_id for item in resp.items}
+        assert "worker-local" in names  # the always-present seed
+        assert "examples-ssh" in names
+        items = {item.object_id: cast(dict[str, Any], item.data) for item in resp.items}
+        assert items["worker-local"]["supported_source_kinds"] == ["warm-tree"]
+        assert items["examples-ssh"]["supported_source_kinds"] == ["git"]
+        # auth-only: the wrapper consulted the request context.
+        assert seen == [True]
+
+    asyncio.run(_run())

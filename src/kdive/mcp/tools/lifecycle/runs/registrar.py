@@ -8,6 +8,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.db.build_hosts import list_all_hosts
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
@@ -21,6 +22,9 @@ from kdive.mcp.tools.lifecycle.runs.create import (
     RunReuseRequirementInput as _RunReuseRequirementInput,
 )
 from kdive.mcp.tools.lifecycle.runs.create import create_run as _create_run
+from kdive.mcp.tools.lifecycle.runs.profile_examples import (
+    build_host_profile_examples as _build_host_profile_examples,
+)
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
@@ -48,6 +52,7 @@ def register(
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool)
     _register_runs_boot(app, pool)
+    _register_runs_profile_examples(app, pool)
 
 
 def _build_handlers(runtime: ProviderRuntime) -> _RunBuildHandlers:
@@ -230,3 +235,20 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Boot an installed run."""
         return await _boot_run(pool, current_context(), run_id)
+
+
+def _register_runs_profile_examples(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.profile_examples",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def runs_profile_examples() -> ToolResponse:
+        """Return a ready-to-edit build profile per registered build host. Requires a token."""
+        # Auth-only (ADR-0117): the verifier already gated the transport; enforce token
+        # presence as defence-in-depth. No platform/project gate, no audit — the projection
+        # is the public host-kind/source-kind rule only (ADR-0158).
+        current_context()
+        async with pool.connection() as conn:
+            hosts = await list_all_hosts(conn)
+        return _build_host_profile_examples(hosts)
