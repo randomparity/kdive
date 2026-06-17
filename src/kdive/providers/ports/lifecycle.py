@@ -170,7 +170,10 @@ class Controller(Protocol):
 
         Raises:
             CategorizedError: ``CONTROL_FAILURE`` for absent domains or provider power
-                faults.
+                faults, ``CONFIGURATION_ERROR`` for invalid provider connection
+                configuration, ``INFRASTRUCTURE_FAILURE`` for provider setup faults, or
+                ``TRANSPORT_FAILURE`` when a remote provider's control channel cannot
+                connect.
         """
         ...
 
@@ -179,6 +182,9 @@ class Controller(Protocol):
 
         Raises:
             CategorizedError: ``CONTROL_FAILURE`` for absent domains or provider crash
-                trigger faults.
+                trigger faults, ``CONFIGURATION_ERROR`` for invalid provider connection
+                configuration, ``INFRASTRUCTURE_FAILURE`` for provider setup faults, or
+                ``TRANSPORT_FAILURE`` when a remote provider's control channel cannot
+                connect.
         """
         ...

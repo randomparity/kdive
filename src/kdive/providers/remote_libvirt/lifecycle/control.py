@@ -83,7 +83,10 @@ class RemoteLibvirtControl:
 
         Raises:
             CategorizedError: ``CONTROL_FAILURE`` if the domain is absent or a
-                non-idempotent libvirt error occurs.
+                non-idempotent libvirt error occurs, ``CONFIGURATION_ERROR`` for invalid
+                remote connection configuration, ``INFRASTRUCTURE_FAILURE`` for TLS
+                materialization faults, or ``TRANSPORT_FAILURE`` when the libvirt TLS
+                connection fails.
         """
         with self._connection() as conn:
             domain = self._lookup(conn, domain_name)
@@ -93,7 +96,10 @@ class RemoteLibvirtControl:
         """Panic the guest via NMI (``injectNMI``); the base OS panics on unknown NMI.
 
         Raises:
-            CategorizedError: ``CONTROL_FAILURE`` if the domain is absent or libvirt errors.
+            CategorizedError: ``CONTROL_FAILURE`` if the domain is absent or libvirt errors,
+                ``CONFIGURATION_ERROR`` for invalid remote connection configuration,
+                ``INFRASTRUCTURE_FAILURE`` for TLS materialization faults, or
+                ``TRANSPORT_FAILURE`` when the libvirt TLS connection fails.
         """
         with self._connection() as conn:
             domain = self._lookup(conn, domain_name)
