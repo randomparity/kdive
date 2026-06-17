@@ -43,7 +43,7 @@ Create a run under a system.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `build_profile` | `object` | yes | Build profile for the Run's kernel. |
+| `build_profile` | `any` | yes | Build profile for the Run's kernel. source='server' builds from a kernel tree (kernel_source_ref required); source='external' ingests a prebuilt artifact. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. See docs/operating/build-source-staging.md for staging the source. |
 | `expected_boot_failure` | `any` | no | Optional expected boot failure, e.g. {'kind':'console_crash','pattern':'Oops'}. |
 | `investigation_id` | `string` | yes | Investigation to attach the Run to. |
 | `reuse_requirement` | `any` | no | Optional System reuse assertion payload with vcpus, memory_gb, disk_gb, and pcie fields. Omit to skip extra reuse matching. |

@@ -58,12 +58,15 @@ surface), mirroring ADR-0124. Specifically:
    preserved for any caller still sending a mapping internally.
 
 2. **Re-envelope the binding error** by adding one `_BINDING_CONVERSIONS` entry for
-   `runs.create`: `_BindingConversion("system_id", _loc_under("build_profile"), _profile_envelope)`.
+   `runs.create`:
+   `_BindingConversion("system_id", _loc_under("build_profile"), _build_profile_envelope)`.
    `system_id` is the call's object id (matching the body path's `request.system_id` failure
    envelope); `_loc_under("build_profile")` recognises a binding failure (the plain union's error
    `loc` is `("build_profile", "ServerBuildProfile"/"ExternalBuildProfile", …)`, all under
-   `build_profile`); `_profile_envelope` reuses ADR-0124's `configuration_error` + bounded
-   `errors` surfacing. A field-level error elsewhere on the call propagates unchanged.
+   `build_profile`); `_build_profile_envelope` is a small build-lane sibling of ADR-0124's
+   `_profile_envelope` — same `configuration_error` + bounded `errors` surfacing, but its message
+   is `"invalid build profile"` to match the in-body `BuildProfile.parse` failure. A field-level
+   error elsewhere on the call propagates unchanged.
 
 3. **Document the config-fragment path** in the `build_profile` parameter description and the
    generated tool reference: that `config` is a `ComponentRef` (a `catalog` ref keyed by name),
@@ -77,10 +80,12 @@ surface), mirroring ADR-0124. Specifically:
    than duplicating it — this ADR covers the *config* selection axis, that doc covers the
    *source* axis.
 
-The `_profile_envelope` helper's literal message string is `"invalid provisioning profile"`;
-it is reused verbatim (it is not surfaced to the caller as `detail` — `detail` carries the
-`CategorizedError` message, and the field-path `errors` list is the actionable content), so no
-new helper is added.
+A dedicated `_build_profile_envelope` helper is added rather than reusing `_profile_envelope`:
+`failure_from_error` surfaces the `CategorizedError` message as `detail`, and `configuration_error`
+`detail` is **not** suppressed (`suppressed_detail` only suppresses `authorization_denied`/
+`not_found`), so reusing `_profile_envelope`'s `"invalid provisioning profile"` message would
+mislabel a build-profile failure. The new helper carries `"invalid build profile"`, byte-matching
+the in-body parse failure.
 
 ## Consequences
 

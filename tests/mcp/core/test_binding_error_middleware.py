@@ -24,6 +24,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.profiles.build import ExternalBuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 
 
@@ -61,6 +62,27 @@ def _profile_validation_error() -> ValidationError:
     """
     try:
         _CallModel.model_validate({"profile": {"schema_version": 1}})
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+class _BuildCallModel(BaseModel):
+    """Mirrors the binding model FastMCP builds for ``runs.create``: a typed ``build_profile``."""
+
+    model_config = ConfigDict(extra="forbid")
+    build_profile: ServerBuildProfile | ExternalBuildProfile
+
+
+def _build_profile_validation_error() -> ValidationError:
+    """A raw pydantic ``ValidationError`` whose locations are under ``build_profile``.
+
+    Exactly the shape FastMCP raises at argument binding for a malformed ``runs.create``
+    ``build_profile`` — the plain union tries both members, so every error ``loc`` starts with
+    ``"build_profile"`` (then the member name).
+    """
+    try:
+        _BuildCallModel.model_validate({"build_profile": {"schema_version": 1}})
     except ValidationError as exc:
         return exc
     raise AssertionError("expected a ValidationError")
@@ -107,6 +129,31 @@ def test_binding_error_on_typed_profile_tool_becomes_configuration_error() -> No
     errors = envelope["data"].get("errors")
     assert isinstance(errors, list) and errors  # field-path entries surfaced
     assert all(set(e) <= {"loc", "msg", "type"} for e in errors)  # no input/ctx echoed
+
+
+def test_runs_create_build_profile_binding_becomes_configuration_error() -> None:
+    envelope = _envelope(
+        _drive(
+            "runs.create",
+            {"system_id": "sys-1", "build_profile": {"schema_version": 1}},
+            _build_profile_validation_error(),
+        )
+    )
+    assert envelope["status"] == "error"
+    assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert envelope["object_id"] == "sys-1"  # the call's system_id, not the tool name
+    # detail matches the in-body BuildProfile.parse message, not the provisioning one
+    assert envelope["detail"] == "invalid build profile"
+    errors = envelope["data"].get("errors")
+    assert isinstance(errors, list) and errors  # field-path entries surfaced
+    assert all(set(e) <= {"loc", "msg", "type"} for e in errors)  # no input/ctx echoed
+
+
+def test_runs_create_non_build_profile_validation_error_is_reraised() -> None:
+    # A ValidationError whose locations are not under `build_profile` is not a binding failure;
+    # the create body never lets a raw ValidationError escape, so it must propagate, not mislabel.
+    with pytest.raises(ValidationError):
+        _drive("runs.create", {"system_id": "sys-1"}, _non_profile_validation_error())
 
 
 def test_reprovision_uses_system_id_as_object_id() -> None:
@@ -234,3 +281,47 @@ def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     assert data["status"] == "error"
     assert data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
     assert data["detail"]
+
+
+def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelopes() -> None:
+    # The integration proof for #482: runs.create with a typed `build_profile` union publishes the
+    # anyOf input schema, accepts a valid profile, and returns the envelope (not a ToolError) for a
+    # malformed one — exercising the real _BINDING_CONVERSIONS["runs.create"] entry.
+    from kdive.mcp.app import _advertise_flat_output_schema
+
+    app: FastMCP = FastMCP(name="probe")
+    app.add_middleware(BindingErrorMiddleware())
+
+    @app.tool(name="runs.create")
+    async def _create(
+        system_id: str, build_profile: ServerBuildProfile | ExternalBuildProfile
+    ) -> ToolResponse:
+        return ToolResponse.success(system_id, "created", data={"source": build_profile.source})
+
+    _advertise_flat_output_schema(app)
+
+    async def _run() -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+        async with Client(app) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+            schema = tools["runs.create"].inputSchema["properties"]["build_profile"]
+            valid = await client.call_tool(
+                "runs.create",
+                {
+                    "system_id": "sys-1",
+                    "build_profile": {"schema_version": 1, "kernel_source_ref": "linux-6.9"},
+                },
+            )
+            malformed = await client.call_tool(
+                "runs.create",
+                {"system_id": "sys-1", "build_profile": {"schema_version": 1}},
+            )
+            return schema, valid.data, malformed.data
+
+    schema, valid_data, malformed_data = asyncio.run(_run())
+    assert "anyOf" in schema  # both build lanes published, discoverable from the tool surface
+    assert valid_data is not None and valid_data["status"] == "created"
+    assert valid_data["data"]["source"] == "server"  # server-default union dispatch
+    assert malformed_data is not None
+    assert malformed_data["status"] == "error"
+    assert malformed_data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert malformed_data["detail"]

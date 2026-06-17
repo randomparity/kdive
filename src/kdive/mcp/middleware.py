@@ -221,6 +221,23 @@ def _profile_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
     return ToolResponse.failure_from_error(object_id, error)
 
 
+def _build_profile_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
+    """Envelope a malformed ``build_profile`` binding error (#482, mirrors ``_profile_envelope``).
+
+    Uses the same ``"invalid build profile"`` message the in-body ``BuildProfile.parse`` failure
+    surfaces (``profiles/build.py``), so the binding-path envelope's ``detail`` is byte-identical to
+    the body path's for an equivalent malformed profile.
+    """
+    error = CategorizedError(
+        "invalid build profile",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "errors": exc.errors(include_url=False, include_input=False, include_context=False),
+        },
+    )
+    return ToolResponse.failure_from_error(object_id, error)
+
+
 def _shape_xor_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
     """Envelope a shape-XOR-custom binding error with a precise ``detail`` (#473, ADR-0132)."""
     both = any(err.get("ctx", {}).get("both") for err in exc.errors())
@@ -258,6 +275,9 @@ _BINDING_CONVERSIONS: dict[str, _BindingConversion] = {
     ),
     "systems.reprovision": _BindingConversion(
         "system_id", _loc_under("profile"), _profile_envelope
+    ),
+    "runs.create": _BindingConversion(
+        "system_id", _loc_under("build_profile"), _build_profile_envelope
     ),
     "allocations.request": _BindingConversion("project", _is_shape_xor_error, _shape_xor_envelope),
 }
