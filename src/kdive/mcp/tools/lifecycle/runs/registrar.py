@@ -23,7 +23,12 @@ from kdive.mcp.tools.lifecycle.runs.create import create_run as _create_run
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
-from kdive.profiles.types import BuildProfileInput, ExpectedBootFailureInput
+from kdive.profiles.build import (
+    ExternalBuildProfile,
+    ServerBuildProfile,
+    dump_build_profile,
+)
+from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 
@@ -72,7 +77,18 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
         investigation_id: Annotated[str, Field(description="Investigation to attach the Run to.")],
         system_id: Annotated[str, Field(description="Ready System (active Allocation) to bind.")],
         build_profile: Annotated[
-            BuildProfileInput, Field(description="Build profile for the Run's kernel.")
+            ServerBuildProfile | ExternalBuildProfile,
+            Field(
+                description=(
+                    "Build profile for the Run's kernel. source='server' builds from a kernel "
+                    "tree (kernel_source_ref required); source='external' ingests a prebuilt "
+                    "artifact. The optional 'config' is a catalog ComponentRef "
+                    "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get "
+                    "the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) "
+                    "for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named "
+                    "fragment. See docs/operating/build-source-staging.md for staging the source."
+                )
+            ),
         ],
         expected_boot_failure: Annotated[
             ExpectedBootFailureInput | None,
@@ -96,7 +112,7 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
         request = _RunCreateRequest(
             investigation_id=investigation_id,
             system_id=system_id,
-            build_profile=build_profile,
+            build_profile=dump_build_profile(build_profile),
             expected_boot_failure=expected_boot_failure,
             reuse_requirement=reuse_requirement,
         )

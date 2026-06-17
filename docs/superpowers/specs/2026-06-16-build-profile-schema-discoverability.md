@@ -51,7 +51,9 @@ FastMCP validates a typed param at argument binding, before the tool body. Add o
 `_BINDING_CONVERSIONS` in `src/kdive/mcp/middleware.py`:
 
 ```python
-"runs.create": _BindingConversion("system_id", _loc_under("build_profile"), _profile_envelope),
+"runs.create": _BindingConversion(
+    "system_id", _loc_under("build_profile"), _build_profile_envelope
+),
 ```
 
 - `system_id` is the call's object id — matching the body path's
@@ -65,9 +67,13 @@ FastMCP validates a typed param at argument binding, before the tool body. Add o
 - `_loc_under("build_profile")` recognises the binding failure: the plain union's error `loc` is
   `("build_profile", "ServerBuildProfile" | "ExternalBuildProfile", …)`, all under
   `build_profile`, so `loc[0] == "build_profile"` holds for every entry.
-- `_profile_envelope` reuses ADR-0124's `configuration_error` envelope with the bounded `errors`
-  list (no input/ctx echoed). Its literal message `"invalid provisioning profile"` is not
-  surfaced to the caller (it is not `detail`), so it is reused as-is.
+- `_build_profile_envelope` is a small build-lane sibling of ADR-0124's `_profile_envelope`: same
+  `configuration_error` + bounded `errors` list (no input/ctx echoed), but the message is
+  `"invalid build profile"` so the binding-path `detail` is byte-identical to the in-body
+  `BuildProfile.parse` failure (`profiles/build.py:151,159`). (`_profile_envelope` could not be
+  reused verbatim — its `"invalid provisioning profile"` message **is** surfaced as `detail` for a
+  `configuration_error`, since `suppressed_detail` only suppresses `authorization_denied`/
+  `not_found`, so it would mislabel a build-profile failure.)
 
 A field-level `ValidationError` the predicate rejects, or any non-`ValidationError`, propagates
 unchanged.
