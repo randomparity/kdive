@@ -10,7 +10,7 @@ from uuid import UUID
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import BuildHost, BuildHostKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.build import GitKernelSource, ServerBuildProfile
+from kdive.profiles.build import GitKernelSource, GitSourceRef, ServerBuildProfile
 from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.ssh_transport import SshBuildTransport
@@ -19,14 +19,20 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 # Patchable seam: tests substitute this to avoid real SSH.
 ssh_build_transport_from_host = SshBuildTransport.from_host
 
+# The factory receives the configured git build source so a transport that provisions a throwaway
+# guest (ephemeral_libvirt) can preflight egress to it before the clone (ADR-0155); ``None`` for a
+# warm-tree source. The ssh/local factories ignore it (their host network is already up).
 type BuildHostTransportFactory = Callable[
-    [BuildHost, SecretRegistry, UUID], AbstractContextManager[BuildTransport]
+    [BuildHost, SecretRegistry, UUID, GitSourceRef | None], AbstractContextManager[BuildTransport]
 ]
 type BuildHostTransportFactories = Mapping[BuildHostKind, BuildHostTransportFactory]
 
 
 def ssh_build_transport_factory(
-    host: BuildHost, secret_registry: SecretRegistry, _run_id: UUID
+    host: BuildHost,
+    secret_registry: SecretRegistry,
+    _run_id: UUID,
+    _source: GitSourceRef | None,
 ) -> AbstractContextManager[BuildTransport]:
     return ssh_build_transport_from_host(host, secret_registry)
 
@@ -52,7 +58,8 @@ async def run_build_on_host(
     factories = _transport_factories(transport_factories)
     factory = factories.get(host.kind)
     if factory is not None:
-        with factory(host, secret_registry, run_id) as transport:
+        source = _git_source(parsed)
+        with factory(host, secret_registry, run_id, source) as transport:
             return await _run_over_transport(
                 capable,
                 transport,
@@ -130,6 +137,16 @@ def _git_coords(parsed: ServerBuildProfile, run_id: UUID) -> tuple[str, str]:
             details={"run_id": str(run_id)},
         )
     return source.git.remote, source.git.ref
+
+
+def _git_source(parsed: ServerBuildProfile) -> GitSourceRef | None:
+    """The git source coordinates for the build-VM egress preflight; ``None`` for a warm tree.
+
+    Unlike :func:`_git_coords` (which requires git for the actual remote clone), this is advisory:
+    a non-git warm-tree source has no remote to preflight, so the factory simply skips the check.
+    """
+    source = parsed.kernel_source_ref
+    return source.git if isinstance(source, GitKernelSource) else None
 
 
 def _require_transport_capable(

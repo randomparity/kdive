@@ -15,7 +15,7 @@ against the database.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -39,6 +39,7 @@ from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.payloads import BuildPayload
+from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
@@ -132,7 +133,10 @@ _EPHEMERAL_EVENTS: list[tuple[str, UUID]] = []
 
 
 def _fake_ephemeral_factory(
-    host: BuildHost, secret_registry: SecretRegistry, run_id: UUID
+    host: BuildHost,
+    secret_registry: SecretRegistry,
+    run_id: UUID,
+    source: GitSourceRef | None,
 ) -> AbstractContextManager[BuildTransport]:
     assert host.base_image_volume is not None
     return _fake_ephemeral_session(host.base_image_volume, secret_registry, run_id=run_id)
@@ -558,6 +562,65 @@ def test_ephemeral_host_non_remote_builder_not_implemented(
             assert await _lease_count(pool, run_id) == 1
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Test 7: run_build_on_host threads the resolved source into the transport factory (ADR-0155)
+# ---------------------------------------------------------------------------
+
+
+class _TransportCapableRecordingBuilder(_RecordingBuilder):
+    """A builder advertising over_transport so run_build_on_host treats it as remote-capable."""
+
+    def over_transport(self, transport: object, **_kw: object) -> _RecordingBuilder:
+        return self
+
+
+@contextmanager
+def _noop_transport() -> Iterator[BuildTransport]:
+    yield cast(BuildTransport, object())
+
+
+def _ephemeral_host() -> BuildHost:
+    return BuildHost(
+        id=uuid4(),
+        name="eph",
+        kind=BuildHostKind.EPHEMERAL_LIBVIRT,
+        address=None,
+        ssh_credential_ref=None,
+        base_image_volume="kdive-build-base.qcow2",
+        workspace_root="/build",
+        max_concurrent=2,
+        enabled=True,
+        state=BuildHostState.READY,
+    )
+
+
+def test_run_build_on_host_passes_git_source_to_factory() -> None:
+    captured: list[GitSourceRef | None] = []
+
+    def _factory(
+        _host: BuildHost,
+        _registry: SecretRegistry,
+        _run_id: UUID,
+        source: GitSourceRef | None,
+    ) -> AbstractContextManager[BuildTransport]:
+        captured.append(source)
+        return _noop_transport()
+
+    run_id = uuid4()
+    parsed = cast(ServerBuildProfile, BuildProfile.parse(_GIT_PROFILE))
+    asyncio.run(
+        build_host_dispatch.run_build_on_host(
+            _TransportCapableRecordingBuilder(),
+            _ephemeral_host(),
+            run_id,
+            parsed,
+            secret_registry=SecretRegistry(),
+            transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
+        )
+    )
+    assert captured == [GitSourceRef(remote="https://git.example/linux.git", ref="v6.9")]
 
 
 def test_unsupported_build_host_kind_fails_before_ephemeral_session(

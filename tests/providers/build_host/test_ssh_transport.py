@@ -95,20 +95,21 @@ def test_run_builds_ssh_wrapper_argv() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. clone — issues init → fetch --depth 1 → checkout FETCH_HEAD in order;
-#    non-zero checkout raises CONFIGURATION_ERROR with redacted stderr
+# 2. clone — issues init → fetch --depth 1 → rev-parse --verify FETCH_HEAD →
+#    checkout FETCH_HEAD in order; non-zero checkout raises CONFIGURATION_ERROR
+#    with redacted stderr
 # ---------------------------------------------------------------------------
 
 
 def test_clone_issues_commands_in_order() -> None:
-    """clone() runs git init, git fetch --depth 1, git checkout FETCH_HEAD in order."""
+    """clone() runs git init, fetch --depth 1, rev-parse --verify, checkout FETCH_HEAD."""
     remote = "https://git.kernel.org/pub/scm/linux.git"
     ref = "v6.9"
     dest = "/build/src"
 
-    # All three sub-commands succeed (returncode 0).
+    # All four sub-commands succeed (returncode 0); rev-parse prints the resolved sha.
     def side_effect(argv: list[str], **kwargs: object) -> MagicMock:
-        return _completed(returncode=0)
+        return _completed(returncode=0, stdout="deadbeef\n")
 
     with patch(_RUN_TARGET, side_effect=side_effect) as mock_run:
         transport = SshBuildTransport(
@@ -118,7 +119,7 @@ def test_clone_issues_commands_in_order() -> None:
         )
         transport.clone(remote, ref, dest)
 
-    assert mock_run.call_count == 3
+    assert mock_run.call_count == 4
     calls = mock_run.call_args_list
 
     # Extract the remote command (last positional element of the ssh argv).
@@ -131,8 +132,10 @@ def test_clone_issues_commands_in_order() -> None:
     assert "--depth" in remote_cmd(calls[1])
     assert remote in remote_cmd(calls[1])
     assert ref in remote_cmd(calls[1])
-    assert "checkout" in remote_cmd(calls[2])
+    assert "rev-parse" in remote_cmd(calls[2])
     assert "FETCH_HEAD" in remote_cmd(calls[2])
+    assert "checkout" in remote_cmd(calls[3])
+    assert "FETCH_HEAD" in remote_cmd(calls[3])
 
 
 def test_clone_non_zero_checkout_raises_configuration_error() -> None:
@@ -142,10 +145,10 @@ def test_clone_non_zero_checkout_raises_configuration_error() -> None:
     def side_effect(argv: list[str], **kwargs: object) -> MagicMock:
         nonlocal call_count
         call_count += 1
-        # init and fetch succeed; checkout fails.
-        if call_count == 3:
+        # init, fetch, and rev-parse succeed; checkout (call 4) fails.
+        if call_count == 4:
             return _completed(returncode=1, stderr="error: pathspec 'FETCH_HEAD' did not match")
-        return _completed(returncode=0)
+        return _completed(returncode=0, stdout="deadbeef\n")
 
     with patch(_RUN_TARGET, side_effect=side_effect):
         transport = SshBuildTransport(
