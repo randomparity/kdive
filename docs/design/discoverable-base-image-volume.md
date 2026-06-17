@@ -69,8 +69,9 @@ image staged *here*?) → `allocations.request` on a host that can serve it.
   `base_image_volume` token to pass **and** whether it is staged on a given resource.
 - No new MCP path *stages* a volume (staging stays an operator prerequisite, ADR-0080).
 - `resources_describe` for a non-remote resource is unchanged.
-- A live probe failure (host down, RPC error, timeout) **degrades** `resources_describe` to a
-  reported `unreachable` staged status — it never fails the describe envelope.
+- A live probe failure **degrades** `resources_describe` to a reported degraded staged status
+  (`unreachable` for host/RPC/timeout, `unknown` for unresolvable config) — it never fails the
+  describe envelope.
 
 ## Design
 
@@ -92,48 +93,73 @@ When the described resource is `kind == remote-libvirt`, `describe_resource`:
 1. Queries `image_catalog` for the caller-visible **staged remote-libvirt** images
    (`provider = 'remote-libvirt' AND volume IS NOT NULL`), applying the same public-plus-viewer
    filter `images_list` uses, ordered `(name, arch)`. This yields `[(name, volume)]`.
-2. Calls an **injected probe** `probe(pool_name, volumes) -> {volume: status}` with the resource's
-   own `pool` and the resolved volume names. The production probe opens one mutual-TLS
-   `qemu+tls://` connection (the same `remote_connection` lifecycle the diagnostics probes and the
-   provisioning plane use), and calls the shared `lookup_volume_staged(conn, pool, volume)` once per
-   volume over that single connection.
+2. Calls an **injected probe** `probe(volumes) -> {volume: status}` with just the resolved volume
+   names. The production probe resolves the connection config (URI, TLS refs) **and the storage
+   pool** from `remote_config_from_inventory()` internally, opens one mutual-TLS `qemu+tls://`
+   connection (the same `remote_connection` lifecycle the diagnostics probes and the provisioning
+   plane use), and calls the shared `lookup_volume_staged(conn, config.storage_pool, volume)` once
+   per volume over that single connection.
 3. Merges a structured `staged_base_images` list into the envelope `data`: an ordered list of
    `{ "name": <catalog name>, "volume": <volume token>, "staged": <status> }`.
 
+**Pool source — `config.storage_pool`, not `resource.pool`.** The probe verifies the pool
+provisioning actually uses, which is `config.storage_pool` (`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`,
+read at op time): provisioning creates the overlay there
+(`providers/remote_libvirt/lifecycle/provisioning.py:276`) and the #513 base-image-staging
+diagnostic probes the same pool (`diagnostics/base_image_staging.py:122`). The `Resource` row's
+`pool` **column** is **not** that pool: the inventory reconcile hardcodes it to `'default'` on
+create for a config-owned remote resource (`inventory/reconcile_resources.py` — the remote instance
+declaration carries no pool), and the row's advertised `storage_pool` capability is explicitly
+advisory (`providers/remote_libvirt/discovery.py:94` "the env config stays authoritative for ops").
+Probing `resource.pool` would therefore verify the wrong pool — reporting `staged` for a volume
+provisioning cannot find (or vice versa) whenever the operator overrides the pool. The probe must
+derive the pool from config, which is why step 2 passes only the volume list.
+
 `status` vocabulary (a string per volume):
 
-| status        | meaning                                                                  |
-|---------------|--------------------------------------------------------------------------|
-| `staged`      | the volume is present on this host's pool (`VolumeStaging.STAGED`)        |
-| `absent`      | the pool exists but the volume is not staged (`VolumeStaging.ABSENT`)     |
-| `pool_absent` | the host's configured pool does not exist (`VolumeStaging.POOL_ABSENT`)   |
-| `unreachable` | the host could not be reached / the storage RPC failed (degraded)        |
+| status        | meaning                                                                       |
+|---------------|-------------------------------------------------------------------------------|
+| `staged`      | the volume is present on the host's pool (`VolumeStaging.STAGED`)              |
+| `absent`      | the pool exists but the volume is not staged (`VolumeStaging.ABSENT`)          |
+| `pool_absent` | the host's configured storage pool does not exist (`VolumeStaging.POOL_ABSENT`)|
+| `unreachable` | the host could not be reached / a storage RPC failed / the probe timed out     |
+| `unknown`     | the remote config could not be resolved (the probe never opened a connection)  |
 
-The first three map directly from `VolumeStaging` (reusing #513's helper). `unreachable` is the
-degraded outcome: the probe maps `CategorizedError(TRANSPORT_FAILURE)` and any post-open
-`libvirt.libvirtError` to `unreachable` for **every** requested volume, and is bounded by a timeout
-(`asyncio.wait_for` around the `asyncio.to_thread` libvirt work) so a black-holing host cannot stall
-the read. The blocking libvirt work runs in a thread, mirroring the diagnostics probes, so the
-event loop is never blocked.
+The first three map directly from `VolumeStaging` (reusing #513's helper). The last two are the
+two distinct **degraded** outcomes, kept separate so the remediation signal stays truthful — the
+same `CONFIGURATION_ERROR`-vs-`TRANSPORT_FAILURE` split #513 keeps
+(`diagnostics/base_image_staging.py:97-100,124-126`):
 
-If config resolution fails (no `[[remote_libvirt]]` instance / malformed inventory →
-`CategorizedError(CONFIGURATION_ERROR)`), the probe returns `unreachable` for the requested volumes
-as well: the describe still succeeds, surfacing the tokens with a "could not verify" status rather
-than failing. If there are **no** staged remote images visible, `staged_base_images` is an empty
-list and **no connection is opened**.
+- **`unreachable`** — `CategorizedError(TRANSPORT_FAILURE)` (TLS connect failed), any post-open
+  `libvirt.libvirtError`, or a timeout. The host or its libvirtd is the problem; the operator's
+  action is to check the host. The probe is bounded by a timeout
+  (`asyncio.wait_for` around the `asyncio.to_thread` libvirt work, `_STAGED_PROBE_TIMEOUT_SECONDS
+  = 5.0` — snappier than the diagnostics sweep's 10s per-check bound, because describe is an
+  interactive read) so a black-holing host cannot stall the read. The blocking libvirt work runs in
+  a thread, so the event loop is never blocked.
+- **`unknown`** — `CategorizedError(CONFIGURATION_ERROR)` from config resolution (no
+  `[[remote_libvirt]]` instance, malformed inventory, base image not `staged`). The
+  inventory/config is the problem, not the host; the probe never opened a connection. The operator's
+  action is to fix `systems.toml`, so it must not read as "host down".
+
+Either degraded outcome applies to **every** requested volume (one resolution/connection serves the
+whole batch). The describe envelope still returns `ok` in all cases — the staged status is advisory
+pre-allocation context, never a precondition of describing the resource. If there are **no** staged
+remote images visible, `staged_base_images` is an empty list and **no connection is opened** (and no
+config is resolved).
 
 The existing `pool` / `cost_class` / `host_uri` keys on `describe_resource` are unchanged.
 
 ### Seam / testability
 
-- The probe is a `Callable[[str, list[str]], Awaitable[dict[str, str]]]` injected into
+- The probe is a `Callable[[list[str]], Awaitable[dict[str, str]]]` injected into
   `describe_resource` with a production default. Handler unit tests inject a fake that returns a
   canned `{volume: status}` map (and one that raises, to prove the describe still succeeds) — no
   libvirt, no TLS, no network. This mirrors how the diagnostics probes inject `open_connection`.
 - The production probe lives in the `remote_libvirt` provider package (it owns the libvirt
-  boundary and the config resolution), reusing `remote_connection` + `lookup_volume_staged`. The
-  MCP layer depends on the provider's probe factory, not on libvirt directly (the same direction
-  diagnostics → providers already takes).
+  boundary, the config resolution, and the storage-pool selection), reusing `remote_connection` +
+  `lookup_volume_staged`. The MCP layer depends on the provider's probe factory, not on libvirt
+  directly (the same direction diagnostics → providers already takes).
 
 ## Out of scope / explicitly unchanged
 
@@ -151,8 +177,10 @@ The existing `pool` / `cost_class` / `host_uri` keys on `describe_resource` are 
 - `resources_describe` (remote-libvirt):
   - probe returns mixed statuses → `staged_base_images` reflects each, ordered.
   - no staged remote images visible → empty list, probe not invoked.
-  - probe raises / times out → `unreachable` for all requested volumes, describe still `ok`.
+  - probe raises (transport) / times out → `unreachable` for all requested volumes, describe `ok`.
+  - probe raises config-error → `unknown` for all requested volumes, describe `ok`.
   - RBAC: a private staged image owned by another project is not listed.
 - `resources_describe` (local-libvirt / fault-inject): no `staged_base_images`, probe never called.
-- The production probe (provider-level): `STAGED`/`ABSENT`/`POOL_ABSENT` map through;
-  `TRANSPORT_FAILURE` and post-open `libvirtError` → `unreachable`; one connection for N volumes.
+- The production probe (provider-level): probes `config.storage_pool` (not `resource.pool`);
+  `STAGED`/`ABSENT`/`POOL_ABSENT` map through; `TRANSPORT_FAILURE`, post-open `libvirtError`, and
+  timeout → `unreachable`; `CONFIGURATION_ERROR` → `unknown`; one connection for N volumes.

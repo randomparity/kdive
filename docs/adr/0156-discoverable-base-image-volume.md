@@ -6,10 +6,10 @@
 - **Builds on (does not supersede):** [ADR-0080](0080-remote-provisioning-disk-image-profile.md)
   (the operator-staged base volume is an out-of-band prerequisite — unchanged here),
   [ADR-0150](0150-diagnostics-base-image-staging-check.md) (the server-vantage
-  `lookup_volume_staged` pool-volume helper this reuses), [ADR-0092](0092-image-catalog.md) /
-  [ADR-0112](0112-systems-toml-inventory.md) (the `image_catalog` row and the `systems.toml`
+  `lookup_volume_staged` pool-volume helper this reuses), [ADR-0092](0092-image-rootfs-lifecycle.md) /
+  [ADR-0112](0112-systems-inventory-config.md) (the `image_catalog` row and the `systems.toml`
   `StagedSource.volume` mapping persisted into it), [ADR-0019](0019-tool-response-envelope.md)
-  (the response envelope), [ADR-0047](0047-generated-tool-reference.md) (the generated reference).
+  (the response envelope), [ADR-0047](0047-agent-facing-tool-guide-generation.md) (the generated reference).
 - **Spec:** [`../design/discoverable-base-image-volume.md`](../design/discoverable-base-image-volume.md)
 
 ## Context
@@ -45,15 +45,24 @@ For a `remote-libvirt` resource, `describe_resource` queries the caller-visible 
 remote-libvirt catalog images, then calls an **injected probe** that opens one `qemu+tls://`
 connection (the shared `remote_connection` lifecycle) and runs the shared `lookup_volume_staged`
 helper (ADR-0150) once per volume over that single connection. The result is merged into the
-envelope `data` as an ordered `staged_base_images` list of
-`{name, volume, staged}`, where `staged` is one of `staged` / `absent` / `pool_absent` /
-`unreachable`.
+envelope `data` as an ordered `staged_base_images` list of `{name, volume, staged}`, where
+`staged` is one of `staged` / `absent` / `pool_absent` / `unreachable` / `unknown`.
 
-The probe is **best-effort and bounded**: a TLS-connect failure, a post-open `libvirtError`, a
-timeout, or an unresolvable config all degrade to `unreachable` for the requested volumes — the
-describe envelope still returns `ok`. The blocking libvirt work runs in a thread under
-`asyncio.wait_for`, so the event loop is never blocked and a black-holing host cannot stall the
-read. When no staged remote image is visible, no connection is opened.
+The probe verifies **`config.storage_pool`** — the pool provisioning actually creates the overlay
+in (`provisioning.py:276`) and the pool #513's diagnostic probes — **not** the `Resource` row's
+`pool` column. That column is hardcoded to `'default'` on create for a config-owned remote resource
+(`inventory/reconcile_resources.py`) and the advertised `storage_pool` capability is advisory
+(`discovery.py:94`); probing it would verify the wrong pool whenever the operator overrides
+`KDIVE_REMOTE_LIBVIRT_STORAGE_POOL`. The probe resolves the pool from config internally, so the
+handler passes only the volume list.
+
+The probe is **best-effort and bounded**: a TLS-connect failure, a post-open `libvirtError`, or a
+timeout degrade to `unreachable`; an unresolvable config degrades to `unknown` (kept distinct so
+"fix systems.toml" never reads as "host down", matching #513's CONFIGURATION_ERROR-vs-TRANSPORT
+split). Either way the describe envelope still returns `ok`. The blocking libvirt work runs in a
+thread under a bounded `asyncio.wait_for` (5s — interactive-read snappy, vs the diagnostics sweep's
+10s), so the event loop is never blocked and a black-holing host cannot stall the read. When no
+staged remote image is visible, no connection is opened.
 
 ### 3. The probe is owned by the provider package, injected into the MCP handler
 
@@ -69,8 +78,8 @@ diagnostics → providers import direction).
   staged on a chosen resource (`resources_describe`) before allocating — closing the provision wall
   without changing the ADR-0080 prerequisite.
 - `resources_describe` for a remote-libvirt resource now performs a live, bounded TLS read. It is
-  best-effort: a degraded probe surfaces `unreachable` rather than failing the read, so a host
-  outage never blinds the rest of the description. Describe latency for a remote resource gains one
+  best-effort: a degraded probe surfaces `unreachable`/`unknown` rather than failing the read, so a
+  host outage or a config drift never blinds the rest of the description. Describe latency for a remote resource gains one
   bounded round-trip; non-remote describes are untouched.
 - `resources_list` stays DB-only (no live probe), so the high-frequency list read keeps its current
   cost and failure profile; staged status is fetched on demand per candidate via describe.
