@@ -296,3 +296,33 @@ async def _async[T](value: T) -> T:
 async def _record_async[T](items: list[T], item: T, value: bool) -> bool:
     items.append(item)
     return value
+
+
+def test_warm_tree_admission_rejects_empty_for_local() -> None:
+    from kdive.providers.shared.build_host.workspace import KERNEL_SRC_UNSET_DETAIL
+
+    with pytest.raises(CategorizedError) as excinfo:
+        build_host_selection.check_warm_tree_source_admission("", host_kind=BuildHostKind.LOCAL)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(excinfo.value) == KERNEL_SRC_UNSET_DETAIL
+
+
+def test_warm_tree_admission_rejects_invalid_for_local() -> None:
+    from kdive.providers.shared.build_host.workspace import KERNEL_SRC_INVALID_DETAIL
+
+    with pytest.raises(CategorizedError) as excinfo:
+        build_host_selection.check_warm_tree_source_admission(
+            "relative/path", host_kind=BuildHostKind.LOCAL
+        )
+    assert str(excinfo.value) == KERNEL_SRC_INVALID_DETAIL
+
+
+def test_warm_tree_admission_admits_usable_local(tmp_path: object) -> None:
+    build_host_selection.check_warm_tree_source_admission(
+        str(tmp_path), host_kind=BuildHostKind.LOCAL
+    )
+
+
+@pytest.mark.parametrize("kind", [BuildHostKind.SSH, BuildHostKind.EPHEMERAL_LIBVIRT])
+def test_warm_tree_admission_noop_for_non_local(kind: BuildHostKind) -> None:
+    build_host_selection.check_warm_tree_source_admission("", host_kind=kind)

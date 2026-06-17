@@ -27,6 +27,7 @@ from kdive.db.build_hosts import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile, is_git_source
+from kdive.providers.shared.build_host.workspace import warm_tree_source_error
 
 
 class SourceKind(StrEnum):
@@ -93,6 +94,33 @@ def check_source_kind_compatibility(
         category=ErrorCategory.CONFIGURATION_ERROR,
         details={"build_host": build_host, "host_kind": host_kind.value},
     )
+
+
+def check_warm_tree_source_admission(kernel_src: str, *, host_kind: BuildHostKind) -> None:
+    """Reject a LOCAL warm-tree build whose ``KDIVE_KERNEL_SRC`` is unset or unusable.
+
+    A no-op for any non-``LOCAL`` host kind (git/remote lanes never read
+    ``KDIVE_KERNEL_SRC``). For a ``LOCAL`` host this applies the same predicate
+    :func:`~kdive.providers.shared.build_host.workspace.sync_tree` applies
+    (``warm_tree_source_error``) and raises the identical ``KERNEL_SRC_UNSET_DETAIL`` /
+    ``KERNEL_SRC_INVALID_DETAIL`` (ADR-0161), so an admission rejection is byte-identical
+    to the build-time backstop. The worker BUILD handler reads ``KDIVE_KERNEL_SRC`` once
+    and threads it here via the dispatch ``LOCAL`` branch, before any workspace side
+    effect; ``sync_tree`` keeps its own check as defense-in-depth.
+
+    Args:
+        kernel_src: The worker's resolved ``KDIVE_KERNEL_SRC`` value.
+        host_kind: The resolved build host's transport kind.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when ``host_kind`` is ``LOCAL`` and
+            ``kernel_src`` is empty or not an absolute path to an existing directory.
+    """
+    if host_kind is not BuildHostKind.LOCAL:
+        return
+    detail = warm_tree_source_error(kernel_src)
+    if detail is not None:
+        raise CategorizedError(detail, category=ErrorCategory.CONFIGURATION_ERROR)
 
 
 async def resolve_and_admit(

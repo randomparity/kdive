@@ -223,7 +223,7 @@ async def _lease_count(pool: AsyncConnectionPool, run_id: str) -> int:
 
 
 def test_local_host_uses_runtime_builder_no_transport(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: object
 ) -> None:
     """A worker-local build_host_id runs runtime.builder directly; no transport, no lease."""
 
@@ -231,6 +231,8 @@ def test_local_host_uses_runtime_builder_no_transport(
         raise AssertionError("ssh transport must not be constructed for a local host")
 
     monkeypatch.setattr(build_host_dispatch, "ssh_build_transport_from_host", _boom)
+    # A usable warm tree so the ADR-0158 admission gate admits the build.
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -617,6 +619,7 @@ def test_run_build_on_host_passes_git_source_to_factory() -> None:
             run_id,
             parsed,
             secret_registry=SecretRegistry(),
+            kernel_src="",
             transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
         )
     )
@@ -658,7 +661,48 @@ def test_unsupported_build_host_kind_fails_before_ephemeral_session(
                             RemoteLibvirtBuild.from_env(secret_registry=SecretRegistry())
                         ),
                         secret_registry=SecretRegistry(),
+                        kernel_src="",
                     )
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+    asyncio.run(_run())
+
+
+_WARM_PROFILE: dict[str, Any] = {
+    "schema_version": 1,
+    "kernel_source_ref": "linux-6.9",
+    "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+}
+
+
+def test_local_empty_kernel_src_fails_admission(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty KDIVE_KERNEL_SRC on a worker-local warm build fails the BUILD job at
+    admission with CONFIGURATION_ERROR, and the builder never runs (ADR-0158)."""
+    from kdive.providers.shared.build_host.workspace import KERNEL_SRC_UNSET_DETAIL
+
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, _WARM_PROFILE)
+            parsed = BuildProfile.parse(_WARM_PROFILE)
+            assert isinstance(parsed, ServerBuildProfile)
+            host = await _worker_local_host(pool)
+            job = await _enqueue(pool, run_id, str(host.id))
+            builder = _RecordingBuilder()
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as excinfo:
+                    await runs_handlers.build_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(builder=builder),
+                        secret_registry=SecretRegistry(),
+                    )
+            assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert str(excinfo.value) == KERNEL_SRC_UNSET_DETAIL
+            assert builder.calls == []
+            assert await _run_state(pool, run_id) == "failed"
 
     asyncio.run(_run())

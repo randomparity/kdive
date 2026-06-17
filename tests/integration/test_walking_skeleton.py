@@ -203,8 +203,12 @@ async def _enqueue_build(pool: AsyncConnectionPool, run_id: str) -> Job:
         )
 
 
-def test_completed_step_replay_does_not_re_execute(migrated_url: str) -> None:
+def test_completed_step_replay_does_not_re_execute(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
     """#4: re-dispatching a completed build job reads the ledger and does not rebuild."""
+    # A usable warm tree so the worker-local build passes ADR-0158 admission.
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
 
     async def _run() -> None:
         async with open_pool(migrated_url) as pool:
