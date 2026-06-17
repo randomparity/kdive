@@ -181,3 +181,20 @@ def is_git_source(profile: ServerBuildProfile) -> bool:
         True if ``kernel_source_ref`` is a :class:`GitKernelSource`; False for bare strings.
     """
     return isinstance(profile.kernel_source_ref, GitKernelSource)
+
+
+def git_source_of(profile: ServerBuildProfile) -> GitSourceRef | None:
+    """Return the git source coordinates for a git-provenance profile, else ``None``.
+
+    A narrowing accessor so call sites get a typed :class:`GitSourceRef` without an
+    ``isinstance`` check on the ``str | GitKernelSource`` union.
+
+    Args:
+        profile: A parsed server-build profile.
+
+    Returns:
+        The :class:`GitSourceRef` when ``kernel_source_ref`` is a :class:`GitKernelSource`;
+        ``None`` for a bare-string (warm-tree) source.
+    """
+    ref = profile.kernel_source_ref
+    return ref.git if isinstance(ref, GitKernelSource) else None
