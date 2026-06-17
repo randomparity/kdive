@@ -51,12 +51,18 @@ fails the gate with a message naming the source, *before* the clone runs.
 
 **1. The preflight is `git ls-remote`, run in-guest over the existing transport.**
 
-- The session runs `git ls-remote --quiet --exit-code <remote> <ref>` via the same
+- The session runs `git ls-remote --quiet --exit-code <remote> HEAD` via the same
   `GuestExecBuildTransport` (allowlist `{'/bin/sh'}`, unchanged) the clone uses, with a bounded
   per-call timeout. Success (`rc 0`) means the guest resolved DNS, completed the TCP/TLS or SSH
-  handshake, *and* the ref exists — the exact preconditions the immediately-following
-  `git fetch --depth 1 <remote> <ref>` needs. Probing with the real remote+ref over the real
-  protocol means the preflight cannot drift from what the clone does.
+  handshake, and reached the repository — the egress preconditions the immediately-following
+  `git fetch --depth 1 <remote> <ref>` needs. Probing the **real remote over the real protocol**
+  means the preflight cannot drift from how the clone dials the source.
+- The probe targets **`HEAD`, not the configured `ref`**. The clone resolves an *arbitrary
+  ref/sha* (`git fetch --depth 1 <remote> <ref>` supports a bare commit SHA). A bare SHA is not an
+  advertised ref, so `ls-remote --exit-code <remote> <that-sha>` returns non-zero on a fully
+  reachable host — binding the egress check to the configured ref would spuriously fail SHA-pinned
+  builds. Probing `HEAD` keeps the check on *egress to the source*; ref existence stays the clone's
+  contract, with the fetch's own stderr surfaced for a genuinely bad ref.
 - This is a **single bounded attempt**, not a poll loop. The route gate already absorbed
   DHCP-slowness; a source that does not answer a bounded `ls-remote` after the route is up is a
   real reachability/config fault, not a not-yet-ready signal, so retrying would only delay an
@@ -67,7 +73,7 @@ fails the gate with a message naming the source, *before* the clone runs.
 - `git ls-remote` returns 128 for both "could not resolve host / connection refused" (a
   network/egress fault) and "repository not found / bad ref" (a configuration fault), and the
   build VM cannot reliably distinguish them from the exit code alone. We map a failed preflight
-  to **`CONFIGURATION_ERROR`** — "build VM cannot reach source `<remote>`" — and attach the
+  to **`CONFIGURATION_ERROR`** — "build VM cannot reach build source `<remote>`" — and attach the
   probe's **redacted** stderr (`redacted_tail` + `redact_url_credentials` on the named remote) so
   triage sees the underlying git error without a credentialed URL leaking into an error detail.
   `CONFIGURATION_ERROR` is the honest dominant category here: the operator's actionable fix is
@@ -91,7 +97,7 @@ fails the gate with a message naming the source, *before* the clone runs.
 ## Consequences
 
 - A build VM that has a default route but cannot reach the configured source now fails the
-  readiness gate with "build VM cannot reach source `<remote>`" **before** the clone, instead of
+  readiness gate with "build VM cannot reach build source `<remote>`" **before** the clone, instead of
   a confusing downstream `git fetch`/FETCH_HEAD error. The operator sees the unreachable source
   named and the redacted git error.
 - A VM with working egress proceeds unchanged: the extra cost is one in-guest `git ls-remote`

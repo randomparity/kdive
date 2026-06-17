@@ -67,18 +67,32 @@ local factories accept and ignore it; the ephemeral factory forwards it to
 After `wait_for_agent` + the existing `_wait_for_network` route gate, and only when
 `source is not None`:
 
-- Run `git ls-remote --quiet --exit-code <remote> <ref>` once via the bound
+- Run `git ls-remote --quiet --exit-code <remote> HEAD` once via the bound
   `GuestExecBuildTransport.run` (allowlist `{'/bin/sh'}`, unchanged), bounded by a per-call
   timeout (`_EGRESS_PROBE_CALL_TIMEOUT_S`, a constructor-default on `BuildVmTiming`).
+  The probe targets **`HEAD`, not the configured `ref`**: it tests egress (DNS + connect +
+  protocol handshake + repo access) to the source, *not* whether the configured ref exists. The
+  clone resolves an arbitrary ref/sha (`ShellBuildTransport.clone` does
+  `git fetch --depth 1 <remote> <ref>`, which supports a bare commit SHA). A bare SHA is **not**
+  an advertised ref, so `ls-remote --exit-code <remote> <that-sha>` would return non-zero on a
+  fully reachable host and spuriously fail SHA-pinned builds — probing `HEAD` avoids binding the
+  egress check to ref advertisement. Ref existence stays the clone's contract (and #518 surfaces
+  the fetch's own stderr for a genuinely bad ref).
 - `rc == 0` → proceed (yield the transport).
-- `rc != 0` → raise `CategorizedError("build VM cannot reach source <redacted-remote>",
+- `rc != 0` → raise `CategorizedError("build VM cannot reach build source <redacted-remote>",
   category=CONFIGURATION_ERROR, details={"remote": redact_url_credentials(remote),
   "stderr": redacted_tail(result.stderr, secret_registry)})`. The `finally` tears the VM down
-  exactly as the route-gate failure path already does.
+  exactly as the route-gate failure path already does. `git ls-remote` returns 128 for both
+  "couldn't resolve/connect" (egress) and "repository not found / auth required" (a reachable but
+  misconfigured source); the build VM cannot distinguish them from the exit code, so the redacted
+  git **stderr** in `details` carries the specific cause while the message stays on the dominant,
+  actionable category.
 - A `CategorizedError` raised by `transport.run` (agent dropped) propagates unchanged.
 
-The remote argument is the same value the immediately-following clone passes to git; the build VM
-runs fixed `shlex`-joined argv (no new injection surface beyond the existing clone).
+The preflight reuses the same in-guest `git` the clone already requires (ADR-0100/0146) — it adds
+no new build-image dependency. The remote argument is the same value the immediately-following
+clone passes to git; the build VM runs fixed `shlex`-joined argv (no new injection surface beyond
+the existing clone).
 
 ### Redaction
 
@@ -105,6 +119,11 @@ Drive `EphemeralBuildVm.session` over the existing fake provision-connection + g
 5. **Agent drop during the preflight propagates.** The `ls-remote` probe raises a
    `CategorizedError` (transport_failure) → it propagates unchanged (not swallowed as
    not-ready), VM torn down.
+6. **SHA-pinned source with reachable host is NOT falsely failed.** `source` is a `GitSourceRef`
+   whose `ref` is a bare commit SHA. The agent fake asserts the issued `ls-remote` argv targets
+   `HEAD` (not the SHA) and answers it `rc 0` → the session yields. Guards finding-1: the egress
+   probe must not bind to ref advertisement, or a SHA-pinned reachable source would spuriously
+   fail the gate.
 
 Existing tests that call `vm.session(_BASE_VOLUME, run_id=RUN_ID)` (no `source`) must keep passing
 unchanged — the preflight defaults to skipped.
