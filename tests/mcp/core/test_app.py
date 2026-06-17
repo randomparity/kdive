@@ -318,3 +318,36 @@ def test_image_build_handler_preserves_store_config_error(
         assert caught.value.__cause__ is error
 
     asyncio.run(_run())
+
+
+def test_exposure_map_covers_every_registered_tool() -> None:
+    """Every registered tool is consciously triaged: gated (CLASSIFIED_TOOLS) or PUBLIC.
+
+    `CLASSIFIED_TOOLS | PUBLIC_TOOLS` must equal the live registry, so a newly added tool
+    trips this (it is in neither) and forces the author to classify it — the completeness
+    guard for #506 / ADR-0148. No stale entries either (the union is exactly the registry).
+    """
+    from kdive.mcp.exposure import (
+        CLASSIFIED_TOOLS,
+        PUBLIC_TOOLS,
+        ExposureScope,
+        required_scopes,
+    )
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    async def _run() -> set[str]:
+        return {t.name for t in await app.list_tools()}
+
+    registered = asyncio.run(_run())
+    triaged = CLASSIFIED_TOOLS | PUBLIC_TOOLS
+    assert triaged == registered, (
+        f"untriaged (classify in exposure.py): {sorted(registered - triaged)}; "
+        f"stale entries: {sorted(triaged - registered)}"
+    )
+    # Spot-pin a few that must stay gated (a regression to public would otherwise be silent).
+    assert required_scopes("control.force_crash") == frozenset({ExposureScope.PROJECT_ADMIN})
+    assert required_scopes("systems.teardown") == frozenset({ExposureScope.PROJECT_ADMIN})
+    assert required_scopes("ops.reconcile_now") == frozenset({ExposureScope.PLATFORM_OPERATOR})
+    assert required_scopes("allocations.request") == frozenset({ExposureScope.PROJECT_OPERATOR})
