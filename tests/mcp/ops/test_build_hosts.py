@@ -399,7 +399,7 @@ def test_list_advertises_supported_source_kinds_per_kind(migrated_url: str) -> N
 
         assert list_resp.status == "ok"
         by_name = {item.data.get("name"): item.data for item in list_resp.items}
-        # the seeded local fallback advertises the warm-tree lane and (ADR-0161) the git lane
+        # the seeded local fallback advertises the warm-tree lane and (ADR-0162) the git lane
         assert by_name["worker-local"]["supported_source_kinds"] == ["warm-tree", "git"]
         # ssh and ephemeral_libvirt advertise the git lane
         assert by_name["ssh-host"]["supported_source_kinds"] == ["git"]

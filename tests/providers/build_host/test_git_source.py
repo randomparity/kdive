@@ -1,4 +1,4 @@
-"""Tests for the shared git-source validator + local-build remote allowlist (ADR-0161)."""
+"""Tests for the shared git-source validator + local-build remote allowlist (ADR-0162)."""
 
 from __future__ import annotations
 

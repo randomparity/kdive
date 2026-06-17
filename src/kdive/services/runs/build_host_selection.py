@@ -45,7 +45,7 @@ def accepted_source_kinds(host_kind: BuildHostKind) -> tuple[SourceKind, ...]:
     """Return the ``kernel_source_ref`` kinds a build host of this kind accepts.
 
     Single source of truth for the host-kind/source-kind matrix: ``LOCAL`` accepts a
-    warm-tree string **or** a git ref (ADR-0161 added the local git-clone lane, whose
+    warm-tree string **or** a git ref (ADR-0162 added the local git-clone lane, whose
     remote is gated by the worker's build-time allowlist); ``SSH`` / ``EPHEMERAL_LIBVIRT``
     accept a git ref only (no warm tree to mirror). Both the create/build compatibility
     check (:func:`check_source_kind_compatibility`) and the ``build_hosts.list`` /
@@ -71,7 +71,7 @@ def check_source_kind_compatibility(
     Consumes :func:`accepted_source_kinds` (the single source of truth for the
     host-kind/source-kind matrix), shared by the ``runs.create`` create-time check and the
     ``runs.build`` admission backstop (``resolve_and_admit``): a ``local`` host accepts a
-    warm-tree string **or** a git ref (ADR-0161, gated by the worker's build-time allowlist);
+    warm-tree string **or** a git ref (ADR-0162, gated by the worker's build-time allowlist);
     an ``ssh`` / ``ephemeral_libvirt`` host accepts a git ref only.
 
     Args:

@@ -100,7 +100,7 @@ def test_source_form_matches_advertised_kind() -> None:
         parsed = BuildProfile.parse(_profile_of(data))
         assert isinstance(parsed, ServerBuildProfile)
         # The example's source kind must be one the host advertises (a host may accept more
-        # than one kind — e.g. a local host after ADR-0161 — and the example shows one of them).
+        # than one kind — e.g. a local host after ADR-0162 — and the example shows one of them).
         example_kind = "git" if is_git_source(parsed) else "warm-tree"
         assert example_kind in data["supported_source_kinds"]
 

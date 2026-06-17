@@ -114,7 +114,7 @@ def test_remote_host_requires_git_source_and_acquires_lease(
 
 
 def test_git_source_on_local_host_is_admitted(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ADR-0161: a git kernel_source_ref is now admitted on the local host (allowlist is
+    # ADR-0162: a git kernel_source_ref is now admitted on the local host (allowlist is
     # enforced at build time on the worker, not here); no capacity lease for a local host.
     async def _run() -> None:
         host = _host()
@@ -195,7 +195,7 @@ def test_remote_host_at_capacity_is_capacity_exhausted(
 
 
 def test_compat_local_with_git_ok() -> None:
-    # ADR-0161: a local host accepts a git source (the remote is gated by the build-time
+    # ADR-0162: a local host accepts a git source (the remote is gated by the build-time
     # allowlist), so the shared compatibility check no longer rejects local+git.
     assert (
         build_host_selection.check_source_kind_compatibility(
@@ -252,7 +252,7 @@ def test_compat_remote_with_git_ok() -> None:
 def test_accepted_source_kinds_matrix() -> None:
     from kdive.services.runs.build_host_selection import SourceKind, accepted_source_kinds
 
-    # ADR-0161: a local host accepts both warm-tree and git (the local git-clone lane).
+    # ADR-0162: a local host accepts both warm-tree and git (the local git-clone lane).
     assert accepted_source_kinds(BuildHostKind.LOCAL) == (SourceKind.WARM_TREE, SourceKind.GIT)
     assert accepted_source_kinds(BuildHostKind.SSH) == (SourceKind.GIT,)
     assert accepted_source_kinds(BuildHostKind.EPHEMERAL_LIBVIRT) == (SourceKind.GIT,)
