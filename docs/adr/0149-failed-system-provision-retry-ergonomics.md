@@ -93,9 +93,15 @@ state, surfaces the original redacted reason, and tells the caller the exact nex
 - **One extra read on the failed branch only.** The admission path already holds a connection
   inside the lock; the job lookup is one indexed `SELECT` on the unique `dedup_key`, run only
   when `existing.state is failed`.
-- **Stale-reason window is not a concern.** Unlike a failed Run (ADR-0141), the provision job is
-  already terminal by the time a retry is attempted (the System reached `failed` *because* the
+- **Stale-reason window is not a concern.** For the `provisioning->failed` path the provision job
+  is already terminal by the time a retry is attempted (the System reached `failed` *because* the
   job dead-lettered), so `failure_message` is present on every retry.
+- **Reprovision-failed Systems are handled.** A System can also reach `failed` via
+  `reprovisioning->failed` (`jobs/handlers/systems.py`), which leaves the original `provision` job
+  `succeeded`. The job surface (`failing_job_id` + reason) is therefore gated on
+  `job.state is failed`, so a succeeded provision job is never advertised as the failing one; the
+  caller still gets the fixed guidance + release/re-request actions. (Surfacing the *reprovision*
+  job's reason is `systems.reprovision`'s domain, out of scope here.)
 
 ## Alternatives considered
 

@@ -64,16 +64,20 @@ See ADR-0149 for the decision and rejected alternatives. In summary:
 
 | `existing` state | provision job `failure_context` | `systems.provision` retry envelope |
 |------------------|---------------------------------|------------------------------------|
-| `failed` | `{failure_message: "..."}` (terminal job) | `configuration_error`, `detail=<sentence> + "..."`, `data.failing_job_id` set, next=release/request |
-| `failed` | job absent / no message | `configuration_error`, `detail=<sentence>` (alone), no `failing_job_id`, next=release/request |
+| `failed` | provision job `failed` w/ `{failure_message: "..."}` | `configuration_error`, `detail=<sentence> + "..."`, `data.failing_job_id` set, next=release/request |
+| `failed` | provision job absent / no message | `configuration_error`, `detail=<sentence>` (alone), no `failing_job_id`, next=release/request |
+| `failed` | provision job `succeeded` (System failed during reprovision) | `configuration_error`, `detail=<sentence>` (alone), **no** `failing_job_id`, next=release/request |
 | `torn_down` / `crashed` / `ready` / `reprovisioning` | — | `configuration_error`, `current_status` set, next=release/request, `detail=None` |
 | `defined` | — | unchanged (route to `systems.provision_defined`) |
 | `provisioning` | — | unchanged (re-enqueue) |
 | none | — | unchanged (mint) |
 
-A retry is always against a *terminal* provision job (the System reached `failed` because the
-job dead-lettered), so unlike a failed Run (ADR-0141) there is no mid-retry empty-`detail`
-window: `failure_message` is present on every retry.
+For the `provisioning->failed` path the retry is always against a *terminal* provision job (the
+System reached `failed` because the job dead-lettered), so unlike a failed Run (ADR-0141) there
+is no mid-retry empty-`detail` window. A System reached via `reprovisioning->failed` leaves the
+original provision job `succeeded`; the job surface is gated on `job.state is failed`, so that
+succeeded job is never advertised — the caller still gets the guidance + release/re-request
+actions.
 
 ## Edge / error paths to test (behaviour, not implementation)
 
@@ -85,6 +89,8 @@ window: `failure_message` is present on every retry.
   Allocation.
 - Failed System retry with **no provision job row** (defensive — can't normally happen):
   `detail` is the fixed sentence alone, never `None`; no `failing_job_id` key.
+- Failed System whose provision job **succeeded** (System failed during reprovision): the
+  succeeded job is not surfaced (`failing_job_id` absent); `detail` is the fixed sentence alone.
 - A non-`failed` other-state System (`torn_down`) retry: `configuration_error` +
   `current_status="torn_down"` + release/request next actions (no job reason).
 - `failure_detail_*` keys the worker recorded are copied verbatim into `data`.

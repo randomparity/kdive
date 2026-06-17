@@ -30,7 +30,7 @@ from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
 from kdive.domain.models import Allocation, Job, JobKind, System
 from kdive.domain.sizing import MB_PER_GB, AllocationSizing
-from kdive.domain.state import AllocationState, IllegalTransition, SystemState
+from kdive.domain.state import AllocationState, IllegalTransition, JobState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
 from kdive.jobs.payloads import SystemPayload
@@ -405,7 +405,10 @@ async def _failed_system_retry_failure(
     detail = _FAILED_SYSTEM_GUIDANCE
     data: dict[str, object] = {"current_status": existing.state.value}
     job = await queue.get_by_dedup_key(conn, f"{alloc.id}:provision")
-    if job is not None:
+    # Only a *failed* provision job carries the reason. A System can also reach `failed` via
+    # `reprovisioning->failed`, leaving the original provision job `succeeded`; never advertise a
+    # non-failed job as the failing one.
+    if job is not None and job.state is JobState.FAILED:
         data["failing_job_id"] = str(job.id)
         reason = job.failure_context.get("failure_message")
         if reason:

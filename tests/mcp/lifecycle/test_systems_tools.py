@@ -452,6 +452,45 @@ def test_provision_retry_failed_system_without_job_returns_sentence(migrated_url
     asyncio.run(_run())
 
 
+async def _succeed_provision_job(pool: AsyncConnectionPool, alloc_id: str, system_id: str) -> None:
+    """Seed a succeeded provision job for ``alloc_id`` (the reprovision-failed-System case)."""
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO jobs (kind, payload, state, max_attempts, attempt, "
+            "    failure_context, authorizing, dedup_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                JobKind.PROVISION.value,
+                Jsonb({"system_id": system_id}),
+                "succeeded",
+                3,
+                1,
+                Jsonb({}),
+                Jsonb({"principal": "user-1", "agent_session": "s", "project": "proj"}),
+                f"{alloc_id}:provision",
+            ),
+        )
+
+
+def test_provision_retry_failed_system_ignores_succeeded_provision_job(migrated_url: str) -> None:
+    # A System can reach FAILED via reprovisioning->failed, leaving the original provision job
+    # SUCCEEDED. The retry must not advertise that succeeded job as the failing one.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+            await _succeed_provision_job(pool, alloc_id, sys_id)
+            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == sys_id
+        assert "failing_job_id" not in resp.data  # the succeeded job is not surfaced
+        assert resp.detail is not None and resp.detail != ""
+        assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+
+    asyncio.run(_run())
+
+
 def test_provision_retry_failed_system_copies_failure_detail_keys(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
