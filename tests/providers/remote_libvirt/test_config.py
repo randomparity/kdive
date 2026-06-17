@@ -16,6 +16,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
     is_remote_libvirt_configured,
     remote_config_from_inventory,
+    resolve_base_image_staged_volume,
 )
 
 _INSTANCE = """
@@ -164,6 +165,74 @@ def test_provisioning_knobs_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert cfg.storage_pool == "kdive-pool"
     assert cfg.network == "lab-net"
     assert cfg.machine == "q35"
+
+
+def test_resolve_base_image_staged_volume_returns_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_inventory(tmp_path, monkeypatch)
+    assert resolve_base_image_staged_volume() == "fedora-kdive-remote-base-43.qcow2"
+
+
+def test_resolve_base_image_staged_volume_no_instance_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_inventory(tmp_path, monkeypatch)
+    with pytest.raises(CategorizedError) as excinfo:
+        resolve_base_image_staged_volume()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_resolve_base_image_staged_volume_multiple_instances_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = _INSTANCE.replace('name = "ub24-big"', 'name = "ub24-small"')
+    _write_inventory(tmp_path, monkeypatch, instances=f"{_INSTANCE}---{second}")
+    with pytest.raises(CategorizedError) as excinfo:
+        resolve_base_image_staged_volume()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "multiple" in str(excinfo.value)
+
+
+def test_resolve_base_image_staged_volume_absent_image_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The instance's base_image names an image not in the [[image]] list. The inventory loader
+    # validates this cross-ref, so a present-but-mismatched doc cannot normally load; force the
+    # drift by writing the doc directly (loader rejects it -> configuration_error at parse time).
+    instance = _INSTANCE.replace(
+        'base_image = "fedora-kdive-remote-base-43"', 'base_image = "no-such-image"'
+    )
+    path = tmp_path / "systems.toml"
+    block = "".join(f"[[remote_libvirt]]{instance}")
+    path.write_text(f"schema_version = 2\n{_IMAGE}\n{block}\n")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+    config.load()
+    with pytest.raises(CategorizedError) as excinfo:
+        resolve_base_image_staged_volume()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_resolve_base_image_staged_volume_non_staged_image_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s3_image = """
+[[image]]
+provider = "remote-libvirt"
+name = "fedora-kdive-remote-base-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "s3"
+object_key = "images/fedora.qcow2"
+"""
+    _write_inventory(tmp_path, monkeypatch, image=s3_image)
+    with pytest.raises(CategorizedError) as excinfo:
+        resolve_base_image_staged_volume()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "staged" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("bad", ["low:47099", "47000", "0:47099", "47099:47000"])

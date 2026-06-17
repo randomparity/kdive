@@ -15,7 +15,7 @@ object-store. Running this runbook is band-gate evidence, not a CI check.
 
 ## What CI already proves (and what it cannot)
 
-`tests/integration/test_doctor_exit_criterion.py` drives all four checks through the real
+`tests/integration/test_doctor_exit_criterion.py` drives each check through the real
 `DiagnosticsService` → `ops.diagnostics` → `doctor` exit-code path and asserts, for each
 seeded fault, the **exact** fix string and the gate-safe exit code:
 
@@ -25,6 +25,7 @@ seeded fault, the **exact** fix string and the gate-safe exit code:
 | closed gdb ACL | `gdbstub_acl` | `gdbstub port range <range> on <host> blocked; open the host firewall / ACL for it` | `1` |
 | missing secret ref | `secret_ref` | `secret ref does not resolve under KDIVE_SECRETS_ROOT; create the file-ref or fix the path` | `1` |
 | blocked guest→object-store egress | `guest_egress` | `guest bridge -> object-store blocked (likely host FORWARD DROP); allow the guest subnet -> MinIO` | `1` |
+| unstaged base-image volume | `remote_libvirt_base_image_staging` | `base image volume is not staged on the remote host's storage pool; stage the operator-provided base image volume on the configured pool (ADR-0080), then retry` | `1` |
 
 CI also proves the error-vs-fail distinction (an unreachable provider reads as `error`, exit
 `6` — distinct from a `fail`'s exit `1`, so a gate never goes green on a check that could not

@@ -351,6 +351,159 @@ def test_provision_terminal_existing_system_is_config_error(migrated_url: str) -
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "torn_down"
+        # ADR-0149: a non-failed terminal state still names the recycle path so the
+        # fallthrough is never a bare null-detail dead end.
+        assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+
+    asyncio.run(_run())
+
+
+async def _fail_provision_job(
+    pool: AsyncConnectionPool, alloc_id: str, system_id: str, context: dict[str, str]
+) -> str:
+    """Seed a terminal (failed) provision job for ``alloc_id`` carrying ``context``.
+
+    Writes the dead-letter row directly (queue.fail is worker-fenced), mirroring the
+    failure_context shape the worker persists, so the retry path can read it back.
+    """
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO jobs (kind, payload, state, max_attempts, attempt, "
+            "    error_category, failure_context, authorizing, dedup_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (
+                JobKind.PROVISION.value,
+                Jsonb({"system_id": system_id}),
+                "failed",
+                3,
+                3,
+                ErrorCategory.PROVISIONING_FAILURE.value,
+                Jsonb(context),
+                Jsonb({"principal": "user-1", "agent_session": "s", "project": "proj"}),
+                f"{alloc_id}:provision",
+            ),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return str(row["id"])
+
+
+def test_provision_retry_failed_system_surfaces_reason_and_actions(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+            job_id = await _fail_provision_job(
+                pool,
+                alloc_id,
+                sys_id,
+                {"failure_message": "base image volume is not staged"},
+            )
+            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == sys_id  # no re-mint: same failed System
+        assert resp.data["current_status"] == "failed"
+        assert resp.data["failing_job_id"] == job_id
+        # The actionable sentence AND the original redacted reason are both surfaced.
+        assert resp.detail is not None
+        assert "failed" in resp.detail
+        assert "allocations.release" in resp.detail or "release" in resp.detail
+        assert "base image volume is not staged" in resp.detail
+        assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+
+    asyncio.run(_run())
+
+
+def test_provision_retry_failed_system_is_idempotent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+            await _fail_provision_job(pool, alloc_id, sys_id, {"failure_message": "boom"})
+            first = await _provision(pool, _ctx(), alloc_id, _profile())
+            second = await _provision(pool, _ctx(), alloc_id, _profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM systems WHERE allocation_id = %s", (alloc_id,)
+                )
+                sys_n = await cur.fetchone()
+        assert first.object_id == second.object_id == sys_id
+        assert first.detail == second.detail
+        assert first.suggested_next_actions == second.suggested_next_actions
+        assert sys_n is not None and sys_n["n"] == 1  # never re-minted
+
+    asyncio.run(_run())
+
+
+def test_provision_retry_failed_system_without_job_returns_sentence(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == sys_id
+        assert resp.detail is not None and resp.detail != ""  # fixed sentence, never null
+        assert "failing_job_id" not in resp.data
+        assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+
+    asyncio.run(_run())
+
+
+async def _succeed_provision_job(pool: AsyncConnectionPool, alloc_id: str, system_id: str) -> None:
+    """Seed a succeeded provision job for ``alloc_id`` (the reprovision-failed-System case)."""
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO jobs (kind, payload, state, max_attempts, attempt, "
+            "    failure_context, authorizing, dedup_key) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                JobKind.PROVISION.value,
+                Jsonb({"system_id": system_id}),
+                "succeeded",
+                3,
+                1,
+                Jsonb({}),
+                Jsonb({"principal": "user-1", "agent_session": "s", "project": "proj"}),
+                f"{alloc_id}:provision",
+            ),
+        )
+
+
+def test_provision_retry_failed_system_ignores_succeeded_provision_job(migrated_url: str) -> None:
+    # A System can reach FAILED via reprovisioning->failed, leaving the original provision job
+    # SUCCEEDED. The retry must not advertise that succeeded job as the failing one.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+            await _succeed_provision_job(pool, alloc_id, sys_id)
+            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.object_id == sys_id
+        assert "failing_job_id" not in resp.data  # the succeeded job is not surfaced
+        assert resp.detail is not None and resp.detail != ""
+        assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+
+    asyncio.run(_run())
+
+
+def test_provision_retry_failed_system_copies_failure_detail_keys(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
+            await _fail_provision_job(
+                pool,
+                alloc_id,
+                sys_id,
+                {"failure_message": "boom", "failure_detail_host": "host-7"},
+            )
+            resp = await _provision(pool, _ctx(), alloc_id, _profile())
+        assert resp.data["failure_detail_host"] == "host-7"
 
     asyncio.run(_run())
 

@@ -40,6 +40,10 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.__main__ import _reconciler_probe
 from kdive.cli.commands import doctor
 from kdive.diagnostics.checks import (
+    BASE_VOLUME_NOT_STAGED_FIX,
+    BaseImageStagingCheck,
+    BaseImageStagingOutcome,
+    BaseImageStagingProbe,
     Check,
     GdbstubAclCheck,
     GdbstubAclProbe,
@@ -92,6 +96,13 @@ def _tls_probe(outcome: TlsProbeOutcome) -> TlsProbe:
 def _acl_probe(*, admitted: bool | None) -> GdbstubAclProbe:
     async def _probe(host: str, port_range: str) -> bool | None:
         return admitted
+
+    return _probe
+
+
+def _staging_probe(outcome: BaseImageStagingOutcome) -> BaseImageStagingProbe:
+    async def _probe() -> BaseImageStagingOutcome:
+        return outcome
 
     return _probe
 
@@ -309,6 +320,44 @@ def test_seeded_egress_block_flags_guest_egress_with_the_forward_fix(migrated_ur
         assert row["fix"] == EGRESS_FIX
         assert "FORWARD" in str(row["fix"])
         assert code == _FAIL_EXIT
+
+    asyncio.run(_run())
+
+
+def test_seeded_unstaged_base_image_flags_with_exact_fix(migrated_url: str) -> None:
+    # #513: a reachable host whose operator-staged base-image volume is absent is a contract fail
+    # with the ADR-0080 staging fix — caught at preflight, before an allocation is requested, so
+    # the gate exits 1. Driven through the real check.run() over the seeded NOT_STAGED outcome.
+    async def _run() -> None:
+        check = BaseImageStagingCheck(
+            provider=_PROVIDER, probe=_staging_probe(BaseImageStagingOutcome.NOT_STAGED)
+        )
+        expected_fix = (await check.run()).fix
+        assert expected_fix == BASE_VOLUME_NOT_STAGED_FIX
+        async with _pool(migrated_url) as pool:
+            rows, code = await _serve_verdict(pool, [check])
+        row = _row_for(rows, "remote_libvirt_base_image_staging")
+        assert row["status"] == "fail"
+        assert row["fix"] == BASE_VOLUME_NOT_STAGED_FIX
+        assert "stage the" in str(row["fix"])
+        assert code == _FAIL_EXIT
+
+    asyncio.run(_run())
+
+
+def test_unstaged_base_image_is_error_when_pool_unreachable(migrated_url: str) -> None:
+    # The error boundary: a host that is down (the volume may be fine) reads as error, exit 6 —
+    # never a confident stage-the-volume fail.
+    async def _run() -> None:
+        check = BaseImageStagingCheck(
+            provider=_PROVIDER, probe=_staging_probe(BaseImageStagingOutcome.UNREACHABLE)
+        )
+        async with _pool(migrated_url) as pool:
+            rows, code = await _serve_verdict(pool, [check])
+        row = _row_for(rows, "remote_libvirt_base_image_staging")
+        assert row["status"] == "error"
+        assert row["fix"] is None
+        assert code == _ERROR_EXIT
 
     asyncio.run(_run())
 

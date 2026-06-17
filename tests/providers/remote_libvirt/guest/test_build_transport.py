@@ -137,13 +137,14 @@ def test_write_bytes_non_zero_is_infrastructure_failure() -> None:
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_clone_runs_init_fetch_checkout_via_agent() -> None:
-    agent = _FakeAgent(exitcode=0)
+def test_clone_runs_init_fetch_verify_checkout_via_agent() -> None:
+    agent = _FakeAgent(exitcode=0, stdout=b"deadbeef\n")
     _transport(agent).clone("https://git.example/linux.git", "v6.9", "/src")
     cmds = [s["arg"][1] for s in agent.spawned]
     assert cmds[0] == "cd / && exec git init /src"
     assert "fetch --depth 1 https://git.example/linux.git v6.9" in cmds[1]
-    assert cmds[2] == "cd / && exec git -C /src checkout FETCH_HEAD"
+    assert cmds[2] == "cd / && exec git -C /src rev-parse --verify --quiet FETCH_HEAD"
+    assert cmds[3] == "cd / && exec git -C /src checkout FETCH_HEAD"
 
 
 def test_upload_file_registers_url_before_exec_and_redacts_on_failure() -> None:

@@ -27,6 +27,16 @@ SECRET_REF_ID = "secret_ref"
 PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
 REACHABILITY_ID = "remote_libvirt_reachability"
+BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
+
+# The operator remediation the base-image-staging check surfaces as its ``fix`` (ADR-0080,
+# ADR-0150). It is owned here, not in the provider's ``storage.py``: ``diagnostics → providers``
+# is the only legal import direction, so the diagnostic output policy lives in diagnostics. It
+# describes the same operator action as ``storage.py``'s provision-time error message.
+BASE_VOLUME_NOT_STAGED_FIX = (
+    "base image volume is not staged on the remote host's storage pool; stage the "
+    "operator-provided base image volume on the configured pool (ADR-0080), then retry"
+)
 
 # The failure-category labels the reachability verdict carries (ADR-0125). They mirror the
 # ``ErrorCategory`` the underlying connection raises, kept as plain strings so ``checks`` stays
@@ -449,6 +459,86 @@ class RemoteLibvirtReachabilityCheck(Check):
             status=CheckStatus.ERROR,
             detail="remote-libvirt reachability could not be probed; check the [[remote_libvirt]] "
             "URI, TLS cert refs, and systems.toml inventory",
+            provider=self._provider,
+            failure_category=_CONFIGURATION_ERROR,
+        )
+
+
+class BaseImageStagingOutcome(StrEnum):
+    """The observable outcomes of a remote-libvirt base-image-staging probe (ADR-0150).
+
+    ``STAGED`` — the pool exists and the configured base-image volume is staged.
+    ``NOT_STAGED`` — the pool exists but the volume is absent: a contract ``fail``.
+    ``UNREACHABLE`` — the ``qemu+tls://`` connect failed (host down / port closed): an ``error``.
+    ``INDETERMINATE`` — the probe could not reach a verdict (absent pool, unresolvable inventory,
+    a non-staged base image, a storage RPC that failed after open): an ``error``, never a confident
+    "volume missing".
+    """
+
+    STAGED = "staged"
+    NOT_STAGED = "not_staged"
+    UNREACHABLE = "unreachable"
+    INDETERMINATE = "indeterminate"
+
+
+BaseImageStagingProbe = Callable[[], Awaitable[BaseImageStagingOutcome]]
+
+
+class BaseImageStagingCheck(Check):
+    """Server-vantage: the operator-staged base-image volume is present on the host pool (ADR-0150).
+
+    Reachability (ADR-0125) proves only that the ``qemu+tls://`` host answers; it explicitly does
+    not check usability. This check probes the one operator prerequisite that blocks provisioning —
+    the base-image volume staged on the host's storage pool (ADR-0080) — from the same server
+    vantage, so an unstaged volume is a ``fail`` (with the staging fix) before a caller burns an
+    allocation on the provision-time failure. A missing pool / unresolvable inventory / host-down is
+    an ``error``: emitting a stage-the-volume fix for any of those is the confident-wrong-fix
+    failure ADR-0091 forbids.
+    """
+
+    def __init__(self, *, provider: str, probe: BaseImageStagingProbe) -> None:
+        self._provider = provider
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return BASE_IMAGE_STAGING_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.SERVER
+
+    async def run(self) -> CheckResult:
+        outcome = await self._probe()
+        if outcome is BaseImageStagingOutcome.STAGED:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail="base image volume is staged on the remote host's storage pool",
+                provider=self._provider,
+            )
+        if outcome is BaseImageStagingOutcome.NOT_STAGED:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.FAIL,
+                detail="base image volume is not staged on the remote host's storage pool",
+                fix=BASE_VOLUME_NOT_STAGED_FIX,
+                provider=self._provider,
+                failure_category=_CONFIGURATION_ERROR,
+            )
+        if outcome is BaseImageStagingOutcome.UNREACHABLE:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.ERROR,
+                detail="remote-libvirt host unreachable; cannot verify base-image staging",
+                provider=self._provider,
+                failure_category=_TRANSPORT_FAILURE,
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.ERROR,
+            detail="base-image staging could not be probed; check the [[remote_libvirt]] "
+            "base_image / [[image]] staged volume, the storage pool, and the inventory",
             provider=self._provider,
             failure_category=_CONFIGURATION_ERROR,
         )
