@@ -11,8 +11,10 @@ from psycopg import AsyncConnection
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
+import kdive.config as config
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.build_artifacts.results import BuildOutput
+from kdive.config.core_settings import KERNEL_SRC
 from kdive.db import build_hosts
 from kdive.db.build_hosts import BuildHost
 from kdive.db.idempotency import abandon_run_step, claim_run_step, complete_run_step
@@ -132,6 +134,7 @@ async def _run_build(
     host: BuildHost,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
+    kernel_src: str,
     transport_factories: BuildHostTransportFactories | None = None,
 ) -> BuildOutput:
     """Resolve the runtime builder and run it on ``host`` through the build-host seam."""
@@ -143,6 +146,7 @@ async def _run_build(
         run_id,
         parsed,
         secret_registry=secret_registry,
+        kernel_src=kernel_src,
         transport_factories=transport_factories,
     )
 
@@ -269,6 +273,7 @@ async def _build_and_record(
     run_id = run.id
     try:
         host = await _resolve_build_host(conn, payload, run_id)
+        kernel_src = config.get(KERNEL_SRC) or ""
         output = await _run_build(
             conn,
             run,
@@ -276,6 +281,7 @@ async def _build_and_record(
             host=host,
             resolver=resolver,
             secret_registry=secret_registry,
+            kernel_src=kernel_src,
             transport_factories=transport_factories,
         )
     except CategorizedError as exc:
