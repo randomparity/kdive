@@ -42,7 +42,7 @@ class DestructiveOp:
 
 
 class DestructiveOpDenied(AuthorizationError):
-    """A destructive op failed one or more of the three gate checks."""
+    """A destructive op failed one or more of the two gate checks."""
 
     def __init__(self, missing: list[str]) -> None:
         self.missing = missing

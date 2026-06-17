@@ -328,9 +328,9 @@ Applied across every plane.
   `kdive.services` (for example allocation admission, renewal, and accounting
   rollups), so persistence orchestration is not hidden inside domain modules.
 - **Destructive-op policy gate** — `control.power(off/cycle/reset)`,
-  `force_crash`, `teardown`, disk delete, and PCI passthrough are gated by three
-  independent, all-required checks: (a) the allocation's granted capability
-  scope, (b) RBAC role, (c) an explicit profile/flag opt-in.
+  `force_crash`, `teardown`, disk delete, and PCI passthrough are gated by two
+  independent, all-required checks: (a) RBAC role and (b) an explicit profile/flag
+  opt-in. ADR-0130 removed the former capability-scope check from the runtime gate.
 - **Concurrency** — serialize per-Allocation and per-System via Postgres advisory
   locks; idempotent steps keyed by `run_id` + step. Admission control serializes
   on a **per-project (budget-scope) lock** — an advisory lock or `SELECT … FOR

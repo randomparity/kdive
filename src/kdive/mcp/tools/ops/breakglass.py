@@ -1,8 +1,8 @@
 """Break-glass `ops.force_teardown` / `ops.force_release` MCP tools (ADR-0062 §4).
 
-A ``platform_admin`` break-glass path that **fully overrides** the three-check destructive
+A ``platform_admin`` break-glass path that **fully overrides** the project destructive
 gate (`assert_destructive_allowed`): the gate protects a member operating within their own
-project, and a stuck cross-project object typically fails all three checks, which is exactly
+project, and a stuck cross-project object may fail the project-local checks, which is exactly
 when break-glass is needed. Authority comes solely from ``require_platform_role(PLATFORM_ADMIN)``
 + a non-blank ``reason`` + an always-written ``platform_audit_log`` row.
 
@@ -103,7 +103,7 @@ async def force_release(
 ) -> ToolResponse:
     """Break-glass release of a stuck cross-project allocation (``platform_admin``).
 
-    Bypasses the three-check destructive gate entirely. Authority = platform_admin + a
+    Bypasses the project destructive gate entirely. Authority = platform_admin + a
     non-blank ``reason`` + the always-written ``platform_audit_log`` row. The per-allocation
     release transition rows are audited under the platform principal via the guard-exempt
     writer (the admin is not a project member). A reconcile failure or stale handle returns a
@@ -180,7 +180,7 @@ async def force_teardown(
 ) -> ToolResponse:
     """Break-glass teardown of a stuck cross-project System (``platform_admin``).
 
-    Bypasses the three-check destructive gate entirely. Authority = platform_admin + a
+    Bypasses the project destructive gate entirely. Authority = platform_admin + a
     non-blank ``reason`` + the always-written ``platform_audit_log`` row. Enqueues the same
     idempotent ``JobKind.TEARDOWN`` job as ``systems.teardown`` (same dedup key) under an
     authorizing context bound to the target's project; a terminal System returns success
