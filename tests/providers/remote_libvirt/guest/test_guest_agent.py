@@ -19,8 +19,21 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
+from tests.providers.remote_libvirt.conftest import libvirt_error
 
 _ALLOWED = frozenset({"/usr/bin/curl", "/usr/bin/kdive-install"})
+
+# libvirt error codes that name a deterministic, non-retryable guest-agent condition
+# (agent not configured / permission denied / unsupported); subcategorized to
+# CONFIGURATION_ERROR at the raise site (ADR-0159, #531).
+_DETERMINISTIC_CODES = (
+    libvirt.VIR_ERR_ARGUMENT_UNSUPPORTED,
+    libvirt.VIR_ERR_ACCESS_DENIED,
+    libvirt.VIR_ERR_OPERATION_DENIED,
+    libvirt.VIR_ERR_NO_SUPPORT,
+    libvirt.VIR_ERR_OPERATION_UNSUPPORTED,
+    libvirt.VIR_ERR_CONFIG_UNSUPPORTED,
+)
 
 
 def _float_clock() -> Callable[[], float]:
@@ -119,19 +132,59 @@ def test_run_rejects_an_empty_argv() -> None:
     assert agent.commands == []
 
 
-def test_agent_unreachable_maps_to_transport_failure() -> None:
+def _exec_raising(exc: BaseException) -> GuestAgentExec:
     def boom(domain: object, command: str, timeout: int, flags: int) -> str:
-        raise libvirt.libvirtError("guest agent is not connected")
+        raise exc
 
-    exc = GuestAgentExec(
+    return GuestAgentExec(
         agent_command=boom,
         allowed_programs=_ALLOWED,
         sleep=lambda _s: None,
         monotonic=_float_clock(),
     )
+
+
+def test_agent_unreachable_maps_to_transport_failure() -> None:
+    # A bare libvirtError (no `.err` tuple) has no live error code: get_error_code() is None,
+    # so it is not in the deterministic set and stays a retryable transport failure (#531).
+    raised = libvirt.libvirtError("guest agent is not connected")
+
     with pytest.raises(CategorizedError) as excinfo:
-        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+        _exec_raising(raised).run(object(), ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert excinfo.value.details["libvirt_error"] == "guest agent is not connected"
+    assert excinfo.value.details["libvirt_error_code"] is None
+    assert "domain" in excinfo.value.details
+
+
+@pytest.mark.parametrize("code", _DETERMINISTIC_CODES)
+def test_deterministic_libvirt_error_maps_to_configuration_error(code: int) -> None:
+    # An agent that is not configured, denies the command, or cannot run it is a permanent
+    # build-host condition; classify it CONFIGURATION_ERROR (retryable=false) so an agent does
+    # not burn retry cycles on a failure that can never clear (#531, ADR-0159).
+    with pytest.raises(CategorizedError) as excinfo:
+        _exec_raising(libvirt_error(code)).run(object(), ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["libvirt_error_code"] == code
+    assert excinfo.value.details["libvirt_error"]  # the libvirt error string, non-empty
+    assert "domain" in excinfo.value.details
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        libvirt.VIR_ERR_AGENT_UNRESPONSIVE,
+        libvirt.VIR_ERR_OPERATION_FAILED,
+    ],
+)
+def test_transient_libvirt_error_stays_transport_failure(code: int) -> None:
+    # A configured-but-not-currently-answering agent (VIR_ERR_AGENT_UNRESPONSIVE: mid-reconnect,
+    # died, sync timeout) or an unrelated transient libvirt error keeps the retryable transport
+    # classification — only the deterministic-config codes flip to CONFIGURATION_ERROR (#531).
+    with pytest.raises(CategorizedError) as excinfo:
+        _exec_raising(libvirt_error(code)).run(object(), ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert excinfo.value.details["libvirt_error_code"] == code
 
 
 def test_qemu_agent_command_maps_missing_libvirt_qemu(
