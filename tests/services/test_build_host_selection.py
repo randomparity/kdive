@@ -113,6 +113,46 @@ def test_remote_host_requires_git_source_and_acquires_lease(
     asyncio.run(_run())
 
 
+def test_git_source_on_local_host_is_admitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR-0157: a git kernel_source_ref is now admitted on the local host (allowlist is
+    # enforced at build time on the worker, not here); no capacity lease for a local host.
+    async def _run() -> None:
+        host = _host()
+        acquired: list[BuildHost] = []
+        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
+        monkeypatch.setattr(
+            build_host_selection,
+            "try_acquire_lease",
+            lambda _conn, lease_host, _run_id: _record_async(acquired, lease_host, True),
+        )
+
+        selected = await build_host_selection.resolve_and_admit(
+            cast(AsyncConnection, object()), _profile(git=True), _RUN_ID
+        )
+
+        assert selected is host
+        assert acquired == []  # local builds take no lease
+
+    asyncio.run(_run())
+
+
+def test_warm_tree_on_remote_host_still_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        host = _host(name="builder", kind=BuildHostKind.SSH)
+        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
+
+        with pytest.raises(CategorizedError) as exc:
+            await build_host_selection.resolve_and_admit(
+                cast(AsyncConnection, object()),
+                _profile(build_host="builder", git=False),
+                _RUN_ID,
+            )
+
+        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+    asyncio.run(_run())
+
+
 def test_missing_host_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run() -> None:
         monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(None))

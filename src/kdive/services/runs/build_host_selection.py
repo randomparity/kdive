@@ -75,12 +75,9 @@ async def resolve_and_admit(
         )
 
     git = is_git_source(parsed_profile)
-    if host.kind is BuildHostKind.LOCAL and git:
-        raise CategorizedError(
-            "a local build host requires a warm-tree kernel_source_ref, not a git ref",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"build_host": name, "host_kind": host.kind.value},
-        )
+    # A local host accepts either provenance: warm-tree (bare string) or a git source whose
+    # remote is enforced against the worker's allowlist at build time (ADR-0157). A remote host
+    # still requires a git source — it has no warm tree to mirror.
     if host.kind is not BuildHostKind.LOCAL and not git:
         raise CategorizedError(
             "a remote build host requires a git kernel_source_ref",
