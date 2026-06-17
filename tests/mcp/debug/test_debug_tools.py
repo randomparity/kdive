@@ -410,9 +410,14 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                 await SYSTEMS.update_state(conn, system.id, SystemState.CRASHED)
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                resp = await debug_tools._insert_session_locked(
-                    conn, _ctx(), run, system, handle, conn_fake, "gdbstub", uuid4()
+                request = debug_tools._AttachRequest(
+                    run=run,
+                    system=system,
+                    session_id=uuid4(),
+                    transport="gdbstub",
+                    connector=conn_fake,
                 )
+                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "crashed"
@@ -438,9 +443,14 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
                 assert run is not None and system is not None
                 conn_fake = _RaisingCloseConnector()
                 handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
-                resp = await debug_tools._insert_session_locked(
-                    conn, _ctx(), run, system, handle, conn_fake, "gdbstub", uuid4()
+                request = debug_tools._AttachRequest(
+                    run=run,
+                    system=system,
+                    session_id=uuid4(),
+                    transport="gdbstub",
+                    connector=conn_fake,
                 )
+                resp = await debug_tools._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "transport_conflict"
         assert count == 1  # only the race winner's row
