@@ -11,10 +11,12 @@ from defusedxml.ElementTree import fromstring
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     PreparedOverlay,
+    VolumeStaging,
     cleanup_overlay_if_created,
     delete_volume,
     ensure_overlay,
     lookup_pool,
+    lookup_volume_staged,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import overlay_volume_name
 from tests.providers.remote_libvirt.conftest import libvirt_error
@@ -187,6 +189,40 @@ def test_cleanup_overlay_only_deletes_created_overlay() -> None:
 def test_delete_volume_is_idempotent_for_absent_pool_or_volume() -> None:
     delete_volume(_Conn(), "missing", "overlay")
     delete_volume(_Conn({"default": _Pool()}), "default", "missing")
+
+
+def test_lookup_volume_staged_returns_staged_when_volume_present() -> None:
+    pool = _Pool({_BASE_VOLUME: _Volume(_BASE_VOLUME)})
+    conn = _Conn({"default": pool})
+
+    assert lookup_volume_staged(conn, "default", _BASE_VOLUME) is VolumeStaging.STAGED
+
+
+def test_lookup_volume_staged_returns_absent_when_volume_missing() -> None:
+    conn = _Conn({"default": _Pool()})
+
+    assert lookup_volume_staged(conn, "default", _BASE_VOLUME) is VolumeStaging.ABSENT
+
+
+def test_lookup_volume_staged_returns_pool_absent_when_pool_missing() -> None:
+    conn = _Conn({"default": _Pool()})
+
+    assert lookup_volume_staged(conn, "missing", _BASE_VOLUME) is VolumeStaging.POOL_ABSENT
+
+
+def test_lookup_volume_staged_reraises_unexpected_pool_error() -> None:
+    conn = _Conn(lookup_error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR))
+
+    with pytest.raises(libvirt.libvirtError):
+        lookup_volume_staged(conn, "default", _BASE_VOLUME)
+
+
+def test_lookup_volume_staged_reraises_unexpected_volume_error() -> None:
+    pool = _Pool(lookup_error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR))
+    conn = _Conn({"default": pool})
+
+    with pytest.raises(libvirt.libvirtError):
+        lookup_volume_staged(conn, "default", _BASE_VOLUME)
 
 
 def test_delete_volume_unexpected_delete_error_is_infrastructure() -> None:

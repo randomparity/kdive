@@ -23,7 +23,7 @@ from kdive.config.core_settings import SYSTEMS_TOML
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
-from kdive.inventory.model import RemoteLibvirtInstance
+from kdive.inventory.model import InventoryDoc, RemoteLibvirtInstance, StagedSource
 from kdive.providers.remote_libvirt.settings import (
     REMOTE_LIBVIRT_MACHINE,
     REMOTE_LIBVIRT_NETWORK,
@@ -78,20 +78,25 @@ def _systems_toml_path() -> Path:
     return Path(config.get(SYSTEMS_TOML) or "./systems.toml")
 
 
-def _load_remote_instances() -> list[RemoteLibvirtInstance]:
-    """Load the ``[[remote_libvirt]]`` instances from ``systems.toml``.
+def _load_inventory_doc() -> InventoryDoc | None:
+    """Load and validate the ``systems.toml`` document, or ``None`` when the file is absent.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the inventory file is present but
             unreadable/malformed/invalid (the parse error is surfaced verbatim).
     """
     try:
-        doc = load_inventory_optional(_systems_toml_path())
+        return load_inventory_optional(_systems_toml_path())
     except InventoryError as exc:
         raise CategorizedError(
             f"systems.toml is present but invalid: {exc}",
             category=ErrorCategory.CONFIGURATION_ERROR,
         ) from exc
+
+
+def _load_remote_instances() -> list[RemoteLibvirtInstance]:
+    """Load the ``[[remote_libvirt]]`` instances from ``systems.toml``."""
+    doc = _load_inventory_doc()
     if doc is None:
         return []
     return list(doc.remote_libvirt)
@@ -123,7 +128,13 @@ def _resolve_instance() -> RemoteLibvirtInstance:
             allocation → resource → instance threading is future work). Failing closed here is
             safer than silently dispatching an op to the wrong host.
     """
-    instances = _load_remote_instances()
+    return _require_single_instance(_load_remote_instances())
+
+
+def _require_single_instance(
+    instances: list[RemoteLibvirtInstance],
+) -> RemoteLibvirtInstance:
+    """Return the one declared instance, or fail closed for zero/many (the single guard home)."""
     if not instances:
         raise CategorizedError(
             "no [[remote_libvirt]] instance is declared in systems.toml; the remote-libvirt "
@@ -138,6 +149,38 @@ def _resolve_instance() -> RemoteLibvirtInstance:
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     return instances[0]
+
+
+def resolve_base_image_staged_volume() -> str:
+    """Return the staged base-image volume name for the single ``[[remote_libvirt]]`` instance.
+
+    Resolves the instance's ``base_image`` cross-reference to its ``[[image]]`` entry and returns
+    that image's operator-staged ``volume``. This is the name the provider looks up on the host's
+    storage pool at provision time, and the same name the base-image-staging diagnostic probes.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when no ``[[remote_libvirt]]`` instance (or more
+            than one) is declared, the inventory is malformed, the ``base_image`` names no declared
+            ``[[image]]``, or that image's source is not ``staged`` (a build/S3 image has no
+            operator-staged volume to look up).
+    """
+    doc = _load_inventory_doc()
+    images = doc.image if doc is not None else []
+    instance = _require_single_instance(list(doc.remote_libvirt) if doc is not None else [])
+    image = next((img for img in images if img.name == instance.base_image), None)
+    if image is None:
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}].base_image={instance.base_image!r} names no "
+            "declared [[image]] in systems.toml",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    if not isinstance(image.source, StagedSource):
+        raise CategorizedError(
+            f"image {instance.base_image!r} source is {image.source.kind!r}, not 'staged'; only a "
+            "staged image has an operator-staged base volume to verify",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return image.source.volume
 
 
 def _parse_gdbstub_range(instance: RemoteLibvirtInstance) -> tuple[int, int]:

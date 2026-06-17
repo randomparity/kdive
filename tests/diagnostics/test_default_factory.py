@@ -14,12 +14,16 @@ from pathlib import Path
 import pytest
 
 import kdive.config as config
+import kdive.diagnostics.base_image_staging as base_image_staging
 import kdive.diagnostics.reachability as reachability
 from kdive.diagnostics.checks import (
+    BASE_IMAGE_STAGING_ID,
+    BASE_VOLUME_NOT_STAGED_FIX,
     GDBSTUB_ACL_ID,
     PROVIDER_TLS_ID,
     REACHABILITY_ID,
     SECRET_REF_ID,
+    BaseImageStagingOutcome,
     CheckStatus,
     ReachabilityOutcome,
     SecretRefCheck,
@@ -88,6 +92,13 @@ def _force_probe(monkeypatch, outcome: ReachabilityOutcome) -> None:
     monkeypatch.setattr(reachability, "remote_libvirt_reachability_probe", lambda **_: _probe)
 
 
+def _force_staging_probe(monkeypatch, outcome: BaseImageStagingOutcome) -> None:
+    async def _probe() -> BaseImageStagingOutcome:
+        return outcome
+
+    monkeypatch.setattr(base_image_staging, "base_image_staging_probe", lambda **_: _probe)
+
+
 def test_factory_builds_a_service_with_a_secret_ref_check(monkeypatch, tmp_path: Path) -> None:
     _set_env(monkeypatch, tmp_path)
     service = default_service_factory(None)
@@ -124,7 +135,7 @@ def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configur
     service = default_service_factory(None)
     runnable_ids = {c.id for c in service._checks}  # noqa: SLF001
     unavailable_ids = {c.id for c in service._unavailable_worker_checks}  # noqa: SLF001
-    assert {SECRET_REF_ID, REACHABILITY_ID} <= runnable_ids
+    assert {SECRET_REF_ID, REACHABILITY_ID, BASE_IMAGE_STAGING_ID} <= runnable_ids
     assert {PROVIDER_TLS_ID, GDBSTUB_ACL_ID} == unavailable_ids
     assert PROVIDER_TLS_ID not in runnable_ids
     assert GDBSTUB_ACL_ID not in runnable_ids
@@ -182,6 +193,39 @@ def test_run_reports_configuration_error_when_config_unresolvable_at_run_time(
     assert by_id[REACHABILITY_ID].status is CheckStatus.ERROR
     assert by_id[REACHABILITY_ID].failure_category == "configuration_error"
     assert by_id[REACHABILITY_ID].fix is None
+
+
+def test_base_image_staging_passes_when_volume_staged(monkeypatch, tmp_path: Path) -> None:
+    _with_remote_instance(monkeypatch, tmp_path)
+    _force_probe(monkeypatch, ReachabilityOutcome.REACHABLE)
+    _force_staging_probe(monkeypatch, BaseImageStagingOutcome.STAGED)
+    report = asyncio.run(default_service_factory(None).run())
+    by_id = {r.check_id: r for r in report.results}
+    assert by_id[BASE_IMAGE_STAGING_ID].status is CheckStatus.PASS
+    assert by_id[BASE_IMAGE_STAGING_ID].provider == "remote-libvirt"
+    assert report.has_failure is False
+
+
+def test_base_image_staging_fails_when_volume_absent(monkeypatch, tmp_path: Path) -> None:
+    # The headline #513 case: a reachable host whose base-image volume is not staged is a FAIL
+    # with the staging fix — surfaced before any allocation is requested, so the doctor gate exits
+    # nonzero (has_failure True) rather than passing reachability and failing at provision.
+    _with_remote_instance(monkeypatch, tmp_path)
+    _force_probe(monkeypatch, ReachabilityOutcome.REACHABLE)
+    _force_staging_probe(monkeypatch, BaseImageStagingOutcome.NOT_STAGED)
+    report = asyncio.run(default_service_factory(None).run())
+    by_id = {r.check_id: r for r in report.results}
+    assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
+    assert by_id[BASE_IMAGE_STAGING_ID].status is CheckStatus.FAIL
+    assert by_id[BASE_IMAGE_STAGING_ID].fix == BASE_VOLUME_NOT_STAGED_FIX
+    assert by_id[BASE_IMAGE_STAGING_ID].failure_category == "configuration_error"
+    assert report.has_failure is True
+
+
+def test_base_image_staging_absent_when_not_configured(monkeypatch, tmp_path: Path) -> None:
+    _no_remote_instance(monkeypatch, tmp_path)
+    ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+    assert BASE_IMAGE_STAGING_ID not in ids
 
 
 def test_multiple_instances_are_not_configured_so_no_reachability_check(
