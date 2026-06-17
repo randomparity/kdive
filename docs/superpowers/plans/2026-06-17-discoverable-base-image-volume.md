@@ -173,7 +173,7 @@ git commit -m "feat: surface staged base-image volume token on catalog reads"
 
 **Interfaces:**
 - Consumes: `remote_config_from_inventory()` (`providers/remote_libvirt/config.py:221`), `remote_connection` + `open_libvirt_protocol` (`providers/remote_libvirt/transport.py`), `lookup_volume_staged` + `VolumeStaging` + `StorageConn` (`providers/remote_libvirt/lifecycle/storage.py`), `secret_backend_from_env` + `SecretRegistry`.
-- Produces: `async def probe_staged_volumes(volumes: list[str]) -> dict[str, str]` — maps each volume name to one of `staged`/`absent`/`pool_absent`/`unreachable`/`unknown`. Never raises. Used by Task 3 as the default probe. Also exports `_STAGED_PROBE_TIMEOUT_SECONDS = 5.0`.
+- Produces: `async def probe_staged_volumes(volumes: list[str], *, ..., timeout=_STAGED_PROBE_TIMEOUT_SECONDS) -> dict[str, str]` — maps each volume name to one of `staged`/`absent`/`pool_absent`/`unreachable`/`unknown`. Never raises. The seams (`config_factory`/`open_connection`/`secret_backend_factory`/`timeout`/`pki_base_dir`) are injectable for testing; production defaults wire the real ones. Used by Task 3 as the default probe (called positionally as `probe(volumes)`). Also exports `_STAGED_PROBE_TIMEOUT_SECONDS = 5.0`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -239,7 +239,12 @@ def _backend():
     return secret_backend_from_env(registry=SecretRegistry())
 
 
-def _probe(volumes, *, conn=None, config_exc=None, transport_exc=False, tmp_path=None):
+def _probe(
+    volumes, *, conn=None, config_exc=None, transport_exc=False, block=False,
+    timeout=5.0, tmp_path=None,
+):
+    import time
+
     def config_factory():
         if config_exc is not None:
             raise config_exc
@@ -248,6 +253,8 @@ def _probe(volumes, *, conn=None, config_exc=None, transport_exc=False, tmp_path
     def open_connection(uri):
         if transport_exc:
             raise libvirt.libvirtError("connect refused")
+        if block:
+            time.sleep(10.0)  # exceed the injected timeout; the wait_for must fire first
         return conn
 
     return asyncio.run(
@@ -256,6 +263,7 @@ def _probe(volumes, *, conn=None, config_exc=None, transport_exc=False, tmp_path
             config_factory=config_factory,
             open_connection=open_connection,
             secret_backend_factory=_backend,
+            timeout=timeout,
             pki_base_dir=tmp_path,
         )
     )
@@ -282,6 +290,12 @@ def test_config_error_is_unknown(tmp_path: Path) -> None:
     exc = CategorizedError("no instance", category=ErrorCategory.CONFIGURATION_ERROR)
     out = _probe(["a.qcow2"], config_exc=exc, tmp_path=tmp_path)
     assert out == {"a.qcow2": "unknown"}
+
+
+def test_timeout_is_unreachable(tmp_path: Path) -> None:
+    # A blocking connect with a tiny injected timeout must degrade to unreachable, fast.
+    out = _probe(["a.qcow2", "b.qcow2"], block=True, timeout=0.05, tmp_path=tmp_path)
+    assert out == {"a.qcow2": "unreachable", "b.qcow2": "unreachable"}
 
 
 def test_empty_volumes_opens_nothing(tmp_path: Path) -> None:
@@ -372,6 +386,7 @@ async def probe_staged_volumes(
     config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
     open_connection: Callable[[str], _StorageProbeConn] = _open_storage_connection,
     secret_backend_factory: Callable[[], SecretBackend] = _default_secret_backend,
+    timeout: float = _STAGED_PROBE_TIMEOUT_SECONDS,
     pki_base_dir: Path | None = None,
 ) -> dict[str, str]:
     """Probe each volume's staged status on the remote host's pool; never raises.
@@ -379,6 +394,9 @@ async def probe_staged_volumes(
     Returns a `{volume: status}` map where status is one of `staged`/`absent`/`pool_absent`
     (live pool verdicts), `unreachable` (host/RPC failure or timeout), or `unknown`
     (the remote config could not be resolved). An empty `volumes` opens no connection.
+
+    `timeout` bounds the blocking libvirt work; it is injectable so a test can drive the
+    timeout→unreachable path quickly without a real multi-second wait.
     """
     if not volumes:
         return {}
@@ -391,10 +409,10 @@ async def probe_staged_volumes(
             asyncio.to_thread(
                 _probe_sync, config, volumes, open_connection, secret_backend_factory, pki_base_dir
             ),
-            _STAGED_PROBE_TIMEOUT_SECONDS,
+            timeout,
         )
     except TimeoutError:
-        _log.warning("staged-volume probe timed out after %.0fs", _STAGED_PROBE_TIMEOUT_SECONDS)
+        _log.warning("staged-volume probe timed out after %.2fs", timeout)
         return dict.fromkeys(volumes, "unreachable")
 
 
@@ -428,7 +446,7 @@ def _probe_sync(
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `uv run python -m pytest tests/providers/remote_libvirt/test_staged_volumes.py -q`
-Expected: PASS (5 tests). If `RemoteLibvirtConfig`/`TlsCertRefs` constructor kwargs differ, read `providers/remote_libvirt/config.py` and align the test's `_config()` to the real fields (do not change production code to fit the test).
+Expected: PASS (6 tests, including the fast `test_timeout_is_unreachable`). `RemoteLibvirtConfig`/`TlsCertRefs` fields are verified: `TlsCertRefs(client_cert_ref, client_key_ref, ca_cert_ref)` and `RemoteLibvirtConfig(uri, cert_refs, concurrent_allocation_cap, storage_pool=...)`.
 
 - [ ] **Step 5: Guardrails + commit**
 
@@ -516,11 +534,8 @@ def test_describe_remote_probe_failure_does_not_fail_describe(migrated_url: str)
             res_id = await _register_remote(pool)
             await _insert_remote_image(pool, name="fedora", volume="fedora.qcow2")
 
-            async def boom(volumes: list[str]) -> dict[str, str]:
-                raise RuntimeError("probe must be guarded? no — handler must not call it raw")
-
-            # The handler calls the probe and trusts its returned map; a probe that itself
-            # degrades returns 'unreachable'. Simulate that contract here.
+            # The handler trusts the probe's returned map; a probe that degraded internally
+            # returns 'unreachable' for every volume. The describe must still succeed.
             async def degraded(volumes: list[str]) -> dict[str, str]:
                 return dict.fromkeys(volumes, "unreachable")
 
