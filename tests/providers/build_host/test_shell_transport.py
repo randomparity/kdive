@@ -168,6 +168,17 @@ def test_upload_file_non_zero_is_infrastructure_failure() -> None:
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_upload_file_missing_etag_is_infrastructure_failure() -> None:
+    t = _RecordingTransport([_ok(stdout="HTTP/1.1 200 OK\r\n\r\n")])
+    with pytest.raises(CategorizedError) as exc:
+        t.upload_file(
+            "/build/bzImage",
+            PresignedUpload(url="https://s3.example/put?sig=secret", required_headers={}),
+        )
+    assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"url": "https://s3.example/put?sig=secret"}
+
+
 def test_cleanup_issues_rm_rf() -> None:
     t = _RecordingTransport([_ok()])
     t.cleanup("/build/scratch")
