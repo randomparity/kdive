@@ -69,11 +69,13 @@ gated by an operator allowlist.
    ```
 
 2. Set `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` on the worker to the remotes you trust it to
-   clone. It is a comma-separated list; each entry is a **host** (`github.com`) or a
-   **host/path-prefix** (`github.com/myorg`). A host entry admits any path on that host; a
-   path-prefix entry matches only at a `/` boundary (`github.com/myorg` does not admit
-   `github.com/myorg-evil`). Only `https`, `ssh`, and `git` remotes are eligible; `file://`
-   and `http://` are rejected. Restart the worker after changing it.
+   clone. It is a comma-separated list; each entry is a bare **host** (`github.com`) or a
+   **host/path-prefix** (`github.com/myorg`) — do not add a scheme or port to an entry (a
+   `github.com:443` entry never matches, since the port is stripped from the remote's host).
+   A host entry admits any path on that host; a path-prefix entry matches only at a `/`
+   boundary (`github.com/myorg` does not admit `github.com/myorg-evil`). Only `https`, `ssh`,
+   and `git` remotes are eligible; `file://` and `http://` are rejected. Restart the worker
+   after changing it.
 
    ```
    KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST=github.com/myorg,git.example.com
