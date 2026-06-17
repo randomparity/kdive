@@ -45,7 +45,7 @@ async def image_build_handler(
     conn: AsyncConnection,
     job: Job,
     *,
-    provider_resolver: ProviderResolver,
+    resolver: ProviderResolver,
     store: ImageObjectStore,
     inspect: InspectSeam = DEFAULT_INSPECT,
 ) -> str:
@@ -54,7 +54,7 @@ async def image_build_handler(
     Args:
         conn: The worker dispatch connection.
         job: The claimed ``IMAGE_BUILD`` job.
-        provider_resolver: Runtime resolver used by production assembly.
+        resolver: Runtime resolver used by production assembly.
         store: The image object store.
         inspect: The libguestfs inspection seam threaded into the validator (tests inject a stub).
 
@@ -66,7 +66,7 @@ async def image_build_handler(
             the missing element), or publish fails — the worker dead-letters with the category.
     """
     payload = load_payload(job, ImageBuildPayload)
-    build_plane = _resolve_build_plane(provider_resolver, payload.provider)
+    build_plane = _resolve_build_plane(resolver, payload.provider)
     output = await asyncio.to_thread(build_plane.build, _spec(payload))
     await asyncio.to_thread(
         validate_guest_contract,
@@ -115,7 +115,7 @@ def _resolve_build_plane(resolver: ProviderResolver, provider: str) -> RootfsBui
 def register_handlers(
     registry: HandlerRegistry,
     *,
-    provider_resolver: ProviderResolver,
+    resolver: ProviderResolver,
     store: ImageObjectStore,
     inspect: InspectSeam = DEFAULT_INSPECT,
 ) -> None:
@@ -125,7 +125,7 @@ def register_handlers(
         lambda conn, job: image_build_handler(
             conn,
             job,
-            provider_resolver=provider_resolver,
+            resolver=resolver,
             store=store,
             inspect=inspect,
         ),

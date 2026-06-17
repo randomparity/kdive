@@ -317,7 +317,7 @@ def _register_image_build_handler(
         return
     image_build.register_handlers(
         registry,
-        provider_resolver=resolver,
+        resolver=resolver,
         store=store,
     )
 
