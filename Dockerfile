@@ -29,9 +29,17 @@ FROM python:3.13-slim-bookworm@sha256:e4fa1f978c539608a10cdf74700ac32a3f719dfc6e
 # dependency group, not apt: bookworm ships only the python3-drgn library,
 # whose CLI/version is unproven for the `drgn --version` build check. libelf1,
 # libdw1, and zlib1g are drgn's runtime shared libraries.
+#
+# The second package line is the kernel-build toolchain the worker's Build plane invokes
+# at job time (ADR-0146): a Linux `make` hard-requires flex/bison/bc; the warm-tree/server
+# build lane also shells out to git (patch_ref + git-clone lane), rsync (warm-tree mirror),
+# and xz; and the kernel build compiles scripts/sign-file, scripts/extract-cert, and
+# objtool against the libssl-dev/libelf-dev headers. Without these the build lane cannot
+# compile a kernel on the shipped image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc make binutils gdb libvirt-clients openssh-client \
       libelf1 libdw1 zlib1g \
+      flex bison bc git rsync xz-utils libssl-dev libelf-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.11.19@sha256:b46b03ddfcfbf8f547af7e9eaefdf8a39c8cebcba7c98858d3162bd28cf536f6 /uv /usr/local/bin/uv
 COPY --from=builder /opt/venv /opt/venv
@@ -43,6 +51,11 @@ ENV PATH=/opt/venv/bin:$PATH PYTHONPATH=/app/src \
     KDIVE_INSTALL_STAGING=/var/lib/kdive/install
 # Fail the build (not just the gated smoke test) if any worker tool is missing/broken.
 RUN drgn --version && gdb --version && virsh --version && gcc --version && make --version
+# Guard the kernel-build toolchain (ADR-0146): the build binaries must answer --version, and
+# the -dev packages are verified by the header files the kernel build consumes (no --version).
+RUN flex --version && bison --version && bc --version \
+    && git --version && rsync --version && xz --version \
+    && test -f /usr/include/openssl/ssl.h && test -f /usr/include/libelf.h
 # Fixed non-root uid 10001 (k8s runAsNonRoot convention) so compose/Helm can chown the
 # mounted writable volumes to a known owner. --no-log-init avoids a sparse lastlog
 # allocation for the high uid; not --system (that caps the uid below SYS_UID_MAX).

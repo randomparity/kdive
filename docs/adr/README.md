@@ -188,3 +188,4 @@ sentence; do not paste the abstract.
 | [0143](0143-investigation-enumerate-runs.md) | `investigations.get` enumerates its attached runs/systems. | Accepted |
 | [0144](0144-ephemeral-build-network-readiness.md) | Ephemeral build-VM network-readiness gate + surface `git fetch`'s return code. | Accepted |
 | [0145](0145-reconciler-tolerate-premigrate-schema.md) | Console-hosting tolerates a not-yet-migrated schema at startup. | Accepted |
+| [0146](0146-worker-build-toolchain.md) | Worker image ships the kernel-build toolchain (`flex`/`bison`/`bc`/`git`/`rsync`/`xz`/`-dev` headers) + dual regression guard. | Accepted |

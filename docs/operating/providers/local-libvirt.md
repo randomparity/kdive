@@ -10,8 +10,10 @@ same host as the worker, driving QEMU/KVM guests through libvirt.
 - Hardware virtualization (`/dev/kvm`) for usable boot performance.
 - A kernel source tree for builds (`KDIVE_KERNEL_SRC`) and disk space for guest overlays,
   artifacts, and captured vmcores.
-- The toolchain the build path invokes (`make`, a compiler, and the usual kernel build
-  dependencies).
+- The toolchain the build path invokes: `make`, a C compiler (`gcc`/`binutils`), and the
+  kernel-build dependencies `flex`, `bison`, `bc`, `git`, `rsync`, `xz`, and the
+  `libssl`/`libelf` development headers. On this venv-on-a-host deployment the operator
+  installs them; the container worker image bundles them (ADR-0146).
 
 All host-facing settings are in [the config reference](../../guide/reference/config.md).
 
