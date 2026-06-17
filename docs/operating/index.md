@@ -20,6 +20,7 @@ runbooks.
 | Page | What it covers |
 |---|---|
 | [Local libvirt](providers/local-libvirt.md) | Single-host libvirt provider prerequisites |
+| [Local libvirt walkthrough](providers/local-libvirt-walkthrough.md) | End-to-end local-libvirt setup: prepare, install, onboard, test |
 | [Remote libvirt](providers/remote-libvirt.md) | Remote libvirt host wiring and prerequisites |
 | [Kernel source staging](build-source-staging.md) | Staging `KDIVE_KERNEL_SRC` (warm-tree) vs the git-clone build lane for `runs.build` |
 
