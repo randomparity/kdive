@@ -38,7 +38,14 @@ from kdive.mcp.tools.ops.resources.renew import renew_resource
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the runtime resource-mutation tools on ``app``, bound to ``pool``."""
+    _register_resources_register_remote_libvirt(app, pool)
+    _register_resources_register_local_libvirt(app, pool)
+    _register_resources_register_fault_inject(app, pool)
+    _register_resources_deregister(app, pool)
+    _register_resources_renew(app, pool)
 
+
+def _register_resources_register_remote_libvirt(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name=REGISTER_REMOTE_LIBVIRT_TOOL,
         annotations=_docmeta.mutating(),
@@ -52,6 +59,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await register_remote_libvirt_resource(pool, current_context(), request)
 
+
+def _register_resources_register_local_libvirt(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name=REGISTER_LOCAL_LIBVIRT_TOOL,
         annotations=_docmeta.mutating(),
@@ -65,6 +74,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await register_local_libvirt_resource(pool, current_context(), request)
 
+
+def _register_resources_register_fault_inject(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name=REGISTER_FAULT_INJECT_TOOL,
         annotations=_docmeta.mutating(),
@@ -78,6 +89,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await register_fault_inject_resource(pool, current_context(), request)
 
+
+def _register_resources_deregister(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name=DEREGISTER_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"}
     )
@@ -97,6 +110,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             pool, current_context(), resource_id=resource_id, force=force
         )
 
+
+def _register_resources_renew(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=RENEW_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def resources_renew(
         resource_id: Annotated[
