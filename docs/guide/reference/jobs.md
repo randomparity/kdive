@@ -16,7 +16,7 @@ Cancel a queued or running job.
 
 `implemented` · `read-only`
 
-Return one durable job.
+Return one durable job visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
