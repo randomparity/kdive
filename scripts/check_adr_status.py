@@ -5,8 +5,8 @@ the PR implementing its decision merges, flipping *both* the ADR's ``Status`` li
 row in the index in that same PR. This guard enforces the three invariants that keep the
 status field honest:
 
-1. **Valid status.** Every ADR file (``docs/adr/NNNN-*.md`` except the template) has a
-   parseable ``Status`` whose leading keyword is one of Proposed / Accepted / Rejected /
+1. **Valid status.** Every ADR file under ``docs/adr/`` (``NNNN-*.md`` except the template)
+   has a parseable ``Status`` whose leading keyword is one of Proposed / Accepted / Rejected /
    Superseded (a trailing qualifier like "Superseded for runtime assembly by 0063" or
    "Accepted — …" is allowed).
 2. **Index sync.** The README index has exactly one row per ADR file (and no row for a
