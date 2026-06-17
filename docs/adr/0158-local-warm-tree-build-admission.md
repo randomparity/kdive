@@ -1,6 +1,6 @@
 # ADR 0158 — Admit a local warm-tree build only when `KDIVE_KERNEL_SRC` is usable
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):** [ADR-0099](0099-remote-build-host-targets.md)
