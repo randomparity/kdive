@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import LiteralString
+from uuid import UUID
 
 import psycopg.errors
 from psycopg.rows import dict_row
@@ -20,7 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
 from kdive.db.build_hosts import BuildHostKind
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.security import audit
@@ -208,8 +209,7 @@ async def _register_build_host(
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(plan.sql, plan.values)
                 row = await cur.fetchone()
-            assert row is not None
-            host_id = row["id"]
+            host_id = _returned_build_host_id(row)
 
             await audit.record_platform(
                 conn,
@@ -237,6 +237,8 @@ async def _register_build_host(
             ErrorCategory.CONFLICT,
             data={"reason": f"a build host named {request.name!r} already exists"},
         )
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(request.name, exc)
 
     _log.info("build host %r (%s) registered by %s", request.name, host_id, ctx.principal)
     return ToolResponse.success(
@@ -245,6 +247,27 @@ async def _register_build_host(
         suggested_next_actions=["build_hosts.list", "runs.build"],
         data={"id": str(host_id), "name": request.name},
     )
+
+
+def _returned_build_host_id(row: dict[str, object] | None) -> UUID:
+    if row is None:
+        raise CategorizedError(
+            "build host insert returned no row",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": "registering build host", "field": "id"},
+        )
+    host_id = row.get("id")
+    if not isinstance(host_id, UUID):
+        raise CategorizedError(
+            "build host insert returned an invalid id",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={
+                "operation": "registering build host",
+                "field": "id",
+                "expected": "uuid",
+            },
+        )
+    return host_id
 
 
 async def register_ssh_build_host(

@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import ManagedBy, ResourceKind, ResourceStatus
 from kdive.domain.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
@@ -308,6 +308,8 @@ async def _insert_registered_resource(
             ErrorCategory.CONFLICT,
             data={"reason": f"a {kind.value} resource named {name!r} already exists"},
         )
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(name, exc)
 
     _log.info(
         "runtime resource %r (%s/%s) registered by %s",
@@ -355,9 +357,27 @@ async def _insert_runtime_resource(
             ),
         )
         row = await cur.fetchone()
-    assert row is not None
-    resource_id = row["id"]
-    assert isinstance(resource_id, UUID)
+    return _returned_resource_id(row)
+
+
+def _returned_resource_id(row: dict[str, object] | None) -> UUID:
+    if row is None:
+        raise CategorizedError(
+            "runtime resource insert returned no row",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": "registering runtime resource", "field": "id"},
+        )
+    resource_id = row.get("id")
+    if not isinstance(resource_id, UUID):
+        raise CategorizedError(
+            "runtime resource insert returned an invalid id",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={
+                "operation": "registering runtime resource",
+                "field": "id",
+                "expected": "uuid",
+            },
+        )
     return resource_id
 
 
