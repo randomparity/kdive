@@ -216,6 +216,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             _store = _resolve_store()
         return _store
 
+    _register_buildconfig_get(app, pool, _resolved_store)
+    _register_buildconfig_set(app, pool, _resolved_store)
+
+
+def _register_buildconfig_get(
+    app: FastMCP, pool: AsyncConnectionPool, resolved_store: Callable[[], ObjectStore]
+) -> None:
     @app.tool(
         name=_TOOL,
         annotations=_docmeta.read_only(),
@@ -232,10 +239,14 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         _ = ctx  # authenticated caller established; no project RBAC for shared catalog
         try:
             async with pool.connection() as conn:
-                return await read_build_config(conn, _resolved_store(), name=name)
+                return await read_build_config(conn, resolved_store(), name=name)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(name, exc, suggested_next_actions=[_TOOL])
 
+
+def _register_buildconfig_set(
+    app: FastMCP, pool: AsyncConnectionPool, resolved_store: Callable[[], ObjectStore]
+) -> None:
     @app.tool(
         name=_SET_TOOL,
         annotations=_docmeta.mutating(),
@@ -259,7 +270,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         try:
             return await set_build_config(
                 pool,
-                _resolved_store,
+                resolved_store,
                 current_context(),
                 name=name,
                 content=content,

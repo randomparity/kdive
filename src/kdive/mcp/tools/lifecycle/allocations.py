@@ -483,7 +483,15 @@ async def list_allocations(
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `allocations.*` tools on ``app``, bound to ``pool``."""
+    _register_allocations_request(app, pool)
+    _register_allocations_get(app, pool)
+    _register_allocations_release(app, pool)
+    _register_allocations_renew(app, pool)
+    _register_allocations_list(app, pool)
+    _register_allocations_wait(app, pool)
 
+
+def _register_allocations_request(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.request",
         annotations=_docmeta.mutating(),
@@ -508,6 +516,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             idempotency_key=idempotency_key,
         )
 
+
+def _register_allocations_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.get",
         annotations=_docmeta.read_only(),
@@ -518,6 +528,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await get_allocation(pool, current_context(), allocation_id)
 
+
+def _register_allocations_release(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.release",
         annotations=_docmeta.mutating(),
@@ -528,6 +540,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await release_allocation(pool, current_context(), allocation_id)
 
+
+def _register_allocations_renew(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.renew",
         annotations=_docmeta.mutating(),
@@ -552,6 +566,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             idempotency_key=idempotency_key,
         )
 
+
+def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.list",
         annotations=_docmeta.read_only(),
@@ -565,6 +581,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await list_allocations(pool, current_context(), project=project, limit=limit)
 
+
+def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.wait",
         annotations=_docmeta.read_only(),

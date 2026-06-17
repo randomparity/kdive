@@ -37,8 +37,14 @@ from kdive.providers.core.resolver import ProviderResolver
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
     """Register the `artifacts.*` tools on ``app``, bound to ``pool``."""
-    read_handlers = _ArtifactReadHandlers()
+    _register_artifacts_list(app, pool)
+    _register_artifacts_get(app, pool)
+    _register_artifacts_search_text(app, pool)
+    _register_artifacts_create_run_upload(app, pool, resolver)
+    _register_artifacts_create_system_upload(app, pool, resolver)
 
+
+def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="artifacts.list",
         annotations=_docmeta.read_only(),
@@ -52,6 +58,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         """List the redacted artifacts for a System. Requires viewer."""
         return await _artifacts_list(pool, current_context(), system_id=system_id)
 
+
+def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="artifacts.get",
         annotations=_docmeta.read_only(),
@@ -71,6 +79,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         presigned `refs.download_uri`. Requires viewer; sensitive ids are not-found.
         """
         return await _artifacts_get(pool, current_context(), artifact_id=artifact_id)
+
+
+def _register_artifacts_search_text(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    read_handlers = _ArtifactReadHandlers()
 
     @app.tool(
         name="artifacts.search_text",
@@ -100,6 +112,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             ),
         )
 
+
+def _register_artifacts_create_run_upload(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="artifacts.create_run_upload",
         annotations=_docmeta.mutating(),
@@ -121,6 +137,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             resolver=resolver,
         )
 
+
+def _register_artifacts_create_system_upload(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="artifacts.create_system_upload",
         annotations=_docmeta.mutating(),

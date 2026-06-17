@@ -551,7 +551,16 @@ async def list_investigations(
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
+    _register_investigations_open(app, pool)
+    _register_investigations_get(app, pool)
+    _register_investigations_close(app, pool)
+    _register_investigations_link(app, pool)
+    _register_investigations_unlink(app, pool)
+    _register_investigations_set(app, pool)
+    _register_investigations_list(app, pool)
 
+
+def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.open",
         annotations=_docmeta.mutating(),
@@ -578,6 +587,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             external_refs=external_refs,
         )
 
+
+def _register_investigations_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.get",
         annotations=_docmeta.read_only(),
@@ -588,6 +599,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await get_investigation(pool, current_context(), investigation_id)
 
+
+def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.close",
         annotations=_docmeta.mutating(),
@@ -600,6 +613,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await close_investigation(pool, current_context(), investigation_id)
 
+
+def _register_investigations_link(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.link",
         annotations=_docmeta.mutating(),
@@ -614,6 +629,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await link_external_ref(pool, current_context(), investigation_id, ref)
 
+
+def _register_investigations_unlink(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.unlink",
         annotations=_docmeta.mutating(),
@@ -630,6 +647,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await unlink_external_ref(pool, current_context(), investigation_id, ref)
 
+
+def _register_investigations_set(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.set",
         annotations=_docmeta.mutating(),
@@ -651,6 +670,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             pool, current_context(), investigation_id, title=title, description=description
         )
 
+
+def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="investigations.list",
         annotations=_docmeta.read_only(),

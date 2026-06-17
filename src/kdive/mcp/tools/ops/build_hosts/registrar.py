@@ -40,7 +40,14 @@ from kdive.mcp.tools.ops.build_hosts.register import (
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the ``build_hosts.*`` tools on ``app``, bound to ``pool``."""
+    _register_build_hosts_register_ssh(app, pool)
+    _register_build_hosts_register_ephemeral_libvirt(app, pool)
+    _register_build_hosts_list(app, pool)
+    _register_build_hosts_disable(app, pool)
+    _register_build_hosts_remove(app, pool)
 
+
+def _register_build_hosts_register_ssh(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name=REGISTER_SSH_TOOL,
         annotations=_docmeta.mutating(),
@@ -54,6 +61,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await register_ssh_build_host(pool, current_context(), request)
 
+
+def _register_build_hosts_register_ephemeral_libvirt(
+    app: FastMCP, pool: AsyncConnectionPool
+) -> None:
     @app.tool(
         name=REGISTER_EPHEMERAL_LIBVIRT_TOOL,
         annotations=_docmeta.mutating(),
@@ -67,16 +78,22 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         return await register_ephemeral_libvirt_build_host(pool, current_context(), request)
 
+
+def _register_build_hosts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=LIST_TOOL, annotations=_docmeta.read_only(), meta={"maturity": "implemented"})
     async def build_hosts_list() -> ToolResponse:
         return await list_build_hosts(pool, current_context())
 
+
+def _register_build_hosts_disable(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=DISABLE_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def build_hosts_disable(
         name: Annotated[str, Field(description="The build host name to disable.")],
     ) -> ToolResponse:
         return await disable_build_host(pool, current_context(), name=name)
 
+
+def _register_build_hosts_remove(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=REMOVE_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def build_hosts_remove(
         name: Annotated[str, Field(description="The build host name to remove.")],
