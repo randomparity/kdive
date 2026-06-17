@@ -27,7 +27,7 @@ _NEXT_ACTIONS = ["runs.create"]
 
 
 async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> ToolResponse:
-    """Drive a non-terminal Run to terminal ``canceled``, freeing its System (ADR-0157).
+    """Drive a non-terminal Run to terminal ``canceled``, freeing its System (ADR-0158).
 
     Under the per-Run lock, transition a ``created``/``running`` Run to ``canceled`` and
     best-effort cancel its in-flight build job. A retried cancel on an already-``canceled``
