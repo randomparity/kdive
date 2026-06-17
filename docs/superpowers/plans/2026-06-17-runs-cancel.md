@@ -254,6 +254,11 @@ def test_finalize_build_after_cancel_does_not_resurrect_run(migrated_url: str) -
 Add the imports this block needs near the top of the file (if not already present):
 `from kdive.jobs.handlers import runs_shared`, `from kdive.services.runs.steps import BuildStepResult`. (`JOBS`, `RUNS`, `RunState`, `JobState`, `uuid4`, `UUID`, `AuthorizationError`, `dict_row` are already imported.)
 
+> Seeding terminal Runs is known-good: `_seed_run(pool, state=RunState.FAILED)` /
+> `RunState.CANCELED` are already used in this file (e.g.
+> `test_build_on_terminal_run_is_config_error`), so the bare `SUCCEEDED`/`FAILED`/`CANCELED`
+> inserts in the cancel tests need no extra columns.
+
 > Before relying on `BuildStepResult(kernel_ref=…, debuginfo_ref=…)`, open `src/kdive/services/runs/steps.py` and confirm the constructor field names; adjust the kwargs in `test_finalize_build_after_cancel_does_not_resurrect_run` to match. If `BuildStepResult` is not trivially constructible, drop that one test and rely on `finalize_build`'s documented early-return (it is already covered by the worker's own tests) — the other ten tests are the load-bearing set.
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -404,37 +409,30 @@ git commit -m "feat: add runs.cancel handler to free a System without teardown"
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/lifecycle/runs/registrar.py`
+- Test: `tests/mcp/core/test_app.py` (extend the existing registration assertion)
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Extend the failing registration assertion**
 
-Append to `tests/mcp/lifecycle/test_runs_tools.py`:
+`tests/mcp/core/test_app.py::test_build_app_registers_jobs_tools` already asserts the
+registered `runs.*` tool names via `await app.list_tools()` (the repo-confirmed FastMCP
+3.4.0 API — there is no `get_tools()`). Add `"runs.cancel"` to that existing set:
 
 ```python
-def test_runs_cancel_tool_is_registered_and_mutating() -> None:
-    from fastmcp import FastMCP
-
-    from kdive.mcp.tools.lifecycle.runs import registrar as runs_registrar
-
-    app = FastMCP("test")
-
-    class _Pool:  # registrar only stores the pool; never connects at registration time.
-        pass
-
-    runs_registrar.register(app, _Pool(), resolver=provider_resolver())  # type: ignore[arg-type]
-
-    async def _names() -> set[str]:
-        return {t.name for t in (await app.get_tools()).values()}
-
-    names = asyncio.run(_names())
-    assert "runs.cancel" in names
+        assert {
+            "runs.create",
+            "runs.get",
+            "runs.build",
+            "runs.complete_build",
+            "runs.install",
+            "runs.boot",
+            "runs.cancel",
+        } <= names
 ```
-
-> Before writing this test, confirm the FastMCP introspection API in this version: open another registrar test (search the test tree for `get_tools` or `list_tools`) and mirror whatever the repo already uses to enumerate registered tool names. If no such helper/test exists, replace the introspection with the simplest call the installed `fastmcp` exposes (e.g. `app._tool_manager` listing) — the assertion only needs the registered name set. Do not invent an API.
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -k runs_cancel_tool_is_registered -q`
-Expected: FAIL — `runs.cancel` not in the registered names.
+Run: `uv run python -m pytest tests/mcp/core/test_app.py::test_build_app_registers_jobs_tools -q`
+Expected: FAIL — `runs.cancel` is not yet in the registered names.
 
 - [ ] **Step 3: Wire the registrar**
 
@@ -470,18 +468,18 @@ def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
 - [ ] **Step 4: Run it to verify it passes**
 
-Run: `uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -k runs_cancel_tool_is_registered -q`
+Run: `uv run python -m pytest tests/mcp/core/test_app.py::test_build_app_registers_jobs_tools -q`
 Expected: PASS.
 
 - [ ] **Step 5: Guardrails**
 
-Run: `just lint && just type && uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py -q`
+Run: `just lint && just type && uv run python -m pytest tests/mcp/lifecycle/test_runs_tools.py tests/mcp/core/test_app.py -q`
 Expected: all green, zero warnings.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/lifecycle/runs/registrar.py tests/mcp/lifecycle/test_runs_tools.py
+git add src/kdive/mcp/tools/lifecycle/runs/registrar.py tests/mcp/core/test_app.py
 git commit -m "feat: register the runs.cancel MCP tool"
 ```
 
