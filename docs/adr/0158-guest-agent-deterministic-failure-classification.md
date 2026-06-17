@@ -1,4 +1,4 @@
-# ADR 0157 — A deterministic guest-agent failure is a configuration error, not a retryable transport failure
+# ADR 0158 — A deterministic guest-agent failure is a configuration error, not a retryable transport failure
 
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-17

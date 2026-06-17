@@ -39,7 +39,7 @@ _DEFAULT_POLL_S = 1.0
 # libvirt error codes that name a DETERMINISTIC, non-retryable guest-agent condition: the
 # agent is not configured (channel absent from the domain), the command is denied, or the
 # host cannot run it. A bare libvirtError with no live code (get_error_code() is None) is NOT
-# in this set, so a genuinely transient channel drop stays TRANSPORT_FAILURE (ADR-0157, #531).
+# in this set, so a genuinely transient channel drop stays TRANSPORT_FAILURE (ADR-0158, #531).
 _DETERMINISTIC_CONFIG_CODES: frozenset[int] = frozenset(
     {
         libvirt.VIR_ERR_ARGUMENT_UNSUPPORTED,  # "QEMU guest agent is not configured"
@@ -242,7 +242,7 @@ class GuestAgentExec:
 
     @staticmethod
     def _classify_libvirt_error(domain: Any, exc: libvirt.libvirtError) -> CategorizedError:
-        """Map a guest-agent libvirt error onto the correct failure category (ADR-0157, #531).
+        """Map a guest-agent libvirt error onto the correct failure category (ADR-0158, #531).
 
         A libvirt error whose code names a deterministic condition — the agent is not
         configured, the command is denied, or the host cannot run it — is a permanent
