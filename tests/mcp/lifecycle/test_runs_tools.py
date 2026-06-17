@@ -68,6 +68,20 @@ _PROFILE: dict[str, Any] = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _staged_warm_tree(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stage a usable warm tree so the worker-local build tests pass ADR-0158 admission.
+
+    These tests inject a recording/failing builder for a worker-local (warm-tree) run; the
+    build now admits ``KDIVE_KERNEL_SRC`` before the builder runs, so an unset value would
+    reject every build at admission and mask each test's intended builder path. A real
+    absolute directory lets admission pass through to the injected builder.
+    """
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path_factory.mktemp("warm-tree")))
+
+
 def _profile() -> dict[str, Any]:
     return copy.deepcopy(_PROFILE)
 
