@@ -39,6 +39,7 @@ A new function alongside `wait_for_agent`, sharing its `Monotonic`/`Sleep` seams
 
 ```python
 type NetworkProbe = Callable[[], bool]
+type TimeoutDetail = Callable[[], dict[str, object]]
 
 def wait_for_network(
     probe: NetworkProbe,
@@ -48,6 +49,7 @@ def wait_for_network(
     sleep: Sleep,
     timeout_s: float,
     poll_s: float,
+    timeout_detail: TimeoutDetail | None = None,
 ) -> None:
     """Poll an in-guest network-readiness probe until it succeeds or the deadline passes."""
 ```
@@ -56,11 +58,23 @@ Behavior:
 
 - Compute `deadline = monotonic() + timeout_s`. Loop: if `probe()` is `True`, return; if
   `monotonic() >= deadline`, raise `PROVISIONING_FAILURE` ("guest network did not come up within
-  Ns", `details={"domain": domain_name, "timeout_s": timeout_s}`); else `sleep(poll_s)`.
+  Ns") with `details={"domain": domain_name, "timeout_s": timeout_s}` **merged with
+  `timeout_detail()`** when that callable is supplied; else `sleep(poll_s)`.
+- `timeout_detail` exists because the probe collapses to a `bool`, and a `False` return cannot by
+  itself distinguish "no default route yet" from "the probe command failed to execute" (a missing
+  binary, an unreadable `/proc/net/route`). The pipeline's exit status is `grep`'s and `pipefail`
+  is not set, so a broken probe reads as rc≠0 = "not ready" and would otherwise surface only as a
+  bare `network did not come up` after the full timeout. The caller passes a `timeout_detail` that
+  returns the **last** probe invocation's (redacted) stderr/stdout, so a broken-image failure is
+  diagnosable instead of a silent timeout (Finding A).
 - The probe owns the "not ready" vs "fatal" distinction: a `False` return means keep polling; a
-  raised `CategorizedError` (agent unreachable mid-probe) propagates. This mirrors
+  raised `CategorizedError` (agent unreachable mid-probe) propagates **by design**. This mirrors
   `wait_for_agent`, which propagates a `libvirtError`. Rationale: `wait_for_agent` already
-  confirmed the channel connected, so a drop during the probe is a real `transport_failure`.
+  confirmed the channel connected and this change does **not** introduce the agent-flapping
+  configuration #500 rules out (gating `qemu-guest-agent.service` on `network-online.target`), so
+  an agent drop during the probe is a genuine `transport_failure`, not slowness — and swallowing
+  it as "not ready" would mask a dead agent behind the full `network_timeout_s` (the inverse of
+  Finding A). The gate tolerates DHCP slowness (probe rc≠0), not agent unreachability (raised).
 - The deadline check uses `>=` and runs **before** the first `sleep`, matching `wait_for_agent`,
   so a `timeout_s` that has already elapsed raises rather than sleeping.
 
@@ -81,7 +95,12 @@ _NETWORK_POLL_S = 2.0
 `/proc/net/route` is tab-separated; column 2 (`Destination`) is `00000000` for the default
 route. `cut -f2` (default tab delimiter) emits each route's destination; `grep -qx 00000000`
 exits 0 iff a line is exactly `00000000`. The header line's field 2 is `Destination`, never
-matched.
+matched. (Verified empirically: a default route's destination is exactly the 8-hex-char
+`00000000`, and the kernel's trailing space-padding falls after the last field, so `cut -f2`
+yields a clean `00000000`.) The probe depends only on `cut` + `grep` (coreutils — present in any
+image with a POSIX userland; the build image is Ubuntu-based), and a probe-execution failure
+(e.g. either binary missing) is surfaced via the `timeout_detail` last-output capture below, not
+swallowed as a bare timeout.
 
 `BuildVmTiming` gains two fields with the constants above as defaults:
 
@@ -89,6 +108,12 @@ matched.
 network_timeout_s: float = _NETWORK_TIMEOUT_S
 network_poll_s: float = _NETWORK_POLL_S
 ```
+
+The 120s network default sits on top of the existing `_AGENT_TIMEOUT_S=180s`, so the worst-case
+pre-build readiness wait grows to ~300s. The BUILD job is a durable worker job with no tighter
+per-step deadline in scope (the lease is reclaimed by the reconciler on job-liveness, not a wall
+clock), so 300s is well within the envelope a kernel build already occupies; the fields are
+injectable so a deployment with a tighter bound can lower them (Finding D).
 
 `session()` inserts the gate after `wait_for_agent` and after constructing the transport, before
 `yield`:
@@ -105,11 +130,22 @@ yield transport
 
 ```python
 def _wait_for_network(self, transport: GuestExecBuildTransport, domain_name: str) -> None:
+    last: list[CommandResult] = []
+
     def probe() -> bool:
         result = transport.run(
             _NETWORK_PROBE_ARGV, cwd="/", timeout_s=_NETWORK_PROBE_CALL_TIMEOUT_S
         )
+        last.append(result)
         return result.returncode == 0
+
+    def timeout_detail() -> dict[str, object]:
+        if not last:
+            return {}
+        return {
+            "probe_stderr": redacted_tail(last[-1].stderr, self._secret_registry),
+            "probe_stdout": last[-1].stdout[-200:],
+        }
 
     wait_for_network(
         probe,
@@ -118,13 +154,18 @@ def _wait_for_network(self, transport: GuestExecBuildTransport, domain_name: str
         sleep=self._timing.sleep,
         timeout_s=self._timing.network_timeout_s,
         poll_s=self._timing.network_poll_s,
+        timeout_detail=timeout_detail,
     )
 ```
 
 `transport.run` composes the argv as one `cd / && exec /bin/sh -c '<probe>'` guest-agent hop
 (the transport's existing `_run_remote` form), so `argv[0]` is the allowlisted `/bin/sh` — no
 allowlist change. The gate is inside the `try:`/`finally:` that owns teardown, so a probe that
-times out (or an agent that drops) still tears the domain + overlay down.
+times out (or an agent that drops) still tears the domain + overlay down. The `timeout_detail`
+closure returns the **last** probe invocation's redacted stderr/stdout, so a deadline failure
+caused by a broken probe (missing `cut`/`grep`, unreadable proc file) is diagnosable rather than
+a bare "network did not come up" (Finding A). `EphemeralBuildVm` already holds a
+`SecretRegistry`, so `redacted_tail` is reused here as it is in `clone()`.
 
 ### C. `clone()` checks init + fetch return codes (`shell_transport.py`)
 
@@ -187,9 +228,12 @@ unchanged. See ADR-0144 "Considered & rejected" for why fetch is not network-cat
 
 - **`wait_for_network`** (`tests/providers/remote_libvirt/lifecycle/test_readiness.py`):
   returns when `probe` is `True` on the first call; polls N times then returns when the probe
-  flips `True`; raises `PROVISIONING_FAILURE` when the probe stays `False` past the deadline;
-  propagates a `CategorizedError` raised by the probe (does not swallow it as "not ready").
-  Drive with a fake clock (`_ticker`) and a stub probe whose return sequence is controlled.
+  flips `True`; raises `PROVISIONING_FAILURE` when the probe stays `False` past the deadline, and
+  that error carries the supplied `timeout_detail()` keys (the broken-probe diagnosability path,
+  Finding A); propagates a `CategorizedError` raised by the probe (does not swallow it as "not
+  ready"). Drive with a fake clock (`_ticker`) and a stub probe whose return sequence is
+  controlled; pass a small `timeout_s` (e.g. a few `_ticker` steps) so the timeout case does not
+  require ~120 fake-clock iterations.
 - **build-VM gate** (`tests/providers/remote_libvirt/lifecycle/test_build_vm.py`): with an agent
   fake whose route-probe `guest-exec-status` returns rc≠0 for the first K polls then rc 0, the
   session yields the transport only after the route appears (assert the probe argv was issued and

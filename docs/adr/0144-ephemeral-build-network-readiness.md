@@ -59,6 +59,14 @@ operation) runs against a network-ready guest.
   `network_timeout_s` (default 120s) and `network_poll_s` (default 2s) make it injectable; on
   deadline it raises `PROVISIONING_FAILURE` ("guest network did not come up within Ns"),
   consistent with the agent-timeout failure on the same path.
+- Because the probe collapses to a `bool`, a `False` cannot by itself distinguish "no route yet"
+  from "the probe command failed to run" (a missing `cut`/`grep`, an unreadable proc file — the
+  pipeline reports `grep`'s rc and `pipefail` is unset). `wait_for_network` takes an optional
+  `timeout_detail` callable; the caller supplies the **last** probe invocation's redacted
+  stderr/stdout, so a deadline failure caused by a broken probe is diagnosable rather than a bare
+  timeout. A raised `CategorizedError` (agent dropped mid-probe) still propagates — the gate
+  tolerates DHCP slowness, not agent unreachability, and this change does not introduce the
+  agent-flapping config the image-side note rules out.
 
 **2. Surface `git fetch`'s return code in `clone()` (clone failure contract).**
 `ShellBuildTransport.clone()` now checks the `git init` and `git fetch` return codes, not only
