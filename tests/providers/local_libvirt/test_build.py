@@ -1517,6 +1517,24 @@ def test_real_checkout_skips_patch_when_absent(
     assert order == ["sync", "merge"]  # no patch step
 
 
+def test_from_env_threads_remote_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("KDIVE_BUILD_WORKSPACE", "/tmp/ws")
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "/srv/linux")
+    monkeypatch.setenv("KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST", "github.com/myorg, git.example.com")
+
+    def _fake_make_checkout(
+        kernel_src: str, secret_registry: SecretRegistry, *, allowlist: Sequence[str]
+    ) -> object:
+        del kernel_src, secret_registry
+        captured["allow"] = tuple(allowlist)
+        return lambda *_a, **_k: None
+
+    monkeypatch.setattr(build_module._build_workspace, "make_checkout", _fake_make_checkout)
+    LocalLibvirtBuild.from_env(secret_registry=SecretRegistry())
+    assert captured["allow"] == ("github.com/myorg", "git.example.com")
+
+
 # --- clone_tree (local git lane) + provenance dispatch (ADR-0157) -------------------
 
 

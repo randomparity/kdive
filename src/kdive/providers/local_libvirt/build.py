@@ -49,6 +49,7 @@ from kdive.providers.shared.build_host.artifact_publish import (
     StorePort,
     publish_artifact_source,
 )
+from kdive.providers.shared.build_host.git_source import local_build_remote_allowlist_from_env
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
 from kdive.providers.shared.build_host.transport_seams import (
     transport_git_checkout,
@@ -130,7 +131,9 @@ class LocalLibvirtBuild:
             tenant="local",
             workspace_root=workspace_root,
             store_factory=object_store_from_env,
-            checkout=_build_workspace.make_checkout(kernel_src, secret_registry),
+            checkout=_build_workspace.make_checkout(
+                kernel_src, secret_registry, allowlist=local_build_remote_allowlist_from_env()
+            ),
             run_olddefconfig=_build_exec.real_run_olddefconfig,
             read_config=_build_exec.real_read_config,
             run_make=_build_exec.real_run_make,
