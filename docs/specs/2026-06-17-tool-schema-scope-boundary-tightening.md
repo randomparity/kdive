@@ -80,8 +80,10 @@ two sentences each, each naming the alternative tool:
   would be satisfied by a `provision_defined` mention — the assertion matches the
   alternative on a token boundary (regex `\bsystems\.provision\b(?!_)`, i.e. the tool
   name not immediately followed by `_`), not a plain substring. It also asserts each
-  description contains a negative-guidance token (one of `not`, `instead`, `rather`)
-  so the "when not to use" intent is actually measured, not assumed.
+  description contains a negative-guidance cue, matched with the same word-boundary
+  discipline (case-insensitive regex `\b(instead|rather|not)\b`) so that substrings
+  like `cannot` / `annotation` / `note` do not vacuously satisfy it — the terse
+  docstrings should prefer the unambiguous `instead` / `rather` cues.
 
 ## Acceptance criteria
 
