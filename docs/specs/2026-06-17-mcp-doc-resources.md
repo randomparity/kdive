@@ -20,8 +20,11 @@ doc named in an error/schema string is reachable over MCP.
 
 1. `app.list_resources()` (the server side of `ListMcpResourcesTool`) returns **at least**
    a resource for `docs/operating/build-source-staging.md` and one for ADR-0080.
-2. Reading each registered resource by URI returns the **current** content of the
-   corresponding source doc (byte-for-byte the canonical `docs/` file).
+2. Reading each registered resource by URI returns text equal to `read_text` of the
+   corresponding canonical `docs/` file, compared via the same UTF-8 `read_text` on both
+   sides so the pre-commit end-of-file fixer cannot split the snapshot from its source.
+   The advertised URI round-trips through `list_resources` unchanged (FastMCP 3.4.0 accepts
+   the `resource://kdive/...` scheme verbatim — verified).
 3. The served content is present in the runtime container image (which ships only `src/`).
 4. No request-supplied path selects a file: the resource set is a closed, code-defined
    allowlist. Reading an unregistered URI is a normal FastMCP not-found, never a filesystem
@@ -60,9 +63,10 @@ empty resource.
 
 ### Packaged snapshots + drift guard
 
-- `scripts/gen_doc_resources.py`: copies each `source` doc into
-  `src/kdive/mcp/resources/_content/<content_file>`. `--check` mode regenerates into a temp
-  dir and diffs against the committed snapshots, exiting non-zero on drift.
+- `scripts/gen_doc_resources.py`: writes each `source` doc's `read_text` (UTF-8) into
+  `src/kdive/mcp/resources/_content/<content_file>` via the same `write_text`, so the
+  snapshot is identical under the repo's text-normalizing hooks. `--check` mode regenerates
+  into a temp dir and diffs against the committed snapshots, exiting non-zero on drift.
 - `justfile`: `resources-docs` (write) and `resources-docs-check` (verify); the latter is
   added to the `ci` recipe **and** to `.github/workflows/ci.yml` as an individual step
   (hosted CI runs sub-recipes directly).
@@ -70,7 +74,8 @@ empty resource.
 ## Tests
 
 - `test_app.py`: `build_app(...)` registers the two doc resources; `list_resources()`
-  includes both URIs; reading each returns text equal to the canonical `docs/` file.
+  includes both URIs **verbatim** (no scheme/host normalization); reading each returns text
+  equal to `read_text` of the canonical `docs/` file.
 - A drift unit test asserts each packaged snapshot equals its canonical source doc (so a
   doc edit without regeneration fails locally, not only in the CI shell recipe).
 - Registrar edge: a missing snapshot file raises at registration (packaging regression).
