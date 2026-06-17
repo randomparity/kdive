@@ -46,8 +46,11 @@ See ADR-0157 for the decision and rejected alternatives. In summary:
      `VIR_ERR_OPERATION_UNSUPPORTED`, `VIR_ERR_CONFIG_UNSUPPORTED`.
    - **Everything else →** `TRANSPORT_FAILURE` (unchanged behavior), including
      `VIR_ERR_AGENT_UNRESPONSIVE`, `VIR_ERR_AGENT_COMMAND_TIMEOUT`, `VIR_ERR_AGENT_UNSYNCED`,
-     and a libvirtError with no live code (`get_error_code() == VIR_ERR_OK`, which is the
-     shape a bare `libvirt.libvirtError("msg")` carries).
+     and a libvirtError with no live error code — a bare `libvirt.libvirtError("msg")` (no
+     `.err` tuple) returns `get_error_code() == None`, which is not a member of the
+     deterministic set and so falls through. The classifier is a single membership test
+     (`code in _DETERMINISTIC_CONFIG_CODES`), so `None` is handled by falling through with no
+     special case.
 
 2. **The message reflects the category.** The deterministic raise carries a message naming a
    build-host/agent configuration problem (e.g. "qemu-guest-agent is not usable on this build
@@ -102,9 +105,9 @@ Unit tests in `tests/providers/remote_libvirt/guest/test_guest_agent.py`, using 
   (the command ran; the agent answered) — existing
   `test_run_times_out_when_the_command_never_exits` must still pass.
 
-Edge cases: a code outside both sets falls through to `TRANSPORT_FAILURE` (conservative
-default); an exception whose `get_error_code()` raises or returns `VIR_ERR_OK` maps to
-`TRANSPORT_FAILURE` (no false terminal).
+Edge cases: a code outside the deterministic set falls through to `TRANSPORT_FAILURE`
+(conservative default); a bare libvirtError whose `get_error_code()` returns `None` falls
+through the same membership test to `TRANSPORT_FAILURE` (no false terminal).
 
 ## Out of scope
 
