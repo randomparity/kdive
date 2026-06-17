@@ -61,15 +61,14 @@ async def run(ns: argparse.Namespace) -> int:
     transport = StreamableHttpTransport(
         url=ns.base, headers={"Authorization": f"Bearer {ns.token}"}
     )
-    rc = 0
     async with Client(transport) as client:
         for name, arguments in build_calls(ns):
             result = await client.call_tool(name, arguments, raise_on_error=False)
             if getattr(result, "is_error", False):
                 print(f"error: tool {name} failed", file=sys.stderr)
-                rc = 1
+                return 1
             print(json.dumps(result.structured_content, default=str))
-    return rc
+    return 0
 
 
 if __name__ == "__main__":
