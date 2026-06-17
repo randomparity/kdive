@@ -70,16 +70,45 @@ subprocesses on the worker:
    git option) or a control character.
 2. `remote_allowed(remote, allowlist)` — enforce the allowlist (below). Reject otherwise.
 3. `shutil.which("git")` — `MISSING_DEPENDENCY` if git is absent (mirrors `apply_patch`).
-4. `git init <workspace>` → `INFRASTRUCTURE_FAILURE` on non-zero.
-5. `git -C <workspace> fetch --depth 1 <remote> <ref>` → `CONFIGURATION_ERROR` on non-zero.
-6. `git -C <workspace> rev-parse --verify --quiet FETCH_HEAD` → `TRANSPORT_FAILURE` if absent
+4. **Clean the workspace first** (`rmtree(workspace, ignore_errors=True)` then `mkdir`), so a
+   retried `run_id` whose best-effort cleanup did not run cannot inherit stale content. The
+   warm-tree lane gets this for free from `rsync --delete`; `git init` + `checkout FETCH_HEAD`
+   does **not** remove pre-existing untracked files, so the clone lane must do it explicitly.
+5. `git init <workspace>` → `INFRASTRUCTURE_FAILURE` on non-zero.
+6. `git -C <workspace> fetch --depth 1 <remote> <ref>` → `CONFIGURATION_ERROR` on non-zero.
+7. `git -C <workspace> rev-parse --verify --quiet FETCH_HEAD` → `TRANSPORT_FAILURE` if absent
    (a fetch whose failure was masked to exit 0 leaves no `FETCH_HEAD`; surface the fetch's own
    stderr rather than a misleading later pathspec error — ADR-0154).
-7. `git -C <workspace> checkout FETCH_HEAD` → `CONFIGURATION_ERROR` on non-zero.
+8. `git -C <workspace> checkout FETCH_HEAD` → `CONFIGURATION_ERROR` on non-zero.
+
+`ref` must be a server-advertised tag or branch. A bare commit SHA is **not** guaranteed
+fetchable by a shallow `fetch <sha>` (most servers reject it unless `uploadpack.allowAnySHA1InWant`
+is set), and a SHA that the server will not serve surfaces as the normal `git fetch` failure
+above — the clone lane does not special-case it.
 
 All captured stderr passes through `redacted_tail` before it reaches any error detail. The
 remote URL and ref are never echoed into error details (a remote may embed a credential in its
 userinfo component, e.g. a token before the `@` host separator).
+
+#### Git egress hardening (the allowlist gates the string, not the connection)
+
+`remote_allowed` validates the *submitted* URL, but a bare `git fetch` would not stay confined
+to it: git follows the server's HTTP redirect on the initial request (`http.followRedirects`
+defaults to `initial`) and applies any ambient `url.<base>.insteadOf` rewrites from system/global
+config — either of which can redirect or rewrite an allowlisted host to an internal target
+*after* the allowlist check passed. The clone lane therefore runs every git invocation with the
+ambient escape hatches closed:
+
+- `-c http.followRedirects=false` — a redirect is an error, not a silent hop off the allowlisted
+  host.
+- `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null` — no system/global gitconfig, so an
+  `insteadOf` rule cannot rewrite the validated remote.
+- `-c protocol.allow=never` plus per-protocol `-c protocol.{https,git,ssh}.allow=always`, and
+  `GIT_PROTOCOL_FROM_USER=0` — only the three vetted transports run, so the scheme gate cannot be
+  sidestepped by a helper transport (`ext::`, `fd::`).
+
+These are part of the egress contract, not an implementation nicety: without them the allowlist
+does not actually bound where the worker connects.
 
 ### Egress control — allowlist (deny by default)
 
@@ -110,7 +139,15 @@ trust the worker to clone from.
    `github.com/myorg-evil`. An entry with no path (`github.com`) admits any path on that host.
 
 A rejection is `CONFIGURATION_ERROR` whose detail names the setting and the staging doc but
-**not** the submitted remote.
+**not** the submitted remote. The detail distinguishes the two reasons an agent most needs to
+tell apart, without echoing the URL: *lane disabled* (the allowlist is empty/unset — the
+operator has not enabled local git builds at all) versus *remote not allowlisted* (the lane is
+on, but this host/path is not permitted). The first tells the agent to ask the operator to
+enable the lane; the second tells it to pick an allowlisted remote.
+
+Discoverability (an agent reading the configured allowlist before it submits, rather than
+learning at build time) is **out of scope** here and tracked as a follow-up; this spec only
+makes the build-time rejection self-explanatory.
 
 ### Code organization
 
@@ -150,6 +187,13 @@ and `make` stay under the `live_vm` gate):
   remote host still admitted.
 - **Clone error mapping** via an injected subprocess seam: git missing, `init`/`fetch`/`checkout`
   non-zero, missing `FETCH_HEAD`.
+- **Egress hardening**: the git argv/env the clone lane builds carries
+  `http.followRedirects=false`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, and the
+  protocol-allow restriction (asserted on the injected runner's captured argv/env, no network).
+- **Clean workspace**: clone_tree removes pre-existing workspace content before `git init` (a
+  stale file planted in the workspace is gone after the clone seam runs).
+- **Rejection reason**: an empty allowlist yields the *lane-disabled* detail; a non-matching
+  remote against a non-empty allowlist yields the *remote-not-allowlisted* detail.
 - **Redaction**: a disallowed-remote error and a clone-failure error never contain the remote
   URL, credentials, or ref.
 

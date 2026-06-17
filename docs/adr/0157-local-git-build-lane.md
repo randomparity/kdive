@@ -34,7 +34,14 @@ git server, a link-local metadata endpoint, or a `file://` path.
    `sync_tree` for a bare string and a new `clone_tree` for a git source, then the unchanged
    `merge_config` + optional `apply_patch`. `clone_tree` reuses ADR-0154's recipe (`git init`
    + `fetch --depth 1` + verify `FETCH_HEAD` + `checkout`) as local subprocesses, with the same
-   error taxonomy and stderr redaction.
+   error taxonomy and stderr redaction. It cleans the workspace before `git init` (the warm-tree
+   lane gets this from `rsync --delete`; `git init` + checkout does not).
+
+   Because the worker runs in the control plane, `clone_tree` closes git's ambient escape
+   hatches so the allowlist actually bounds the connection: `http.followRedirects=false` (a
+   server redirect off the allowlisted host is an error, not a silent hop), `GIT_CONFIG_NOSYSTEM`
+   + `GIT_CONFIG_GLOBAL=/dev/null` (no `insteadOf` rewrite of the validated remote), and a
+   protocol-allow restriction to the three vetted transports.
 
 3. **Gate the lane with an operator allowlist, deny by default.** A new worker setting
    `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` (comma-separated) lists trusted hosts or host+path
