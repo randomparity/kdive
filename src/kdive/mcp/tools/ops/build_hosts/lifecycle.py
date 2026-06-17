@@ -17,7 +17,7 @@ import psycopg.errors
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.build_hosts import WORKER_LOCAL_ID, get_by_name
+from kdive.db.build_hosts import WORKER_LOCAL_ID, BuildHostKind, get_by_name
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._platform_auth import (
@@ -30,6 +30,7 @@ from kdive.mcp.tools.ops import _reads
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
+from kdive.services.runs.build_host_selection import accepted_source_kinds
 
 _log = logging.getLogger(__name__)
 
@@ -94,6 +95,9 @@ async def list_build_hosts(
                 "max_concurrent": str(row["max_concurrent"]),
                 "enabled": str(row["enabled"]).lower(),
                 "state": row["state"],
+                "supported_source_kinds": [
+                    kind.value for kind in accepted_source_kinds(BuildHostKind(row["kind"]))
+                ],
             },
         )
         for row in rows
