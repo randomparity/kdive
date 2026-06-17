@@ -13,21 +13,35 @@ The control-plane image (ADR-0088) runs the worker, which executes the Build pla
 `gcc make binutils gdb libvirt-clients openssh-client libelf1 libdw1 zlib1g`. A Linux
 kernel `make` hard-requires `flex`, `bison`, `bc` — all missing — and the lane also needs
 `git` (`patch_ref` + git-clone lane), `rsync` (warm-tree mirror), `xz`, and the
-`libssl-dev`/`libelf-dev` headers the kernel build compiles against. So no published image
-can run the build lane, and the only guards (the `Dockerfile` `--version` RUN and the gated
-smoke test) assert only the previously-shipped tools, so the gap is invisible.
+`libssl-dev`/`libelf-dev` headers the kernel build compiles against. So the image is
+missing tools the build lane hard-requires, and the only guards (the `Dockerfile`
+`--version` RUN and the gated smoke test) assert only the previously-shipped tools, so the
+gap is invisible — a missing kernel-build tool surfaces late, inside a job, not at
+image-build time.
 
 ## Goal / acceptance criteria
 
 1. The built image carries `flex`, `bison`, `bc`, `git`, `rsync`, `xz`, and the
    `libssl-dev`/`libelf-dev` headers in addition to the existing `gcc/make/binutils/gdb/…`.
 2. A missing build tool fails the **image build** (not just a late job): the build-time
-   `RUN` asserts each new binary's `--version` and that the two `-dev` packages are
-   installed.
+   `RUN` asserts each new binary's `--version` and that the `libssl-dev`/`libelf-dev`
+   header files exist on disk.
 3. The gated smoke test (`tests/image/test_image_smoke.py`) asserts each build binary
    resolves on PATH for the non-root user at the image boundary.
 4. Operator docs that name the build prerequisite are honest about the concrete
    dependencies and which deployment supplies them.
+
+### Verification boundary
+
+The guards above verify **presence** of the named tools (binary `--version` exits 0; the
+two `-dev` header files exist on disk), not that a kernel actually compiles. Presence is
+necessary but not sufficient: a still-unlisted dependency, or a tool present but too old,
+would pass every guard. No per-PR check compiles a kernel — that path is heavy (a kernel
+tree + minutes of `make`) and is exercised only behind the gated `live_vm`/`live_stack`
+suites, not in the `image-build` job. The named set is therefore reasoned from the
+worker-local direct-boot `make bzImage` target's needs (no `modules_install`, so no `kmod`;
+no initramfs assembly in-image, so no `cpio`), and the `at minimum` framing in ADR-0146 is
+deliberate: if a real build later surfaces another missing tool, it is added the same way.
 
 ## Non-goals
 
@@ -65,8 +79,10 @@ In `Dockerfile`:
   build-time headers).
 - Extend the build-time verification `RUN` to also run
   `flex --version && bison --version && bc --version && git --version && rsync --version &&
-  xz --version` and to assert `dpkg -s libssl-dev libelf-dev` (the `-dev` packages have no
-  `--version`).
+  xz --version` and, for the `-dev` packages (which have no `--version`), assert their
+  header files exist on disk: `test -f /usr/include/openssl/ssl.h` (libssl-dev) and
+  `test -f /usr/include/libelf.h` (libelf-dev). A header-file existence check verifies what
+  the kernel build actually consumes, rather than only `dpkg` metadata.
 
 - Files: `Dockerfile`.
 - Acceptance: `docker build` succeeds; building with any of the new packages removed fails

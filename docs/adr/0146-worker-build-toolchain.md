@@ -43,7 +43,9 @@ silently.
 2. **Guard the toolchain at two surfaces so the gap cannot regress silently.**
    - **Build-time `RUN` (`Dockerfile`).** Extend the existing tool-verification RUN to also
      run `flex/bison/bc/git/rsync/xz --version` and to assert the `libssl-dev`/`libelf-dev`
-     packages are installed (`dpkg -s`). A missing tool fails the **image build itself**
+     header files exist on disk (`test -f /usr/include/openssl/ssl.h` and
+     `test -f /usr/include/libelf.h`) — a functional check of what the kernel build
+     consumes, not just `dpkg` metadata. A missing tool fails the **image build itself**
      (and the CI `image-build` job), before any test runs — no release image can be cut
      without the toolchain.
    - **Gated smoke test (`tests/image/test_image_smoke.py`).** Assert each build *binary*
