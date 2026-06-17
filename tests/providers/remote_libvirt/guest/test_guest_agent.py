@@ -174,14 +174,13 @@ def test_deterministic_libvirt_error_maps_to_configuration_error(code: int) -> N
     "code",
     [
         libvirt.VIR_ERR_AGENT_UNRESPONSIVE,
-        libvirt.VIR_ERR_AGENT_COMMAND_TIMEOUT,
-        libvirt.VIR_ERR_AGENT_UNSYNCED,
         libvirt.VIR_ERR_OPERATION_FAILED,
     ],
 )
 def test_transient_libvirt_error_stays_transport_failure(code: int) -> None:
-    # A configured-but-not-currently-answering agent (mid-reconnect, died, sync timeout) or an
-    # unrelated transient libvirt error keeps the retryable transport classification (#531).
+    # A configured-but-not-currently-answering agent (VIR_ERR_AGENT_UNRESPONSIVE: mid-reconnect,
+    # died, sync timeout) or an unrelated transient libvirt error keeps the retryable transport
+    # classification — only the deterministic-config codes flip to CONFIGURATION_ERROR (#531).
     with pytest.raises(CategorizedError) as excinfo:
         _exec_raising(libvirt_error(code)).run(object(), ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
