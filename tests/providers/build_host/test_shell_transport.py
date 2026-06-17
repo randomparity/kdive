@@ -105,6 +105,25 @@ def test_clone_issues_init_fetch_checkout_in_order() -> None:
     assert argvs[2] == ["git", "-C", "/src", "checkout", "FETCH_HEAD"]
 
 
+def test_clone_init_non_zero_is_infrastructure_failure() -> None:
+    t = _RecordingTransport([_ok(returncode=1, stderr="permission denied")])
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("https://git.example/linux.git", "v6.9", "/src")
+    assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "permission denied" in str(exc.value.details["stderr"])
+
+
+def test_clone_fetch_non_zero_is_configuration_error_with_fetch_stderr() -> None:
+    # init ok, fetch fails — the regression for the masked-cause bug (checkout never runs).
+    t = _RecordingTransport([_ok(), _ok(returncode=128, stderr="Could not resolve host")])
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("https://git.example/linux.git", "v6.9", "/src")
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert "Could not resolve host" in str(exc.value.details["stderr"])
+    # Only init + fetch ran; checkout was never reached.
+    assert [c[0][:2] for c in t.calls] == [["git", "init"], ["git", "-C"]]
+
+
 def test_clone_checkout_non_zero_is_configuration_error() -> None:
     t = _RecordingTransport([_ok(), _ok(), _ok(returncode=1, stderr="pathspec")])
     with pytest.raises(CategorizedError) as exc:

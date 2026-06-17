@@ -14,6 +14,7 @@ from uuid import UUID
 import libvirt
 import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BuildVmTiming,
@@ -48,6 +49,26 @@ def _agent_ok(domain: Any, command: str, timeout: int, flags: int) -> str:
     return json.dumps({"return": {"exited": True, "exitcode": 0}})
 
 
+def _agent_route_after(polls: int) -> tuple[Any, dict[str, int]]:
+    """A guest-agent fake whose route probe reports rc!=0 for the first `polls` checks then rc 0.
+
+    The probe is the only guest-exec issued in these tests, so each guest-exec/guest-exec-status
+    pair is one probe. Returns rc 1 (no route) until `polls` checks have happened, then rc 0. The
+    returned `state` dict exposes `checks` so a test can assert the gate actually polled.
+    """
+    state = {"checks": 0}
+
+    def _agent(domain: Any, command: str, timeout: int, flags: int) -> str:
+        msg = json.loads(command)
+        if msg["execute"] == "guest-exec":
+            return json.dumps({"return": {"pid": 1}})
+        state["checks"] += 1
+        rc = 0 if state["checks"] > polls else 1
+        return json.dumps({"return": {"exited": True, "exitcode": rc}})
+
+    return _agent, state
+
+
 def _conn_with_base() -> FakeProvisionConn:
     pool = FakePool({_BASE_VOLUME: FakeVolume(_BASE_VOLUME)})
     return FakeProvisionConn({"default": pool})
@@ -68,6 +89,26 @@ def _build_vm(conn: FakeProvisionConn, tmp_path: Any) -> EphemeralBuildVm:
         ),
         agent_command=_agent_ok,
         timing=BuildVmTiming(sleep=lambda _s: None, monotonic=_ticker()),
+    )
+
+
+def _build_vm_with_agent(
+    conn: FakeProvisionConn, tmp_path: Any, agent: Any, **timing: Any
+) -> EphemeralBuildVm:
+    def _open(_uri: str) -> Any:
+        return conn
+
+    return EphemeralBuildVm(
+        secret_registry=SecretRegistry(),
+        connections=remote_libvirt_connections(
+            secret_registry=SecretRegistry(),
+            config_factory=_config,
+            open_connection=_open,
+            secret_backend_factory=RecordingBackend,
+            pki_base_dir=tmp_path,
+        ),
+        agent_command=agent,
+        timing=BuildVmTiming(sleep=lambda _s: None, monotonic=_ticker(), **timing),
     )
 
 
@@ -143,3 +184,33 @@ def test_session_teardown_failure_preserves_body_error_and_logs_context(
         record.exc_info is not None and "domain teardown failed" in record.message
         for record in caplog.records
     )
+
+
+# --- network-readiness gate (ADR-0144) ----------------------------------------------
+
+
+def test_session_yields_only_after_route_appears(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent, state = _agent_route_after(2)
+    vm = _build_vm_with_agent(conn, tmp_path, agent)
+
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+        assert conn.domains[DOMAIN_NAME].active
+        # The gate polled until the route appeared (rc1, rc1, rc0) — not a vacuous immediate yield.
+        assert state["checks"] == 3
+    assert DOMAIN_NAME not in conn.domains
+
+
+def test_session_network_never_ready_raises_and_tears_down(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    agent, _state = _agent_route_after(10_000)
+    # Route never appears; small network timeout so the fake clock reaches the deadline quickly.
+    vm = _build_vm_with_agent(conn, tmp_path, agent, network_timeout_s=5.0, network_poll_s=1.0)
+
+    with pytest.raises(CategorizedError) as exc, vm.session(_BASE_VOLUME, run_id=RUN_ID):
+        pass
+    assert exc.value.category == ErrorCategory.PROVISIONING_FAILURE
+    # Teardown still ran.
+    assert DOMAIN_NAME not in conn.domains
+    assert OVERLAY in conn.pools["default"].deleted
