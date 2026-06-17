@@ -8,6 +8,7 @@ callable (production: ``libvirt_qemu.qemuAgentCommand``); no real host is touche
 from __future__ import annotations
 
 import base64
+import builtins
 import itertools
 import json
 from collections.abc import Callable
@@ -17,7 +18,7 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec
+from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
 
 _ALLOWED = frozenset({"/usr/bin/curl", "/usr/bin/kdive-install"})
 
@@ -131,6 +132,55 @@ def test_agent_unreachable_maps_to_transport_failure() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
+def test_qemu_agent_command_maps_missing_libvirt_qemu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def _import(
+        name: str,
+        globals_: dict[str, object] | None = None,
+        locals_: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> object:
+        if name == "libvirt_qemu":
+            raise ModuleNotFoundError(name="libvirt_qemu")
+        return original_import(name, globals_, locals_, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        qemu_agent_command(object(), "{}", 1, 0)
+
+    assert excinfo.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert excinfo.value.details == {"dependency": "libvirt_qemu"}
+
+
+def test_qemu_agent_command_propagates_unrelated_import_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def _import(
+        name: str,
+        globals_: dict[str, object] | None = None,
+        locals_: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> object:
+        if name == "libvirt_qemu":
+            raise ModuleNotFoundError(name="other_dependency")
+        return original_import(name, globals_, locals_, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        qemu_agent_command(object(), "{}", 1, 0)
+
+    assert excinfo.value.name == "other_dependency"
 
 
 def test_malformed_agent_response_maps_to_infrastructure_failure() -> None:

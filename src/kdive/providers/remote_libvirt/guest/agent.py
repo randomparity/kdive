@@ -56,7 +56,16 @@ def qemu_agent_command(domain: Any, command: str, timeout: int, flags: int) -> s
     Imported lazily so the package stays importable where the ``libvirt-qemu`` binding
     is absent (the same buildable-without-host posture as the rest of the provider).
     """
-    import libvirt_qemu
+    try:
+        import libvirt_qemu
+    except ModuleNotFoundError as exc:
+        if exc.name != "libvirt_qemu":
+            raise
+        raise CategorizedError(
+            "libvirt_qemu binding is required for qemu-guest-agent commands",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"dependency": "libvirt_qemu"},
+        ) from exc
 
     return libvirt_qemu.qemuAgentCommand(domain, command, timeout, flags)
 
