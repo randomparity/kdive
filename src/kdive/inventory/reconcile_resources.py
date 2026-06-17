@@ -46,6 +46,7 @@ from kdive.domain.resource_capabilities import (
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
+from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
 from kdive.inventory.reconcile import (
     CONFIG_MANAGED_BY,
@@ -464,49 +465,87 @@ def _caps(row: _CapsRow) -> ResourceCaps:
 
 
 def _resource_caps(value: object) -> ResourceCaps:
-    assert isinstance(value, dict)
+    if not isinstance(value, dict):
+        raise InventoryError("resources", "capabilities", "database row is not a JSON object")
     return cast("ResourceCaps", value)
 
 
 def _upsert_row(row: dict[str, Any]) -> _UpsertResourceRow:
-    assert isinstance(row["id"], UUID)
-    assert row["name"] is None or isinstance(row["name"], str)
-    assert isinstance(row["host_uri"], str)
-    assert isinstance(row["cost_class"], str)
-    assert isinstance(row["managed_by"], str)
-    assert row["lease_expires_at"] is None or isinstance(row["lease_expires_at"], datetime)
-    assert row["owner_project"] is None or isinstance(row["owner_project"], str)
-    assert isinstance(row["affinity_allowlist"], list)
+    row_id = _expect_uuid(row, "id")
+    name = _expect_optional_str(row, "name")
+    host_uri = _expect_str(row, "host_uri")
+    cost_class = _expect_str(row, "cost_class")
+    managed_by = _expect_str(row, "managed_by")
+    lease_expires_at = _expect_optional_datetime(row, "lease_expires_at")
+    owner_project = _expect_optional_str(row, "owner_project")
+    affinity_allowlist = _expect_str_list(row, "affinity_allowlist")
     return {
-        "id": row["id"],
-        "name": row["name"],
-        "host_uri": row["host_uri"],
-        "cost_class": row["cost_class"],
-        "managed_by": row["managed_by"],
-        "lease_expires_at": row["lease_expires_at"],
-        "owner_project": row["owner_project"],
-        "affinity_allowlist": cast("list[str]", row["affinity_allowlist"]),
+        "id": row_id,
+        "name": name,
+        "host_uri": host_uri,
+        "cost_class": cost_class,
+        "managed_by": managed_by,
+        "lease_expires_at": lease_expires_at,
+        "owner_project": owner_project,
+        "affinity_allowlist": affinity_allowlist,
         "capabilities": _resource_caps(row["capabilities"]),
     }
 
 
 def _local_row(row: dict[str, Any]) -> _LocalResourceRow:
-    assert isinstance(row["id"], UUID)
-    assert row["name"] is None or isinstance(row["name"], str)
-    assert isinstance(row["cost_class"], str)
     return {
-        "id": row["id"],
-        "name": row["name"],
-        "cost_class": row["cost_class"],
+        "id": _expect_uuid(row, "id"),
+        "name": _expect_optional_str(row, "name"),
+        "cost_class": _expect_str(row, "cost_class"),
         "capabilities": _resource_caps(row["capabilities"]),
     }
 
 
 def _prune_row(row: dict[str, Any]) -> _PruneResourceRow:
-    assert isinstance(row["id"], UUID)
-    assert isinstance(row["kind"], str)
-    assert isinstance(row["name"], str)
-    return {"id": row["id"], "kind": row["kind"], "name": row["name"]}
+    return {
+        "id": _expect_uuid(row, "id"),
+        "kind": _expect_str(row, "kind"),
+        "name": _expect_str(row, "name"),
+    }
+
+
+def _expect_uuid(row: dict[str, Any], field: str) -> UUID:
+    value = row[field]
+    if not isinstance(value, UUID):
+        raise _row_error(field, "uuid")
+    return value
+
+
+def _expect_str(row: dict[str, Any], field: str) -> str:
+    value = row[field]
+    if not isinstance(value, str):
+        raise _row_error(field, "str")
+    return value
+
+
+def _expect_optional_str(row: dict[str, Any], field: str) -> str | None:
+    value = row[field]
+    if value is not None and not isinstance(value, str):
+        raise _row_error(field, "str or null")
+    return value
+
+
+def _expect_optional_datetime(row: dict[str, Any], field: str) -> datetime | None:
+    value = row[field]
+    if value is not None and not isinstance(value, datetime):
+        raise _row_error(field, "datetime or null")
+    return value
+
+
+def _expect_str_list(row: dict[str, Any], field: str) -> list[str]:
+    value = row[field]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise _row_error(field, "list[str]")
+    return value
+
+
+def _row_error(field: str, expected: str) -> InventoryError:
+    return InventoryError("resources", field, f"database row expected {expected}")
 
 
 def _record(kind: ResourceKind, name: str, detail: str = "") -> ReconcileRecord:

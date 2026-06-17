@@ -37,6 +37,7 @@ from psycopg.rows import dict_row
 
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import ImageState
+from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
     BuildSource,
     ImageEntry,
@@ -94,7 +95,8 @@ async def _resolve_s3_head(
 def _opt_str(row: dict[str, object], key: str) -> str | None:
     """Read an optional text column from a fetched row, narrowing ``object`` to ``str|None``."""
     value = row.get(key)
-    assert value is None or isinstance(value, str)
+    if value is not None and not isinstance(value, str):
+        raise InventoryError("image_catalog", key, "database row expected str or null")
     return value
 
 
@@ -378,5 +380,6 @@ async def _prune_departed(
 
 def _row_id(row: dict[str, object]) -> UUID:
     value = row["id"]
-    assert isinstance(value, UUID)
+    if not isinstance(value, UUID):
+        raise InventoryError("image_catalog", "id", "database row expected uuid")
     return value
