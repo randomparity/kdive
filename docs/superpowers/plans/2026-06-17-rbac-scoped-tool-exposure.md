@@ -77,7 +77,7 @@ def test_access_token_resolves_in_on_list_tools() -> None:
 
     probe = _TokenProbe()
     app.add_middleware(probe)
-    token = mint(kp, sub="alice", projects=["proj-a"], roles={"proj-a": "viewer"})
+    token = mint(kp, subject="alice", projects=["proj-a"], roles={"proj-a": "viewer"})  # mint is kw-only; `subject=`, not `sub=`
 
     async def _run() -> None:
         async with Client(app, auth=token) as client:
@@ -114,6 +114,7 @@ git commit -m "test(mcp): confirm access token resolves in on_list_tools (#506)"
   - `def scope_for(tool_name: str) -> ExposureScope` — map lookup, default `PUBLIC`.
   - `def is_visible(scope: ExposureScope, ctx: RequestContext) -> bool`.
   - `def visible_tool_names(ctx: RequestContext, names: Iterable[str]) -> set[str]`.
+  - `CLASSIFIED_TOOLS: frozenset[str]` (union of all `_SCOPE_SETS`) and `PUBLIC_TOOLS: frozenset[str]` (reviewed intentionally-public tools), for the completeness guard.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -254,6 +255,12 @@ _SCOPE_SETS: tuple[tuple[ExposureScope, frozenset[str]], ...] = (
 _SCOPE_BY_TOOL: dict[str, ExposureScope] = {
     name: scope for scope, names in _SCOPE_SETS for name in names
 }
+
+#: Union of all gated tools (for the completeness guard).
+CLASSIFIED_TOOLS: frozenset[str] = frozenset(_SCOPE_BY_TOOL)
+#: Reviewed intentionally-public tools. `CLASSIFIED_TOOLS | PUBLIC_TOOLS` must equal the
+#: live registry; the completeness guard fails if a new tool is in neither (untriaged).
+PUBLIC_TOOLS: frozenset[str] = frozenset({...})
 
 
 def scope_for(tool_name: str) -> ExposureScope:
@@ -603,7 +610,7 @@ git commit -m "feat(db): add tool_invocation usage table + writer (#506)"
 - Test: `tests/mcp/core/test_usage_tracking_middleware.py` (create)
 
 **Interfaces:**
-- Consumes: `record_usage`, `UsageEvent`, `current_context`, `mcp.responses.ToolResponse`, `domain.errors.ErrorCategory`, `security.authz.rbac.AuthorizationError`, `security.authz.actor.actor_from_client_id` (the existing actor classifier — verify its exact name/signature in `src/kdive/security/authz/actor.py`).
+- Consumes: `record_usage`, `UsageEvent`, `current_context`, `mcp.responses.ToolResponse`, `domain.errors.ErrorCategory`, `security.authz.rbac.AuthorizationError`, and `kdive.mcp.tools._platform_auth.actor_for` (the existing `actor_for(ctx) -> str` helper that wraps `resolve_actor` + `config.require(CLI_CLIENT_ID)`; reuse it — do NOT reinvent the actor classifier).
 - Produces: `class UsageTrackingMiddleware(Middleware)` taking `pool: AsyncConnectionPool` and an optional `acquire_timeout: float = 1.0`.
 
 - [ ] **Step 1: Write failing tests (one per outcome + best-effort swallow)**
@@ -753,7 +760,7 @@ class UsageTrackingMiddleware(Middleware):
                 project=_arg_project(context),
                 tool=context.message.name,
                 outcome=outcome,
-                actor=actor_from_client_id(ctx.client_id),
+                actor=actor_for(ctx),  # from kdive.mcp.tools._platform_auth
                 client_id=ctx.client_id,
             )
             async with self._pool.connection(timeout=self._acquire_timeout) as conn, \
@@ -763,7 +770,7 @@ class UsageTrackingMiddleware(Middleware):
             _log.warning("usage recording failed for tool", exc_info=True)
 ```
 
-Add module-private helpers `_result_error_category(result) -> str | None` (reads the envelope's `error_category` from the `ToolResult.structured_content` dict, returning `None` on success or when the shape is unrecognised) and `_arg_project(context) -> str | None` (reads `arguments.get("project")` if a non-empty str). Verify `actor_from_client_id` exists; if the public name differs, use the real one from `security/authz/actor.py`.
+Add module-private helpers `_result_error_category(result) -> str | None` (reads the envelope's `error_category` from the `ToolResult.structured_content` dict, returning `None` on success or when the shape is unrecognised) and `_arg_project(context) -> str | None` (reads `arguments.get("project")` if a non-empty str). `actor_for(ctx)` requires `KDIVE_CLI_CLIENT_ID` to be configured (`config.require`); the test must set it or the wire/conftest fixtures already do — confirm and, if a unit test runs without it, monkeypatch `actor_for` to return `"agent"`.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -790,15 +797,17 @@ git commit -m "feat(mcp): record per-call usage with outcome classification (#50
 **Interfaces:**
 - Consumes: `ToolExposureMiddleware`, `UsageTrackingMiddleware` from `mcp.middleware`.
 
-- [ ] **Step 1: Write the completeness guard test (it will fail until `_SCOPE_SETS` is filled)**
+- [ ] **Step 1: Write the completeness guard test (it will fail until the map is filled)**
+
+The PUBLIC-default means we cannot require every tool to have an entry (PUBLIC tools intentionally have none). To genuinely force triage of a NEW tool, the guard pins the **full reviewed set of tool names** against the live registry: adding any tool fails the test, forcing the author to (a) add it to the reviewed snapshot and (b) consciously classify it (or leave it PUBLIC on purpose). Maintain the snapshot as `mcp.exposure.CLASSIFIED_TOOLS` (the union of every `_SCOPE_SETS` set) plus a reviewed `PUBLIC_TOOLS` frozenset in `exposure.py`; their union must equal the live registry.
 
 ```python
-def test_every_tool_is_classified_or_public() -> None:
-    """Every registered tool resolves to a scope; gated tools must be in the map.
+def test_exposure_map_covers_every_registered_tool() -> None:
+    """Every registered tool is consciously triaged: gated (in a scope set) or PUBLIC.
 
-    Forces a new privileged tool to be triaged: any tool whose name is NOT in the
-    exposure map defaults to PUBLIC, so this test pins the *known gated* tools into the
-    map and fails if one drops out (a silent un-gating). PUBLIC tools need no entry.
+    `CLASSIFIED_TOOLS | PUBLIC_TOOLS` must equal the live registry. A new tool trips this
+    (it is in neither), forcing the author to classify it — closing the silent-leak gap
+    spec criterion 3 names. No stale entries either (the union is exactly the registry).
     """
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
@@ -806,20 +815,23 @@ def test_every_tool_is_classified_or_public() -> None:
     async def _run() -> set[str]:
         return {t.name for t in await app.list_tools()}
 
-    names = asyncio.run(_run())
-    # Spot-pin: these MUST stay gated (not silently PUBLIC).
-    from kdive.mcp.exposure import ExposureScope, scope_for
+    registered = asyncio.run(_run())
+    from kdive.mcp.exposure import CLASSIFIED_TOOLS, PUBLIC_TOOLS, ExposureScope, scope_for
 
+    triaged = CLASSIFIED_TOOLS | PUBLIC_TOOLS
+    assert triaged == registered, (
+        f"untriaged tools (classify in exposure.py): {registered - triaged}; "
+        f"stale entries: {triaged - registered}"
+    )
+    # Spot-pin a few that MUST stay gated (a regression to PUBLIC would be silent).
     assert scope_for("control.power") is ExposureScope.PROJECT_ADMIN
     assert scope_for("ops.reconcile_now") in {
         ExposureScope.PLATFORM_OPERATOR, ExposureScope.PLATFORM_ADMIN
     }
     assert scope_for("allocations.request") is ExposureScope.PROJECT_OPERATOR
-    # Every classified name is a real registered tool (no stale entries).
-    from kdive.mcp.exposure import _SCOPE_BY_TOOL
-
-    assert set(_SCOPE_BY_TOOL) <= names
 ```
+
+This requires `exposure.py` to export `CLASSIFIED_TOOLS = frozenset().union(*(s for _, s in _SCOPE_SETS))` and a reviewed `PUBLIC_TOOLS: frozenset[str]` listing every intentionally-public tool. Step 3 fills both from the live enumeration.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -844,7 +856,7 @@ print('\n'.join(sorted(t.name for t in asyncio.run(app.list_tools()))))
 "
 ```
 
-For each tool, read its registrar's `require_role` / `require_platform_role` call and assign the matching `ExposureScope` (`<=` the real requirement). Reads requiring only project `viewer` may stay `PROJECT_VIEWER` or `PUBLIC` (a no-project caller seeing a viewer-gated read it can't use costs only catalog size; prefer `PROJECT_VIEWER` so a bare token's catalog is genuinely minimal). Cross-check against `_docmeta.DESTRUCTIVE_TOOLS` (all destructive tools are at least `PROJECT_ADMIN` or platform-scoped). Replace every `{...}`.
+For each tool, read its registrar's `require_role` / `require_platform_role` call and assign the matching `ExposureScope` (`<=` the real requirement). Reads requiring only project `viewer` may stay `PROJECT_VIEWER` or `PUBLIC` (a no-project caller seeing a viewer-gated read it can't use costs only catalog size; prefer `PROJECT_VIEWER` so a bare token's catalog is genuinely minimal). Cross-check against `_docmeta.DESTRUCTIVE_TOOLS` (all destructive tools are at least `PROJECT_ADMIN` or platform-scoped). Replace every `{...}` in `_SCOPE_SETS`, **and** fill `PUBLIC_TOOLS` with every remaining (intentionally-public) tool name so that `CLASSIFIED_TOOLS | PUBLIC_TOOLS` equals the live registry — the completeness guard (Task 5 Step 1) enforces this exactly.
 
 - [ ] **Step 4: Wire the middlewares in `build_app`**
 
