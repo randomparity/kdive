@@ -1,6 +1,6 @@
 # ADR 0157 — A deterministic guest-agent failure is a configuration error, not a retryable transport failure
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-17
 - **Deciders:** KDIVE maintainers
 - **Builds on (does not supersede):** [ADR-0078](0078-object-store-in-target-install-seam.md)
