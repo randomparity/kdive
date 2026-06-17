@@ -23,6 +23,16 @@ Enqueue a kernel build for a run.
 | `cmdline` | `any` | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Omit for no extra debug args. Bound on the first build of a Run. |
 | `run_id` | `string` | yes | The Run to build. |
 
+## `runs.cancel`
+
+`implemented`
+
+Cancel a non-terminal run, freeing its system without a teardown.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `run_id` | `string` | yes | The non-terminal Run to cancel. |
+
 ## `runs.complete_build`
 
 `implemented`

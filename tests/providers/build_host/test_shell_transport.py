@@ -23,7 +23,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 def test_validate_url_still_rejects_control_char_after_relocation() -> None:
-    # _validate_url reads _UNSAFE_CHARS now imported from git_source (ADR-0158 relocation).
+    # _validate_url reads _UNSAFE_CHARS now imported from git_source (ADR-0159 relocation).
     with pytest.raises(CategorizedError) as exc:
         _validate_url("https://example.com/x\n")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR

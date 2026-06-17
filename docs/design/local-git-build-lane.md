@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-17
-- **ADR:** [ADR-0158](../adr/0158-local-git-build-lane.md)
+- **ADR:** [ADR-0159](../adr/0159-local-git-build-lane.md)
 - **Issue:** [#530](https://github.com/randomparity/kdive/issues/530) — "Support Multiple Kernel
   Build Repos"
 
@@ -199,7 +199,7 @@ and `make` stay under the `live_vm` gate):
 
 ## Docs
 
-- ADR-0158 (decision + rejected alternatives).
+- ADR-0159 (decision + rejected alternatives).
 - `mcp/resources/_content/build-source-staging.md`: the two-lane table gains a git-on-local
   (allowlisted) row; the "a bare string never overrides `KDIVE_KERNEL_SRC`" caveat stays; the
   `_BUILD_LANE_GUIDANCE` message in `workspace.py` and the config reference gain the new setting.

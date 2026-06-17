@@ -42,9 +42,11 @@ from kdive.domain.state import (
     SystemState,
 )
 from kdive.jobs.handlers import runs as runs_handlers
+from kdive.jobs.handlers import runs_shared
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
+from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest,
     RunReuseRequirementInput,
@@ -1722,7 +1724,7 @@ def test_build_host_provenance_mismatch_ssh_with_warm_tree_is_config_error(
 
 
 def test_build_host_local_with_git_ref_is_admitted(migrated_url: str) -> None:
-    # ADR-0158: worker-local (local kind) + git kernel_source_ref is now admitted (the remote
+    # ADR-0159: worker-local (local kind) + git kernel_source_ref is now admitted (the remote
     # allowlist is enforced at build time on the worker, not at admission). The build job is
     # enqueued and no capacity lease is taken for a local host.
     async def _run() -> None:
@@ -1892,7 +1894,7 @@ def test_create_ephemeral_host_with_warm_tree_is_config_error_no_run(migrated_ur
 
 
 def test_create_local_host_with_git_ref_succeeds(migrated_url: str) -> None:
-    # ADR-0158: default worker-local (kind local) + git kernel_source_ref is now compatible at
+    # ADR-0159: default worker-local (kind local) + git kernel_source_ref is now compatible at
     # create (the remote is gated by the build-time allowlist); the run is created.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -1992,7 +1994,7 @@ def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
 def test_build_backstop_rejects_when_host_kind_flips_after_create(migrated_url: str) -> None:
     # Create-valid (local + warm-tree) then flip the host to ssh before build: the build-time
     # check is the defense-in-depth backstop and still rejects an ssh+warm-tree pairing, with
-    # no build job. (ADR-0158 makes local+git valid, so the still-incompatible direction is a
+    # no build job. (ADR-0159 makes local+git valid, so the still-incompatible direction is a
     # non-local host with a warm-tree source.)
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3760,5 +3762,235 @@ def test_install_debug_args_pass_boundary(migrated_url: str, cmdline: str) -> No
             njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
         assert resp.status == "queued"
         assert njobs == 1
+
+    asyncio.run(_run())
+
+
+# --- runs.cancel ---------------------------------------------------------------
+
+
+async def _run_state(pool: AsyncConnectionPool, run_id: str) -> str:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return str(row["state"])
+
+
+@pytest.mark.parametrize(
+    ("state", "transition"),
+    [(RunState.CREATED, "created->canceled"), (RunState.RUNNING, "running->canceled")],
+)
+def test_cancel_drives_non_terminal_run_canceled(
+    migrated_url: str, state: RunState, transition: str
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+            if state is RunState.RUNNING:
+                async with pool.connection() as conn:
+                    await conn.execute("UPDATE runs SET state='running' WHERE id=%s", (run_id,))
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "canceled"
+            assert resp.error_category is None
+            assert resp.suggested_next_actions == ["runs.create"]
+            assert await _run_state(pool, run_id) == "canceled"
+            n = await _count(
+                pool,
+                "SELECT count(*) AS n FROM audit_log WHERE transition=%s AND object_id=%s",
+                (transition, run_id),
+            )
+        assert n == 1
+
+    asyncio.run(_run())
+
+
+def test_cancel_already_canceled_is_idempotent_no_op(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CANCELED)
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "canceled"
+            assert resp.error_category is None
+            n = await _count(
+                pool,
+                "SELECT count(*) AS n FROM audit_log WHERE tool='runs.cancel' AND object_id=%s",
+                (run_id,),
+            )
+        assert n == 0
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("state", [RunState.SUCCEEDED, RunState.FAILED])
+def test_cancel_other_terminal_run_conflicts(migrated_url: str, state: RunState) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=state)
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "error"
+            assert resp.error_category == "conflict"
+            assert resp.data["current_status"] == state.value
+            assert await _run_state(pool, run_id) == state.value
+
+    asyncio.run(_run())
+
+
+def test_cancel_frees_system_for_a_new_run(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            first = await _create(pool, _ctx(), inv_id, sys_id)
+            assert first.status == "created"
+            blocked = await _create(pool, _ctx(), inv_id, sys_id)
+            assert blocked.status == "error"
+            assert blocked.error_category == "transport_conflict"
+            assert blocked.data["reason"] == "system_has_live_run"
+            cancel = await cancel_run(pool, _ctx(Role.OPERATOR), first.object_id)
+            assert cancel.status == "canceled"
+            again = await _create(pool, _ctx(), inv_id, sys_id)
+            assert again.status == "created"
+
+    asyncio.run(_run())
+
+
+def test_cancel_unknown_run_id_is_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), str(uuid4()))
+            assert resp.status == "error"
+            assert resp.error_category == "not_found"
+
+    asyncio.run(_run())
+
+
+def test_cancel_malformed_run_id_is_configuration_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), "not-a-uuid")
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_cancel_cross_project_run_is_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED, project="proj")
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR, projects=("other",)), run_id)
+            assert resp.status == "error"
+            assert resp.error_category == "not_found"
+            assert await _run_state(pool, run_id) == "created"
+
+    asyncio.run(_run())
+
+
+def test_cancel_requires_operator(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+            with pytest.raises(AuthorizationError):
+                await cancel_run(pool, _ctx(Role.VIEWER), run_id)
+            assert await _run_state(pool, run_id) == "created"
+
+    asyncio.run(_run())
+
+
+def test_cancel_cancels_in_flight_build_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_running_run(pool)
+            await _enqueue_build_job(pool, run_id)
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "canceled"
+            async with pool.connection() as conn:
+                job = await _build_job_for(conn, run_id)
+            assert job.state is JobState.CANCELED
+            assert await _run_state(pool, run_id) == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_cancel_leaves_terminal_build_job_untouched(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_running_run(pool)
+            job = await _enqueue_build_job(pool, run_id)
+            async with pool.connection() as conn:
+                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                await JOBS.update_state(conn, job.id, JobState.SUCCEEDED)
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "canceled"
+            async with pool.connection() as conn:
+                refreshed = await _build_job_for(conn, run_id)
+            assert refreshed.state is JobState.SUCCEEDED
+
+    asyncio.run(_run())
+
+
+def test_cancel_running_run_with_running_build_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_running_run(pool)
+            job = await _enqueue_build_job(pool, run_id)
+            async with pool.connection() as conn:
+                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "canceled"
+            async with pool.connection() as conn:
+                refreshed = await _build_job_for(conn, run_id)
+            assert refreshed.state is JobState.CANCELED
+            assert await _run_state(pool, run_id) == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_cancel_swallows_build_job_race_to_terminal(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The worker completes a build job via fenced raw SQL holding no per-Run lock, so a job
+    # read as `running` can turn terminal before cancel's FOR UPDATE acquires it. Simulate
+    # that race: the real row is `succeeded`, but get_by_dedup_key (as cancel sees it) returns
+    # a stale `running` snapshot, so JOBS.update_state hits the terminal row and raises
+    # IllegalTransition. The cancel must swallow it and still drive the Run to canceled.
+    from kdive.mcp.tools.lifecycle.runs import cancel as cancel_mod
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_running_run(pool)
+            job = await _enqueue_build_job(pool, run_id)
+            async with pool.connection() as conn:
+                await JOBS.update_state(conn, job.id, JobState.RUNNING)
+                await JOBS.update_state(conn, job.id, JobState.SUCCEEDED)
+            stale = job.model_copy(update={"state": JobState.RUNNING})
+
+            async def _stale_get(conn: AsyncConnection, dedup_key: str) -> Job:
+                return stale
+
+            monkeypatch.setattr(cancel_mod.queue, "get_by_dedup_key", _stale_get)
+            resp = await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            assert resp.status == "canceled"
+            assert await _run_state(pool, run_id) == "canceled"
+            async with pool.connection() as conn:
+                refreshed = await _build_job_for(conn, run_id)
+            assert refreshed.state is JobState.SUCCEEDED
+
+    asyncio.run(_run())
+
+
+def test_finalize_build_after_cancel_does_not_resurrect_run(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_running_run(pool)
+            job = await _enqueue_build_job(pool, run_id)
+            await cancel_run(pool, _ctx(Role.OPERATOR), run_id)
+            result = run_steps.BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b")
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                await runs_shared.finalize_build(conn, job, run, result)
+            assert await _run_state(pool, run_id) == "canceled"
 
     asyncio.run(_run())

@@ -122,6 +122,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "projects.list": ("tests/mcp/catalog/test_projects_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
+    "runs.cancel": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.complete_build": ("tests/mcp/lifecycle/test_complete_build_tool.py",),
     "runs.create": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.get": ("tests/mcp/lifecycle/test_runs_tools.py",),

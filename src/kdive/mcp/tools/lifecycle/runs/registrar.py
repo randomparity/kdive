@@ -13,6 +13,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers as _RunBuildHandlers
+from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest as _RunCreateRequest,
 )
@@ -42,6 +43,7 @@ def register(
     """Register the `runs.*` tools on ``app``, bound to ``pool``."""
     _register_runs_get(app, pool, resolver)
     _register_runs_create(app, pool)
+    _register_runs_cancel(app, pool)
     _register_runs_build(app, pool, resolver)
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool)
@@ -119,6 +121,19 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
             reuse_requirement=reuse_requirement,
         )
         return await _create_run(pool, current_context(), request)
+
+
+def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.cancel",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def runs_cancel(
+        run_id: Annotated[str, Field(description="The non-terminal Run to cancel.")],
+    ) -> ToolResponse:
+        """Cancel a non-terminal run, freeing its system without a teardown."""
+        return await _cancel_run(pool, current_context(), run_id)
 
 
 def _register_runs_build(

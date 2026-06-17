@@ -1,4 +1,4 @@
-"""Git-source validation and the local-build remote allowlist (ADR-0158).
+"""Git-source validation and the local-build remote allowlist (ADR-0159).
 
 This module owns the two pieces the local git-clone build lane and the remote build
 transport share: :func:`validate_git_arg` (reject a remote/ref that could parse as a git
