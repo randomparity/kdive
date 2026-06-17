@@ -4,7 +4,7 @@
 
 **Goal:** Add a `runs.cancel(run_id)` MCP tool that drives a non-terminal Run to terminal `canceled` under the per-Run lock, best-effort cancels its in-flight build job, and frees the System without `systems.teardown`.
 
-**Architecture:** A plain async handler `cancel_run(pool, ctx, run_id)` in a new `cancel.py`, wrapped by a thin FastMCP `runs.cancel` tool in the existing `registrar.py`. The transition uses the existing `RUNS.update_state` (which calls `ensure_transition`) under `advisory_xact_lock(LockScope.RUN, …)` — the same lock `runs.build` and the worker build handlers hold, so the cooperative build-job cancel is race-safe. No new state, no migration. See spec `docs/specs/2026-06-17-runs-cancel.md` and ADR-0157.
+**Architecture:** A plain async handler `cancel_run(pool, ctx, run_id)` in a new `cancel.py`, wrapped by a thin FastMCP `runs.cancel` tool in the existing `registrar.py`. The transition uses the existing `RUNS.update_state` (which calls `ensure_transition`) under `advisory_xact_lock(LockScope.RUN, …)` — the same lock `runs.build` and the worker build handlers hold, so the cooperative build-job cancel is race-safe. No new state, no migration. See spec `docs/specs/2026-06-17-runs-cancel.md` and ADR-0158.
 
 **Tech Stack:** Python 3.13, psycopg (async), FastMCP, pytest. Guardrails via `just` (lint/type/test). Tests are handler-direct (injected pool + `RequestContext`), no transport.
 
@@ -298,7 +298,7 @@ _NEXT_ACTIONS = ["runs.create"]
 
 
 async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> ToolResponse:
-    """Drive a non-terminal Run to terminal ``canceled``, freeing its System (ADR-0157).
+    """Drive a non-terminal Run to terminal ``canceled``, freeing its System (ADR-0158).
 
     Under the per-Run lock, transition a ``created``/``running`` Run to ``canceled`` and
     best-effort cancel its in-flight build job. A retried cancel on an already-``canceled``
@@ -488,7 +488,7 @@ git commit -m "feat: register the runs.cancel MCP tool"
 ## Task 3: Full gate + ADR/spec status
 
 **Files:**
-- Modify: `docs/adr/0157-runs-cancel-tool.md`, `docs/adr/README.md` (status `Proposed` → `Accepted` is done by the merging PR per the ADR process; leave `Proposed` until merge).
+- Modify: `docs/adr/0158-runs-cancel-tool.md`, `docs/adr/README.md` (status `Proposed` → `Accepted` is done by the merging PR per the ADR process; leave `Proposed` until merge).
 
 - [ ] **Step 1: Run the full CI gate**
 
