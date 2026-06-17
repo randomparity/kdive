@@ -71,10 +71,15 @@ Migration `0039_tool_invocation.sql` adds a table modelled on `platform_audit_lo
 **best-effort**: own pool connection, recording failure logged and swallowed, never fails
 or delays the call (the `DenialAuditMiddleware` precedent). It sits just inside
 `TelemetryMiddleware` (which stays outermost) so it observes the final enveloped outcome
-after `DenialAuditMiddleware` maps a denial — classifying `denied` from
-`authorization_denied`, `error` from any other failure envelope or propagated exception,
-`ok` otherwise. `denied` is kept distinct because a denied call is direct evidence the
-agent reached for a tool it cannot use — the signal a later exposure refinement wants.
+after `DenialAuditMiddleware` maps a denial. It classifies `denied` from an
+`authorization_denied` envelope **or** a propagated `AuthorizationError` (its subclasses
+`DestructiveOpDenied` and the base non-member denial propagate past
+`DenialAuditMiddleware` rather than becoming an envelope, so an envelope-only check would
+miscount them as `error`), `error` from any other failure, `ok` otherwise. The recorder
+acquires its connection with a bounded non-blocking timeout (dropping the row, logged,
+when the pool is saturated) so it never delays response delivery. `denied` is kept
+distinct because a denied call is direct evidence the agent reached for a tool it cannot
+use — the signal a later exposure refinement wants.
 
 ## Consequences
 
