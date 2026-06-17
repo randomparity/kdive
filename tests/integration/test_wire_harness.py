@@ -107,3 +107,46 @@ def test_live_stack_tier_reads_resources_over_http_per_role() -> None:
             assert isinstance(result, list)
 
     asyncio.run(_run())
+
+
+@pytest.mark.live_stack
+def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
+    """list_tools is filtered per connection (#506, ADR-0148): a viewer-only token sees a
+    strictly smaller catalog than a privileged token, and the gated tools it cannot invoke
+    are absent. This is the transport-level proof that the verified token resolves inside
+    the ``on_list_tools`` hook over real HTTP — the filter never fires under the in-memory
+    transport (which carries no token), so the live tier is the only place it is provable.
+    """
+    issuer = require_issuer()
+    base_url = require_stack()
+
+    async def _names(
+        subject: str, roles: dict[str, str], platform_roles: list[str] | None
+    ) -> set[str]:
+        token = mint_token(
+            issuer,
+            subject=subject,
+            projects=[_PROJECT],
+            roles=roles,
+            platform_roles=platform_roles,
+            agent_session="sess-1",
+        )
+        async with LiveStackClient.over_http(base_url, token) as client:
+            return set(await client.list_tools())
+
+    async def _run() -> None:
+        viewer = await _names("viewer-scope", {_PROJECT: "viewer"}, None)
+        privileged = await _names(
+            "admin-scope", {_PROJECT: "admin"}, ["platform_operator", "platform_admin"]
+        )
+
+        # Public + viewer-gated reads are advertised to the viewer.
+        assert {"projects.list", "jobs.get", "systems.list"} <= viewer
+        # Operator/admin/platform-gated tools are hidden from the viewer.
+        for hidden in ("allocations.request", "control.force_crash", "ops.reconcile_now"):
+            assert hidden not in viewer, f"{hidden} leaked into the viewer catalog"
+        # The privileged token sees them, and the viewer catalog is a strict subset.
+        assert {"allocations.request", "control.force_crash", "ops.reconcile_now"} <= privileged
+        assert viewer < privileged
+
+    asyncio.run(_run())
