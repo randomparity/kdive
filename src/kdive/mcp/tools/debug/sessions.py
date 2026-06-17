@@ -292,12 +292,17 @@ class DebugSessionHandlers:
             if isinstance(opened, ToolResponse):
                 return opened
             async with pool.connection() as conn:
-                response = await _insert_session_locked(
-                    conn,
-                    ctx,
-                    request,
-                    opened,
-                )
+                try:
+                    response = await _insert_session_locked(
+                        conn,
+                        ctx,
+                        request,
+                        opened,
+                    )
+                except Exception:
+                    await _close(request.connector, str(opened))
+                    self._secret_registry.release(secret_scope)
+                    raise
             _release_failed_attach_secret(self._secret_registry, secret_scope, response)
             return response
 

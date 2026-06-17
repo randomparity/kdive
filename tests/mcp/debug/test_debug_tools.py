@@ -861,6 +861,44 @@ def test_start_session_ssh_resolves_connector_before_credential(migrated_url: st
     asyncio.run(_run())
 
 
+def test_start_session_cleans_up_open_transport_and_secret_on_insert_failure(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_ssh_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            log: list[str] = []
+            registry = SecretRegistry()
+            connector = _OrderRecordingConnector(log)
+
+            def _backend_factory(session_id: UUID) -> _OrderRecordingBackend:
+                return _OrderRecordingBackend(
+                    log, registry=registry, scope=f"debug-session:{session_id}"
+                )
+
+            async def _raise_after_open(*_args: object, **_kwargs: object) -> None:
+                raise RuntimeError("insert failed")
+
+            monkeypatch.setattr(debug_tools, "_insert_session_locked", _raise_after_open)
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
+                provider_resolver(connector=connector, profile_policy=_PROFILE_POLICY),
+                runtime_resolver=None,
+                secret_backend_factory=_backend_factory,
+                secret_registry=registry,
+            )
+
+            with pytest.raises(RuntimeError, match="insert failed"):
+                await handlers.start_session(pool, _ctx(), run_id=run_id, transport="drgn-live")
+
+        assert log == ["resolve:ssh/guest-key", "open:drgn-live"]
+        assert connector.closed == ["drgn-live://127.0.0.1:22"]
+        assert "guest-ssh-secret" not in registry.snapshot()
+
+    asyncio.run(_run())
+
+
 def test_start_session_opens_transport_between_db_connections(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
