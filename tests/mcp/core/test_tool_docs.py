@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import re
 import textwrap
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -20,6 +21,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.state import SystemState
 from kdive.mcp.app import build_app
 from kdive.mcp.tools import _docmeta
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -399,6 +401,64 @@ def test_backstop_actually_detects_the_known_gate_callers() -> None:
         "control.power",
         "systems.reprovision",
     }
+
+
+def _collect_enums(schema: Any) -> list[list[Any]]:
+    """Every ``enum`` value-list anywhere in ``schema`` (the rendered ``anyOf`` nests it)."""
+    found: list[list[Any]] = []
+    if isinstance(schema, dict):
+        enum = schema.get("enum")
+        if isinstance(enum, list):
+            found.append(enum)
+        for value in schema.values():
+            found.extend(_collect_enums(value))
+    elif isinstance(schema, list):
+        for item in schema:
+            found.extend(_collect_enums(item))
+    return found
+
+
+def test_systems_list_state_filter_is_enum_constrained() -> None:
+    # ADR-0147: the closed-value-set `state` filter advertises the SystemState enum at the
+    # schema layer (so an invalid value is a schema error the model sees up front), while the
+    # open-value-set `shape`/`pcie` filters stay bare strings (shape is runtime-mutable via
+    # shapes.set; pcie is a structured <vendor>:<device> format).
+    props = {t.name: t for t in TOOLS}["systems.list"].parameters["properties"]
+
+    state_enums = _collect_enums(props["state"])
+    assert state_enums, "systems.list `state` advertises no enum; it must carry SystemState"
+    assert {value for enum in state_enums for value in enum} == {s.value for s in SystemState}
+
+    for open_filter in ("shape", "pcie"):
+        assert not _collect_enums(props[open_filter]), (
+            f"systems.list `{open_filter}` must stay an open string filter, not an enum"
+        )
+
+
+_CONFUSABLE_SYSTEMS_ALTERNATIVES = {
+    "systems.define": (r"\bsystems\.provision\b(?!_)",),
+    "systems.provision": (r"\bsystems\.define\b", r"\bsystems\.provision_defined\b"),
+    "systems.provision_defined": (r"\bsystems\.define\b",),
+    "systems.reprovision": (r"\bsystems\.provision\b(?!_)",),
+}
+_NEGATIVE_GUIDANCE = re.compile(r"\b(instead|rather|not)\b", re.IGNORECASE)
+
+
+def test_confusable_systems_tools_name_their_alternative() -> None:
+    # ADR-0147: the mis-sequence-prone systems.* lifecycle tools must name their specific
+    # alternative tool and carry a when-NOT-to-use cue. Matching is token-precise so a
+    # `provision_defined` mention cannot vacuously satisfy a bare-`provision` requirement,
+    # and the negative cue is word-bounded so `cannot`/`annotation` do not satisfy it.
+    tools = {t.name: t for t in TOOLS}
+    for name, alternative_patterns in _CONFUSABLE_SYSTEMS_ALTERNATIVES.items():
+        description = tools[name].description or ""
+        for pattern in alternative_patterns:
+            assert re.search(pattern, description), (
+                f"{name} description must name its alternative tool (/{pattern}/): {description!r}"
+            )
+        assert _NEGATIVE_GUIDANCE.search(description), (
+            f"{name} description must carry a when-not-to-use cue: {description!r}"
+        )
 
 
 def test_active_tools_have_a_covering_test() -> None:

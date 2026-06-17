@@ -278,6 +278,18 @@ async def _call_tool(client: Client, name: str, args: dict[str, Any] | None = No
     return ToolResponse.model_validate(payload)
 
 
+async def _call_tool_schema_rejected(client: Client, name: str, args: dict[str, Any]) -> str:
+    """Call a tool expecting input-schema rejection; return the joined error text.
+
+    A closed-value-set param typed as an enum (ADR-0147) is rejected by FastMCP at the
+    input-schema layer, before the handler runs, so the wire result is an error
+    ``CallToolResult`` rather than a ``configuration_error`` ``ToolResponse``.
+    """
+    result = await client.call_tool(name, args, raise_on_error=False)
+    assert getattr(result, "is_error", False), f"expected schema rejection, got {result!r}"
+    return "\n".join(getattr(block, "text", "") for block in (result.content or []))
+
+
 def test_catalog_resource_wrappers_roundtrip_through_fastmcp(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -459,7 +471,7 @@ def test_runs_wrappers_roundtrip_create_and_validation_through_fastmcp(
 def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _run() -> tuple[ToolResponse, ToolResponse]:
+    async def _run() -> tuple[ToolResponse, str]:
         async with _pool(migrated_url) as pool:
             allocation_id = await granted_allocation(pool)
             monkeypatch.setattr(systems_tools, "current_context", _ctx)
@@ -470,17 +482,24 @@ def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
                     "systems.define",
                     {"allocation_id": allocation_id, "profile": upload_profile()},
                 )
-                invalid = await _call_tool(client, "systems.list", {"state": "bogus"})
-        return defined, invalid
+                # ADR-0147: an invalid `state` filter is now rejected at the input-schema
+                # layer (state is the SystemState enum), so the wire result is an error
+                # CallToolResult whose message enumerates the valid states — not a
+                # post-binding configuration_error envelope (that path stays covered by the
+                # direct-handler tests in test_systems_list.py).
+                invalid_state_error = await _call_tool_schema_rejected(
+                    client, "systems.list", {"state": "bogus"}
+                )
+        return defined, invalid_state_error
 
-    defined, invalid = asyncio.run(_run())
+    defined, invalid_state_error = asyncio.run(_run())
     assert defined.status == "defined", defined
     assert defined.suggested_next_actions == [
         "artifacts.create_system_upload",
         "systems.provision_defined",
     ]
-    assert invalid.status == "error"
-    assert invalid.error_category == "configuration_error"
+    assert "Input should be" in invalid_state_error
+    assert "ready" in invalid_state_error
 
 
 def test_artifact_upload_wrapper_roundtrips_and_validates_through_fastmcp(
