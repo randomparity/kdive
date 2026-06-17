@@ -108,7 +108,7 @@ def check_warm_tree_source_admission(kernel_src: str, *, host_kind: BuildHostKin
     ``KDIVE_KERNEL_SRC``). For a ``LOCAL`` host this applies the same predicate
     :func:`~kdive.providers.shared.build_host.workspace.sync_tree` applies
     (``warm_tree_source_error``) and raises the identical ``KERNEL_SRC_UNSET_DETAIL`` /
-    ``KERNEL_SRC_INVALID_DETAIL`` (ADR-0160), so an admission rejection is byte-identical
+    ``KERNEL_SRC_INVALID_DETAIL`` (ADR-0161), so an admission rejection is byte-identical
     to the build-time backstop. The worker BUILD handler reads ``KDIVE_KERNEL_SRC`` once
     and threads it here via the dispatch ``LOCAL`` branch, before any workspace side
     effect; ``sync_tree`` keeps its own check as defense-in-depth.

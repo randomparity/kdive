@@ -56,7 +56,7 @@ async def run_build_on_host(
     """Run ``builder`` on the selected build host.
 
     For a ``LOCAL`` host the warm-tree ``KDIVE_KERNEL_SRC`` (``kernel_src``, resolved by
-    the worker BUILD handler) is admitted before the build runs (ADR-0160), so an
+    the worker BUILD handler) is admitted before the build runs (ADR-0161), so an
     unset/invalid tree fails before any workspace side effect; ``sync_tree`` keeps the
     backstop. The admission runs off the event loop because its usability probe stats
     the path. ``kernel_src`` is ignored for non-``LOCAL`` (git/remote) hosts.

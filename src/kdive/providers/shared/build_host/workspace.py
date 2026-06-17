@@ -55,7 +55,7 @@ def warm_tree_source_error(kernel_src: str) -> str | None:
 
     The single definition of the warm-tree ``KDIVE_KERNEL_SRC`` rule, shared by
     :func:`sync_tree` (the build-time backstop) and the admission helper
-    (``check_warm_tree_source_admission``, ADR-0160). Empty/whitespace reads as "unset";
+    (``check_warm_tree_source_admission``, ADR-0161). Empty/whitespace reads as "unset";
     a present value that is not an absolute path to an existing directory reads as
     "invalid".
 
