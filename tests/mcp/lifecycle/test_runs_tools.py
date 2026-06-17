@@ -1845,6 +1845,150 @@ def test_build_host_ephemeral_free_slot_lease_and_job_committed(migrated_url: st
     asyncio.run(_run())
 
 
+# --- runs.create: build-host <-> source-kind compatibility (#534) --------------------
+
+# An external-build profile (no kernel_source_ref, no build_host): the compat check skips it.
+_EXTERNAL_BUILD: dict[str, Any] = {"schema_version": 1, "source": "external"}
+
+
+async def _run_count_on_system(pool: AsyncConnectionPool, system_id: str) -> int:
+    return await _count(pool, "SELECT count(*) AS n FROM runs WHERE system_id = %s", (system_id,))
+
+
+def test_create_remote_host_with_warm_tree_is_config_error_no_run(migrated_url: str) -> None:
+    # ssh host + warm-tree (string) kernel_source_ref → rejected AT create; no run inserted.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_ssh_host(pool, name="ssh-create")
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "ssh-create"}
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            nruns = await _run_count_on_system(pool, sys_id)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.detail == "a remote build host requires a git kernel_source_ref"
+        assert nruns == 0
+
+    asyncio.run(_run())
+
+
+def test_create_ephemeral_host_with_warm_tree_is_config_error_no_run(migrated_url: str) -> None:
+    # ephemeral_libvirt host + warm-tree string → rejected AT create with the remote message.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_ephemeral_host(pool, name="eph-create")
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "eph-create"}
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            nruns = await _run_count_on_system(pool, sys_id)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.detail == "a remote build host requires a git kernel_source_ref"
+        assert nruns == 0
+
+    asyncio.run(_run())
+
+
+def test_create_local_host_with_git_ref_is_config_error_no_run(migrated_url: str) -> None:
+    # default worker-local (kind local) + git kernel_source_ref → rejected AT create.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            profile = copy.deepcopy(_GIT_BUILD)  # no build_host → resolves worker-local
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            nruns = await _run_count_on_system(pool, sys_id)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.detail == (
+            "a local build host requires a warm-tree kernel_source_ref, not a git ref"
+        )
+        assert nruns == 0
+
+    asyncio.run(_run())
+
+
+def test_create_remote_host_with_git_ref_succeeds(migrated_url: str) -> None:
+    # ssh host + git ref → compatible; the run is created (no lease taken at create).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            host_id = await _insert_ssh_host(pool, name="ssh-ok")
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "ssh-ok"}
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            nruns = await _run_count_on_system(pool, sys_id)
+            nleases = await _lease_count(pool, host_id)
+        assert resp.status == "created"
+        assert nruns == 1
+        assert nleases == 0  # create takes no build-host lease
+
+    asyncio.run(_run())
+
+
+def test_create_local_host_with_warm_tree_succeeds(migrated_url: str) -> None:
+    # default worker-local + warm-tree string → compatible; the run is created.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_VALID_BUILD))
+            nruns = await _run_count_on_system(pool, sys_id)
+        assert resp.status == "created"
+        assert nruns == 1
+
+    asyncio.run(_run())
+
+
+def test_create_absent_named_host_still_creates(migrated_url: str) -> None:
+    # A profile naming a host that is not registered: host existence is a build-time
+    # concern, so create does NOT reject — the run is inserted CREATED.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "no-such-host"}
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+            nruns = await _run_count_on_system(pool, sys_id)
+        assert resp.status == "created"
+        assert nruns == 1
+
+    asyncio.run(_run())
+
+
+def test_create_external_profile_skips_compat_check(migrated_url: str) -> None:
+    # An external-build profile has no kernel_source_ref/build_host; the compat check is
+    # skipped and the run is created.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(
+                pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_EXTERNAL_BUILD)
+            )
+            nruns = await _run_count_on_system(pool, sys_id)
+        assert resp.status == "created"
+        assert nruns == 1
+
+    asyncio.run(_run())
+
+
+def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
+    # A System that already has a non-terminal run + an incompatible profile must return
+    # the live-run block (transport_conflict), NOT the compatibility error.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_ssh_host(pool, name="ssh-order")
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            first = await _create(pool, _ctx(), inv_id, sys_id, profile=copy.deepcopy(_VALID_BUILD))
+            assert first.status == "created"
+            profile = {**copy.deepcopy(_VALID_BUILD), "build_host": "ssh-order"}
+            resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
+        assert resp.status == "error" and resp.error_category == "transport_conflict"
+
+    asyncio.run(_run())
+
+
 # --- build_handler (the worker) ------------------------------------------------------
 
 from kdive.build_artifacts.results import BuildOutput  # noqa: E402
