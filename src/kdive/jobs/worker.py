@@ -21,13 +21,17 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Job
+from kdive.domain.state import JobState, RunState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry, JobHandler
-from kdive.jobs.payloads import PayloadValidationError
+from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 from kdive.jobs.worker_telemetry import JobSpan, WorkerTelemetry
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -38,6 +42,8 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 _CONTEXT_VALUE_MAX = 1000
 _CONTEXT_KEY = re.compile(r"[^a-zA-Z0-9_.-]+")
+_RUN_COMPENSATION_STATES = (RunState.CREATED, RunState.RUNNING)
+_RUN_COMPENSATION_STATE_VALUES = tuple(state.value for state in _RUN_COMPENSATION_STATES)
 
 
 @dataclass(frozen=True)
@@ -129,7 +135,10 @@ class Worker:
         handler = self._registry.get(job.kind)
         if handler is None:
             async with self._pool.connection() as conn:
-                await queue.fail(conn, job, ErrorCategory.NOT_IMPLEMENTED, terminal=True)
+                failed_job = await queue.fail(
+                    conn, job, ErrorCategory.NOT_IMPLEMENTED, terminal=True
+                )
+                await _compensate_run_failure(conn, failed_job, ErrorCategory.NOT_IMPLEMENTED)
             _log.warning("no handler for job %s kind %s; dead-lettered", job.id, job.kind)
             return job
         await self._dispatch(job, handler)
@@ -207,13 +216,14 @@ class Worker:
             category = _failure_category(exc)
             terminal = isinstance(exc, CategorizedError) and exc.terminal
             async with self._pool.connection() as conn:
-                await queue.fail(
+                failed_job = await queue.fail(
                     conn,
                     job,
                     category,
                     terminal=terminal,
                     failure_context=_failure_context(exc, self._secret_registry),
                 )
+                await _compensate_run_failure(conn, failed_job, category)
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
             return
         async with self._pool.connection() as conn:
@@ -252,6 +262,46 @@ def _failure_category(exc: Exception) -> ErrorCategory:
     if isinstance(exc, PayloadValidationError):
         return ErrorCategory.CONFIGURATION_ERROR
     return ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+async def _compensate_run_failure(
+    conn: AsyncConnection,
+    job: Job,
+    category: ErrorCategory,
+) -> None:
+    if job.state is not JobState.FAILED:
+        return
+    try:
+        run_id = run_id_from_payload(job.kind, job.payload)
+    except PayloadValidationError as exc:
+        _log.warning(
+            "job %s has invalid payload; skipping Run compensation: %s",
+            job.id,
+            exc,
+        )
+        return
+    if run_id is None:
+        return
+    async with (
+        conn.transaction(),
+        advisory_xact_lock(conn, LockScope.RUN, run_id),
+        conn.cursor(row_factory=dict_row) as cur,
+    ):
+        await cur.execute(
+            "UPDATE runs SET state = %s, failure_category = %s, failing_job_id = %s "
+            "WHERE id = %s AND state = ANY(%s) "
+            "RETURNING id",
+            (
+                RunState.FAILED.value,
+                category.value,
+                job.id,
+                run_id,
+                list(_RUN_COMPENSATION_STATE_VALUES),
+            ),
+        )
+        row = await cur.fetchone()
+    if row is not None:
+        _log.info("job %s terminal failure compensated run %s", job.id, run_id)
 
 
 def _failure_context(exc: Exception, registry: SecretRegistry) -> dict[str, str]:
