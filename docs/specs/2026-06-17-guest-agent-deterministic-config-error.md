@@ -56,10 +56,19 @@ See ADR-0157 for the decision and rejected alternatives. In summary:
    envelope `detail`.
 
 3. **`details` gains two auditable keys on both branches:** `libvirt_error` = the libvirt
-   error string (`str(exc)`), `libvirt_error_code` = `exc.get_error_code()`. `domain` stays.
-   These are hypervisor-side diagnostics, not kdive secret material; they pass through the
-   response boundary's existing `safe_error_details` redaction unchanged (ADR-0078: the TLS
-   client cert is consumed by the transport layer and never reaches this seam).
+   error string (`str(exc)`), `libvirt_error_code` = `exc.get_error_code()` (an `int`).
+   `domain` stays. The guest-exec seam runs only on the build/install **worker** path
+   (`GuestExecBuildTransport` → `run_build_on_host` → the worker job handler), so the
+   surfaced `details` flow through the worker's redaction seam, not the synchronous
+   `safe_error_details` path: `worker._failure_context` builds the persisted
+   `job.failure_context` by running every scalar `CategorizedError.details` value (both new
+   keys are scalars: `str` and `int`) through the `Redactor` (`security/secrets/redaction.py`
+   — known-secret-value substitution + the `key=value` secret-name pattern), keyed as
+   `failure_detail_libvirt_error` / `failure_detail_libvirt_error_code`. `jobs.get`
+   (`ToolResponse.from_job`) then surfaces that already-redacted context. The libvirt error
+   string is a hypervisor-side diagnostic and carries no kdive secret material at this seam
+   (ADR-0078: the TLS client cert is consumed by the transport layer and never reaches the
+   exec seam), and the worker `Redactor` still scrubs it on the way to persistence regardless.
 
 4. **No new error category, field, column, or migration.** `CONFIGURATION_ERROR` and
    `TRANSPORT_FAILURE` both already exist and already carry the correct `retryable` in
@@ -84,8 +93,11 @@ Unit tests in `tests/providers/remote_libvirt/guest/test_guest_agent.py`, using 
 - **Transient → `TRANSPORT_FAILURE`:** `VIR_ERR_AGENT_UNRESPONSIVE` and a no-code
   `libvirt.libvirtError("guest agent is not connected")` both stay `TRANSPORT_FAILURE`. The
   existing `test_agent_unreachable_maps_to_transport_failure` is preserved (no-code path).
-- **`details` payload:** both branches carry `libvirt_error` (the error string) and
-  `libvirt_error_code` (the numeric code) alongside `domain`.
+- **`details` payload:** at the unit boundary (`GuestAgentExec` raises `CategorizedError`) the
+  test asserts `exc.details` carries `libvirt_error` (the error string), `libvirt_error_code`
+  (the numeric code), and `domain` on both branches. The downstream worker keying
+  (`failure_detail_libvirt_error`, redaction) is already covered by the worker's own tests and
+  is not re-exercised here.
 - **Timeout path unchanged:** `_await_exit`'s in-guest timeout stays `TRANSPORT_FAILURE`
   (the command ran; the agent answered) — existing
   `test_run_times_out_when_the_command_never_exits` must still pass.
