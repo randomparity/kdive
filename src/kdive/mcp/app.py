@@ -35,6 +35,7 @@ from kdive.mcp.middleware import (
     ToolExposureMiddleware,
     UsageTrackingMiddleware,
 )
+from kdive.mcp.resources import registrar as doc_resources
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
 from kdive.mcp.tools.accounting.reports import register as register_accounting_reports
@@ -217,6 +218,17 @@ def _register_ops_secrets_tools(
     ops_secrets_tools.register(app, pool, assembly.secret_registry)
 
 
+def _register_doc_resources(
+    app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
+) -> None:
+    """Register the allowlisted operator docs as MCP resources (ADR-0151).
+
+    Resources need neither the pool nor the provider assembly; this adapter keeps the
+    ``PlaneRegistrar`` seam uniform.
+    """
+    doc_resources.register(app)
+
+
 def _register_system_handlers(
     registry: HandlerRegistry,
     resolver: ProviderResolver,
@@ -294,6 +306,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_ops_build_hosts_tools,
     _register_ops_images_tools,
     _register_ops_secrets_tools,
+    _register_doc_resources,
 )
 
 

@@ -116,6 +116,32 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
     asyncio.run(_run())
 
 
+def test_build_app_registers_doc_resources() -> None:
+    # ADR-0151: build_app registers the operator docs the tool surface cites as MCP
+    # resources, so ListMcpResources returns them and each reads back the canonical doc.
+    from pathlib import Path
+
+    from kdive.mcp.resources.registrar import DOC_RESOURCES
+
+    repo_root = Path(__file__).resolve().parents[3]
+    assert (repo_root / "docs").is_dir(), "repo-root resolution is wrong"
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+    async def _run() -> None:
+        listed = {str(r.uri) for r in await app.list_resources()}
+        assert {e.uri for e in DOC_RESOURCES} <= listed
+        for entry in DOC_RESOURCES:
+            result = await app.read_resource(entry.uri)
+            served = result.contents[0].content
+            assert isinstance(served, str)
+            canonical = (repo_root / entry.source).read_text(encoding="utf-8")
+            assert served == canonical
+
+    asyncio.run(_run())
+
+
 def test_binding_error_middleware_is_registered_innermost() -> None:
     # BindingErrorMiddleware must sit after Telemetry + DenialAudit so a binding ValidationError
     # is converted to a returned envelope inside the telemetry span (ADR-0124; ADR-0132).
