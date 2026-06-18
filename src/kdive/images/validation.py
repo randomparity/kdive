@@ -48,7 +48,7 @@ def _real_inspect(qcow2_path: Path, candidates: Sequence[str]) -> set[str]:
     commands = "\n".join(f"exists {path}" for path in candidates)
     argv = ["guestfish", "--ro", "-a", str(qcow2_path), "-i"]
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted inputs
+        result = subprocess.run(  # noqa: S603 - fixed guestfish argv; image path is a data arg
             argv,
             input=commands + "\n",
             capture_output=True,

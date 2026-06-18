@@ -415,7 +415,7 @@ def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cove
     if virsh is None:
         return _DomainExitProbe(False, "virsh executable not found")
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        proc = subprocess.run(  # noqa: S603 - resolved virsh; URI/domain are argv data, no shell
             [virsh, "-c", uri, "domstate", domain_name],
             capture_output=True,
             text=True,

@@ -36,7 +36,7 @@ def _real_make_overlay(base: str, overlay: str) -> None:
             details=_overlay_error_details("create_overlay", overlay, tool=_QEMU_IMG),
         )
     try:
-        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, trusted paths
+        result = subprocess.run(  # noqa: S603 - resolved qemu-img; base/overlay are argv data
             [qemu_img, "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", base, overlay],
             capture_output=True,
             text=True,
