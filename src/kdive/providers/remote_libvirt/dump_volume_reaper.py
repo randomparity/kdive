@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from typing import Protocol
 from uuid import UUID
 
 import libvirt
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolume
 from kdive.providers.remote_libvirt.reaper_connections import (
     open_libvirt_reaper,
@@ -57,6 +59,9 @@ class _Pool(Protocol):
 class _ReaperConn(Protocol):
     def storagePoolLookupByName(self, name: str) -> _Pool: ...  # noqa: N802 - binding name
     def close(self) -> None: ...
+
+
+type OpenDumpReaperConnection = Callable[[str], _ReaperConn]
 
 
 def system_id_from_dump_volume_name(name: str) -> UUID | None:
@@ -144,14 +149,28 @@ class RemoteLibvirtDumpVolumeReaper:
             pool = conn.storagePoolLookupByName(config.storage_pool)
             try:
                 volume = pool.storageVolLookupByName(name)
-            except libvirt.libvirtError:
-                return  # already gone (a live capture's finally beat the reap) — idempotent
-            volume.delete(0)
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                    return  # already gone (a live capture's finally beat the reap)
+                raise _infra("looking up host_dump volume", volume=name) from exc
+            try:
+                volume.delete(0)
+            except libvirt.libvirtError as exc:
+                raise _infra("deleting host_dump volume", volume=name) from exc
             _log.info("reconciler: deleted orphaned host_dump volume %s", name)
+
+
+def _infra(verb: str, **details: str) -> CategorizedError:
+    return CategorizedError(
+        f"libvirt error {verb}",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details=dict(details),
+    )
 
 
 __all__ = [
     "RemoteLibvirtDumpVolumeReaper",
+    "OpenDumpReaperConnection",
     "system_id_from_dump_volume_name",
     "volume_mtime_epoch_s",
 ]

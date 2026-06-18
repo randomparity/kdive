@@ -6,18 +6,34 @@ reconciler's live-holder guards, plus the DumpVolumeReaper protocol conformance.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+from typing import cast
 from uuid import UUID
 
+import libvirt
+import pytest
+
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolumeReaper
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.dump_volume_reaper import (
+    OpenDumpReaperConnection,
     RemoteLibvirtDumpVolumeReaper,
     system_id_from_dump_volume_name,
     volume_mtime_epoch_s,
 )
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import host_dump_volume_name
+from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.providers.remote_libvirt.conftest import libvirt_error
 
 _SID = UUID("00000000-0000-0000-0000-0000000000cc")
+_CERT_REFS = TlsCertRefs(
+    client_cert_ref="secret://client-cert",
+    client_key_ref="secret://client-key",  # pragma: allowlist secret
+    ca_cert_ref="secret://ca-cert",
+)
 
 
 def test_reaper_satisfies_the_dump_volume_reaper_port() -> None:
@@ -56,4 +72,108 @@ def test_mtime_is_zero_when_absent_or_malformed() -> None:
             "<volume><target><timestamps><mtime>nope</mtime></timestamps></target></volume>"
         )
         == 0.0
+    )
+
+
+def test_delete_dump_volume_treats_missing_volume_as_done(tmp_path: Path) -> None:
+    conn = _FakeConn(volume_error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL))
+    reaper = _reaper(conn, tmp_path)
+
+    asyncio.run(reaper.delete_dump_volume(host_dump_volume_name(_SID)))
+
+    assert conn.pool.lookups == [host_dump_volume_name(_SID)]
+    assert conn.closed
+
+
+def test_delete_dump_volume_preserves_non_absence_lookup_failures(tmp_path: Path) -> None:
+    conn = _FakeConn(volume_error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR))
+    reaper = _reaper(conn, tmp_path)
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(reaper.delete_dump_volume(host_dump_volume_name(_SID)))
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert conn.pool.lookups == [host_dump_volume_name(_SID)]
+    assert conn.pool.volume.deleted == 0
+    assert conn.closed
+
+
+class _SecretBackend:
+    def resolve(self, ref: str) -> str:
+        return f"PEM::{ref}"
+
+
+class _FakeVolume:
+    def __init__(self) -> None:
+        self.deleted = 0
+
+    def name(self) -> str:
+        return host_dump_volume_name(_SID)
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
+        del flags
+        return (
+            "<volume><target><timestamps><mtime>1700000000</mtime></timestamps></target></volume>"
+        )
+
+    def delete(self, flags: int = 0) -> int:
+        del flags
+        self.deleted += 1
+        return 0
+
+
+class _FakePool:
+    def __init__(self, volume_error: libvirt.libvirtError | None = None) -> None:
+        self._volume_error = volume_error
+        self.volume = _FakeVolume()
+        self.lookups: list[str] = []
+
+    def listAllVolumes(self, flags: int = 0) -> list[_FakeVolume]:  # noqa: N802
+        del flags
+        return [self.volume]
+
+    def storageVolLookupByName(self, name: str) -> _FakeVolume:  # noqa: N802
+        self.lookups.append(name)
+        if self._volume_error is not None:
+            raise self._volume_error
+        return self.volume
+
+    def refresh(self, flags: int = 0) -> int:
+        del flags
+        return 0
+
+
+class _FakeConn:
+    def __init__(self, volume_error: libvirt.libvirtError | None = None) -> None:
+        self.pool = _FakePool(volume_error)
+        self.closed = False
+
+    def storagePoolLookupByName(self, name: str) -> _FakePool:  # noqa: N802
+        assert name == "default"
+        return self.pool
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _reaper(conn: _FakeConn, pki_base_dir: Path) -> RemoteLibvirtDumpVolumeReaper:
+    config = RemoteLibvirtConfig(
+        uri="qemu+tls://builder.example/system",
+        cert_refs=_CERT_REFS,
+        concurrent_allocation_cap=1,
+    )
+
+    def open_connection(uri: str) -> _FakeConn:
+        del uri
+        return conn
+
+    return RemoteLibvirtDumpVolumeReaper(
+        secret_registry=SecretRegistry(),
+        connections=remote_libvirt_connections(
+            secret_registry=SecretRegistry(),
+            config_factory=lambda: config,
+            open_connection=cast(OpenDumpReaperConnection, open_connection),
+            secret_backend_factory=_SecretBackend,
+            pki_base_dir=pki_base_dir,
+        ),
     )
