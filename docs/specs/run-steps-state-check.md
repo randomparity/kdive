@@ -67,8 +67,24 @@ See ADR-0171 for the decisions and rejected alternatives. In summary:
 - **Migration:** a fresh migrate admits a `running` and a `succeeded` row and rejects
   a third value with `CheckViolation`; the bidirectional parity test; the
   `CHECK_ENUMS` parametrization picks up the new entry.
-- **Read path:** `claim_run_step` raises `RuntimeError` (not a hang) when a row with
-  an unknown state is present — exercised by inserting the row with the constraint
-  temporarily dropped (the only way to stage corrupt data), or by driving the branch
-  directly. A `succeeded` row replays its result; a stale `running` row (older than
-  the stale interval) is reclaimed and re-claimable.
+- **`succeeded` replay:** a `claim_run_step` against a step whose row is `succeeded`
+  returns `StepClaim(claimed=False, result=...)` with the stored result.
+- **Stale `running` reclamation:** stage a `running` row older than
+  `_STALE_RUNNING_INTERVAL` (30 minutes), then assert `claim_run_step` deletes it and
+  re-claims (`claimed=True`). The `run_steps_set_updated_at` trigger rewrites
+  `updated_at := now()` on every row-changing UPDATE, so a plain backdating UPDATE
+  cannot age the row. Age it one of two ways: INSERT the row with an explicit
+  `updated_at = now() - interval '31 minutes'` (the `BEFORE UPDATE` trigger does not
+  fire on INSERT), or `ALTER TABLE run_steps DISABLE TRIGGER run_steps_set_updated_at`
+  around the aging UPDATE and re-enable it after (the established
+  `tests/reconciler/test_orphaned_active_sweep.py::_age_updated_at` pattern). The
+  reclamation assertion (`claimed=True`) is what fails if the row was not actually
+  aged, so the staleness is not silently lost.
+- **Invalid-state read-path guard:** `claim_run_step` raises `RuntimeError` (not a
+  hang) when a row with an unknown state is present. `claim_run_step` reads the state
+  straight from the DB with no injection seam, so the only way to stage corrupt data
+  is to remove the CHECK: on a fresh per-test migrated database, `ALTER TABLE
+  run_steps DROP CONSTRAINT run_steps_state_check`, insert a row with an out-of-enum
+  state, then assert `pytest.raises(RuntimeError)` *escapes* `claim_run_step` (proving
+  the poll loop aborts rather than rolling back and retrying). The constraint drop
+  runs on the test's own freshly-migrated DB so it does not leak into other tests.
