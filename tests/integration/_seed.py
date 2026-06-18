@@ -256,6 +256,49 @@ async def seed_running_run(
     return str(run.id)
 
 
+async def seed_unbound_running_run(
+    pool: AsyncConnectionPool,
+    *,
+    project: str = "proj",
+    target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    build_profile: dict[str, Any] | None = None,
+) -> str:
+    """Insert an `active` Investigation + a `running` Run with no System (ADR-0169).
+
+    Models a Run created on the decoupled path: it has a committed ``target_kind`` and is
+    buildable, but ``system_id`` is ``None`` until ``runs.bind`` attaches a System.
+    """
+    async with pool.connection() as conn:
+        inv = await INVESTIGATIONS.insert(
+            conn,
+            Investigation(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project=project,
+                title="unbound-run",
+                state=InvestigationState.ACTIVE,
+            ),
+        )
+        run = await RUNS.insert(
+            conn,
+            Run(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project=project,
+                investigation_id=inv.id,
+                system_id=None,
+                target_kind=target_kind,
+                state=RunState.RUNNING,
+                build_profile=build_profile or copy.deepcopy(BUILD_PROFILE),
+            ),
+        )
+    return str(run.id)
+
+
 async def seed_crashed_system_with_run(
     pool: AsyncConnectionPool,
     *,

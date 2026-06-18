@@ -50,6 +50,7 @@ from tests.integration._seed import (
     seed_granted_allocation,
     seed_running_run,
     seed_system,
+    seed_unbound_running_run,
 )
 from tests.mcp.systems_support import provider_resolver
 
@@ -237,6 +238,31 @@ def test_local_host_uses_runtime_builder_no_transport(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_run(pool)
+            host = await _worker_local_host(pool)
+            job = await _enqueue(pool, run_id, str(host.id))
+            builder = _RecordingBuilder()
+            async with pool.connection() as conn:
+                await runs_handlers.build_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(builder=builder),
+                    secret_registry=SecretRegistry(),
+                )
+            assert builder.calls == [UUID(run_id)]
+            assert await _run_state(pool, run_id) == "succeeded"
+
+    asyncio.run(_run())
+
+
+def test_unbound_run_builds_via_target_kind(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """A Run with no System builds: the builder is resolved from target_kind (ADR-0169)."""
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_unbound_running_run(pool)
             host = await _worker_local_host(pool)
             job = await _enqueue(pool, run_id, str(host.id))
             builder = _RecordingBuilder()
@@ -653,7 +679,6 @@ def test_unsupported_build_host_kind_fails_before_ephemeral_session(
                 assert isinstance(parsed, runs_handlers.ServerBuildProfile)
                 with pytest.raises(CategorizedError) as exc:
                     await runs_handlers._run_build(
-                        conn,
                         run,
                         parsed,
                         host=host,

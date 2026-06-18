@@ -88,7 +88,6 @@ async def _release_build_lease(conn: AsyncConnection, run_id: UUID) -> None:
 
 
 async def _run_build(
-    conn: AsyncConnection,
     run: Run,
     parsed: ServerBuildProfile,
     *,
@@ -98,9 +97,13 @@ async def _run_build(
     kernel_src: str,
     transport_factories: BuildHostTransportFactories | None = None,
 ) -> BuildOutput:
-    """Resolve the runtime builder and run it on ``host`` through the build-host seam."""
+    """Resolve the runtime builder and run it on ``host`` through the build-host seam.
+
+    The builder is selected from ``run.target_kind`` (ADR-0169), not the System join, so a Run
+    that has no System bound yet still builds against its committed resource kind.
+    """
     run_id = run.id
-    builder = (await resolver.runtime_for_run(conn, run_id)).builder
+    builder = resolver.resolve(run.target_kind).builder
     return await run_build_on_host(
         builder,
         host,
@@ -236,7 +239,6 @@ async def _build_and_record(
         host = await _resolve_build_host(conn, payload, run_id)
         kernel_src = config.get(KERNEL_SRC) or ""
         output = await _run_build(
-            conn,
             run,
             parsed,
             host=host,
