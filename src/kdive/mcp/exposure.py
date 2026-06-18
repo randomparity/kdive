@@ -218,7 +218,14 @@ def required_scopes(tool_name: str) -> frozenset[ExposureScope]:
 
 
 def _max_project_rank(ctx: RequestContext) -> int:
-    return max((_ROLE_RANK[r] for r in ctx.roles.values()), default=-1)
+    return max(
+        (
+            _ROLE_RANK[role]
+            for project in ctx.projects
+            if (role := ctx.roles.get(project)) is not None
+        ),
+        default=-1,
+    )
 
 
 def _has_platform(ctx: RequestContext, needed: PlatformRole) -> bool:

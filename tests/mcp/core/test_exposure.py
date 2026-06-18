@@ -19,13 +19,16 @@ from kdive.security.authz.rbac import PlatformRole, Role
 
 
 def _ctx(
-    *, roles: dict[str, Role] | None = None, platform: frozenset[PlatformRole] = frozenset()
+    *,
+    roles: dict[str, Role] | None = None,
+    projects: tuple[str, ...] | None = None,
+    platform: frozenset[PlatformRole] = frozenset(),
 ) -> RequestContext:
     roles = roles or {}
     return RequestContext(
         principal="p",
         agent_session=None,
-        projects=tuple(roles),
+        projects=tuple(roles) if projects is None else projects,
         roles=roles,
         platform_roles=platform,
     )
@@ -43,6 +46,16 @@ def test_viewer_only_does_not_satisfy_operator_or_admin() -> None:
     assert scope_satisfied(ExposureScope.PROJECT_VIEWER, viewer)
     assert not scope_satisfied(ExposureScope.PROJECT_OPERATOR, viewer)
     assert not scope_satisfied(ExposureScope.PROJECT_ADMIN, viewer)
+
+
+def test_project_roles_on_ungranted_projects_do_not_expose_project_tools() -> None:
+    ungranted = _ctx(roles={"a": Role.ADMIN}, projects=())
+    other_project = _ctx(roles={"a": Role.ADMIN}, projects=("b",))
+
+    assert not scope_satisfied(ExposureScope.PROJECT_VIEWER, ungranted)
+    assert not tool_visible("runs.build", ungranted)
+    assert visible_tool_names(ungranted, {"projects.list", "runs.build"}) == {"projects.list"}
+    assert not scope_satisfied(ExposureScope.PROJECT_ADMIN, other_project)
 
 
 def test_platform_admin_implies_auditor_only() -> None:
