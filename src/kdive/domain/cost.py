@@ -109,7 +109,6 @@ def rate(coeff: Decimal, *, vcpus: int, memory_gb: int) -> Decimal:
 
 
 def cost(rate_kcu_per_hr: Decimal, hours: Decimal) -> Decimal:
-    """Return the exact (unquantized) kcu cost of ``rate_kcu_per_hr`` over ``hours``."""
     return rate_kcu_per_hr * hours
 
 

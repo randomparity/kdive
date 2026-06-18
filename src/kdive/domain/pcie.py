@@ -143,7 +143,6 @@ def parse_match_spec(spec: str) -> MatchSpec:
 
 
 def descriptor_matches(spec: MatchSpec, descriptor: PCIeDescriptor) -> bool:
-    """Return whether ``descriptor`` satisfies ``spec`` (occupancy not considered)."""
     if spec.kind == "vendor_device":
         return (
             descriptor["vendor_id"] == spec.vendor_id and descriptor["device_id"] == spec.device_id
