@@ -16,9 +16,11 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
-from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle.allocations.common import (
     MAX_WAIT_S,
@@ -38,7 +40,7 @@ async def get_allocation(
     """Return an allocation visible to the caller, or a no-leak not_found."""
     uid = _as_uuid(allocation_id)
     if uid is None:
-        return _config_error(allocation_id)
+        return _invalid_uuid_error("allocation_id", allocation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             alloc = await ALLOCATIONS.get(conn, uid)
@@ -64,9 +66,13 @@ async def wait_allocation(
     """Poll until a requested allocation settles or the clamped timeout elapses."""
     uid = _as_uuid(allocation_id)
     if uid is None:
-        return _config_error(allocation_id)
+        return _invalid_uuid_error("allocation_id", allocation_id)
     if not math.isfinite(timeout_s):
-        return _config_error(allocation_id)
+        return _config_error_reason(
+            allocation_id,
+            ConfigErrorReason.INVALID_TIMEOUT,
+            detail="timeout_s must be a finite number of seconds",
+        )
     loop = asyncio.get_running_loop()
     deadline = loop.time() + min(max(timeout_s, 0.0), MAX_WAIT_S)
     with bind_context(principal=ctx.principal):

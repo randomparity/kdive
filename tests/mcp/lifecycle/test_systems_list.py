@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -325,6 +325,9 @@ def test_class_pcie_spec_is_config_error(migrated_url: str) -> None:
             resp = await _list_systems(pool, _ctx(), pcie="class=02")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        # ADR-0174: a vendor/device-less match names its reason.
+        assert resp.data["reason"] == "invalid_pcie_match"
+        assert resp.detail is not None
 
     asyncio.run(_run())
 
@@ -335,6 +338,9 @@ def test_malformed_allocation_id_is_config_error(migrated_url: str) -> None:
             resp = await _list_systems(pool, _ctx(), allocation_id="not-a-uuid")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 
@@ -345,6 +351,9 @@ def test_unknown_state_is_config_error(migrated_url: str) -> None:
             resp = await _list_systems(pool, _ctx(), state="bogus")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        # ADR-0174: an unknown state filter enumerates the accepted values.
+        assert resp.data["reason"] == "invalid_state"
+        assert "ready" in cast(list[str], resp.data["accepted_values"])
 
     asyncio.run(_run())
 
