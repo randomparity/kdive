@@ -4,7 +4,7 @@ Provides the shared merge-contract primitives every per-entity reconciler reuses
 
 * :class:`ReconcileDiff` — the per-pass outcome (``created`` / ``updated`` / ``pruned`` /
   ``cordoned`` / ``warned`` lists of small records), surfaced to the operator and the loop;
-* :data:`ManagedBy` — re-exported from :mod:`kdive.domain.models` (the ownership partition);
+* :data:`ManagedBy` — re-exported from :mod:`kdive.domain.catalog.resources`;
 * :func:`inventory_pass_lock` — a session-scoped advisory lock held for a **whole** reconcile
   pass, so the multi-transaction pass (batched upsert + per-row prunes) never races a second
   pass into the ``(provider, name, arch)`` identity constraint;

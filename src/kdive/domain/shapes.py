@@ -3,7 +3,7 @@
 A shape names a curated sizing preset (``small`` … ``max``, seeded by migration 0013). A
 resolved shape yields one :class:`ShapeSizing` tuple ``{vcpus, memory_mb, disk_gb,
 pcie_match?}``. The mapping is exact: ``memory_mb`` is a whole-GB multiple (the
-:class:`~kdive.domain.models.SystemShape` model and the migration CHECK both enforce it),
+:class:`~kdive.domain.lifecycle.SystemShape` model and the migration CHECK both enforce it),
 so the cost Selector's ``memory_mb → memory_gb`` is lossless.
 
 A shape fixes **size only**: ``cost_class`` (and therefore price) is resolved admission-side

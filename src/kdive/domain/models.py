@@ -1,4 +1,4 @@
-"""Compatibility facade for durable domain records.
+"""Legacy compatibility facade for durable domain records.
 
 The bounded domain modules own their records and enums:
 
@@ -8,8 +8,8 @@ The bounded domain modules own their records and enums:
 * :mod:`kdive.domain.accounting`, :mod:`kdive.domain.catalog.images`, and
   :mod:`kdive.domain.catalog.artifacts` own their respective catalog records.
 
-This module remains as the legacy aggregate import surface for repository code and tests while
-call sites move to the bounded modules.
+This module remains for legacy tests and external imports while in-tree production code uses
+the bounded modules directly.
 """
 
 from __future__ import annotations

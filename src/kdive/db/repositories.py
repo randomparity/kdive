@@ -18,23 +18,13 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel
 
-from kdive.domain.models import (
-    Allocation,
-    Artifact,
-    Budget,
-    CostClassCoefficient,
-    DebugSession,
-    DomainModel,
-    ImageCatalogEntry,
-    Investigation,
-    Job,
-    LedgerEntry,
-    Quota,
-    Resource,
-    Run,
-    System,
-    SystemShape,
-)
+from kdive.domain._records import DomainModel
+from kdive.domain.accounting import Budget, CostClassCoefficient, LedgerEntry, Quota
+from kdive.domain.catalog.artifacts import Artifact
+from kdive.domain.catalog.images import ImageCatalogEntry
+from kdive.domain.catalog.resources import Resource
+from kdive.domain.jobs import Job
+from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System, SystemShape
 from kdive.domain.state import (
     AllocationState,
     DebugSessionState,

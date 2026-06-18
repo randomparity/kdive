@@ -1,9 +1,9 @@
 """Job-handler type and registry for the durable queue (ADR-0018).
 
 A :data:`JobHandler` is the async callable a worker invokes for one claimed
-:class:`~kdive.domain.models.Job`; it runs the op and returns a ``result_ref``
+:class:`~kdive.domain.jobs.Job`; it runs the op and returns a ``result_ref``
 (object-store key) or ``None``, or raises to fail the job. :class:`HandlerRegistry`
-binds exactly one handler per :class:`~kdive.domain.models.JobKind`; plane registrars
+binds exactly one handler per :class:`~kdive.domain.jobs.JobKind`; plane registrars
 populate it at worker startup and the worker dispatches by ``Job.kind``.
 """
 
