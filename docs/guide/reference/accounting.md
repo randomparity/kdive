@@ -10,8 +10,15 @@ Price a hypothetical selector over a window without writing anything. Requires v
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `project` | `string` | yes | Project to price the estimate for. |
-| `request` | `object` | yes | Estimate request payload: size, lease window, cost class. |
+| `project` | string | yes | Project to price the estimate for. |
+| `request` | object | yes | Estimate request payload: size, lease window, cost class. |
+
+`request` fields:
+
+- `vcpus` (`integer`, required)
+- `memory_gb` (`integer`, required)
+- `window` (`any`, required)
+- `cost_class` (`string`, optional)
 
 ## `accounting.report_all_projects`
 
@@ -21,8 +28,8 @@ Return platform-wide accounting usage for all projects.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `group_by` | `any` | no | Group rows by 'principal', or omit for per-project grouping. |
-| `window` | `any` | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
+| `group_by` | string (nullable) | no | Group rows by 'principal', or omit for per-project grouping. |
+| `window` | array<string (nullable)> (nullable) | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
 
 ## `accounting.report_granted_set`
 
@@ -32,9 +39,9 @@ Return accounting usage for the caller's granted projects.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `group_by` | `any` | no | Group rows by 'principal', or omit for per-project grouping. |
-| `projects` | `any` | no | Named project subset for granted-set scope; omit for all members. |
-| `window` | `any` | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
+| `group_by` | string (nullable) | no | Group rows by 'principal', or omit for per-project grouping. |
+| `projects` | array<string> (nullable) | no | Named project subset for granted-set scope; omit for all members. |
+| `window` | array<string (nullable)> (nullable) | no | [start, end] ISO-8601 timestamptz pair; omit for all time. |
 
 ## `accounting.set_budget`
 
@@ -44,8 +51,8 @@ Set a project's spend budget limit_kcu; preserves spent_kcu. Requires admin.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit_kcu` | `any` | yes | Budget ceiling in KCU (number or decimal string, >= 0). |
-| `project` | `string` | yes | Project to set the spend budget for. |
+| `limit_kcu` | number \| string | yes | Budget ceiling in KCU (number or decimal string, >= 0). |
+| `project` | string | yes | Project to set the spend budget for. |
 
 ## `accounting.set_quota`
 
@@ -55,10 +62,10 @@ Set a project's concurrency caps and pending-queue cap. Requires admin.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `max_concurrent_allocations` | `integer` | yes | Maximum concurrent allocations allowed (>= 0). |
-| `max_concurrent_systems` | `integer` | yes | Maximum concurrent Systems allowed (>= 0). |
-| `max_pending_allocations` | `integer` | no | Maximum queued (requested) allocations (>= 0); 0 = no queue. |
-| `project` | `string` | yes | Project to set concurrency caps for. |
+| `max_concurrent_allocations` | integer | yes | Maximum concurrent allocations allowed (>= 0). |
+| `max_concurrent_systems` | integer | yes | Maximum concurrent Systems allowed (>= 0). |
+| `max_pending_allocations` | integer | no | Maximum queued (requested) allocations (>= 0); 0 = no queue. |
+| `project` | string | yes | Project to set concurrency caps for. |
 
 ## `accounting.usage_investigation`
 
@@ -68,7 +75,7 @@ Return usage totals for one investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `investigation_id` | `string` | yes | Investigation UUID to report spend for. |
+| `investigation_id` | string | yes | Investigation UUID to report spend for. |
 
 ## `accounting.usage_project`
 
@@ -78,4 +85,4 @@ Return usage totals for one project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `project` | `string` | yes | Project to report spend for. |
+| `project` | string | yes | Project to report spend for. |

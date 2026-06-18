@@ -10,7 +10,7 @@ Close an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `investigation_id` | `string` | yes | The Investigation to drive to closed. |
+| `investigation_id` | string | yes | The Investigation to drive to closed. |
 
 ## `investigations.get`
 
@@ -20,7 +20,7 @@ Return one investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `investigation_id` | `string` | yes | The Investigation to render. |
+| `investigation_id` | string | yes | The Investigation to render. |
 
 ## `investigations.link`
 
@@ -30,8 +30,14 @@ Link a run to an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `investigation_id` | `string` | yes | The Investigation to add the ref to. |
-| `ref` | `object` | yes | External ref to upsert, with tracker, id, and url. |
+| `investigation_id` | string | yes | The Investigation to add the ref to. |
+| `ref` | object | yes | External ref to upsert, with tracker, id, and url. |
+
+`ref` fields:
+
+- `tracker` (`string`, required)
+- `id` (`string`, required)
+- `url` (`string`, required)
 
 ## `investigations.list`
 
@@ -41,8 +47,8 @@ List the Investigations you can view, newest-first, for reporting.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `project` | `any` | no | Restrict to one project you can view; omit for all. |
-| `state` | `any` | no | Filter by state (open/active/closed/abandoned). |
+| `project` | string (nullable) | no | Restrict to one project you can view; omit for all. |
+| `state` | string (nullable) | no | Filter by state (open/active/closed/abandoned). |
 
 ## `investigations.open`
 
@@ -52,10 +58,10 @@ Open an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `description` | `any` | no | Optional free-form description for reporting (<=4096 chars). |
-| `external_refs` | `any` | no | Optional external tracker refs (each with tracker, id, url). |
-| `project` | `string` | yes | Project to create the Investigation under. |
-| `title` | `string` | yes | Human-readable title (1..=200 chars). |
+| `description` | string (nullable) | no | Optional free-form description for reporting (<=4096 chars). |
+| `external_refs` | array<object> (nullable) | no | Optional external tracker refs (each with tracker, id, url). |
+| `project` | string | yes | Project to create the Investigation under. |
+| `title` | string | yes | Human-readable title (1..=200 chars). |
 
 ## `investigations.set`
 
@@ -65,9 +71,9 @@ Edit a non-terminal Investigation's title and/or free-form description.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `description` | `any` | no | New description (<=4096); "" clears it; omit to leave unchanged. |
-| `investigation_id` | `string` | yes | The Investigation to edit. |
-| `title` | `any` | no | New title (1..=200 chars); omit to leave unchanged. |
+| `description` | string (nullable) | no | New description (<=4096); "" clears it; omit to leave unchanged. |
+| `investigation_id` | string | yes | The Investigation to edit. |
+| `title` | string (nullable) | no | New title (1..=200 chars); omit to leave unchanged. |
 
 ## `investigations.unlink`
 
@@ -77,5 +83,10 @@ Unlink a run from an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `investigation_id` | `string` | yes | The Investigation to remove the ref from. |
-| `ref` | `object` | yes | Ref to remove; only tracker and id are used as the key. |
+| `investigation_id` | string | yes | The Investigation to remove the ref from. |
+| `ref` | object | yes | Ref to remove; only tracker and id are used as the key. |
+
+`ref` fields:
+
+- `tracker` (`string`, optional)
+- `id` (`string`, optional)

@@ -10,8 +10,17 @@ Mint presigned PUTs for an external Run's build artifacts. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `artifacts` | `array` | yes | Declared build artifacts: [{name, sha256 (base64), size_bytes}]. |
-| `run_id` | `string` | yes | The external-build Run id. |
+| `artifacts` | array<object> | yes | Declared build artifacts: [{name, sha256 (base64), size_bytes}]. |
+| `run_id` | string | yes | The external-build Run id. |
+
+`artifacts` fields:
+
+  - `name` (`string`, required) — Accepted artifact name (see artifacts.expected_uploads).
+  - `sha256` (`string`, required) — Base64-encoded SHA-256 of the whole object.
+  - `size_bytes` (`integer`, required) — Total object size in bytes.
+  - `chunks` (`array<object>`, optional) — Optional chunked-upload parts; omit for a single PUT.
+      - `sha256` (`string`, required) — Base64-encoded SHA-256 of this chunk.
+      - `size_bytes` (`integer`, required) — This chunk's size in bytes.
 
 Examples for `artifacts`:
 
@@ -53,8 +62,17 @@ Mint a presigned PUT for a DEFINED System's rootfs. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `artifacts` | `array` | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. |
-| `system_id` | `string` | yes | The DEFINED System id. |
+| `artifacts` | array<object> | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. |
+| `system_id` | string | yes | The DEFINED System id. |
+
+`artifacts` fields:
+
+  - `name` (`string`, required) — Accepted artifact name (see artifacts.expected_uploads).
+  - `sha256` (`string`, required) — Base64-encoded SHA-256 of the whole object.
+  - `size_bytes` (`integer`, required) — Total object size in bytes.
+  - `chunks` (`array<object>`, optional) — Optional chunked-upload parts; omit for a single PUT.
+      - `sha256` (`string`, required) — Base64-encoded SHA-256 of this chunk.
+      - `size_bytes` (`integer`, required) — This chunk's size in bytes.
 
 Examples for `artifacts`:
 
@@ -111,7 +129,7 @@ presigned `refs.download_uri`. Requires viewer; sensitive ids are not-found.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `artifact_id` | `string` | yes | The redacted artifact to fetch (sensitive ids are not-found). |
+| `artifact_id` | string | yes | The redacted artifact to fetch (sensitive ids are not-found). |
 
 ## `artifacts.list`
 
@@ -125,7 +143,7 @@ List the redacted artifacts for a System. Requires viewer.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `system_id` | `string` | yes | The System whose redacted artifacts to list. |
+| `system_id` | string | yes | The System whose redacted artifacts to list. |
 
 ## `artifacts.search_text`
 
@@ -139,8 +157,8 @@ Search a redacted System artifact with bounded literal line context.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `after_lines` | `integer` | no | Context lines after each match. |
-| `artifact_id` | `string` | yes | The redacted System artifact id. |
-| `before_lines` | `integer` | no | Context lines before each match. |
-| `max_matches` | `integer` | no | Maximum match windows to return. |
-| `pattern` | `string` | yes | Literal OR search pattern, e.g. '__d_lookup' or 'panic'. |
+| `after_lines` | integer | no | Context lines after each match. |
+| `artifact_id` | string | yes | The redacted System artifact id. |
+| `before_lines` | integer | no | Context lines before each match. |
+| `max_matches` | integer | no | Maximum match windows to return. |
+| `pattern` | string | yes | Literal OR search pattern, e.g. '__d_lookup' or 'panic'. |

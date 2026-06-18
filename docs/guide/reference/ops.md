@@ -16,9 +16,9 @@ audited distinctly).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `provider` | `any` | no | Diagnose one named registered provider; omit for all registered. |
-| `with_buildhost_agent` | `boolean` | no | Opt into the heavy ephemeral_libvirt_buildhost_agent probe: provisions a throwaway builder on each ephemeral_libvirt build host and checks its guest-agent reachability. Audited distinctly; off by default. |
-| `with_egress` | `boolean` | no | Opt into the heavy guest_egress probe: provisions a short-lived guest on the target provider and execs a presigned request to object-store from inside it. Audited distinctly; off by default. |
+| `provider` | string (nullable) | no | Diagnose one named registered provider; omit for all registered. |
+| `with_buildhost_agent` | boolean | no | Opt into the heavy ephemeral_libvirt_buildhost_agent probe: provisions a throwaway builder on each ephemeral_libvirt build host and checks its guest-agent reachability. Audited distinctly; off by default. |
+| `with_egress` | boolean | no | Opt into the heavy guest_egress probe: provisions a short-lived guest on the target provider and execs a presigned request to object-store from inside it. Audited distinctly; off by default. |
 
 ## `ops.export_cost_classes`
 
@@ -34,8 +34,8 @@ Break-glass release of a stuck cross-project Allocation. Requires platform_admin
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `string` | yes | The cross-project Allocation to release. |
-| `reason` | `string` | yes | Mandatory non-blank break-glass justification (audited). |
+| `allocation_id` | string | yes | The cross-project Allocation to release. |
+| `reason` | string | yes | Mandatory non-blank break-glass justification (audited). |
 
 ## `ops.force_teardown`
 
@@ -45,8 +45,8 @@ Break-glass teardown of a stuck cross-project System. Requires platform_admin.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `reason` | `string` | yes | Mandatory non-blank break-glass justification (audited). |
-| `system_id` | `string` | yes | The cross-project System to tear down. |
+| `reason` | string | yes | Mandatory non-blank break-glass justification (audited). |
+| `system_id` | string | yes | The cross-project System to tear down. |
 
 ## `ops.jobs_list`
 
@@ -56,8 +56,8 @@ Cross-project queue depth and per-job state. Requires platform operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | `integer` | no | Maximum per-job rows returned (capped at 200). |
-| `states` | `any` | no | Filter per-job rows to these job states; omit for all. |
+| `limit` | integer | no | Maximum per-job rows returned (capped at 200). |
+| `states` | array<string> (nullable) | no | Filter per-job rows to these job states; omit for all. |
 
 ## `ops.queue_pause`
 
@@ -91,8 +91,8 @@ Upsert a cost class's pricing coefficient. Applies from the next charge. Operato
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `coeff` | `any` | yes | Pricing multiplier (number or decimal string, > 0). |
-| `cost_class` | `string` | yes | Cost class whose pricing coefficient to set. |
+| `coeff` | number \| string | yes | Pricing multiplier (number or decimal string, > 0). |
+| `cost_class` | string | yes | Cost class whose pricing coefficient to set. |
 
 ## `ops.set_host_capacity`
 
@@ -102,5 +102,5 @@ Set a host's concurrent allocation cap. Blocks new placement; no eviction. Opera
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `concurrent_allocation_cap` | `integer` | yes | Maximum concurrent allocations on the host (>= 0). |
-| `resource_id` | `string` | yes | Host (resource) id to set the cap for. |
+| `concurrent_allocation_cap` | integer | yes | Maximum concurrent allocations on the host (>= 0). |
+| `resource_id` | string | yes | Host (resource) id to set the cap for. |

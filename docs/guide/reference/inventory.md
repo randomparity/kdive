@@ -13,5 +13,5 @@ when either cap is hit — narrow with the project/resource filters.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `project` | `any` | no | Filter the summary to one project; omit for all. |
-| `resource_id` | `any` | no | Filter to allocations/systems on one host UUID. |
+| `project` | string (nullable) | no | Filter the summary to one project; omit for all. |
+| `resource_id` | string (nullable) | no | Filter to allocations/systems on one host UUID. |

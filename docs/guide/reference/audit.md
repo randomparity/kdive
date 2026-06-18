@@ -13,4 +13,20 @@ Returns the most recent matching rows (capped at 500, newest first);
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `any` | yes | Project or all-projects audit query request. |
+| `request` | object(scope=project) \| object(scope=all-projects) | yes | Project or all-projects audit query request. |
+
+`request` fields:
+
+- _variant object(scope=project):_
+  - `principal` (`string (nullable)`, optional) — Filter by acting principal.
+  - `object_id` (`string (nullable)`, optional) — Filter by audited object UUID.
+  - `transition` (`string (nullable)`, optional) — Filter by transition literal (e.g. 'requested').
+  - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+  - `scope` (``=project``, required)
+  - `project` (`string`, required) — Project to read; requires project admin.
+- _variant object(scope=all-projects):_
+  - `principal` (`string (nullable)`, optional) — Filter by acting principal.
+  - `object_id` (`string (nullable)`, optional) — Filter by audited object UUID.
+  - `transition` (`string (nullable)`, optional) — Filter by transition literal (e.g. 'requested').
+  - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+  - `scope` (``=all-projects``, required)

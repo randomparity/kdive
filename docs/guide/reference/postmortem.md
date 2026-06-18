@@ -14,8 +14,8 @@ Run crash postmortem commands for a captured vmcore.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `commands` | `array` | yes | Crash commands to run (allowlisted read-only verbs). |
-| `run_id` | `string` | yes | The Run whose captured core to analyze. |
+| `commands` | array<string> | yes | Crash commands to run (allowlisted read-only verbs). |
+| `run_id` | string | yes | The Run whose captured core to analyze. |
 
 ## `postmortem.triage`
 
@@ -29,4 +29,4 @@ Run the default crash triage for a captured vmcore.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `run_id` | `string` | yes | The Run whose captured core to triage. |
+| `run_id` | string | yes | The Run whose captured core to triage. |

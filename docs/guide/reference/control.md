@@ -16,7 +16,7 @@ Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + g
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `system_id` | `string` | yes | The ready System to force-crash via NMI. |
+| `system_id` | string | yes | The ready System to force-crash via NMI. |
 
 ## `control.power`
 
@@ -33,5 +33,5 @@ are destructive (admin). Enqueues a power job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | `string` | yes | Power action: `on` (operator) or `off`/`cycle`/`reset` (admin). |
-| `system_id` | `string` | yes | The started System to act on. |
+| `action` | string | yes | Power action: `on` (operator) or `off`/`cycle`/`reset` (admin). |
+| `system_id` | string | yes | The started System to act on. |

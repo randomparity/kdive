@@ -12,8 +12,51 @@ Use `systems.provision` instead when the profile needs no upload window. Operato
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `string` | yes | Granted Allocation to create a DEFINED System for. |
-| `profile` | `object` | yes | Provisioning profile for the System; an 'upload' rootfs opens a pre-provision rootfs-upload window. |
+| `allocation_id` | string | yes | Granted Allocation to create a DEFINED System for. |
+| `profile` | object(schema_version=1) | yes | Provisioning profile for the System; an 'upload' rootfs opens a pre-provision rootfs-upload window. |
+
+`profile` fields:
+
+- `schema_version` (``=1``, required)
+- `arch` (`string`, required)
+- `vcpu` (`integer (nullable)`, optional)
+- `memory_mb` (`integer (nullable)`, optional)
+- `disk_gb` (`integer (nullable)`, optional)
+- `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods (ADR-0024 decision 2a, ADR-0080).  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model, ADR-0078); ``direct-kernel`` stays the local-libvirt/fault-inject method.
+- `kernel_source_ref` (`string (nullable)`, optional)
+- `provider` (`object`, required) — The provider-specific section, keyed by provider name (ADR-0024 decision 1).  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
+  - `local-libvirt` (`object (nullable)`, optional)
+    - `domain_xml_params` (`map<string, string>`, optional)
+    - `rootfs` (`object(kind=local) \| object(kind=artifact) \| object(kind=catalog) \| object(kind=upload)`, required)
+      - _variant object(kind=local):_
+        - `kind` (``=local``, required)
+        - `path` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=artifact):_
+        - `kind` (``=artifact``, required)
+        - `artifact_id` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=catalog):_
+        - `kind` (``=catalog``, required)
+        - `provider` (`string`, required)
+        - `name` (`string`, required)
+      - _variant object(kind=upload):_
+        - `kind` (``=upload``, required)
+    - `crashkernel` (`string (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+    - `ssh_credential_ref` (`string (nullable)`, optional)
+    - `debug` (`object`, optional) — Per-System debug provisioning flags (ADR-0049 Decision 3).  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
+      - `preserve_on_crash` (`boolean`, optional)
+      - `gdbstub` (`boolean`, optional)
+  - `fault-inject` (`object (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+    - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump``, optional)
+  - `remote-libvirt` (`object (nullable)`, optional)
+    - `base_image_volume` (`string`, required)
+    - `crashkernel` (`string (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+
+See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready-to-edit `profile` example per configured provider.
 
 ## `systems.get`
 
@@ -23,7 +66,7 @@ Return a System the caller can view.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `system_id` | `string` | yes | The System to render. |
+| `system_id` | string | yes | The System to render. |
 
 ## `systems.list`
 
@@ -33,11 +76,11 @@ List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires v
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `any` | no | Only Systems under this Allocation id. |
-| `limit` | `integer` | no | Maximum rows returned (capped at 200). |
-| `pcie` | `any` | no | Only Systems whose Allocation claims a device matching this '<vendor>:<device>' spec. |
-| `shape` | `any` | no | Only Systems with this named shape, or '__custom__' for full-custom (no shape). |
-| `state` | `any` | no | Only Systems in this lifecycle state. |
+| `allocation_id` | string (nullable) | no | Only Systems under this Allocation id. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
+| `pcie` | string (nullable) | no | Only Systems whose Allocation claims a device matching this '<vendor>:<device>' spec. |
+| `shape` | string (nullable) | no | Only Systems with this named shape, or '__custom__' for full-custom (no shape). |
+| `state` | `defined`, `provisioning`, `ready`, `reprovisioning`, `crashed`, `torn_down`, `failed` (nullable) | no | Only Systems in this lifecycle state. |
 
 ## `systems.profile_examples`
 
@@ -64,8 +107,51 @@ System. Operator only.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `string` | yes | Granted Allocation to provision a System for. |
-| `profile` | `object` | yes | Provisioning profile for the System create lane. |
+| `allocation_id` | string | yes | Granted Allocation to provision a System for. |
+| `profile` | object(schema_version=1) | yes | Provisioning profile for the System create lane. |
+
+`profile` fields:
+
+- `schema_version` (``=1``, required)
+- `arch` (`string`, required)
+- `vcpu` (`integer (nullable)`, optional)
+- `memory_mb` (`integer (nullable)`, optional)
+- `disk_gb` (`integer (nullable)`, optional)
+- `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods (ADR-0024 decision 2a, ADR-0080).  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model, ADR-0078); ``direct-kernel`` stays the local-libvirt/fault-inject method.
+- `kernel_source_ref` (`string (nullable)`, optional)
+- `provider` (`object`, required) — The provider-specific section, keyed by provider name (ADR-0024 decision 1).  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
+  - `local-libvirt` (`object (nullable)`, optional)
+    - `domain_xml_params` (`map<string, string>`, optional)
+    - `rootfs` (`object(kind=local) \| object(kind=artifact) \| object(kind=catalog) \| object(kind=upload)`, required)
+      - _variant object(kind=local):_
+        - `kind` (``=local``, required)
+        - `path` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=artifact):_
+        - `kind` (``=artifact``, required)
+        - `artifact_id` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=catalog):_
+        - `kind` (``=catalog``, required)
+        - `provider` (`string`, required)
+        - `name` (`string`, required)
+      - _variant object(kind=upload):_
+        - `kind` (``=upload``, required)
+    - `crashkernel` (`string (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+    - `ssh_credential_ref` (`string (nullable)`, optional)
+    - `debug` (`object`, optional) — Per-System debug provisioning flags (ADR-0049 Decision 3).  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
+      - `preserve_on_crash` (`boolean`, optional)
+      - `gdbstub` (`boolean`, optional)
+  - `fault-inject` (`object (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+    - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump``, optional)
+  - `remote-libvirt` (`object (nullable)`, optional)
+    - `base_image_volume` (`string`, required)
+    - `crashkernel` (`string (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+
+See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready-to-edit `profile` example per configured provider.
 
 ## `systems.provision_defined`
 
@@ -77,7 +163,7 @@ Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `system_id` | `string` | yes | Defined System whose stored profile should be provisioned. |
+| `system_id` | string | yes | Defined System whose stored profile should be provisioned. |
 
 ## `systems.reprovision`
 
@@ -94,8 +180,49 @@ use `systems.provision` instead. Requires operator and opt-in.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `profile` | `object` | yes | New provisioning profile; must opt in to reprovision. |
-| `system_id` | `string` | yes | The ready System to reprovision in place. |
+| `profile` | object(schema_version=1) | yes | New provisioning profile; must opt in to reprovision. |
+| `system_id` | string | yes | The ready System to reprovision in place. |
+
+`profile` fields:
+
+- `schema_version` (``=1``, required)
+- `arch` (`string`, required)
+- `vcpu` (`integer (nullable)`, optional)
+- `memory_mb` (`integer (nullable)`, optional)
+- `disk_gb` (`integer (nullable)`, optional)
+- `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods (ADR-0024 decision 2a, ADR-0080).  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model, ADR-0078); ``direct-kernel`` stays the local-libvirt/fault-inject method.
+- `kernel_source_ref` (`string (nullable)`, optional)
+- `provider` (`object`, required) — The provider-specific section, keyed by provider name (ADR-0024 decision 1).  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
+  - `local-libvirt` (`object (nullable)`, optional)
+    - `domain_xml_params` (`map<string, string>`, optional)
+    - `rootfs` (`object(kind=local) \| object(kind=artifact) \| object(kind=catalog) \| object(kind=upload)`, required)
+      - _variant object(kind=local):_
+        - `kind` (``=local``, required)
+        - `path` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=artifact):_
+        - `kind` (``=artifact``, required)
+        - `artifact_id` (`string`, required)
+        - `sha256` (`string (nullable)`, optional)
+      - _variant object(kind=catalog):_
+        - `kind` (``=catalog``, required)
+        - `provider` (`string`, required)
+        - `name` (`string`, required)
+      - _variant object(kind=upload):_
+        - `kind` (``=upload``, required)
+    - `crashkernel` (`string (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+    - `ssh_credential_ref` (`string (nullable)`, optional)
+    - `debug` (`object`, optional) — Per-System debug provisioning flags (ADR-0049 Decision 3).  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
+      - `preserve_on_crash` (`boolean`, optional)
+      - `gdbstub` (`boolean`, optional)
+  - `fault-inject` (`object (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
+    - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump``, optional)
+  - `remote-libvirt` (`object (nullable)`, optional)
+    - `base_image_volume` (`string`, required)
+    - `crashkernel` (`string (nullable)`, optional)
+    - `destructive_ops` (`array<string>`, optional)
 
 ## `systems.teardown`
 
@@ -111,4 +238,4 @@ Enqueue teardown for a System. Requires admin on the System's project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `system_id` | `string` | yes | The System to tear down. |
+| `system_id` | string | yes | The System to tear down. |
