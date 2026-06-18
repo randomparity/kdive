@@ -18,7 +18,11 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec, qemu_agent_command
+from kdive.providers.remote_libvirt.guest.agent import (
+    BUILD_DETERMINISTIC_CONFIG_CODES,
+    GuestAgentExec,
+    qemu_agent_command,
+)
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
 _ALLOWED = frozenset({"/usr/bin/curl", "/usr/bin/kdive-install"})
@@ -185,6 +189,51 @@ def test_transient_libvirt_error_stays_transport_failure(code: int) -> None:
         _exec_raising(libvirt_error(code)).run(object(), ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
     assert excinfo.value.details["libvirt_error_code"] == code
+
+
+def _exec_raising_with_codes(exc: BaseException, codes: frozenset[int]) -> GuestAgentExec:
+    def boom(domain: object, command: str, timeout: int, flags: int) -> str:
+        raise exc
+
+    return GuestAgentExec(
+        agent_command=boom,
+        allowed_programs=_ALLOWED,
+        deterministic_codes=codes,
+        sleep=lambda _s: None,
+        monotonic=_float_clock(),
+    )
+
+
+def test_build_deterministic_set_classifies_code_86_as_configuration_error() -> None:
+    # The build transport runs only after the guest-ping readiness gate (ADR-0168), so a
+    # post-readiness AGENT_UNRESPONSIVE is a deterministic dead agent for the build path:
+    # constructed with BUILD_DETERMINISTIC_CONFIG_CODES it classifies code 86 non-retryable.
+    exc = _exec_raising_with_codes(
+        libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE), BUILD_DETERMINISTIC_CONFIG_CODES
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["libvirt_error_code"] == libvirt.VIR_ERR_AGENT_UNRESPONSIVE
+
+
+def test_build_deterministic_set_still_maps_base_codes_to_configuration_error() -> None:
+    # Extending the set must not drop the ADR-0159 base codes.
+    exc = _exec_raising_with_codes(
+        libvirt_error(libvirt.VIR_ERR_ACCESS_DENIED), BUILD_DETERMINISTIC_CONFIG_CODES
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_default_set_keeps_code_86_transport_failure() -> None:
+    # The default classifier (install/retrieve/debug planes) is unchanged: code 86 stays
+    # retryable transport_failure, preserving ADR-0159 for callers with no readiness gate.
+    exc = _exec_raising(libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE))
+    with pytest.raises(CategorizedError) as excinfo:
+        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
 
 
 def test_qemu_agent_command_maps_missing_libvirt_qemu(

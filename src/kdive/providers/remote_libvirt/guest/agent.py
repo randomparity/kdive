@@ -51,6 +51,48 @@ _DETERMINISTIC_CONFIG_CODES: frozenset[int] = frozenset(
     }
 )
 
+# The build transport runs only AFTER the guest-ping readiness gate (ADR-0168) has confirmed the
+# agent answers a command, so a subsequent VIR_ERR_AGENT_UNRESPONSIVE (code 86) is no longer the
+# mid-boot transient ADR-0159 keeps retryable — it is a deterministic dead-agent condition for the
+# build path. This extended set is used ONLY by GuestExecBuildTransport; every other consumer keeps
+# the base set above, so ADR-0159's global contract is unchanged.
+BUILD_DETERMINISTIC_CONFIG_CODES: frozenset[int] = _DETERMINISTIC_CONFIG_CODES | frozenset(
+    {libvirt.VIR_ERR_AGENT_UNRESPONSIVE}
+)
+
+
+def classify_agent_libvirt_error(
+    domain: Any, exc: libvirt.libvirtError, *, deterministic_codes: frozenset[int]
+) -> CategorizedError:
+    """Map a guest-agent libvirt error onto the correct failure category (ADR-0159, ADR-0168).
+
+    A libvirt error whose code is in ``deterministic_codes`` names a deterministic condition —
+    the agent is not configured, the command is denied, the host cannot run it, or (for the
+    post-readiness build transport) the agent has gone unresponsive — and is a permanent failure
+    (``CONFIGURATION_ERROR``, not retryable). Every other libvirt error, including a bare error
+    with no live code (``get_error_code()`` is ``None``), is a genuinely transient channel drop and
+    stays ``TRANSPORT_FAILURE`` (retryable). The libvirt error string and code go into ``details``
+    so the distinction is auditable downstream.
+    """
+    code = exc.get_error_code()
+    details: dict[str, object] = {
+        "domain": _domain_name(domain),
+        "libvirt_error": str(exc),
+        "libvirt_error_code": code,
+    }
+    if code in deterministic_codes:
+        return CategorizedError(
+            "qemu-guest-agent is not usable on this build host "
+            "(not configured, unsupported, denied, or unresponsive)",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details=details,
+        )
+    return CategorizedError(
+        "qemu-guest-agent command failed (agent unreachable or not connected)",
+        category=ErrorCategory.TRANSPORT_FAILURE,
+        details=details,
+    )
+
 
 type AgentCommand = Callable[[Any, str, int, int], str]
 type Sleep = Callable[[float], None]
@@ -134,6 +176,7 @@ class GuestAgentExec:
         *,
         agent_command: AgentCommand,
         allowed_programs: frozenset[str],
+        deterministic_codes: frozenset[int] = _DETERMINISTIC_CONFIG_CODES,
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         poll_s: float = _DEFAULT_POLL_S,
         agent_call_timeout_s: int = _DEFAULT_AGENT_CALL_TIMEOUT_S,
@@ -142,6 +185,7 @@ class GuestAgentExec:
     ) -> None:
         self._agent_command = agent_command
         self._allowed_programs = allowed_programs
+        self._deterministic_codes = deterministic_codes
         self._timeout_s = timeout_s
         self._poll_s = poll_s
         self._agent_call_timeout_s = agent_call_timeout_s
@@ -225,7 +269,9 @@ class GuestAgentExec:
         try:
             raw = self._agent_command(domain, command, self._agent_call_timeout_s, 0)
         except libvirt.libvirtError as exc:
-            raise self._classify_libvirt_error(domain, exc) from exc
+            raise classify_agent_libvirt_error(
+                domain, exc, deterministic_codes=self._deterministic_codes
+            ) from exc
         try:
             decoded = json.loads(raw)
         except (json.JSONDecodeError, TypeError) as exc:
@@ -239,37 +285,6 @@ class GuestAgentExec:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             )
         return decoded
-
-    @staticmethod
-    def _classify_libvirt_error(domain: Any, exc: libvirt.libvirtError) -> CategorizedError:
-        """Map a guest-agent libvirt error onto the correct failure category (ADR-0159, #531).
-
-        A libvirt error whose code names a deterministic condition — the agent is not
-        configured, the command is denied, or the host cannot run it — is a permanent
-        build-host configuration problem (``CONFIGURATION_ERROR``, not retryable). Every other
-        libvirt error, including a bare error with no live code (``get_error_code()`` is
-        ``None``), is a genuinely transient channel drop and stays ``TRANSPORT_FAILURE``
-        (retryable). The libvirt error string and code go into ``details`` so the distinction
-        is auditable downstream.
-        """
-        code = exc.get_error_code()
-        details: dict[str, object] = {
-            "domain": _domain_name(domain),
-            "libvirt_error": str(exc),
-            "libvirt_error_code": code,
-        }
-        if code in _DETERMINISTIC_CONFIG_CODES:
-            return CategorizedError(
-                "qemu-guest-agent is not usable on this build host "
-                "(not configured, unsupported, or permission denied)",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details=details,
-            )
-        return CategorizedError(
-            "qemu-guest-agent command failed (agent unreachable or not connected)",
-            category=ErrorCategory.TRANSPORT_FAILURE,
-            details=details,
-        )
 
 
 def _domain_name(domain: Any) -> str:
