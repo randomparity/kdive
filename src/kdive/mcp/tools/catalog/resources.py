@@ -2,9 +2,11 @@
 
 Thin FastMCP wrappers over plain async handlers that take the pool + request context as
 arguments (tested directly, never through MCP). Resource reads are filtered by the same
-project affinity predicate used by allocation placement. The nested `capabilities` jsonb is
-projected to a flat `dict[str, str]` for the response envelope (ADR-0019 `data` is
-`dict[str, str]`).
+project affinity predicate used by allocation placement. Response ``data`` follows the
+ADR-0019 ``dict[str, JsonValue]`` contract: the nested ``capabilities`` jsonb is projected
+to flat scalar fields (``kind``, ``arch``, ``vcpus``, ``memory_mb``,
+``concurrent_allocation_cap``, and ``transports``), while ``resources.describe`` can add
+``pool``, ``cost_class``, ``host_uri``, and the remote-libvirt ``staged_base_images`` list.
 """
 
 from __future__ import annotations
