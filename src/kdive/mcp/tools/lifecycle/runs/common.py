@@ -57,7 +57,11 @@ def no_job_failure_detail(category: ErrorCategory) -> str:
 
 
 def envelope_for_run(
-    run: Run, *, required_cmdline: str | None = None, failing_job: Job | None = None
+    run: Run,
+    *,
+    required_cmdline: str | None = None,
+    failing_job: Job | None = None,
+    active_debug_session_ids: list[str] | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -67,6 +71,11 @@ def envelope_for_run(
     out-of-band knowledge of the job id (ADR-0141). The `detail` is routed through
     `ToolResponse.failure`, so the no-leak seam (`suppressed_detail`, ADR-0123) governs it; no
     new redaction runs here — the worker already redacted `failure_context`.
+
+    `active_debug_session_ids` (ADR-0176) lists the ids of `attach`/`live` debug sessions on
+    this Run so a recovering agent can pivot from a known Run to a live session handle. The
+    Run is already project-scoped before this is built, so the ids carry no cross-project
+    signal. Surfaced only on a non-failed Run (a failed Run holds no live session).
     """
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -83,6 +92,7 @@ def envelope_for_run(
         "project": run.project,
         "target_kind": run.target_kind.value,
         "system_id": str(run.system_id) if run.system_id is not None else None,
+        "active_debug_session_ids": list(active_debug_session_ids or []),
     }
     if required_cmdline is not None:
         data["required_cmdline"] = required_cmdline
