@@ -151,8 +151,10 @@ def test_from_vmcore_passes_through_port_redacted_report(migrated_url: str) -> N
     asyncio.run(_run())
 
 
-def test_from_vmcore_unbuilt_run_is_not_found(migrated_url: str) -> None:
-    # A run with a null debuginfo_ref has no introspectable target: not_found (ADR-0097).
+def test_from_vmcore_never_booted_reports_no_vmcore(migrated_url: str) -> None:
+    # A never-booted run lacks debuginfo, build, AND a captured core. The introspect tool is
+    # vmcore-centric, so the operative gap (no_vmcore) surfaces first, not the earliest-unmet
+    # build precondition (#553, ADR-0165).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
@@ -161,7 +163,24 @@ def test_from_vmcore_unbuilt_run_is_not_found(migrated_url: str) -> None:
                 pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
             )
         assert resp.status == "error" and resp.error_category == "not_found"
-        # The unmet precondition + next actions reach the caller (#487).
+        assert resp.data["reason"] == "no_vmcore"
+        assert resp.suggested_next_actions == ["vmcore.fetch", "runs.get"]
+
+    asyncio.run(_run())
+
+
+def test_from_vmcore_core_present_null_debuginfo_is_no_debuginfo(migrated_url: str) -> None:
+    # A run with a captured core but a null debuginfo_ref still reports the precise no_debuginfo
+    # reason: the reorder only moves no_vmcore ahead, it does not collapse the distinct reasons.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id="deadbeef")
+            await _seed_vmcore_row(pool, sys_id)
+            resp = await introspect_tools.introspect_from_vmcore(
+                pool, _ctx(), run_id=run_id, introspector=_FakeIntrospector()
+            )
+        assert resp.status == "error" and resp.error_category == "not_found"
         assert resp.data["reason"] == "no_debuginfo"
         assert resp.suggested_next_actions == ["runs.get", "runs.build"]
 

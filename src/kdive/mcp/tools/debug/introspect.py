@@ -52,8 +52,9 @@ async def introspect_from_vmcore(
     """Run offline drgn introspection over the Run's captured core; return the redacted report.
 
     Requires the viewer role. A malformed `run_id` is a `configuration_error`; a Run that is
-    absent, in an ungranted project (no-leak), or missing its target artifact (null
-    `debuginfo_ref`, no recorded `build` step, or no captured core) is `not_found` (ADR-0097). A
+    absent, in an ungranted project (no-leak), or missing its target artifact (no captured core,
+    null `debuginfo_ref`, or no recorded `build` step — checked in that order, ADR-0165) is
+    `not_found` (ADR-0097). A
     provenance mismatch or a drgn open/decode fault surfaces as the port's typed
     `CategorizedError` category, never a 500. Off a prepared live host, the provider seam reports
     ``missing_dependency`` instead of importing drgn.

@@ -527,16 +527,18 @@ def test_postmortem_triage_runs_and_relabels_actions(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_postmortem_triage_propagates_not_found(migrated_url: str) -> None:
+def test_postmortem_triage_never_booted_reports_no_vmcore(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id=None)
             resp = await _vmcore_handlers().postmortem_triage(pool, _ctx(), run_id=run_id)
         assert resp.status == "error" and resp.error_category == "not_found"
-        # The granular precondition reason + next actions reach the caller (#487).
-        assert resp.data["reason"] == "no_debuginfo"
-        assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+        # A never-booted run lacks debuginfo, build, AND a captured core. Triage is vmcore-centric,
+        # so the operative gap (no_vmcore) surfaces first, not the earliest-unmet build precondition
+        # (#553, ADR-0165). The next action points at the capture entry.
+        assert resp.data["reason"] == "no_vmcore"
+        assert resp.suggested_next_actions == ["vmcore.fetch", "runs.get"]
 
     asyncio.run(_run())
 

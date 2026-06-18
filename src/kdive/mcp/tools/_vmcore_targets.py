@@ -48,9 +48,13 @@ async def resolve_run_vmcore_target(
 
     A malformed ``run_id`` is a parse failure (``configuration_error``). A syntactically valid
     id that resolves to no visible Run — absent, in an ungranted project (no-leak), or missing a
-    prerequisite target artifact (null ``debuginfo_ref``, no recorded build, no captured core) —
-    is ``not_found`` (ADR-0097). The two helpers stay distinct so the malformed branch cannot
-    drift into ``not_found``.
+    prerequisite target artifact — is ``not_found`` (ADR-0097). The preconditions are checked
+    most-operative-first for these vmcore-centric callers (ADR-0165): no captured core
+    (``no_vmcore``), then null ``debuginfo_ref`` (``no_debuginfo``), then no recorded build
+    (``no_build``). A never-booted Run therefore reports ``no_vmcore`` (its operative gap), while
+    a Run with a captured core but missing symbolization/provenance inputs still reports the
+    precise ``no_debuginfo`` / ``no_build`` reason. The two helpers stay distinct so the malformed
+    branch cannot drift into ``not_found``.
     """
     uid = _as_uuid(run_id)
     if uid is None:
@@ -59,14 +63,14 @@ async def resolve_run_vmcore_target(
     if run is None or run.project not in ctx.projects:
         raise _target_not_found()
     require_role(ctx, run.project, Role.VIEWER)
+    vmcore_ref = await raw_vmcore_key(conn, run.system_id)
+    if vmcore_ref is None:
+        raise _precondition_not_found(NO_VMCORE)
     if run.debuginfo_ref is None:
         raise _precondition_not_found(NO_DEBUGINFO)
     build_id = await _build_id_for_run(conn, uid)
     if build_id is None:
         raise _precondition_not_found(NO_BUILD)
-    vmcore_ref = await raw_vmcore_key(conn, run.system_id)
-    if vmcore_ref is None:
-        raise _precondition_not_found(NO_VMCORE)
     return RunVmcoreTarget(run.debuginfo_ref, build_id, vmcore_ref)
 
 
