@@ -45,14 +45,26 @@ reference graph that could cycle.
    - An `object` renders its field list as an indented Markdown sub-list under the
      parameter row, each field showing name, rendered type, `required`, and description.
      `array` items recurse the same way.
-   - Recursion is bounded by a `max_depth` (default 6) that fails loud
-     (`raise ValueError`) if exceeded, rather than silently truncating — an unbounded or
-     silently-capped walk would reintroduce the information loss this ADR removes.
+   - Recursion is bounded by a `max_depth` that fails loud (`raise ValueError`) if
+     exceeded, rather than silently truncating — an unbounded or silently-capped walk
+     would reintroduce the information loss this ADR removes. The bound counts *semantic*
+     recursion (object→field-subschema, array→item-subschema, union→variant), not raw
+     JSON dict/list nesting; the deepest live parameter (`systems.define.profile`) sits
+     well inside it. The bound is a named constant with generous headroom over the deepest
+     live schema, pinned by a test so a future deeper schema fails loud at the test rather
+     than first in CI doc-gen.
+   - An unresolved `$ref`/`$defs` node is not a structured shape the renderer can walk, so
+     it raises `ValueError` explicitly rather than falling through to a bare `object`/`any`
+     (the silent loss this ADR removes). No tool emits one today; the explicit raise makes
+     the absence enforced rather than assumed.
 
-2. **Render at least one valid example for the build profile.** `runs.create` and
-   `runs.complete_build` are documented with a worked `build_profile` example block per
-   source lane, sourced from the same example payloads `runs.profile_examples` returns, so
-   the doc and the live tool cannot drift.
+2. **Render at least one valid example for the build profile.** `runs.create` is
+   documented with a worked `build_profile` example block per source lane. The example
+   payloads are a shared pure constant in the generator module (the gen script runs with a
+   null pool and cannot call the Postgres-backed `runs.profile_examples` tool, so the
+   example is sourced from a constant, not the tool). A test validates each example against
+   `BuildProfile.parse` so a schema change that invalidates the documented example fails
+   loud rather than drifting.
 
 3. **Cross-link the provisioning profile to generated examples.** `systems.define.profile`
    and `systems.provision.profile` render their nested fields and link to the
@@ -78,8 +90,8 @@ composition rather than interleaving.
 - The generated `*.md` files grow; the `docs-check` CI gate keeps them byte-stable, and
   the new guard prevents regressions back to `any`/`object`/`array`.
 - The renderer assumes inlined schemas. If a future tool emits `$ref`/`$defs`, the
-  `max_depth` guard will surface it as a loud failure (a `$ref` is an unresolved object
-  with no `properties`), prompting an explicit resolver rather than a silent `any`.
+  renderer raises `ValueError` on the unresolved node (an explicit check, not a side effect
+  of the depth bound), prompting an explicit resolver rather than emitting a silent `any`.
 
 ## Alternatives considered
 
