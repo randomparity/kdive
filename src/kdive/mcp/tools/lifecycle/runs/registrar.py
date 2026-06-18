@@ -13,6 +13,8 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
+from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
 from kdive.mcp.tools.lifecycle.runs.complete_build import (
     CompleteBuildHandlers as _CompleteBuildHandlers,
@@ -51,6 +53,7 @@ def register(
     """Register the `runs.*` tools on ``app``, bound to ``pool``."""
     _register_runs_get(app, pool, resolver)
     _register_runs_create(app, pool, resolver)
+    _register_runs_bind(app, pool)
     _register_runs_cancel(app, pool)
     _register_runs_build(app, pool, resolver)
     _register_runs_complete_build(app, pool, resolver)
@@ -153,6 +156,39 @@ def _register_runs_create(
             reuse_requirement=reuse_requirement,
         )
         return await _create_run(pool, current_context(), request, resolver=resolver)
+
+
+def _register_runs_bind(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.bind",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def runs_bind(
+        run_id: Annotated[str, Field(description="The unbound Run to attach a System to.")],
+        system_id: Annotated[
+            str,
+            Field(
+                description="Ready System (active Allocation) to bind. Its resource kind must "
+                "equal the Run's target_kind; discover ready systems with systems.list and read "
+                "each one's 'kind'."
+            ),
+        ],
+        reuse_requirement: Annotated[
+            _RunReuseRequirementInput | None,
+            Field(
+                description="Optional System reuse assertion payload with vcpus, memory_gb, "
+                "disk_gb, and pcie fields. Omit to skip extra reuse matching."
+            ),
+        ] = None,
+    ) -> ToolResponse:
+        """Attach a ready system to an unbound run before install."""
+        request = _RunBindRequest(
+            run_id=run_id,
+            system_id=system_id,
+            reuse_requirement=reuse_requirement,
+        )
+        return await _bind_run(pool, current_context(), request)
 
 
 def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:

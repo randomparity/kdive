@@ -46,6 +46,7 @@ from kdive.jobs.handlers import runs_boot, runs_shared
 from kdive.jobs.handlers import runs_common as run_handler_common
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
+from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest,
@@ -258,6 +259,133 @@ async def _seed_run(
             ),
         )
     return str(run.id)
+
+
+async def _seed_unbound_run(
+    pool: AsyncConnectionPool,
+    *,
+    state: RunState = RunState.SUCCEEDED,
+    target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    project: str = "proj",
+) -> str:
+    """Insert an Investigation + an unbound Run (system_id IS NULL) and return the run id."""
+    inv_id = await _seed_investigation(pool, project=project)
+    async with pool.connection() as conn:
+        run = await RUNS.insert(
+            conn,
+            Run(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project=project,
+                investigation_id=UUID(inv_id),
+                system_id=None,
+                target_kind=target_kind,
+                state=state,
+                build_profile=_profile(),
+            ),
+        )
+    return str(run.id)
+
+
+async def _bind(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    run_id: str,
+    sys_id: str,
+    *,
+    reuse_requirement: RunReuseRequirementInput | None = None,
+):
+    return await bind_run(
+        pool,
+        ctx,
+        RunBindRequest(run_id=run_id, system_id=sys_id, reuse_requirement=reuse_requirement),
+    )
+
+
+def test_bind_unbound_run_succeeds(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            sys_id = await _seed_system(pool)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT system_id FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        assert resp.status == "bound"
+        assert resp.data["system_id"] == sys_id
+        assert "runs.install" in resp.suggested_next_actions
+        assert row is not None and str(row["system_id"]) == sys_id
+
+    asyncio.run(_run())
+
+
+def test_bind_kind_mismatch_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, target_kind=ResourceKind.REMOTE_LIBVIRT)
+            sys_id = await _seed_system(pool)  # local-libvirt
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT system_id FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "target_kind_mismatch"
+        assert row is not None and row["system_id"] is None
+
+    asyncio.run(_run())
+
+
+def test_bind_already_bound_run_is_conflict(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            sys_id = await _seed_system(pool)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+        assert resp.status == "error" and resp.error_category == "transport_conflict"
+        assert resp.data["reason"] == "run_already_bound"
+
+    asyncio.run(_run())
+
+
+def test_bind_terminal_run_is_stale(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.FAILED)
+            sys_id = await _seed_system(pool)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+        assert resp.status == "error" and resp.error_category == "stale_handle"
+
+    asyncio.run(_run())
+
+
+def test_bind_system_with_live_run_is_conflict(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _seed_system(pool)
+            occupant_inv = await _seed_investigation(pool)
+            async with pool.connection() as conn:
+                await RUNS.insert(
+                    conn,
+                    Run(
+                        id=uuid4(),
+                        created_at=_DT,
+                        updated_at=_DT,
+                        principal="user-1",
+                        project="proj",
+                        investigation_id=UUID(occupant_inv),
+                        system_id=UUID(sys_id),
+                        target_kind=ResourceKind.LOCAL_LIBVIRT,
+                        state=RunState.RUNNING,
+                        build_profile=_profile(),
+                    ),
+                )
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+        assert resp.status == "error" and resp.error_category == "transport_conflict"
+
+    asyncio.run(_run())
 
 
 def test_envelope_for_run_failed_uses_run_failure_category() -> None:

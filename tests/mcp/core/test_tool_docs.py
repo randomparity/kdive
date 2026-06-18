@@ -121,6 +121,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "postmortem.crash": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
     "postmortem.triage": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
     "projects.list": ("tests/mcp/catalog/test_projects_tools.py",),
+    "runs.bind": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.boot": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.build": ("tests/mcp/lifecycle/test_runs_tools.py",),
     "runs.cancel": ("tests/mcp/lifecycle/test_runs_tools.py",),
