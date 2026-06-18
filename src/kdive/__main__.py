@@ -67,8 +67,6 @@ _S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REG
 
 
 class _VersionAction(argparse.Action):
-    """Print the full version only when ``--version`` is selected."""
-
     def __init__(self, option_strings: list[str], dest: str = argparse.SUPPRESS) -> None:
         super().__init__(option_strings=option_strings, dest=dest, nargs=0)
 
