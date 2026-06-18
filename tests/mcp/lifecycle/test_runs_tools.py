@@ -596,6 +596,7 @@ async def _create(
             build_profile=profile or _profile(),
             reuse_requirement=reuse_requirement,
         ),
+        resolver=provider_resolver(),
     )
 
 
@@ -630,6 +631,145 @@ def test_create_first_run_flips_investigation_active(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_create_unbound_run_succeeds(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=None,
+                    build_profile=_profile(),
+                    target_kind="local-libvirt",
+                ),
+                resolver=provider_resolver(),
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT system_id, target_kind, state FROM runs WHERE id = %s",
+                    (resp.object_id,),
+                )
+                row = await cur.fetchone()
+                await cur.execute("SELECT state FROM investigations WHERE id = %s", (inv_id,))
+                inv = await cur.fetchone()
+        assert resp.status == "created"
+        assert row is not None and row["system_id"] is None
+        assert row["target_kind"] == "local-libvirt"
+        assert resp.data["system_id"] is None
+        assert resp.data["target_kind"] == "local-libvirt"
+        assert "runs.build" in resp.suggested_next_actions
+        assert inv is not None and inv["state"] == "active"
+
+    asyncio.run(_run())
+
+
+def test_create_unbound_missing_target_kind_lists_available(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(investigation_id=inv_id, system_id=None, build_profile=_profile()),
+                resolver=provider_resolver(),
+            )
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT count(*) FROM runs")
+                count_row = await cur.fetchone()
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "target_kind_required"
+        available = resp.data["available_target_kinds"]
+        assert isinstance(available, list) and "local-libvirt" in available
+        assert count_row is not None and count_row[0] == 0
+
+    asyncio.run(_run())
+
+
+def test_create_unbound_unknown_target_kind_lists_available(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=None,
+                    build_profile=_profile(),
+                    target_kind="remote-libvirt",
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "unknown_target_kind"
+        available = resp.data["available_target_kinds"]
+        assert isinstance(available, list) and "local-libvirt" in available
+
+    asyncio.run(_run())
+
+
+def test_create_unbound_with_reuse_requirement_rejected(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=None,
+                    build_profile=_profile(),
+                    target_kind="local-libvirt",
+                    reuse_requirement=RunReuseRequirementInput(vcpus=2),
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "reuse_requires_system"
+
+    asyncio.run(_run())
+
+
+def test_create_bound_explicit_target_kind_mismatch(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=sys_id,
+                    build_profile=_profile(),
+                    target_kind="remote-libvirt",
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "target_kind_mismatch"
+
+    asyncio.run(_run())
+
+
+def test_create_bound_stores_derived_target_kind(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(pool, _ctx(), inv_id, sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT target_kind FROM runs WHERE id = %s", (resp.object_id,))
+                row = await cur.fetchone()
+        assert resp.status == "created"
+        assert row is not None and row["target_kind"] == "local-libvirt"
+        assert resp.data["target_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
+
+
 def test_create_rejects_empty_build_profile(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -641,6 +781,7 @@ def test_create_rejects_empty_build_profile(migrated_url: str) -> None:
                 pool,
                 _ctx(),
                 RunCreateRequest(investigation_id=inv_id, system_id=sys_id, build_profile={}),
+                resolver=provider_resolver(),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -671,6 +812,7 @@ def test_create_run_persists_expected_boot_failure(migrated_url: str) -> None:
                     build_profile=_profile(),
                     expected_boot_failure=expected,
                 ),
+                resolver=provider_resolver(),
             )
             assert resp.status == "created"
             assert resp.data["expected_boot_failure"] == "console_crash"
@@ -700,6 +842,7 @@ def test_create_run_rejects_bad_expected_boot_failure(migrated_url: str) -> None
                     build_profile=_profile(),
                     expected_boot_failure={"kind": "console_crash", "pattern": ""},
                 ),
+                resolver=provider_resolver(),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -814,6 +957,7 @@ def test_create_cross_project_join_is_config_error(migrated_url: str) -> None:
                     system_id=sys_id,
                     build_profile=_profile(),
                 ),
+                resolver=provider_resolver(),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -830,6 +974,7 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
                 pool,
                 _ctx(),
                 RunCreateRequest(investigation_id=inv_id, system_id=sys_id, build_profile=bad),
+                resolver=provider_resolver(),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
