@@ -36,8 +36,10 @@
 | [`debug.clear_breakpoint`](debug.md#debugclear_breakpoint) | `partial` |
 | [`debug.continue`](debug.md#debugcontinue) | `partial` |
 | [`debug.end_session`](debug.md#debugend_session) | `partial` |
+| [`debug.get_session`](debug.md#debugget_session) | `implemented` |
 | [`debug.interrupt`](debug.md#debuginterrupt) | `partial` |
 | [`debug.list_breakpoints`](debug.md#debuglist_breakpoints) | `partial` |
+| [`debug.list_sessions`](debug.md#debuglist_sessions) | `implemented` |
 | [`debug.read_memory`](debug.md#debugread_memory) | `partial` |
 | [`debug.read_registers`](debug.md#debugread_registers) | `partial` |
 | [`debug.set_breakpoint`](debug.md#debugset_breakpoint) | `partial` |
