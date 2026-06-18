@@ -153,31 +153,10 @@ class DefinedSystemAdmitted:
 type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted | DefinedSystemAdmitted
 
 
-def _failure(
-    subject_id: UUID,
-    category: ErrorCategory = ErrorCategory.CONFIGURATION_ERROR,
-    *,
-    reason: AdmissionFailureReason,
-    current_status: str | None = None,
-    failure_message: str | None = None,
-    failure_details: dict[str, object] | None = None,
-    recovery: AdmissionRecovery | None = None,
-) -> AdmissionFailure:
+def _failure_from_error(subject_id: UUID, exc: CategorizedError) -> AdmissionFailure:
     return AdmissionFailure(
         subject_id=subject_id,
-        category=category,
-        reason=reason,
-        current_status=current_status,
-        failure_message=failure_message,
-        failure_details=failure_details,
-        recovery=recovery,
-    )
-
-
-def _failure_from_error(subject_id: UUID, exc: CategorizedError) -> AdmissionFailure:
-    return _failure(
-        subject_id,
-        exc.category,
+        category=exc.category,
         reason=AdmissionFailureReason.PROVIDER_POLICY_REJECTED,
         failure_message=str(exc),
         failure_details=dict(safe_error_details(exc.details)),
@@ -284,9 +263,9 @@ class SystemAdmission:
             # cancellation, so no System/job was written (ADR-0126); convert the would-be socket
             # drop into a typed, retryable transport_failure. The retry is deduped by the
             # allocation lock (existing-System path), so retryable does not double-provision.
-            return _failure(
-                request.allocation_id,
-                ErrorCategory.TRANSPORT_FAILURE,
+            return AdmissionFailure(
+                subject_id=request.allocation_id,
+                category=ErrorCategory.TRANSPORT_FAILURE,
                 reason=AdmissionFailureReason.TIMEOUT,
                 failure_message=(
                     f"provisioning admission exceeded the {bound:g}s pre-mutation bound; retry"
@@ -297,8 +276,9 @@ class SystemAdmission:
             async with pool.connection() as conn:
                 latest = await ALLOCATIONS.get(conn, request.allocation_id)
             current_status = latest.state.value if latest else None
-            return _failure(
-                request.allocation_id,
+            return AdmissionFailure(
+                subject_id=request.allocation_id,
+                category=ErrorCategory.CONFIGURATION_ERROR,
                 reason=AdmissionFailureReason.ALLOCATION_NOT_ADMITTED,
                 current_status=current_status,
             )
@@ -318,8 +298,9 @@ class SystemAdmission:
             return _failure_from_error(request.allocation_id, exc)
         async with _locked_allocation_system(pool, ctx, request.allocation_id) as locked:
             if isinstance(locked, MissingAllocation):
-                return _failure(
-                    locked.allocation_id,
+                return AdmissionFailure(
+                    subject_id=locked.allocation_id,
+                    category=ErrorCategory.CONFIGURATION_ERROR,
                     reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
                 )
             conn, alloc, existing = locked
@@ -448,8 +429,9 @@ async def _failed_system_retry_failure(
         for key, value in job.failure_context.items():
             if key.startswith("failure_detail_"):
                 failure_details[key] = value
-    return _failure(
-        existing.id,
+    return AdmissionFailure(
+        subject_id=existing.id,
+        category=ErrorCategory.CONFIGURATION_ERROR,
         reason=AdmissionFailureReason.SYSTEM_RECYCLE_REQUIRED,
         current_status=existing.state.value,
         failure_message=failure_message,
@@ -474,8 +456,9 @@ async def _provision_create_response(
             conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout
         )
     if existing.state is SystemState.DEFINED:
-        return _failure(
-            existing.id,
+        return AdmissionFailure(
+            subject_id=existing.id,
+            category=ErrorCategory.CONFIGURATION_ERROR,
             reason=AdmissionFailureReason.SYSTEM_ALREADY_DEFINED,
             current_status=existing.state.value,
             recovery=AdmissionRecovery.PROVISION_DEFINED_SYSTEM,
@@ -491,8 +474,9 @@ async def _provision_create_response(
         )
     if existing.state is SystemState.FAILED:
         return await _failed_system_retry_failure(conn, alloc, existing)
-    return _failure(
-        existing.id,
+    return AdmissionFailure(
+        subject_id=existing.id,
+        category=ErrorCategory.CONFIGURATION_ERROR,
         reason=AdmissionFailureReason.SYSTEM_RECYCLE_REQUIRED,
         current_status=existing.state.value,
         failure_message=_FAILED_SYSTEM_GUIDANCE,
@@ -517,8 +501,9 @@ async def _define_create_response(
         )
     if existing.state is SystemState.DEFINED:
         return DefinedSystemAdmitted(existing)  # idempotent re-define
-    return _failure(
-        existing.id,
+    return AdmissionFailure(
+        subject_id=existing.id,
+        category=ErrorCategory.CONFIGURATION_ERROR,
         reason=AdmissionFailureReason.SYSTEM_STATE_CONFLICT,
         current_status=existing.state.value,
     )
@@ -588,7 +573,11 @@ async def _provision_defined_locked(
     async with pool.connection() as probe:
         probe_system = await SYSTEMS.get(probe, system_id)
         if probe_system is None or probe_system.project not in ctx.projects:
-            return _failure(system_id, reason=AdmissionFailureReason.SUBJECT_NOT_FOUND)
+            return AdmissionFailure(
+                subject_id=system_id,
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+            )
         project = probe_system.project
         allocation_id = probe_system.allocation_id
     async with (
@@ -599,12 +588,17 @@ async def _provision_defined_locked(
     ):
         system = await SYSTEMS.get(conn, system_id)
         if system is None or system.project not in ctx.projects:
-            return _failure(system_id, reason=AdmissionFailureReason.SUBJECT_NOT_FOUND)
+            return AdmissionFailure(
+                subject_id=system_id,
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+            )
         require_role(ctx, system.project, Role.OPERATOR)
         alloc = await ALLOCATIONS.get(conn, system.allocation_id)
         if alloc is None or alloc.project != system.project:
-            return _failure(
-                system.allocation_id,
+            return AdmissionFailure(
+                subject_id=system.allocation_id,
+                category=ErrorCategory.CONFIGURATION_ERROR,
                 reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
             )
         return await _provision_defined_response(
@@ -637,8 +631,9 @@ async def _provision_defined_response(
             system_id=system.id,
         )
     if system.state is not SystemState.DEFINED:
-        return _failure(
-            system.id,
+        return AdmissionFailure(
+            subject_id=system.id,
+            category=ErrorCategory.CONFIGURATION_ERROR,
             reason=AdmissionFailureReason.SYSTEM_STATE_CONFLICT,
             current_status=system.state.value,
         )
@@ -649,8 +644,9 @@ async def _provision_defined_response(
     except CategorizedError as exc:
         return _failure_from_error(system.id, exc)
     if alloc.state is not AllocationState.ACTIVE:
-        return _failure(
-            alloc.id,
+        return AdmissionFailure(
+            subject_id=alloc.id,
+            category=ErrorCategory.CONFIGURATION_ERROR,
             reason=AdmissionFailureReason.ALLOCATION_STATE_CONFLICT,
             current_status=alloc.state.value,
         )
@@ -665,8 +661,9 @@ async def _new_system_allowed(
     rootfs_validator: RootfsValidator,
 ) -> AdmissionFailure | None:
     if alloc.state is not AllocationState.GRANTED:
-        return _failure(
-            alloc.id,
+        return AdmissionFailure(
+            subject_id=alloc.id,
+            category=ErrorCategory.CONFIGURATION_ERROR,
             reason=AdmissionFailureReason.ALLOCATION_STATE_CONFLICT,
             current_status=alloc.state.value,
         )
@@ -674,9 +671,9 @@ async def _new_system_allowed(
     # project lock. Fail-closed — no quota row → denied (ADR-0007 §4); a denial writes
     # no System, no job, and leaves the allocation granted (the all-or-nothing rule).
     if not await _within_system_quota(conn, alloc.project):
-        return _failure(
-            alloc.id,
-            ErrorCategory.QUOTA_EXCEEDED,
+        return AdmissionFailure(
+            subject_id=alloc.id,
+            category=ErrorCategory.QUOTA_EXCEEDED,
             reason=AdmissionFailureReason.QUOTA_EXCEEDED,
             recovery=AdmissionRecovery.INSPECT_SYSTEMS_AND_ALLOCATIONS,
         )
