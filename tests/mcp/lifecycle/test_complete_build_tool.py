@@ -24,7 +24,8 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     create_run_upload as _create_run_upload,
 )
-from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
+from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
+from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )
@@ -61,7 +62,8 @@ _TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={"config": frozenset({"local"})},
 )
-_DEFAULT_BUILD_HANDLERS = RunBuildHandlers(_TEST_COMPONENT_SOURCES)
+_DEFAULT_BUILD_HANDLERS = CompleteBuildHandlers()
+_DEFAULT_SERVER_BUILD_HANDLERS = BuildRunHandlers(_TEST_COMPONENT_SOURCES)
 
 
 async def create_run_upload(
@@ -82,8 +84,8 @@ async def create_run_upload(
     )
 
 
-def _build_handlers(validator) -> RunBuildHandlers:
-    return RunBuildHandlers(_TEST_COMPONENT_SOURCES, validate_complete_build=validator)
+def _build_handlers(validator) -> CompleteBuildHandlers:
+    return CompleteBuildHandlers(validate_complete_build=validator)
 
 
 class _UploadStore:
@@ -210,7 +212,7 @@ def test_build_run_rejects_external_source(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_external_run(pool)
-            resp = await _DEFAULT_BUILD_HANDLERS.build_run(
+            resp = await _DEFAULT_SERVER_BUILD_HANDLERS.build_run(
                 pool,
                 _ctx(),
                 str(run_id),
@@ -320,8 +322,7 @@ def test_complete_build_writes_artifacts_after_effective_config_validation(
                 },
             )
 
-            resp = await RunBuildHandlers(
-                _TEST_COMPONENT_SOURCES,
+            resp = await CompleteBuildHandlers(
                 object_store_factory=lambda: store,
             ).complete_build(
                 pool,
@@ -360,8 +361,7 @@ def test_complete_build_rejects_missing_effective_config_without_artifacts(
                 {kernel_key: HeadResult(len(_BZIMAGE_HEAD), "ck", "e-k")},
             )
 
-            resp = await RunBuildHandlers(
-                _TEST_COMPONENT_SOURCES,
+            resp = await CompleteBuildHandlers(
                 object_store_factory=lambda: store,
             ).complete_build(
                 pool,
@@ -438,9 +438,8 @@ class _ReassemblyStore:
         self.events.append(("delete", key))
 
 
-def _chunked_handlers(store: _ReassemblyStore, output: BuildOutput) -> RunBuildHandlers:
-    return RunBuildHandlers(
-        _TEST_COMPONENT_SOURCES,
+def _chunked_handlers(store: _ReassemblyStore, output: BuildOutput) -> CompleteBuildHandlers:
+    return CompleteBuildHandlers(
         validate_complete_build=_FakeValidator(output),
         object_store_factory=lambda: store,
     )
@@ -508,8 +507,7 @@ def test_chunked_complete_build_store_factory_error_returns_envelope(migrated_ur
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
-            handlers = RunBuildHandlers(
-                _TEST_COMPONENT_SOURCES,
+            handlers = CompleteBuildHandlers(
                 validate_complete_build=_FakeValidator(
                     BuildOutput(f"local/runs/{run_id}/kernel", "", "")
                 ),

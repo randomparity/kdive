@@ -13,8 +13,10 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
-from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers as _RunBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
+from kdive.mcp.tools.lifecycle.runs.complete_build import (
+    CompleteBuildHandlers as _CompleteBuildHandlers,
+)
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest as _RunCreateRequest,
 )
@@ -25,6 +27,7 @@ from kdive.mcp.tools.lifecycle.runs.create import create_run as _create_run
 from kdive.mcp.tools.lifecycle.runs.profile_examples import (
     build_host_profile_examples as _build_host_profile_examples,
 )
+from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers as _BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
@@ -55,11 +58,15 @@ def register(
     _register_runs_profile_examples(app, pool)
 
 
-def _build_handlers(runtime: ProviderRuntime) -> _RunBuildHandlers:
-    return _RunBuildHandlers(
+def _build_handlers(runtime: ProviderRuntime) -> _BuildRunHandlers:
+    return _BuildRunHandlers(
         runtime.component_sources,
         config_validator=runtime.build_config_validator,
     )
+
+
+def _complete_build_handlers() -> _CompleteBuildHandlers:
+    return _CompleteBuildHandlers()
 
 
 def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver) -> None:
@@ -205,7 +212,7 @@ def _register_runs_complete_build(
             pool,
             resolver,
             run_id,
-            lambda runtime: _build_handlers(runtime).complete_build(
+            lambda _runtime: _complete_build_handlers().complete_build(
                 pool, current_context(), run_id, build_id=build_id, cmdline=cmdline
             ),
         )

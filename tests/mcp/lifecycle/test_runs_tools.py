@@ -45,13 +45,13 @@ from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.handlers import runs_shared
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
-from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest,
     RunReuseRequirementInput,
     create_run,
 )
+from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.authz.rbac import AuthorizationError, Role
@@ -1283,7 +1283,7 @@ _TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={"config": frozenset({"local"})},
 )
-_BUILD_HANDLERS = RunBuildHandlers(_TEST_COMPONENT_SOURCES)
+_BUILD_HANDLERS = BuildRunHandlers(_TEST_COMPONENT_SOURCES)
 # A provider that accepts the catalog config source (local-libvirt/remote-libvirt under ADR-0096).
 _CATALOG_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="catalog-provider",
@@ -1447,7 +1447,7 @@ def test_build_rejects_local_config_outside_provider_roots_before_state_change(
             }
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
 
-            resp = await RunBuildHandlers(
+            resp = await BuildRunHandlers(
                 _TEST_COMPONENT_SOURCES,
                 config_validator=_reject_config,
             ).build_run(
@@ -1487,7 +1487,7 @@ def test_build_omitted_config_validates_kdump_catalog_default(migrated_url: str)
             }
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
 
-            resp = await RunBuildHandlers(
+            resp = await BuildRunHandlers(
                 _CATALOG_COMPONENT_SOURCES,
                 config_validator=validated.append,
             ).build_run(pool, _ctx(Role.OPERATOR), run_id)
