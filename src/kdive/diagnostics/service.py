@@ -23,6 +23,7 @@ from pathlib import Path
 
 import kdive.config as config
 import kdive.diagnostics.base_image_staging as base_image_staging
+import kdive.diagnostics.kernel_src as kernel_src
 import kdive.diagnostics.reachability as reachability
 from kdive.config.core_settings import SECRETS_ROOT
 from kdive.diagnostics.checks import (
@@ -32,6 +33,7 @@ from kdive.diagnostics.checks import (
     Check,
     CheckResult,
     CheckStatus,
+    LocalKernelSrcCheck,
     RemoteLibvirtReachabilityCheck,
     SecretRefCheck,
     Vantage,
@@ -282,6 +284,18 @@ def _secret_ref_check() -> SecretRefCheck:
     )
 
 
+def _build_host_checks() -> list[Check]:
+    """Assemble the server-vantage build-host preflight checks (ADR-0163).
+
+    The ``local_kernel_src`` check is always assembled: the seeded ``worker-local`` ``LOCAL`` build
+    host is a database invariant, so the local warm-tree lane always exists, and a server-vantage
+    config read needs no DB. ``KDIVE_KERNEL_SRC`` resolution is deferred to probe time. (The #531
+    ephemeral-libvirt guest-agent reachability probe is a separate, mutating, DB-backed check split
+    to a follow-up.)
+    """
+    return [LocalKernelSrcCheck(probe=kernel_src.warm_tree_source_probe())]
+
+
 def _remote_libvirt_checks() -> list[Check]:
     """Assemble the remote-libvirt diagnostic checks when an instance is declared.
 
@@ -316,7 +330,9 @@ def default_service_factory(
     """Build the production read-only diagnostics service for ``provider``.
 
     Assembles the server-vantage ``secret_ref`` check over the configured secret refs, resolved
-    against the file-ref backend under ``KDIVE_SECRETS_ROOT``. When a ``[[remote_libvirt]]``
+    against the file-ref backend under ``KDIVE_SECRETS_ROOT``, and the always-on server-vantage
+    ``local_kernel_src`` build-host check (ADR-0163), which flags an unusable ``KDIVE_KERNEL_SRC``
+    on the seeded local build host. When a ``[[remote_libvirt]]``
     instance is declared (``is_remote_libvirt_configured()``), it also assembles the server-vantage
     ``remote_libvirt_reachability`` check (ADR-0125, the qemu+tls reachability probe) and the
     explicit unavailable-worker metadata for ``provider_tls``/``gdbstub_acl``.
@@ -346,7 +362,7 @@ def default_service_factory(
             "target provider; none is wired in this deployment (ADR-0091, M2.4)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    checks: list[Check] = [_secret_ref_check()]
+    checks: list[Check] = [_secret_ref_check(), *_build_host_checks()]
     unavailable_worker_checks: list[WorkerVantageCheck] = []
     if is_remote_libvirt_configured():
         checks.extend(_remote_libvirt_checks())
