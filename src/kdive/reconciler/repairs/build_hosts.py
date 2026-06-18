@@ -8,6 +8,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.db.build_hosts import BuildHostState, list_probeable_ssh_hosts, mark_state
+from kdive.db.buildhost_agent_probes import is_probe_live
 from kdive.providers.infra.reaping import BuildVmReaper
 from kdive.providers.shared.build_host.reachability import BuildHostProber
 
@@ -91,17 +92,23 @@ async def probe_build_host_reachability(conn: AsyncConnection, prober: BuildHost
 
 
 async def reap_orphan_build_vms(conn: AsyncConnection, reaper: BuildVmReaper) -> int:
-    """Reap ephemeral build VMs whose owning BUILD job is terminal or gone (ADR-0100).
+    """Reap ephemeral build VMs whose owning BUILD job is terminal or gone (ADR-0100, ADR-0167).
 
     Mirrors :func:`reclaim_orphan_build_host_leases`'s job-liveness guard so a build running up
     to ``MAKE_TIMEOUT_S`` keeps its VM. A domain whose name does not encode a Run (``run_id`` is
-    ``None``) is left alone — it cannot be confirmed dead. **Ordering:** the reconciler runs this
-    BEFORE the lease reclaim, so a freed slot never coexists with a live leaked VM (§4.6).
-    Returns the number of VMs reaped.
+    ``None``) is left alone — it cannot be confirmed dead. A ``kdive-build-<run_id>`` domain
+    provisioned by the ``ephemeral_libvirt_buildhost_agent`` doctor probe has no BUILD job, so a
+    second live-holder clause keeps it while its probe marker heartbeat is fresh
+    (:func:`is_probe_live`, staleness evaluated in Postgres); once the probe's process dies the
+    heartbeat goes stale and this same sweep reaps the leaked builder, with the marker TTL as the
+    hard backstop. **Ordering:** the reconciler runs this BEFORE the lease reclaim, so a freed slot
+    never coexists with a live leaked VM (§4.6). Returns the number of VMs reaped.
     """
     reaped = 0
     for vm in await reaper.list_build_vms():
-        if vm.run_id is None or await _build_job_is_live(conn, vm.run_id):
+        if vm.run_id is None:
+            continue
+        if await _build_job_is_live(conn, vm.run_id) or await is_probe_live(conn, vm.run_id):
             continue
         await reaper.delete_build_vm(vm.domain_name)
         reaped += 1
