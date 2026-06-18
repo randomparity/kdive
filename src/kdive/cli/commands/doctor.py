@@ -37,11 +37,11 @@ def _session_factory() -> Session:
 
 
 def _payload(args: argparse.Namespace) -> dict[str, object]:
-    """Thread the explicit provider target and the ``--with-egress`` opt-in to the tool.
+    """Thread the provider target and the mutating opt-ins to the tool.
 
-    The default run (no provider, no egress) sends an empty payload so the tool runs its
-    three cheap read checks; ``--with-egress`` is only forwarded when set so the tool can
-    treat the heavy egress probe as strictly opt-in.
+    The default run (no provider, no opt-in) sends an empty payload so the tool runs only its
+    cheap read checks; ``--with-egress`` and ``--with-buildhost-agent`` are each forwarded only
+    when set, so the heavy probes stay strictly opt-in (ADR-0091, ADR-0167).
     """
     payload: dict[str, object] = {}
     provider = getattr(args, "provider", None)
@@ -49,6 +49,8 @@ def _payload(args: argparse.Namespace) -> dict[str, object]:
         payload["provider"] = provider
     if getattr(args, "with_egress", False):
         payload["with_egress"] = True
+    if getattr(args, "with_buildhost_agent", False):
+        payload["with_buildhost_agent"] = True
     return payload
 
 

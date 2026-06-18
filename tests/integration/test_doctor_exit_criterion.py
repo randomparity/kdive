@@ -160,7 +160,9 @@ def _fixed_factory(service: DiagnosticsService) -> diagnostics.ServiceFactory:
     through the real tool, not a shortcut).
     """
 
-    def _build(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
+    def _build(
+        provider: str | None, *, with_egress: bool = False, with_buildhost_agent: bool = False
+    ) -> DiagnosticsService:
         return service
 
     return _build
