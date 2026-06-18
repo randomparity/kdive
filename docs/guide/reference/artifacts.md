@@ -98,6 +98,10 @@ Return the accepted upload-artifact names per owner-kind. Requires a token.
 
 `partial` · `read-only`
 
+**Maturity:** live_dependency — Fetches a redacted artifact's bytes; the artifact only exists after a live build/boot/capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test fetches inline + presigned content for an artifact a real run produced, or a recorded live_stack run does.
+
 Fetch one redacted artifact's content by id.
 
 Returns the object ref plus, best-effort, the redacted bytes inline in
@@ -113,6 +117,10 @@ presigned `refs.download_uri`. Requires viewer; sensitive ids are not-found.
 
 `partial` · `read-only`
 
+**Maturity:** live_dependency — Lists redacted artifacts a System produced; those rows only exist after a live build/boot/capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test asserts the listing against artifacts a real run produced, or a recorded live_stack run does.
+
 List the redacted artifacts for a System. Requires viewer.
 
 | Parameter | Type | Required | Description |
@@ -122,6 +130,10 @@ List the redacted artifacts for a System. Requires viewer.
 ## `artifacts.search_text`
 
 `partial` · `read-only`
+
+**Maturity:** live_dependency — Searches a redacted artifact's text; the artifact only exists after a live build/boot/capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test searches an artifact a real run produced, or a recorded live_stack run does.
 
 Search a redacted System artifact with bounded literal line context.
 

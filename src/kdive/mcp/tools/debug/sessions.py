@@ -97,7 +97,19 @@ def register(
     @app.tool(
         name="debug.start_session",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Opens a single-attach gdbstub/drgn-live transport to a booted Run; requires "
+                "a real booted kernel, reached only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run attaches a debug session to a "
+                "real booted Run."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def debug_start_session(
         run_id: Annotated[str, Field(description="The booted Run to attach a debug session to.")],
@@ -114,7 +126,19 @@ def register(
     @app.tool(
         name="debug.end_session",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Detaches and closes a live DebugSession's transport; requires a real attached "
+                "session, reached only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run ends a debug session attached to "
+                "a real booted Run."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def debug_end_session(
         session_id: Annotated[str, Field(description="The DebugSession to detach and close.")],

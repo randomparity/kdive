@@ -6,6 +6,12 @@
 
 `partial`
 
+**Maturity:** live_dependency — Clears a breakpoint on a live gdbstub-backed DebugSession.
+
+**Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+
 Clear a breakpoint by number on a live DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
@@ -17,6 +23,12 @@ Clear a breakpoint by number on a live DebugSession. Requires operator.
 
 `partial`
 
+**Maturity:** live_dependency — Resumes a live gdbstub-backed DebugSession, waiting for a stop.
+
+**Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+
 Resume execution on a live DebugSession and wait for a stop event. Operator only.
 
 | Parameter | Type | Required | Description |
@@ -27,6 +39,12 @@ Resume execution on a live DebugSession and wait for a stop event. Operator only
 ## `debug.end_session`
 
 `partial`
+
+**Maturity:** live_dependency — Detaches and closes a live DebugSession's transport; requires a real attached session, reached only under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run ends a debug session attached to a real booted Run.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
 
 Drive a live/attach DebugSession to detached; close its transport. Requires operator.
 
@@ -48,6 +66,12 @@ Return one visible debug session for recovery. Requires viewer.
 
 `partial`
 
+**Maturity:** live_dependency — Interrupts a running live gdbstub-backed DebugSession via gdb-MI.
+
+**Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+
 Send an interrupt to halt a running live DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
@@ -57,6 +81,12 @@ Send an interrupt to halt a running live DebugSession. Requires operator.
 ## `debug.list_breakpoints`
 
 `partial` · `read-only`
+
+**Maturity:** live_dependency — Lists breakpoints on a live gdbstub-backed DebugSession via gdb-MI.
+
+**Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
 
 List all breakpoints on a live DebugSession. Requires operator.
 
@@ -82,6 +112,12 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 
 `partial` · `read-only`
 
+**Maturity:** live_dependency — Reads raw memory from a live gdbstub-backed DebugSession.
+
+**Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+
 Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires operator.
 
 | Parameter | Type | Required | Description |
@@ -94,6 +130,12 @@ Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires oper
 
 `partial` · `read-only`
 
+**Maturity:** live_dependency — Reads named registers from a live gdbstub-backed DebugSession.
+
+**Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+
 Read named registers from a live DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
@@ -105,6 +147,12 @@ Read named registers from a live DebugSession. Requires operator.
 
 `partial`
 
+**Maturity:** live_dependency — Sets a breakpoint on a live gdbstub-backed DebugSession via gdb-MI.
+
+**Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+
 Set a breakpoint on a live DebugSession via gdb-MI. Requires operator.
 
 | Parameter | Type | Required | Description |
@@ -115,6 +163,12 @@ Set a breakpoint on a live DebugSession via gdb-MI. Requires operator.
 ## `debug.start_session`
 
 `partial`
+
+**Maturity:** live_dependency — Opens a single-attach gdbstub/drgn-live transport to a booted Run; requires a real booted kernel, reached only under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run attaches a debug session to a real booted Run.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
 
 Open a single-attach transport and insert a live DebugSession. Requires operator.
 

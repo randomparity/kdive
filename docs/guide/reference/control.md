@@ -6,6 +6,12 @@
 
 `partial` · `destructive`
 
+**Maturity:** live_dependency — Enqueues an NMI force-crash job the provider runs against a ready System; the crash path is exercised only under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run drives ready->crashed and the resulting vmcore capture.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+
 Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + gate.
 
 | Parameter | Type | Required | Description |
@@ -15,6 +21,12 @@ Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + g
 ## `control.power`
 
 `partial` · `destructive`
+
+**Maturity:** live_dependency — Enqueues a power job the provider runs against a started System; the off/cycle/reset path is exercised only under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run drives a power action through to the System's observed state change.
+
+**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
 
 Power action on a started System: `on` is reversible (operator); off/cycle/reset
 are destructive (admin). Enqueues a power job.

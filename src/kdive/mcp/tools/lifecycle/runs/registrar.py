@@ -210,7 +210,19 @@ def _register_runs_build(
     @app.tool(
         name="runs.build",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Enqueues a kernel build the worker runs against the provider's build host; "
+                "the toolchain build path is exercised only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run produces a real kernel artifact "
+                "the build ledger records."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def runs_build(
         run_id: Annotated[str, Field(description="The Run to build.")],
@@ -284,7 +296,19 @@ def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="runs.install",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Installs a built kernel onto its System via the provider; the install path "
+                "is exercised only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run installs a real kernel and the "
+                "subsequent boot observes it."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def runs_install(
         run_id: Annotated[str, Field(description="The Run whose built kernel to install.")],
@@ -297,7 +321,19 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="runs.boot",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Boots an installed kernel via the provider and waits for readiness; the boot "
+                "path is exercised only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run boots a real kernel and asserts "
+                "the booted kernel identity."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def runs_boot(
         run_id: Annotated[str, Field(description="The Run whose installed kernel to boot.")],
