@@ -9,7 +9,12 @@ from uuid import UUID
 import psycopg
 import pytest
 
-from kdive.db.idempotency import JsonValue, run_step
+from kdive.db.idempotency import (
+    JsonValue,
+    claim_run_step,
+    complete_run_step,
+    run_step,
+)
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:
@@ -172,3 +177,57 @@ def test_concurrent_first_call_resolves_to_one_result(migrated_url: str) -> None
         assert results[0] == results[1]  # both return the committed winner's value
 
     asyncio.run(_run_test())
+
+
+def test_claim_run_step_replays_succeeded(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            run_id = await _seed_run(conn)
+            claim = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
+            assert claim.claimed is True
+            await complete_run_step(conn, run_id, "s", {"v": 1})
+            replay = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
+            assert replay.claimed is False
+            assert replay.result == {"v": 1}
+
+    asyncio.run(_run())
+
+
+def test_claim_run_step_reclaims_stale_running(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            run_id = await _seed_run(conn)
+            # Stage a running row aged past the 30-minute stale interval. The
+            # run_steps_set_updated_at trigger fires BEFORE UPDATE only, so an INSERT
+            # with an explicit old updated_at is not rewritten to now(). wait_for bounds
+            # the call so a non-aged row surfaces as TimeoutError, not a hang.
+            await conn.execute(
+                "INSERT INTO run_steps (run_id, step, state, updated_at) "
+                "VALUES (%s, 's', 'running', now() - interval '31 minutes')",
+                (run_id,),
+            )
+            claim = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
+            assert claim.claimed is True  # stale row deleted, freshly re-claimed
+
+    asyncio.run(_run())
+
+
+def test_claim_run_step_raises_on_unknown_state(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            run_id = await _seed_run(conn)
+            # claim_run_step reads state straight from the DB with no injection seam,
+            # so stage corrupt data by dropping the CHECK on this test's own freshly
+            # migrated database (no leak into other tests).
+            await conn.execute("ALTER TABLE run_steps DROP CONSTRAINT run_steps_state_check")
+            await conn.execute(
+                "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 's', 'bogus')",
+                (run_id,),
+            )
+            # Without the guard, claim_run_step polls forever -> wait_for raises
+            # TimeoutError (not RuntimeError), so pytest.raises fails: the red signal.
+            # With the guard it raises RuntimeError before the timeout.
+            with pytest.raises(RuntimeError, match="unknown state"):
+                await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
+
+    asyncio.run(_run())

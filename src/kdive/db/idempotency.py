@@ -133,8 +133,14 @@ async def claim_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> Step
                 if inserted is not None:
                     return StepClaim(True, None)
                 continue
-            if existing["state"] == _RunStepState.SUCCEEDED.value:
+            state = existing["state"]
+            if state == _RunStepState.SUCCEEDED.value:
                 return StepClaim(False, _step_result(existing["result"], run_id=run_id, step=step))
+            if state != _RunStepState.RUNNING.value:
+                raise RuntimeError(
+                    f"run_step ({run_id}, {step}) has unknown state {state!r}; "
+                    f"expected one of {[s.value for s in _RunStepState]}"
+                )
         await asyncio.sleep(_STEP_WAIT_POLL_SEC)
 
 

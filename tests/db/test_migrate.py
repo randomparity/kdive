@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import LiteralString
@@ -10,7 +11,7 @@ from typing import LiteralString
 import psycopg
 import pytest
 
-from kdive.db import migrate
+from kdive.db import idempotency, migrate
 from kdive.domain import errors, models
 from kdive.domain.capacity import state
 
@@ -32,6 +33,7 @@ CHECK_ENUMS = [
     ("image_catalog_managed_by_check", models.ManagedBy),
     ("resources_managed_by_check", models.ManagedBy),
     ("build_hosts_managed_by_check", models.ManagedBy),
+    ("run_steps_state_check", idempotency._RunStepState),
 ]
 
 OBJECT_TABLES = {
@@ -138,6 +140,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0040",
         "0041",
         "0042",
+        "0043",
     ]
     assert second == []
 
@@ -155,6 +158,68 @@ def test_dedup_key_not_null(pg_conn: psycopg.Connection) -> None:
         "WHERE table_name = 'jobs' AND column_name = 'dedup_key'"
     ).fetchone()
     assert row is not None and row[0] == "NO"
+
+
+def _seed_run_for_steps(conn: psycopg.Connection) -> str:
+    """Insert the resource->allocation->system->investigation->run FK chain for run_steps."""
+    resource_id = _seed_resource_row(conn)
+    alloc = conn.execute(
+        "INSERT INTO allocations (resource_id, state, principal, project) "
+        "VALUES (%s, 'granted', 'alice', 'proj') RETURNING id",
+        (resource_id,),
+    ).fetchone()
+    assert alloc is not None
+    sysm = conn.execute(
+        "INSERT INTO systems (allocation_id, state, provisioning_profile, principal, project) "
+        "VALUES (%s, 'ready', '{}'::jsonb, 'alice', 'proj') RETURNING id",
+        (alloc[0],),
+    ).fetchone()
+    assert sysm is not None
+    inv = conn.execute(
+        "INSERT INTO investigations (title, state, principal, project) "
+        "VALUES ('t', 'open', 'alice', 'proj') RETURNING id"
+    ).fetchone()
+    assert inv is not None
+    run = conn.execute(
+        "INSERT INTO runs (investigation_id, system_id, target_kind, state, build_profile, "
+        "principal, project) "
+        "VALUES (%s, %s, 'local-libvirt', 'created', '{}'::jsonb, 'alice', 'proj') RETURNING id",
+        (inv[0], sysm[0]),
+    ).fetchone()
+    assert run is not None
+    return str(run[0])
+
+
+def test_run_steps_state_check_admits_enum_values_and_rejects_others(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    run_id = _seed_run_for_steps(pg_conn)
+    for step_state in ("running", "succeeded"):
+        pg_conn.execute(
+            "INSERT INTO run_steps (run_id, step, state) VALUES (%s, %s, %s)",
+            (run_id, f"step-{step_state}", step_state),
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute(
+            "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 'bad', 'bogus')",
+            (run_id,),
+        )
+
+
+def test_run_steps_state_check_admits_exactly_the_enum(pg_conn: psycopg.Connection) -> None:
+    """The CHECK's admitted set equals _RunStepState exactly — no SQL-only extras."""
+    migrate.apply_migrations(pg_conn)
+    row = pg_conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'run_steps_state_check'"
+    ).fetchone()
+    assert row is not None, "run_steps_state_check constraint is missing"
+    # pg renders the CHECK with the admitted values as single-quoted literals
+    # (state = ANY (ARRAY['running'::text, ...]) or state IN ('running', ...)); the
+    # ::text casts sit outside the quotes, so the quoted tokens are exactly the values.
+    admitted = set(re.findall(r"'([^']+)'", row[0]))
+    assert admitted == {s.value for s in idempotency._RunStepState}
 
 
 def test_runs_expected_boot_failure_column(pg_conn: psycopg.Connection) -> None:
@@ -364,7 +429,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
 
     monkeypatch.setattr(migrate, "discover_migrations", lambda: full)
     applied = migrate.apply_migrations(pg_conn)
-    assert applied == ["0042"]
+    assert applied == ["0042", "0043"]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
 
@@ -678,6 +743,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0040",
         "0041",
         "0042",
+        "0043",
     ]
 
 
