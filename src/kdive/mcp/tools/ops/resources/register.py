@@ -235,7 +235,7 @@ def _common_registration(
     return None, resolved_owner
 
 
-def _resolve_ports(
+def _default_registration_seams(
     probe: ResourceProbe | None, secrets_root: Path | None
 ) -> tuple[ResourceProbe, Path]:
     return probe or TcpResourceProbe(), secrets_root or secrets_root_from_env()
@@ -443,7 +443,7 @@ async def register_remote_libvirt_resource(
         return failure
     if not request.host_uri.strip():
         return config_error(request.name, "remote_libvirt requires a host URI")
-    probe, secrets_root = _resolve_ports(probe, secrets_root)
+    probe, secrets_root = _default_registration_seams(probe, secrets_root)
     failure = _validate_secret_refs(
         name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
     )
@@ -505,7 +505,7 @@ async def register_local_libvirt_resource(
         return failure
     if not request.host_uri.strip():
         return config_error(request.name, "local_libvirt requires a host URI")
-    probe, secrets_root = _resolve_ports(probe, secrets_root)
+    probe, secrets_root = _default_registration_seams(probe, secrets_root)
     failure = _validate_secret_refs(
         name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
     )
@@ -560,7 +560,7 @@ async def register_fault_inject_resource(
     failure, owner_project = _common_registration(ctx, request)
     if failure is not None:
         return failure
-    _, secrets_root = _resolve_ports(probe, secrets_root)
+    _, secrets_root = _default_registration_seams(probe, secrets_root)
     failure = _validate_secret_refs(
         name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
     )
