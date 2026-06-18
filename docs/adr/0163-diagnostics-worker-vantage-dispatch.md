@@ -56,13 +56,16 @@ hang."
    that is the control, not an op-scoped redactor over a result that holds no secrets.
 
 3. **The probes.** `provider_tls` does a direct TLS handshake (Python `ssl`) to the libvirt TLS
-   endpoint with the materialized client cert/key and the configured CA — *not* a libvirt open,
-   because `remote_connection` wraps a failed qemu+tls open opaquely as `TRANSPORT_FAILURE`, which
-   cannot tell a bad cert from a down host (the distinction this check exists to make). Handshake OK
-   → `pass`; `ssl.SSLCertVerificationError` → `fail` (reissue / set the provider CA); refused /
-   timeout / other `SSLError` → `error` (the safe direction — an ambiguous handshake is "could not
-   validate," never a fabricated `fail`). Classifying on the typed `ssl` exception keeps the verdict
-   stable across libvirt versions. `gdbstub_acl` is a *policy* check with no live listener: the
+   endpoint — host and port parsed from `config.uri` (default `16514` only when absent) so it
+   targets the same endpoint the worker uses — with the materialized client cert/key and the
+   configured CA. It is *not* a libvirt open, because `remote_connection` wraps a failed qemu+tls
+   open opaquely as `TRANSPORT_FAILURE`, which cannot tell a bad cert from a down host (the
+   distinction this check exists to make). Handshake OK → `pass`; `ssl.SSLCertVerificationError` →
+   `fail` (reissue / set the provider CA); refused / timeout / other `SSLError` → `error` (the safe
+   direction — an ambiguous handshake is "could not validate," never a fabricated `fail`).
+   Classifying on the typed `ssl` exception keeps the verdict stable across libvirt versions. The
+   check is scoped to chain validity, not libvirt's `tls_allowed_dn_list` authz (which surfaces via
+   reachability/provision). `gdbstub_acl` is a *policy* check with no live listener: the
    worker attempts a TCP connect to `gdb_addr:<lowest port in range>` — connect or fast
    `ECONNREFUSED` → `pass` (the SYN reached the host TCP stack, excluding the M2 `DROP`/blackhole
    fault); connect timeout → `fail` (the firewall drops it); any other error → `error`. An unset
@@ -75,11 +78,15 @@ hang."
    dispatcher's poll), polls the job row until terminal or the **reserved dispatch budget** elapses,
    then maps: succeeded → the real results (malformed inline result → `error`); dead-lettered →
    `error` carrying the job's `error_category`; budget-with-no-pickup → `WORKER_UNAVAILABLE`
-   (`transport_failure`, the `/livez`/`/readyz` detail). The dispatcher gets a budget floor
-   (`max(remaining_overall, WORKER_DISPATCH_BUDGET)`) so a slow server-vantage check cannot starve
-   it to near-zero and manufacture a spurious `WORKER_UNAVAILABLE` on a healthy worker; the overall
-   deadline is sized to cover the server checks plus that floor. The dispatcher owns the entire
-   worker-vantage outcome, keeping `DiagnosticsService.run()` a simple merge.
+   (`transport_failure`, a "did not pick up in time — check the worker is up and not saturated"
+   detail). The overall deadline is **partitioned** into a bounded server phase and a bounded worker
+   phase that sum to it (not a floor added on top, which could push runtime past the deadline and
+   void the gate guarantee), so the dispatcher always gets its full worker-phase budget regardless
+   of how long the server checks ran — a slow server check cannot manufacture a spurious
+   `WORKER_UNAVAILABLE`. A busy single worker (the diagnostics job waiting behind a long
+   provision/build, since the queue is FIFO by `created_at`) is a genuine in-time pickup failure and
+   is covered by that same honest detail. The dispatcher owns the entire worker-vantage outcome,
+   keeping `DiagnosticsService.run()` a simple merge.
 
 5. **`default_service_factory` wires the dispatcher when remote-libvirt is configured.** It captures
    the pool (no object store). When remote-libvirt is not configured the factory passes

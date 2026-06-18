@@ -91,9 +91,12 @@ and bounded.
 piggy-back on libvirt's connection open: a qemu+tls open failure is wrapped opaquely as
 `TRANSPORT_FAILURE` by `remote_connection` (`transport.py`), so a cert-verification failure is
 indistinguishable from host-down there — and the check's whole value is telling those two apart.
-Instead the probe does a direct TLS handshake (Python `ssl`) to the libvirt TLS endpoint
-(`host:16514`) using the materialized client cert/key and the configured CA, classifying via `ssl`
-exceptions:
+Instead the probe does a direct TLS handshake (Python `ssl`) to the libvirt TLS endpoint using the
+materialized client cert/key and the configured CA, classifying via `ssl` exceptions. The endpoint
+host and port are **parsed from `config.uri`** (`urlsplit(...).hostname` / `.port`), defaulting the
+port to libvirt's TLS default `16514` only when the URI omits it — so the probe targets the exact
+endpoint the real worker connection uses, not a hardcoded port that a non-default deployment would
+false-`UNREACHABLE`. The outcomes:
 - handshake completes → `TlsProbeOutcome.VALID` → `pass`.
 - `ssl.SSLCertVerificationError` (server cert not signed by the configured CA, or otherwise fails
   verification) → `INVALID` → `fail` (reissue / set the provider CA).
@@ -107,6 +110,12 @@ Classifying on the typed `ssl` exception (not a libvirt error string) keeps the 
 across libvirt versions; a unit test pins the cert-verification shape so a future regression fails
 CI. The TLS materialization reuses the transport's secret-ref → pkipath path; blocking work is
 offloaded with `asyncio.to_thread`.
+
+This check is scoped to **chain validity** — that the configured CA signs the server cert and the
+client identity presents. It does **not** cover libvirt's application-layer `tls_allowed_dn_list`
+(an allow-listed client DN is authz the handshake completes regardless of), which surfaces via the
+reachability check / at provision time; a green `provider_tls` means "the TLS chain validates," not
+"the worker is fully authorized to connect."
 
 `diagnostics/gdbstub_acl.py` — `gdbstub_acl_probe()` builds a `GdbstubAclProbe`. A policy check, no
 live listener (ADR-0091 §2): it attempts a TCP connect from the worker to `host:port` for the
@@ -170,13 +179,31 @@ The worker polls the queue every 1s (`WorkerConfig.poll_interval`) and runs two 
 the dispatch needs a window comfortably above ~2s to avoid a spurious `WORKER_UNAVAILABLE` on a
 healthy worker. A naive "give the dispatcher whatever overall budget remains after the
 server-vantage checks" is unsafe: three server checks can each burn up to the 10s per-check timeout
-against a slow host and starve the dispatcher to near-zero. So the dispatcher is given a **reserved
-floor** (`WORKER_DISPATCH_BUDGET`, ~15s): the service runs the server-vantage checks first, then
-calls the dispatcher with `max(remaining_overall, WORKER_DISPATCH_BUDGET)`, and the overall timeout
-is sized to cover both phases (server checks + the worker floor). This guarantees a healthy worker
-always gets enough time, so a `WORKER_UNAVAILABLE` verdict means a genuine pickup failure, not a
-server-check that ran long. The per-probe timeouts on the worker side still bound a black-holing
-host within that floor.
+against a slow host and starve the dispatcher to near-zero.
+
+The fix is to **partition** the overall deadline into two bounded phases that *sum to* it, rather
+than a floor that adds on top of an already-consumed deadline (a floor would let total runtime
+exceed `overall_timeout`, voiding the gate guarantee that `doctor` reports a clean `error` instead
+of running long). Concretely the overall budget grows to accommodate both phases: the server-phase
+budget keeps today's full server-vantage allowance (`_DEFAULT_OVERALL_TIMEOUT`, ~30s — so server
+checks are **not** regressed to a tighter budget), and a worker-phase budget
+(`WORKER_DISPATCH_BUDGET`, ~15s) is added on for the dispatch, making the new overall ~45s. The
+server checks run under the server-phase budget; the dispatcher is then always given its full
+worker-phase budget regardless of how long the server phase took, so a slow server check cannot
+starve it. A `WORKER_UNAVAILABLE` verdict therefore means a genuine pickup failure within a
+guaranteed-adequate window, and total `doctor` runtime stays bounded (~45s) — well within the MCP
+transport's in-flight tolerance (uvicorn keepalive bounds idle gaps between requests, not a single
+in-flight call, per ADR-0138).
+
+**Worker contention is a real cause of a genuine pickup failure.** `dequeue` claims the oldest
+eligible job by `created_at`, and a typical deployment runs one worker. If `doctor` runs while a
+minutes-long `provision`/`build` job is in flight, the diagnostics job waits behind it and the
+worker phase elapses → `WORKER_UNAVAILABLE`. This is honest (the worker genuinely could not pick
+the job up in time) but is *not* a worker outage, so the substituted detail is worded to cover both:
+"worker did not pick up the diagnostic job in time — check that the worker is up (`/livez`,
+`/readyz`) and not saturated." A priority lane for diagnostics jobs is out of scope (the queue is
+FIFO by `created_at` with no priority column); the behavior is documented rather than engineered
+around.
 
 ### 5. Service + factory wiring
 
