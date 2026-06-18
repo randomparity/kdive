@@ -28,7 +28,7 @@ class _ControlTarget(NamedTuple):
     project: str
 
 
-def domain_name(system: System) -> str:
+def _resolved_domain_name(system: System) -> str:
     return system.domain_name or domain_name_for(system.id)
 
 
@@ -41,7 +41,7 @@ async def _control_target(conn: AsyncConnection, system_id: UUID, *, op: str) ->
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
-        return _ControlTarget(domain_name(system), system.project)
+        return _ControlTarget(_resolved_domain_name(system), system.project)
 
 
 async def _controller(conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver):
@@ -113,7 +113,7 @@ async def _force_crash_target(conn: AsyncConnection, system_id: UUID) -> _Contro
             )
         if system.state in TERMINAL_SYSTEM_STATES:
             return None
-        return _ControlTarget(domain_name(system), system.project)
+        return _ControlTarget(_resolved_domain_name(system), system.project)
 
 
 async def _finalize_force_crash(
