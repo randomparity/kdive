@@ -1,6 +1,6 @@
 # ADR 0163 — Diagnostics worker-vantage dispatch (`provider_tls`, `gdbstub_acl`)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-17
 - **Deciders:** kdive maintainers
 - **Builds on (does not supersede):**
