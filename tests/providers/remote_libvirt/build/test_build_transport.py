@@ -36,7 +36,7 @@ from kdive.providers.remote_libvirt.build import (
     transport_make_bundle,
     transport_vmlinux_source,
 )
-from kdive.providers.shared.build_host.transport_seams import (
+from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_read_build_id,
     transport_run_modules_install,
 )

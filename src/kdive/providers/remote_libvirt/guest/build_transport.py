@@ -2,15 +2,14 @@
 
 The ephemeral remote-libvirt build VM runs its build over the in-guest guest-agent exec
 channel rather than SSH. ``guest-exec`` has no working-directory argument, so each command is
-composed as a single in-guest shell hop — ``/bin/sh -c "cd <cwd> && exec <argv>"`` — exactly
-the posture the sibling :class:`~kdive.providers.shared.build_host.ssh_transport.SshBuildTransport`
-uses (ssh runs the command through the remote login shell). The worker composes fixed,
-``shlex``-quoted argv, so there is no injection surface; the build VM is an ephemeral,
+composed as a single in-guest shell hop — ``/bin/sh -c "cd <cwd> && exec <argv>"`` — matching
+the sibling SSH transport posture (ssh runs the command through the remote login shell).
+The worker composes fixed, ``shlex``-quoted argv, so there is no injection surface; the build VM
+is an ephemeral,
 single-build, operator-staged target (the divergence from ADR-0078's debug-target no-shell
 rule is recorded in ADR-0100).
 
-The shared read/clone/upload/cleanup surface comes from
-:class:`~kdive.providers.shared.build_host.shell_transport.ShellBuildTransport`; this module
+The shared read/clone/upload/cleanup surface comes from ``ShellBuildTransport``; this module
 provides the guest-agent ``_run_remote`` primitive and a ``write_bytes`` that composes its own
 base64 pipeline (which the ``exec``-join run form cannot express).
 """
@@ -32,8 +31,8 @@ from kdive.providers.remote_libvirt.guest.agent import (
     Monotonic,
     Sleep,
 )
-from kdive.providers.shared.build_host.shell_transport import ShellBuildTransport
-from kdive.providers.shared.build_host.workspace import redacted_tail
+from kdive.providers.shared.build_host.transports.shell_transport import ShellBuildTransport
+from kdive.providers.shared.build_host.workspaces.workspace import redacted_tail
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _SHELL = "/bin/sh"

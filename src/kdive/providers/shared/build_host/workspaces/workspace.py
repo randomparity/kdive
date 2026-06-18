@@ -12,7 +12,11 @@ from uuid import UUID
 from kdive.build_artifacts.validation import patch_target_paths, snapshot_file_bytes
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitSourceRef, ServerBuildProfile, git_source_of
-from kdive.providers.shared.build_host.config import resolve_local_ref
+from kdive.providers.shared.build_host.configuration.config import resolve_local_ref
+from kdive.providers.shared.build_host.configuration.git_source import (
+    remote_allowed,
+    validate_git_arg,
+)
 from kdive.providers.shared.build_host.execution import (
     MAKE_TIMEOUT_S,
     build_failure,
@@ -20,7 +24,6 @@ from kdive.providers.shared.build_host.execution import (
     run_make_target,
     workspace_failure,
 )
-from kdive.providers.shared.build_host.git_source import remote_allowed, validate_git_arg
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 

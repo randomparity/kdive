@@ -18,8 +18,11 @@ import logging
 from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
-from kdive.providers.shared.build_host.git_source import _UNSAFE_CHARS, validate_git_arg
-from kdive.providers.shared.build_host.workspace import redacted_tail
+from kdive.providers.shared.build_host.configuration.git_source import (
+    _UNSAFE_CHARS,
+    validate_git_arg,
+)
+from kdive.providers.shared.build_host.workspaces.workspace import redacted_tail
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)

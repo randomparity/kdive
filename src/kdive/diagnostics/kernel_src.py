@@ -25,7 +25,7 @@ from collections.abc import Callable
 import kdive.config as config
 from kdive.config.core_settings import KERNEL_SRC
 from kdive.diagnostics.checks import WarmTreeSourceOutcome, WarmTreeSourceProbe
-from kdive.providers.shared.build_host.workspace import (
+from kdive.providers.shared.build_host.workspaces.workspace import (
     KERNEL_SRC_UNSET_DETAIL,
     warm_tree_source_error,
 )

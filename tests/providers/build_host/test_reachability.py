@@ -15,7 +15,7 @@ from uuid import uuid4
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
-from kdive.providers.shared.build_host.ssh_transport import SshBuildTransport
+from kdive.providers.shared.build_host.transports.ssh_transport import SshBuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _MODULE = "kdive.providers.shared.build_host.reachability"
@@ -100,7 +100,7 @@ def test_probe_no_registry_growth_across_passes() -> None:
 
     with (
         patch(
-            "kdive.providers.shared.build_host.ssh_transport._resolve_ssh_key",
+            "kdive.providers.shared.build_host.transports.ssh_transport._resolve_ssh_key",
             return_value=_FAKE_KEY,
         ),
         patch.object(SshBuildTransport, "check_reachable", return_value=True),

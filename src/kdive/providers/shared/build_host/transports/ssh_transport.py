@@ -5,9 +5,8 @@ The SSH identity (private key) is materialized into a per-op 0600 temp file from
 configured secrets root, then deleted on every exit path.
 
 The shared BuildTransport surface (``run``/``read_*``/``clone``/``upload_file``/``cleanup``)
-lives on :class:`~kdive.providers.shared.build_host.shell_transport.ShellBuildTransport`; this
-module provides only the ssh-specific ``_run_remote`` primitive, the stdin-streamed
-``write_bytes``, and the identity lifecycle.
+lives on ``ShellBuildTransport``; this module provides only the ssh-specific ``_run_remote``
+primitive, the stdin-streamed ``write_bytes``, and the identity lifecycle.
 """
 
 from __future__ import annotations
@@ -28,11 +27,14 @@ from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.execution import launch_failure
 
 # Re-export the read-size cap (defined on the base) for callers/tests importing it here.
-from kdive.providers.shared.build_host.shell_transport import (
+from kdive.providers.shared.build_host.transports.shell_transport import (
     _MAX_REMOTE_READ_B64_BYTES as _MAX_REMOTE_READ_B64_BYTES,
 )
-from kdive.providers.shared.build_host.shell_transport import _UNSAFE_CHARS, ShellBuildTransport
-from kdive.providers.shared.build_host.workspace import redacted_tail
+from kdive.providers.shared.build_host.transports.shell_transport import (
+    _UNSAFE_CHARS,
+    ShellBuildTransport,
+)
+from kdive.providers.shared.build_host.workspaces.workspace import redacted_tail
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import FileRefBackend, secrets_root_from_env
 

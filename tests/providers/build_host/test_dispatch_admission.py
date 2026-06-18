@@ -12,7 +12,7 @@ from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.shared.build_host.dispatch import run_build_on_host
-from kdive.providers.shared.build_host.workspace import KERNEL_SRC_UNSET_DETAIL
+from kdive.providers.shared.build_host.workspaces.workspace import KERNEL_SRC_UNSET_DETAIL
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN_ID = UUID("00000000-0000-0000-0000-0000000000d1")

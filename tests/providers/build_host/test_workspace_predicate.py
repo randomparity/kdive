@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kdive.providers.shared.build_host.workspace import (
+from kdive.providers.shared.build_host.workspaces.workspace import (
     KERNEL_SRC_INVALID_DETAIL,
     KERNEL_SRC_UNSET_DETAIL,
     warm_tree_source_error,

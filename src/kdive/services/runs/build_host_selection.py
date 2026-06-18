@@ -27,7 +27,7 @@ from kdive.db.build_hosts import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile, is_git_source
-from kdive.providers.shared.build_host.workspace import warm_tree_source_error
+from kdive.providers.shared.build_host.workspaces.workspace import warm_tree_source_error
 
 
 class SourceKind(StrEnum):
@@ -101,7 +101,7 @@ def check_warm_tree_source_admission(kernel_src: str, *, host_kind: BuildHostKin
 
     A no-op for any non-``LOCAL`` host kind (git/remote lanes never read
     ``KDIVE_KERNEL_SRC``). For a ``LOCAL`` host this applies the same predicate
-    :func:`~kdive.providers.shared.build_host.workspace.sync_tree` applies
+    :func:`~kdive.providers.shared.build_host.workspaces.workspace.sync_tree` applies
     (``warm_tree_source_error``) and raises the identical ``KERNEL_SRC_UNSET_DETAIL`` /
     ``KERNEL_SRC_INVALID_DETAIL`` (ADR-0161), so an admission rejection is byte-identical
     to the build-time backstop. The worker BUILD handler reads ``KDIVE_KERNEL_SRC`` once

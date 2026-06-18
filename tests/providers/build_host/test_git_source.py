@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.shared.build_host.git_source import (
+from kdive.providers.shared.build_host.configuration.git_source import (
     remote_allowed,
     validate_git_arg,
 )

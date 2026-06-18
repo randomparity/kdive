@@ -19,7 +19,7 @@ from kdive.build_artifacts.validation import parse_gnu_build_id, patch_target_pa
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
-from kdive.providers.shared.build_host.config import resolve_local_ref
+from kdive.providers.shared.build_host.configuration.config import resolve_local_ref
 from kdive.providers.shared.build_host.execution import (
     MAKE_TIMEOUT_S,
     OBJCOPY_TIMEOUT_S,
@@ -29,7 +29,11 @@ from kdive.providers.shared.build_host.execution import (
     RunStep,
     build_failure,
 )
-from kdive.providers.shared.build_host.workspace import GIT_APPLY_TIMEOUT_S, Checkout, redacted_tail
+from kdive.providers.shared.build_host.workspaces.workspace import (
+    GIT_APPLY_TIMEOUT_S,
+    Checkout,
+    redacted_tail,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 # ---------------------------------------------------------------------------
