@@ -197,7 +197,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     @app.tool(
         name="introspect.from_vmcore",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Runs offline drgn over a Run's captured core; requires a real captured "
+                "vmcore plus matching debuginfo, produced only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run introspects a real captured core "
+                "and returns a redacted report."
+            ),
+        ),
     )
     async def introspect_from_vmcore_tool(
         run_id: Annotated[
@@ -228,7 +239,19 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     @app.tool(
         name="introspect.run",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Runs live drgn over a drgn-live DebugSession; requires a real attached "
+                "live session, reached only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run runs a live drgn helper against "
+                "a real booted Run."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def introspect_run_tool(
         session_id: Annotated[str, Field(description="A live drgn-live DebugSession.")],

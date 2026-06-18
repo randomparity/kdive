@@ -55,6 +55,24 @@ from kdive.security.authz.context import RequestContext
 _EngineOp = Callable[[GdbMiEngine, GdbMiAttachment], ToolResponse]
 
 
+def _gdbmi_maturity(detail: str) -> dict[str, object]:
+    """The shared ADR-0175 maturity for the gdb-MI `debug.*` tools.
+
+    All seven act over a live gdbstub-backed DebugSession reached only under the
+    gated live markers; they differ only in the per-op ``detail``.
+    """
+    return _docmeta.maturity_meta(
+        "partial",
+        reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+        detail=detail,
+        promotion=(
+            "A non-gated test or recorded live_stack run drives this gdb-MI op against a real "
+            "attached DebugSession."
+        ),
+        providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+    )
+
+
 def _default_transcript_dir() -> Path:
     # Configurable (KDIVE_DEBUG_DIR) so a deployment points it at the run-artifact tree and
     # tests at a temp dir; the registry default mirrors the other planes' /var/lib/kdive/* roots.
@@ -348,7 +366,7 @@ def _register_debug_set_breakpoint(
     @app.tool(
         name="debug.set_breakpoint",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_gdbmi_maturity("Sets a breakpoint on a live gdbstub-backed DebugSession via gdb-MI."),
     )
     async def debug_set_breakpoint(
         session_id: Annotated[
@@ -372,7 +390,7 @@ def _register_debug_clear_breakpoint(
     @app.tool(
         name="debug.clear_breakpoint",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_gdbmi_maturity("Clears a breakpoint on a live gdbstub-backed DebugSession."),
     )
     async def debug_clear_breakpoint(
         session_id: Annotated[
@@ -399,7 +417,7 @@ def _register_debug_list_breakpoints(
     @app.tool(
         name="debug.list_breakpoints",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_gdbmi_maturity("Lists breakpoints on a live gdbstub-backed DebugSession via gdb-MI."),
     )
     async def debug_list_breakpoints(
         session_id: Annotated[
@@ -418,7 +436,7 @@ def _register_debug_read_memory(
     @app.tool(
         name="debug.read_memory",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_gdbmi_maturity("Reads raw memory from a live gdbstub-backed DebugSession."),
     )
     async def debug_read_memory(
         session_id: Annotated[str, Field(description="The live DebugSession to read memory from.")],
@@ -441,7 +459,7 @@ def _register_debug_read_registers(
     @app.tool(
         name="debug.read_registers",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_gdbmi_maturity("Reads named registers from a live gdbstub-backed DebugSession."),
     )
     async def debug_read_registers(
         session_id: Annotated[
@@ -468,7 +486,7 @@ def _register_debug_continue(
     @app.tool(
         name="debug.continue",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_gdbmi_maturity("Resumes a live gdbstub-backed DebugSession, waiting for a stop."),
     )
     async def debug_continue(
         session_id: Annotated[
@@ -498,7 +516,7 @@ def _register_debug_interrupt(
     @app.tool(
         name="debug.interrupt",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_gdbmi_maturity("Interrupts a running live gdbstub-backed DebugSession via gdb-MI."),
     )
     async def debug_interrupt(
         session_id: Annotated[str, Field(description="The live DebugSession to interrupt.")],

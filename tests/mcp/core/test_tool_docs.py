@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast, get_type_hints
 
+import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
@@ -367,6 +368,57 @@ def test_every_tool_has_a_valid_maturity() -> None:
     valid = {"implemented", "partial", "planned"}
     offenders = [t.name for t in TOOLS if (t.meta or {}).get("maturity") not in valid]
     assert not offenders, f"tools with missing/invalid maturity: {offenders}"
+
+
+_VALID_MATURITY_REASONS = {r.value for r in _docmeta.MaturityReason}
+
+
+def test_partial_tools_carry_a_maturity_reason() -> None:
+    # ADR-0175: every `partial` tool must explain itself with a structured
+    # maturity_detail (a closed reason + a one-line detail + a one-line promotion
+    # bar) so a black-box agent reads WHY, not just `partial`.
+    offenders: list[str] = []
+    for t in TOOLS:
+        meta = t.meta or {}
+        if meta.get("maturity") != "partial":
+            continue
+        detail = meta.get("maturity_detail")
+        if not isinstance(detail, dict):
+            offenders.append(f"{t.name}: missing maturity_detail")
+            continue
+        if detail.get("reason") not in _VALID_MATURITY_REASONS:
+            offenders.append(f"{t.name}: invalid reason {detail.get('reason')!r}")
+        if not (detail.get("detail") or "").strip():
+            offenders.append(f"{t.name}: empty detail")
+        if not (detail.get("promotion") or "").strip():
+            offenders.append(f"{t.name}: empty promotion")
+    assert not offenders, f"partial tools missing maturity explanation: {offenders}"
+
+
+def test_non_partial_tools_have_no_maturity_detail() -> None:
+    # A maturity_detail left behind after a tool is promoted to `implemented`
+    # would mislead; only `partial` tools carry one.
+    offenders = [
+        t.name
+        for t in TOOLS
+        if (t.meta or {}).get("maturity") != "partial" and "maturity_detail" in (t.meta or {})
+    ]
+    assert not offenders, f"non-partial tools carrying a stale maturity_detail: {offenders}"
+
+
+def test_maturity_meta_rejects_partial_without_reason() -> None:
+    with pytest.raises(ValueError, match="requires reason"):
+        _docmeta.maturity_meta("partial")
+
+
+def test_maturity_meta_rejects_reason_on_non_partial() -> None:
+    with pytest.raises(ValueError, match="must not carry"):
+        _docmeta.maturity_meta(
+            "implemented",
+            reason=_docmeta.MaturityReason.OPERATOR_GATE,
+            detail="x",
+            promotion="y",
+        )
 
 
 def test_destructive_hint_matches_reviewed_set() -> None:

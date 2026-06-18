@@ -33,7 +33,19 @@ def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="artifacts.list",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Lists redacted artifacts a System produced; those rows only exist after "
+                "a live build/boot/capture path runs, exercised under the gated live "
+                "markers."
+            ),
+            promotion=(
+                "A non-gated test asserts the listing against artifacts a real run produced, "
+                "or a recorded live_stack run does."
+            ),
+        ),
     )
     async def artifacts_list(
         system_id: Annotated[
@@ -48,7 +60,18 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="artifacts.get",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Fetches a redacted artifact's bytes; the artifact only exists after a live "
+                "build/boot/capture path runs, exercised under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test fetches inline + presigned content for an artifact a real "
+                "run produced, or a recorded live_stack run does."
+            ),
+        ),
     )
     async def artifacts_get(
         artifact_id: Annotated[
@@ -72,7 +95,18 @@ def _register_artifacts_search_text(app: FastMCP, pool: AsyncConnectionPool) -> 
     @app.tool(
         name="artifacts.search_text",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Searches a redacted artifact's text; the artifact only exists after a live "
+                "build/boot/capture path runs, exercised under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test searches an artifact a real run produced, or a recorded "
+                "live_stack run does."
+            ),
+        ),
     )
     async def artifacts_search_text(
         artifact_id: Annotated[str, Field(description="The redacted System artifact id.")],

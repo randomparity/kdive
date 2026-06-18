@@ -310,7 +310,22 @@ def register(
     @app.tool(
         name="vmcore.fetch",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.PROVIDER_SUPPORT,
+            detail=(
+                "Captures a vmcore by a core-producing method (HOST_DUMP/KDUMP) the bound "
+                "provider must advertise; capture runs only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run captures a real vmcore by each "
+                "advertised core-producing method per provider."
+            ),
+            providers=(
+                "local-libvirt: HOST_DUMP; remote-libvirt: HOST_DUMP/KDUMP; "
+                "fault-inject: simulated HOST_DUMP."
+            ),
+        ),
     )
     async def vmcore_fetch(
         system_id: Annotated[str, Field(description="The crashed System whose vmcore to capture.")],
@@ -330,7 +345,18 @@ def register(
     @app.tool(
         name="vmcore.list",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Lists a System's redacted vmcore artifacts; those rows only exist after a "
+                "live capture path runs, exercised under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run lists vmcore artifacts a real "
+                "capture produced."
+            ),
+        ),
     )
     async def vmcore_list(
         system_id: Annotated[
@@ -344,7 +370,18 @@ def register(
     @app.tool(
         name="postmortem.crash",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Runs allowlisted crash(8) verbs over a Run's captured core; requires a real "
+                "captured vmcore, produced only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run runs crash commands over a real "
+                "captured core."
+            ),
+        ),
     )
     async def postmortem_crash_tool(
         run_id: Annotated[str, Field(description="The Run whose captured core to analyze.")],
@@ -361,7 +398,15 @@ def register(
     @app.tool(
         name="postmortem.triage",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Runs the default crash triage batch over a Run's captured core; requires a "
+                "real captured vmcore, produced only under the gated live markers."
+            ),
+            promotion=("A non-gated test or recorded live_stack run triages a real captured core."),
+        ),
     )
     async def postmortem_triage_tool(
         run_id: Annotated[str, Field(description="The Run whose captured core to triage.")],

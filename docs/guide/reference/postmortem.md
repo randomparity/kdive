@@ -6,6 +6,10 @@
 
 `partial` · `read-only`
 
+**Maturity:** live_dependency — Runs allowlisted crash(8) verbs over a Run's captured core; requires a real captured vmcore, produced only under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run runs crash commands over a real captured core.
+
 Run crash postmortem commands for a captured vmcore.
 
 | Parameter | Type | Required | Description |
@@ -16,6 +20,10 @@ Run crash postmortem commands for a captured vmcore.
 ## `postmortem.triage`
 
 `partial` · `read-only`
+
+**Maturity:** live_dependency — Runs the default crash triage batch over a Run's captured core; requires a real captured vmcore, produced only under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run triages a real captured core.
 
 Run the default crash triage for a captured vmcore.
 
