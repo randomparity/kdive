@@ -22,7 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
-from kdive.diagnostics.service import default_service_factory
+from kdive.diagnostics.service import DiagnosticsService, default_service_factory
 from kdive.domain.errors import CategorizedError
 from kdive.domain.models import Job, JobKind
 from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
@@ -184,7 +184,13 @@ def _register_introspection_tools(
 def _register_diagnostics_tools(
     app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
 ) -> None:
-    ops_diagnostics_tools.register(app, pool, default_service_factory)
+    # Bind the pool into the factory with an explicit closure (not functools.partial, which strict
+    # ty rejects against the parameterized ServiceFactory Protocol) so worker-vantage checks can
+    # dispatch to the worker (ADR-0164).
+    def _service_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
+        return default_service_factory(provider, with_egress=with_egress, pool=pool)
+
+    ops_diagnostics_tools.register(app, pool, _service_factory)
 
 
 def _register_ops_build_hosts_tools(
@@ -268,6 +274,17 @@ def _register_vmcore_handlers(
     _transport_factories: BuildHostTransportFactories | None,
 ) -> None:
     vmcore.register_handlers(registry, resolver=resolver)
+
+
+def _register_diagnostics_handlers(
+    registry: HandlerRegistry,
+    _resolver: ProviderResolver,
+    _secret_registry: SecretRegistry,
+    _transport_factories: BuildHostTransportFactories | None,
+) -> None:
+    from kdive.jobs.handlers import diagnostics as diagnostics_handler
+
+    diagnostics_handler.register_handlers(registry)
 
 
 # Tool seam: each plane exposes register(app, pool); provider-aware planes receive AppAssembly.
@@ -358,6 +375,7 @@ _HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
     _register_control_handlers,
     _register_vmcore_handlers,
     _register_image_build_handler,
+    _register_diagnostics_handlers,
 )
 
 

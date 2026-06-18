@@ -184,3 +184,79 @@ def test_service_substitution_reason_threads_into_results() -> None:
     assert report.results[0].status is CheckStatus.ERROR
     assert FEATURE_NOT_ENABLED_DETAIL in report.results[0].detail
     assert report.results[0].failure_category == "not_implemented"
+
+
+class _FakeDispatcher:
+    """A worker-check dispatcher stub returning a fixed result list (ADR-0164)."""
+
+    def __init__(self, results: list[CheckResult]) -> None:
+        self._results = results
+
+    async def run_worker_checks(self) -> list[CheckResult]:
+        return self._results
+
+
+def test_dispatcher_results_replace_substitution() -> None:
+    from kdive.diagnostics.checks import PROVIDER_TLS_ID
+
+    dispatcher = _FakeDispatcher(
+        [CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt")]
+    )
+    service = DiagnosticsService(checks=[], per_check_timeout=1.0, worker_dispatcher=dispatcher)
+    report = asyncio.run(service.run())
+    assert [r.check_id for r in report.results] == [PROVIDER_TLS_ID]
+    assert not report.has_error
+
+
+def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
+    # Composition: a server-vantage check + a JobWorkerCheckDispatcher whose job SUCCEEDS with
+    # serialized real results -> one verdict carrying both, no substitution (AC 1 of #514).
+    from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID, SECRET_REF_ID
+    from kdive.diagnostics.result_codec import serialize_results
+    from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
+    from kdive.domain.state import JobState
+
+    class _Job:
+        def __init__(self, state: JobState, result_ref: str | None) -> None:
+            self.id = "j"
+            self.state = state
+            self.result_ref = result_ref
+            self.error_category = None
+
+    serialized = serialize_results(
+        [
+            CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
+            CheckResult(
+                GDBSTUB_ACL_ID,
+                CheckStatus.FAIL,
+                "blocked",
+                fix="open the ACL",
+                provider="remote-libvirt",
+                failure_category="configuration_error",
+            ),
+        ]
+    )
+
+    async def _enqueue(dedup_key: str, payload: object, authorizing: object) -> _Job:
+        return _Job(JobState.QUEUED, None)
+
+    async def _get(dedup_key: str) -> _Job:
+        return _Job(JobState.SUCCEEDED, serialized)
+
+    dispatcher = JobWorkerCheckDispatcher(
+        pool=None,
+        enqueue_fn=_enqueue,  # ty: ignore[invalid-argument-type]
+        get_fn=_get,  # ty: ignore[invalid-argument-type]
+        clock=lambda: 0.0,
+        dedup_suffix="x",
+    )
+    service = DiagnosticsService(
+        checks=[_Fixed(_ok(SECRET_REF_ID))],
+        per_check_timeout=1.0,
+        worker_dispatcher=dispatcher,
+    )
+    report = asyncio.run(service.run())
+    by_id = {r.check_id: r for r in report.results}
+    assert set(by_id) == {SECRET_REF_ID, PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
+    assert by_id[GDBSTUB_ACL_ID].status is CheckStatus.FAIL  # real result, not a substitution
+    assert report.has_failure
