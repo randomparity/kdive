@@ -77,6 +77,31 @@ def test_drain_visible_to_operator_or_admin() -> None:
     assert tool_visible("resources.drain", admin)
 
 
+def test_build_host_list_visible_to_platform_auditor() -> None:
+    auditor = _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+
+    assert required_scopes("build_hosts.list") == frozenset({ExposureScope.PLATFORM_AUDITOR})
+    assert tool_visible("build_hosts.list", auditor)
+    assert not tool_visible("build_hosts.list", operator)
+
+
+def test_build_host_mutations_visible_to_platform_admin_only() -> None:
+    admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+    tools = {
+        "build_hosts.disable",
+        "build_hosts.remove",
+        "build_hosts.register_ssh",
+        "build_hosts.register_ephemeral_libvirt",
+    }
+
+    for tool in tools:
+        assert required_scopes(tool) == frozenset({ExposureScope.PLATFORM_ADMIN})
+        assert tool_visible(tool, admin)
+        assert not tool_visible(tool, operator)
+
+
 def test_no_grants_sees_only_public_subset() -> None:
     bare = _ctx()
     names = {

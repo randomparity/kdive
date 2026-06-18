@@ -91,12 +91,12 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "artifacts.create_system_upload": _OPERATOR,
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
-    # build hosts (platform operator)
-    "build_hosts.list": _PLAT_OP,
-    "build_hosts.disable": _PLAT_OP,
-    "build_hosts.remove": _PLAT_OP,
-    "build_hosts.register_ssh": _PLAT_OP,
-    "build_hosts.register_ephemeral_libvirt": _PLAT_OP,
+    # build hosts
+    "build_hosts.list": _PLAT_AUDITOR,
+    "build_hosts.disable": _PLAT_ADMIN,
+    "build_hosts.remove": _PLAT_ADMIN,
+    "build_hosts.register_ssh": _PLAT_ADMIN,
+    "build_hosts.register_ephemeral_libvirt": _PLAT_ADMIN,
     # build config
     "buildconfig.set": _PLAT_ADMIN,
     # control
