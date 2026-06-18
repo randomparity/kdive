@@ -37,6 +37,7 @@ from kdive.mcp.tools._common import ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
@@ -62,15 +63,6 @@ def _validate_text(title: str | None, description: str | None) -> bool:
     if title is not None and not (1 <= len(title) <= _TITLE_MAX):
         return False
     return description is None or len(description) <= _DESCRIPTION_MAX
-
-
-def _invalid_uuid_error(investigation_id: str) -> ToolResponse:
-    """A ``configuration_error`` for a malformed ``investigation_id`` (ADR-0174)."""
-    return _config_error_reason(
-        investigation_id,
-        ConfigErrorReason.INVALID_UUID,
-        detail=f"investigation_id {investigation_id!r} is not a valid UUID",
-    )
 
 
 def _invalid_text_error(object_id: str) -> ToolResponse:
@@ -266,7 +258,7 @@ async def get_investigation(
     """Return an Investigation the caller's project owns, or a not-found-shaped error."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _invalid_uuid_error(investigation_id)
+        return _invalid_uuid_error("investigation_id", investigation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await INVESTIGATIONS.get(conn, uid)
@@ -325,7 +317,7 @@ async def close_investigation(
     """Drive an Investigation to `closed` (idempotent on an already-`closed` row)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _invalid_uuid_error(investigation_id)
+        return _invalid_uuid_error("investigation_id", investigation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
@@ -456,7 +448,7 @@ async def link_external_ref(
     """Upsert an external ref onto an Investigation (keyed on `(tracker, id)`)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _invalid_uuid_error(investigation_id)
+        return _invalid_uuid_error("investigation_id", investigation_id)
     try:
         parsed = ExternalRef.model_validate(ref)
     except ValidationError:
@@ -479,7 +471,7 @@ async def unlink_external_ref(
     """Remove an external ref by its `(tracker, id)` key (idempotent; `url` ignored)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _invalid_uuid_error(investigation_id)
+        return _invalid_uuid_error("investigation_id", investigation_id)
     key = _natural_key(ref)
     if key is None:
         return _config_error_reason(
@@ -552,7 +544,7 @@ async def set_investigation(
     """Edit an Investigation's title and/or description (partial, value-based; ADR-0135)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _invalid_uuid_error(investigation_id)
+        return _invalid_uuid_error("investigation_id", investigation_id)
     if title is None and description is None:
         return _config_error_reason(
             investigation_id,

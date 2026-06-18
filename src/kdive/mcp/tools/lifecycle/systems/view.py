@@ -20,6 +20,7 @@ from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -78,11 +79,7 @@ async def get_system(
     """Return a System the caller's project owns, or a not-found-shaped error."""
     uid = _as_uuid(system_id)
     if uid is None:
-        return _config_error_reason(
-            system_id,
-            ConfigErrorReason.INVALID_UUID,
-            detail=f"system_id {system_id!r} is not a valid UUID",
-        )
+        return _invalid_uuid_error("system_id", system_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             system = await SYSTEMS.get(conn, uid)
@@ -119,11 +116,7 @@ def _build_filters(
     if allocation_id is not None:
         uid = _as_uuid(allocation_id)
         if uid is None:
-            return _config_error_reason(
-                allocation_id,
-                ConfigErrorReason.INVALID_UUID,
-                detail=f"allocation_id {allocation_id!r} is not a valid UUID",
-            )
+            return _invalid_uuid_error("allocation_id", allocation_id)
         clauses.append(sql.SQL("s.allocation_id = %s"))
         params.append(uid)
     if state is not None:

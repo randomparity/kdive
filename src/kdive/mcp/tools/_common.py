@@ -33,11 +33,40 @@ class ConfigErrorReason(StrEnum):
     INVALID_PCIE_MATCH = "invalid_pcie_match"
 
 
+_MAX_ECHOED_ID = 64
+"""Cap on a caller-supplied id echoed into ``detail`` (ADR-0166/0174 echo rule)."""
+
+
 def as_uuid(value: str) -> UUID | None:
     try:
         return UUID(value)
     except ValueError:
         return None
+
+
+def _short_id(value: str) -> str:
+    """Bound a caller-supplied id for safe echo into ``detail`` (ADR-0166/0174).
+
+    A malformed id is unbounded caller input; echoing it whole would let a hostile caller
+    reflect an arbitrarily large string into the response. Truncate to ``_MAX_ECHOED_ID`` with
+    an ellipsis marker so the surfaced value stays short and bounded.
+    """
+    if len(value) <= _MAX_ECHOED_ID:
+        return value
+    return f"{value[:_MAX_ECHOED_ID]}…"
+
+
+def invalid_uuid_error(field: str, raw_id: str) -> ToolResponse:
+    """A ``configuration_error`` naming a malformed ``field`` id (ADR-0174).
+
+    The echoed id is bounded (``_short_id``) so an oversized malformed id cannot blow up
+    ``detail``. The full (unbounded) value remains the envelope ``object_id`` as before.
+    """
+    return config_error_reason(
+        raw_id,
+        ConfigErrorReason.INVALID_UUID,
+        detail=f"{field} {_short_id(raw_id)!r} is not a valid UUID",
+    )
 
 
 def clamp_list_limit(limit: int) -> int:
@@ -122,6 +151,7 @@ __all__ = [
     "config_error",
     "config_error_reason",
     "context_from_job",
+    "invalid_uuid_error",
     "job_envelope",
     "not_found",
     "stale_handle",

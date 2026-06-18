@@ -20,6 +20,7 @@ from kdive.mcp.tools._common import ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.lifecycle.allocations.common import (
     MAX_WAIT_S,
@@ -39,11 +40,7 @@ async def get_allocation(
     """Return an allocation visible to the caller, or a no-leak not_found."""
     uid = _as_uuid(allocation_id)
     if uid is None:
-        return _config_error_reason(
-            allocation_id,
-            ConfigErrorReason.INVALID_UUID,
-            detail=f"allocation_id {allocation_id!r} is not a valid UUID",
-        )
+        return _invalid_uuid_error("allocation_id", allocation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             alloc = await ALLOCATIONS.get(conn, uid)
@@ -69,11 +66,7 @@ async def wait_allocation(
     """Poll until a requested allocation settles or the clamped timeout elapses."""
     uid = _as_uuid(allocation_id)
     if uid is None:
-        return _config_error_reason(
-            allocation_id,
-            ConfigErrorReason.INVALID_UUID,
-            detail=f"allocation_id {allocation_id!r} is not a valid UUID",
-        )
+        return _invalid_uuid_error("allocation_id", allocation_id)
     if not math.isfinite(timeout_s):
         return _config_error_reason(
             allocation_id,

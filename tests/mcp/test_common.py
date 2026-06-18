@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.tools._common import ConfigErrorReason, authz_denied, config_error_reason
+from kdive.mcp.tools._common import (
+    ConfigErrorReason,
+    authz_denied,
+    config_error_reason,
+    invalid_uuid_error,
+)
 
 
 def test_config_error_reason_surfaces_reason_and_detail() -> None:
@@ -33,6 +38,26 @@ def test_config_error_reason_defaults_detail_to_none_keeps_reason() -> None:
     resp = config_error_reason("x", ConfigErrorReason.MISSING_REQUIRED_FIELD)
     # AC#1: at least one of detail or data.reason is present.
     assert resp.data["reason"] == "missing_required_field"
+
+
+def test_invalid_uuid_error_names_field_and_reason() -> None:
+    resp = invalid_uuid_error("run_id", "not-a-uuid")
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    assert resp.object_id == "not-a-uuid"
+    assert resp.data["reason"] == "invalid_uuid"
+    assert resp.detail is not None
+    assert "run_id" in resp.detail and "not-a-uuid" in resp.detail
+
+
+def test_invalid_uuid_error_bounds_the_echoed_id() -> None:
+    # An oversized malformed id must not be reflected whole into detail (ADR-0166/0174 echo
+    # rule); the full value still rides as object_id, but detail stays bounded.
+    huge = "z" * 5000
+    resp = invalid_uuid_error("run_id", huge)
+    assert resp.object_id == huge
+    assert resp.detail is not None
+    assert len(resp.detail) < 200
+    assert "…" in resp.detail
 
 
 def test_authz_denied_surfaces_missing_checks() -> None:

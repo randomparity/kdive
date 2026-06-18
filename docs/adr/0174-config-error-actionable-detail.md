@@ -97,7 +97,10 @@ stable wire order.
 Every `detail` string is a fixed template that interpolates only the reason/field name and,
 for the malformed-id case, the offending id the caller already supplied. No `detail`
 interpolates a secret, secret-ref path, internal hostname, object-store key, or a resource
-name the caller did not provide — consistent with ADR-0123's egress rule. The malformed PCIe
+name the caller did not provide — consistent with ADR-0123's egress rule. The echoed
+malformed id is **bounded** to 64 chars (a shared `invalid_uuid_error` helper truncates with an
+ellipsis), per ADR-0166's echo rule, so an oversized malformed id cannot inflate `detail`; the
+full value still rides as the envelope `object_id` exactly as before. The malformed PCIe
 site already routes its parse error through `ToolResponse.failure_from_error`
 (`failure_from_error` surfaces the `CategorizedError` message); that path is unchanged and the
 bare `vendor/device` fallback gains the `invalid_pcie_match` reason.
