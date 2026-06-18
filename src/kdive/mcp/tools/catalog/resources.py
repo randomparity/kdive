@@ -34,6 +34,7 @@ from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects
 
 _log = logging.getLogger(__name__)
+type ResourceListItem = Resource | ToolResponse
 
 # A probe of `{volume: status}` for the caller-visible staged remote-libvirt base-image volumes
 # (ADR-0156). Injected so handler tests need no libvirt; the production default opens one
@@ -70,7 +71,7 @@ async def _staged_remote_images(
 
 async def _fetch_resource_rows(
     conn: AsyncConnection, kind: ResourceKind | None
-) -> list[dict[str, Any]]:
+) -> list[ResourceListItem]:
     if kind is None:
         query = "SELECT * FROM resources ORDER BY created_at, id"
         params: tuple[object, ...] = ()
@@ -79,11 +80,24 @@ async def _fetch_resource_rows(
         params = (kind.value,)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
-        return list(await cur.fetchall())
+        rows = await cur.fetchall()
+    return [_resource_list_item(row) for row in rows]
 
 
-def _resource_row_error(row: dict[str, Any]) -> ToolResponse:
-    object_id = row.get("id")
+def _resource_list_item(row: dict[str, Any]) -> ResourceListItem:
+    try:
+        return Resource.model_validate(row)
+    except ValueError:
+        object_id = row.get("id")
+        _log.warning(
+            "resource %s violates the response invariant; degraded",
+            object_id if object_id is not None else "<missing>",
+            exc_info=True,
+        )
+        return _resource_row_error(object_id)
+
+
+def _resource_row_error(object_id: object | None) -> ToolResponse:
     return ToolResponse.failure(
         str(object_id) if object_id is not None else "resources.list",
         ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -104,25 +118,19 @@ async def list_resources_tool(
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
-            rows = await _fetch_resource_rows(conn, resource_kind)
+            resources = await _fetch_resource_rows(conn, resource_kind)
         responses: list[ToolResponse] = []
-        for row in rows:
-            try:
-                resource = Resource.model_validate(row)
-                if not resource_visible_to_projects(resource, viewer_projects):
-                    continue
-                responses.append(
-                    resource_envelope(
-                        resource, next_actions=["resources.describe", "allocations.request"]
-                    )
+        for resource in resources:
+            if isinstance(resource, ToolResponse):
+                responses.append(resource)
+                continue
+            if not resource_visible_to_projects(resource, viewer_projects):
+                continue
+            responses.append(
+                resource_envelope(
+                    resource, next_actions=["resources.describe", "allocations.request"]
                 )
-            except ValueError:
-                _log.warning(
-                    "resource %s violates the response invariant; degraded",
-                    row.get("id", "<missing>"),
-                    exc_info=True,
-                )
-                responses.append(_resource_row_error(row))
+            )
         return ToolResponse.collection(
             "resources",
             "ok",

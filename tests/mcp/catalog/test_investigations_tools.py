@@ -834,10 +834,9 @@ def test_list_requires_viewer_role(migrated_url: str) -> None:
 
 
 def test_investigation_row_error_envelope() -> None:
-    """The degraded-row helper yields a configuration_error envelope (no DB needed)."""
     from uuid import uuid4 as _u  # local import; module-level imports include only UUID
 
-    resp = inv_tools._investigation_row_error({"id": _u()})
+    resp = inv_tools._investigation_row_error(_u())
     assert resp.status == "error"
     assert resp.error_category == "configuration_error"
 
