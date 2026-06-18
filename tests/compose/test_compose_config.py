@@ -38,7 +38,7 @@ def _docker_compose_available() -> bool:
             ).returncode
             == 0
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return False
 
 

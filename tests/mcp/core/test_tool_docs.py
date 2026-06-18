@@ -181,7 +181,7 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
             return None
         try:
             hints = get_type_hints(factory, globalns=factory.__globals__, localns=nonlocals)
-        except (NameError, TypeError):
+        except NameError, TypeError:
             return None
         owner_type = hints.get("return")
         delegate = getattr(owner_type, attr, None)
@@ -190,7 +190,7 @@ def _reaches_symbol(fn: Callable[..., Any], target: str) -> bool:
     def _walk(f: Callable[..., Any]) -> bool:
         try:
             tree = ast.parse(textwrap.dedent(inspect.getsource(f)))
-        except (OSError, TypeError):
+        except OSError, TypeError:
             return False
         glb = getattr(f, "__globals__", {})
         try:

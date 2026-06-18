@@ -6,7 +6,7 @@ agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development setup
 
-KDIVE is Python 3.13, managed with [`uv`](https://docs.astral.sh/uv/). The
+KDIVE is Python 3.14, managed with [`uv`](https://docs.astral.sh/uv/). The
 `justfile` is the single source of truth for build, lint, type, and test
 commands — run the same recipes locally that CI runs.
 

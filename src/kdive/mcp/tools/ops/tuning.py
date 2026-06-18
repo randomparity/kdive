@@ -201,7 +201,7 @@ def _parse_resource_id(value: str) -> UUID:
     """Parse the host id, rejecting a malformed UUID as ``configuration_error``."""
     try:
         return UUID(value)
-    except (ValueError, AttributeError, TypeError):
+    except ValueError, AttributeError, TypeError:
         raise CategorizedError(
             f"resource_id {value!r} is not a UUID",
             category=ErrorCategory.CONFIGURATION_ERROR,

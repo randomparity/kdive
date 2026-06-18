@@ -81,7 +81,7 @@ def _parse_pci_descriptor(device_xml: str) -> PCIeDescriptor | None:
         vendor_id = _hex_id(_required_attr(cap, "vendor", "id"))
         device_id = _hex_id(_required_attr(cap, "product", "id"))
         class_code = (cap.findtext("class") or "").removeprefix("0x").lower()
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return None
     if not class_code:
         return None

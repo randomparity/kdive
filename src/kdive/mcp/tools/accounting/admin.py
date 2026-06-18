@@ -125,7 +125,7 @@ def _parse_non_negative_kcu(value: object) -> Decimal:
     """Parse ``value`` into a finite, non-negative kcu Decimal."""
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, DecimalException, ValueError, TypeError):
+    except InvalidOperation, DecimalException, ValueError, TypeError:
         raise CategorizedError(
             f"limit_kcu {value!r} is not a number",
             category=ErrorCategory.CONFIGURATION_ERROR,
