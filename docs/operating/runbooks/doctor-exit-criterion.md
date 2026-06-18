@@ -79,6 +79,26 @@ process **exit code** for each — both are independently-checkable evidence. Th
 are seeded on the deployment (not in kdive); after recording each, restore the healthy
 configuration before seeding the next so the runs are independent.
 
+### Worker-vantage dispatch prerequisite (ADR-0163)
+
+`provider_tls` and `gdbstub_acl` are **worker-vantage**: `doctor` enqueues a
+`diagnostics_worker_check` job and the worker runs the real probes (the worker is the host the
+remote debug session connects from, ADR-0083), then `doctor` bounded-waits for the inline result.
+So these two checks produce a real three-state verdict only when **a worker is running** against
+the same Postgres queue. If no worker picks the job up in time, both read as `error` with
+`failure_category=transport_failure` and the detail `worker did not pick up the diagnostic job in
+time; check that the worker is up (/livez, /readyz) and not saturated` — an honest substitution,
+not a hang or a fabricated `fail`. A deployment that wires no worker-job dispatch at all (no
+`[[remote_libvirt]]` instance) keeps the `not_implemented` substitution (ADR-0139).
+
+> **OPERATOR-TODO (live verification).** The worker→host TLS handshake and the worker→host gdbstub
+> ACL connect are exercised against real hardware only. CI verifies the three-state mapping with
+> injected fakes (`tests/diagnostics/test_provider_tls_probe.py`,
+> `tests/diagnostics/test_gdbstub_acl_probe.py`, `tests/diagnostics/test_worker_dispatch*.py`). On
+> the two-host HW-validation setup, run `kdivectl doctor --provider remote-libvirt --json` with the
+> worker up and record that `provider_tls`/`gdbstub_acl` produce a real `pass`/`fail`/`error` (not
+> `not_implemented`) for the seeded faults below.
+
 ### Read-only baseline + three read faults
 
 ```bash
@@ -111,10 +131,16 @@ kdivectl doctor --provider remote-libvirt --with-egress --json ; echo "exit=$?"
 ### The error-vs-fail distinction (live)
 
 Power down the remote provider host (or block its management port) and run
-`doctor --provider remote-libvirt`. The worker-vantage checks must read as **`error`** (the
-host is simply down — the contract may be fine), `doctor` exits **`6`** (distinct from a
-`fail`'s `1`), and **no** check emits a fix. This proves `doctor` does not emit a confident
-wrong remediation when a dependency is merely unreachable.
+`doctor --provider remote-libvirt`. `remote_libvirt_reachability` reads as **`fail`**
+(`transport_failure` — the host is down) and `provider_tls` reads as **`error`** (the TLS chain
+could not be validated; the contract may be fine), with **no** fix on the `error`. This proves
+`doctor` does not emit a confident wrong remediation when the TLS chain is merely unreachable.
+
+Note `gdbstub_acl`: its TCP-connect heuristic cannot distinguish a powered-down host (no response)
+from a firewall `DROP`, so on a fully-down host it reads as **`fail`** ("blocked"), not `error`.
+The co-reported `remote_libvirt_reachability` = `fail` (host down) is what contextualizes it — read
+the worker-vantage `gdbstub_acl` verdict together with reachability, not in isolation. A
+`gdbstub_acl` `fail` while reachability `pass`es is the genuine closed-ACL fault.
 
 ## Recording the evidence (each probe independently checkable)
 
