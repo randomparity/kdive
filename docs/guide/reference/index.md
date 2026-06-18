@@ -91,6 +91,7 @@
 | [`resources.renew`](resources.md#resourcesrenew) | `implemented` |
 | [`resources.set_status`](resources.md#resourcesset_status) | `implemented` |
 | [`resources.uncordon`](resources.md#resourcesuncordon) | `implemented` |
+| [`runs.bind`](runs.md#runsbind) | `implemented` |
 | [`runs.boot`](runs.md#runsboot) | `partial` |
 | [`runs.build`](runs.md#runsbuild) | `partial` |
 | [`runs.cancel`](runs.md#runscancel) | `implemented` |
