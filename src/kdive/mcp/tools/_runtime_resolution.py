@@ -15,7 +15,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 
 type _RuntimeResolver = Callable[[AsyncConnection, UUID], Awaitable[ProviderRuntime]]
-type RuntimeHandler = Callable[[ProviderRuntime], Awaitable[ToolResponse]]
+type RuntimeCallback = Callable[[ProviderRuntime], Awaitable[ToolResponse]]
 
 
 class _InvalidRuntimeObjectId(ValueError):
@@ -40,7 +40,7 @@ async def _with_runtime_for_object(
     pool: AsyncConnectionPool,
     object_id: str,
     resolve: _RuntimeResolver,
-    handle: RuntimeHandler,
+    runtime_callback: RuntimeCallback,
 ) -> ToolResponse:
     try:
         runtime = await _runtime_for_object(pool, object_id, resolve)
@@ -48,17 +48,17 @@ async def _with_runtime_for_object(
         return config_error(object_id)
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(object_id, exc)
-    return await handle(runtime)
+    return await runtime_callback(runtime)
 
 
 async def with_runtime_for_allocation(
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
     allocation_id: str,
-    handle: RuntimeHandler,
+    runtime_callback: RuntimeCallback,
 ) -> ToolResponse:
     return await _with_runtime_for_object(
-        pool, allocation_id, resolver.runtime_for_allocation, handle
+        pool, allocation_id, resolver.runtime_for_allocation, runtime_callback
     )
 
 
@@ -66,15 +66,17 @@ async def with_runtime_for_system(
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
     system_id: str,
-    handle: RuntimeHandler,
+    runtime_callback: RuntimeCallback,
 ) -> ToolResponse:
-    return await _with_runtime_for_object(pool, system_id, resolver.runtime_for_system, handle)
+    return await _with_runtime_for_object(
+        pool, system_id, resolver.runtime_for_system, runtime_callback
+    )
 
 
 async def with_runtime_for_run(
     pool: AsyncConnectionPool,
     resolver: ProviderResolver,
     run_id: str,
-    handle: RuntimeHandler,
+    runtime_callback: RuntimeCallback,
 ) -> ToolResponse:
-    return await _with_runtime_for_object(pool, run_id, resolver.runtime_for_run, handle)
+    return await _with_runtime_for_object(pool, run_id, resolver.runtime_for_run, runtime_callback)
