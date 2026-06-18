@@ -25,6 +25,12 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
+from kdive.domain.capacity.state import (
+    AllocationState,
+    InvestigationState,
+    RunState,
+    SystemState,
+)
 from kdive.domain.models import (
     Allocation,
     Budget,
@@ -32,12 +38,6 @@ from kdive.domain.models import (
     Quota,
     Run,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    InvestigationState,
-    RunState,
-    SystemState,
 )
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.services.resources.discovery import register_discovered_resource

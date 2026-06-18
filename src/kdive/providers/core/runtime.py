@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.references import ComponentRef
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.jobs import DestructiveJobKind
+from kdive.domain.operations.jobs import DestructiveJobKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.ports import (

@@ -14,10 +14,10 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
 from kdive.domain.accounting import Budget, Quota
+from kdive.domain.capacity.state import AllocationState, IllegalTransition
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
@@ -794,9 +794,9 @@ def test_failed_envelope_reports_failure_category_else_infrastructure() -> None:
     from datetime import UTC, datetime
     from uuid import uuid4
 
+    from kdive.domain.capacity.state import AllocationState
     from kdive.domain.errors import ErrorCategory
     from kdive.domain.models import Allocation
-    from kdive.domain.state import AllocationState
 
     _id = uuid4()
     _now = datetime.now(UTC)

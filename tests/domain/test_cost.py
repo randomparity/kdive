@@ -14,8 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.cost import (
+from kdive.domain.accounting.cost import (
     KCU_QUANTUM,
     W_CPU,
     W_MEM,
@@ -27,8 +26,9 @@ from kdive.domain.cost import (
     validate_size,
     validate_window,
 )
+from kdive.domain.capacity.state import ResourceStatus
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.state import ResourceStatus
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 

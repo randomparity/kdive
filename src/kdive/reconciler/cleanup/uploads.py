@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.state import RunState, SystemState
+from kdive.domain.capacity.state import RunState, SystemState
 
 _log = logging.getLogger(__name__)
 

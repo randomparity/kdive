@@ -22,10 +22,10 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError
-from kdive.domain.jobs import JobKind
-from kdive.domain.state import SystemState
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import CaptureVmcorePayload
 from kdive.log import bind_context

@@ -17,9 +17,9 @@ from kdive.diagnostics.checks import (
     Vantage,
 )
 from kdive.diagnostics.result_codec import deserialize_results
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
-from kdive.domain.state import JobState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.diagnostics import diagnostics_worker_check_handler
 
 

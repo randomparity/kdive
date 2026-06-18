@@ -22,7 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.diagnostics.service import DiagnosticsService, default_service_factory
 from kdive.domain.errors import CategorizedError
-from kdive.domain.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.mcp.auth import build_verifier

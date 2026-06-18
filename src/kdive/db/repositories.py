@@ -1,7 +1,7 @@
 """Typed async CRUD over the durable objects (ADR-0003, ADR-0016).
 
 A base `Repository[M]` provides `insert` / `get`; `StatefulRepository[M, S]` adds
-`update_state`, guarded by `kdive.domain.state.can_transition` and bound to the
+`update_state`, guarded by `kdive.domain.capacity.state.can_transition` and bound to the
 object's state enum `S`. Module-level instances bind these to each table. Rows map to
 Pydantic models field-for-column; the database owns the `created_at` / `updated_at`
 timestamps (they are omitted from inserts and read back via `RETURNING *`).
@@ -20,12 +20,7 @@ from pydantic import BaseModel
 
 from kdive.domain._records import DomainModel
 from kdive.domain.accounting import Budget, CostClassCoefficient, LedgerEntry, Quota
-from kdive.domain.catalog.artifacts import Artifact
-from kdive.domain.catalog.images import ImageCatalogEntry
-from kdive.domain.catalog.resources import Resource
-from kdive.domain.jobs import Job
-from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System, SystemShape
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
     InvestigationState,
@@ -35,6 +30,11 @@ from kdive.domain.state import (
     SystemState,
     ensure_transition,
 )
+from kdive.domain.catalog.artifacts import Artifact
+from kdive.domain.catalog.images import ImageCatalogEntry
+from kdive.domain.catalog.resources import Resource
+from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System, SystemShape
+from kdive.domain.operations.jobs import Job
 
 # DB-authoritative columns, omitted from inserts so their defaults/trigger apply.
 _SERVER_GENERATED = ("created_at", "updated_at")

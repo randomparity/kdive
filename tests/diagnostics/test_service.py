@@ -219,7 +219,7 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
     from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID, SECRET_REF_ID
     from kdive.diagnostics.result_codec import serialize_results
     from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
-    from kdive.domain.state import JobState
+    from kdive.domain.capacity.state import JobState
 
     class _Job:
         def __init__(self, state: JobState, result_ref: str | None) -> None:

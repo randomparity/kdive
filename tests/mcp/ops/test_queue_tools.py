@@ -22,7 +22,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
-from kdive.domain.jobs import JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload
 from kdive.mcp.auth import RequestContext

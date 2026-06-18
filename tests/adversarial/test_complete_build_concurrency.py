@@ -15,7 +15,7 @@ import asyncio
 
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.repositories import RUNS
-from kdive.domain.state import RunState
+from kdive.domain.capacity.state import RunState
 from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
 from tests.mcp.complete_build_support import (
     FakeValidator,

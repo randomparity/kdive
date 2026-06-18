@@ -27,6 +27,13 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
+from kdive.domain.capacity.state import (
+    AllocationState,
+    InvestigationState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -36,13 +43,6 @@ from kdive.domain.models import (
     ResourceKind,
     Run,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    InvestigationState,
-    ResourceStatus,
-    RunState,
-    SystemState,
 )
 from kdive.services.accounting import ledger as accounting
 from tests.db_waits import wait_until_backend_waiting

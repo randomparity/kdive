@@ -1,9 +1,9 @@
 """Job-handler type and registry for the durable queue (ADR-0018).
 
 A :data:`JobHandler` is the async callable a worker invokes for one claimed
-:class:`~kdive.domain.jobs.Job`; it runs the op and returns a ``result_ref``
+:class:`~kdive.domain.operations.jobs.Job`; it runs the op and returns a ``result_ref``
 (object-store key) or ``None``, or raises to fail the job. :class:`HandlerRegistry`
-binds exactly one handler per :class:`~kdive.domain.jobs.JobKind`; plane registrars
+binds exactly one handler per :class:`~kdive.domain.operations.jobs.JobKind`; plane registrars
 populate it at worker startup and the worker dispatches by ``Job.kind``.
 """
 
@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from psycopg import AsyncConnection
 
-from kdive.domain.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 
 type JobHandler = Callable[[AsyncConnection, Job], Awaitable[str | None]]
 

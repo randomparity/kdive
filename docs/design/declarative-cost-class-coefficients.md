@@ -60,7 +60,7 @@ coeff = 2.5
 - New `CostClassEntry` Pydantic model in `inventory/model.py`: `name: str`, `coeff: Decimal`.
 - `InventoryDoc` gains `cost_class: list[CostClassEntry] = Field(default_factory=list)`.
 - **Validation shares one rule module with `ops` so the two surfaces cannot diverge.** Extract the
-  two rules into a neutral helper module (e.g. `domain/cost_class_rules.py`) that **both**
+  two rules into a neutral helper module (e.g. `domain/accounting/cost_class_rules.py`) that **both**
   `mcp/tools/ops/tuning.py` and the inventory validator import — *not* `inventory/` importing
   `mcp/tools/ops` (inventory imports nothing from `mcp/` today; that core→tool edge is a layering
   inversion). `ops.set_cost_class_coeff` is refactored to call the shared helper too, so the rule

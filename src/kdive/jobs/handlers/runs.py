@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from kdive.domain.jobs import JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers.runs_boot import boot_handler
 from kdive.jobs.handlers.runs_build import (
     BuildHostTransportFactories,

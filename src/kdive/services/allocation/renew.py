@@ -37,7 +37,7 @@ from psycopg import AsyncConnection
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
-from kdive.domain.cost import (
+from kdive.domain.accounting.cost import (
     cost,
     parse_window_hours,
     quantize_kcu,
@@ -45,10 +45,10 @@ from kdive.domain.cost import (
     resolve_coeff,
     validate_window,
 )
+from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lease import LeaseExtension, clamp_extension_hours
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.state import AllocationState
+from kdive.domain.lifecycle.lease import LeaseExtension, clamp_extension_hours
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.error_details import categorized_details

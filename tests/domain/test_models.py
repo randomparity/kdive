@@ -10,6 +10,15 @@ from typing import Any, TypedDict
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.capacity.state import (
+    AllocationState,
+    DebugSessionState,
+    InvestigationState,
+    JobState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -31,15 +40,6 @@ from kdive.domain.models import (
     Sensitivity,
     System,
     SystemShape,
-)
-from kdive.domain.state import (
-    AllocationState,
-    DebugSessionState,
-    InvestigationState,
-    JobState,
-    ResourceStatus,
-    RunState,
-    SystemState,
 )
 
 _NOW = dt.datetime(2026, 6, 3, 12, 0, tzinfo=dt.UTC)
@@ -441,9 +441,9 @@ def test_allocation_failure_category_coerces_and_defaults() -> None:
     from datetime import UTC, datetime
     from uuid import uuid4
 
+    from kdive.domain.capacity.state import AllocationState
     from kdive.domain.errors import ErrorCategory
     from kdive.domain.models import Allocation
-    from kdive.domain.state import AllocationState
 
     base = {
         "id": uuid4(),

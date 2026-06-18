@@ -28,11 +28,11 @@ from kdive.components.validation import ComponentSourceCapabilities
 from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
 from kdive.domain.lifecycle import Allocation, System
-from kdive.domain.sizing import MB_PER_GB, AllocationSizing
-from kdive.domain.state import AllocationState, IllegalTransition, JobState, SystemState
+from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
 from kdive.jobs.payloads import SystemPayload

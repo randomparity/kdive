@@ -13,9 +13,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
+from kdive.domain.capacity.state import AllocationState, IllegalTransition
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.services.accounting import ledger as accounting

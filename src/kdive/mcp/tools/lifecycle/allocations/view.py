@@ -11,9 +11,9 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS
+from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.state import AllocationState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid

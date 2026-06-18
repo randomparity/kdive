@@ -15,7 +15,7 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import vmcore as vmcore_plane
 from kdive.jobs.models import HandlerRegistry

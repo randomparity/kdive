@@ -9,7 +9,7 @@ from psycopg import AsyncConnection
 from kdive.diagnostics.checks import Check, run_check
 from kdive.diagnostics.result_codec import serialize_results
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import DiagnosticsWorkerCheckPayload, load_payload
 

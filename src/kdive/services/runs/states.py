@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
+from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 
 RUN_HOSTABLE = frozenset({SystemState.READY})
 SYSTEM_GONE = frozenset({SystemState.TORN_DOWN, SystemState.FAILED, SystemState.CRASHED})

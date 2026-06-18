@@ -13,8 +13,8 @@ from kdive.diagnostics.checks import (
 )
 from kdive.diagnostics.result_codec import serialize_results
 from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.state import JobState
 from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 
 

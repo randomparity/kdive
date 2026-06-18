@@ -27,6 +27,14 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
+from kdive.domain.capacity.state import (
+    AllocationState,
+    DebugSessionState,
+    InvestigationState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.models import (
     Allocation,
     DebugSession,
@@ -35,14 +43,6 @@ from kdive.domain.models import (
     ResourceKind,
     Run,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    DebugSessionState,
-    InvestigationState,
-    ResourceStatus,
-    RunState,
-    SystemState,
 )
 from kdive.providers.infra.reaping import OwnedDomain
 from tests.db.conftest import migrated_url, pg_conn, postgres_url

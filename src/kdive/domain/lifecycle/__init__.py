@@ -9,21 +9,21 @@ from uuid import UUID
 from pydantic import Field, field_validator
 
 from kdive.domain._records import DomainBase, DomainModel
-from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import ErrorCategory
-from kdive.domain.pcie import PCIeClaim
-from kdive.domain.profile_documents import (
-    SerializedBuildProfile,
-    SerializedExpectedBootFailure,
-    SerializedProvisioningProfile,
-)
-from kdive.domain.sizing import MB_PER_GB
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
     InvestigationState,
     RunState,
     SystemState,
+)
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import ErrorCategory
+from kdive.domain.lifecycle.sizing import MB_PER_GB
+from kdive.domain.pcie import PCIeClaim
+from kdive.domain.profile_documents import (
+    SerializedBuildProfile,
+    SerializedExpectedBootFailure,
+    SerializedProvisioningProfile,
 )
 
 

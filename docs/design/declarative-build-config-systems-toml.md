@@ -188,7 +188,7 @@ frozenset (`tests/scripts/test_m2_portability_gate.py`), the same as migration `
 `KDIVE_MAX_BUILD_CONFIG_BYTES`). These split cleanly by whether they need config:
 
 - **Config-free checks (`name` charset, content non-empty)** move into a neutral
-  `build_configs/rules.py` — mirroring `domain/cost_class_rules.py` — and run **at parse
+  `build_configs/rules.py` — mirroring `domain/accounting/cost_class_rules.py` — and run **at parse
   time** in the inventory model's field validators. They need no runtime value, so the
   loader stays pure (it imports no config singleton; `model.py` does not import
   `kdive.config` today and must not start). The helper raises a bare `ValueError`; each
@@ -215,7 +215,7 @@ frozenset (`tests/scripts/test_m2_portability_gate.py`), the same as migration `
   the only layer that does not check it.
 
 `inventory/` must not import `mcp/` (a core→tool layering inversion); `build_configs/` is
-neutral and importable by both, like `domain/cost_class_rules.py`.
+neutral and importable by both, like `domain/accounting/cost_class_rules.py`.
 
 ### Inventory model
 

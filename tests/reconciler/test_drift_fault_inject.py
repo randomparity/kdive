@@ -27,13 +27,13 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
     RunState,
     SystemState,
 )
+from kdive.domain.errors import ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject.faulting.engine import FaultEngine, FaultPlane
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper

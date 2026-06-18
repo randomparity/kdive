@@ -25,8 +25,8 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.errors import CategorizedError
-from kdive.domain.state import AllocationState, SystemState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import reconcile as ops_reconcile
 from kdive.providers.infra.reaping import NullReaper

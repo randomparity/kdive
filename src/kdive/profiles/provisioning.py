@@ -40,8 +40,8 @@ from kdive.components.references import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.sizing import AllocationSizing
 from kdive.domain.profile_documents import SerializedProvisioningProfile
-from kdive.domain.sizing import AllocationSizing
 from kdive.profiles._schema import schema_version_validator
 from kdive.profiles.types import ProvisioningProfileInput
 

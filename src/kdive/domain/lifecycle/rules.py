@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.domain.state import AllocationState, SystemState
+from kdive.domain.capacity.state import AllocationState, SystemState
 
 # Allocation states that still hold live capacity and PCIe claims. Derived from the enum,
 # not literal strings, so it cannot drift if the state machine gains a value.

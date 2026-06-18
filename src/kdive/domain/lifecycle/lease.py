@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from kdive.domain.cost import parse_window_hours, validate_window
+from kdive.domain.accounting.cost import parse_window_hours, validate_window
 
 _DEFAULT_HOURS = Decimal(4)
 _MAX_HOURS = Decimal(24)

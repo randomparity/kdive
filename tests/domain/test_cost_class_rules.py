@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from kdive.domain.cost_class_rules import parse_positive_coeff, validate_cost_class_name
+from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 
 
 def test_valid_name_returned_unchanged() -> None:

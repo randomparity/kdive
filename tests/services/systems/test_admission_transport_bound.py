@@ -207,7 +207,7 @@ def test_first_mutation_disables_the_deadline(migrated_url: str) -> None:
 
 def test_no_mutation_branch_never_disables_the_deadline(migrated_url: str) -> None:
     """Acceptance #4 corollary: a terminal-existing-System failure disables zero times."""
-    from kdive.domain.state import SystemState
+    from kdive.domain.capacity.state import SystemState
     from tests.mcp.lifecycle.test_systems_tools import _seed_system
 
     reschedules: list[float | None] = []

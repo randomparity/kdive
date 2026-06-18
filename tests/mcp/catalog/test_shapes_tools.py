@@ -28,9 +28,9 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEM_SHAPES
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import shapes
@@ -158,7 +158,7 @@ def test_list_returns_seed_sorted(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await shapes.list_shapes(pool, _VIEWER)
         assert resp.status == "ok"
-        assert resp.data["count"] == "4"
+        assert resp.data["count"] == 4
         assert [item.object_id for item in resp.items] == _SEED_NAMES
         small = next(item for item in resp.items if item.object_id == "small")
         assert small.data["vcpus"] == "1"

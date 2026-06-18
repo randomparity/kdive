@@ -14,8 +14,8 @@ from kdive.build_artifacts.results import BuildOutput
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
+from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.state import RunState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts.uploads import (

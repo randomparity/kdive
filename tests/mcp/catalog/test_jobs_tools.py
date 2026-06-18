@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
-from kdive.domain.jobs import JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload
 from kdive.mcp.auth import RequestContext
@@ -299,7 +299,7 @@ def test_list_jobs_newest_first_and_capped(migrated_url: str) -> None:
         items = resp.items
         assert resp.object_id == "jobs"
         assert resp.status == "ok"
-        assert resp.data["count"] == "2"
+        assert resp.data["count"] == 2
         assert len(items) == 2
         assert all(r.status == "queued" for r in items)
 

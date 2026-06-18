@@ -11,7 +11,7 @@ from kdive.components.validation import (
     reject_unsupported_component_source,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import DESTRUCTIVE_JOB_KINDS
+from kdive.domain.operations.jobs import DESTRUCTIVE_JOB_KINDS
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource, _UploadRootfs
 from kdive.providers.core.runtime import ProfilePolicy
 

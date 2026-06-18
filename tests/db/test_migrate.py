@@ -10,7 +10,8 @@ import psycopg
 import pytest
 
 from kdive.db import migrate
-from kdive.domain import errors, models, state
+from kdive.domain import errors, models
+from kdive.domain.capacity import state
 
 # Each lifecycle/category CHECK constraint and the enum it must mirror (ADR-0015).
 CHECK_ENUMS = [

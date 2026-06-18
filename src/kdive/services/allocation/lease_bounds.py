@@ -7,9 +7,9 @@ from decimal import Decimal
 import kdive.config as config
 from kdive.config.core_settings import LEASE_DEFAULT, LEASE_MAX
 from kdive.config.registry import Setting
-from kdive.domain.cost import parse_window_hours, validate_window
+from kdive.domain.accounting.cost import parse_window_hours, validate_window
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lease import DEFAULT_LEASE_BOUNDS, LeaseBounds
+from kdive.domain.lifecycle.lease import DEFAULT_LEASE_BOUNDS, LeaseBounds
 
 
 def configured_lease_bounds() -> LeaseBounds:

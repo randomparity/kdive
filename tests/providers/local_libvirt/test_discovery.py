@@ -7,11 +7,11 @@ import logging
 import libvirt
 import pytest
 
+from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError
 from kdive.domain.pcie import PCIE_DEVICES_KEY
-from kdive.domain.state import ResourceStatus
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from tests.providers.local_libvirt.fakes import (
     FakeDomain,

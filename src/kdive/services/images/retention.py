@@ -13,9 +13,9 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.artifacts.storage import ObjectListing
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.state import SystemState
 
 _log = logging.getLogger(__name__)
 

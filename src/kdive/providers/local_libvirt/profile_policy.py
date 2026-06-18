@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import DestructiveJobKind
+from kdive.domain.operations.jobs import DestructiveJobKind
 from kdive.profiles.provisioning import (
     SUPPORTED_DOMAIN_XML_PARAMS,
     ProvisioningProfile,

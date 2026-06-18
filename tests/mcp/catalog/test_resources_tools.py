@@ -15,10 +15,10 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation, System
-from kdive.domain.state import AllocationState, SystemState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools

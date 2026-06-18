@@ -15,12 +15,12 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
 from kdive.domain.accounting import Budget, Quota
+from kdive.domain.capacity.state import AllocationState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.state import AllocationState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload
 from kdive.mcp.auth import RequestContext

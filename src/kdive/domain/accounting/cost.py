@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.sizing import MB_PER_GB
+from kdive.domain.lifecycle.sizing import MB_PER_GB
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection

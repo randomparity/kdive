@@ -7,9 +7,9 @@ import logging
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.domain.capacity.state import JobState, RunState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.jobs import JobKind
-from kdive.domain.state import JobState, RunState
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 
 _log = logging.getLogger(__name__)

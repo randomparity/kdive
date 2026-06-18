@@ -23,7 +23,7 @@ investigation; a shared allocation is attributed to none and appears only in the
 ``shared_kcu`` — so per-investigation sums never double-count (ADR-0007 §3).
 
 All arithmetic uses :class:`~decimal.Decimal`; every recorded/reported kcu passes through
-:func:`~kdive.domain.cost.quantize_kcu`, so the estimate, the reserved row, and the
+:func:`~kdive.domain.accounting.cost.quantize_kcu`, so the estimate, the reserved row, and the
 reconciled credit that price one selector agree to the last place.
 """
 
@@ -41,7 +41,7 @@ from psycopg.rows import dict_row
 
 from kdive.db.repositories import LEDGER
 from kdive.domain.accounting import LedgerEntry, LedgerEventType
-from kdive.domain.cost import cost, quantize_kcu, rate, resolve_coeff
+from kdive.domain.accounting.cost import cost, quantize_kcu, rate, resolve_coeff
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 if TYPE_CHECKING:

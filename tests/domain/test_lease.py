@@ -1,4 +1,7 @@
-"""Tests for the lease-window resolver and renewal clamp (`kdive.domain.lease`, ADR-0036)."""
+"""Tests for the lease-window resolver and renewal clamp.
+
+Module under test: ``kdive.domain.lifecycle.lease`` (ADR-0036).
+"""
 
 from __future__ import annotations
 
@@ -8,7 +11,7 @@ from decimal import Decimal
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lease import LeaseBounds, clamp_extension_hours, resolve_window_hours
+from kdive.domain.lifecycle.lease import LeaseBounds, clamp_extension_hours, resolve_window_hours
 
 _NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 

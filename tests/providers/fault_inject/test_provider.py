@@ -13,7 +13,7 @@ from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import PowerAction
+from kdive.domain.operations.jobs import PowerAction
 from kdive.profiles.build import ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject.build import FaultInjectBuild

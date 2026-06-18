@@ -33,9 +33,9 @@ from pydantic import Field
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import DEBUG_SESSIONS, RUNS, SYSTEMS
+from kdive.domain.capacity.state import DebugSessionState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import DebugSession, Run, System
-from kdive.domain.state import DebugSessionState, RunState, SystemState
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

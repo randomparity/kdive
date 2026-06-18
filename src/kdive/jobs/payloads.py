@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, mo
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageVisibility
-from kdive.domain.jobs import Job, JobAuthorizing, JobKind, PowerAction
+from kdive.domain.operations.jobs import Job, JobAuthorizing, JobKind, PowerAction
 
 
 class PayloadValidationError(ValueError):

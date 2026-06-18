@@ -7,9 +7,9 @@ from uuid import UUID
 
 import pytest
 
+from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.state import AllocationState
 from kdive.mcp.tools.lifecycle.systems.provision import _admission_response
 from kdive.services.systems import admission
 from tests.mcp.systems_support import provisioning_profile

@@ -16,10 +16,10 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import DEBUG_SESSIONS
+from kdive.domain.capacity.state import DebugSessionState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import DebugSession
-from kdive.domain.state import DebugSessionState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import introspect as introspect_tools

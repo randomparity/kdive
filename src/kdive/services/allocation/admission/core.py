@@ -37,8 +37,7 @@ from psycopg import AsyncConnection
 import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
-from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.cost import (
+from kdive.domain.accounting.cost import (
     Selector,
     cost,
     quantize_kcu,
@@ -47,11 +46,12 @@ from kdive.domain.cost import (
     validate_against_resource,
     validate_size,
 )
+from kdive.domain.capacity.state import AllocationState
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lease import resolve_window_hours
 from kdive.domain.lifecycle import Allocation
+from kdive.domain.lifecycle.lease import resolve_window_hours
 from kdive.domain.pcie import MatchOutcome, PCIeClaim, PCIeDescriptor
-from kdive.domain.state import AllocationState
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.admission.affinity import project_may_place

@@ -21,9 +21,9 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES, SYSTEMS
 from kdive.domain.accounting import Budget
+from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle import Allocation, System
-from kdive.domain.state import AllocationState, ResourceStatus, SystemState
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.gc import gc_idempotency_keys

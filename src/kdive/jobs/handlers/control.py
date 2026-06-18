@@ -10,11 +10,11 @@ from psycopg import AsyncConnection
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import DebugSessionState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
 from kdive.domain.lifecycle import System
-from kdive.domain.lifecycle_rules import TERMINAL_SYSTEM_STATES
-from kdive.domain.state import DebugSessionState, SystemState
+from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload

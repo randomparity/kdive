@@ -13,10 +13,10 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
 from kdive.domain.errors import CategorizedError
-from kdive.domain.jobs import DestructiveJobKind, Job, JobKind
 from kdive.domain.lifecycle import System
-from kdive.domain.state import IllegalTransition, RunState, SystemState
+from kdive.domain.operations.jobs import DestructiveJobKind, Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload
 from kdive.log import bind_context

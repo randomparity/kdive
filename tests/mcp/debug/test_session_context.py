@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from kdive.domain.state import DebugSessionState
+from kdive.domain.capacity.state import DebugSessionState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug.session_context import (
     debug_session_error,

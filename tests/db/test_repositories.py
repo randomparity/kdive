@@ -25,6 +25,16 @@ from kdive.db.repositories import (
     SYSTEMS,
     ObjectNotFound,
 )
+from kdive.domain.capacity.state import (
+    AllocationState,
+    DebugSessionState,
+    IllegalTransition,
+    InvestigationState,
+    JobState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.models import (
     Allocation,
     Artifact,
@@ -42,16 +52,6 @@ from kdive.domain.models import (
     Run,
     Sensitivity,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    DebugSessionState,
-    IllegalTransition,
-    InvestigationState,
-    JobState,
-    ResourceStatus,
-    RunState,
-    SystemState,
 )
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

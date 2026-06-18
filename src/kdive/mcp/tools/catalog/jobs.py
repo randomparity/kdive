@@ -26,9 +26,9 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import JOBS, ObjectNotFound
+from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.jobs import Job
-from kdive.domain.state import IllegalTransition, JobState
+from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context

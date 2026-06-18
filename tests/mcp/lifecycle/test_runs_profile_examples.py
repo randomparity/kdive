@@ -145,7 +145,7 @@ def test_empty_host_list_is_valid_empty_collection() -> None:
     resp = build_host_profile_examples([])
     assert resp.status == "ok"
     assert resp.items == []
-    assert resp.data["count"] == "0"
+    assert resp.data["count"] == 0
 
 
 # --- registrar boundary + pool-backed behavior ---

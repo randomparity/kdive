@@ -17,10 +17,10 @@ from kdive.components.validation import (
 )
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
+from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
 from kdive.domain.lifecycle import Run
-from kdive.domain.state import RunState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import BuildPayload
 from kdive.log import bind_context

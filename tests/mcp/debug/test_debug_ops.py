@@ -25,15 +25,15 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
     InvestigationState,
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import ops as debug_ops

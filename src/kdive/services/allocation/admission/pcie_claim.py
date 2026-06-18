@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from psycopg import AsyncConnection
 
-from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
+from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.pcie import MultisetResolution, PCIeClaim, PCIeDescriptor, resolve_multiset
 
 if TYPE_CHECKING:

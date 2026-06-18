@@ -21,6 +21,14 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.references import CatalogComponentRef
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, JOBS, RESOURCES, RUNS, SYSTEMS
+from kdive.domain.capacity.state import (
+    AllocationState,
+    InvestigationState,
+    JobState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -33,14 +41,6 @@ from kdive.domain.models import (
     System,
 )
 from kdive.domain.pcie import PCIeClaim
-from kdive.domain.state import (
-    AllocationState,
-    InvestigationState,
-    JobState,
-    ResourceStatus,
-    RunState,
-    SystemState,
-)
 from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.handlers import runs_boot, runs_shared
 from kdive.jobs.handlers import runs_common as run_handler_common

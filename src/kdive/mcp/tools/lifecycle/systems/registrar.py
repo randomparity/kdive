@@ -8,7 +8,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.domain.state import SystemState
+from kdive.domain.capacity.state import SystemState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta

@@ -8,9 +8,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import Job, JobKind
-from kdive.domain.state import JobState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.mcp.responses import (
     _RETRYABLE_BY_CATEGORY,
     ResponseData,

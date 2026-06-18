@@ -25,6 +25,7 @@ from kdive.components.references import (
 )
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
+from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -35,7 +36,6 @@ from kdive.domain.models import (
     Sensitivity,
     System,
 )
-from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.models import HandlerRegistry

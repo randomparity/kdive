@@ -9,8 +9,8 @@ from typing import Any, Literal, TypedDict
 from pydantic import Field
 
 from kdive.domain._records import DomainModel
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.state import JobState
 
 
 class JobKind(StrEnum):

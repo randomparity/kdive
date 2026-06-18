@@ -33,9 +33,9 @@ from kdive.db.build_hosts import (
     try_acquire_lease,
 )
 from kdive.db.repositories import RUNS
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.jobs import JobKind
-from kdive.domain.state import SystemState
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.payloads import BuildPayload

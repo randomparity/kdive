@@ -33,10 +33,11 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import SYSTEM_SHAPES
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import SystemShape
-from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
+from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.pcie import (
     MatchOutcome,
     PCIeClaim,
@@ -44,7 +45,6 @@ from kdive.domain.pcie import (
     parse_match_spec,
     resolve_spec,
 )
-from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse

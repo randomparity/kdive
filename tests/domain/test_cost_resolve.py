@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import psycopg
 
-from kdive.domain.cost import resolve_coeff
+from kdive.domain.accounting.cost import resolve_coeff
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 

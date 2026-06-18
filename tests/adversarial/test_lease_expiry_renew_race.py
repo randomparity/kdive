@@ -21,7 +21,7 @@ from uuid import UUID
 
 import psycopg
 
-from kdive.domain.state import AllocationState
+from kdive.domain.capacity.state import AllocationState
 from kdive.mcp.auth import RequestContext
 from kdive.reconciler.loop import _expire_one
 from kdive.services.allocation.renew import renew

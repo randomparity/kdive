@@ -6,8 +6,8 @@ from psycopg import AsyncConnection
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.shapes import ResolvedSizing, ShapeSizing
-from kdive.domain.sizing import MB_PER_GB
+from kdive.domain.lifecycle.shapes import ResolvedSizing, ShapeSizing
+from kdive.domain.lifecycle.sizing import MB_PER_GB
 
 
 async def resolve_shape(conn: AsyncConnection, name: str) -> ShapeSizing:
@@ -21,7 +21,7 @@ async def resolve_shape(conn: AsyncConnection, name: str) -> ShapeSizing:
         name: The shape name to resolve (e.g. ``"medium"``).
 
     Returns:
-        The resolved :class:`~kdive.domain.shapes.ShapeSizing` for ``name``.
+        The resolved :class:`~kdive.domain.lifecycle.shapes.ShapeSizing` for ``name``.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` if ``name`` has no catalog row.
@@ -64,7 +64,7 @@ async def resolve_request_sizing(
         disk_gb: Custom disk in GB (required when ``shape`` is ``None``).
 
     Returns:
-        The unified :class:`~kdive.domain.shapes.ResolvedSizing`.
+        The unified :class:`~kdive.domain.lifecycle.shapes.ResolvedSizing`.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` for an unknown shape or an incomplete

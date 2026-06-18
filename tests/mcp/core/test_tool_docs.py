@@ -21,7 +21,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.state import SystemState
+from kdive.domain.capacity.state import SystemState
 from kdive.mcp.app import build_app
 from kdive.mcp.tools import _docmeta
 from kdive.security.secrets.secret_registry import SecretRegistry
