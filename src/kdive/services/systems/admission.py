@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from types import TracebackType
 from typing import Literal, Protocol, Self
 from uuid import UUID, uuid4
@@ -27,7 +28,7 @@ from kdive.components.validation import ComponentSourceCapabilities
 from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation, Job, JobKind, System
 from kdive.domain.sizing import MB_PER_GB, AllocationSizing
 from kdive.domain.state import AllocationState, IllegalTransition, JobState, SystemState
@@ -108,13 +109,34 @@ class ProvisionDefinedRequest:
     system_id: UUID
 
 
+class AdmissionFailureReason(StrEnum):
+    ALLOCATION_NOT_ADMITTED = "allocation_not_admitted"
+    ALLOCATION_STATE_CONFLICT = "allocation_state_conflict"
+    PROVIDER_POLICY_REJECTED = "provider_policy_rejected"
+    QUOTA_EXCEEDED = "quota_exceeded"
+    SUBJECT_NOT_FOUND = "subject_not_found"
+    SYSTEM_ALREADY_DEFINED = "system_already_defined"
+    SYSTEM_RECYCLE_REQUIRED = "system_recycle_required"
+    SYSTEM_STATE_CONFLICT = "system_state_conflict"
+    TIMEOUT = "timeout"
+
+
+class AdmissionRecovery(StrEnum):
+    INSPECT_SYSTEMS_AND_ALLOCATIONS = "inspect_systems_and_allocations"
+    PROVISION_DEFINED_SYSTEM = "provision_defined_system"
+    RECYCLE_ALLOCATION = "recycle_allocation"
+    RETRY_PROVISION = "retry_provision"
+
+
 @dataclass(frozen=True, slots=True)
 class AdmissionFailure:
-    object_id: str
+    subject_id: UUID
     category: ErrorCategory
-    data: dict[str, object]
-    suggested_next_actions: tuple[str, ...] = ()
-    detail: str | None = None
+    reason: AdmissionFailureReason
+    current_status: str | None = None
+    failure_message: str | None = None
+    failure_details: dict[str, object] | None = None
+    recovery: AdmissionRecovery | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,28 +154,33 @@ type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted | DefinedSystemAd
 
 
 def _failure(
-    object_id: str | UUID,
+    subject_id: UUID,
     category: ErrorCategory = ErrorCategory.CONFIGURATION_ERROR,
     *,
-    data: dict[str, object] | None = None,
-    suggested_next_actions: tuple[str, ...] = (),
-    detail: str | None = None,
+    reason: AdmissionFailureReason,
+    current_status: str | None = None,
+    failure_message: str | None = None,
+    failure_details: dict[str, object] | None = None,
+    recovery: AdmissionRecovery | None = None,
 ) -> AdmissionFailure:
     return AdmissionFailure(
-        object_id=str(object_id),
+        subject_id=subject_id,
         category=category,
-        data=data or {},
-        suggested_next_actions=suggested_next_actions,
-        detail=suppressed_detail(category, detail),
+        reason=reason,
+        current_status=current_status,
+        failure_message=failure_message,
+        failure_details=failure_details,
+        recovery=recovery,
     )
 
 
-def _failure_from_error(object_id: str | UUID, exc: CategorizedError) -> AdmissionFailure:
+def _failure_from_error(subject_id: UUID, exc: CategorizedError) -> AdmissionFailure:
     return _failure(
-        object_id,
+        subject_id,
         exc.category,
-        data=dict(safe_error_details(exc.details)),
-        detail=str(exc),
+        reason=AdmissionFailureReason.PROVIDER_POLICY_REJECTED,
+        failure_message=str(exc),
+        failure_details=dict(safe_error_details(exc.details)),
     )
 
 
@@ -260,16 +287,21 @@ class SystemAdmission:
             return _failure(
                 request.allocation_id,
                 ErrorCategory.TRANSPORT_FAILURE,
-                detail=(
+                reason=AdmissionFailureReason.TIMEOUT,
+                failure_message=(
                     f"provisioning admission exceeded the {bound:g}s pre-mutation bound; retry"
                 ),
-                suggested_next_actions=("systems.provision",),
+                recovery=AdmissionRecovery.RETRY_PROVISION,
             )
         except IllegalTransition:
             async with pool.connection() as conn:
                 latest = await ALLOCATIONS.get(conn, request.allocation_id)
-            data: dict[str, object] = {"current_status": latest.state.value} if latest else {}
-            return _failure(request.allocation_id, data=data)
+            current_status = latest.state.value if latest else None
+            return _failure(
+                request.allocation_id,
+                reason=AdmissionFailureReason.ALLOCATION_NOT_ADMITTED,
+                current_status=current_status,
+            )
 
     async def _admit_within_bound(
         self,
@@ -286,7 +318,10 @@ class SystemAdmission:
             return _failure_from_error(request.allocation_id, exc)
         async with _locked_allocation_system(pool, ctx, request.allocation_id) as locked:
             if isinstance(locked, MissingAllocation):
-                return _failure(locked.allocation_id)
+                return _failure(
+                    locked.allocation_id,
+                    reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+                )
             conn, alloc, existing = locked
             try:
                 stored = _stored_profile_for(request.profile, alloc)
@@ -383,9 +418,6 @@ async def _locked_allocation_system(
         yield conn, alloc, existing
 
 
-# The intended recycle path for a spent Allocation: release it, then request a fresh one
-# (a fresh Allocation yields a fresh System — one System per Allocation, ADR-0149).
-_RECYCLE_ALLOCATION_ACTIONS = ("allocations.release", "allocations.request")
 _FAILED_SYSTEM_GUIDANCE = (
     "this allocation's system is in 'failed' and cannot be re-provisioned; "
     "release this allocation and request a fresh one for a new system"
@@ -402,25 +434,27 @@ async def _failed_system_retry_failure(
     names the release/re-request next actions. No re-mint: one System per Allocation. No new
     redaction — the worker already redacted ``failure_context``; this echoes those same bytes.
     """
-    detail = _FAILED_SYSTEM_GUIDANCE
-    data: dict[str, object] = {"current_status": existing.state.value}
+    failure_message = _FAILED_SYSTEM_GUIDANCE
+    failure_details: dict[str, object] = {}
     job = await queue.get_by_dedup_key(conn, f"{alloc.id}:provision")
     # Only a *failed* provision job carries the reason. A System can also reach `failed` via
     # `reprovisioning->failed`, leaving the original provision job `succeeded`; never advertise a
     # non-failed job as the failing one.
     if job is not None and job.state is JobState.FAILED:
-        data["failing_job_id"] = str(job.id)
+        failure_details["failing_job_id"] = str(job.id)
         reason = job.failure_context.get("failure_message")
         if reason:
-            detail = f"{_FAILED_SYSTEM_GUIDANCE} (original reason: {reason})"
+            failure_message = f"{_FAILED_SYSTEM_GUIDANCE} (original reason: {reason})"
         for key, value in job.failure_context.items():
             if key.startswith("failure_detail_"):
-                data[key] = value
+                failure_details[key] = value
     return _failure(
         existing.id,
-        data=data,
-        detail=detail,
-        suggested_next_actions=_RECYCLE_ALLOCATION_ACTIONS,
+        reason=AdmissionFailureReason.SYSTEM_RECYCLE_REQUIRED,
+        current_status=existing.state.value,
+        failure_message=failure_message,
+        failure_details=failure_details,
+        recovery=AdmissionRecovery.RECYCLE_ALLOCATION,
     )
 
 
@@ -442,10 +476,9 @@ async def _provision_create_response(
     if existing.state is SystemState.DEFINED:
         return _failure(
             existing.id,
-            data={
-                "current_status": existing.state.value,
-                "reason": "use_systems.provision_defined",
-            },
+            reason=AdmissionFailureReason.SYSTEM_ALREADY_DEFINED,
+            current_status=existing.state.value,
+            recovery=AdmissionRecovery.PROVISION_DEFINED_SYSTEM,
         )
     if existing.state is SystemState.PROVISIONING:
         timeout.reschedule(None)  # mutation boundary: re-enqueue runs unbounded (ADR-0126)
@@ -460,8 +493,10 @@ async def _provision_create_response(
         return await _failed_system_retry_failure(conn, alloc, existing)
     return _failure(
         existing.id,
-        data={"current_status": existing.state.value},
-        suggested_next_actions=_RECYCLE_ALLOCATION_ACTIONS,
+        reason=AdmissionFailureReason.SYSTEM_RECYCLE_REQUIRED,
+        current_status=existing.state.value,
+        failure_message=_FAILED_SYSTEM_GUIDANCE,
+        recovery=AdmissionRecovery.RECYCLE_ALLOCATION,
     )
 
 
@@ -482,7 +517,11 @@ async def _define_create_response(
         )
     if existing.state is SystemState.DEFINED:
         return DefinedSystemAdmitted(existing)  # idempotent re-define
-    return _failure(existing.id, data={"current_status": existing.state.value})
+    return _failure(
+        existing.id,
+        reason=AdmissionFailureReason.SYSTEM_STATE_CONFLICT,
+        current_status=existing.state.value,
+    )
 
 
 async def _admit_defined(
@@ -549,7 +588,7 @@ async def _provision_defined_locked(
     async with pool.connection() as probe:
         probe_system = await SYSTEMS.get(probe, system_id)
         if probe_system is None or probe_system.project not in ctx.projects:
-            return _failure(system_id)
+            return _failure(system_id, reason=AdmissionFailureReason.SUBJECT_NOT_FOUND)
         project = probe_system.project
         allocation_id = probe_system.allocation_id
     async with (
@@ -560,11 +599,14 @@ async def _provision_defined_locked(
     ):
         system = await SYSTEMS.get(conn, system_id)
         if system is None or system.project not in ctx.projects:
-            return _failure(system_id)
+            return _failure(system_id, reason=AdmissionFailureReason.SUBJECT_NOT_FOUND)
         require_role(ctx, system.project, Role.OPERATOR)
         alloc = await ALLOCATIONS.get(conn, system.allocation_id)
         if alloc is None or alloc.project != system.project:
-            return _failure(system.allocation_id)
+            return _failure(
+                system.allocation_id,
+                reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
+            )
         return await _provision_defined_response(
             conn,
             ctx,
@@ -595,7 +637,11 @@ async def _provision_defined_response(
             system_id=system.id,
         )
     if system.state is not SystemState.DEFINED:
-        return _failure(system.id, data={"current_status": system.state.value})
+        return _failure(
+            system.id,
+            reason=AdmissionFailureReason.SYSTEM_STATE_CONFLICT,
+            current_status=system.state.value,
+        )
     try:
         parsed = ProvisioningProfile.parse(system.provisioning_profile)
         validate_profile_for_provider(parsed, profile_policy, component_sources)
@@ -603,7 +649,11 @@ async def _provision_defined_response(
     except CategorizedError as exc:
         return _failure_from_error(system.id, exc)
     if alloc.state is not AllocationState.ACTIVE:
-        return _failure(alloc.id, data={"current_status": alloc.state.value})
+        return _failure(
+            alloc.id,
+            reason=AdmissionFailureReason.ALLOCATION_STATE_CONFLICT,
+            current_status=alloc.state.value,
+        )
     return await _admit_defined(conn, ctx, alloc, system)
 
 
@@ -615,7 +665,11 @@ async def _new_system_allowed(
     rootfs_validator: RootfsValidator,
 ) -> AdmissionFailure | None:
     if alloc.state is not AllocationState.GRANTED:
-        return _failure(alloc.id, data={"current_status": alloc.state.value})
+        return _failure(
+            alloc.id,
+            reason=AdmissionFailureReason.ALLOCATION_STATE_CONFLICT,
+            current_status=alloc.state.value,
+        )
     # New System: enforce the per-project max_concurrent_systems quota under the held
     # project lock. Fail-closed — no quota row → denied (ADR-0007 §4); a denial writes
     # no System, no job, and leaves the allocation granted (the all-or-nothing rule).
@@ -623,7 +677,8 @@ async def _new_system_allowed(
         return _failure(
             alloc.id,
             ErrorCategory.QUOTA_EXCEEDED,
-            suggested_next_actions=("systems.get", "allocations.list"),
+            reason=AdmissionFailureReason.QUOTA_EXCEEDED,
+            recovery=AdmissionRecovery.INSPECT_SYSTEMS_AND_ALLOCATIONS,
         )
     try:
         await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)

@@ -10,11 +10,13 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Allocation
 from kdive.domain.state import AllocationState
+from kdive.mcp.tools.lifecycle.systems.provision import _admission_response
 from kdive.services.systems import admission
 from tests.mcp.systems_support import provisioning_profile
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _ALLOC_ID = UUID("00000000-0000-0000-0000-00000000ad01")
+_SYSTEM_ID = UUID("00000000-0000-0000-0000-00000000ad02")
 
 
 def _allocation(
@@ -60,10 +62,10 @@ def test_failure_from_error_keeps_only_json_safe_scalar_details() -> None:
         },
     )
 
-    failure = admission._failure_from_error("object-1", exc)
+    failure = admission._failure_from_error(_SYSTEM_ID, exc)
 
     assert failure.category is ErrorCategory.CONFIGURATION_ERROR
-    assert failure.data == {
+    assert failure.failure_details == {
         "path": "/tmp/rootfs.qcow2",
         "ok": True,
         "count": 3,
@@ -80,10 +82,11 @@ def test_failure_from_error_threads_detail_and_structured_errors() -> None:
         },
     )
 
-    failure = admission._failure_from_error("object-1", exc)
+    failure = admission._failure_from_error(_SYSTEM_ID, exc)
 
-    assert failure.detail == "invalid provisioning profile"
-    assert failure.data["errors"] == [
+    assert failure.failure_message == "invalid provisioning profile"
+    assert failure.failure_details is not None
+    assert failure.failure_details["errors"] == [
         {"loc": ["provider", "kind"], "msg": "field required", "type": "missing"}
     ]
 
@@ -94,9 +97,11 @@ def test_failure_from_error_suppresses_detail_for_not_found() -> None:
         category=ErrorCategory.NOT_FOUND,
     )
 
-    failure = admission._failure_from_error("object-1", exc)
+    failure = admission._failure_from_error(_SYSTEM_ID, exc)
+    response = _admission_response(failure)
 
-    assert failure.detail == "not found"
+    assert failure.failure_message == "system 11111111-2222-3333-4444-555555555555 was not found"
+    assert response.detail == "not found"
 
 
 def test_stored_profile_fills_sizing_from_allocation_snapshot() -> None:

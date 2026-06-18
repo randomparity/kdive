@@ -15,6 +15,7 @@ from typing import cast
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.validation import ComponentSourceCapabilities
+from kdive.domain.errors import suppressed_detail
 from kdive.log import bind_context
 from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools._common import (
@@ -30,6 +31,8 @@ from kdive.providers.core.runtime import ProfilePolicy
 from kdive.security.authz.context import RequestContext
 from kdive.services.systems.admission import (
     AdmissionFailure,
+    AdmissionFailureReason,
+    AdmissionRecovery,
     AdmissionResult,
     CreateSystemRequest,
     DefinedSystemAdmitted,
@@ -39,15 +42,32 @@ from kdive.services.systems.admission import (
 )
 from kdive.services.systems.validation import RootfsValidator
 
+_RECOVERY_ACTIONS: dict[AdmissionRecovery, list[str]] = {
+    AdmissionRecovery.INSPECT_SYSTEMS_AND_ALLOCATIONS: ["systems.get", "allocations.list"],
+    AdmissionRecovery.PROVISION_DEFINED_SYSTEM: ["systems.provision_defined"],
+    AdmissionRecovery.RECYCLE_ALLOCATION: ["allocations.release", "allocations.request"],
+    AdmissionRecovery.RETRY_PROVISION: ["systems.provision"],
+}
+
+
+def _admission_failure_data(result: AdmissionFailure) -> ResponseData:
+    data: dict[str, object] = dict(result.failure_details or {})
+    if result.current_status is not None:
+        data["current_status"] = result.current_status
+    if result.reason is AdmissionFailureReason.SYSTEM_ALREADY_DEFINED:
+        data["reason"] = "use_systems.provision_defined"
+    return cast(ResponseData, data)
+
 
 def _admission_response(result: AdmissionResult) -> ToolResponse:
     if isinstance(result, AdmissionFailure):
+        actions = _RECOVERY_ACTIONS[result.recovery] if result.recovery is not None else []
         return ToolResponse.failure(
-            result.object_id,
+            str(result.subject_id),
             result.category,
-            detail=result.detail,
-            suggested_next_actions=list(result.suggested_next_actions),
-            data=cast(ResponseData, result.data),
+            detail=suppressed_detail(result.category, result.failure_message),
+            suggested_next_actions=actions,
+            data=_admission_failure_data(result),
         )
     if isinstance(result, ProvisionJobAdmitted):
         return job_envelope(result.job, "system_id", result.system_id)
