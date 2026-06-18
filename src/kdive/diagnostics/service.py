@@ -29,6 +29,7 @@ from kdive.diagnostics.checks import (
     Check,
     CheckResult,
     CheckStatus,
+    EphemeralLibvirtBuildHostAgentCheck,
     LocalKernelSrcCheck,
     SecretRefCheck,
     Vantage,
@@ -65,6 +66,14 @@ _NOT_IMPLEMENTED = "not_implemented"
 
 _DEFAULT_PER_CHECK_TIMEOUT = 10.0
 _DEFAULT_OVERALL_TIMEOUT = 30.0
+
+# When the mutating build-host agent probe is opted in, the service runs under generous timeouts:
+# the builder's wait_for_agent bound is 180s, far above the default 10s per-check cap, so under the
+# defaults the probe would always time out to error. The per-check timeout bounds the whole check,
+# which probes hosts sequentially, so it must cover several builders; overall is None (the per-check
+# bound is the cap). This is service-global, so it also loosens the bound for co-assembled cheap
+# checks during that run — accepted for an explicit, rarely-run operator action (ADR-0167).
+_BUILDHOST_AGENT_PER_CHECK_TIMEOUT = 600.0
 
 
 class WorkerVantageSubstitution(StrEnum):
@@ -303,16 +312,45 @@ def _secret_ref_check() -> SecretRefCheck:
     )
 
 
-def _build_host_checks() -> list[Check]:
-    """Assemble the server-vantage build-host preflight checks (ADR-0163).
+def _build_host_checks(pool: AsyncConnectionPool | None) -> list[Check]:
+    """Assemble the always-on server-vantage build-host preflight checks (ADR-0163, ADR-0167).
 
     The ``local_kernel_src`` check is always assembled: the seeded ``worker-local`` ``LOCAL`` build
     host is a database invariant, so the local warm-tree lane always exists, and a server-vantage
-    config read needs no DB. ``KDIVE_KERNEL_SRC`` resolution is deferred to probe time. (The #531
-    ephemeral-libvirt guest-agent reachability probe is a separate, mutating, DB-backed check split
-    to a follow-up.)
+    config read needs no DB. ``KDIVE_KERNEL_SRC`` resolution is deferred to probe time. When a
+    ``pool`` is available the check is also ``enabled``-gated (ADR-0167): it is suppressed (an n/a
+    ``pass``) when the operator has disabled the seeded local host, closing the ADR-0163 exit-code
+    regression. Without a pool it keeps the always-enabled default. (The #531 ephemeral-libvirt
+    guest-agent probe is a separate, mutating, opt-in check assembled in the factory.)
     """
-    return [LocalKernelSrcCheck(probe=kernel_src.warm_tree_source_probe())]
+    if pool is None:
+        return [LocalKernelSrcCheck(probe=kernel_src.warm_tree_source_probe())]
+    return [
+        LocalKernelSrcCheck(
+            probe=kernel_src.warm_tree_source_probe(),
+            enabled_probe=kernel_src.local_host_enabled_probe(pool),
+        )
+    ]
+
+
+def _buildhost_agent_check(pool: AsyncConnectionPool | None) -> EphemeralLibvirtBuildHostAgentCheck:
+    """Assemble the opt-in ephemeral build-host agent check; fail fast without a pool (ADR-0167).
+
+    The probe enumerates ``ephemeral_libvirt`` hosts and writes reaper markers, both of which need
+    the async pool. A requested opt-in without a pool is a configuration error, not a silently
+    dropped check.
+    """
+    if pool is None:
+        raise CategorizedError(
+            "ephemeral_libvirt_buildhost_agent (--with-buildhost-agent) needs a database pool to "
+            "enumerate build hosts; none is wired in this deployment (ADR-0167)",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    # Function-local import: diagnostics.buildhost_agent imports providers + db, so a top-level
+    # import here would widen this module's import graph; only needed when opted in.
+    from kdive.diagnostics.buildhost_agent import buildhost_agent_probe
+
+    return EphemeralLibvirtBuildHostAgentCheck(probe=buildhost_agent_probe(pool))
 
 
 def _worker_vantage_checks(
@@ -328,6 +366,7 @@ def default_service_factory(
     provider: str | None,
     *,
     with_egress: bool = False,
+    with_buildhost_agent: bool = False,
     pool: AsyncConnectionPool | None = None,
     provider_contributions: Sequence[DiagnosticProviderContribution] = (),
 ) -> DiagnosticsService:
@@ -356,9 +395,16 @@ def default_service_factory(
     a fail-fast configuration error rather than silently dropping the opt-in check; a
     deployment that has staged the image wires a probe-guest-backed factory in its place.
 
+    ``with_buildhost_agent`` opts into the heavy mutating ``ephemeral_libvirt_buildhost_agent``
+    probe (ADR-0167), which provisions a throwaway builder on each ``ephemeral_libvirt`` build host
+    and checks guest-agent reachability. It needs the ``pool`` to enumerate hosts and write reaper
+    markers, so it fails fast when none is wired; when assembled, the service runs under generous
+    timeouts (the builder's agent wait far exceeds the default 10s per-check cap).
+
     Raises:
         CategorizedError: ``with_egress`` is requested but no probe-guest image/seam is wired
-            in this deployment (``CONFIGURATION_ERROR``).
+            in this deployment, or ``with_buildhost_agent`` is requested without a ``pool``
+            (``CONFIGURATION_ERROR``).
     """
     if with_egress:
         raise CategorizedError(
@@ -366,7 +412,13 @@ def default_service_factory(
             "target provider; none is wired in this deployment (ADR-0091, M2.4)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    checks: list[Check] = [_secret_ref_check(), *_build_host_checks()]
+    checks: list[Check] = [_secret_ref_check(), *_build_host_checks(pool)]
+    per_check_timeout = _DEFAULT_PER_CHECK_TIMEOUT
+    overall_timeout: float | None = _DEFAULT_OVERALL_TIMEOUT
+    if with_buildhost_agent:
+        checks.append(_buildhost_agent_check(pool))
+        per_check_timeout = _BUILDHOST_AGENT_PER_CHECK_TIMEOUT
+        overall_timeout = None
     unavailable_worker_checks: list[WorkerVantageCheck] = []
     worker_mode: WorkerVantageMode | None = None
     for contribution in provider_contributions:
@@ -397,7 +449,7 @@ def default_service_factory(
     # outage) — ADR-0139.
     return DiagnosticsService(
         checks=checks,
-        per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,
-        overall_timeout=_DEFAULT_OVERALL_TIMEOUT,
+        per_check_timeout=per_check_timeout,
+        overall_timeout=overall_timeout,
         worker_mode=worker_mode,
     )
