@@ -243,6 +243,7 @@ def _default_registration_seams(
 
 
 type ResourceDbPreflight = Callable[[AsyncConnection], Awaitable[ToolResponse | None]]
+type RegistrationPlanFactory = Callable[[str | None], "_RegistrationPlan"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +255,45 @@ class _RegistrationPlan:
     owner_project: str | None
     tool: str
     db_preflight: ResourceDbPreflight
+
+
+async def _register_with_plan(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    request: RuntimeResourceRegistration,
+    tool: str,
+    plan_factory: RegistrationPlanFactory,
+    probe: ResourceProbe | None,
+    secrets_root: Path | None,
+    reachability_host_uri: str | None = None,
+) -> ToolResponse:
+    failure = await _authorize_registration(pool, ctx, tool=tool, name=request.name)
+    if failure is not None:
+        return failure
+    failure, owner_project = _common_registration(ctx, request)
+    if failure is not None:
+        return failure
+    if reachability_host_uri is None:
+        _, secrets_root = _default_registration_seams(None, secrets_root)
+    else:
+        resolved_probe, secrets_root = _default_registration_seams(probe, secrets_root)
+    failure = _validate_secret_refs(
+        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
+    )
+    if failure is not None:
+        return failure
+    if reachability_host_uri is not None:
+        failure = await _validate_reachability(
+            name=request.name, host_uri=reachability_host_uri, probe=resolved_probe
+        )
+        if failure is not None:
+            return failure
+    return await _insert_registered_resource(
+        pool,
+        ctx,
+        plan=plan_factory(owner_project),
+    )
 
 
 async def _insert_registered_resource(
@@ -417,30 +457,8 @@ async def register_remote_libvirt_resource(
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime remote-libvirt resource. Requires ``platform_admin``."""
-    failure = await _authorize_registration(
-        pool,
-        ctx,
-        tool=REGISTER_REMOTE_LIBVIRT_TOOL,
-        name=request.name,
-    )
-    if failure is not None:
-        return failure
-    failure, owner_project = _common_registration(ctx, request)
-    if failure is not None:
-        return failure
     if not request.host_uri.strip():
         return config_error(request.name, "remote_libvirt requires a host URI")
-    probe, secrets_root = _default_registration_seams(probe, secrets_root)
-    failure = _validate_secret_refs(
-        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
-    )
-    if failure is not None:
-        return failure
-    failure = await _validate_reachability(
-        name=request.name, host_uri=request.host_uri, probe=probe
-    )
-    if failure is not None:
-        return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
         failure = await _validate_runtime_name_available(
@@ -452,10 +470,8 @@ async def register_remote_libvirt_resource(
             conn, name=request.name, base_image=request.base_image
         )
 
-    return await _insert_registered_resource(
-        pool,
-        ctx,
-        plan=_RegistrationPlan(
+    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
+        return _RegistrationPlan(
             kind=ResourceKind.REMOTE_LIBVIRT,
             request=request,
             host_uri=request.host_uri,
@@ -463,7 +479,17 @@ async def register_remote_libvirt_resource(
             owner_project=owner_project,
             tool=REGISTER_REMOTE_LIBVIRT_TOOL,
             db_preflight=db_preflight,
-        ),
+        )
+
+    return await _register_with_plan(
+        pool,
+        ctx,
+        request=request,
+        tool=REGISTER_REMOTE_LIBVIRT_TOOL,
+        plan_factory=plan_factory,
+        probe=probe,
+        secrets_root=secrets_root,
+        reachability_host_uri=request.host_uri,
     )
 
 
@@ -476,40 +502,16 @@ async def register_local_libvirt_resource(
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime local-libvirt resource. Requires ``platform_admin``."""
-    failure = await _authorize_registration(
-        pool,
-        ctx,
-        tool=REGISTER_LOCAL_LIBVIRT_TOOL,
-        name=request.name,
-    )
-    if failure is not None:
-        return failure
-    failure, owner_project = _common_registration(ctx, request)
-    if failure is not None:
-        return failure
     if not request.host_uri.strip():
         return config_error(request.name, "local_libvirt requires a host URI")
-    probe, secrets_root = _default_registration_seams(probe, secrets_root)
-    failure = _validate_secret_refs(
-        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
-    )
-    if failure is not None:
-        return failure
-    failure = await _validate_reachability(
-        name=request.name, host_uri=request.host_uri, probe=probe
-    )
-    if failure is not None:
-        return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
         return await _validate_runtime_name_available(
             conn, kind=ResourceKind.LOCAL_LIBVIRT, name=request.name
         )
 
-    return await _insert_registered_resource(
-        pool,
-        ctx,
-        plan=_RegistrationPlan(
+    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
+        return _RegistrationPlan(
             kind=ResourceKind.LOCAL_LIBVIRT,
             request=request,
             host_uri=request.host_uri,
@@ -517,7 +519,17 @@ async def register_local_libvirt_resource(
             owner_project=owner_project,
             tool=REGISTER_LOCAL_LIBVIRT_TOOL,
             db_preflight=db_preflight,
-        ),
+        )
+
+    return await _register_with_plan(
+        pool,
+        ctx,
+        request=request,
+        tool=REGISTER_LOCAL_LIBVIRT_TOOL,
+        plan_factory=plan_factory,
+        probe=probe,
+        secrets_root=secrets_root,
+        reachability_host_uri=request.host_uri,
     )
 
 
@@ -530,33 +542,14 @@ async def register_fault_inject_resource(
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime fault-inject resource. Requires ``platform_admin``."""
-    failure = await _authorize_registration(
-        pool,
-        ctx,
-        tool=REGISTER_FAULT_INJECT_TOOL,
-        name=request.name,
-    )
-    if failure is not None:
-        return failure
-    failure, owner_project = _common_registration(ctx, request)
-    if failure is not None:
-        return failure
-    _, secrets_root = _default_registration_seams(probe, secrets_root)
-    failure = _validate_secret_refs(
-        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
-    )
-    if failure is not None:
-        return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
         return await _validate_runtime_name_available(
             conn, kind=ResourceKind.FAULT_INJECT, name=request.name
         )
 
-    return await _insert_registered_resource(
-        pool,
-        ctx,
-        plan=_RegistrationPlan(
+    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
+        return _RegistrationPlan(
             kind=ResourceKind.FAULT_INJECT,
             request=request,
             host_uri=_FAULT_INJECT_HOST_URI,
@@ -564,7 +557,16 @@ async def register_fault_inject_resource(
             owner_project=owner_project,
             tool=REGISTER_FAULT_INJECT_TOOL,
             db_preflight=db_preflight,
-        ),
+        )
+
+    return await _register_with_plan(
+        pool,
+        ctx,
+        request=request,
+        tool=REGISTER_FAULT_INJECT_TOOL,
+        plan_factory=plan_factory,
+        probe=probe,
+        secrets_root=secrets_root,
     )
 
 
