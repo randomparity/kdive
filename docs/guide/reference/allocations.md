@@ -63,11 +63,6 @@ Request capacity and create an allocation grant.
 
 Poll until the allocation leaves the queued state or the deadline elapses.
 
-Blocks (long-poll) until the ``requested`` allocation is promoted to ``granted``,
-cancelled to ``released``, or terminated to ``failed``. Returns the settled
-envelope immediately when the allocation is already settled. ``timeout_s`` is
-capped at 300 s; a zero or negative value means a single read with no wait.
-
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `allocation_id` | `string` | yes | The Allocation to poll until it leaves the requested (queued) state. |
