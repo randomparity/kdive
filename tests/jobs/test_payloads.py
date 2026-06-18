@@ -16,6 +16,7 @@ from kdive.jobs.payloads import (
     Authorizing,
     BuildPayload,
     CaptureVmcorePayload,
+    DiagnosticsWorkerCheckPayload,
     PayloadValidationError,
     PowerPayload,
     ReprovisionPayload,
@@ -212,3 +213,27 @@ def test_authorizing_requires_project_at_enqueue_boundary() -> None:
 def test_authorizing_rejects_missing_project() -> None:
     with pytest.raises(PayloadValidationError, match="invalid job authorizing"):
         dump_authorizing(cast(Any, {"principal": "alice"}))
+
+
+def test_diagnostics_worker_check_payload_roundtrips() -> None:
+    payload = DiagnosticsWorkerCheckPayload(provider="remote-libvirt")
+    dumped = dump_payload(JobKind.DIAGNOSTICS_WORKER_CHECK, payload)
+    assert dumped == {"provider": "remote-libvirt"}
+
+    now = datetime.now(UTC)
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.DIAGNOSTICS_WORKER_CHECK,
+        payload=dumped,
+        state=JobState.QUEUED,
+        max_attempts=1,
+        authorizing={
+            "principal": "diagnostics",
+            "agent_session": None,
+            "project": "remote-libvirt",
+        },
+        dedup_key="diagnostics:remote-libvirt:x",
+    )
+    assert load_payload(job, DiagnosticsWorkerCheckPayload).provider == "remote-libvirt"

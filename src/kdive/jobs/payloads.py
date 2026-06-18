@@ -119,6 +119,16 @@ class ImageBuildPayload(_PayloadBase):
         return self
 
 
+class DiagnosticsWorkerCheckPayload(_PayloadBase):
+    """The inputs a ``DIAGNOSTICS_WORKER_CHECK`` job carries (ADR-0163).
+
+    Only the concrete provider id (``remote-libvirt``); the handler re-resolves the host config
+    from the inventory at probe time, so no host identity or secret rides on the queue.
+    """
+
+    provider: str
+
+
 _PayloadModel = (
     type[SystemPayload]
     | type[ReprovisionPayload]
@@ -126,6 +136,7 @@ _PayloadModel = (
     | type[PowerPayload]
     | type[CaptureVmcorePayload]
     | type[ImageBuildPayload]
+    | type[DiagnosticsWorkerCheckPayload]
 )
 PayloadModel = (
     SystemPayload
@@ -134,6 +145,7 @@ PayloadModel = (
     | PowerPayload
     | CaptureVmcorePayload
     | ImageBuildPayload
+    | DiagnosticsWorkerCheckPayload
 )
 
 _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
@@ -147,6 +159,7 @@ _PAYLOAD_MODELS: dict[JobKind, _PayloadModel] = {
     JobKind.POWER: PowerPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
     JobKind.IMAGE_BUILD: ImageBuildPayload,
+    JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
 }
 _RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,
