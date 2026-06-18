@@ -28,8 +28,8 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEM_SHAPES
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse

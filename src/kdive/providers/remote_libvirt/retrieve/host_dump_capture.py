@@ -21,8 +21,8 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.artifacts.storage import ArtifactStreamRequest, StoredArtifact
-from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import CaptureOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig

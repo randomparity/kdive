@@ -11,7 +11,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts

@@ -13,8 +13,8 @@ from kdive.components.references import ComponentRef
 from kdive.components.requirements import CmdlineRequirements, ConfigRequirements
 from kdive.components.visibility import PUBLIC_VISIBILITY, Visibility
 from kdive.config.core_settings import FIXTURE_CATALOG_PATH
+from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.image_format import ImageFormat
 
 DEFAULT_FIXTURE_CATALOG_PATH = Path(__file__).parents[3] / "fixtures" / "local-libvirt"
 

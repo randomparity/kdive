@@ -17,9 +17,9 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEM_SHAPES
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Allocation, SystemShape
 from kdive.domain.pcie import PCIeClaim
-from kdive.domain.resources import ResourceKind
 from kdive.domain.state import AllocationState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse

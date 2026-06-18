@@ -7,7 +7,7 @@ import re
 import psycopg
 
 from kdive.db import migrate
-from kdive.domain.resources import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.assembly.composition import ProviderComposition
 
 

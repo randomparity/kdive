@@ -19,8 +19,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.resources import ResourceKind
 from kdive.providers.core.runtime import ProviderRuntime
 
 _log = logging.getLogger(__name__)

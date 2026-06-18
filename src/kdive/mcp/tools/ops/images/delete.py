@@ -9,8 +9,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import IMAGE_CATALOG
+from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.images import ImageVisibility
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid

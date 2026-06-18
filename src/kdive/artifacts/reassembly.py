@@ -9,7 +9,7 @@ from typing import Protocol
 from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.validation import verify_chunks
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _log = logging.getLogger(__name__)

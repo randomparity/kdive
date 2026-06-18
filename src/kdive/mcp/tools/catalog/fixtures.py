@@ -22,8 +22,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.catalog import fixture_catalog_path_from_env, load_fixture_catalog
+from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.images import ImageVisibility
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta

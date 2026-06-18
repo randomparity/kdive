@@ -10,7 +10,7 @@ import pytest
 from kdive.artifacts.reassembly import reassemble_chunked
 from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _PREFIX = "local/runs/x/"

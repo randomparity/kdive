@@ -7,9 +7,9 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.catalog.resources import Resource
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.resources import Resource
 from kdive.domain.state import AllocationState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse

@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PRIVATE_LIFETIME_MAX
-from kdive.domain.images import ImageVisibility
+from kdive.domain.catalog.images import ImageVisibility
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid

@@ -15,8 +15,8 @@ from kdive.artifacts.storage import (
     PresignPutRequest,
     StoredArtifact,
 )
-from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.retrieve import common
 from kdive.security.secrets.secret_registry import SecretRegistry

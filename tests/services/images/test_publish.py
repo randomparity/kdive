@@ -21,8 +21,8 @@ import pytest
 
 from kdive.artifacts import storage as artifact_types
 from kdive.db.repositories import IMAGE_CATALOG
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.images.catalog import resolve_rootfs
 from kdive.services.images.publish import PublishRequest, publish_image
 

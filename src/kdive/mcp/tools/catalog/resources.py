@@ -21,9 +21,9 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
+from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.images import ImageVisibility
-from kdive.domain.resources import Resource, ResourceKind
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse

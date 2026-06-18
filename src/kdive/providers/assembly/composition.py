@@ -17,7 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.config.core_settings import FAULT_INJECT, LOCAL_LIBVIRT_ENABLED
 from kdive.db.build_hosts import BuildHostKind
-from kdive.domain.resources import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver

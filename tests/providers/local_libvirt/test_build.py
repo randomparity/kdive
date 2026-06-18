@@ -20,7 +20,7 @@ from kdive.components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import (
     BuildProfile,

@@ -10,8 +10,8 @@ import pytest
 
 import kdive.providers.fault_inject.lifecycle.connect as connect_module
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.jobs import PowerAction
 from kdive.profiles.build import ServerBuildProfile

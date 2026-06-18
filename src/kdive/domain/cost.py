@@ -30,14 +30,14 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
+from kdive.domain.catalog.resource_capabilities import MEMORY_MB_KEY, VCPUS_KEY
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.resource_capabilities import MEMORY_MB_KEY, VCPUS_KEY
 from kdive.domain.sizing import MB_PER_GB
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
-    from kdive.domain.resources import Resource
+    from kdive.domain.catalog.resources import Resource
 
 # Resource-capabilities keys advertising the host's billable size ceiling (the discovery
 # provider populates them). A selector may not exceed these — the admission-only

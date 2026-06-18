@@ -22,8 +22,8 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
 from kdive.domain.accounting import Budget
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_allocation

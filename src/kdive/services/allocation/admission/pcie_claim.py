@@ -36,7 +36,7 @@ from kdive.domain.pcie import (
 if TYPE_CHECKING:
     from uuid import UUID
 
-    from kdive.domain.resources import Resource
+    from kdive.domain.catalog.resources import Resource
 
 _DESCRIPTOR_FIELDS = ("bdf", "vendor_id", "device_id", "class_code", "label")
 

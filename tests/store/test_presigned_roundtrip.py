@@ -13,7 +13,7 @@ import hashlib
 import httpx
 
 from kdive.artifacts.storage import ArtifactWriteRequest, PresignPutRequest
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 
 
 def _b64_sha256(data: bytes) -> str:

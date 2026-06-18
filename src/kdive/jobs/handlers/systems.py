@@ -13,7 +13,7 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.jobs import Job, JobKind
 from kdive.domain.lifecycle import System

@@ -12,7 +12,7 @@ import psycopg
 from psycopg.errors import UndefinedTable
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.resources import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.state import SystemState
 
 _log = logging.getLogger(__name__)

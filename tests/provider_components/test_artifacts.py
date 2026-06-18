@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, artifact_key, owner_prefix
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 

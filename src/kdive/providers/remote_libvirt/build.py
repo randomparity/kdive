@@ -46,7 +46,7 @@ from kdive.build_configs.defaults import (
 )
 from kdive.components.references import ComponentRef
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport

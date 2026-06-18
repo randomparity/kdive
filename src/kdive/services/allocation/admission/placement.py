@@ -10,8 +10,8 @@ from psycopg.rows import dict_row
 
 import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.repositories import RESOURCES
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.pcie import MatchOutcome
-from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import ResourceStatus
 from kdive.services.allocation.admission.affinity import project_may_place
 

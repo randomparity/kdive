@@ -14,8 +14,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.image_format import ImageFormat
-from kdive.domain.images import ImageVisibility
+from kdive.domain.catalog.image_format import ImageFormat
+from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.jobs import Job, JobAuthorizing, JobKind, PowerAction
 
 

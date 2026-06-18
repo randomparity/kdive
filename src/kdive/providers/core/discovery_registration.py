@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from kdive.domain.discovery import DiscoverySource
-from kdive.domain.resources import ResourceKind
+from kdive.domain.catalog.discovery import DiscoverySource
+from kdive.domain.catalog.resources import ResourceKind
 
 
 @dataclass(frozen=True, slots=True)

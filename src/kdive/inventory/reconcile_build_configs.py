@@ -27,7 +27,7 @@ from kdive.build_configs.catalog import read_build_config_provenance, upsert_con
 from kdive.build_configs.rules import exceeds_build_config_cap
 from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import BuildConfigDecl, InventoryDoc
 from kdive.inventory.reconcile import ReconcileDiff, ReconcileRecord

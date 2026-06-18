@@ -37,11 +37,11 @@ from psycopg.types.json import Jsonb
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
+from kdive.domain.catalog.resources import Resource
 from kdive.domain.cost import Selector
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Allocation
 from kdive.domain.pcie import PCIeClaim, parse_match_spec
-from kdive.domain.resources import Resource
 from kdive.domain.state import AllocationState, ensure_transition
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext

@@ -35,8 +35,8 @@ from fastmcp import FastMCP
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.catalog.resources import ManagedBy, ResourceKind
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.resources import ManagedBy, ResourceKind
 from kdive.domain.state import AllocationState
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops.resources import host_ops as resources_host_ops

@@ -8,7 +8,7 @@ from uuid import UUID
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.log import bind_context
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role

@@ -40,9 +40,9 @@ from kdive.config.core_settings import (
     IMAGE_PRIVATE_MAX_COUNT,
 )
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.domain.catalog.image_format import ImageFormat
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.image_format import ImageFormat
-from kdive.domain.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.images.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
 from kdive.security import audit
 from kdive.services.images.publish import (

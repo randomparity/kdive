@@ -20,9 +20,9 @@ from kdive.components.references import (
     LocalComponentRef,
 )
 from kdive.db.build_hosts import BuildHostKind
-from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.resources import ResourceKind
+from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition

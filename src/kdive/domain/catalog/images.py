@@ -9,8 +9,8 @@ from typing import Any
 from pydantic import Field
 
 from kdive.domain._records import DomainModel
-from kdive.domain.image_format import ImageFormat
-from kdive.domain.ownership import ManagedBy
+from kdive.domain.catalog.image_format import ImageFormat
+from kdive.domain.catalog.ownership import ManagedBy
 
 
 class ImageVisibility(StrEnum):

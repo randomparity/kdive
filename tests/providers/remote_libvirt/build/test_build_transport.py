@@ -25,7 +25,7 @@ from kdive.artifacts.storage import (
     StoredArtifact,
 )
 from kdive.build_artifacts.validation import parse_gnu_build_id
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt import build as build_module

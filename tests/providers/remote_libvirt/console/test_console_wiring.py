@@ -8,7 +8,7 @@ from uuid import uuid4
 import psycopg
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
 
 

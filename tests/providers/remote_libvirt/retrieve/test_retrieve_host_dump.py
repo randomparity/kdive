@@ -28,8 +28,8 @@ from kdive.artifacts.storage import (
     PresignPutRequest,
     StoredArtifact,
 )
-from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve

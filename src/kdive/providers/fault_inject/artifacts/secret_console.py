@@ -16,7 +16,7 @@ from typing import NamedTuple, Protocol
 from uuid import UUID
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env

@@ -37,6 +37,8 @@ from psycopg import AsyncConnection
 import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.cost import (
     Selector,
     cost,
@@ -50,8 +52,6 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lease import resolve_window_hours
 from kdive.domain.lifecycle import Allocation
 from kdive.domain.pcie import MatchOutcome, PCIeClaim, PCIeDescriptor
-from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
-from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting

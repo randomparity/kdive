@@ -14,9 +14,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
 from kdive.domain.accounting import Budget, Quota
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
-from kdive.domain.resources import ResourceKind
 from kdive.domain.state import AllocationState, IllegalTransition
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse

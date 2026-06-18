@@ -15,7 +15,7 @@ from kdive.build_configs import defaults as build_defaults
 from kdive.build_configs.catalog import BuildConfigEntry
 from kdive.build_configs.defaults import DEFAULT_CONFIG_REF, build_config_fetch_from_env
 from kdive.components.references import CatalogComponentRef
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.shared.build_host.common import (

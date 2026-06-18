@@ -27,13 +27,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.resource_capabilities import (
+from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
-from kdive.domain.resources import ManagedBy, ResourceKind
+from kdive.domain.catalog.resources import ManagedBy, ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.state import ResourceStatus
 from kdive.inventory.reconcile import resource_identity_lock
 from kdive.mcp.responses import ToolResponse

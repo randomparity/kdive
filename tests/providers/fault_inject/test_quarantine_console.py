@@ -12,7 +12,7 @@ from kdive.artifacts.storage import (
     FetchedArtifact,
     StoredArtifact,
 )
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.providers.fault_inject.artifacts.quarantine_console import (
     FaultInjectQuarantineConsole,
     QuarantineHealOutput,

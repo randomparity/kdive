@@ -41,12 +41,12 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.domain.resource_capabilities import (
+from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
-from kdive.domain.resources import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
 from kdive.inventory.reconcile import (

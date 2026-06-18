@@ -8,8 +8,8 @@ from uuid import UUID
 import pytest
 
 from kdive.artifacts.storage import StoredArtifact
-from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
 from kdive.providers.remote_libvirt.retrieve import postmortem

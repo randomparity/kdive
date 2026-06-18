@@ -19,8 +19,8 @@ from typing import Protocol
 from uuid import UUID
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import (
     CaptureOutput,

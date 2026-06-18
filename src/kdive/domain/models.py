@@ -2,11 +2,11 @@
 
 The bounded domain modules own their records and enums:
 
-* :mod:`kdive.domain.resources` owns resources.
+* :mod:`kdive.domain.catalog.resources` owns resources.
 * :mod:`kdive.domain.lifecycle` owns allocations, systems, runs, and investigations.
 * :mod:`kdive.domain.jobs` owns jobs and power/job vocabulary.
-* :mod:`kdive.domain.accounting`, :mod:`kdive.domain.images`, and
-  :mod:`kdive.domain.artifacts` own their respective catalog records.
+* :mod:`kdive.domain.accounting`, :mod:`kdive.domain.catalog.images`, and
+  :mod:`kdive.domain.catalog.artifacts` own their respective catalog records.
 
 This module remains as the legacy aggregate import surface for repository code and tests while
 call sites move to the bounded modules.
@@ -21,11 +21,14 @@ from kdive.domain.accounting import CostClassCoefficient as CostClassCoefficient
 from kdive.domain.accounting import LedgerEntry as LedgerEntry
 from kdive.domain.accounting import LedgerEventType as LedgerEventType
 from kdive.domain.accounting import Quota as Quota
-from kdive.domain.artifacts import Artifact as Artifact
-from kdive.domain.artifacts import Sensitivity as Sensitivity
-from kdive.domain.images import ImageCatalogEntry as ImageCatalogEntry
-from kdive.domain.images import ImageState as ImageState
-from kdive.domain.images import ImageVisibility as ImageVisibility
+from kdive.domain.catalog.artifacts import Artifact as Artifact
+from kdive.domain.catalog.artifacts import Sensitivity as Sensitivity
+from kdive.domain.catalog.images import ImageCatalogEntry as ImageCatalogEntry
+from kdive.domain.catalog.images import ImageState as ImageState
+from kdive.domain.catalog.images import ImageVisibility as ImageVisibility
+from kdive.domain.catalog.resources import ManagedBy as ManagedBy
+from kdive.domain.catalog.resources import Resource as Resource
+from kdive.domain.catalog.resources import ResourceKind as ResourceKind
 from kdive.domain.jobs import DESTRUCTIVE_JOB_KINDS as DESTRUCTIVE_JOB_KINDS
 from kdive.domain.jobs import DestructiveJobKind as DestructiveJobKind
 from kdive.domain.jobs import Job as Job
@@ -42,9 +45,6 @@ from kdive.domain.lifecycle import Run as Run
 from kdive.domain.lifecycle import System as System
 from kdive.domain.lifecycle import SystemShape as SystemShape
 from kdive.domain.pcie import PCIeClaim as PCIeClaim
-from kdive.domain.resources import ManagedBy as ManagedBy
-from kdive.domain.resources import Resource as Resource
-from kdive.domain.resources import ResourceKind as ResourceKind
 
 __all__ = [
     "DESTRUCTIVE_JOB_KINDS",

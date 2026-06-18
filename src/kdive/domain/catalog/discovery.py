@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, TypedDict
 
-from kdive.domain.resources import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.state import ResourceStatus
 
 

@@ -33,8 +33,8 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.config.core_settings import IMAGE_PRIVATE_LIFETIME_MAX
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.state import SystemState
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.responses import ToolResponse

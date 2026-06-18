@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 

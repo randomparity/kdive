@@ -27,7 +27,7 @@ from kdive.build_configs.catalog import get_build_config, upsert_operator_build_
 from kdive.build_configs.rules import exceeds_build_config_cap, validate_build_config_name
 from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.artifacts import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context

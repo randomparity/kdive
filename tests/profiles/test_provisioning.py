@@ -9,9 +9,9 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.jobs import JobKind
-from kdive.domain.resources import ResourceKind
 from kdive.domain.sizing import AllocationSizing
 from kdive.profiles.provider_policy import (
     capture_method,
