@@ -24,6 +24,7 @@ from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
     parse_literal_terms,
@@ -109,11 +110,11 @@ async def _authorized_redacted_artifact(
             await cur.execute(_GET_SQL, (uid, Sensitivity.REDACTED.value))
             row = await cur.fetchone()
             if row is None:
-                return _config_error(artifact_id)
+                return _not_found(artifact_id)
             await cur.execute(_PROJECT_SQL, (row["owner_id"],))
             owner = await cur.fetchone()
         if owner is None or owner["project"] not in ctx.projects:
-            return _config_error(artifact_id)
+            return _not_found(artifact_id)
         require_role(ctx, owner["project"], Role.VIEWER)
         return _AuthorizedArtifact(key=str(row["object_key"]))
 

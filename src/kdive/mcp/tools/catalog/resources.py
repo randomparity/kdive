@@ -28,6 +28,7 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -164,7 +165,7 @@ async def describe_resource(
         async with pool.connection() as conn:
             resource = await RESOURCES.get(conn, uid)
             if resource is None or not resource_visible_to_projects(resource, viewer_projects):
-                return resource_config_error(resource_id)
+                return _not_found(resource_id)
             staged_images: list[tuple[str, str]] = []
             if resource.kind is ResourceKind.REMOTE_LIBVIRT:
                 staged_images = await _staged_remote_images(conn, ctx)

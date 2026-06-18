@@ -213,15 +213,15 @@ def test_describe_hides_resource_outside_project_affinity(migrated_url: str) -> 
 
     resp = asyncio.run(_run())
     assert resp.status == "error"
-    assert resp.error_category == "configuration_error"
+    assert resp.error_category == "not_found"
 
 
-def test_describe_unknown_is_error(migrated_url: str) -> None:
+def test_describe_unknown_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await catalog_resources_tools.describe_resource(pool, CTX, str(uuid4()))
         assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
+        assert resp.error_category == "not_found"
 
     asyncio.run(_run())
 
