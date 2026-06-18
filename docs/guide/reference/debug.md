@@ -34,6 +34,16 @@ Drive a live/attach DebugSession to detached; close its transport. Requires oper
 |---|---|---|---|
 | `session_id` | `string` | yes | The DebugSession to detach and close. |
 
+## `debug.get_session`
+
+`implemented` · `read-only`
+
+Return one visible debug session for recovery. Requires viewer.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | `string` | yes | The DebugSession to inspect. |
+
 ## `debug.interrupt`
 
 `partial`
@@ -53,6 +63,20 @@ List all breakpoints on a live DebugSession. Requires operator.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `session_id` | `string` | yes | The live DebugSession whose breakpoints to list. |
+
+## `debug.list_sessions`
+
+`implemented` · `read-only`
+
+List the caller's debug sessions, filterable by run/system/project/state. Viewer.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `limit` | `integer` | no | Maximum rows returned (capped at 200). |
+| `project` | `any` | no | Only sessions in this project (within your membership). |
+| `run_id` | `any` | no | Only sessions for this Run id. |
+| `state` | `any` | no | Only sessions in this lifecycle state. |
+| `system_id` | `any` | no | Only sessions on this System id. |
 
 ## `debug.read_memory`
 

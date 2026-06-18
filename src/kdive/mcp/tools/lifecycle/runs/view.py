@@ -11,6 +11,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools.debug.sessions_read import active_session_ids_for_run
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -43,9 +44,15 @@ async def get_run(
                 if run.state is RunState.FAILED and run.failing_job_id is not None
                 else None
             )
+            active_sessions = await active_session_ids_for_run(conn, run.id)
         required = (
             system_required_cmdline(_install_method_for(system, runtime.profile_policy))
             if system is not None and runtime is not None
             else None
         )
-        return envelope_for_run(run, required_cmdline=required, failing_job=failing_job)
+        return envelope_for_run(
+            run,
+            required_cmdline=required,
+            failing_job=failing_job,
+            active_debug_session_ids=active_sessions,
+        )
