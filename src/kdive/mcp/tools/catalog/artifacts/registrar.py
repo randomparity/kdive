@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -17,6 +18,24 @@ from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
     expected_uploads as _expected_uploads,
 )
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.serialization import JsonValue
+
+
+def _declaration_schema_extra(examples: Sequence[JsonValue]) -> dict[str, object]:
+    """Advertise the upload-declaration item schema + ``examples`` (ADR-0173).
+
+    Merged into the ``artifacts`` array parameter's advertised JSON Schema so a black-box
+    client can discover the declaration shape. Returns a fresh dict so pydantic/FastMCP
+    never mutates the shared module constants. Advertisement only: the runtime parameter
+    stays a permissive ``Mapping`` (``ArtifactDeclaration``), so a malformed declaration
+    still reaches the ADR-0166 self-correcting validators rather than a boundary error. The
+    item *shape* is shared across both upload tools; ``examples`` carry each tool's
+    accepted artifact names.
+    """
+    return {
+        "items": artifact_uploads.UPLOAD_DECLARATION_ITEM_SCHEMA,
+        "examples": examples,
+    }
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
@@ -33,7 +52,19 @@ def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="artifacts.list",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Lists redacted artifacts a System produced; those rows only exist after "
+                "a live build/boot/capture path runs, exercised under the gated live "
+                "markers."
+            ),
+            promotion=(
+                "A non-gated test asserts the listing against artifacts a real run produced, "
+                "or a recorded live_stack run does."
+            ),
+        ),
     )
     async def artifacts_list(
         system_id: Annotated[
@@ -48,7 +79,18 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="artifacts.get",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Fetches a redacted artifact's bytes; the artifact only exists after a live "
+                "build/boot/capture path runs, exercised under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test fetches inline + presigned content for an artifact a real "
+                "run produced, or a recorded live_stack run does."
+            ),
+        ),
     )
     async def artifacts_get(
         artifact_id: Annotated[
@@ -72,7 +114,18 @@ def _register_artifacts_search_text(app: FastMCP, pool: AsyncConnectionPool) -> 
     @app.tool(
         name="artifacts.search_text",
         annotations=_docmeta.read_only(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Searches a redacted artifact's text; the artifact only exists after a live "
+                "build/boot/capture path runs, exercised under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test searches an artifact a real run produced, or a recorded "
+                "live_stack run does."
+            ),
+        ),
     )
     async def artifacts_search_text(
         artifact_id: Annotated[str, Field(description="The redacted System artifact id.")],
@@ -110,7 +163,12 @@ def _register_artifacts_create_run_upload(
         run_id: Annotated[str, Field(description="The external-build Run id.")],
         artifacts: Annotated[
             list[artifact_uploads.ArtifactDeclaration],
-            Field(description="Declared build artifacts: [{name, sha256 (base64), size_bytes}]."),
+            Field(
+                description="Declared build artifacts: [{name, sha256 (base64), size_bytes}].",
+                json_schema_extra=_declaration_schema_extra(
+                    artifact_uploads.RUN_DECLARATION_EXAMPLES
+                ),
+            ),
         ],
     ) -> ToolResponse:
         """Mint presigned PUTs for an external Run's build artifacts. Requires operator."""
@@ -135,7 +193,12 @@ def _register_artifacts_create_system_upload(
         system_id: Annotated[str, Field(description="The DEFINED System id.")],
         artifacts: Annotated[
             list[artifact_uploads.ArtifactDeclaration],
-            Field(description="Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]."),
+            Field(
+                description="Declared rootfs artifact: [{name, sha256 (base64), size_bytes}].",
+                json_schema_extra=_declaration_schema_extra(
+                    artifact_uploads.SYSTEM_DECLARATION_EXAMPLES
+                ),
+            ),
         ],
     ) -> ToolResponse:
         """Mint a presigned PUT for a DEFINED System's rootfs. Requires operator."""

@@ -167,6 +167,17 @@ class ParamDoc:
     required: bool
     description: str
     detail: tuple[str, ...] = ()
+    examples: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class MaturityDetail:
+    """Why a `partial` tool is not yet `implemented` (ADR-0175)."""
+
+    reason: str
+    detail: str
+    promotion: str
+    providers: str | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +189,46 @@ class ToolDoc:
     read_only: bool
     destructive: bool
     params: tuple[ParamDoc, ...] = ()
+    maturity_detail: MaturityDetail | None = None
+
+
+_VALID_MATURITY_REASONS = {
+    "provider_support",
+    "live_dependency",
+    "unproven_worker_path",
+    "operator_gate",
+    "degraded_stub",
+}
+
+
+def _maturity_detail(name: str, maturity: str, meta: dict[str, Any]) -> MaturityDetail | None:
+    """Validate and lift the `maturity_detail` off ``meta`` (ADR-0175).
+
+    A ``partial`` tool must carry a well-formed detail; a non-``partial`` tool must
+    carry none. The generator raises here so ``just docs-check`` fails independently
+    of the test suite.
+    """
+    raw = meta.get("maturity_detail")
+    if maturity != "partial":
+        if raw is not None:
+            raise ValueError(f"{name}: non-partial tool carries a maturity_detail")
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{name}: partial tool has no maturity_detail")
+    reason = raw.get("reason")
+    if reason not in _VALID_MATURITY_REASONS:
+        raise ValueError(f"{name}: invalid maturity reason {reason!r}")
+    detail = (raw.get("detail") or "").strip()
+    promotion = (raw.get("promotion") or "").strip()
+    if not detail:
+        raise ValueError(f"{name}: maturity_detail has no detail")
+    if not promotion:
+        raise ValueError(f"{name}: maturity_detail has no promotion")
+    providers = raw.get("providers")
+    providers = providers.strip() if isinstance(providers, str) else None
+    return MaturityDetail(
+        reason=reason, detail=detail, promotion=promotion, providers=providers or None
+    )
 
 
 def _params(schema: dict[str, Any]) -> tuple[ParamDoc, ...]:
@@ -186,6 +237,7 @@ def _params(schema: dict[str, Any]) -> tuple[ParamDoc, ...]:
     out: list[ParamDoc] = []
     for name, spec in props.items():
         detail = render_param_detail(spec) if _is_structured(spec) else ()
+        examples = spec.get("examples")
         out.append(
             ParamDoc(
                 name=name,
@@ -193,6 +245,7 @@ def _params(schema: dict[str, Any]) -> tuple[ParamDoc, ...]:
                 required=name in required,
                 description=(spec.get("description") or "").strip(),
                 detail=detail,
+                examples=tuple(examples) if isinstance(examples, list) else (),
             )
         )
     return tuple(out)
@@ -204,9 +257,11 @@ def tool_docs(tools: list[Any]) -> list[ToolDoc]:
     for t in tools:
         if not (t.description or "").strip():
             raise ValueError(f"{t.name}: tool has no description")
-        maturity = (t.meta or {}).get("maturity")
+        meta = t.meta or {}
+        maturity = meta.get("maturity")
         if maturity not in {"implemented", "partial", "planned"}:
             raise ValueError(f"{t.name}: missing/invalid maturity {maturity!r}")
+        maturity_detail = _maturity_detail(t.name, maturity, meta)
         params = _params(t.parameters)
         for p in params:
             if not p.description:
@@ -225,6 +280,7 @@ def tool_docs(tools: list[Any]) -> list[ToolDoc]:
                 read_only=bool(ann and ann.readOnlyHint),
                 destructive=bool(ann and ann.destructiveHint),
                 params=params,
+                maturity_detail=maturity_detail,
             )
         )
     return docs
@@ -294,10 +350,43 @@ def _detail_lines(params: tuple[ParamDoc, ...]) -> list[str]:
     return lines
 
 
+def _maturity_block(d: ToolDoc) -> list[str]:
+    """The ADR-0175 maturity explanation, rendered under the badge for partial tools."""
+    md = d.maturity_detail
+    if md is None:
+        return []
+    lines = [
+        f"**Maturity:** {md.reason} — {md.detail}",
+        "",
+        f"**Promotion:** {md.promotion}",
+        "",
+    ]
+    if md.providers:
+        lines += [f"**Provider support:** {md.providers}", ""]
+    return lines
+
+
+def _example_lines(params: tuple[ParamDoc, ...]) -> list[str]:
+    """Render an Examples block for any parameter carrying schema ``examples``.
+
+    The block sits below the parameter table (never inside a table cell), so a
+    multi-line JSON example cannot break the Markdown table the way a piped or
+    newline-bearing description would.
+    """
+    lines: list[str] = []
+    for p in sorted(params, key=lambda x: x.name):
+        if not p.examples:
+            continue
+        lines += [f"Examples for `{p.name}`:", ""]
+        for example in p.examples:
+            lines += ["```json", json.dumps(example, indent=2), "```", ""]
+    return lines
+
+
 def render_namespace(namespace: str, docs: list[ToolDoc]) -> str:
     lines = [_HEADER, "", f"# `{namespace}` tools", ""]
     for d in sorted(docs, key=lambda x: x.name):
-        lines += [f"## `{d.name}`", "", _badges(d), "", d.description, ""]
+        lines += [f"## `{d.name}`", "", _badges(d), "", *_maturity_block(d), d.description, ""]
         if d.params:
             lines += ["| Parameter | Type | Required | Description |", "|---|---|---|---|"]
             for p in sorted(d.params, key=lambda x: x.name):
@@ -305,6 +394,7 @@ def render_namespace(namespace: str, docs: list[ToolDoc]) -> str:
                 lines.append(f"| `{p.name}` | {p.type} | {req} | {p.description} |")
             lines.append("")
             lines += _detail_lines(d.params)
+            lines += _example_lines(d.params)
         lines += _tool_extras(d.name)
     return "\n".join(lines).rstrip() + "\n"
 

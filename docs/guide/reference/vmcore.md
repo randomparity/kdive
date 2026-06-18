@@ -6,6 +6,12 @@
 
 `partial`
 
+**Maturity:** provider_support — Captures a vmcore by a core-producing method (HOST_DUMP/KDUMP) the bound provider must advertise; capture runs only under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run captures a real vmcore by each advertised core-producing method per provider.
+
+**Provider support:** local-libvirt: HOST_DUMP; remote-libvirt: HOST_DUMP/KDUMP; fault-inject: simulated HOST_DUMP.
+
 Capture and persist a vmcore.
 
 | Parameter | Type | Required | Description |
@@ -16,6 +22,10 @@ Capture and persist a vmcore.
 ## `vmcore.list`
 
 `partial` · `read-only`
+
+**Maturity:** live_dependency — Lists a System's redacted vmcore artifacts; those rows only exist after a live capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test or recorded live_stack run lists vmcore artifacts a real capture produced.
 
 List vmcore artifacts for one system.
 

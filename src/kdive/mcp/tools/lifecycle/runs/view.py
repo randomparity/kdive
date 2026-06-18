@@ -9,8 +9,9 @@ from kdive.domain.capacity.state import RunState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
-from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools.debug.sessions_read import active_session_ids_for_run
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -29,7 +30,7 @@ async def get_run(
     """Return a Run the caller's project owns, advertising the boot's required cmdline."""
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)
@@ -43,9 +44,15 @@ async def get_run(
                 if run.state is RunState.FAILED and run.failing_job_id is not None
                 else None
             )
+            active_sessions = await active_session_ids_for_run(conn, run.id)
         required = (
             system_required_cmdline(_install_method_for(system, runtime.profile_policy))
             if system is not None and runtime is not None
             else None
         )
-        return envelope_for_run(run, required_cmdline=required, failing_job=failing_job)
+        return envelope_for_run(
+            run,
+            required_cmdline=required,
+            failing_job=failing_job,
+            active_debug_session_ids=active_sessions,
+        )

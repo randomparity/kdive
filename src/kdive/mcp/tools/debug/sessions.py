@@ -10,9 +10,11 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.domain.capacity.state import DebugSessionState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools.debug.ops import DebugRuntimeResolver, _register_debug_ops
 from kdive.mcp.tools.debug.sessions_lifecycle import (
     _GDBSTUB,
@@ -26,6 +28,9 @@ from kdive.mcp.tools.debug.sessions_lifecycle import (
 from kdive.mcp.tools.debug.sessions_lifecycle import (
     DebugSessionHandlers as _LifecycleDebugSessionHandlers,
 )
+from kdive.mcp.tools.debug.sessions_read import SessionsListRequest as _SessionsListRequest
+from kdive.mcp.tools.debug.sessions_read import get_session as _get_session
+from kdive.mcp.tools.debug.sessions_read import list_sessions as _list_sessions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
@@ -92,7 +97,19 @@ def register(
     @app.tool(
         name="debug.start_session",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Opens a single-attach gdbstub/drgn-live transport to a booted Run; requires "
+                "a real booted kernel, reached only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run attaches a debug session to a "
+                "real booted Run."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def debug_start_session(
         run_id: Annotated[str, Field(description="The booted Run to attach a debug session to.")],
@@ -109,12 +126,67 @@ def register(
     @app.tool(
         name="debug.end_session",
         annotations=_docmeta.mutating(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Detaches and closes a live DebugSession's transport; requires a real attached "
+                "session, reached only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run ends a debug session attached to "
+                "a real booted Run."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def debug_end_session(
         session_id: Annotated[str, Field(description="The DebugSession to detach and close.")],
     ) -> ToolResponse:
         """Drive a live/attach DebugSession to detached; close its transport. Requires operator."""
         return await handlers.end_session(pool, current_context(), session_id)
+
+    @app.tool(
+        name="debug.get_session",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def debug_get_session(
+        session_id: Annotated[str, Field(description="The DebugSession to inspect.")],
+    ) -> ToolResponse:
+        """Return one visible debug session for recovery. Requires viewer."""
+        return await _get_session(pool, current_context(), session_id)
+
+    @app.tool(
+        name="debug.list_sessions",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def debug_list_sessions(
+        run_id: Annotated[str | None, Field(description="Only sessions for this Run id.")] = None,
+        system_id: Annotated[
+            str | None, Field(description="Only sessions on this System id.")
+        ] = None,
+        project: Annotated[
+            str | None,
+            Field(description="Only sessions in this project (within your membership)."),
+        ] = None,
+        state: Annotated[
+            DebugSessionState | None,
+            Field(description="Only sessions in this lifecycle state."),
+        ] = None,
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = _DEFAULT_LIST_LIMIT,
+    ) -> ToolResponse:
+        """List the caller's debug sessions, filterable by run/system/project/state. Viewer."""
+        request = _SessionsListRequest(
+            run_id=run_id,
+            system_id=system_id,
+            project=project,
+            state=state,
+            limit=limit,
+        )
+        return await _list_sessions(pool, current_context(), request)
 
     _register_debug_ops(app, pool, runtime)

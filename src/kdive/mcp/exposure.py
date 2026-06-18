@@ -104,6 +104,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "control.force_crash": _ADMIN,
     # debug
     "debug.list_breakpoints": _VIEWER,
+    "debug.get_session": _VIEWER,
+    "debug.list_sessions": _VIEWER,
     "debug.start_session": _OPERATOR,
     "debug.end_session": _OPERATOR,
     "debug.continue": _OPERATOR,

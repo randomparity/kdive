@@ -204,7 +204,19 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     @app.tool(
         name="control.power",
         annotations=_docmeta.destructive(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Enqueues a power job the provider runs against a started System; the "
+                "off/cycle/reset path is exercised only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run drives a power action through "
+                "to the System's observed state change."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def control_power(
         system_id: Annotated[str, Field(description="The started System to act on.")],
@@ -222,7 +234,19 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     @app.tool(
         name="control.force_crash",
         annotations=_docmeta.destructive(),
-        meta={"maturity": "partial"},
+        meta=_docmeta.maturity_meta(
+            "partial",
+            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
+            detail=(
+                "Enqueues an NMI force-crash job the provider runs against a ready System; "
+                "the crash path is exercised only under the gated live markers."
+            ),
+            promotion=(
+                "A non-gated test or recorded live_stack run drives ready->crashed and the "
+                "resulting vmcore capture."
+            ),
+            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+        ),
     )
     async def control_force_crash(
         system_id: Annotated[str, Field(description="The ready System to force-crash via NMI.")],

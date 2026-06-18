@@ -10,8 +10,49 @@ Mint presigned PUTs for an external Run's build artifacts. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `artifacts` | array<object(free-form)> | yes | Declared build artifacts: [{name, sha256 (base64), size_bytes}]. |
+| `artifacts` | array<object> | yes | Declared build artifacts: [{name, sha256 (base64), size_bytes}]. |
 | `run_id` | string | yes | The external-build Run id. |
+
+`artifacts` fields:
+
+  - `name` (`string`, required) — Accepted artifact name (see artifacts.expected_uploads).
+  - `sha256` (`string`, required) — Base64-encoded SHA-256 of the whole object.
+  - `size_bytes` (`integer`, required) — Total object size in bytes.
+  - `chunks` (`array<object>`, optional) — Optional chunked-upload parts; omit for a single PUT.
+      - `sha256` (`string`, required) — Base64-encoded SHA-256 of this chunk.
+      - `size_bytes` (`integer`, required) — This chunk's size in bytes.
+
+Examples for `artifacts`:
+
+```json
+[
+  {
+    "name": "kernel",
+    "sha256": "rL0Y20zC...base64...",
+    "size_bytes": 12582912
+  }
+]
+```
+
+```json
+[
+  {
+    "chunks": [
+      {
+        "sha256": "p1...base64...",
+        "size_bytes": 5242880
+      },
+      {
+        "sha256": "p2...base64...",
+        "size_bytes": 2097152
+      }
+    ],
+    "name": "vmlinux",
+    "sha256": "kZ8s1f9q...base64...",
+    "size_bytes": 7340032
+  }
+]
+```
 
 ## `artifacts.create_system_upload`
 
@@ -21,8 +62,49 @@ Mint a presigned PUT for a DEFINED System's rootfs. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `artifacts` | array<object(free-form)> | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. |
+| `artifacts` | array<object> | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. |
 | `system_id` | string | yes | The DEFINED System id. |
+
+`artifacts` fields:
+
+  - `name` (`string`, required) — Accepted artifact name (see artifacts.expected_uploads).
+  - `sha256` (`string`, required) — Base64-encoded SHA-256 of the whole object.
+  - `size_bytes` (`integer`, required) — Total object size in bytes.
+  - `chunks` (`array<object>`, optional) — Optional chunked-upload parts; omit for a single PUT.
+      - `sha256` (`string`, required) — Base64-encoded SHA-256 of this chunk.
+      - `size_bytes` (`integer`, required) — This chunk's size in bytes.
+
+Examples for `artifacts`:
+
+```json
+[
+  {
+    "name": "rootfs",
+    "sha256": "rL0Y20zC...base64...",
+    "size_bytes": 12582912
+  }
+]
+```
+
+```json
+[
+  {
+    "chunks": [
+      {
+        "sha256": "p1...base64...",
+        "size_bytes": 5242880
+      },
+      {
+        "sha256": "p2...base64...",
+        "size_bytes": 2097152
+      }
+    ],
+    "name": "rootfs",
+    "sha256": "kZ8s1f9q...base64...",
+    "size_bytes": 7340032
+  }
+]
+```
 
 ## `artifacts.expected_uploads`
 
@@ -33,6 +115,10 @@ Return the accepted upload-artifact names per owner-kind. Requires a token.
 ## `artifacts.get`
 
 `partial` · `read-only`
+
+**Maturity:** live_dependency — Fetches a redacted artifact's bytes; the artifact only exists after a live build/boot/capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test fetches inline + presigned content for an artifact a real run produced, or a recorded live_stack run does.
 
 Fetch one redacted artifact's content by id.
 
@@ -49,6 +135,10 @@ presigned `refs.download_uri`. Requires viewer; sensitive ids are not-found.
 
 `partial` · `read-only`
 
+**Maturity:** live_dependency — Lists redacted artifacts a System produced; those rows only exist after a live build/boot/capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test asserts the listing against artifacts a real run produced, or a recorded live_stack run does.
+
 List the redacted artifacts for a System. Requires viewer.
 
 | Parameter | Type | Required | Description |
@@ -58,6 +148,10 @@ List the redacted artifacts for a System. Requires viewer.
 ## `artifacts.search_text`
 
 `partial` · `read-only`
+
+**Maturity:** live_dependency — Searches a redacted artifact's text; the artifact only exists after a live build/boot/capture path runs, exercised under the gated live markers.
+
+**Promotion:** A non-gated test searches an artifact a real run produced, or a recorded live_stack run does.
 
 Search a redacted System artifact with bounded literal line context.
 
