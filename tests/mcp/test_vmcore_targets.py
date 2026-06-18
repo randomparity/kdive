@@ -89,8 +89,10 @@ def test_resolve_run_vmcore_target_rejects_bad_run_id(migrated_url: str) -> None
 
 
 def test_resolve_run_vmcore_target_missing_build_id_is_not_found(migrated_url: str) -> None:
-    # A run with no recorded build step has no introspectable target artifact: not_found, not a
-    # malformed-input configuration_error (ADR-0097). The malformed-run-id case stays config.
+    # A run with a captured core + debuginfo but no recorded build step surfaces the no_build
+    # precondition reason: not_found, not a malformed-input configuration_error (ADR-0097). The
+    # vmcore row is seeded so the no_vmcore check (now first, ADR-0165) passes and the no_build
+    # check is reached.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             system_id = await seed_crashed_system(pool)
@@ -112,13 +114,17 @@ def test_resolve_run_vmcore_target_missing_build_id_is_not_found(migrated_url: s
 
 
 def test_resolve_run_vmcore_target_null_debuginfo_reason(migrated_url: str) -> None:
-    # A run whose debuginfo_ref is null surfaces the no_debuginfo precondition reason (#487).
+    # A run with a captured core but a null debuginfo_ref surfaces the no_debuginfo precondition
+    # reason (#487). The vmcore row is seeded so the no_vmcore check (now first, ADR-0165) passes
+    # and the debuginfo check is reached — this guards that the reorder keeps no_debuginfo distinct
+    # for the core-present-but-unsymbolizable case.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             system_id = await seed_crashed_system(pool)
             run_id = await seed_run_on_system(
                 pool, system_id, debuginfo_ref=None, build_id="deadbeef"
             )
+            await _seed_vmcore_row(pool, system_id)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
                     await resolve_run_vmcore_target(conn, _ctx(), run_id)
@@ -129,14 +135,33 @@ def test_resolve_run_vmcore_target_null_debuginfo_reason(migrated_url: str) -> N
     asyncio.run(_run())
 
 
-def test_resolve_run_vmcore_target_no_core_reason(migrated_url: str) -> None:
-    # A built run with no captured vmcore row surfaces the no_vmcore precondition reason (#487).
+def test_resolve_run_vmcore_target_booted_no_core_reason(migrated_url: str) -> None:
+    # A built+booted run with no captured vmcore row surfaces the no_vmcore precondition reason
+    # (#487). One of the two #553 acceptance cases.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             system_id = await seed_crashed_system(pool)
             run_id = await seed_run_on_system(
                 pool, system_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef"
             )
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as exc:
+                    await resolve_run_vmcore_target(conn, _ctx(), run_id)
+
+        assert exc.value.category is ErrorCategory.NOT_FOUND
+        assert exc.value.details["reason"] == NO_VMCORE
+
+    asyncio.run(_run())
+
+
+def test_resolve_run_vmcore_target_never_booted_reports_no_vmcore(migrated_url: str) -> None:
+    # A never-booted run lacks debuginfo, build, AND a captured core at once. Triaging it through
+    # the vmcore-centric resolver reports the operative gap (no_vmcore), not the earliest-unmet
+    # build precondition (no_debuginfo). The other #553 acceptance case (ADR-0165).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(pool, system_id, debuginfo_ref=None, build_id=None)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
                     await resolve_run_vmcore_target(conn, _ctx(), run_id)
