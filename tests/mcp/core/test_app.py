@@ -276,6 +276,8 @@ def test_build_handler_registry_binds_provisioning_and_build_handlers() -> None:
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
     assert registry.get(JobKind.CAPTURE_VMCORE) is not None
+    # The diagnostics worker-vantage dispatch plane (#514) binds its check-runner handler.
+    assert registry.get(JobKind.DIAGNOSTICS_WORKER_CHECK) is not None
 
 
 def test_build_handler_registry_derives_worker_ports_from_one_composition(

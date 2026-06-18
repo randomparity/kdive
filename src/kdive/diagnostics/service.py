@@ -44,6 +44,8 @@ from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
 
 if TYPE_CHECKING:
+    from psycopg_pool import AsyncConnectionPool
+
     # Runtime-import only inside default_service_factory to avoid a cycle: worker_dispatch imports
     # WORKER_UNAVAILABLE_DETAIL from this module (ADR-0163).
     from kdive.diagnostics.worker_dispatch import WorkerCheckDispatcher
@@ -332,23 +334,23 @@ def _remote_libvirt_unavailable_worker_checks() -> list[WorkerVantageCheck]:
 
 
 def default_service_factory(
-    provider: str | None, *, with_egress: bool = False
+    provider: str | None, *, with_egress: bool = False, pool: AsyncConnectionPool | None = None
 ) -> DiagnosticsService:
     """Build the production read-only diagnostics service for ``provider``.
 
     Assembles the server-vantage ``secret_ref`` check over the configured secret refs, resolved
     against the file-ref backend under ``KDIVE_SECRETS_ROOT``. When a ``[[remote_libvirt]]``
     instance is declared (``is_remote_libvirt_configured()``), it also assembles the server-vantage
-    ``remote_libvirt_reachability`` check (ADR-0125, the qemu+tls reachability probe) and the
-    explicit unavailable-worker metadata for ``provider_tls``/``gdbstub_acl``.
+    ``remote_libvirt_reachability`` and ``remote_libvirt_base_image_staging`` checks (ADR-0125,
+    ADR-0150).
 
-    The service is built with ``worker_available=False`` and
-    ``substitution_reason=FEATURE_NOT_ENABLED``: this slice wires no worker-job dispatch, so the
-    worker-vantage checks surface as an honest ``error`` ("worker-vantage diagnostic checks ... are
-    not enabled in this deployment", ``failure_category=not_implemented``) rather than a fabricated
-    probe verdict or the worker-down ``/livez``/``/readyz`` detail — a running worker is not the
-    cause (ADR-0139, #484). The server-vantage ``secret_ref`` and ``remote_libvirt_reachability``
-    checks are unaffected by the flag and still run.
+    The worker-vantage ``provider_tls``/``gdbstub_acl`` checks run on the worker via a
+    :class:`~kdive.diagnostics.worker_dispatch.JobWorkerCheckDispatcher` when ``pool`` is supplied
+    and remote-libvirt is configured (ADR-0163): the service bounded-waits for the dispatched job
+    and merges its real three-state results, surfacing ``WORKER_UNAVAILABLE`` only when the worker
+    does not pick the job up in time. When no ``pool`` is supplied (no dispatch wired), the
+    worker-vantage checks keep the honest ``FEATURE_NOT_ENABLED`` substitution
+    (``failure_category=not_implemented``, ADR-0139) instead of a fabricated verdict.
 
     ``with_egress`` opts into the heavy mutating ``guest_egress`` probe, which provisions a
     short-lived guest on the target provider. Its production probe-guest seam needs a bootable
@@ -369,12 +371,20 @@ def default_service_factory(
         )
     checks: list[Check] = [_secret_ref_check()]
     unavailable_worker_checks: list[WorkerVantageCheck] = []
+    worker_dispatcher: WorkerCheckDispatcher | None = None
     if is_remote_libvirt_configured():
         checks.extend(_remote_libvirt_checks())
-        unavailable_worker_checks.extend(_remote_libvirt_unavailable_worker_checks())
-    # FEATURE_NOT_ENABLED makes the substituted detail say provider_tls/gdbstub_acl are unwired
-    # here, not that a worker is down. The worker-job follow-up replaces
-    # unavailable_worker_checks with concrete worker-vantage checks and drops this reason.
+        if pool is not None:
+            # Function-local import: worker_dispatch imports WORKER_UNAVAILABLE_DETAIL from this
+            # module, so a top-level import here would be a cycle (ADR-0163).
+            from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
+
+            worker_dispatcher = JobWorkerCheckDispatcher(pool)
+        else:
+            unavailable_worker_checks.extend(_remote_libvirt_unavailable_worker_checks())
+    # When a dispatcher is wired it owns the worker-vantage outcome; otherwise FEATURE_NOT_ENABLED
+    # keeps the substituted detail honest (provider_tls/gdbstub_acl are unwired here, not a worker
+    # outage) — ADR-0139.
     return DiagnosticsService(
         checks=checks,
         per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,
@@ -382,4 +392,5 @@ def default_service_factory(
         worker_available=False,
         substitution_reason=WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
         unavailable_worker_checks=unavailable_worker_checks,
+        worker_dispatcher=worker_dispatcher,
     )

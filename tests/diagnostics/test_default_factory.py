@@ -237,3 +237,40 @@ def test_multiple_instances_are_not_configured_so_no_reachability_check(
     _with_remote_instance(monkeypatch, tmp_path, instances=two)
     ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
     assert ids == {SECRET_REF_ID}
+
+
+# ---- worker-vantage dispatch wiring (ADR-0163, #514) ---------------------------------
+
+
+def test_factory_wires_dispatcher_when_pool_and_remote_configured(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from typing import cast
+
+    from psycopg_pool import AsyncConnectionPool
+
+    _with_remote_instance(monkeypatch, tmp_path)
+    service = default_service_factory(None, pool=cast(AsyncConnectionPool, object()))
+    assert service._worker_dispatcher is not None  # noqa: SLF001
+    # The dispatcher owns the worker-vantage outcome, so no static unavailable metadata is emitted.
+    assert service._unavailable_worker_checks == []  # noqa: SLF001
+
+
+def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) -> None:
+    _with_remote_instance(monkeypatch, tmp_path)
+    service = default_service_factory(None)
+    assert service._worker_dispatcher is None  # noqa: SLF001
+    unavailable_ids = {c.id for c in service._unavailable_worker_checks}  # noqa: SLF001
+    assert unavailable_ids == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
+
+
+def test_factory_no_dispatcher_when_pool_but_remote_not_configured(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from typing import cast
+
+    from psycopg_pool import AsyncConnectionPool
+
+    _no_remote_instance(monkeypatch, tmp_path)
+    service = default_service_factory(None, pool=cast(AsyncConnectionPool, object()))
+    assert service._worker_dispatcher is None  # noqa: SLF001
