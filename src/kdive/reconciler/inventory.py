@@ -51,7 +51,6 @@ _log = logging.getLogger(__name__)
 
 
 def _changes(diff: ReconcileDiff) -> int:
-    """Count the rows a reconcile pass created/updated/pruned/cordoned (steady state = 0)."""
     return len(diff.created) + len(diff.updated) + len(diff.pruned) + len(diff.cordoned)
 
 
@@ -76,13 +75,10 @@ class InventoryReconcilePass:
         self._cached_doc: InventoryDoc | None = None
 
     def reset(self) -> None:
-        """Drop the cached parse (for tests and a clean re-parse on next pass)."""
         self._cached_hash = None
         self._cached_doc = None
 
     def make_repair(self, store: ImageHeadStore) -> Callable[[AsyncConnection], Awaitable[int]]:
-        """Bind ``store`` into a loop repair fn returning the count of catalog changes."""
-
         async def _repair(conn: AsyncConnection) -> int:
             return await self.run(conn, store)
 
@@ -140,7 +136,6 @@ class InventoryReconcilePass:
         return doc
 
     def _parse(self, path: Path) -> InventoryDoc | None:
-        """Parse via the loader, logging then re-raising an :class:`InventoryError`."""
         try:
             return load_inventory_optional(path)
         except InventoryError:
