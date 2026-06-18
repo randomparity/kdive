@@ -20,6 +20,7 @@ from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     BASE_VOLUME_NOT_STAGED_FIX,
     GDBSTUB_ACL_ID,
+    LOCAL_KERNEL_SRC_ID,
     PROVIDER_TLS_ID,
     REACHABILITY_ID,
     SECRET_REF_ID,
@@ -64,8 +65,14 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 """
 
 
+# The always-on local_kernel_src check (ADR-0163) reads KDIVE_KERNEL_SRC and FAILs when it is
+# unusable, which would flip report.has_failure and add a row to every aggregated run(). The shared
+# run-fixtures point it at `root` (an existing absolute tmp dir → USABLE) so the new check passes
+# and does not pollute the has_failure expectations the existing tests assert; tests that exercise
+# the check's FAIL path set/clear KDIVE_KERNEL_SRC explicitly instead of using these helpers.
 def _set_env(monkeypatch, root: Path, **refs: str) -> None:
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     for name, value in refs.items():
         monkeypatch.setenv(name, value)
     config.load()
@@ -75,12 +82,14 @@ def _with_remote_instance(monkeypatch, root: Path, *, instances: str = _INSTANCE
     path = root / "systems.toml"
     path.write_text(f"schema_version = 2\n{_IMAGE}\n{instances}\n")
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
     config.load()
 
 
 def _no_remote_instance(monkeypatch, root: Path) -> None:
     monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(root))
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(root / "absent.toml"))
     config.load()
 
@@ -152,7 +161,7 @@ def test_factory_service_is_worker_unavailable_when_remote_configured(
 def test_factory_omits_remote_checks_when_not_configured(monkeypatch, tmp_path: Path) -> None:
     _no_remote_instance(monkeypatch, tmp_path)
     ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
-    assert ids == {SECRET_REF_ID}
+    assert ids == {SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}
 
 
 def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
@@ -236,7 +245,49 @@ def test_multiple_instances_are_not_configured_so_no_reachability_check(
     two = _INSTANCE + _INSTANCE.replace('"ub24-big"', '"second-host"')
     _with_remote_instance(monkeypatch, tmp_path, instances=two)
     ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
-    assert ids == {SECRET_REF_ID}
+    assert ids == {SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}
+
+
+# ---- local build-host warm-tree source check (ADR-0163, #532) ------------------------
+
+
+def test_factory_always_includes_local_kernel_src(monkeypatch, tmp_path: Path) -> None:
+    # The seeded worker-local LOCAL host is a DB invariant, so local_kernel_src is always
+    # assembled — remote configured or not.
+    _no_remote_instance(monkeypatch, tmp_path)
+    assert LOCAL_KERNEL_SRC_ID in {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+    _with_remote_instance(monkeypatch, tmp_path)
+    assert LOCAL_KERNEL_SRC_ID in {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+
+
+def test_local_kernel_src_fails_when_unset(monkeypatch, tmp_path: Path) -> None:
+    # The #532 headline: an unset KDIVE_KERNEL_SRC is a contract fail surfaced at preflight, so
+    # the doctor gate exits nonzero (has_failure True) rather than passing while every local
+    # warm-tree build fails. Set KDIVE_KERNEL_SRC explicitly (not via the shared helper, which
+    # makes it usable) to exercise the FAIL path.
+    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(tmp_path))
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
+    monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
+    config.load()
+    report = asyncio.run(default_service_factory(None).run())
+    by_id = {r.check_id: r for r in report.results}
+    assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.FAIL
+    assert by_id[LOCAL_KERNEL_SRC_ID].failure_category == "configuration_error"
+    assert by_id[LOCAL_KERNEL_SRC_ID].fix is not None
+    assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
+    assert report.has_failure is True
+
+
+def test_local_kernel_src_passes_when_usable(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(tmp_path))
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
+    config.load()
+    report = asyncio.run(default_service_factory(None).run())
+    by_id = {r.check_id: r for r in report.results}
+    assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.PASS
+    assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
+    assert report.has_failure is False
 
 
 # ---- worker-vantage dispatch wiring (ADR-0164, #514) ---------------------------------
