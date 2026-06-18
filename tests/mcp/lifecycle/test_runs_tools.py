@@ -388,6 +388,46 @@ def test_bind_system_with_live_run_is_conflict(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_install_unbound_run_is_not_bound(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await install_run(pool, _ctx(), run_id)
+            n_jobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "run_not_bound"
+        assert "runs.bind" in resp.suggested_next_actions
+        assert n_jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_boot_unbound_run_is_not_bound(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await boot_run(pool, _ctx(), run_id)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "run_not_bound"
+        assert "runs.bind" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_cancel_unbound_run_succeeds(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.RUNNING)
+            resp = await cancel_run(pool, _ctx(), run_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        assert resp.status == "canceled"
+        assert row is not None and row["state"] == "canceled"
+
+    asyncio.run(_run())
+
+
 def test_envelope_for_run_failed_uses_run_failure_category() -> None:
     resp = runs_common.envelope_for_run(
         _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE)
@@ -517,18 +557,21 @@ def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
     [
         (RunState.CREATED, ["runs.get", "runs.build"]),
         (RunState.RUNNING, ["runs.get", "runs.build"]),
-        (RunState.SUCCEEDED, ["runs.get"]),
+        (RunState.SUCCEEDED, ["runs.get", "runs.install"]),
         (RunState.CANCELED, ["runs.get"]),
     ],
 )
-def test_envelope_for_run_suggests_build_only_before_terminal_states(
+def test_envelope_for_run_suggests_next_action_per_state(
     state: RunState, actions: list[str]
 ) -> None:
+    # `_run_model` is a bound Run, so SUCCEEDED advances to install (unbound would be bind).
     resp = runs_common.envelope_for_run(_run_model(state))
 
     assert resp.status == state.value
     assert resp.suggested_next_actions == actions
-    assert resp.data == {"project": "proj"}
+    assert resp.data["project"] == "proj"
+    assert resp.data["target_kind"] == "local-libvirt"
+    assert "system_id" in resp.data
 
 
 def test_run_job_envelope_adds_run_id_to_standard_job_envelope() -> None:
@@ -541,6 +584,31 @@ def test_run_job_envelope_adds_run_id_to_standard_job_envelope() -> None:
     assert resp.status == "queued"
     assert resp.suggested_next_actions == ["jobs.wait", "jobs.cancel"]
     assert resp.data == {"kind": "build", "run_id": str(run_id)}
+
+
+def test_get_unbound_succeeded_run_points_to_bind(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.status == "succeeded"
+        assert resp.suggested_next_actions == ["runs.get", "runs.bind"]
+        assert resp.data["system_id"] is None
+        assert resp.data["target_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
+
+
+def test_get_bound_succeeded_run_points_to_install(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.status == "succeeded"
+        assert resp.suggested_next_actions == ["runs.get", "runs.install"]
+        assert resp.data["target_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
 
 
 def test_get_created_run(migrated_url: str) -> None:

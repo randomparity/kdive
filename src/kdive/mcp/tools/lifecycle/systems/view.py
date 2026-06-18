@@ -39,19 +39,26 @@ class SystemsListRequest:
     limit: int = DEFAULT_LIST_LIMIT
 
 
-def system_envelope(system: System) -> ToolResponse:
-    """Render a System; ``failed`` becomes a failure envelope."""
+def system_envelope(system: System, *, resource_kind: str | None = None) -> ToolResponse:
+    """Render a System; ``failed`` becomes a failure envelope.
+
+    ``resource_kind`` (the backing Resource's kind) is included when supplied so a list caller
+    can match a ready System against a Run's ``target_kind`` for ``runs.bind`` (ADR-0169).
+    """
+    data: dict[str, str] = {"project": system.project}
+    if resource_kind is not None:
+        data["resource_kind"] = resource_kind
     if system.state is SystemState.FAILED:
         return ToolResponse.failure(
             str(system.id),
             ErrorCategory.INFRASTRUCTURE_FAILURE,
-            data={"current_status": system.state.value},
+            data={"current_status": system.state.value, **data},
         )
     return ToolResponse.success(
         str(system.id),
         system.state.value,
         suggested_next_actions=["systems.get", "systems.teardown"],
-        data={"project": system.project},
+        data=data,
     )
 
 
@@ -169,20 +176,28 @@ async def list_systems(
         if not viewer_projects:
             return _systems_collection([])
         query = sql.SQL(
-            "SELECT s.* FROM systems s JOIN allocations a ON a.id = s.allocation_id "
+            "SELECT s.*, r.kind AS resource_kind FROM systems s "
+            "JOIN allocations a ON a.id = s.allocation_id "
+            "JOIN resources r ON r.id = a.resource_id "
             "WHERE {where} ORDER BY s.created_at DESC, s.id LIMIT %s"
         ).format(where=sql.SQL(" AND ").join(filters.clauses))
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(query, (*filters.params, capped))
             rows = await cur.fetchall()
-        return _systems_collection([System.model_validate(row) for row in rows])
+        return _systems_collection([_split_kind(row) for row in rows])
 
 
-def _systems_collection(systems: list[System]) -> ToolResponse:
-    """Render Systems into one collection envelope."""
+def _split_kind(row: dict[str, object]) -> tuple[System, str]:
+    """Separate the joined ``resource_kind`` from the System columns before validation."""
+    resource_kind = str(row.pop("resource_kind"))
+    return System.model_validate(row), resource_kind
+
+
+def _systems_collection(systems: list[tuple[System, str]]) -> ToolResponse:
+    """Render Systems (each with its backing Resource kind) into one collection envelope."""
     return ToolResponse.collection(
         "systems",
         "ok",
-        [system_envelope(system) for system in systems],
+        [system_envelope(system, resource_kind=resource_kind) for system, resource_kind in systems],
         suggested_next_actions=["systems.get", "runs.create"],
     )

@@ -189,6 +189,22 @@ def test_lists_callers_systems(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_list_exposes_resource_kind(migrated_url: str) -> None:
+    """systems.list rows carry resource_kind so an agent can match runs.bind (ADR-0169)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, resource_id=res)
+            await _seed_system(pool, allocation_id=alloc)
+            resp = await _list_systems(pool, _ctx())
+        assert resp.status == "ok" and len(resp.items) == 1
+        assert resp.items[0].data["resource_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
+
+
 def test_filter_by_allocation_id(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
