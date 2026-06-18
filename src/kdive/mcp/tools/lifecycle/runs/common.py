@@ -73,9 +73,17 @@ def envelope_for_run(
         return _failed_envelope(run, category, failing_job)
     if run.state in (RunState.CREATED, RunState.RUNNING):
         actions = ["runs.get", "runs.build"]
-    else:
+    elif run.state is RunState.SUCCEEDED:
+        # A built but unbound Run (ADR-0169) binds a System before it can install.
+        next_step = "runs.bind" if run.system_id is None else "runs.install"
+        actions = ["runs.get", next_step]
+    else:  # CANCELED — terminal, nothing to advance.
         actions = ["runs.get"]
-    data: dict[str, JsonValue] = {"project": run.project}
+    data: dict[str, JsonValue] = {
+        "project": run.project,
+        "target_kind": run.target_kind.value,
+        "system_id": str(run.system_id) if run.system_id is not None else None,
+    }
     if required_cmdline is not None:
         data["required_cmdline"] = required_cmdline
     if run.expected_boot_failure is not None:

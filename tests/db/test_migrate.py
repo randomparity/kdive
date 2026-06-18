@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from enum import StrEnum
 from pathlib import Path
+from typing import LiteralString
 
 import psycopg
 import pytest
@@ -136,6 +137,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0039",
         "0040",
         "0041",
+        "0042",
     ]
     assert second == []
 
@@ -297,6 +299,73 @@ def test_investigations_description_length_check(pg_conn: psycopg.Connection) ->
     )
     with pytest.raises(psycopg.errors.CheckViolation):
         pg_conn.execute("UPDATE investigations SET description = repeat('x', 4097)")
+
+
+def _is_nullable(conn: psycopg.Connection, table: str, column: str) -> bool:
+    row = conn.execute(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_name = %s AND column_name = %s",
+        (table, column),
+    ).fetchone()
+    assert row is not None
+    return row[0] == "YES"
+
+
+def test_runs_system_id_nullable_and_target_kind_not_null(pg_conn: psycopg.Connection) -> None:
+    """0042 relaxes runs.system_id to nullable and adds a NOT NULL runs.target_kind."""
+    migrate.apply_migrations(pg_conn)
+    columns = _columns(pg_conn, "runs")
+    assert columns["target_kind"] == "text"
+    assert _is_nullable(pg_conn, "runs", "system_id") is True
+    assert _is_nullable(pg_conn, "runs", "target_kind") is False
+
+
+def test_0042_backfills_target_kind_from_resource_kind(
+    pg_conn: psycopg.Connection, monkeypatch
+) -> None:
+    """A Run that predates 0042 gets target_kind backfilled from its resource kind."""
+    full = migrate.discover_migrations()
+    through_0041 = [m for m in full if m.version <= "0041"]
+    monkeypatch.setattr(migrate, "discover_migrations", lambda: through_0041)
+    migrate.apply_migrations(pg_conn)
+
+    def _scalar(query: LiteralString, params: tuple = ()) -> object:
+        row = pg_conn.execute(query, params).fetchone()
+        assert row is not None
+        return row[0]
+
+    pg_conn.execute(
+        "INSERT INTO resources (kind, pool, cost_class, status, host_uri) "
+        "VALUES ('remote-libvirt', 'p', 'c', 'available', 'qemu+tls://h/system')"
+    )
+    resource_id = _scalar("SELECT id FROM resources")
+    pg_conn.execute(
+        "INSERT INTO allocations (resource_id, state, principal, project) "
+        "VALUES (%s, 'granted', 'alice', 'proj')",
+        (resource_id,),
+    )
+    allocation_id = _scalar("SELECT id FROM allocations")
+    pg_conn.execute(
+        "INSERT INTO systems (allocation_id, state, provisioning_profile, principal, project) "
+        "VALUES (%s, 'ready', '{}'::jsonb, 'alice', 'proj')",
+        (allocation_id,),
+    )
+    system_id = _scalar("SELECT id FROM systems")
+    pg_conn.execute(
+        "INSERT INTO investigations (title, state, principal, project) "
+        "VALUES ('t', 'active', 'alice', 'proj')"
+    )
+    investigation_id = _scalar("SELECT id FROM investigations")
+    pg_conn.execute(
+        "INSERT INTO runs (investigation_id, system_id, state, build_profile, principal, project) "
+        "VALUES (%s, %s, 'created', '{}'::jsonb, 'alice', 'proj')",
+        (investigation_id, system_id),
+    )
+
+    monkeypatch.setattr(migrate, "discover_migrations", lambda: full)
+    applied = migrate.apply_migrations(pg_conn)
+    assert applied == ["0042"]
+    assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
 
 def _columns(conn: psycopg.Connection, table: str) -> dict[str, str]:
@@ -608,6 +677,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0039",
         "0040",
         "0041",
+        "0042",
     ]
 
 

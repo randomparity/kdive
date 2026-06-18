@@ -36,7 +36,7 @@ async def get_run(
             if run is None or run.project not in ctx.projects:
                 return _not_found(run_id)
             require_role(ctx, run.project, Role.VIEWER)
-            system = await SYSTEMS.get(conn, run.system_id)
+            system = await SYSTEMS.get(conn, run.system_id) if run.system_id is not None else None
             runtime = await resolver.runtime_for_run(conn, run.id) if system is not None else None
             failing_job = (
                 await JOBS.get(conn, run.failing_job_id)

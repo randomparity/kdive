@@ -48,6 +48,7 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Allocation, Investigation, Run, System
 from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers import systems as systems_handlers
@@ -624,6 +625,7 @@ async def _seed_run_for_investigation(
                 project=project,
                 investigation_id=investigation_id,
                 system_id=system.id,
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.SUCCEEDED,
                 build_profile={},
             ),
@@ -767,6 +769,7 @@ def test_c4_abandoned_job_fails_run_lease_expired(migrated_url: str) -> None:
                         project="proj",
                         investigation_id=inv.id,
                         system_id=system_id,
+                        target_kind=ResourceKind.LOCAL_LIBVIRT,
                         state=RunState.RUNNING,
                         build_profile={},
                     ),

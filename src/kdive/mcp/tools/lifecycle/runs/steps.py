@@ -11,6 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -39,6 +40,8 @@ async def install_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: st
             require_role(ctx, run.project, Role.OPERATOR)
             if run.state is not RunState.SUCCEEDED:
                 return _config_error(run_id, data={"current_status": run.state.value})
+            if run.system_id is None:
+                return _not_bound(run_id)
             return await _enqueue_step(conn, ctx, run, JobKind.INSTALL, "install", "runs.install")
 
 
@@ -55,9 +58,22 @@ async def boot_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) 
             require_role(ctx, run.project, Role.OPERATOR)
             if run.state is not RunState.SUCCEEDED:
                 return _config_error(run_id, data={"current_status": run.state.value})
+            if run.system_id is None:
+                return _not_bound(run_id)
             if not await _has_succeeded_step(conn, uid, "install"):
                 return _config_error(run_id, data={"reason": "install_first"})
             return await _enqueue_step(conn, ctx, run, JobKind.BOOT, "boot", "runs.boot")
+
+
+def _not_bound(run_id: str) -> ToolResponse:
+    """Reject install/boot of an unbound Run, pointing the agent at runs.bind (ADR-0169)."""
+    return ToolResponse.failure(
+        run_id,
+        ErrorCategory.CONFIGURATION_ERROR,
+        detail="run is not bound to a system",
+        suggested_next_actions=["runs.bind"],
+        data={"reason": "run_not_bound"},
+    )
 
 
 async def _has_succeeded_step(conn: AsyncConnection, run_id: UUID, step: str) -> bool:

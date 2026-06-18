@@ -32,8 +32,9 @@ async def cancel_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str
     Under the per-Run lock, transition a ``created``/``running`` Run to ``canceled`` and
     best-effort cancel its in-flight build job. A retried cancel on an already-``canceled``
     Run is an idempotent success no-op; a ``succeeded``/``failed`` Run returns ``conflict``
-    (it is never relabeled). The cancel frees the System for a new ``runs.create`` with no
-    ``systems.teardown``.
+    (it is never relabeled). A bound Run's cancel frees the System for a new ``runs.create``
+    with no ``systems.teardown``; an unbound Run (ADR-0169, ``system_id IS NULL``) has no System
+    to free and cancel touches none, so it works the same way.
 
     Args:
         pool: The connection pool.

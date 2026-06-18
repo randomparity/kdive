@@ -124,6 +124,7 @@ def _run(investigation_id: UUID, system_id: UUID, **kw: object) -> Run:
         project="proj",
         investigation_id=investigation_id,
         system_id=system_id,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.CREATED,
         build_profile={"cfg": 1},
     )

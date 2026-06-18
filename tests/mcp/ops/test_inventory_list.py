@@ -206,6 +206,20 @@ def test_auditor_lists_all_projects_and_audits(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_system_rows_expose_resource_kind(migrated_url: str) -> None:
+    """inventory.list system rows carry resource_kind so an agent can match runs.bind (ADR-0169)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            resp = await inventory_tools.list_inventory(pool, ctx)
+        kinds = {s["resource_kind"] for s in _systems(resp)}
+        assert kinds == {"local-libvirt"}
+
+    asyncio.run(_run())
+
+
 def test_admin_satisfies_auditor_gate(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

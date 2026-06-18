@@ -17,7 +17,7 @@ from kdive.domain.capacity.state import (
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.sizing import MB_PER_GB
 from kdive.domain.pcie import PCIeClaim
 from kdive.domain.profile_documents import (
@@ -104,10 +104,17 @@ class ExpectedBootFailure(DomainBase):
 
 
 class Run(DomainModel, Attribution):
-    """One build/install/boot attempt — the join of a System and an Investigation."""
+    """One build/install/boot attempt — joins an Investigation to a System (ADR-0169).
+
+    ``system_id`` is bound at create for the classic path or deferred to ``runs.bind`` for the
+    decoupled path, so it is ``None`` while a Run is unbound. ``target_kind`` is the resource
+    kind the Run committed to: it selects the builder and constrains the System a later bind may
+    attach, and is always present (the bound path derives it from the System).
+    """
 
     investigation_id: UUID
-    system_id: UUID
+    system_id: UUID | None = None
+    target_kind: ResourceKind
     state: RunState
     build_profile: SerializedBuildProfile
     expected_boot_failure: SerializedExpectedBootFailure | None = None
@@ -115,6 +122,25 @@ class Run(DomainModel, Attribution):
     debuginfo_ref: str | None = None
     failure_category: ErrorCategory | None = None
     failing_job_id: UUID | None = None
+
+    def require_system_id(self) -> UUID:
+        """Return the bound System id, or fail closed for an unbound Run (ADR-0169).
+
+        Consumers that structurally require a bound System (install, boot, and the
+        system-join runtime lookups) call this; the unbound lanes (build, create, bind)
+        never do.
+
+        Raises:
+            CategorizedError: ``configuration_error`` (``reason: run_not_bound``) when the Run
+                has no System bound yet.
+        """
+        if self.system_id is None:
+            raise CategorizedError(
+                "run is not bound to a system",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"run_id": str(self.id), "reason": "run_not_bound"},
+            )
+        return self.system_id
 
 
 class DebugSession(DomainModel, Attribution):

@@ -45,7 +45,10 @@ from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.handlers import runs_boot, runs_shared
 from kdive.jobs.handlers import runs_common as run_handler_common
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
+from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest,
@@ -108,6 +111,7 @@ def _run_model(
         project="proj",
         investigation_id=uuid4(),
         system_id=uuid4(),
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=state,
         build_profile=_profile(),
         expected_boot_failure=expected_boot_failure,
@@ -250,12 +254,221 @@ async def _seed_run(
                 project=project,
                 investigation_id=UUID(inv_id),
                 system_id=UUID(sys_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=state,
                 build_profile=_profile() if build_profile is None else build_profile,
                 failure_category=failure,
             ),
         )
     return str(run.id)
+
+
+async def _seed_unbound_run(
+    pool: AsyncConnectionPool,
+    *,
+    state: RunState = RunState.SUCCEEDED,
+    target_kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    project: str = "proj",
+) -> str:
+    """Insert an Investigation + an unbound Run (system_id IS NULL) and return the run id."""
+    inv_id = await _seed_investigation(pool, project=project)
+    async with pool.connection() as conn:
+        run = await RUNS.insert(
+            conn,
+            Run(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project=project,
+                investigation_id=UUID(inv_id),
+                system_id=None,
+                target_kind=target_kind,
+                state=state,
+                build_profile=_profile(),
+            ),
+        )
+    return str(run.id)
+
+
+async def _bind(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    run_id: str,
+    sys_id: str,
+    *,
+    reuse_requirement: RunReuseRequirementInput | None = None,
+):
+    return await bind_run(
+        pool,
+        ctx,
+        RunBindRequest(run_id=run_id, system_id=sys_id, reuse_requirement=reuse_requirement),
+    )
+
+
+def test_bind_unbound_run_succeeds(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            sys_id = await _seed_system(pool)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT system_id FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        assert resp.status == "bound"
+        assert resp.data["system_id"] == sys_id
+        assert "runs.install" in resp.suggested_next_actions
+        assert row is not None and str(row["system_id"]) == sys_id
+
+    asyncio.run(_run())
+
+
+def test_bind_kind_mismatch_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, target_kind=ResourceKind.REMOTE_LIBVIRT)
+            sys_id = await _seed_system(pool)  # local-libvirt
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT system_id FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "target_kind_mismatch"
+        assert row is not None and row["system_id"] is None
+
+    asyncio.run(_run())
+
+
+def test_bind_already_bound_run_is_conflict(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            sys_id = await _seed_system(pool)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+        assert resp.status == "error" and resp.error_category == "transport_conflict"
+        assert resp.data["reason"] == "run_already_bound"
+
+    asyncio.run(_run())
+
+
+def test_bind_terminal_run_is_stale(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.FAILED)
+            sys_id = await _seed_system(pool)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+        assert resp.status == "error" and resp.error_category == "stale_handle"
+
+    asyncio.run(_run())
+
+
+def test_bind_system_with_live_run_is_conflict(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _seed_system(pool)
+            occupant_inv = await _seed_investigation(pool)
+            async with pool.connection() as conn:
+                await RUNS.insert(
+                    conn,
+                    Run(
+                        id=uuid4(),
+                        created_at=_DT,
+                        updated_at=_DT,
+                        principal="user-1",
+                        project="proj",
+                        investigation_id=UUID(occupant_inv),
+                        system_id=UUID(sys_id),
+                        target_kind=ResourceKind.LOCAL_LIBVIRT,
+                        state=RunState.RUNNING,
+                        build_profile=_profile(),
+                    ),
+                )
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await _bind(pool, _ctx(), run_id, sys_id)
+        assert resp.status == "error" and resp.error_category == "transport_conflict"
+
+    asyncio.run(_run())
+
+
+def test_install_unbound_run_is_not_bound(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await install_run(pool, _ctx(), run_id)
+            n_jobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "run_not_bound"
+        assert "runs.bind" in resp.suggested_next_actions
+        assert n_jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_boot_unbound_run_is_not_bound(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await boot_run(pool, _ctx(), run_id)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "run_not_bound"
+        assert "runs.bind" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_cancel_unbound_run_succeeds(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.RUNNING)
+            resp = await cancel_run(pool, _ctx(), run_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        assert resp.status == "canceled"
+        assert row is not None and row["state"] == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_with_runtime_for_run_resolves_unbound_run(migrated_url: str) -> None:
+    """The runs.build / runs.complete_build admission path resolves an unbound Run (ADR-0169).
+
+    Regression: with_runtime_for_run formerly joined runs->systems->resources, so an unbound Run
+    (system_id IS NULL) was NOT_FOUND and the whole create-unbound -> build flow failed at the
+    tool boundary. The runtime is now selected from the Run's committed target_kind.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            unbound = await _seed_unbound_run(pool, state=RunState.CREATED)
+            bound = await _seed_run(pool, state=RunState.CREATED)
+            seen: list[str] = []
+
+            async def _cb(rid: str) -> ToolResponse:
+                seen.append(rid)
+                return ToolResponse.success(rid, "ok")
+
+            unbound_resp = await with_runtime_for_run(
+                pool,
+                provider_resolver(),
+                _ctx(),
+                unbound,
+                lambda _r: _cb(unbound),
+                required_role=Role.OPERATOR,
+            )
+            bound_resp = await with_runtime_for_run(
+                pool,
+                provider_resolver(),
+                _ctx(),
+                bound,
+                lambda _r: _cb(bound),
+                required_role=Role.OPERATOR,
+            )
+        assert unbound_resp.status == "ok"
+        assert bound_resp.status == "ok"
+        assert set(seen) == {unbound, bound}
+
+    asyncio.run(_run())
 
 
 def test_envelope_for_run_failed_uses_run_failure_category() -> None:
@@ -387,18 +600,21 @@ def test_envelope_for_run_expected_boot_failure_detail_is_structured() -> None:
     [
         (RunState.CREATED, ["runs.get", "runs.build"]),
         (RunState.RUNNING, ["runs.get", "runs.build"]),
-        (RunState.SUCCEEDED, ["runs.get"]),
+        (RunState.SUCCEEDED, ["runs.get", "runs.install"]),
         (RunState.CANCELED, ["runs.get"]),
     ],
 )
-def test_envelope_for_run_suggests_build_only_before_terminal_states(
+def test_envelope_for_run_suggests_next_action_per_state(
     state: RunState, actions: list[str]
 ) -> None:
+    # `_run_model` is a bound Run, so SUCCEEDED advances to install (unbound would be bind).
     resp = runs_common.envelope_for_run(_run_model(state))
 
     assert resp.status == state.value
     assert resp.suggested_next_actions == actions
-    assert resp.data == {"project": "proj"}
+    assert resp.data["project"] == "proj"
+    assert resp.data["target_kind"] == "local-libvirt"
+    assert "system_id" in resp.data
 
 
 def test_run_job_envelope_adds_run_id_to_standard_job_envelope() -> None:
@@ -411,6 +627,31 @@ def test_run_job_envelope_adds_run_id_to_standard_job_envelope() -> None:
     assert resp.status == "queued"
     assert resp.suggested_next_actions == ["jobs.wait", "jobs.cancel"]
     assert resp.data == {"kind": "build", "run_id": str(run_id)}
+
+
+def test_get_unbound_succeeded_run_points_to_bind(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_unbound_run(pool, state=RunState.SUCCEEDED)
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.status == "succeeded"
+        assert resp.suggested_next_actions == ["runs.get", "runs.bind"]
+        assert resp.data["system_id"] is None
+        assert resp.data["target_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
+
+
+def test_get_bound_succeeded_run_points_to_install(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.status == "succeeded"
+        assert resp.suggested_next_actions == ["runs.get", "runs.install"]
+        assert resp.data["target_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
 
 
 def test_get_created_run(migrated_url: str) -> None:
@@ -594,6 +835,7 @@ async def _create(
             build_profile=profile or _profile(),
             reuse_requirement=reuse_requirement,
         ),
+        resolver=provider_resolver(),
     )
 
 
@@ -628,6 +870,145 @@ def test_create_first_run_flips_investigation_active(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_create_unbound_run_succeeds(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=None,
+                    build_profile=_profile(),
+                    target_kind="local-libvirt",
+                ),
+                resolver=provider_resolver(),
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT system_id, target_kind, state FROM runs WHERE id = %s",
+                    (resp.object_id,),
+                )
+                row = await cur.fetchone()
+                await cur.execute("SELECT state FROM investigations WHERE id = %s", (inv_id,))
+                inv = await cur.fetchone()
+        assert resp.status == "created"
+        assert row is not None and row["system_id"] is None
+        assert row["target_kind"] == "local-libvirt"
+        assert resp.data["system_id"] is None
+        assert resp.data["target_kind"] == "local-libvirt"
+        assert "runs.build" in resp.suggested_next_actions
+        assert inv is not None and inv["state"] == "active"
+
+    asyncio.run(_run())
+
+
+def test_create_unbound_missing_target_kind_lists_available(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(investigation_id=inv_id, system_id=None, build_profile=_profile()),
+                resolver=provider_resolver(),
+            )
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT count(*) FROM runs")
+                count_row = await cur.fetchone()
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "target_kind_required"
+        available = resp.data["available_target_kinds"]
+        assert isinstance(available, list) and "local-libvirt" in available
+        assert count_row is not None and count_row[0] == 0
+
+    asyncio.run(_run())
+
+
+def test_create_unbound_unknown_target_kind_lists_available(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=None,
+                    build_profile=_profile(),
+                    target_kind="remote-libvirt",
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "unknown_target_kind"
+        available = resp.data["available_target_kinds"]
+        assert isinstance(available, list) and "local-libvirt" in available
+
+    asyncio.run(_run())
+
+
+def test_create_unbound_with_reuse_requirement_rejected(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=None,
+                    build_profile=_profile(),
+                    target_kind="local-libvirt",
+                    reuse_requirement=RunReuseRequirementInput(vcpus=2),
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "reuse_requires_system"
+
+    asyncio.run(_run())
+
+
+def test_create_bound_explicit_target_kind_mismatch(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await create_run(
+                pool,
+                _ctx(),
+                RunCreateRequest(
+                    investigation_id=inv_id,
+                    system_id=sys_id,
+                    build_profile=_profile(),
+                    target_kind="remote-libvirt",
+                ),
+                resolver=provider_resolver(),
+            )
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "target_kind_mismatch"
+
+    asyncio.run(_run())
+
+
+def test_create_bound_stores_derived_target_kind(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            resp = await _create(pool, _ctx(), inv_id, sys_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT target_kind FROM runs WHERE id = %s", (resp.object_id,))
+                row = await cur.fetchone()
+        assert resp.status == "created"
+        assert row is not None and row["target_kind"] == "local-libvirt"
+        assert resp.data["target_kind"] == "local-libvirt"
+
+    asyncio.run(_run())
+
+
 def test_create_rejects_empty_build_profile(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -639,6 +1020,7 @@ def test_create_rejects_empty_build_profile(migrated_url: str) -> None:
                 pool,
                 _ctx(),
                 RunCreateRequest(investigation_id=inv_id, system_id=sys_id, build_profile={}),
+                resolver=provider_resolver(),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -669,6 +1051,7 @@ def test_create_run_persists_expected_boot_failure(migrated_url: str) -> None:
                     build_profile=_profile(),
                     expected_boot_failure=expected,
                 ),
+                resolver=provider_resolver(),
             )
             assert resp.status == "created"
             assert resp.data["expected_boot_failure"] == "console_crash"
@@ -698,6 +1081,7 @@ def test_create_run_rejects_bad_expected_boot_failure(migrated_url: str) -> None
                     build_profile=_profile(),
                     expected_boot_failure={"kind": "console_crash", "pattern": ""},
                 ),
+                resolver=provider_resolver(),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -812,6 +1196,7 @@ def test_create_cross_project_join_is_config_error(migrated_url: str) -> None:
                     system_id=sys_id,
                     build_profile=_profile(),
                 ),
+                resolver=provider_resolver(),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
 
@@ -828,6 +1213,7 @@ def test_create_non_dict_build_profile_is_config_error(migrated_url: str) -> Non
                 pool,
                 _ctx(),
                 RunCreateRequest(investigation_id=inv_id, system_id=sys_id, build_profile=bad),
+                resolver=provider_resolver(),
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM runs")
@@ -2537,6 +2923,7 @@ async def _seed_succeeded_run_on_system(pool: AsyncConnectionPool, system_id: st
                 project="proj",
                 investigation_id=UUID(inv_id),
                 system_id=UUID(system_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.SUCCEEDED,
                 build_profile=copy.deepcopy(_SUCCEEDED_BUILD),
                 failure_category=None,

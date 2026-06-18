@@ -117,8 +117,10 @@ async def _fetch_systems(
         where += " AND a.resource_id = %s"
         params.append(resource_id)
     query: LiteralString = (
-        "SELECT s.id, s.allocation_id, a.resource_id, s.project, s.principal, s.state, "
-        "s.domain_name FROM systems s JOIN allocations a ON a.id = s.allocation_id "
+        "SELECT s.id, s.allocation_id, a.resource_id, r.kind AS resource_kind, s.project, "
+        "s.principal, s.state, s.domain_name FROM systems s "
+        "JOIN allocations a ON a.id = s.allocation_id "
+        "JOIN resources r ON r.id = a.resource_id "
         "WHERE true" + where + " ORDER BY s.created_at DESC, s.id DESC LIMIT %s"
     )
     params.append(_MAX_ROWS)
@@ -152,6 +154,7 @@ def _system_data(row: dict[str, object]) -> dict[str, str | None]:
         "id": str(row["id"]),
         "allocation_id": str(row["allocation_id"]),
         "resource_id": str(row["resource_id"]),
+        "resource_kind": _as_str(row["resource_kind"]),
         "project": _as_str(row["project"]),
         "principal": _as_str(row["principal"]),
         "state": _as_str(row["state"]),

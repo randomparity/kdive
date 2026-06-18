@@ -22,6 +22,7 @@ from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
 from kdive.domain.accounting import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Allocation, Investigation, Run, System
 from kdive.mcp.app import build_app
 from kdive.mcp.responses import ToolResponse
@@ -240,6 +241,7 @@ async def _seed_fault_inject_run(pool: AsyncConnectionPool) -> str:
                 project="proj",
                 investigation_id=investigation.id,
                 system_id=system.id,
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.SUCCEEDED,
                 build_profile=_RUN_BUILD_PROFILE,
             ),

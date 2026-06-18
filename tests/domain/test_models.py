@@ -19,7 +19,7 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
     Artifact,
@@ -147,6 +147,7 @@ def test_run_join_point_and_failure_category() -> None:
         **_attrib(),
         investigation_id=_ID2,
         system_id=_ID,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.FAILED,
         build_profile={"config": "defconfig"},
         failure_category=ErrorCategory.BUILD_FAILURE,
@@ -157,12 +158,43 @@ def test_run_join_point_and_failure_category() -> None:
     assert run.failing_job_id is None
 
 
+def test_run_unbound_has_no_system_and_require_raises() -> None:
+    run = Run(
+        **_base(),
+        **_attrib(),
+        investigation_id=_ID2,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
+        state=RunState.CREATED,
+        build_profile={"config": "defconfig"},
+    )
+    assert run.system_id is None
+    assert run.target_kind is ResourceKind.LOCAL_LIBVIRT
+    with pytest.raises(CategorizedError) as excinfo:
+        run.require_system_id()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "run_not_bound"
+
+
+def test_run_require_system_id_returns_bound_system() -> None:
+    run = Run(
+        **_base(),
+        **_attrib(),
+        investigation_id=_ID2,
+        system_id=_ID,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
+        state=RunState.CREATED,
+        build_profile={"config": "defconfig"},
+    )
+    assert run.require_system_id() == _ID
+
+
 def test_run_carries_failing_job_id_link() -> None:
     run = Run(
         **_base(),
         **_attrib(),
         investigation_id=_ID2,
         system_id=_ID,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.FAILED,
         build_profile={"config": "defconfig"},
         failure_category=ErrorCategory.BUILD_FAILURE,
@@ -182,6 +214,7 @@ def test_expected_boot_failure_model_and_run_field() -> None:
         **_attrib(),
         investigation_id=_ID2,
         system_id=_ID,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.CREATED,
         build_profile={"source": "server"},
         expected_boot_failure=expected.model_dump(mode="json"),
@@ -422,6 +455,7 @@ def test_run_round_trips_through_json() -> None:
         **_attrib(),
         investigation_id=_ID2,
         system_id=_ID,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
         state=RunState.RUNNING,
         build_profile={"config": "defconfig"},
     )

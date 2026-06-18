@@ -193,6 +193,7 @@ async def seed_run(
             project="proj",
             investigation_id=investigation.id,
             system_id=system_id,
+            target_kind=ResourceKind.LOCAL_LIBVIRT,
             state=run_state,
             build_profile={"cfg": 1},
         ),

@@ -2,6 +2,18 @@
 
 # `runs` tools
 
+## `runs.bind`
+
+`implemented`
+
+Attach a ready system to an unbound run before install.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `reuse_requirement` | `any` | no | Optional System reuse assertion payload with vcpus, memory_gb, disk_gb, and pcie fields. Omit to skip extra reuse matching. |
+| `run_id` | `string` | yes | The unbound Run to attach a System to. |
+| `system_id` | `string` | yes | Ready System (active Allocation) to bind. Its resource kind must equal the Run's target_kind; discover ready systems with systems.list and read each one's 'kind'. |
+
 ## `runs.boot`
 
 `partial`
@@ -49,7 +61,7 @@ Complete an externally built run.
 
 `implemented`
 
-Create a run under a system.
+Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -57,7 +69,8 @@ Create a run under a system.
 | `expected_boot_failure` | `any` | no | Optional expected boot failure, e.g. {'kind':'console_crash','pattern':'Oops'}. |
 | `investigation_id` | `string` | yes | Investigation to attach the Run to. |
 | `reuse_requirement` | `any` | no | Optional System reuse assertion payload with vcpus, memory_gb, disk_gb, and pcie fields. Omit to skip extra reuse matching. |
-| `system_id` | `string` | yes | Ready System (active Allocation) to bind. |
+| `system_id` | `any` | no | Ready System (active Allocation) to bind now. OMIT to create an unbound Run that builds against 'target_kind' and is attached to a System later via runs.bind — this avoids holding target capacity to attempt a build. |
+| `target_kind` | `any` | no | Resource kind the Run builds for (e.g. 'local-libvirt'). REQUIRED when system_id is omitted; discover valid values from a runs.create error's 'available_target_kinds'. When system_id is set it is derived from the System, and an explicit mismatched value is rejected. |
 
 ## `runs.get`
 

@@ -177,6 +177,7 @@ async def _seed_investigation(pool: AsyncConnectionPool, project: str) -> UUID:
                 project=project,
                 investigation_id=inv.id,
                 system_id=system.id,
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.CREATED,
                 build_profile={},
             ),

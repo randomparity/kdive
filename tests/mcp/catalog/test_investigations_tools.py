@@ -668,6 +668,7 @@ async def _attach_run(
 
     from kdive.db.repositories import RUNS
     from kdive.domain.capacity.state import RunState
+    from kdive.domain.catalog.resources import ResourceKind
     from kdive.domain.models import Run
     from tests.mcp._seed import seed_crashed_system
 
@@ -684,6 +685,7 @@ async def _attach_run(
                 project=project,
                 investigation_id=UUID(inv_id),
                 system_id=UUID(sid),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.RUNNING,
                 build_profile={},
             ),

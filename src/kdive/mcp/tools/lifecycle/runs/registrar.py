@@ -13,6 +13,8 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
+from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run as _cancel_run
 from kdive.mcp.tools.lifecycle.runs.complete_build import (
     CompleteBuildHandlers as _CompleteBuildHandlers,
@@ -50,7 +52,8 @@ def register(
 ) -> None:
     """Register the `runs.*` tools on ``app``, bound to ``pool``."""
     _register_runs_get(app, pool, resolver)
-    _register_runs_create(app, pool)
+    _register_runs_create(app, pool, resolver)
+    _register_runs_bind(app, pool)
     _register_runs_cancel(app, pool)
     _register_runs_build(app, pool, resolver)
     _register_runs_complete_build(app, pool, resolver)
@@ -83,7 +86,9 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 
 
-def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _register_runs_create(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="runs.create",
         annotations=_docmeta.mutating(),
@@ -91,7 +96,6 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def runs_create(
         investigation_id: Annotated[str, Field(description="Investigation to attach the Run to.")],
-        system_id: Annotated[str, Field(description="Ready System (active Allocation) to bind.")],
         build_profile: Annotated[
             ServerBuildProfile | ExternalBuildProfile,
             Field(
@@ -106,6 +110,23 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 )
             ),
         ],
+        system_id: Annotated[
+            str | None,
+            Field(
+                description="Ready System (active Allocation) to bind now. OMIT to create an "
+                "unbound Run that builds against 'target_kind' and is attached to a System "
+                "later via runs.bind — this avoids holding target capacity to attempt a build."
+            ),
+        ] = None,
+        target_kind: Annotated[
+            str | None,
+            Field(
+                description="Resource kind the Run builds for (e.g. 'local-libvirt'). REQUIRED "
+                "when system_id is omitted; discover valid values from a runs.create error's "
+                "'available_target_kinds'. When system_id is set it is derived from the System, "
+                "and an explicit mismatched value is rejected."
+            ),
+        ] = None,
         expected_boot_failure: Annotated[
             ExpectedBootFailureInput | None,
             Field(
@@ -125,15 +146,49 @@ def _register_runs_create(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = None,
     ) -> ToolResponse:
-        """Create a run under a system."""
+        """Create a run, bound to a system or unbound against a target_kind."""
         request = _RunCreateRequest(
             investigation_id=investigation_id,
             system_id=system_id,
+            target_kind=target_kind,
             build_profile=dump_build_profile(build_profile),
             expected_boot_failure=expected_boot_failure,
             reuse_requirement=reuse_requirement,
         )
-        return await _create_run(pool, current_context(), request)
+        return await _create_run(pool, current_context(), request, resolver=resolver)
+
+
+def _register_runs_bind(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.bind",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def runs_bind(
+        run_id: Annotated[str, Field(description="The unbound Run to attach a System to.")],
+        system_id: Annotated[
+            str,
+            Field(
+                description="Ready System (active Allocation) to bind. Its resource kind must "
+                "equal the Run's target_kind; discover ready systems with systems.list and read "
+                "each one's 'kind'."
+            ),
+        ],
+        reuse_requirement: Annotated[
+            _RunReuseRequirementInput | None,
+            Field(
+                description="Optional System reuse assertion payload with vcpus, memory_gb, "
+                "disk_gb, and pcie fields. Omit to skip extra reuse matching."
+            ),
+        ] = None,
+    ) -> ToolResponse:
+        """Attach a ready system to an unbound run before install."""
+        request = _RunBindRequest(
+            run_id=run_id,
+            system_id=system_id,
+            reuse_requirement=reuse_requirement,
+        )
+        return await _bind_run(pool, current_context(), request)
 
 
 def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:

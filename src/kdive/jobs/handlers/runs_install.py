@@ -43,14 +43,15 @@ async def install_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"run_id": str(run_id)},
         )
-    system = await SYSTEMS.get(conn, run.system_id)
+    system_id = run.require_system_id()
+    system = await SYSTEMS.get(conn, system_id)
     if system is None:
         raise CategorizedError(
             "install target system is gone",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"run_id": str(run_id), "system_id": str(run.system_id)},
+            details={"run_id": str(run_id), "system_id": str(system_id)},
         )
-    runtime = await resolver.runtime_for_system(conn, run.system_id)
+    runtime = await resolver.runtime_for_system(conn, system_id)
     installer = runtime.installer
     method = install_method_for(system, runtime.profile_policy)
     kernel_ref = run.kernel_ref
@@ -65,7 +66,7 @@ async def install_handler(
         await asyncio.to_thread(
             installer.install,
             InstallRequest(
-                system_id=run.system_id,
+                system_id=system_id,
                 run_id=run_id,
                 kernel_ref=kernel_ref,
                 cmdline=cmdline,
@@ -77,7 +78,7 @@ async def install_handler(
         await abandon_run_step_best_effort(conn, run_id, "install")
         raise
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
-        await complete_run_step(conn, run_id, "install", {"system_id": str(run.system_id)})
+        await complete_run_step(conn, run_id, "install", {"system_id": str(system_id)})
         await audit.record(
             conn,
             job_ctx,
