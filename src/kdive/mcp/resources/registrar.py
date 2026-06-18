@@ -73,6 +73,18 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "Cited by systems.profile_examples and remote provisioning errors."
         ),
     ),
+    DocResource(
+        uri="resource://kdive/docs/guide/response-envelope.md",
+        source="docs/guide/response-envelope.md",
+        content_file="response-envelope.md",
+        name="response-envelope",
+        title="The kdive ToolResponse envelope",
+        description=(
+            "How to read any kdive tool result: the uniform ToolResponse envelope fields and how "
+            "to interpret the intentionally-open data, items, and refs. Referenced by the "
+            "advertised tool outputSchema (ADR-0170)."
+        ),
+    ),
 )
 
 
