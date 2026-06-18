@@ -1188,7 +1188,17 @@ Expected: FAIL.
 `default_service_factory`: add `pool: AsyncConnectionPool | None = None`. When `is_remote_libvirt_configured()` and `pool is not None`, set `worker_dispatcher = JobWorkerCheckDispatcher(pool)` and do **not** populate `unavailable_worker_checks`; drop `worker_available`/`substitution_reason` for that branch (they only matter to the substitution path). Keep the existing `_remote_libvirt_checks()` server-vantage checks.
 
 `app.py`:
-- `_register_diagnostics_tools` → pass `functools.partial(default_service_factory, pool=pool)` as the factory.
+- `_register_diagnostics_tools` → bind the pool with an **explicit closure** (not `functools.partial`, which strict `ty` rejects against the parameterized `ServiceFactory` Protocol):
+
+```python
+def _register_diagnostics_tools(app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly) -> None:
+    def _service_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
+        return default_service_factory(provider, with_egress=with_egress, pool=pool)
+
+    ops_diagnostics_tools.register(app, pool, _service_factory)
+```
+
+(Match the existing `_register_diagnostics_tools` parameter list in `app.py:184`; it already receives `pool`.)
 - Add:
 
 ```python
