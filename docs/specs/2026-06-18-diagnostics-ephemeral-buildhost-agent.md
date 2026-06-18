@@ -46,8 +46,14 @@ Aggregated into **one** `CheckResult` (precedence mirrors `secret_ref`):
 | Aggregate condition | Status | failure_category | fix |
 |---|---|---|---|
 | any host `AGENT_UNREACHABLE` | `fail` | `configuration_error` | `BUILDHOST_AGENT_FIX` |
-| no `fail`, but any `HOST_UNREACHABLE`, or **no** `ephemeral_libvirt` host registered | `error` | (carried for transport/config) | — (never on error) |
+| no `fail`, but any `HOST_UNREACHABLE`, or **no** `ephemeral_libvirt` host registered | `error` | see rule below | — (never on error) |
 | every probed host `AGENT_READY` | `pass` | — | — |
+
+The single aggregate `error` result carries a **deterministic** `failure_category`: `transport_failure`
+only when **every** error cause was a transport drop (TLS/libvirt RPC); otherwise `configuration_error`
+(no hosts registered, no staged base image, a mix of causes, or any config cause present). This is a
+fixed rule, not "whichever host was last", so the category is stable for programmatic triage; the
+per-host specifics live in `detail`.
 
 The probe provisions through `EphemeralBuildVm.session(base_image_volume, run_id=…, wait_network=False)`:
 provision → `wait_for_agent` → yield transport → run one trivial command (e.g. `["true"]`) →
@@ -64,9 +70,22 @@ timeouts — per-check `>=` the builder's agent-wait bound plus margin, and an o
 covers every probed host. The hosts are probed **sequentially** inside the one check (so the
 builder footprint is one VM at a time), and the per-check timeout bounds the **whole** check, so it
 must be `>= N_hosts * (agent_wait + teardown) + margin`; the overall timeout is set to `None` (the
-per-check bound is the cap) or to the same generous value. The cheap read-only checks are
-unaffected — a larger ceiling is an upper bound, not a delay. The assembled-timeout values are an
+per-check bound is the cap) or to the same generous value. The assembled-timeout values are an
 acceptance criterion (they are invisible to the injected-probe unit tests).
+
+**Cross-check timeout coupling (intended, stated).** `DiagnosticsService` applies **one**
+`per_check_timeout` to every assembled check (`_run_within_budget` uses `min(self._timeout, remaining)`).
+So raising it for the build-host probe also raises it for the cheap checks co-assembled in the same
+run (`secret_ref`, `local_kernel_src`, and, when a remote provider is configured,
+`remote_libvirt_reachability` / `remote_libvirt_base_image_staging`). A *healthy* cheap check is
+unaffected (the ceiling is an upper bound, not a delay), but a *hung* one — e.g. a `reachability`
+probe against a black-holed remote host — is now bounded at the generous value instead of 10 s. This
+is accepted: `--with-buildhost-agent` is an explicit, rarely-run operator action that already
+provisions a builder, so a looser bound on a co-assembled hung check during that run is a reasonable
+trade for not adding per-check timeouts to the framework. The default run (no flag) keeps the tight
+10 s / 30 s bounds unchanged. The probe additionally self-bounds: each per-host
+`EphemeralBuildVm` carries its own `wait_for_agent` deadline (180 s) and teardown, so the service
+timeout is a backstop above the probe's own internal bound, not the probe's only guard.
 
 #### Cancellation and cleanup
 
