@@ -157,7 +157,7 @@ def _secret_scope(session_id: UUID) -> str:
 
 
 async def _system_for_run(conn: AsyncConnection, run: Run) -> System | None:
-    return await SYSTEMS.get(conn, run.system_id)
+    return await SYSTEMS.get(conn, run.require_system_id())
 
 
 async def _succeeded_boot_result(conn: AsyncConnection, run_id: UUID) -> dict[str, Any] | None:

@@ -195,8 +195,9 @@ async def _run_boot_and_capture_outcome(
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
 ) -> dict[str, Any]:
+    system_id = run.require_system_id()
     try:
-        await asyncio.to_thread(booter.boot, run.system_id)
+        await asyncio.to_thread(booter.boot, system_id)
     except CategorizedError as exc:
         artifact = None
         if (
@@ -204,22 +205,22 @@ async def _run_boot_and_capture_outcome(
             and run.expected_boot_failure is not None
         ):
             artifact = await _capture_console_artifact(
-                conn, run.system_id, secret_registry, artifact_store
+                conn, system_id, secret_registry, artifact_store
             )
         if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
             await _record_boot_audit(conn, job_ctx, run)
             return {
-                "system_id": str(run.system_id),
+                "system_id": str(system_id),
                 "boot_outcome": "expected_crash_observed",
                 "expectation_matched": True,
                 "evidence_kind": "console",
                 "evidence_artifact_id": str(artifact.id),
             }
         raise
-    artifact = await _capture_console_artifact(conn, run.system_id, secret_registry, artifact_store)
+    artifact = await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
     await _record_boot_audit(conn, job_ctx, run)
     return {
-        "system_id": str(run.system_id),
+        "system_id": str(system_id),
         "boot_outcome": "ready",
         **({"evidence_artifact_id": str(artifact.id)} if artifact else {}),
     }
@@ -247,6 +248,7 @@ async def boot_handler(
     if not claim.claimed:
         return str(run_id)
     booter = (await resolver.runtime_for_run(conn, run_id)).booter
+    system_id = run.require_system_id()
 
     try:
         result = await _run_boot_and_capture_outcome(
@@ -255,7 +257,7 @@ async def boot_handler(
     except CategorizedError:
         await abandon_run_step_best_effort(conn, run_id, "boot")
         try:
-            await _capture_console_artifact(conn, run.system_id, secret_registry, artifact_store)
+            await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
         finally:
             raise
     except Exception:
@@ -263,7 +265,7 @@ async def boot_handler(
         raise
     async with (
         conn.transaction(),
-        advisory_xact_lock(conn, LockScope.SYSTEM, run.system_id),
+        advisory_xact_lock(conn, LockScope.SYSTEM, system_id),
         advisory_xact_lock(conn, LockScope.RUN, run_id),
     ):
         await complete_run_step(conn, run_id, "boot", result)

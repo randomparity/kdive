@@ -16,6 +16,7 @@ from kdive.db.build_hosts import get_by_name
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import InvestigationState, RunState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Allocation, ExpectedBootFailure, Investigation, Run, System
 from kdive.domain.lifecycle.system_reuse import (
@@ -272,6 +273,22 @@ async def _investigation_for_update(conn: AsyncConnection, uid: UUID) -> Investi
     return Investigation.model_validate(row) if row else None
 
 
+async def _resource_kind_for_system(conn: AsyncConnection, system_id: UUID) -> ResourceKind:
+    """Return the resource kind backing a System (ADR-0169 bound-path target_kind derivation)."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT r.kind FROM systems s "
+            "JOIN allocations a ON a.id = s.allocation_id "
+            "JOIN resources r ON r.id = a.resource_id "
+            "WHERE s.id = %s",
+            (system_id,),
+        )
+        row = await cur.fetchone()
+    if row is None:  # Invariant: the System was validated live under its lock before this call.
+        raise RuntimeError(f"resource kind lookup found no row for system {system_id}")
+    return ResourceKind(row[0])
+
+
 async def _count_non_terminal_runs(conn: AsyncConnection, system_id: UUID) -> int:
     async with conn.cursor() as cur:
         await cur.execute(
@@ -430,7 +447,16 @@ async def _create_locked(
         compat_block = await _compat_block_response(conn, build_profile, targets.system_id)
         if compat_block is not None:
             raise compat_block
-        run = await _insert_run(conn, ctx, targets, build_profile, expected_boot_failure, project)
+        target_kind = await _resource_kind_for_system(conn, targets.system_id)
+        run = await _insert_run(
+            conn,
+            ctx,
+            targets,
+            build_profile,
+            expected_boot_failure,
+            project,
+            target_kind=target_kind,
+        )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
     return _created_result(run, targets, expected_boot_failure, project)
 
@@ -442,6 +468,8 @@ async def _insert_run(
     build_profile: ParsedBuildProfile,
     expected_boot_failure: SerializedExpectedBootFailure | None,
     project: str,
+    *,
+    target_kind: ResourceKind,
 ) -> Run:
     now = datetime.now(UTC)
     run = await RUNS.insert(
@@ -455,6 +483,7 @@ async def _insert_run(
             project=project,
             investigation_id=targets.investigation_id,
             system_id=targets.system_id,
+            target_kind=target_kind,
             state=RunState.CREATED,
             build_profile=dump_build_profile(build_profile),
             expected_boot_failure=expected_boot_failure,

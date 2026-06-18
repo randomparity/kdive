@@ -245,6 +245,7 @@ async def _seed_created_run(
                 project=project,
                 investigation_id=inv.id,
                 system_id=UUID(sys_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.CREATED,
                 build_profile=copy.deepcopy(build_profile),
             ),

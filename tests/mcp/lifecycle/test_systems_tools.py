@@ -26,6 +26,7 @@ from kdive.components.references import (
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -1396,6 +1397,7 @@ async def _seed_run(pool: AsyncConnectionPool, sys_id: str, state: RunState) -> 
                 project="proj",
                 investigation_id=inv.id,
                 system_id=UUID(sys_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=state,
                 build_profile={},
             ),

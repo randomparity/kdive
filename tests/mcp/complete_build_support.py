@@ -120,6 +120,7 @@ async def seed_run(conn_pool: AsyncConnectionPool, build_profile: dict[str, Any]
                 project="proj",
                 investigation_id=inv_id,
                 system_id=sys_id,
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.CREATED,
                 build_profile=build_profile,
             ),

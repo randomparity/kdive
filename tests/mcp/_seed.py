@@ -22,6 +22,7 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Allocation, Investigation, Run, System
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.services.resources.discovery import register_discovered_resource
@@ -127,6 +128,7 @@ async def seed_run_on_system(
                 project=project,
                 investigation_id=inv.id,
                 system_id=UUID(sys_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.SUCCEEDED,
                 build_profile={},
                 debuginfo_ref=debuginfo_ref,

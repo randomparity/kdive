@@ -198,8 +198,9 @@ async def seed_run(conn: psycopg.AsyncConnection) -> UUID:
         )
         investigation_id = (await one(cur))[0]
         await cur.execute(
-            "INSERT INTO runs (investigation_id, system_id, state, build_profile, "
-            "principal, project) VALUES (%s, %s, 'created', '{}'::jsonb, 'alice', 'proj') "
+            "INSERT INTO runs (investigation_id, system_id, target_kind, state, build_profile, "
+            "principal, project) "
+            "VALUES (%s, %s, 'local-libvirt', 'created', '{}'::jsonb, 'alice', 'proj') "
             "RETURNING id",
             (investigation_id, system_id),
         )

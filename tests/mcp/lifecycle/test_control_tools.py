@@ -28,6 +28,7 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -177,6 +178,7 @@ async def _seed_live_session(pool: AsyncConnectionPool, sys_id: str) -> str:
                 project="proj",
                 investigation_id=inv.id,
                 system_id=UUID(sys_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.RUNNING,
                 build_profile={},
             ),

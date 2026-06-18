@@ -230,6 +230,7 @@ async def _seed_live_session(pool: AsyncConnectionPool, *, state: DebugSessionSt
                 project="proj",
                 investigation_id=inv.id,
                 system_id=system.id,
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.SUCCEEDED,
                 build_profile={},
             ),

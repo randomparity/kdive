@@ -39,6 +39,7 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
@@ -168,6 +169,7 @@ async def _seed_booted_run(pool: AsyncConnectionPool, system_id: str) -> str:
                 project="proj",
                 investigation_id=inv.id,
                 system_id=UUID(system_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.SUCCEEDED,
                 build_profile={},
             ),

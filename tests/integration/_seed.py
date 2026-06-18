@@ -31,6 +31,7 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.models import (
     Allocation,
     Budget,
@@ -247,6 +248,7 @@ async def seed_running_run(
                 project=project,
                 investigation_id=inv.id,
                 system_id=UUID(system_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.RUNNING,
                 build_profile=build_profile or copy.deepcopy(BUILD_PROFILE),
             ),
@@ -293,6 +295,7 @@ async def seed_crashed_system_with_run(
                 project=project,
                 investigation_id=inv.id,
                 system_id=UUID(sys_id),
+                target_kind=ResourceKind.LOCAL_LIBVIRT,
                 state=RunState.SUCCEEDED,
                 build_profile=copy.deepcopy(BUILD_PROFILE),
                 debuginfo_ref=debuginfo_ref,
