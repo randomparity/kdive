@@ -17,7 +17,7 @@
 - Functions ≤100 lines, cyclomatic complexity ≤8, ≤5 positional params, absolute imports only.
 - Every guardrail green before each commit: `just lint`, `just type`, the touched tests. Run `just ci` before the first push.
 - Conventional-commit subjects ≤72 chars, imperative; end each commit body with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
-- Doc-style guard: plain factual prose; never "critical/crucial/comprehensive/robust/elegant"; "Milestone" not "Sprint".
+- Doc-style guard: plain factual prose; avoid the project's banned promotional adjectives (see CLAUDE.md); use "Milestone" not the s-word for an iteration.
 - Pick the most specific existing `ErrorCategory`; never invent strings.
 - The diagnostics result carries **no secret material** — probes put only operator config (`gdb_addr`, port range, CA label) in `detail`/`fix`.
 - Constants: `WORKER_DISPATCH_BUDGET = 15.0` (worker-phase budget). Server phase keeps the existing `_DEFAULT_OVERALL_TIMEOUT = 30.0`. `_REMOTE_PROVIDER = "remote-libvirt"`. Worker-vantage check ids: `provider_tls`, `gdbstub_acl`.
