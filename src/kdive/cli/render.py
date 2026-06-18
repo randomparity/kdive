@@ -15,7 +15,6 @@ _GAP = "  "
 
 
 def _cell(value: object) -> str:
-    """Render one cell: ``None`` becomes the empty string, everything else ``str()``."""
     return "" if value is None else str(value)
 
 

@@ -33,7 +33,6 @@ _ERROR_EXIT = 6
 
 
 def _session_factory() -> Session:
-    """Build the authenticated session; overridden in tests with a fake."""
     return Session.from_env()
 
 
@@ -54,7 +53,6 @@ def _payload(args: argparse.Namespace) -> dict[str, object]:
 
 
 async def _call(arguments: Mapping[str, object]) -> Mapping[str, object]:
-    """Call ``ops.diagnostics`` once through the authenticated session and return the envelope."""
     session = _session_factory()
     async with session.client() as client:
         result = await client.call_tool(_TOOL, dict(arguments))
@@ -62,7 +60,6 @@ async def _call(arguments: Mapping[str, object]) -> Mapping[str, object]:
 
 
 def _envelope_fields(envelope: object) -> Mapping[str, object]:
-    """Return the envelope's top-level fields as a string-keyed mapping (empty if malformed)."""
     if not isinstance(envelope, Mapping):
         return {}
     return {str(k): v for k, v in envelope.items()}
@@ -85,7 +82,6 @@ def _rows(fields: Mapping[str, object]) -> list[dict[str, object]]:
 
 
 def _sanitize(value: object) -> object:
-    """Strip newlines/tabs from a string cell so a verdict row stays one logical line."""
     if isinstance(value, str):
         return value.replace("\n", " ").replace("\r", " ").replace("\t", " ")
     return value
@@ -110,7 +106,6 @@ def _exit_code(fields: Mapping[str, object]) -> int:
 
 
 def _flag(fields: Mapping[str, object], key: str) -> bool:
-    """Read a string-encoded boolean flag from the verdict's ``data`` (``"true"``/``"false"``)."""
     data = _envelope_fields(fields.get("data"))
     return data.get(key) == "true"
 
