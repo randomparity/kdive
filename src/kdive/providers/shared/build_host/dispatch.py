@@ -15,7 +15,7 @@ from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.transports.ssh_transport import SshBuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.runs.build_host_selection import check_warm_tree_source_admission
+from kdive.services.runs.build_host_policy import check_warm_tree_source_admission
 
 # Patchable seam: tests substitute this to avoid real SSH.
 ssh_build_transport_from_host = SshBuildTransport.from_host

@@ -2,11 +2,9 @@
 
 The build-host boundary for :class:`~kdive.diagnostics.checks.LocalKernelSrcCheck`: it resolves
 ``KDIVE_KERNEL_SRC`` from the config snapshot and classifies it over the single shared
-``warm_tree_source_error`` predicate (``providers/shared/build_host/workspace.py``) — the same rule
+``warm_tree_source_error`` predicate (``services/runs/build_host_policy.py``) — the same rule
 the build-time ``sync_tree`` and the admission-time ``check_warm_tree_source_admission`` enforce
-(ADR-0161). This is the one module that imports the provider-owned predicate; the check class in
-``checks.py`` stays free of any provider import (``diagnostics → providers`` is the only legal
-direction).
+(ADR-0161).
 
 ``KDIVE_KERNEL_SRC`` resolution is deferred to probe time (mirroring ``reachability.py``): the
 ``config.get`` snapshot read happens when the check runs, so a value that drifts after assembly is
@@ -25,7 +23,7 @@ from collections.abc import Callable
 import kdive.config as config
 from kdive.config.core_settings import KERNEL_SRC
 from kdive.diagnostics.checks import WarmTreeSourceOutcome, WarmTreeSourceProbe
-from kdive.providers.shared.build_host.workspaces.workspace import (
+from kdive.services.runs.build_host_policy import (
     KERNEL_SRC_UNSET_DETAIL,
     warm_tree_source_error,
 )
