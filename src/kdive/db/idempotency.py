@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from enum import StrEnum
 from typing import NamedTuple
 from uuid import UUID
 
@@ -33,6 +34,11 @@ from kdive.serialization import JsonValue, ensure_json_value
 
 _STEP_WAIT_POLL_SEC = 0.05
 _STALE_RUNNING_INTERVAL = "30 minutes"
+
+
+class _RunStepState(StrEnum):
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
 
 
 class StepClaim(NamedTuple):
@@ -80,9 +86,9 @@ async def run_step(
         result = _step_result(await fn(), run_id=run_id, step=step)
         await cur.execute(
             "INSERT INTO run_steps (run_id, step, state, result) "
-            "VALUES (%s, %s, 'succeeded', %s) "
+            "VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (run_id, step) DO NOTHING RETURNING result",
-            (run_id, step, Jsonb(result)),
+            (run_id, step, _RunStepState.SUCCEEDED.value, Jsonb(result)),
         )
         inserted = await cur.fetchone()
         if inserted is not None:
@@ -107,9 +113,9 @@ async def claim_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> Step
         async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "DELETE FROM run_steps "
-                "WHERE run_id = %s AND step = %s AND state = 'running' "
+                "WHERE run_id = %s AND step = %s AND state = %s "
                 "AND updated_at < now() - %s::interval",
-                (run_id, step, _STALE_RUNNING_INTERVAL),
+                (run_id, step, _RunStepState.RUNNING.value, _STALE_RUNNING_INTERVAL),
             )
             await cur.execute(
                 "SELECT state, result FROM run_steps WHERE run_id = %s AND step = %s",
@@ -119,15 +125,15 @@ async def claim_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> Step
             if existing is None:
                 await cur.execute(
                     "INSERT INTO run_steps (run_id, step, state, result) "
-                    "VALUES (%s, %s, 'running', NULL) "
+                    "VALUES (%s, %s, %s, NULL) "
                     "ON CONFLICT (run_id, step) DO NOTHING RETURNING result",
-                    (run_id, step),
+                    (run_id, step, _RunStepState.RUNNING.value),
                 )
                 inserted = await cur.fetchone()
                 if inserted is not None:
                     return StepClaim(True, None)
                 continue
-            if existing["state"] == "succeeded":
+            if existing["state"] == _RunStepState.SUCCEEDED.value:
                 return StepClaim(False, _step_result(existing["result"], run_id=run_id, step=step))
         await asyncio.sleep(_STEP_WAIT_POLL_SEC)
 
@@ -139,9 +145,15 @@ async def complete_run_step(
     result = _step_result(result, run_id=run_id, step=step)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "UPDATE run_steps SET state = 'succeeded', result = %s "
-            "WHERE run_id = %s AND step = %s AND state = 'running' RETURNING result",
-            (Jsonb(result), run_id, step),
+            "UPDATE run_steps SET state = %s, result = %s "
+            "WHERE run_id = %s AND step = %s AND state = %s RETURNING result",
+            (
+                _RunStepState.SUCCEEDED.value,
+                Jsonb(result),
+                run_id,
+                step,
+                _RunStepState.RUNNING.value,
+            ),
         )
         row = await cur.fetchone()
     if row is None:
@@ -153,6 +165,6 @@ async def abandon_run_step(conn: AsyncConnection, run_id: UUID, step: str) -> No
     """Drop a running claim so a retry can attempt the side effect again."""
     async with conn.transaction():
         await conn.execute(
-            "DELETE FROM run_steps WHERE run_id = %s AND step = %s AND state = 'running'",
-            (run_id, step),
+            "DELETE FROM run_steps WHERE run_id = %s AND step = %s AND state = %s",
+            (run_id, step, _RunStepState.RUNNING.value),
         )

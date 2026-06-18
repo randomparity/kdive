@@ -32,6 +32,7 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from math import isfinite
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +63,12 @@ _log = logging.getLogger(__name__)
 #: Histogram bucket bounds (seconds) for per-tool request duration (the "D" in RED).
 _DURATION_BUCKETS = (0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 _DROP_ARGUMENT = object()
+
+
+class _ToolOutcome(StrEnum):
+    OK = "ok"
+    ERROR = "error"
+    DENIED = "denied"
 
 
 def _current_agent_session() -> str | None:
@@ -438,24 +445,24 @@ class UsageTrackingMiddleware(Middleware):
         try:
             result = await call_next(context)
         except AuthorizationError:
-            await self._record(context, "denied")
+            await self._record(context, _ToolOutcome.DENIED)
             raise
         except Exception:
-            await self._record(context, "error")
+            await self._record(context, _ToolOutcome.ERROR)
             raise
         await self._record(context, self._classify(result))
         return result
 
     @staticmethod
-    def _classify(result: Any) -> str:
+    def _classify(result: Any) -> _ToolOutcome:
         category = _result_error_category(result)
         if category is None:
-            return "ok"
+            return _ToolOutcome.OK
         if category == ErrorCategory.AUTHORIZATION_DENIED.value:
-            return "denied"
-        return "error"
+            return _ToolOutcome.DENIED
+        return _ToolOutcome.ERROR
 
-    async def _record(self, context: Any, outcome: str) -> None:
+    async def _record(self, context: Any, outcome: _ToolOutcome) -> None:
         tool = getattr(context.message, "name", "?")
         try:
             ctx = current_context()
@@ -464,7 +471,7 @@ class UsageTrackingMiddleware(Middleware):
                 agent_session=ctx.agent_session,
                 project=_call_project(context),
                 tool=tool,
-                outcome=outcome,
+                outcome=outcome.value,
                 actor=actor_for(ctx),
                 client_id=ctx.client_id,
             )
@@ -521,20 +528,24 @@ class TelemetryMiddleware(Middleware):
             try:
                 result = await call_next(context)
             except Exception as exc:
-                self._finish(span, tool, "error", started)
-                self._errors.add(1, {"tool": tool, "outcome": "error"})
+                self._finish(span, tool, _ToolOutcome.ERROR, started)
+                self._errors.add(1, {"tool": tool, "outcome": _ToolOutcome.ERROR.value})
                 span.record_exception(exc)
                 span.set_status(Status(StatusCode.ERROR))
                 raise
-            outcome = "error" if _result_error_category(result) is not None else "ok"
+            outcome = (
+                _ToolOutcome.ERROR
+                if _result_error_category(result) is not None
+                else _ToolOutcome.OK
+            )
             self._finish(span, tool, outcome, started)
-            if outcome == "error":
-                self._errors.add(1, {"tool": tool, "outcome": outcome})
+            if outcome is _ToolOutcome.ERROR:
+                self._errors.add(1, {"tool": tool, "outcome": outcome.value})
                 span.set_status(Status(StatusCode.ERROR))
             return result
 
-    def _finish(self, span: Any, tool: str, outcome: str, started: float) -> None:
-        labels = {"tool": tool, "outcome": outcome}
-        span.set_attribute("outcome", outcome)
+    def _finish(self, span: Any, tool: str, outcome: _ToolOutcome, started: float) -> None:
+        labels = {"tool": tool, "outcome": outcome.value}
+        span.set_attribute("outcome", outcome.value)
         self._requests.add(1, labels)
         self._duration.record(time.perf_counter() - started, labels)
