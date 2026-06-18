@@ -28,6 +28,19 @@ PROVIDER_TLS_ID = "provider_tls"
 GDBSTUB_ACL_ID = "gdbstub_acl"
 REACHABILITY_ID = "remote_libvirt_reachability"
 BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
+LOCAL_KERNEL_SRC_ID = "local_kernel_src"
+
+# The build-lane remediation the local-kernel-src check surfaces as its ``fix`` (ADR-0163). It is
+# owned here, not in the provider's ``workspace.py``: ``diagnostics → providers`` is the only legal
+# import direction, so the diagnostic output policy lives in diagnostics. It names the same two
+# lanes as ``workspace.py``'s ``_BUILD_LANE_GUIDANCE`` (stage a warm tree + set
+# ``KDIVE_KERNEL_SRC``, or register a git build host) as an independent literal, so ``checks``
+# stays free of a provider import.
+LOCAL_KERNEL_SRC_FIX = (
+    "stage a kernel source tree on the build worker and set KDIVE_KERNEL_SRC to its absolute "
+    "path (docs/operating/build-source-staging.md), or route builds to a registered git build "
+    "host (build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)"
+)
 
 # The operator remediation the base-image-staging check surfaces as its ``fix`` (ADR-0080,
 # ADR-0150). It is owned here, not in the provider's ``storage.py``: ``diagnostics → providers``
@@ -540,5 +553,84 @@ class BaseImageStagingCheck(Check):
             detail="base-image staging could not be probed; check the [[remote_libvirt]] "
             "base_image / [[image]] staged volume, the storage pool, and the inventory",
             provider=self._provider,
+            failure_category=_CONFIGURATION_ERROR,
+        )
+
+
+class WarmTreeSourceOutcome(StrEnum):
+    """The three observable outcomes of a local warm-tree source probe (ADR-0163, ADR-0161).
+
+    ``USABLE`` — ``KDIVE_KERNEL_SRC`` points at an existing absolute directory.
+    ``UNSET`` — it is unset/empty/whitespace: a contract ``fail``.
+    ``INVALID`` — it is set but not an existing absolute tree: a contract ``fail``.
+
+    There is no indeterminate outcome: a config read plus a local ``stat`` always reaches a
+    verdict, so this check has no ``error`` branch (unlike the libvirt probes, whose RPC can be
+    unreachable).
+    """
+
+    USABLE = "usable"
+    UNSET = "unset"
+    INVALID = "invalid"
+
+
+WarmTreeSourceProbe = Callable[[], Awaitable[WarmTreeSourceOutcome]]
+
+
+class LocalKernelSrcCheck(Check):
+    """Server-vantage: the seeded local build host's warm-tree source is usable (ADR-0163).
+
+    ``ops.diagnostics`` validated the remote-libvirt runtime provider and the secret backend but
+    had no check touching any build host, so it reported healthy while every local warm-tree build
+    failed deterministically on an unusable ``KDIVE_KERNEL_SRC`` (#532). The seeded ``worker-local``
+    ``LOCAL`` host is a database invariant, so this check is always assembled; it resolves
+    ``KDIVE_KERNEL_SRC`` over the same ``warm_tree_source_error`` predicate the build-time
+    ``sync_tree`` and admission-time ``check_warm_tree_source_admission`` enforce (ADR-0161), via an
+    injected probe so the check holds the three-state policy and is unit-tested without the
+    filesystem or config.
+
+    The verdict is provider-independent (``provider=None``, like ``secret_ref``): it is a property
+    of the build worker, not a runtime provider. ``PASS`` asserts source-path usability, not that
+    the directory is a valid/buildable kernel tree — the predicate does not inspect tree contents.
+    It reads the server process's ``KDIVE_KERNEL_SRC``, which is correct when server and worker
+    share an environment (the default single-host / compose deployment); a split deployment is the
+    worker-vantage refinement (ADR-0163 "Considered & rejected").
+    """
+
+    def __init__(self, *, probe: WarmTreeSourceProbe) -> None:
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return LOCAL_KERNEL_SRC_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.SERVER
+
+    async def run(self) -> CheckResult:
+        outcome = await self._probe()
+        if outcome is WarmTreeSourceOutcome.USABLE:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail="warm-tree kernel source is set on the build worker "
+                "(KDIVE_KERNEL_SRC points at an existing absolute tree)",
+            )
+        if outcome is WarmTreeSourceOutcome.UNSET:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.FAIL,
+                detail="the local build worker has no warm-tree kernel source: KDIVE_KERNEL_SRC "
+                "is unset, so every local warm-tree build fails",
+                fix=LOCAL_KERNEL_SRC_FIX,
+                failure_category=_CONFIGURATION_ERROR,
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.FAIL,
+            detail="KDIVE_KERNEL_SRC is set on the build worker but is not an absolute path to an "
+            "existing kernel source tree, so every local warm-tree build fails",
+            fix=LOCAL_KERNEL_SRC_FIX,
             failure_category=_CONFIGURATION_ERROR,
         )
