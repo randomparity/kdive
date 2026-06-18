@@ -70,9 +70,15 @@ allowlist at `resource://kdive/docs/guide/response-envelope.md`; the schema's to
 
 - A black-box agent learns the envelope shape from `tools/list` alone: which fields exist,
   which are nullable, and that `data`/`items` are intentionally open.
-- The FastMCP 3.4.0 client builds a validator and populates `.data` (no recursion, no parse
-  error). `structured_content` is byte-identical to ADR-0113, so `LiveStackClient` and the
-  `structured_content`-shape pin test are unaffected.
+- The FastMCP 3.4.0 client builds a validator with no recursion and no parse error.
+  `structured_content` is byte-identical to ADR-0113 — that is the compatibility guarantee,
+  so `LiveStackClient` (which reads `structured_content`) and the `structured_content`-shape
+  pin test are unaffected. The Python *type* of `CallToolResult.data` does change: because the
+  schema now carries `properties`, the client deserializes `.data` into a generated pydantic
+  model (attribute access, `result.data.object_id`) instead of leaving it the plain dict the
+  bare `{"type": "object"}` schema produced. A consumer that subscripted `.data` directly must
+  switch to attribute access or read `structured_content`; no in-repo consumer does (the
+  live-stack client already reads `structured_content`).
 - The single `build_app` sweep still covers every current and future tool; the zero-count
   guard still fails loud if the FastMCP registry accessor changes under us.
 - The advertised `data`/`items` shapes are generic. An agent that needs the per-payload keys

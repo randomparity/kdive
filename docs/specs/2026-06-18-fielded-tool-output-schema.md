@@ -137,17 +137,34 @@ Tests live in `tests/mcp/core/test_output_schema.py` (the ADR-0113 suite) unless
    `tests/mcp/core/test_tool_wrapper_boundary.py` asserts every real `build_app` tool
    advertises the fielded schema (replacing the `== {"type": "object"}` assertion).
 3. **AC#2 — no recursion, client parses.** A success, a collection (non-empty `items`), and
-   a failure envelope each round-trip through a FastMCP `Client.call_tool`: `.data` is a
-   populated dict and no "structured content" parse-error is logged. Proves the new schema
-   does not reintroduce the ADR-0113 break and that `validate_python` accepts real payloads.
-4. **AC#2 — schema is `$ref`-free.** The advertised schema serialized to JSON contains no
+   a failure envelope each round-trip through a FastMCP `Client.call_tool` with **no
+   "structured content" parse-error logged**, and `CallToolResult.data` is non-`None`
+   (the parse succeeded). Proves the new schema does not reintroduce the ADR-0113 break and
+   that the client accepts every real payload.
+
+   Note the type of `CallToolResult.data` changes. Under ADR-0113's bare `{"type":
+   "object"}`, the client left `.data` as a plain dict (subscriptable). Once the schema
+   carries `properties`, the FastMCP 3.4.0 client builds a real validator, so `.data`
+   deserializes to a generated pydantic model accessed by **attribute** (`result.data.object_id`),
+   **not** subscript (`result.data["object_id"]` raises `TypeError: 'Root' object is not
+   subscriptable`). Verified empirically against `fastmcp==3.4.0`. The existing
+   `test_sweep_restores_data_and_logs_no_parse_error` (`tests/mcp/core/test_output_schema.py`)
+   asserts `isinstance(.data, dict)` + subscript and **must be updated** to read the
+   `structured_content` dict (or attribute access) — it is on the change list, not unchanged.
+4. **AC#2 — `structured_content` is byte-identical.** The raw `CallToolResult.structured_content`
+   dict for each envelope is unchanged from the flat-schema behavior (all nine fields, same
+   values). This is the real compatibility guarantee: a consumer that reads results by
+   subscripting `structured_content` (as `LiveStackClient` does) is unaffected; only a
+   consumer subscripting `.data` directly would need to switch to attribute access or
+   `structured_content`.
+5. **AC#2 — schema is `$ref`-free.** The advertised schema serialized to JSON contains no
    `"$ref"` and no `"$defs"` key (a structural pin on "non-recursive").
-5. **AC#3 — drift guard.** `set(schema["properties"]) == set(ToolResponse.model_fields)`.
+6. **AC#3 — drift guard.** `set(schema["properties"]) == set(ToolResponse.model_fields)`.
    Adding or removing an envelope field without updating `ENVELOPE_OUTPUT_SCHEMA` fails this
    test.
-6. **Zero-count guard retained.** The empty-surface `RuntimeError` test still passes against
+7. **Zero-count guard retained.** The empty-surface `RuntimeError` test still passes against
    the renamed helper.
-7. **AC#4 — doc resource reachable.** A `build_app`-backed test (or the existing resource
+8. **AC#4 — doc resource reachable.** A `build_app`-backed test (or the existing resource
    listing test) shows `resource://kdive/docs/guide/response-envelope.md` is advertised, and
    `just resources-docs-check` passes (snapshot regenerated).
 
