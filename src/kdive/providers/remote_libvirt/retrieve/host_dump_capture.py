@@ -398,16 +398,6 @@ class HostDumpCapturer:
             volume.delete(0)
 
 
-def pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
-    """Return ``(pool_type, target_path)`` from a storage-pool XML (tolerant parse)."""
-    try:
-        root: ET.Element = _safe_fromstring(pool_xml)
-    except ET.ParseError, DefusedXmlException:
-        return None, None
-    target = root.findtext("./target/path")
-    return root.get("type"), target
-
-
 def pool_type_and_target_strict(
     pool_xml: str, *, operation: str, storage_pool: str
 ) -> tuple[str | None, str | None]:
