@@ -23,9 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import kdive.config as config
-import kdive.diagnostics.base_image_staging as base_image_staging
 import kdive.diagnostics.kernel_src as kernel_src
-import kdive.diagnostics.reachability as reachability
 from kdive.config.core_settings import SECRETS_ROOT
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
@@ -42,6 +40,7 @@ from kdive.diagnostics.checks import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
+from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
 

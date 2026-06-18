@@ -1,13 +1,14 @@
-"""The production remote-libvirt base-image-staging probe adapter (ADR-0150, #513).
+"""Remote-libvirt base-image-staging probe adapter (ADR-0150, #513).
 
 The libvirt boundary for :class:`~kdive.diagnostics.checks.BaseImageStagingCheck`: it resolves the
 single declared ``[[remote_libvirt]]`` instance's storage pool and staged base-image volume name,
 opens the mutual-TLS ``qemu+tls://`` connection through the shared ``remote_connection`` lifecycle,
 and looks the volume up on the pool via the shared :func:`lookup_volume_staged` helper. It mirrors
-:func:`kdive.diagnostics.reachability.remote_libvirt_reachability_probe`: blocking libvirt work is
-offloaded with :func:`asyncio.to_thread`, config/volume resolution is deferred to probe time so an
-inventory that drifts after assembly reports a legible ``configuration_error`` rather than
-collapsing the report, and a fresh per-probe :class:`SecretRegistry` backs the TLS materialization.
+:func:`kdive.providers.remote_libvirt.diagnostics.reachability.remote_libvirt_reachability_probe`:
+blocking libvirt work is offloaded with :func:`asyncio.to_thread`, config/volume resolution is
+deferred to probe time so an inventory that drifts after assembly reports a legible
+``configuration_error`` rather than collapsing the report, and a fresh per-probe
+:class:`SecretRegistry` backs the TLS materialization.
 
 Outcome mapping:
 

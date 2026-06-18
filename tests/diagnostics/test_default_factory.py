@@ -14,8 +14,6 @@ from pathlib import Path
 import pytest
 
 import kdive.config as config
-import kdive.diagnostics.base_image_staging as base_image_staging
-import kdive.diagnostics.reachability as reachability
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     BASE_VOLUME_NOT_STAGED_FIX,
@@ -35,6 +33,7 @@ from kdive.diagnostics.service import (
     default_service_factory,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
 
 _INSTANCE = """
 [[remote_libvirt]]

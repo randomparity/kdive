@@ -1,4 +1,4 @@
-"""The production remote-libvirt reachability probe adapter (ADR-0125, #453).
+"""Remote-libvirt reachability probe adapter (ADR-0125, #453).
 
 The libvirt boundary for :class:`RemoteLibvirtReachabilityCheck`: it resolves the single declared
 ``[[remote_libvirt]]`` instance, opens the mutual-TLS ``qemu+tls://`` connection, and calls

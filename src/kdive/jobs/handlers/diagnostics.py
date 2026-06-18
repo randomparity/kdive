@@ -20,7 +20,6 @@ from kdive.diagnostics.checks import (
     run_check,
 )
 from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
-from kdive.diagnostics.provider_tls import provider_tls_probe
 from kdive.diagnostics.result_codec import serialize_results
 from kdive.domain.models import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
@@ -28,6 +27,7 @@ from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     remote_config_from_inventory,
 )
+from kdive.providers.remote_libvirt.diagnostics.provider_tls import provider_tls_probe
 
 _REMOTE_PROVIDER = "remote-libvirt"
 _PER_CHECK_TIMEOUT_S = 6.0
