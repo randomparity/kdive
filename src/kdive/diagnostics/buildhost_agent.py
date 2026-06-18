@@ -15,10 +15,12 @@ async heartbeat task beats; the heartbeat-cancel and marker-release live in the 
 frees the marker (the orphaned thread's builder is then reclaimed by the reaper via the stale
 heartbeat, with the marker TTL as the hard backstop).
 
-The agent-vs-host discriminator is whether ``wait_for_agent`` returned (the session yielded a
+The agent-vs-host discriminator is whether the agent became usable (the session yielded a
 transport): a failure inside the body (exec raised / non-zero rc) means the agent connected →
 ``AGENT_UNREACHABLE``; a ``CategorizedError`` escaping the session is ``HOST_UNREACHABLE`` unless
-its category is ``PROVISIONING_FAILURE`` (the agent never connected) → ``AGENT_UNREACHABLE``.
+it names an agent-never-usable condition — category ``PROVISIONING_FAILURE`` (channel never
+connected) or the ``AGENT_READINESS_DETAIL_KEY`` marker from the guest-ping gate (channel
+connected but agent never answered, ADR-0168) → ``AGENT_UNREACHABLE``.
 """
 
 from __future__ import annotations
@@ -44,6 +46,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitSourceRef
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt.lifecycle.build_vm import ephemeral_build_session
+from kdive.providers.remote_libvirt.lifecycle.readiness import (
+    AGENT_READINESS_DETAIL_KEY,
+    AGENT_UNRESPONSIVE,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _log = logging.getLogger(__name__)
@@ -187,7 +193,11 @@ def _blocking_probe(
                 return BuildHostAgentOutcome.AGENT_UNREACHABLE, False
             return BuildHostAgentOutcome.AGENT_READY, False
     except CategorizedError as exc:
-        if exc.category is ErrorCategory.PROVISIONING_FAILURE:
+        # The agent never became usable: either the channel never connected (provisioning_failure)
+        # or it connected but never answered the guest-ping gate (configuration_error carrying the
+        # agent_readiness marker, ADR-0168). Both are agent/image FAILs, not host ERRORs.
+        agent_unresponsive = exc.details.get(AGENT_READINESS_DETAIL_KEY) == AGENT_UNRESPONSIVE
+        if exc.category is ErrorCategory.PROVISIONING_FAILURE or agent_unresponsive:
             return BuildHostAgentOutcome.AGENT_UNREACHABLE, False
         transport_error = exc.category in (
             ErrorCategory.TRANSPORT_FAILURE,

@@ -46,9 +46,16 @@ OVERLAY = build_overlay_volume_name(RUN_ID)
 def _agent_ok(domain: Any, command: str, timeout: int, flags: int) -> str:
     """A guest-agent fake good enough for a no-op transport binding (no exec in these tests)."""
     msg = json.loads(command)
+    if msg["execute"] == "guest-ping":
+        return json.dumps({"return": {}})
     if msg["execute"] == "guest-exec":
         return json.dumps({"return": {"pid": 1}})
     return json.dumps({"return": {"exited": True, "exitcode": 0}})
+
+
+def _agent_unresponsive(domain: Any, command: str, timeout: int, flags: int) -> str:
+    """A guest-agent fake whose guest-ping always reports code 86 (agent never answers)."""
+    raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
 
 
 def _agent_route_after(polls: int) -> tuple[Any, dict[str, int]]:
@@ -62,6 +69,8 @@ def _agent_route_after(polls: int) -> tuple[Any, dict[str, int]]:
 
     def _agent(domain: Any, command: str, timeout: int, flags: int) -> str:
         msg = json.loads(command)
+        if msg["execute"] == "guest-ping":
+            return json.dumps({"return": {}})
         if msg["execute"] == "guest-exec":
             return json.dumps({"return": {"pid": 1}})
         state["checks"] += 1
@@ -102,6 +111,8 @@ class _EgressAgent:
 
     def __call__(self, domain: Any, command: str, timeout: int, flags: int) -> str:
         msg = json.loads(command)
+        if msg["execute"] == "guest-ping":
+            return json.dumps({"return": {}})
         if msg["execute"] == "guest-exec":
             argv = " ".join([msg["arguments"]["path"], *msg["arguments"].get("arg", [])])
             kind = "egress" if _LS_REMOTE_MARKER in argv else "route"
@@ -238,6 +249,31 @@ def test_session_teardown_failure_preserves_body_error_and_logs_context(
         record.exc_info is not None and "domain teardown failed" in record.message
         for record in caplog.records
     )
+
+
+# --- agent-responsiveness gate (ADR-0168) -------------------------------------------
+
+
+def test_session_fails_non_retryable_when_agent_never_responsive(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    # The XML channel reports connected (wait_for_agent passes), but guest-ping never answers.
+    vm = _build_vm_with_agent(
+        conn,
+        tmp_path,
+        _agent_unresponsive,
+        agent_responsive_timeout_s=3.0,
+        agent_responsive_poll_s=1.0,
+    )
+
+    with pytest.raises(CategorizedError) as exc, vm.session(_BASE_VOLUME, run_id=RUN_ID):
+        pass
+
+    # Non-retryable configuration_error carrying the agent_readiness marker, not transport_failure.
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["agent_readiness"] == "unresponsive"
+    # The gate runs before the transport is used: no network probe, and teardown still ran.
+    assert DOMAIN_NAME not in conn.domains
+    assert OVERLAY in conn.pools["default"].deleted
 
 
 # --- network-readiness gate (ADR-0144) ----------------------------------------------

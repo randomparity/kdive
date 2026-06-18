@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from uuid import UUID, uuid4
 
+import libvirt
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
@@ -21,7 +22,9 @@ from kdive.diagnostics import buildhost_agent as adapter
 from kdive.diagnostics.checks import BuildHostAgentOutcome
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.remote_libvirt.lifecycle.readiness import wait_for_agent_responsive
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.providers.remote_libvirt.conftest import libvirt_error
 
 _RUN = UUID("00000000-0000-0000-0000-0000000000aa")
 
@@ -106,6 +109,47 @@ def test_host_unreachable_on_configuration_error_before_agent() -> None:
     outcome, transport_err = _blocking(_host(), _session_factory(enter_raises=err))
     assert outcome is BuildHostAgentOutcome.HOST_UNREACHABLE
     assert transport_err is False
+
+
+def _gate_driven_unresponsive_factory():
+    """A session factory that drives the REAL wait_for_agent_responsive gate to its deadline.
+
+    Using the production gate (not a hand-built error) means the raised CategorizedError carries
+    the production agent_readiness marker, so a drift in the shared constant breaks this test.
+    """
+
+    @contextmanager
+    def factory(
+        base_image_volume: str,
+        secret_registry: SecretRegistry,
+        *,
+        run_id: UUID,
+        source: object | None = None,
+        wait_network: bool = True,
+    ) -> Iterator[_FakeTransport]:
+        def _always_unresponsive(domain: object, command: str, timeout: int, flags: int) -> str:
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+
+        ticks = iter(range(0, 1000))
+        wait_for_agent_responsive(
+            _always_unresponsive,
+            object(),
+            "eph",
+            monotonic=lambda: float(next(ticks)),
+            sleep=lambda _s: None,
+            timeout_s=2.0,
+            poll_s=1.0,
+        )
+        yield _FakeTransport()  # unreachable: the gate raises before yielding
+
+    return factory
+
+
+def test_agent_unreachable_when_agent_never_responsive() -> None:
+    # The build session's guest-ping gate (ADR-0168) fails an agent that opens the channel but
+    # never answers. That marked CONFIGURATION_ERROR is an agent (image) FAIL, not a host ERROR.
+    outcome, _ = _blocking(_host(), _gate_driven_unresponsive_factory())
+    assert outcome is BuildHostAgentOutcome.AGENT_UNREACHABLE
 
 
 def test_host_unreachable_transport_error_on_tls_failure_before_agent() -> None:

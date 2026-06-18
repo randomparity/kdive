@@ -39,6 +39,7 @@ from kdive.providers.remote_libvirt.lifecycle.readiness import (
     Monotonic,
     Sleep,
     wait_for_agent,
+    wait_for_agent_responsive,
     wait_for_network,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import (
@@ -79,6 +80,12 @@ _BUILD_ARCH = "x86_64"
 _AGENT_TIMEOUT_S = 180.0
 _AGENT_POLL_S = 2.0
 
+# The XML channel reaches state="connected" before the qemu-guest-agent daemon answers commands;
+# this second, active guest-ping gate (ADR-0168) waits for an answering agent so the first build
+# exec does not race into the unresponsive window. Its budget is distinct from the XML gate's.
+_AGENT_RESPONSIVE_TIMEOUT_S = 120.0
+_AGENT_RESPONSIVE_POLL_S = 2.0
+
 # A default route is installed exactly when the guest's DHCP lease lands, so its presence is the
 # precise "network is up" signal. /proc/net/route is kernel truth; cut+grep avoid an iproute2 dep.
 _DEFAULT_ROUTE_PROBE = "cut -f2 /proc/net/route | grep -qx 00000000"
@@ -106,6 +113,8 @@ class BuildVmTiming:
     monotonic: Monotonic = time.monotonic
     agent_timeout_s: float = _AGENT_TIMEOUT_S
     agent_poll_s: float = _AGENT_POLL_S
+    agent_responsive_timeout_s: float = _AGENT_RESPONSIVE_TIMEOUT_S
+    agent_responsive_poll_s: float = _AGENT_RESPONSIVE_POLL_S
     network_timeout_s: float = _NETWORK_TIMEOUT_S
     network_poll_s: float = _NETWORK_POLL_S
     egress_probe_timeout_s: int = _EGRESS_PROBE_CALL_TIMEOUT_S
@@ -256,8 +265,21 @@ class EphemeralBuildVm:
                     timeout_s=self._timing.agent_timeout_s,
                     poll_s=self._timing.agent_poll_s,
                 )
+                domain = conn.lookupByName(domain_name)
+                # The XML gate only proves the channel opened; wait for the agent to actually
+                # answer a command before the first exec races into the unresponsive window
+                # (ADR-0168). A never-responsive agent fails non-retryable here.
+                wait_for_agent_responsive(
+                    self._agent_command,
+                    domain,
+                    domain_name,
+                    monotonic=self._timing.monotonic,
+                    sleep=self._timing.sleep,
+                    timeout_s=self._timing.agent_responsive_timeout_s,
+                    poll_s=self._timing.agent_responsive_poll_s,
+                )
                 transport = GuestExecBuildTransport(
-                    domain=conn.lookupByName(domain_name),
+                    domain=domain,
                     agent_command=self._agent_command,
                     secret_registry=self._secret_registry,
                 )
