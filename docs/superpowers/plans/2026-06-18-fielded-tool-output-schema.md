@@ -24,7 +24,7 @@
 **Files:**
 - Modify: `src/kdive/mcp/app.py:393-424` (constant + helper), `:477` (call site).
 - Test: `tests/mcp/core/test_output_schema.py` (rewrite the suite's assertions).
-- Modify: `tests/mcp/core/test_binding_error_middleware.py:257,269,290,301` (rename references).
+- Test (behavior change, not just a rename): `tests/mcp/core/test_binding_error_middleware.py` — rename the helper references at `:257,269,290,301` **and** convert the two end-to-end tests' `result.data` subscript reads to `result.structured_content[...]`, because once the fielded schema is swept on, `result.data` is a pydantic model (not subscriptable), while `structured_content` stays the byte-stable dict.
 
 **Interfaces:**
 - Produces: `ENVELOPE_OUTPUT_SCHEMA: dict[str, Any]` (fielded), `_advertise_envelope_output_schema(app: FastMCP) -> int` (renamed from `_advertise_flat_output_schema`, same body shape + zero-count guard).
@@ -64,9 +64,31 @@ def test_sweep_advertises_fielded_schema() -> None:
         assert set(schema["properties"]) == set(ToolResponse.model_fields)
 ```
 
-Update the three existing behavior tests that call the helper:
-- `test_failure_detail_round_trips_through_client`, `test_sweep_restores_data_and_logs_no_parse_error`, `test_unswept_recursive_schema_fails_to_parse`, `test_sweep_raises_on_empty_tool_surface`: rename `_advertise_flat_output_schema` → `_advertise_envelope_output_schema`.
-- In `test_sweep_restores_data_and_logs_no_parse_error`, `.data` is now a pydantic model, not a dict. Replace the dict assertions with `structured_content` reads:
+Update the existing behavior tests that call the helper. First rename `_advertise_flat_output_schema` → `_advertise_envelope_output_schema` in `test_failure_detail_round_trips_through_client`, `test_sweep_restores_data_and_logs_no_parse_error`, `test_sweep_raises_on_empty_tool_surface` (the unswept `test_unswept_recursive_schema_fails_to_parse` does not call the helper but does call `_call_and_capture`, see below).
+
+`_call_and_capture` gains a third return value (`structured_content`). **Every caller must be updated to the 3-tuple** — there are three: `test_failure_detail_round_trips_through_client` (was line 105), `test_sweep_restores_data_and_logs_no_parse_error` (was line 114), and `test_unswept_recursive_schema_fails_to_parse` (was line 127, unswept path). Change the helper and all three unpack sites together:
+
+```python
+def _call_and_capture(
+    app: FastMCP, tool: str
+) -> tuple[object | None, list[str], dict[str, Any] | None]:
+    """Call ``tool``; return (``.data``, structured-content parse-error messages, ``.structured_content``)."""
+    logger = logging.getLogger("fastmcp")
+    handler = _ErrorCollector()
+    logger.addHandler(handler)
+    try:
+
+        async def _call() -> tuple[object | None, dict[str, Any] | None]:
+            async with Client(app) as client:
+                result = await client.call_tool(tool, {})
+                return result.data, result.structured_content
+
+        data, structured = asyncio.run(_call())
+    finally:
+        logger.removeHandler(handler)
+    errors = [r.getMessage() for r in handler.records if "structured content" in r.getMessage()]
+    return data, errors, structured
+```
 
 ```python
 def test_sweep_restores_data_and_logs_no_parse_error() -> None:
@@ -74,13 +96,21 @@ def test_sweep_restores_data_and_logs_no_parse_error() -> None:
     _advertise_envelope_output_schema(app)
     data, errors, structured = _call_and_capture(app, "scalar.one")
     assert data is not None  # parse succeeded (model instance), not nulled
-    assert structured["object_id"] == "obj-1"  # S1b: structured_content restored
-    assert errors == []  # S1a: no parse-error log
+    assert structured is not None and structured["object_id"] == "obj-1"  # structured_content restored
+    assert errors == []  # no parse-error log
+
+
+def test_collection_round_trips_through_client() -> None:
+    # AC#2: a non-empty `items` envelope parses; structured_content keeps the nested list.
+    app = _probe_app()
+    _advertise_envelope_output_schema(app)
+    data, errors, structured = _call_and_capture(app, "list.coll")
+    assert data is not None
+    assert structured is not None and isinstance(structured["items"], list) and structured["items"]
+    assert errors == []
 ```
 
-Extend `_call_and_capture` to also return `result.structured_content`, and update `test_failure_detail_round_trips_through_client` to read `structured["detail"]` from `structured_content` rather than `data["detail"]`.
-
-Add a collection round-trip case to `_probe_app` is unnecessary — `list.coll` already exists; add an assertion in `test_sweep_restores_data_and_logs_no_parse_error` style for `list.coll` that `structured["items"]` is a non-empty list and no parse error logs.
+Update `test_failure_detail_round_trips_through_client` to unpack the 3-tuple and read `structured["detail"]` (not `data["detail"]`). Update `test_unswept_recursive_schema_fails_to_parse` to unpack the 3-tuple (`data, errors, _structured = _call_and_capture(...)`); its assertions (`data is None`, `errors` non-empty) are unchanged because the unswept path still nulls `.data`.
 
 - [ ] **Step 2: Run the tests, verify they fail.**
 
@@ -142,7 +172,9 @@ def _advertise_envelope_output_schema(app: FastMCP) -> int:
     return swept
 ```
 
-Update the call site at `app.py:477` (`_advertise_flat_output_schema(app)` → `_advertise_envelope_output_schema(app)`) and the comment above it if it names the old helper. In `tests/mcp/core/test_binding_error_middleware.py`, rename the import and two call sites (`:257,269,290,301`).
+Update the call site at `app.py:477` (`_advertise_flat_output_schema(app)` → `_advertise_envelope_output_schema(app)`) and the comment above it if it names the old helper.
+
+In `tests/mcp/core/test_binding_error_middleware.py`, rename the import and call sites (`:257,269,290,301`) **and** convert each test's `result.data` subscript reads to `result.structured_content`, because `result.data` is now a non-subscriptable model. Concretely, in `test_end_to_end_malformed_profile_returns_envelope_not_toolerror` the inner `_run` must `return result.structured_content` and the assertions read `data["status"]`/`data["error_category"]`/`data["detail"]` off that dict (line ~277-283); apply the same `result.data` → `result.structured_content` change to the second test (`test_end_to_end_runs_create_typed_build_profile...`, line ~303+). The `data is not None` and the `["status"]`/`["error_category"]`/`["detail"]`/`["source"]` assertions then pass unchanged against the dict.
 
 - [ ] **Step 4: Run the tests, verify they pass.**
 
