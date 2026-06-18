@@ -80,15 +80,31 @@ return values (no re-implementation of the rule).
 
 **Files:** `src/kdive/diagnostics/service.py`, `tests/diagnostics/test_default_factory.py`.
 
+**Prerequisite — the always-on check perturbs every `run()`-based test.** Because the check is
+always assembled and its probe reads `KDIVE_KERNEL_SRC`, which the existing fixtures never set,
+its probe resolves `""` → `UNSET` → `FAIL`, which flips `report.has_failure` and adds a row to
+every aggregated run. So updating the two set-equality assertions is **not** sufficient:
+`test_base_image_staging_passes_when_volume_staged` (asserts `report.has_failure is False`,
+~line 206) breaks, and any other `run()`-based test that asserts a known `has_failure` becomes
+nondeterministic. **Invariant:** every `run()`-based default-factory test must control
+`KDIVE_KERNEL_SRC` so the always-on check is deterministic — do not weaken a real `has_failure`
+assertion to absorb the new failure.
+
 **TDD:**
-1. Update the two existing assertions that pin the assembled set to `{SECRET_REF_ID}`
+1. Make `KDIVE_KERNEL_SRC` usable in the shared run-fixture setup so the new check passes and
+   does not pollute `has_failure`: have `_set_env` and `_with_remote_instance` (and the
+   `_no_remote_instance` helper) `monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))` before
+   `config.load()` (`tmp_path` is an existing absolute dir → `USABLE`). This keeps every existing
+   `run()` expectation (`test_base_image_staging_passes_when_volume_staged`'s
+   `has_failure is False`, the `_run_substitutes_*` row checks) valid without weakening them.
+2. Update the two assertions that pin the assembled set to `{SECRET_REF_ID}`
    (`test_factory_omits_remote_checks_when_not_configured`,
    `test_multiple_instances_are_not_configured_so_no_reachability_check`) to
-   `{SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}`. Add:
+   `{SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}`.
+3. Add new tests (set `KDIVE_KERNEL_SRC` explicitly, not via the shared helper):
    - `local_kernel_src` is always in the assembled set (remote configured or not);
    - a run with `KDIVE_KERNEL_SRC` unset → `local_kernel_src` `fail`, `report.has_failure` True;
    - a run with `KDIVE_KERNEL_SRC` = a `tmp_path` tree → `local_kernel_src` `pass`.
-   Use the existing `_set_env`/`config.load()` helpers; set/unset `KDIVE_KERNEL_SRC` alongside.
 2. Implement: `import kdive.diagnostics.kernel_src as kernel_src`; add
    `def _build_host_checks() -> list[Check]: return [LocalKernelSrcCheck(probe=kernel_src.warm_tree_source_probe())]`;
    in `default_service_factory`, `checks.extend(_build_host_checks())` after `_secret_ref_check()`
@@ -100,10 +116,11 @@ unchanged in behavior.
 ## Task 4 — full guardrails + cleanup
 
 Run `just lint`, `just type`, `just test` (the non-live suite), then the full `just ci` before
-pushing. Fix every warning. Confirm no other test asserted the old `{secret_ref}`-only set
-(grep `tests/` for `SECRET_REF_ID}` / `== {"secret_ref"}`). No migration/DDL/MCP/config/
-generated-doc change is introduced (verify `git diff --stat` touches only `diagnostics/`,
-`tests/diagnostics/`, and the already-committed docs).
+pushing. Fix every warning. Confirm no other test depends on the old assembled set or a clean
+aggregate: grep `tests/` for `SECRET_REF_ID}`, `== {"secret_ref"}`, **and `has_failure`** (the
+always-on FAIL flips it), plus any other caller of `default_service_factory(...).run()`. No
+migration/DDL/MCP/config/generated-doc change is introduced (verify `git diff --stat` touches
+only `diagnostics/`, `tests/diagnostics/`, and the already-committed docs).
 
 ## Rollback / cleanup
 
