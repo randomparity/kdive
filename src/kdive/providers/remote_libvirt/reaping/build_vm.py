@@ -27,7 +27,7 @@ from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     build_overlay_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import delete_volume
-from kdive.providers.remote_libvirt.reaper_connections import (
+from kdive.providers.remote_libvirt.reaping.connections import (
     open_libvirt_reaper,
     remote_libvirt_reaper_connections,
 )

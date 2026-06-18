@@ -39,7 +39,6 @@ from kdive.providers.infra.console_hosting import (
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
-from kdive.providers.remote_libvirt.build_vm_reaper import RemoteLibvirtBuildVmReaper
 from kdive.providers.remote_libvirt.config import remote_config_from_inventory
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector
 from kdive.providers.remote_libvirt.console.wiring import (
@@ -52,13 +51,14 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtVmcoreIntrospect,
 )
 from kdive.providers.remote_libvirt.discovery import RemoteLibvirtDiscovery
-from kdive.providers.remote_libvirt.dump_volume_reaper import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.lifecycle.build_vm import ephemeral_build_session
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
+from kdive.providers.remote_libvirt.reaping.build_vm import RemoteLibvirtBuildVmReaper
+from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
 from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTransportResetter

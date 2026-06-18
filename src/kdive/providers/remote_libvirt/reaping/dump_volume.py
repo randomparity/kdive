@@ -25,7 +25,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolume
-from kdive.providers.remote_libvirt.reaper_connections import (
+from kdive.providers.remote_libvirt.reaping.connections import (
     open_libvirt_reaper,
     remote_libvirt_reaper_connections,
 )

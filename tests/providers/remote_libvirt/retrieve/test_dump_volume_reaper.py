@@ -17,7 +17,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolumeReaper
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.dump_volume_reaper import (
+from kdive.providers.remote_libvirt.reaping.dump_volume import (
     OpenDumpReaperConnection,
     RemoteLibvirtDumpVolumeReaper,
     system_id_from_dump_volume_name,

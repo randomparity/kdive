@@ -534,7 +534,7 @@ def test_dump_volume_reaper_is_null_without_remote() -> None:
 
 
 def test_dump_volume_reaper_is_remote_when_enabled() -> None:
-    from kdive.providers.remote_libvirt.dump_volume_reaper import RemoteLibvirtDumpVolumeReaper
+    from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 
     comp = composition.ProviderComposition()
     reaper = comp.build_reconciler_dump_volume_reaper(enable_remote_libvirt=True)
@@ -550,7 +550,7 @@ def test_build_vm_reaper_is_null_without_remote() -> None:
 
 
 def test_build_vm_reaper_is_remote_when_enabled() -> None:
-    from kdive.providers.remote_libvirt.build_vm_reaper import RemoteLibvirtBuildVmReaper
+    from kdive.providers.remote_libvirt.reaping.build_vm import RemoteLibvirtBuildVmReaper
 
     comp = composition.ProviderComposition()
     reaper = comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=True)
