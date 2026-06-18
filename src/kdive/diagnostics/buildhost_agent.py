@@ -141,6 +141,14 @@ async def _probe_one_host(
             _blocking_probe, host, run_id, secret_registry, session_factory
         )
         return BuildHostProbeResult(host.name, outcome, transport_error)
+    except Exception:  # noqa: BLE001 - one host's unexpected failure is its own indeterminate
+        # result, never a propagated error that collapses the whole aggregate (and masks other
+        # hosts' real verdicts). _blocking_probe already maps the expected CategorizedError cases;
+        # this is the per-host backstop mirroring run_check's per-check one.
+        _log.error(
+            "buildhost agent probe failed unexpectedly for host=%s", host.name, exc_info=True
+        )
+        return BuildHostProbeResult(host.name, BuildHostAgentOutcome.HOST_UNREACHABLE)
     finally:
         await _cancel(beat)
         await _release(pool, probe_id, host.name)

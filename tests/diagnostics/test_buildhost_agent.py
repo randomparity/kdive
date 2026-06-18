@@ -54,7 +54,7 @@ class _FakeTransport:
 
 def _session_factory(
     *,
-    enter_raises: CategorizedError | None = None,
+    enter_raises: Exception | None = None,
     rc: int = 0,
     exec_raises: CategorizedError | None = None,
 ):
@@ -156,6 +156,22 @@ def test_probe_enumerates_only_enabled_ephemeral_hosts(migrated_url: str) -> Non
             names = {r.host_name for r in results}
             assert names == {"on"}  # disabled host skipped; seeded worker-local (local) skipped
             assert results[0].outcome is BuildHostAgentOutcome.AGENT_READY
+
+    asyncio.run(_run())
+
+
+def test_unexpected_exception_is_per_host_unreachable(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, open=False) as pool:
+            await pool.open()
+            await _seed(pool, name="flaky", enabled=True)
+            # A plain (non-CategorizedError) failure from the session seam.
+            boom = _session_factory(enter_raises=RuntimeError("unexpected error"))
+            probe = adapter.buildhost_agent_probe(pool, session_factory=boom)
+            results = await probe()
+            # One host's unexpected failure is that host's HOST_UNREACHABLE — the aggregate is not
+            # collapsed to a whole-check error (other hosts' verdicts survive).
+            assert [r.outcome for r in results] == [BuildHostAgentOutcome.HOST_UNREACHABLE]
 
     asyncio.run(_run())
 
