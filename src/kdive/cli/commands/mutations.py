@@ -49,7 +49,7 @@ def _decode_exp(token: str) -> int | None:
     try:
         decoded = base64.urlsafe_b64decode(body)
         claims = json.loads(decoded)
-    except (binascii.Error, ValueError):
+    except binascii.Error, ValueError:
         return None
     if not isinstance(claims, Mapping):
         return None

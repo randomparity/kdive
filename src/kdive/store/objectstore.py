@@ -243,7 +243,7 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         try:
             sensitivity = Sensitivity(resp["Metadata"]["sensitivity"])
-        except (KeyError, ValueError):
+        except KeyError, ValueError:
             sensitivity = None
         return artifact_types.HeadResult(
             size_bytes=int(resp["ContentLength"]),

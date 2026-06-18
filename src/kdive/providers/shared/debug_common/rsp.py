@@ -56,7 +56,7 @@ def rsp_reachable(host: str, port: int) -> bool:  # pragma: no cover - live_vm
     deadline = time.monotonic() + _PROBE_TIMEOUT_S
     try:
         sock = socket.create_connection((host, port), timeout=_PROBE_TIMEOUT_S)
-    except (OSError, TimeoutError):
+    except OSError, TimeoutError:
         return False
     buffer = b""
     try:

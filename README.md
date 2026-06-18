@@ -22,7 +22,7 @@ The full documentation index is [`docs/README.md`](docs/README.md).
 
 ## Quickstart (development)
 
-KDIVE is Python 3.13, managed with [`uv`](https://docs.astral.sh/uv/). `just
+KDIVE is Python 3.14, managed with [`uv`](https://docs.astral.sh/uv/). `just
 setup` cannot bootstrap its own runner, so install `just` and `prek` first:
 
 ```bash

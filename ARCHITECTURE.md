@@ -6,7 +6,7 @@ the precise lifecycles, state machines, and decisions. Architecture decisions ar
 recorded as ADRs under [`docs/adr/`](docs/adr/).
 
 KDIVE gives agentic coding environments a full Linux kernel build → boot → debug
-lifecycle as a multi-user MCP service. It is Python 3.13, managed with `uv`.
+lifecycle as a multi-user MCP service. It is Python 3.14, managed with `uv`.
 
 ## Three processes, one codebase
 

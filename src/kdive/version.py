@@ -48,7 +48,7 @@ def _git(*args: str) -> str | None:
             timeout=_GIT_TIMEOUT,
             check=True,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     return result.stdout.strip()
 

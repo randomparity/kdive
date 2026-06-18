@@ -9,7 +9,7 @@ coding environments a full Linux kernel build → boot → debug lifecycle acros
 heterogeneous resources. Local VMs are the default; remote libvirt is an
 operator-configured opt-in provider; cloud, bare-metal, and PowerVM remain future targets.
 It is a greenfield rewrite of a single-user stdio PoC into a multi-user HTTP service.
-Python 3.13, managed with `uv`.
+Python 3.14, managed with `uv`.
 
 Read `docs/design/top-level-design.md` first — it is the authoritative architecture. The
 current milestone plans are `docs/archive/plans/m0-implementation.md` and

@@ -199,7 +199,7 @@ async def open_investigation(
         normalized_description = description or None  # "" -> None on open (ADR-0135 §2)
         try:
             refs = _parse_external_refs(external_refs)
-        except (ValidationError, TypeError):
+        except ValidationError, TypeError:
             return _config_error(project)
         now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
         async with pool.connection() as conn, conn.transaction():

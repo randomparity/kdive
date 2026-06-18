@@ -357,7 +357,7 @@ def _s3_checksum_to_component_sha256(value: str | None) -> str | None:
         return None
     try:
         decoded = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError):
+    except binascii.Error, ValueError:
         return None
     if len(decoded) != 32:
         return None

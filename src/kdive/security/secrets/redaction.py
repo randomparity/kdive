@@ -40,7 +40,7 @@ def redact_url_credentials(url: str) -> str:
                 url = urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
             return url
         return _USERINFO_AUTHORITY.sub("", url)
-    except (ValueError, UnicodeError):
+    except ValueError, UnicodeError:
         return REDACTION
 
 

@@ -129,7 +129,7 @@ def recorded_gdb_port(domain_xml: str) -> int | None:
     """The gdbstub port a domain's XML records, or ``None`` if absent/malformed."""
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except ET.ParseError, DefusedXmlException:
         return None
     return _recorded_gdb_port(root)
 
@@ -149,7 +149,7 @@ def agent_channel_connected(domain_xml: str) -> bool:
     """Whether the live XML reports the guest-agent channel ``state='connected'``."""
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except ET.ParseError, DefusedXmlException:
         return False
     return _agent_channel_connected(root)
 
@@ -164,7 +164,7 @@ def disk_pool(domain_xml: str) -> str | None:
     """The storage pool the domain's disk records, or ``None``."""
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except ET.ParseError, DefusedXmlException:
         return None
     return _disk_pool(root)
 

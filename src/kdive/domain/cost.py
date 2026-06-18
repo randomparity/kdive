@@ -127,7 +127,7 @@ def parse_window_hours(window: object) -> Decimal:
     """
     try:
         parsed = Decimal(str(window))
-    except (InvalidOperation, DecimalException, ValueError, TypeError):
+    except InvalidOperation, DecimalException, ValueError, TypeError:
         raise CategorizedError(
             f"window {window!r} is not a number",
             category=ErrorCategory.CONFIGURATION_ERROR,

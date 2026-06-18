@@ -36,7 +36,7 @@ def parse_capabilities_arch(caps_xml: str) -> str:
     """Read ``<host><cpu><arch>`` from libvirt capabilities XML; ``unknown`` if malformed."""
     try:
         root: ET.Element = _safe_fromstring(caps_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except ET.ParseError, DefusedXmlException:
         return "unknown"
     return root.findtext("./host/cpu/arch") or "unknown"
 
@@ -45,7 +45,7 @@ def parse_metadata_system_id(meta_xml: str) -> str | None:
     """Read the System id from a kdive metadata XML element; ``None`` if empty/malformed."""
     try:
         element: ET.Element = _safe_fromstring(meta_xml)
-    except (ET.ParseError, DefusedXmlException):
+    except ET.ParseError, DefusedXmlException:
         return None
     text = (element.text or "").strip()
     return text or None

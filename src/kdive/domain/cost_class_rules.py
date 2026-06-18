@@ -43,7 +43,7 @@ def parse_positive_coeff(value: object) -> Decimal:
     """
     try:
         parsed = Decimal(str(value))
-    except (InvalidOperation, DecimalException, ValueError, TypeError):
+    except InvalidOperation, DecimalException, ValueError, TypeError:
         raise ValueError(f"coeff {value!r} is not a number") from None
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"coeff {value!r} must be a finite number > 0")
