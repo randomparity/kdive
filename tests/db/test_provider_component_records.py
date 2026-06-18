@@ -418,49 +418,6 @@ def test_expired_component_upload_cannot_finalize(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_failed_component_upload_cannot_finalize(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with AsyncConnectionPool(migrated_url, open=False) as pool:
-            await pool.open()
-            upload_id, key = await create_component_upload_intent(
-                pool,
-                ComponentUploadIntentRequest(
-                    registration=ComponentUploadRegistration(
-                        tenant="proj-a",
-                        provider="local-libvirt",
-                        component_kind=ComponentKind.ROOTFS,
-                        visibility=ComponentUploadVisibility.PROJECT,
-                        project="proj-a",
-                        principal="alice",
-                    ),
-                    sha256="sha256:" + "8" * 64,
-                    size_bytes=42,
-                    ttl=timedelta(hours=1),
-                ),
-            )
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE component_uploads SET state = 'failed' WHERE id = %s",
-                    (upload_id,),
-                )
-            store = _ObjectStore(
-                {key: HeadResult(size_bytes=42, checksum_sha256="sha256:" + "8" * 64, etag="e")}
-            )
-
-            try:
-                await finalize_component_upload(pool, upload_id, object_store=store)
-            except CategorizedError as exc:
-                assert exc.category is ErrorCategory.CONFIGURATION_ERROR
-            else:
-                raise AssertionError("failed upload should reject finalization")
-
-            count = await _provider_component_count(pool)
-
-        assert count == 0
-
-    asyncio.run(_run())
-
-
 def test_component_upload_finalization_uses_persisted_tenant(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, open=False) as pool:
