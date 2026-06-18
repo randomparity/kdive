@@ -30,7 +30,7 @@ from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_upload_tools
 from kdive.mcp.tools.debug import ops as debug_ops_tools
 from kdive.mcp.tools.debug import sessions as debug_sessions_tools
-from kdive.mcp.tools.lifecycle import allocations as allocations_tools
+from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
 from kdive.mcp.tools.lifecycle.runs import registrar as runs_tools
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resources_tools

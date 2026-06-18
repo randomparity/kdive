@@ -8,6 +8,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
 from kdive.mcp.tools import _docmeta
@@ -22,12 +23,6 @@ from kdive.mcp.tools.lifecycle.allocations.request import (
 from kdive.mcp.tools.lifecycle.allocations.view import get_allocation as _get_allocation
 from kdive.mcp.tools.lifecycle.allocations.view import list_allocations as _list_allocations
 from kdive.mcp.tools.lifecycle.allocations.view import wait_allocation as _wait_allocation
-
-
-def _current_context():
-    from kdive.mcp.tools.lifecycle import allocations
-
-    return allocations.current_context()
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -60,7 +55,7 @@ def _register_allocations_request(app: FastMCP, pool: AsyncConnectionPool) -> No
         """Request capacity and create an allocation grant."""
         return await _request_allocation(
             pool,
-            _current_context(),
+            current_context(),
             project=project,
             request=request,
             idempotency_key=idempotency_key,
@@ -77,7 +72,7 @@ def _register_allocations_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
         allocation_id: Annotated[str, Field(description="The Allocation to render.")],
     ) -> ToolResponse:
         """Return one allocation visible to the caller."""
-        return await _get_allocation(pool, _current_context(), allocation_id)
+        return await _get_allocation(pool, current_context(), allocation_id)
 
 
 def _register_allocations_release(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -90,7 +85,7 @@ def _register_allocations_release(app: FastMCP, pool: AsyncConnectionPool) -> No
         allocation_id: Annotated[str, Field(description="The Allocation to release.")],
     ) -> ToolResponse:
         """Release an active allocation."""
-        return await _release_allocation(pool, _current_context(), allocation_id)
+        return await _release_allocation(pool, current_context(), allocation_id)
 
 
 def _register_allocations_renew(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -113,7 +108,7 @@ def _register_allocations_renew(app: FastMCP, pool: AsyncConnectionPool) -> None
         """Extend an allocation lease window."""
         return await _renew_allocation(
             pool,
-            _current_context(),
+            current_context(),
             allocation_id,
             extend=extend,
             idempotency_key=idempotency_key,
@@ -133,7 +128,7 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """List allocations visible in a project."""
-        return await _list_allocations(pool, _current_context(), project=project, limit=limit)
+        return await _list_allocations(pool, current_context(), project=project, limit=limit)
 
 
 def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -154,4 +149,4 @@ def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ] = 30.0,
     ) -> ToolResponse:
         """Poll until the allocation leaves the queued state or the deadline elapses."""
-        return await _wait_allocation(pool, _current_context(), allocation_id, timeout_s)
+        return await _wait_allocation(pool, current_context(), allocation_id, timeout_s)
