@@ -40,5 +40,4 @@ def validate_build_config_content(content: str) -> str:
 
 
 def exceeds_build_config_cap(data: bytes, cap: int) -> bool:
-    """Return ``True`` iff ``data`` is larger than ``cap`` bytes (the shared byte-cap predicate)."""
     return len(data) > cap

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 
 def _fragment_symbols(fragment_text: str) -> list[str]:
-    """The ``CONFIG_X`` names a fragment sets to ``=y``/``=m`` (ignoring comments/blanks)."""
     symbols = []
     for raw in fragment_text.splitlines():
         line = raw.strip()
@@ -23,7 +22,6 @@ def _fragment_symbols(fragment_text: str) -> list[str]:
 
 
 def _dropped_fragment_symbols(fragment_text: str, final_config_text: str) -> list[str]:
-    """Fragment symbols absent from the final ``.config`` (dropped by olddefconfig)."""
     enabled = {
         line.split("=", 1)[0]
         for line in final_config_text.splitlines()
