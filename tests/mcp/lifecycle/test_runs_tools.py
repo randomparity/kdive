@@ -1890,6 +1890,30 @@ def test_build_host_ephemeral_free_slot_lease_and_job_committed(migrated_url: st
     asyncio.run(_run())
 
 
+def test_build_running_replay_returns_existing_job_without_host_readmission(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            host_id = await _insert_ssh_host(pool, name="replay-host", max_concurrent=1)
+            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "replay-host"}
+            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
+            first = await _build(pool, _ctx(), run_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE build_hosts SET enabled = false WHERE id = %s",
+                    (host_id,),
+                )
+            second = await _build(pool, _ctx(), run_id)
+            nleases = await _lease_count(pool, host_id)
+        assert first.status == "queued"
+        assert second.status == "queued"
+        assert second.object_id == first.object_id
+        assert nleases == 1
+
+    asyncio.run(_run())
+
+
 # --- runs.create: build-host <-> source-kind compatibility (#534) --------------------
 
 # An external-build profile (no kernel_source_ref, no build_host): the compat check skips it.

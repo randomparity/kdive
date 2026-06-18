@@ -106,6 +106,10 @@ async def _build_locked(
     try:
         async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
             state = await _locked_build_state(conn, run)
+            if state is not RunState.CREATED:
+                existing = await queue.get_by_dedup_key(conn, _build_dedup_key(run))
+                if existing is not None:
+                    return run_job_envelope(existing, run.id)
             host = await resolve_and_admit(conn, parsed_profile, run.id)
             if state is RunState.CREATED:
                 await conn.execute(
@@ -167,8 +171,12 @@ async def _enqueue_build(
         JobKind.BUILD,
         payload,
         job_authorizing(ctx, run.project),
-        f"{run.id}:build",
+        _build_dedup_key(run),
     )
+
+
+def _build_dedup_key(run: Run) -> str:
+    return f"{run.id}:build"
 
 
 __all__ = ["BuildRunHandlers", "ConfigValidator"]
