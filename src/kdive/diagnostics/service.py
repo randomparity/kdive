@@ -26,21 +26,16 @@ import kdive.config as config
 import kdive.diagnostics.kernel_src as kernel_src
 from kdive.config.core_settings import SECRETS_ROOT
 from kdive.diagnostics.checks import (
-    GDBSTUB_ACL_ID,
-    PROVIDER_TLS_ID,
-    BaseImageStagingCheck,
     Check,
     CheckResult,
     CheckStatus,
     LocalKernelSrcCheck,
-    RemoteLibvirtReachabilityCheck,
     SecretRefCheck,
     Vantage,
     run_check,
 )
+from kdive.diagnostics.provider_contracts import WorkerVantageDescriptor
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
-from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
 
@@ -50,8 +45,6 @@ if TYPE_CHECKING:
     # Runtime-import only inside default_service_factory to avoid a cycle: worker_dispatch imports
     # WORKER_UNAVAILABLE_DETAIL from this module (ADR-0164).
     from kdive.diagnostics.worker_dispatch import WorkerCheckDispatcher
-
-_REMOTE_PROVIDER = "remote-libvirt"
 
 WORKER_UNAVAILABLE_DETAIL = (
     "worker did not pick up the diagnostic job in time; check that the worker is up "
@@ -318,31 +311,12 @@ def _build_host_checks() -> list[Check]:
     return [LocalKernelSrcCheck(probe=kernel_src.warm_tree_source_probe())]
 
 
-def _remote_libvirt_checks() -> list[Check]:
-    """Assemble the remote-libvirt diagnostic checks when an instance is declared.
-
-    The server-vantage ``remote_libvirt_reachability`` check is the concrete probe (ADR-0125) and
-    the ``remote_libvirt_base_image_staging`` check probes the operator-staged base-image volume
-    (ADR-0150); both resolve config lazily at run time. Worker-vantage checks are reported
-    separately as explicit unavailable metadata until worker-job dispatch is wired (ADR-0139).
-    """
+def _worker_vantage_checks(
+    descriptors: Sequence[WorkerVantageDescriptor],
+) -> list[WorkerVantageCheck]:
     return [
-        RemoteLibvirtReachabilityCheck(
-            provider=_REMOTE_PROVIDER,
-            probe=reachability.remote_libvirt_reachability_probe(),
-        ),
-        BaseImageStagingCheck(
-            provider=_REMOTE_PROVIDER,
-            probe=base_image_staging.base_image_staging_probe(),
-        ),
-    ]
-
-
-def _remote_libvirt_unavailable_worker_checks() -> list[WorkerVantageCheck]:
-    """Name worker-vantage remote-libvirt diagnostics that this deployment cannot run."""
-    return [
-        WorkerVantageCheck(id=PROVIDER_TLS_ID, provider=_REMOTE_PROVIDER),
-        WorkerVantageCheck(id=GDBSTUB_ACL_ID, provider=_REMOTE_PROVIDER),
+        WorkerVantageCheck(id=descriptor.id, provider=descriptor.provider)
+        for descriptor in descriptors
     ]
 
 
@@ -355,9 +329,9 @@ def default_service_factory(
     against the file-ref backend under ``KDIVE_SECRETS_ROOT``, and the always-on server-vantage
     ``local_kernel_src`` build-host check (ADR-0163), which flags an unusable ``KDIVE_KERNEL_SRC``
     on the seeded local build host. When a ``[[remote_libvirt]]``
-    instance is declared (``is_remote_libvirt_configured()``), it also assembles the server-vantage
+    instance is declared, the provider diagnostic contribution also assembles the server-vantage
     ``remote_libvirt_reachability`` and ``remote_libvirt_base_image_staging`` checks (ADR-0125,
-    ADR-0150).
+    ADR-0150) without this generic service constructing provider-specific checks directly.
 
     The worker-vantage ``provider_tls``/``gdbstub_acl`` checks run on the worker via a
     :class:`~kdive.diagnostics.worker_dispatch.JobWorkerCheckDispatcher` when ``pool`` is supplied
@@ -387,8 +361,13 @@ def default_service_factory(
     checks: list[Check] = [_secret_ref_check(), *_build_host_checks()]
     unavailable_worker_checks: list[WorkerVantageCheck] = []
     worker_dispatcher: WorkerCheckDispatcher | None = None
-    if is_remote_libvirt_configured():
-        checks.extend(_remote_libvirt_checks())
+    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
+
+    for contribution in diagnostic_provider_contributions():
+        if not contribution.enabled():
+            continue
+        checks.extend(contribution.checks())
+        unavailable = contribution.unavailable_worker_checks()
         if pool is not None:
             # Function-local import: worker_dispatch imports WORKER_UNAVAILABLE_DETAIL from this
             # module, so a top-level import here would be a cycle (ADR-0164).
@@ -396,7 +375,7 @@ def default_service_factory(
 
             worker_dispatcher = JobWorkerCheckDispatcher(pool)
         else:
-            unavailable_worker_checks.extend(_remote_libvirt_unavailable_worker_checks())
+            unavailable_worker_checks.extend(_worker_vantage_checks(unavailable))
     # When a dispatcher is wired it owns the worker-vantage outcome; otherwise FEATURE_NOT_ENABLED
     # keeps the substituted detail honest (provider_tls/gdbstub_acl are unwired here, not a worker
     # outage) — ADR-0139.
