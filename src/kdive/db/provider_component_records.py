@@ -36,11 +36,6 @@ class ComponentUploadState(StrEnum):
     FINALIZED = "finalized"
 
 
-_COMPONENT_KINDS: frozenset[ComponentKind] = frozenset(
-    {"rootfs", "kernel", "initrd", "config", "patch", "vmlinux"}
-)
-
-
 @dataclass(frozen=True, slots=True)
 class ComponentRegistration:
     provider: str
@@ -393,12 +388,13 @@ def _component_from_row(row: dict[str, object]) -> ProviderComponent:
 
 
 def _component_kind_from_row(value: object) -> ComponentKind:
-    if isinstance(value, str) and value in _COMPONENT_KINDS:
-        return cast(ComponentKind, value)
-    raise CategorizedError(
-        "stored provider component kind is invalid",
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-    )
+    try:
+        return ComponentKind(str(value))
+    except ValueError:
+        raise CategorizedError(
+            "stored provider component kind is invalid",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from None
 
 
 def _visibility_from_row(value: object) -> Visibility:

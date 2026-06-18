@@ -18,7 +18,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.components.references import CatalogComponentRef
+from kdive.components.references import CatalogComponentRef, ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, JOBS, RESOURCES, RUNS, SYSTEMS
 from kdive.domain.capacity.state import (
@@ -1282,13 +1282,13 @@ _VALID_BUILD: dict[str, Any] = {
 }
 _TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
-    accepted_component_sources={"config": frozenset({"local"})},
+    accepted_component_sources={ComponentKind.CONFIG: frozenset({"local"})},
 )
 _BUILD_HANDLERS = BuildRunHandlers(_TEST_COMPONENT_SOURCES)
 # A provider that accepts the catalog config source (local-libvirt/remote-libvirt under ADR-0096).
 _CATALOG_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="catalog-provider",
-    accepted_component_sources={"config": frozenset({"catalog", "local"})},
+    accepted_component_sources={ComponentKind.CONFIG: frozenset({"catalog", "local"})},
 )
 
 

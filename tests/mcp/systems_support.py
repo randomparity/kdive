@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.references import ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
 from kdive.domain.accounting import Budget, Quota
@@ -39,8 +40,8 @@ TEST_PROFILE_POLICY = LocalLibvirtProfilePolicy()
 TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={
-        "rootfs": frozenset({"catalog", "local"}),
-        "config": frozenset({"local"}),
+        ComponentKind.ROOTFS: frozenset({"catalog", "local"}),
+        ComponentKind.CONFIG: frozenset({"local"}),
     },
 )
 SYSTEM_PROVISION_HANDLERS = SystemProvisionHandlers(

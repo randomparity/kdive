@@ -11,6 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput
+from kdive.components.references import ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db import upload_manifest
 from kdive.db.repositories import RUNS
@@ -60,7 +61,7 @@ _EXTERNAL_PROFILE_WITH_REQUIREMENTS = {
 }
 _TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
-    accepted_component_sources={"config": frozenset({"local"})},
+    accepted_component_sources={ComponentKind.CONFIG: frozenset({"local"})},
 )
 _DEFAULT_BUILD_HANDLERS = CompleteBuildHandlers()
 _DEFAULT_SERVER_BUILD_HANDLERS = BuildRunHandlers(_TEST_COMPONENT_SOURCES)
