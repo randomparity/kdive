@@ -25,6 +25,24 @@ to empty (`src/kdive/mcp/tools/_common.py:28-33`). The bare sites a black-box MC
 - Debug session: malformed UUID, unknown transport, detached session with no System
   (`debug/sessions_lifecycle.py:259-280,347-372`).
 
+Two `configuration_error` producers are deliberately **out of scope** and stay bare:
+
+- The cross-project / absent run branch in `_prepare_attach_request`
+  (`debug/sessions_lifecycle.py:318-320`) returns `configuration_error` for a *valid* UUID that
+  resolves to no run the caller may see. By existing design (the
+  `test_start_session_cross_project_is_config_error` contract) this is the same envelope whether
+  the run is absent or in an ungranted project, so it carries no existence signal. Adding a
+  field-specific reason here would risk distinguishing those two cases — a no-leak regression
+  (AC#5) — so it is left untouched.
+- The degraded-row fallbacks (`_investigation_row_error`, `investigations.py:552-556`, and the
+  allocation list-degraded branch) emit `configuration_error` when a *stored* row violates the
+  response invariant. These are internal-integrity signals, not caller parse failures; the
+  offending value is server state, not caller input, so they stay bare.
+
+AC#1 ("every returned `configuration_error` includes `detail` or `data.reason`") is therefore
+read as: every *parse/validation* `configuration_error` at the named caller-facing sites. The
+two fallbacks above are the explicit, enumerated exceptions.
+
 A client that receives only `configuration_error` cannot tell which field was wrong, what the
 accepted values are, or what to do next — it must guess. The acceptance criteria for #569
 require every returned `configuration_error` to carry at least one of `detail` or
@@ -44,8 +62,9 @@ above, following ADR-0166's `reason`/`field`/`accepted_*` shape.
 
 ### 1. A small reason vocabulary
 
-A closed set of reason tokens in `src/kdive/mcp/tools/_common.py`, surfaced under
-`data.reason`:
+A closed `StrEnum` (`ConfigErrorReason`) in `src/kdive/mcp/tools/_common.py`, surfaced under
+`data.reason`. The vocabulary is a type, not bare string literals, so the helper accepts only a
+member and a typo is a `ty` error at the call site rather than a silently-shipped string:
 
 - `invalid_uuid` — a syntactically malformed object id.
 - `invalid_state` — an unknown lifecycle-state filter value.
@@ -64,8 +83,8 @@ from a reason token plus an optional `accepted_values` list and an optional fixe
 `detail`, so a call site states the field-specific reason in one place:
 
 ```python
-config_error_reason(object_id, reason="invalid_uuid", detail="…")
-config_error_reason(object_id, reason="invalid_state",
+config_error_reason(object_id, ConfigErrorReason.INVALID_UUID, detail="…")
+config_error_reason(object_id, ConfigErrorReason.INVALID_STATE,
                     accepted_values=[s.value for s in SystemState], detail="…")
 ```
 
@@ -88,8 +107,8 @@ bare `vendor/device` fallback gains the `invalid_pcie_match` reason.
 - A black-box MCP client gets a self-correcting envelope for every parse/validation failure:
   `data.reason` names the failure class, `accepted_values` enumerates the finite valid set, and
   `detail` is a human one-liner.
-- The reason vocabulary is closed and tested: a drift guard asserts every reason a call site
-  emits is in the vocabulary set, so a typo cannot ship.
+- The reason vocabulary is a closed `StrEnum`: the helper accepts only a `ConfigErrorReason`
+  member, so a typo is a type error at the call site, not a silently-shipped string.
 - No envelope shape change: `reason`/`accepted_values` are ordinary `data` keys and `detail` is
   the existing field. No migration, no schema change.
 - The no-leak not-found seam is untouched: the `not_found` sites (a valid id with no visible
