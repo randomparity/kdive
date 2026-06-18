@@ -61,6 +61,14 @@ The gate classifies a `libvirtError` with the **base** ADR-0159 deterministic se
 So a healthy-but-slow agent is waited for; a permanently-broken agent fails **non-retryable** with
 an actionable message rather than a misleading retryable one.
 
+The gate's timeout and poll are new `BuildVmTiming` fields (`agent_responsive_timeout_s` default
+120.0, `agent_responsive_poll_s` default 2.0), distinct from the XML `agent_timeout_s`/`agent_poll_s`,
+and each guest-ping carries a fixed positive per-call timeout (`5`s, never libvirt's blocking `-2`)
+so a wedged channel surfaces as a classifiable `libvirtError` rather than blocking the worker
+thread. The deadline error carries a single exported marker constant pair from
+`lifecycle/readiness.py` (`AGENT_READINESS_DETAIL_KEY`, `AGENT_UNRESPONSIVE`), imported by both the
+raise site and the diagnostic read site so the cross-module contract has one source of truth.
+
 **2. The build transport treats a post-readiness code 86 as deterministic.** Because the build
 transport runs only *after* the gate confirmed the agent answers, a subsequent code 86 is no
 longer the mid-boot transient ADR-0159 protects — it is a deterministic dead-agent condition.
