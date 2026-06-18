@@ -33,3 +33,20 @@ def test_probe_classifies(raiser: Exception | None, expected: bool | None) -> No
 
     assert asyncio.run(_run()) is expected
     assert captured == {"host": "host.example", "port": 47000}
+
+
+def test_empty_host_is_indeterminate_without_connecting() -> None:
+    # An unset gdb_addr ("") must report error (None), not silently probe localhost (ADR-0163).
+    called = False
+
+    def fake_connector(host: str, port: int) -> None:
+        nonlocal called
+        called = True
+
+    probe = gdbstub_acl_probe(connector=fake_connector)
+
+    async def _run() -> bool | None:
+        return await probe("", "47000-47099")
+
+    assert asyncio.run(_run()) is None
+    assert called is False

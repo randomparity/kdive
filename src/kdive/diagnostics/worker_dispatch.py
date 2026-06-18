@@ -120,6 +120,11 @@ class JobWorkerCheckDispatcher:
 
     async def run_worker_checks(self) -> list[CheckResult]:
         dedup_key = self._dedup_key()
+        # Platform-internal job: it is a read-only side effect of an already-audited operator
+        # `ops.diagnostics` call (ADR-0091 §4), not an agent/tenant request, so it carries a
+        # synthetic `diagnostics` principal rather than threading the per-request operator identity
+        # into this registration-time-built dispatcher. The provider id doubles as the (non-tenant)
+        # project so the row is not scoped to any real project's `recent_jobs` view.
         job = await self._enqueue(
             dedup_key,
             DiagnosticsWorkerCheckPayload(provider=_REMOTE_PROVIDER),

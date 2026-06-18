@@ -42,6 +42,12 @@ def gdbstub_acl_probe(*, connector: AclConnector = _connect) -> GdbstubAclProbe:
 
 
 def _probe_sync(host: str, port: int, connector: AclConnector) -> bool | None:
+    if not host:
+        # An unset gdb_addr cannot be probed -> indeterminate (error), never a guess. Without this
+        # guard `socket.create_connection(("", port))` would resolve "" to localhost and probe the
+        # wrong hop (ADR-0163).
+        _log.warning("gdbstub_acl probe has no host (gdb_addr unset); reporting indeterminate")
+        return None
     try:
         connector(host, port)
     except ConnectionRefusedError:
