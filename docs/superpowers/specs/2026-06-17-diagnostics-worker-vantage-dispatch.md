@@ -61,6 +61,15 @@ Payload `DiagnosticsWorkerCheckPayload{provider: str}`. The handler re-resolves
 reachability probe does), so the payload carries no host identity — minimal cross-process coupling
 and no secret material on the queue.
 
+The payload `provider` is the **concrete `remote-libvirt` id** (`_REMOTE_PROVIDER`), *not* the
+`ops.diagnostics` tool's `provider` argument. The worker-vantage checks are remote-libvirt-specific:
+the current factory already assembles them whenever `is_remote_libvirt_configured()` and hardcodes
+`_REMOTE_PROVIDER` on the substituted results, independent of the tool's `provider` target (which
+may be `None` = "all registered", `"remote-libvirt"`, or another provider). The dispatcher mirrors
+that exactly — it is gated on `is_remote_libvirt_configured()` and always dispatches a
+remote-libvirt-scoped job — so behavior for `provider=None` / a non-remote target is unchanged from
+today, and the tool's nullable `provider` never flows into the required payload field.
+
 ### 2. Worker handler — `jobs/handlers/diagnostics.py`
 
 Resolves the remote-libvirt config, builds `ProviderTlsCheck` + `GdbstubAclCheck` with the
@@ -162,8 +171,11 @@ inline). It:
    under the dispatcher's poll, which would make the bounded wait race against the retry).
 2. Polls `get_by_dedup_key` every ~0.25s until the job reaches a terminal state or the dispatch
    budget elapses.
-3. On **succeeded** → parses the inline `result_ref` JSON into `CheckResult`s (a malformed/empty
-   `result_ref` → an `error` verdict, never a crash).
+3. On **succeeded** → parses the inline `result_ref` JSON and **reconstructs each result through
+   `CheckResult`** (re-running its `__post_init__` invariants, e.g. fail-needs-fix), accepting only
+   the two expected worker-vantage `check_id`s (`provider_tls`, `gdbstub_acl`). A malformed/empty
+   `result_ref`, an unexpected `check_id`, or an invariant violation → an `error` verdict, never a
+   crash and never a surprising verdict injected verbatim.
 4. On **failed** → returns one `error` `CheckResult` per worker-vantage check, carrying the job's
    `error_category` (e.g. `configuration_error` for a bad inventory).
 5. On **budget reached with the job still queued/running** → returns `WORKER_UNAVAILABLE`
@@ -172,6 +184,13 @@ inline). It:
 
 The dispatcher owns the full worker-vantage outcome (run or substitute), keeping
 `DiagnosticsService.run()` a simple merge.
+
+The dispatcher logs the enqueued job id and the job's terminal disposition
+(`succeeded`/`failed`/`timed-out`) at `info`/`warning`. This makes a wiring regression diagnosable:
+if the handler is never registered, every dispatch times out and the verdict is always
+`WORKER_UNAVAILABLE` — the log distinguishes "the diagnostics job dead-letters / is never claimed"
+(a feature/worker problem) from a deployment whose worker is simply down, which the verdict alone
+cannot.
 
 #### Timing budget
 

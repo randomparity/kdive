@@ -42,8 +42,10 @@ hang."
 1. **A new durable job kind, `diagnostics_worker_check`, carries the worker-vantage checks to the
    worker.** It is added to `JobKind` and admitted by an additive migration that drops and recreates
    `jobs_kind_check` (mirroring the `image_build` precedent, ADR-0092). Its payload carries only the
-   `provider`; the handler re-resolves `remote_config_from_inventory()` at probe time on the worker,
-   so no host identity or secret material rides on the queue.
+   `provider` (the concrete `remote-libvirt` id — these checks are remote-libvirt-specific and
+   gated on `is_remote_libvirt_configured()`, mirroring today's assembly, not the tool's nullable
+   `provider` target); the handler re-resolves `remote_config_from_inventory()` at probe time on the
+   worker, so no host identity or secret material rides on the queue.
 
 2. **The worker handler runs the two real checks and returns their results inline.** It builds
    `ProviderTlsCheck` + `GdbstubAclCheck` with production probes, runs each through `run_check`
