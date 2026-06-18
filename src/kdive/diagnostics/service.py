@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import kdive.config as config
 import kdive.diagnostics.base_image_staging as base_image_staging
@@ -42,9 +43,17 @@ from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
 
+if TYPE_CHECKING:
+    # Runtime-import only inside default_service_factory to avoid a cycle: worker_dispatch imports
+    # WORKER_UNAVAILABLE_DETAIL from this module (ADR-0163).
+    from kdive.diagnostics.worker_dispatch import WorkerCheckDispatcher
+
 _REMOTE_PROVIDER = "remote-libvirt"
 
-WORKER_UNAVAILABLE_DETAIL = "worker could not pick up the diagnostic job; check /livez and /readyz"
+WORKER_UNAVAILABLE_DETAIL = (
+    "worker did not pick up the diagnostic job in time; check that the worker is up "
+    "(/livez, /readyz) and not saturated"
+)
 FEATURE_NOT_ENABLED_DETAIL = (
     "worker-vantage diagnostic checks (provider_tls, gdbstub_acl) are not enabled "
     "in this deployment"
@@ -154,6 +163,7 @@ class DiagnosticsService:
             WorkerVantageSubstitution.WORKER_UNAVAILABLE
         ),
         unavailable_worker_checks: Sequence[WorkerVantageCheck] = (),
+        worker_dispatcher: WorkerCheckDispatcher | None = None,
     ) -> None:
         """Build the service.
 
@@ -175,6 +185,11 @@ class DiagnosticsService:
                 dispatch is wired so the detail does not misread as a worker outage.
             unavailable_worker_checks: Worker-vantage diagnostics that this deployment cannot
                 run at all. They are explicit result metadata, not runnable ``Check`` objects.
+            worker_dispatcher: When set, owns the worker-vantage outcome (ADR-0163): ``run`` calls
+                it to obtain real ``provider_tls``/``gdbstub_acl`` results (or a substituted
+                ``error`` on a worker that does not pick the job up in time) instead of the static
+                ``unavailable_worker_checks`` substitution. ``None`` keeps the legacy substitution
+                path unchanged.
         """
         self._checks = list(checks)
         self._timeout = per_check_timeout
@@ -182,6 +197,7 @@ class DiagnosticsService:
         self._worker_available = worker_available
         self._substitution_reason = substitution_reason
         self._unavailable_worker_checks = list(unavailable_worker_checks)
+        self._worker_dispatcher = worker_dispatcher
 
     async def run(self) -> DiagnosticsReport:
         """Run every check and return the aggregated report.
@@ -194,13 +210,18 @@ class DiagnosticsService:
         runnable = [c for c in self._checks if self._can_run(c)]
         skipped = [c for c in self._checks if not self._can_run(c)]
         results = await self._run_within_budget(runnable)
-        results.extend(worker_unavailable_results(skipped, self._substitution_reason))
-        results.extend(
-            worker_unavailable_results(
-                self._unavailable_worker_checks,
-                self._substitution_reason,
+        if self._worker_dispatcher is not None:
+            # The dispatcher owns the entire worker-vantage outcome (run on the worker, or a
+            # substituted error on a worker that does not pick the job up in time) — ADR-0163.
+            results.extend(await self._worker_dispatcher.run_worker_checks())
+        else:
+            results.extend(worker_unavailable_results(skipped, self._substitution_reason))
+            results.extend(
+                worker_unavailable_results(
+                    self._unavailable_worker_checks,
+                    self._substitution_reason,
+                )
             )
-        )
         return DiagnosticsReport(results=results)
 
     async def _run_within_budget(self, checks: Sequence[Check]) -> list[CheckResult]:
