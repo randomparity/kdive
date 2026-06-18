@@ -21,6 +21,7 @@ from kdive.jobs.handlers.runs_common import abandon_run_step_best_effort
 from kdive.jobs.payloads import RunPayload, load_payload
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import Booter
+from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security import audit
 from kdive.security.artifacts.artifact_search import ArtifactSearchInputError, search_text
 from kdive.security.authz.context import RequestContext
@@ -92,9 +93,7 @@ async def _capture_console_artifact(
 
 
 async def _read_redacted_console(system_id: UUID, secret_registry: SecretRegistry) -> bytes | None:
-    from kdive.jobs.handlers import runs
-
-    raw = await asyncio.to_thread(runs.read_console_log, runs.console_log_path(system_id))
+    raw = await asyncio.to_thread(read_console_log, console_log_path(system_id))
     if not raw:
         _log.warning(
             "console log for system %s is empty or unreadable; registering no console artifact",

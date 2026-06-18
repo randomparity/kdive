@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from kdive.db.idempotency import abandon_run_step
 from kdive.domain.models import JobKind
 from kdive.jobs.handlers.runs_boot import boot_handler
 from kdive.jobs.handlers.runs_build import (
@@ -15,7 +14,6 @@ from kdive.jobs.handlers.runs_build import (
 from kdive.jobs.handlers.runs_install import install_handler
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 
@@ -24,12 +22,9 @@ __all__ = [
     "BuildHostTransportFactories",
     "ServerBuildProfile",
     "_run_build",
-    "abandon_run_step",
     "boot_handler",
     "build_handler",
-    "console_log_path",
     "install_handler",
-    "read_console_log",
     "register_handlers",
 ]
 
