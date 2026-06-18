@@ -33,9 +33,9 @@ from kdive.db.build_hosts import (
     try_acquire_lease,
 )
 from kdive.db.repositories import RUNS
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import JobKind
-from kdive.domain.state import SystemState
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.payloads import BuildPayload
@@ -680,7 +680,7 @@ def test_local_empty_kernel_src_fails_admission(
 ) -> None:
     """An empty KDIVE_KERNEL_SRC on a worker-local warm build fails the BUILD job at
     admission with CONFIGURATION_ERROR, and the builder never runs (ADR-0158)."""
-    from kdive.providers.shared.build_host.workspace import KERNEL_SRC_UNSET_DETAIL
+    from kdive.services.runs.build_host_policy import KERNEL_SRC_UNSET_DETAIL
 
     monkeypatch.setenv("KDIVE_KERNEL_SRC", "")
 

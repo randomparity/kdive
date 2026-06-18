@@ -22,9 +22,10 @@ from dataclasses import dataclass
 from enum import StrEnum, auto
 from typing import Literal, TypedDict
 
+from kdive.domain.catalog.resource_capabilities import PCIE_DEVICES_KEY as _PCIE_DEVICES_KEY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-PCIE_DEVICES_KEY = "pcie_devices"
+PCIE_DEVICES_KEY = _PCIE_DEVICES_KEY
 """The Resource ``capabilities`` key carrying the static PCIe descriptor list."""
 
 
@@ -143,7 +144,6 @@ def parse_match_spec(spec: str) -> MatchSpec:
 
 
 def descriptor_matches(spec: MatchSpec, descriptor: PCIeDescriptor) -> bool:
-    """Return whether ``descriptor`` satisfies ``spec`` (occupancy not considered)."""
     if spec.kind == "vendor_device":
         return (
             descriptor["vendor_id"] == spec.vendor_id and descriptor["device_id"] == spec.device_id

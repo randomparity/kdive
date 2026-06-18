@@ -80,11 +80,9 @@ class Registry:
         self._snapshot: dict[str, str] | None = None
 
     def load(self, env: Mapping[str, str]) -> None:
-        """Snapshot the ``KDIVE_*`` subset of ``env``, replacing any prior snapshot."""
         self._snapshot = {k: v for k, v in env.items() if k.startswith("KDIVE_")}
 
     def reset(self) -> None:
-        """Drop the snapshot so the next read re-snapshots from ``os.environ``."""
         self._snapshot = None
 
     def _env(self) -> dict[str, str]:

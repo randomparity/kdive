@@ -15,9 +15,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.db.repositories import JOBS
+from kdive.domain.capacity.state import JobState, RunState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Job, JobKind
-from kdive.domain.state import JobState, RunState, SystemState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.health.heartbeat import Heartbeat
 from kdive.jobs import queue
 from kdive.jobs import worker as worker_module

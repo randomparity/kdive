@@ -16,8 +16,9 @@ import psycopg
 import pytest
 
 from kdive.artifacts import storage as artifact_types
+from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ImageCatalogEntry, ImageState, ImageVisibility, Sensitivity
 from kdive.images.fetch import fetch_registered_rootfs
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

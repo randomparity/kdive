@@ -22,8 +22,8 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from kdive.artifacts.storage import ArtifactStreamRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.ports import CaptureOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.retrieve.common import (
@@ -396,16 +396,6 @@ class HostDumpCapturer:
     def _delete_volume(volume: Any) -> None:
         with contextlib.suppress(Exception):
             volume.delete(0)
-
-
-def pool_type_and_target(pool_xml: str) -> tuple[str | None, str | None]:
-    """Return ``(pool_type, target_path)`` from a storage-pool XML (tolerant parse)."""
-    try:
-        root: ET.Element = _safe_fromstring(pool_xml)
-    except ET.ParseError, DefusedXmlException:
-        return None, None
-    target = root.findtext("./target/path")
-    return root.get("type"), target
 
 
 def pool_type_and_target_strict(

@@ -11,7 +11,7 @@ from __future__ import annotations
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.domain.models import ImageCatalogEntry, ImageState, ImageVisibility
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 
 # Order by visibility so the project's private row (if any) sorts before the public one; the
 # resolver takes the first. `private` < `public` lexically, so the explicit CASE keeps the

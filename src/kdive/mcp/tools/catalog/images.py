@@ -15,7 +15,7 @@ from fastmcp import FastMCP
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.models import ImageCatalogEntry, ImageVisibility
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

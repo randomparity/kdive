@@ -152,7 +152,6 @@ def _name_targets(rollup: accounting_domain.Report, targets: list[str]) -> accou
 
 
 def _audit_granted_set(targets: list[str], group_by: str | None) -> bool:
-    """A granted-set read is audited iff it spans >1 project or groups by principal."""
     return len(targets) > 1 or group_by == _GROUP_BY_PRINCIPAL
 
 
@@ -262,7 +261,6 @@ def _report_args(
     group_by: str | None,
     window: tuple[datetime | None, datetime | None] | None,
 ) -> dict[str, object]:
-    """The public tool args, for the audit ``args_digest`` (no secret values)."""
     return {
         "scope": scope,
         "projects": named,

@@ -47,7 +47,13 @@ def test_dispatch_enqueue_poll_complete_roundtrip(migrated_url: str) -> None:
     async def _run() -> list[CheckResult]:
         async with AsyncConnectionPool(migrated_url, open=False) as pool:
             await pool.open()
-            dispatcher = JobWorkerCheckDispatcher(pool, poll_interval=0.02, dedup_suffix="dbtest")
+            dispatcher = JobWorkerCheckDispatcher(
+                pool,
+                provider="remote-libvirt",
+                worker_check_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID),
+                poll_interval=0.02,
+                dedup_suffix="dbtest",
+            )
             worker = asyncio.create_task(_complete_when_claimable(migrated_url))
             results = await dispatcher.run_worker_checks()
             await worker

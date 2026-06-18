@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kdive.domain.models import ImageVisibility
+from kdive.domain.catalog.images import ImageVisibility
 from kdive.inventory.model import ImageEntry, InventoryDoc, StagedSource
 from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue

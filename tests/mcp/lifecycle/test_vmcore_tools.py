@@ -13,8 +13,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import StoredArtifact
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Job, JobKind, Sensitivity
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import vmcore as vmcore_plane
 from kdive.jobs.models import HandlerRegistry

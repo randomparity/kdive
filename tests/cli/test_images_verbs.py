@@ -65,7 +65,7 @@ def _collection(items: list[dict]) -> dict:
     return {
         "object_id": "images",
         "status": "ok",
-        "data": {"count": str(len(items))},
+        "data": {"count": len(items)},
         "items": items,
     }
 

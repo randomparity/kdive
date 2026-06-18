@@ -12,7 +12,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
-from kdive.domain.state import AllocationState, DebugSessionState, RunState, SystemState
+from kdive.domain.capacity.state import AllocationState, DebugSessionState, RunState, SystemState
 from kdive.providers.infra.reaping import DumpVolume, InfraReaper, NullReaper
 from kdive.reconciler import loop
 from kdive.reconciler.cleanup.gc import (

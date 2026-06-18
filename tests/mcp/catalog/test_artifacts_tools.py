@@ -12,8 +12,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts.reads import (
@@ -217,7 +217,7 @@ def test_artifacts_search_text_sensitive_is_not_found(migrated_url: str) -> None
                 request=_search_request(sens_id, "panic"),
             )
         assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
+        assert resp.error_category == "not_found"
 
     asyncio.run(_run())
 
@@ -519,7 +519,7 @@ def test_artifacts_get_sensitive_is_not_found_shaped(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             _, sens_id, _ = await _seed_system_with_artifacts(pool)
             resp = await artifacts_get(pool, _ctx(), artifact_id=sens_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.status == "error" and resp.error_category == "not_found"
 
     asyncio.run(_run())
 
@@ -529,7 +529,7 @@ def test_artifacts_get_cross_project_is_not_found_shaped(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             resp = await artifacts_get(pool, _ctx(projects=("other",)), artifact_id=red_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.status == "error" and resp.error_category == "not_found"
 
     asyncio.run(_run())
 
@@ -573,7 +573,7 @@ def test_artifacts_get_excludes_quarantined(migrated_url: str) -> None:
         # quarantined error is specifically the sensitivity gate, not a not-found/authz miss.
         assert red_resp.status == "available"
         assert quar_resp.status == "error"
-        assert quar_resp.error_category == "configuration_error"
+        assert quar_resp.error_category == "not_found"
 
     asyncio.run(_run())
 
@@ -601,7 +601,7 @@ def test_artifacts_search_text_quarantined_is_not_found(migrated_url: str) -> No
                 pool, _ctx(), request=_search_request(quar_id, "panic")
             )
         assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
+        assert resp.error_category == "not_found"
         assert store.got is False  # excluded by SQL before any object fetch
 
     asyncio.run(_run())

@@ -31,21 +31,22 @@ live allocation is **cordoned**, not deleted (the reaper-style refuse-if-live co
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 from uuid import UUID
 
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.domain.models import ResourceKind
-from kdive.domain.resource_capabilities import (
+from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
 from kdive.inventory.reconcile import (
@@ -79,28 +80,35 @@ type ResourceCapValue = str | int | float | bool | None | list[ResourceCapValue]
 type ResourceCaps = dict[str, ResourceCapValue]
 
 
-class _CapsRow(TypedDict):
-    capabilities: ResourceCaps
-
-
-class _UpsertResourceRow(_CapsRow):
+@dataclass(frozen=True)
+class _UpsertResourceRow:
     id: UUID
     name: str | None
     host_uri: str
     cost_class: str
+    capabilities: ResourceCaps
     managed_by: str
     lease_expires_at: datetime | None
     owner_project: str | None
     affinity_allowlist: list[str]
 
 
-class _LocalResourceRow(_CapsRow):
+@dataclass(frozen=True)
+class _LocalResourceRow:
     id: UUID
     name: str | None
     cost_class: str
+    capabilities: ResourceCaps
 
 
-class _PruneResourceRow(TypedDict):
+@dataclass(frozen=True)
+class _DiscoveredResourceRow:
+    id: UUID
+    host_uri: str
+
+
+@dataclass(frozen=True)
+class _PruneResourceRow:
     id: UUID
     kind: str
     name: str
@@ -231,7 +239,7 @@ async def _upsert_config_resource(
             declared=declared,
         )
         return
-    existing = _caps(row)
+    existing = row.capabilities
     merged = {**existing, **declared.caps}
     for key in discovery_owned_keys:
         if key in existing:
@@ -295,7 +303,7 @@ async def _adopt_config_resource(
             declared.cost_class,
             Jsonb(caps),
             CONFIG_MANAGED_BY,
-            row["id"],
+            row.id,
         ),
     )
     diff.updated.append(_record(declared.kind, declared.name))
@@ -311,25 +319,25 @@ async def _update_config_resource(
 ) -> None:
     """Apply ordinary config field changes to an already config-managed row."""
     if (
-        row["host_uri"] == declared.host_uri
-        and row["cost_class"] == declared.cost_class
-        and _caps(row) == caps
+        row.host_uri == declared.host_uri
+        and row.cost_class == declared.cost_class
+        and row.capabilities == caps
     ):
         return
     await cur.execute(
         "UPDATE resources SET host_uri = %s, cost_class = %s, capabilities = %s WHERE id = %s",
-        (declared.host_uri, declared.cost_class, Jsonb(caps), row["id"]),
+        (declared.host_uri, declared.cost_class, Jsonb(caps), row.id),
     )
     diff.updated.append(_record(declared.kind, declared.name))
 
 
 def _needs_config_adoption(row: _UpsertResourceRow) -> bool:
     return (
-        str(row["managed_by"]) != CONFIG_MANAGED_BY
-        or row["name"] is None
-        or row["lease_expires_at"] is not None
-        or row["owner_project"] is not None
-        or list(row["affinity_allowlist"]) != []
+        row.managed_by != CONFIG_MANAGED_BY
+        or row.name is None
+        or row.lease_expires_at is not None
+        or row.owner_project is not None
+        or row.affinity_allowlist != []
     )
 
 
@@ -385,14 +393,17 @@ async def _overlay_one_local(cur: Any, inst: LocalLibvirtInstance, diff: Reconci
         )
         return
     row = _local_row(row)
-    merged = {**_caps(row), CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap}
+    merged = {
+        **row.capabilities,
+        CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
+    }
     changed = (
-        row["name"] != inst.name or row["cost_class"] != inst.cost_class or _caps(row) != merged
+        row.name != inst.name or row.cost_class != inst.cost_class or row.capabilities != merged
     )
     if changed:
         await cur.execute(
             "UPDATE resources SET name = %s, cost_class = %s, capabilities = %s WHERE id = %s",
-            (inst.name, inst.cost_class, Jsonb(merged), row["id"]),
+            (inst.name, inst.cost_class, Jsonb(merged), row.id),
         )
         diff.updated.append(_record(ResourceKind.LOCAL_LIBVIRT, inst.name))
 
@@ -408,11 +419,12 @@ async def _name_unconfigured_discovered(
             (DISCOVERY_MANAGED_BY,),
         )
         rows = await cur.fetchall()
-        for row in rows:
-            if row["host_uri"] in configured:
+        for raw_row in rows:
+            row = _discovered_row(raw_row)
+            if row.host_uri in configured:
                 continue  # the local-libvirt overlay names this one
-            name = _deterministic_name(str(row["host_uri"]))
-            await cur.execute("UPDATE resources SET name = %s WHERE id = %s", (name, row["id"]))
+            name = _deterministic_name(row.host_uri)
+            await cur.execute("UPDATE resources SET name = %s WHERE id = %s", (name, row.id))
 
 
 async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: ReconcileDiff) -> None:
@@ -425,12 +437,12 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
         rows = await cur.fetchall()
     for raw in rows:
         row = _prune_row(raw)
-        identity = (str(row["kind"]), str(row["name"]))
+        identity = (row.kind, row.name)
         if identity in declared:
             continue
-        name = str(row["name"])
-        kind = ResourceKind(str(row["kind"]))
-        outcome = await prune_or_cordon_resource(conn, _row_id(row), name, kind=kind)
+        name = row.name
+        kind = ResourceKind(row.kind)
+        outcome = await prune_or_cordon_resource(conn, row.id, name, kind=kind)
         record = ReconcileRecord(name=name, entry=f"resource[{identity[0]}/{name}]")
         if outcome.cordoned:
             diff.cordoned.append(record)
@@ -460,17 +472,13 @@ def _deterministic_name(host_uri: str) -> str:
     return f"discovered-{cleaned}" if cleaned else "discovered-host"
 
 
-def _caps(row: _CapsRow) -> ResourceCaps:
-    return row["capabilities"]
-
-
 def _resource_caps(value: object) -> ResourceCaps:
     if not isinstance(value, dict):
         raise InventoryError("resources", "capabilities", "database row is not a JSON object")
     return cast("ResourceCaps", value)
 
 
-def _upsert_row(row: dict[str, Any]) -> _UpsertResourceRow:
+def _upsert_row(row: Mapping[str, object]) -> _UpsertResourceRow:
     row_id = _expect_uuid(row, "id")
     name = _expect_optional_str(row, "name")
     host_uri = _expect_str(row, "host_uri")
@@ -479,69 +487,76 @@ def _upsert_row(row: dict[str, Any]) -> _UpsertResourceRow:
     lease_expires_at = _expect_optional_datetime(row, "lease_expires_at")
     owner_project = _expect_optional_str(row, "owner_project")
     affinity_allowlist = _expect_str_list(row, "affinity_allowlist")
-    return {
-        "id": row_id,
-        "name": name,
-        "host_uri": host_uri,
-        "cost_class": cost_class,
-        "managed_by": managed_by,
-        "lease_expires_at": lease_expires_at,
-        "owner_project": owner_project,
-        "affinity_allowlist": affinity_allowlist,
-        "capabilities": _resource_caps(row["capabilities"]),
-    }
+    return _UpsertResourceRow(
+        id=row_id,
+        name=name,
+        host_uri=host_uri,
+        cost_class=cost_class,
+        capabilities=_resource_caps(row["capabilities"]),
+        managed_by=managed_by,
+        lease_expires_at=lease_expires_at,
+        owner_project=owner_project,
+        affinity_allowlist=affinity_allowlist,
+    )
 
 
-def _local_row(row: dict[str, Any]) -> _LocalResourceRow:
-    return {
-        "id": _expect_uuid(row, "id"),
-        "name": _expect_optional_str(row, "name"),
-        "cost_class": _expect_str(row, "cost_class"),
-        "capabilities": _resource_caps(row["capabilities"]),
-    }
+def _local_row(row: Mapping[str, object]) -> _LocalResourceRow:
+    return _LocalResourceRow(
+        id=_expect_uuid(row, "id"),
+        name=_expect_optional_str(row, "name"),
+        cost_class=_expect_str(row, "cost_class"),
+        capabilities=_resource_caps(row["capabilities"]),
+    )
 
 
-def _prune_row(row: dict[str, Any]) -> _PruneResourceRow:
-    return {
-        "id": _expect_uuid(row, "id"),
-        "kind": _expect_str(row, "kind"),
-        "name": _expect_str(row, "name"),
-    }
+def _discovered_row(row: Mapping[str, object]) -> _DiscoveredResourceRow:
+    return _DiscoveredResourceRow(
+        id=_expect_uuid(row, "id"),
+        host_uri=_expect_str(row, "host_uri"),
+    )
 
 
-def _expect_uuid(row: dict[str, Any], field: str) -> UUID:
+def _prune_row(row: Mapping[str, object]) -> _PruneResourceRow:
+    return _PruneResourceRow(
+        id=_expect_uuid(row, "id"),
+        kind=_expect_str(row, "kind"),
+        name=_expect_str(row, "name"),
+    )
+
+
+def _expect_uuid(row: Mapping[str, object], field: str) -> UUID:
     value = row[field]
     if not isinstance(value, UUID):
         raise _row_error(field, "uuid")
     return value
 
 
-def _expect_str(row: dict[str, Any], field: str) -> str:
+def _expect_str(row: Mapping[str, object], field: str) -> str:
     value = row[field]
     if not isinstance(value, str):
         raise _row_error(field, "str")
     return value
 
 
-def _expect_optional_str(row: dict[str, Any], field: str) -> str | None:
+def _expect_optional_str(row: Mapping[str, object], field: str) -> str | None:
     value = row[field]
     if value is not None and not isinstance(value, str):
         raise _row_error(field, "str or null")
     return value
 
 
-def _expect_optional_datetime(row: dict[str, Any], field: str) -> datetime | None:
+def _expect_optional_datetime(row: Mapping[str, object], field: str) -> datetime | None:
     value = row[field]
     if value is not None and not isinstance(value, datetime):
         raise _row_error(field, "datetime or null")
     return value
 
 
-def _expect_str_list(row: dict[str, Any], field: str) -> list[str]:
+def _expect_str_list(row: Mapping[str, object], field: str) -> list[str]:
     value = row[field]
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise _row_error(field, "list[str]")
-    return value
+    return cast("list[str]", value)
 
 
 def _row_error(field: str, expected: str) -> InventoryError:
@@ -550,10 +565,6 @@ def _row_error(field: str, expected: str) -> InventoryError:
 
 def _record(kind: ResourceKind, name: str, detail: str = "") -> ReconcileRecord:
     return ReconcileRecord(name=name, entry=f"resource[{kind.value}/{name}]", detail=detail)
-
-
-def _row_id(row: _PruneResourceRow) -> UUID:
-    return row["id"]
 
 
 __all__ = ["reconcile_resources"]

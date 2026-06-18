@@ -21,10 +21,12 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
-from kdive.domain.models import Allocation, Budget, Resource, ResourceKind
-from kdive.domain.state import AllocationState, ResourceStatus
+from kdive.domain.accounting import Budget
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.lifecycle import allocations as alloc_tools
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_allocation
 from kdive.security.authz.rbac import Role
 from kdive.services.accounting import ledger as accounting
 from tests.db_waits import wait_until_any_backend_waiting
@@ -130,7 +132,7 @@ def test_release_active_allocation_reconciles_to_actual(migrated_url: str) -> No
                 active_started_at=started,
                 estimate="9.0000",
             )
-            resp = await alloc_tools.release_allocation(pool, _ctx(), str(alloc_id))
+            resp = await release_allocation(pool, _ctx(), str(alloc_id))
             assert resp.status == "released"
             rows = await _ledger_rows(pool, alloc_id)
             assert [r[0] for r in rows] == ["reserved", "reconciled"]
@@ -157,7 +159,7 @@ def test_release_from_granted_is_full_credit(migrated_url: str) -> None:
                 active_started_at=None,  # never went active
                 estimate="9.0000",
             )
-            resp = await alloc_tools.release_allocation(pool, _ctx(), str(alloc_id))
+            resp = await release_allocation(pool, _ctx(), str(alloc_id))
             assert resp.status == "released"
             rows = await _ledger_rows(pool, alloc_id)
             assert rows == [("reserved", Decimal("9.0000")), ("reconciled", Decimal("-9.0000"))]
@@ -178,9 +180,9 @@ def test_double_release_writes_one_reconciled_row(migrated_url: str) -> None:
                 active_started_at=None,
                 estimate="9.0000",
             )
-            first = await alloc_tools.release_allocation(pool, _ctx(), str(alloc_id))
+            first = await release_allocation(pool, _ctx(), str(alloc_id))
             assert first.status == "released"
-            second = await alloc_tools.release_allocation(pool, _ctx(), str(alloc_id))
+            second = await release_allocation(pool, _ctx(), str(alloc_id))
             assert second.status == "error"
             assert second.error_category == "stale_handle"
             reconciled = [r for r in await _ledger_rows(pool, alloc_id) if r[0] == "reconciled"]
@@ -213,9 +215,7 @@ def test_concurrent_release_vs_expired_sweep_reconciles_once(migrated_url: str) 
                     advisory_xact_lock(sweep, LockScope.ALLOCATION, alloc_id),
                 ):
                     # release on the pool blocks behind the held PROJECT lock.
-                    task = asyncio.ensure_future(
-                        alloc_tools.release_allocation(pool, _ctx(), str(alloc_id))
-                    )
+                    task = asyncio.ensure_future(release_allocation(pool, _ctx(), str(alloc_id)))
                     await wait_until_any_backend_waiting(sweep, locktype="advisory")
                     assert not task.done()  # blocked on the sweep's locks
                     # The sweep flips ->expired and reconciles, then releases the locks.
@@ -267,7 +267,7 @@ def test_release_active_without_size_fails_clean_and_rolls_back(migrated_url: st
                     ),
                 )
                 await accounting.reserve(conn, alloc, Decimal("9.0000"))
-            resp = await alloc_tools.release_allocation(pool, _ctx(), str(alloc.id))
+            resp = await release_allocation(pool, _ctx(), str(alloc.id))
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
             async with pool.connection() as conn:

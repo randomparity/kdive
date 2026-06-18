@@ -13,10 +13,12 @@ from kdive.artifacts.storage import StoredArtifact
 from kdive.db import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
+from kdive.domain.capacity.state import IllegalTransition, SystemState
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle_rules import TERMINAL_SYSTEM_STATES
-from kdive.domain.models import Job, JobKind, Sensitivity, System
-from kdive.domain.state import IllegalTransition, SystemState
+from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
@@ -26,17 +28,13 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
-from kdive.store import objectstore as _objectstore
 from kdive.store.objectstore import (
+    ObjectStore,
     artifact_key,
     register_artifact_row,
 )
 
 _log = logging.getLogger(__name__)
-
-
-def object_store_from_env() -> _objectstore.ObjectStore:
-    return _objectstore.object_store_from_env()
 
 
 async def audit_transition(
@@ -70,12 +68,19 @@ async def _commit_uploaded_rootfs(
     system: System,
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
+    artifact_store: ObjectStore | None,
 ) -> None:
     """Commit the write-once artifacts row for an 'upload'-kind rootfs (ADR-0048 §6)."""
     if not rootfs_upload_window_allowed(profile_policy, profile):
         return
+    if artifact_store is None:
+        raise CategorizedError(
+            "object storage is not configured; cannot commit uploaded rootfs",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"system_id": str(system.id), "artifact": "rootfs"},
+        )
     key = artifact_key("local", "systems", str(system.id), "rootfs")
-    head = await asyncio.to_thread(object_store_from_env().head, key)
+    head = await asyncio.to_thread(artifact_store.head, key)
     if head is None:
         raise CategorizedError(
             "upload-kind rootfs was never uploaded",
@@ -95,8 +100,9 @@ async def _finalize_provision_ready(
     system: System,
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
+    artifact_store: ObjectStore | None,
 ) -> None:
-    await _commit_uploaded_rootfs(conn, system, profile, profile_policy)
+    await _commit_uploaded_rootfs(conn, system, profile, profile_policy, artifact_store)
     await open_billing_interval(conn, system.allocation_id)
     await audit_transition(
         conn,
@@ -154,6 +160,7 @@ async def _commit_provision_result(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
     domain_name: str,
+    artifact_store: ObjectStore | None,
 ) -> SystemState | None:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
         current = await _locked_system_state(conn, system.id)
@@ -162,7 +169,9 @@ async def _commit_provision_result(
                 "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
                 (SystemState.READY.value, domain_name, system.id),
             )
-            await _finalize_provision_ready(conn, job, system, profile, profile_policy)
+            await _finalize_provision_ready(
+                conn, job, system, profile, profile_policy, artifact_store
+            )
         return current
 
 
@@ -171,6 +180,7 @@ async def provision_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    artifact_store: ObjectStore | None = None,
 ) -> str | None:
     """Define+start the tagged domain and drive the System ``provisioning -> ready``."""
     system_id = UUID(load_payload(job, SystemPayload).system_id)
@@ -207,7 +217,7 @@ async def provision_handler(
         exc.terminal = True
         raise
     current = await _commit_provision_result(
-        conn, job, system, profile, runtime.profile_policy, domain_name
+        conn, job, system, profile, runtime.profile_policy, domain_name, artifact_store
     )
     if current in TERMINAL_SYSTEM_STATES:
         await asyncio.to_thread(provisioner.teardown, domain_name)
@@ -310,11 +320,14 @@ def register_handlers(
     registry: HandlerRegistry,
     *,
     resolver: ProviderResolver,
+    artifact_store: ObjectStore | None = None,
 ) -> None:
     """Bind the `provision`/`teardown`/`reprovision` job handlers."""
     registry.register(
         JobKind.PROVISION,
-        lambda conn, job: provision_handler(conn, job, resolver=resolver),
+        lambda conn, job: provision_handler(
+            conn, job, resolver=resolver, artifact_store=artifact_store
+        ),
     )
     registry.register(
         JobKind.TEARDOWN,

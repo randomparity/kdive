@@ -16,7 +16,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, Field
 
-from kdive.domain.image_format import ImageFormat
+from kdive.domain.catalog.image_format import ImageFormat
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

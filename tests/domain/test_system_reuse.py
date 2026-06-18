@@ -7,16 +7,16 @@ from uuid import uuid4
 
 import pytest
 
+from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, System
-from kdive.domain.pcie import PCIeClaim
-from kdive.domain.sizing import AllocationSizing
-from kdive.domain.state import AllocationState, SystemState
-from kdive.domain.system_reuse import (
+from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.lifecycle.sizing import AllocationSizing
+from kdive.domain.lifecycle.system_reuse import (
     ReuseRequirement,
     read_system_sizing,
     snapshot_satisfies,
 )
+from kdive.domain.pcie import PCIeClaim
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 

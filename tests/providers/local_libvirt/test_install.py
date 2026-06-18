@@ -14,10 +14,11 @@ import pytest
 
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.local_libvirt.lifecycle import install
 from kdive.providers.local_libvirt.lifecycle.install import (
+    ConsoleVerdict,
     LocalLibvirtInstall,
     ReadinessResult,
     _stage_object,
@@ -505,21 +506,27 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 
 def test_verdict_to_result_crashed_is_answered_failure() -> None:
     # The demo's load-bearing signal: a crashed verdict must resolve to readiness failure.
-    assert _verdict_to_result("crashed", exited=False) == ReadinessResult(answered=True, ok=False)
+    assert _verdict_to_result(ConsoleVerdict.CRASHED, exited=False) == ReadinessResult(
+        answered=True, ok=False
+    )
 
 
 def test_verdict_to_result_ready_is_answered_ok() -> None:
-    assert _verdict_to_result("ready", exited=False) == ReadinessResult(answered=True, ok=True)
+    assert _verdict_to_result(ConsoleVerdict.READY, exited=False) == ReadinessResult(
+        answered=True, ok=True
+    )
 
 
 def test_verdict_to_result_pending_running_keeps_polling() -> None:
     # A still-booting guest is not yet answered → None tells the probe to keep polling.
-    assert _verdict_to_result("pending", exited=False) is None
+    assert _verdict_to_result(ConsoleVerdict.PENDING, exited=False) is None
 
 
 def test_verdict_to_result_pending_exited_is_answered_failure() -> None:
     # A guest that exited without reaching the marker is answered-but-failed (v1's `exited`).
-    assert _verdict_to_result("pending", exited=True) == ReadinessResult(answered=True, ok=False)
+    assert _verdict_to_result(ConsoleVerdict.PENDING, exited=True) == ReadinessResult(
+        answered=True, ok=False
+    )
 
 
 def test_real_readiness_treats_missing_domain_as_terminal(

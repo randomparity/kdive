@@ -20,9 +20,9 @@ import psycopg
 import pytest
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import JobKind
-from kdive.domain.state import JobState
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload
 from tests.adversarial.conftest import count_rows, open_conn, open_conns

@@ -13,7 +13,7 @@ import pytest
 from psycopg import sql
 
 from kdive.db import migrate
-from kdive.domain.models import ImageState, ImageVisibility
+from kdive.domain.catalog.images import ImageState, ImageVisibility
 
 
 def _columns(conn: psycopg.Connection, table: str) -> dict[str, str]:

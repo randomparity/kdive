@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.references import ComponentRef
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import DestructiveJobKind
+from kdive.domain.operations.jobs import DestructiveJobKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.ports import (
@@ -37,6 +37,7 @@ from kdive.providers.ports import (
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
 type BuildConfigValidator = Callable[[ComponentRef], None]
 type RootfsValidator = Callable[[RootfsSource], None]
+type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
 
 
 def _unconfigured_component_sources() -> ComponentSourceCapabilities:
@@ -99,6 +100,7 @@ class ProviderRuntime:
     build_config_validator: BuildConfigValidator | None = None
     rootfs_validator: RootfsValidator | None = None
     rootfs_build_plane: RootfsBuildPlane | None = None
+    staged_volume_probe: StagedVolumeProbe | None = None
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:

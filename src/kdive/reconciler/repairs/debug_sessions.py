@@ -9,7 +9,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.domain.state import DebugSessionState
+from kdive.domain.capacity.state import DebugSessionState
 from kdive.providers.core.transport_reset import TransportResetter
 
 _log = logging.getLogger(__name__)

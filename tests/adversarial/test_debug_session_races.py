@@ -32,14 +32,14 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.models import DebugSession, Investigation, Run, System
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
     InvestigationState,
     RunState,
     SystemState,
 )
+from kdive.domain.lifecycle import DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy

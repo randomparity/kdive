@@ -79,7 +79,6 @@ def ensure_token_valid(token: str, *, now: int, margin_s: int = 30) -> None:
 
 
 def _session_factory() -> Session:
-    """Build the authenticated session; overridden in tests with a fake."""
     return Session.from_env()
 
 
@@ -97,7 +96,6 @@ async def _call(name: str, arguments: Mapping[str, object]) -> Mapping[str, obje
 
 
 def _flatten(envelope: object) -> dict[str, object]:
-    """Flatten one response envelope into a record: ``id``/``state`` plus its ``data``."""
     if not isinstance(envelope, Mapping):
         return {}
     fields: Mapping[str, object] = {str(k): v for k, v in envelope.items()}
@@ -123,7 +121,6 @@ async def _run(name: str, arguments: Mapping[str, object], *, as_json: bool) -> 
 
 
 async def run_mutating_tool(name: str, arguments: Mapping[str, object], *, as_json: bool) -> int:
-    """Run one mutating MCP tool for sibling command modules."""
     return await _run(name, arguments, as_json=as_json)
 
 

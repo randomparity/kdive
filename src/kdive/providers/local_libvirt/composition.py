@@ -16,7 +16,7 @@ from kdive.components.references import (
 )
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,
     ProviderDiscoveryRegistration,

@@ -3,7 +3,7 @@
 Two `platform_operator` knobs, both audited to ``platform_audit_log``:
 
 * **``ops.set_cost_class_coeff(cost_class, coeff)``** upserts the ``cost_class_coefficients``
-  row the pricing path reads (``domain/cost.py``). New pricing applies from the **next**
+  row the pricing path reads (``domain/accounting/cost.py``). New pricing applies from the **next**
   charge onward; it never retro-reprices committed ledger rows. The pricing read is already
   DB-backed and fail-closed on a missing row, so this is a direct upsert.
 * **``ops.set_host_capacity(resource_id, concurrent_allocation_cap)``** updates the host's
@@ -28,9 +28,9 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.domain.cost_class_rules import parse_positive_coeff, validate_cost_class_name
+from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

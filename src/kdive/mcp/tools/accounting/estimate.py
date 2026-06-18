@@ -9,7 +9,7 @@ from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.domain.cost import (
+from kdive.domain.accounting.cost import (
     W_CPU,
     W_MEM,
     Selector,

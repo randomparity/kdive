@@ -2,9 +2,11 @@
 
 Thin FastMCP wrappers over plain async handlers that take the pool + request context as
 arguments (tested directly, never through MCP). Resource reads are filtered by the same
-project affinity predicate used by allocation placement. The nested `capabilities` jsonb is
-projected to a flat `dict[str, str]` for the response envelope (ADR-0019 `data` is
-`dict[str, str]`).
+project affinity predicate used by allocation placement. Response ``data`` follows the
+ADR-0019 ``dict[str, JsonValue]`` contract: the nested ``capabilities`` jsonb is projected
+to flat scalar fields (``kind``, ``arch``, ``vcpus``, ``memory_mb``,
+``concurrent_allocation_cap``, and ``transports``), while ``resources.describe`` can add
+``pool``, ``cost_class``, ``host_uri``, and the remote-libvirt ``staged_base_images`` list.
 """
 
 from __future__ import annotations
@@ -21,19 +23,22 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
-from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import ImageVisibility, Resource, ResourceKind
+from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
-from kdive.providers.remote_libvirt.staged_volumes import probe_staged_volumes
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects
 
 _log = logging.getLogger(__name__)
+type ResourceListItem = Resource | ToolResponse
 
 # A probe of `{volume: status}` for the caller-visible staged remote-libvirt base-image volumes
 # (ADR-0156). Injected so handler tests need no libvirt; the production default opens one
@@ -70,7 +75,7 @@ async def _staged_remote_images(
 
 async def _fetch_resource_rows(
     conn: AsyncConnection, kind: ResourceKind | None
-) -> list[dict[str, Any]]:
+) -> list[ResourceListItem]:
     if kind is None:
         query = "SELECT * FROM resources ORDER BY created_at, id"
         params: tuple[object, ...] = ()
@@ -79,11 +84,24 @@ async def _fetch_resource_rows(
         params = (kind.value,)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
-        return list(await cur.fetchall())
+        rows = await cur.fetchall()
+    return [_resource_list_item(row) for row in rows]
 
 
-def _resource_row_error(row: dict[str, Any]) -> ToolResponse:
-    object_id = row.get("id")
+def _resource_list_item(row: dict[str, Any]) -> ResourceListItem:
+    try:
+        return Resource.model_validate(row)
+    except ValueError:
+        object_id = row.get("id")
+        _log.warning(
+            "resource %s violates the response invariant; degraded",
+            object_id if object_id is not None else "<missing>",
+            exc_info=True,
+        )
+        return _resource_row_error(object_id)
+
+
+def _resource_row_error(object_id: object | None) -> ToolResponse:
     return ToolResponse.failure(
         str(object_id) if object_id is not None else "resources.list",
         ErrorCategory.INFRASTRUCTURE_FAILURE,
@@ -104,25 +122,19 @@ async def list_resources_tool(
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
-            rows = await _fetch_resource_rows(conn, resource_kind)
+            resources = await _fetch_resource_rows(conn, resource_kind)
         responses: list[ToolResponse] = []
-        for row in rows:
-            try:
-                resource = Resource.model_validate(row)
-                if not resource_visible_to_projects(resource, viewer_projects):
-                    continue
-                responses.append(
-                    resource_envelope(
-                        resource, next_actions=["resources.describe", "allocations.request"]
-                    )
+        for resource in resources:
+            if isinstance(resource, ToolResponse):
+                responses.append(resource)
+                continue
+            if not resource_visible_to_projects(resource, viewer_projects):
+                continue
+            responses.append(
+                resource_envelope(
+                    resource, next_actions=["resources.describe", "allocations.request"]
                 )
-            except ValueError:
-                _log.warning(
-                    "resource %s violates the response invariant; degraded",
-                    row.get("id", "<missing>"),
-                    exc_info=True,
-                )
-                responses.append(_resource_row_error(row))
+            )
         return ToolResponse.collection(
             "resources",
             "ok",
@@ -136,6 +148,7 @@ async def describe_resource(
     ctx: RequestContext,
     resource_id: str,
     *,
+    resolver: ProviderResolver | None = None,
     staged_probe: StagedVolumeProbe | None = None,
 ) -> ToolResponse:
     """Return one resource's envelope with pool/cost_class/host_uri, or an error.
@@ -154,7 +167,7 @@ async def describe_resource(
         async with pool.connection() as conn:
             resource = await RESOURCES.get(conn, uid)
             if resource is None or not resource_visible_to_projects(resource, viewer_projects):
-                return resource_config_error(resource_id)
+                return _not_found(resource_id)
             staged_images: list[tuple[str, str]] = []
             if resource.kind is ResourceKind.REMOTE_LIBVIRT:
                 staged_images = await _staged_remote_images(conn, ctx)
@@ -163,8 +176,12 @@ async def describe_resource(
         envelope.data["cost_class"] = resource.cost_class
         envelope.data["host_uri"] = resource.host_uri
         if resource.kind is ResourceKind.REMOTE_LIBVIRT:
-            probe = staged_probe or probe_staged_volumes
-            statuses = await probe([volume for _, volume in staged_images]) if staged_images else {}
+            probe = staged_probe or _runtime_staged_probe(resolver, resource.kind)
+            statuses = (
+                await probe([volume for _, volume in staged_images])
+                if probe is not None and staged_images
+                else {}
+            )
             staged_base_images: list[JsonValue] = [
                 {"name": name, "volume": volume, "staged": statuses.get(volume, "unknown")}
                 for name, volume in staged_images
@@ -173,7 +190,20 @@ async def describe_resource(
         return envelope
 
 
-def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _runtime_staged_probe(
+    resolver: ProviderResolver | None, kind: ResourceKind
+) -> StagedVolumeProbe | None:
+    if resolver is None:
+        return None
+    try:
+        return resolver.resolve(kind).staged_volume_probe
+    except CategorizedError:
+        return None
+
+
+def register(
+    app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver | None = None
+) -> None:
     """Register resource catalog read tools on ``app``, bound to ``pool``."""
 
     @app.tool(
@@ -199,4 +229,4 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         resource_id: Annotated[str, Field(description="The Resource UUID to describe.")],
     ) -> ToolResponse:
         """Return one runtime resource visible to the caller."""
-        return await describe_resource(pool, current_context(), resource_id)
+        return await describe_resource(pool, current_context(), resource_id, resolver=resolver)

@@ -31,7 +31,7 @@ from collections.abc import Callable
 from typing import Any, NamedTuple, Protocol
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.models import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -80,10 +80,10 @@ def _build_transcript(argv: list[str], result: AgentExecResult) -> str:
 class InTargetArtifactChannel:
     """Register a minted presigned URL, run a constrained in-guest command, redact, persist.
 
-    The per-op registry ``scope`` is **single-sourced** here: the caller mints the URL (via
-    ``store.presign_get`` / ``presign_put``) and hands it over unused; this channel registers
-    it under ``scope`` and releases that same ``scope`` after the persist, so registration and
-    release cannot diverge and strand a live capability in the registry.
+    The registry ``scope`` is **single-sourced** here: the caller mints the URL (via
+    ``store.presign_get`` / ``presign_put``) and hands it over unused; this channel derives a
+    child scope for each call, registers the URL under it, and releases that child after the
+    persist, so concurrent reuse cannot release another in-flight call's capability.
     """
 
     def __init__(
@@ -131,7 +131,8 @@ class InTargetArtifactChannel:
                 argv, an unreachable agent, a timeout, or a malformed reply) or the object
                 store; the scope is released before the error escapes.
         """
-        self._registry.register(capability_url, scope=self._scope)
+        call_scope = (self._scope, object())
+        self._registry.register(capability_url, scope=call_scope)
         try:
             result = self._agent_exec.run(domain, argv)
             transcript = _build_transcript(argv, result)
@@ -151,4 +152,4 @@ class InTargetArtifactChannel:
                 result=result, artifact=artifact, transcript_snippet=redacted
             )
         finally:
-            self._registry.release(self._scope)
+            self._registry.release(call_scope)

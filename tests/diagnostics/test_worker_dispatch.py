@@ -13,8 +13,9 @@ from kdive.diagnostics.checks import (
 )
 from kdive.diagnostics.result_codec import serialize_results
 from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.state import JobState
+from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 
 
 class _FakeJob:
@@ -40,7 +41,7 @@ class _FakeQueue:
     def __init__(self, sequence: Iterable[_FakeJob]) -> None:
         self._sequence = list(sequence)
         self._last: _FakeJob = _FakeJob(JobState.QUEUED)
-        self.enqueued: object = None
+        self.enqueued: tuple[str, object, object] | None = None
 
     async def enqueue(self, dedup_key: str, payload: object, authorizing: object) -> _FakeJob:
         self.enqueued = (dedup_key, payload, authorizing)
@@ -60,6 +61,8 @@ def _dispatcher(queue: _FakeQueue, *, clock_ticks: list[float]) -> JobWorkerChec
     ticks = iter(clock_ticks)  # increasing values -> the bounded wait terminates deterministically
     return JobWorkerCheckDispatcher(
         pool=None,
+        provider="remote-libvirt",
+        worker_check_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID),
         budget=15.0,
         enqueue_fn=queue.enqueue,  # ty: ignore[invalid-argument-type]
         get_fn=queue.get_by_dedup_key,  # ty: ignore[invalid-argument-type]
@@ -79,6 +82,10 @@ def test_succeeded_returns_real_results() -> None:
     queue = _FakeQueue([_FakeJob(JobState.SUCCEEDED, result_ref=out)])
     results = asyncio.run(_dispatcher(queue, clock_ticks=[0.0, 0.1]).run_worker_checks())
     assert {r.status for r in results} == {CheckStatus.PASS}
+    assert queue.enqueued is not None
+    _, payload, authorizing = queue.enqueued
+    assert payload == DiagnosticsWorkerCheckPayload(provider="remote-libvirt")
+    assert authorizing == Authorizing(principal="diagnostics", project="remote-libvirt")
 
 
 def test_failed_maps_to_error_with_category() -> None:

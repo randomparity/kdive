@@ -23,8 +23,8 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
+from kdive.domain.catalog.resources import ManagedBy
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import ManagedBy
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid

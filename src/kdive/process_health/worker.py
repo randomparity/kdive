@@ -26,13 +26,6 @@ def build_worker_probe(
     postgres_ping: Callable[[], Awaitable[None]],
     object_store_factory: Callable[[], _Pingable],
 ) -> HealthProbe:
-    """Return the worker/reconciler readiness probe (Postgres + MinIO, no OIDC).
-
-    Args:
-        postgres_ping: Coroutine running a ``SELECT 1`` over the shared pool.
-        object_store_factory: Builds an object store exposing a synchronous ``ping()``;
-            called inside the check so a misconfigured store reads as not-ready.
-    """
     return HealthProbe(
         checks=build_worker_checks(
             postgres_ping=postgres_ping,

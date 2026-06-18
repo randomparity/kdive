@@ -26,6 +26,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
+from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -33,7 +34,6 @@ from kdive.domain.models import (
     ResourceKind,
     System,
 )
-from kdive.domain.state import AllocationState, ResourceStatus, SystemState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import breakglass
 from kdive.security.authz.rbac import PlatformRole

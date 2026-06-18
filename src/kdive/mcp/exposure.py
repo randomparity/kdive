@@ -91,12 +91,12 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "artifacts.create_system_upload": _OPERATOR,
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
-    # build hosts (platform operator)
-    "build_hosts.list": _PLAT_OP,
-    "build_hosts.disable": _PLAT_OP,
-    "build_hosts.remove": _PLAT_OP,
-    "build_hosts.register_ssh": _PLAT_OP,
-    "build_hosts.register_ephemeral_libvirt": _PLAT_OP,
+    # build hosts
+    "build_hosts.list": _PLAT_AUDITOR,
+    "build_hosts.disable": _PLAT_ADMIN,
+    "build_hosts.remove": _PLAT_ADMIN,
+    "build_hosts.register_ssh": _PLAT_ADMIN,
+    "build_hosts.register_ephemeral_libvirt": _PLAT_ADMIN,
     # build config
     "buildconfig.set": _PLAT_ADMIN,
     # control
@@ -112,13 +112,13 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "debug.clear_breakpoint": _OPERATOR,
     "debug.read_memory": _OPERATOR,
     "debug.read_registers": _OPERATOR,
-    # images (platform operator)
+    # images
     "images.build": _PLAT_OP,
     "images.publish": _PLAT_OP,
-    "images.upload": _PLAT_OP,
-    "images.delete": _PLAT_OP,
-    "images.extend": _PLAT_OP,
-    "images.prune_expired": _PLAT_OP,
+    "images.upload": _OPERATOR,
+    "images.delete": _OPERATOR,
+    "images.extend": _PLAT_ADMIN,
+    "images.prune_expired": _PLAT_ADMIN,
     # introspect
     "introspect.from_vmcore": _VIEWER,
     "introspect.run": _VIEWER,
@@ -152,15 +152,15 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # postmortem
     "postmortem.crash": _OPERATOR,
     "postmortem.triage": _OPERATOR,
-    # resources (platform operator; drain is dual: operator or admin)
+    # resources (drain is dual: operator or admin)
     "resources.cordon": _PLAT_OP,
     "resources.uncordon": _PLAT_OP,
     "resources.set_status": _PLAT_OP,
-    "resources.deregister": _PLAT_OP,
-    "resources.renew": _PLAT_OP,
-    "resources.register_local_libvirt": _PLAT_OP,
-    "resources.register_remote_libvirt": _PLAT_OP,
-    "resources.register_fault_inject": _PLAT_OP,
+    "resources.deregister": _PLAT_ADMIN,
+    "resources.renew": _PLAT_ADMIN,
+    "resources.register_local_libvirt": _PLAT_ADMIN,
+    "resources.register_remote_libvirt": _PLAT_ADMIN,
+    "resources.register_fault_inject": _PLAT_ADMIN,
     "resources.drain": frozenset({ExposureScope.PLATFORM_OPERATOR, ExposureScope.PLATFORM_ADMIN}),
     # runs
     "runs.get": _VIEWER,
@@ -218,7 +218,14 @@ def required_scopes(tool_name: str) -> frozenset[ExposureScope]:
 
 
 def _max_project_rank(ctx: RequestContext) -> int:
-    return max((_ROLE_RANK[r] for r in ctx.roles.values()), default=-1)
+    return max(
+        (
+            _ROLE_RANK[role]
+            for project in ctx.projects
+            if (role := ctx.roles.get(project)) is not None
+        ),
+        default=-1,
+    )
 
 
 def _has_platform(ctx: RequestContext, needed: PlatformRole) -> bool:

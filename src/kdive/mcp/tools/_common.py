@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Job
+from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import authorizing, context_from_job
 from kdive.mcp.responses import ResponseDataInput, ToolResponse, current_status_data
 from kdive.serialization import JsonValue

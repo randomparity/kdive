@@ -50,7 +50,7 @@ from kdive.providers.remote_libvirt.transport import (
     RemoteLibvirtConnections,
     remote_libvirt_connections,
 )
-from kdive.providers.shared.build_host.workspace import redacted_tail
+from kdive.providers.shared.build_host.workspaces.workspace import redacted_tail
 from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, register_kdive_namespace
 from kdive.security.secrets.redaction import redact_url_credentials
 from kdive.security.secrets.secret_registry import SecretRegistry

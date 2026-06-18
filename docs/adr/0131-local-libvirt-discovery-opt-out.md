@@ -72,7 +72,7 @@ process. The generated config reference (`docs/guide/reference/config.md`) is CI
 Keep `register_all_discovery`'s attempt-all-then-raise-first behavior as is. It already
 satisfies "remote-libvirt discovery registers regardless of compose/iteration order," and
 the reconciler's caller is already best-effort. Changing it to never raise would silently
-weaken `admin/bootstrap.register_local_resource`, whose contract is to surface a local
+weaken `admin/bootstrap.register_discovered_resources`, whose contract is to surface a local
 registration failure to the operator running `migrate`. The gate, not a re-raise change, is
 the correct fix for #468.
 
@@ -90,11 +90,11 @@ the correct fix for #468.
   'local-libvirt'") rather than a deep libvirt socket error.
 - Default behavior is unchanged: with the flag absent or `true`, the local-libvirt runtime is
   composed into every resolver exactly as before.
-- The `migrate`-time `admin/bootstrap.register_local_resource` step is a
+- The `migrate`-time `admin/bootstrap.register_discovered_resources` step is a
   `build_provider_resolver().register_all_discovery(pool)` call, so with the flag false it
   registers no local-libvirt resource (only other enabled providers). This is correct for k8s
-  (the migrate Job has no local libvirt socket); the function name now means "register this
-  deployment's discoverable resources." Renaming is out of scope; the behavior is tested.
+  (the migrate Job has no local libvirt socket); the function name describes registering this
+  deployment's discoverable resources. The behavior is tested.
 - A zero-provider deployment (every provider disabled) is no longer a startup crash; it is a
   `WARN` from the `ProviderResolver` constructor (so the server and worker tiers, whose
   readiness probes do not inspect provider composition, surface it at startup), an `INFO` line

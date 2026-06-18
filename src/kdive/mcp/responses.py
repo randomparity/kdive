@@ -13,9 +13,9 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
-from kdive.domain.models import Job
-from kdive.domain.state import JobState
+from kdive.domain.operations.jobs import Job
 from kdive.serialization import JsonValue, safe_error_details, validate_json_value
 
 # Literal next tool names by the job's state.
@@ -153,7 +153,7 @@ class ToolResponse(BaseModel):
     ) -> ToolResponse:
         """Build one envelope for a collection-returning tool."""
         payload = dict(data or {})
-        payload["count"] = str(len(items))
+        payload["count"] = len(items)
         return cls(
             object_id=object_id,
             status=status,

@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import SystemShape
+from kdive.domain.lifecycle import SystemShape
 from kdive.domain.pcie import parse_match_spec
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -196,7 +196,6 @@ def _shape_envelope(shape: SystemShape) -> ToolResponse:
 
 
 def _shape_args(shape: SystemShape) -> dict[str, str]:
-    """Flatten a shape to the string-valued envelope/audit payload (ADR-0019 data is str)."""
     data = {
         "name": shape.name,
         "vcpus": str(shape.vcpus),

@@ -14,7 +14,7 @@ path in ``admission.py``.
 
 from __future__ import annotations
 
-from kdive.domain.models import Resource
+from kdive.domain.catalog.resources import Resource
 
 
 def project_may_place(resource: Resource, project: str) -> bool:

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Resource
-from kdive.domain.resource_capabilities import (
+from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
+from kdive.domain.catalog.resources import Resource
+from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
 
 _FLAT_CAP_KEYS = ("arch", VCPUS_KEY, MEMORY_MB_KEY, CONCURRENT_ALLOCATION_CAP_KEY)
@@ -20,12 +20,13 @@ def resource_config_error(object_id: str) -> ToolResponse:
 
 def resource_capability_data(resource: Resource) -> dict[str, str]:
     """Flatten the capabilities jsonb to string values for the envelope."""
-    caps = resource.capabilities
+    caps = resource.capability_view
     data: dict[str, str] = {"kind": resource.kind.value}
     for key in _FLAT_CAP_KEYS:
-        if key in caps:
-            data[key] = str(caps[key])
-    transports = caps.get("transports")
+        value = caps.scalar(key)
+        if value is not None:
+            data[key] = str(value)
+    transports = caps.scalar("transports")
     if isinstance(transports, (list, tuple)):
         data["transports"] = ",".join(str(t) for t in transports)
     return data

@@ -10,10 +10,10 @@ from psycopg.sql import Composable
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import System
+from kdive.domain.lifecycle import System
 from kdive.domain.pcie import parse_match_spec
-from kdive.domain.state import SystemState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT

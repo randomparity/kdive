@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 
 
 def validate_key_component(label: str, value: str) -> str:

@@ -26,8 +26,9 @@ from kdive.config.core_settings import (
     IMAGE_PRIVATE_MAX_BYTES,
     IMAGE_PRIVATE_MAX_COUNT,
 )
+from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.images import ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ImageState, ImageVisibility, Sensitivity
 from kdive.images.catalog import resolve_rootfs
 from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
 from kdive.services.images.upload import PrivateUploadRequest, register_private_upload

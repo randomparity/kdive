@@ -14,7 +14,7 @@ import pytest
 from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
-from kdive.providers.shared.build_host.shell_transport import (
+from kdive.providers.shared.build_host.transports.shell_transport import (
     _MAX_REMOTE_READ_B64_BYTES,
     ShellBuildTransport,
     _validate_url,

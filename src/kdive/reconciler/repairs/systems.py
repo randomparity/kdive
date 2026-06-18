@@ -9,8 +9,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.models import JobKind
-from kdive.domain.state import AllocationState, SystemState
+from kdive.domain.capacity.state import AllocationState, SystemState
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload
 from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL

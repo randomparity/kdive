@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -26,13 +27,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 import kdive.config as config
 from kdive.config.core_settings import RESOURCE_LEASE_TTL_SECONDS
-from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ManagedBy, ResourceKind, ResourceStatus
-from kdive.domain.resource_capabilities import (
+from kdive.domain.capacity.state import ResourceStatus
+from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
+from kdive.domain.catalog.resources import ManagedBy, ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.reconcile import resource_identity_lock
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -234,38 +236,79 @@ def _common_registration(
     return None, resolved_owner
 
 
-def _resolve_ports(
+def _default_registration_seams(
     probe: ResourceProbe | None, secrets_root: Path | None
 ) -> tuple[ResourceProbe, Path]:
     return probe or TcpResourceProbe(), secrets_root or secrets_root_from_env()
 
 
 type ResourceDbPreflight = Callable[[AsyncConnection], Awaitable[ToolResponse | None]]
+type RegistrationPlanFactory = Callable[[str | None], "_RegistrationPlan"]
+
+
+@dataclass(frozen=True, slots=True)
+class _RegistrationPlan:
+    kind: ResourceKind
+    request: RuntimeResourceRegistration
+    host_uri: str
+    base_image: str | None
+    owner_project: str | None
+    tool: str
+    db_preflight: ResourceDbPreflight
+
+
+async def _register_with_plan(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    request: RuntimeResourceRegistration,
+    tool: str,
+    plan_factory: RegistrationPlanFactory,
+    probe: ResourceProbe | None,
+    secrets_root: Path | None,
+    reachability_host_uri: str | None = None,
+) -> ToolResponse:
+    failure = await _authorize_registration(pool, ctx, tool=tool, name=request.name)
+    if failure is not None:
+        return failure
+    failure, owner_project = _common_registration(ctx, request)
+    if failure is not None:
+        return failure
+    if reachability_host_uri is None:
+        _, secrets_root = _default_registration_seams(None, secrets_root)
+    else:
+        resolved_probe, secrets_root = _default_registration_seams(probe, secrets_root)
+    failure = _validate_secret_refs(
+        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
+    )
+    if failure is not None:
+        return failure
+    if reachability_host_uri is not None:
+        failure = await _validate_reachability(
+            name=request.name, host_uri=reachability_host_uri, probe=resolved_probe
+        )
+        if failure is not None:
+            return failure
+    return await _insert_registered_resource(
+        pool,
+        ctx,
+        plan=plan_factory(owner_project),
+    )
 
 
 async def _insert_registered_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    kind: ResourceKind,
-    name: str,
-    cost_class: str,
-    host_uri: str,
-    base_image: str | None,
-    cap: int,
-    vcpus: int,
-    memory_mb: int,
-    secret_refs: tuple[str, ...],
-    owner_project: str | None,
-    tool: str,
-    db_preflight: ResourceDbPreflight,
+    plan: _RegistrationPlan,
 ) -> ToolResponse:
     """Run the DB preflight + the guarded INSERT in one transaction; map conflicts to envelopes."""
+    request = plan.request
     lease = _lease_deadline()
     caps = {
-        VCPUS_KEY: vcpus,
-        MEMORY_MB_KEY: memory_mb,
-        CONCURRENT_ALLOCATION_CAP_KEY: cap,
+        VCPUS_KEY: request.vcpus,
+        MEMORY_MB_KEY: request.memory_mb,
+        CONCURRENT_ALLOCATION_CAP_KEY: request.concurrent_allocation_cap,
     }
     try:
         # Serialize with the inventory reconcile on the (kind, name) identity so a concurrent
@@ -273,48 +316,40 @@ async def _insert_registered_resource(
         async with (
             pool.connection() as conn,
             conn.transaction(),
-            resource_identity_lock(conn, kind, name),
+            resource_identity_lock(conn, plan.kind, request.name),
         ):
-            failure = await db_preflight(conn)
+            failure = await plan.db_preflight(conn)
             if failure is not None:
                 return failure
             resource_id = await _insert_runtime_resource(
                 conn,
-                kind=kind,
-                name=name,
+                kind=plan.kind,
+                name=request.name,
                 caps=caps,
-                cost_class=cost_class,
-                host_uri=host_uri,
-                owner_project=owner_project,
+                cost_class=request.cost_class,
+                host_uri=plan.host_uri,
+                owner_project=plan.owner_project,
                 lease=lease,
             )
             await _audit_register(
                 conn,
                 ctx,
-                kind=kind,
-                name=name,
-                host_uri=host_uri,
-                base_image=base_image,
-                cost_class=cost_class,
-                cap=cap,
-                secret_refs=secret_refs,
-                owner_project=owner_project,
+                plan=plan,
                 resource_id=resource_id,
-                tool=tool,
             )
     except psycopg.errors.UniqueViolation:
         return ToolResponse.failure(
-            name,
+            request.name,
             ErrorCategory.CONFLICT,
-            data={"reason": f"a {kind.value} resource named {name!r} already exists"},
+            data={"reason": f"a {plan.kind.value} resource named {request.name!r} already exists"},
         )
     except CategorizedError as exc:
-        return ToolResponse.failure_from_error(name, exc)
+        return ToolResponse.failure_from_error(request.name, exc)
 
     _log.info(
         "runtime resource %r (%s/%s) registered by %s",
-        name,
-        kind.value,
+        request.name,
+        plan.kind.value,
         resource_id,
         ctx.principal,
     )
@@ -322,7 +357,7 @@ async def _insert_registered_resource(
         str(resource_id),
         "registered",
         suggested_next_actions=["resources.list", "resources.renew"],
-        data={"id": str(resource_id), "name": name, "kind": kind.value},
+        data={"id": str(resource_id), "name": request.name, "kind": plan.kind.value},
     )
 
 
@@ -385,34 +420,27 @@ async def _audit_register(
     conn: AsyncConnection,
     ctx: RequestContext,
     *,
-    kind: ResourceKind,
-    name: str,
-    host_uri: str,
-    base_image: str | None,
-    cost_class: str,
-    cap: int,
-    secret_refs: tuple[str, ...],
-    owner_project: str | None,
+    plan: _RegistrationPlan,
     resource_id: UUID,
-    tool: str,
 ) -> None:
     """Write the register audit row (secret references only — never secret bytes)."""
+    request = plan.request
     await audit.record_platform(
         conn,
         principal=ctx.principal,
         agent_session=ctx.agent_session,
         event=audit.PlatformAuditEvent(
-            tool=tool,
+            tool=plan.tool,
             scope=f"resource:{resource_id}",
             args={
-                "name": name,
-                "kind": kind.value,
-                "host_uri": host_uri,
-                "base_image": base_image,
-                "cost_class": cost_class,
-                "concurrent_allocation_cap": cap,
-                "secret_refs": list(secret_refs),
-                "owner_project": owner_project,
+                "name": request.name,
+                "kind": plan.kind.value,
+                "host_uri": plan.host_uri,
+                "base_image": plan.base_image,
+                "cost_class": request.cost_class,
+                "concurrent_allocation_cap": request.concurrent_allocation_cap,
+                "secret_refs": list(request.secret_refs),
+                "owner_project": plan.owner_project,
             },
             platform_role=held_platform_roles(ctx),
             actor=actor_for(ctx),
@@ -429,30 +457,8 @@ async def register_remote_libvirt_resource(
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime remote-libvirt resource. Requires ``platform_admin``."""
-    failure = await _authorize_registration(
-        pool,
-        ctx,
-        tool=REGISTER_REMOTE_LIBVIRT_TOOL,
-        name=request.name,
-    )
-    if failure is not None:
-        return failure
-    failure, owner_project = _common_registration(ctx, request)
-    if failure is not None:
-        return failure
     if not request.host_uri.strip():
         return config_error(request.name, "remote_libvirt requires a host URI")
-    probe, secrets_root = _resolve_ports(probe, secrets_root)
-    failure = _validate_secret_refs(
-        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
-    )
-    if failure is not None:
-        return failure
-    failure = await _validate_reachability(
-        name=request.name, host_uri=request.host_uri, probe=probe
-    )
-    if failure is not None:
-        return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
         failure = await _validate_runtime_name_available(
@@ -464,21 +470,26 @@ async def register_remote_libvirt_resource(
             conn, name=request.name, base_image=request.base_image
         )
 
-    return await _insert_registered_resource(
+    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
+        return _RegistrationPlan(
+            kind=ResourceKind.REMOTE_LIBVIRT,
+            request=request,
+            host_uri=request.host_uri,
+            base_image=request.base_image,
+            owner_project=owner_project,
+            tool=REGISTER_REMOTE_LIBVIRT_TOOL,
+            db_preflight=db_preflight,
+        )
+
+    return await _register_with_plan(
         pool,
         ctx,
-        kind=ResourceKind.REMOTE_LIBVIRT,
-        name=request.name,
-        cost_class=request.cost_class,
-        host_uri=request.host_uri,
-        base_image=request.base_image,
-        cap=request.concurrent_allocation_cap,
-        vcpus=request.vcpus,
-        memory_mb=request.memory_mb,
-        secret_refs=request.secret_refs,
-        owner_project=owner_project,
+        request=request,
         tool=REGISTER_REMOTE_LIBVIRT_TOOL,
-        db_preflight=db_preflight,
+        plan_factory=plan_factory,
+        probe=probe,
+        secrets_root=secrets_root,
+        reachability_host_uri=request.host_uri,
     )
 
 
@@ -491,51 +502,34 @@ async def register_local_libvirt_resource(
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime local-libvirt resource. Requires ``platform_admin``."""
-    failure = await _authorize_registration(
-        pool,
-        ctx,
-        tool=REGISTER_LOCAL_LIBVIRT_TOOL,
-        name=request.name,
-    )
-    if failure is not None:
-        return failure
-    failure, owner_project = _common_registration(ctx, request)
-    if failure is not None:
-        return failure
     if not request.host_uri.strip():
         return config_error(request.name, "local_libvirt requires a host URI")
-    probe, secrets_root = _resolve_ports(probe, secrets_root)
-    failure = _validate_secret_refs(
-        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
-    )
-    if failure is not None:
-        return failure
-    failure = await _validate_reachability(
-        name=request.name, host_uri=request.host_uri, probe=probe
-    )
-    if failure is not None:
-        return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
         return await _validate_runtime_name_available(
             conn, kind=ResourceKind.LOCAL_LIBVIRT, name=request.name
         )
 
-    return await _insert_registered_resource(
+    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
+        return _RegistrationPlan(
+            kind=ResourceKind.LOCAL_LIBVIRT,
+            request=request,
+            host_uri=request.host_uri,
+            base_image=None,
+            owner_project=owner_project,
+            tool=REGISTER_LOCAL_LIBVIRT_TOOL,
+            db_preflight=db_preflight,
+        )
+
+    return await _register_with_plan(
         pool,
         ctx,
-        kind=ResourceKind.LOCAL_LIBVIRT,
-        name=request.name,
-        cost_class=request.cost_class,
-        host_uri=request.host_uri,
-        base_image=None,
-        cap=request.concurrent_allocation_cap,
-        vcpus=request.vcpus,
-        memory_mb=request.memory_mb,
-        secret_refs=request.secret_refs,
-        owner_project=owner_project,
+        request=request,
         tool=REGISTER_LOCAL_LIBVIRT_TOOL,
-        db_preflight=db_preflight,
+        plan_factory=plan_factory,
+        probe=probe,
+        secrets_root=secrets_root,
+        reachability_host_uri=request.host_uri,
     )
 
 
@@ -548,44 +542,31 @@ async def register_fault_inject_resource(
     secrets_root: Path | None = None,
 ) -> ToolResponse:
     """Register a runtime fault-inject resource. Requires ``platform_admin``."""
-    failure = await _authorize_registration(
-        pool,
-        ctx,
-        tool=REGISTER_FAULT_INJECT_TOOL,
-        name=request.name,
-    )
-    if failure is not None:
-        return failure
-    failure, owner_project = _common_registration(ctx, request)
-    if failure is not None:
-        return failure
-    _, secrets_root = _resolve_ports(probe, secrets_root)
-    failure = _validate_secret_refs(
-        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
-    )
-    if failure is not None:
-        return failure
 
     async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
         return await _validate_runtime_name_available(
             conn, kind=ResourceKind.FAULT_INJECT, name=request.name
         )
 
-    return await _insert_registered_resource(
+    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
+        return _RegistrationPlan(
+            kind=ResourceKind.FAULT_INJECT,
+            request=request,
+            host_uri=_FAULT_INJECT_HOST_URI,
+            base_image=None,
+            owner_project=owner_project,
+            tool=REGISTER_FAULT_INJECT_TOOL,
+            db_preflight=db_preflight,
+        )
+
+    return await _register_with_plan(
         pool,
         ctx,
-        kind=ResourceKind.FAULT_INJECT,
-        name=request.name,
-        cost_class=request.cost_class,
-        host_uri=_FAULT_INJECT_HOST_URI,
-        base_image=None,
-        cap=request.concurrent_allocation_cap,
-        vcpus=request.vcpus,
-        memory_mb=request.memory_mb,
-        secret_refs=request.secret_refs,
-        owner_project=owner_project,
+        request=request,
         tool=REGISTER_FAULT_INJECT_TOOL,
-        db_preflight=db_preflight,
+        plan_factory=plan_factory,
+        probe=probe,
+        secrets_root=secrets_root,
     )
 
 

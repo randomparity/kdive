@@ -16,8 +16,8 @@ from uuid import uuid4
 import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.security.secrets.redaction import REDACTION
@@ -29,6 +29,9 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 # of the register->mask path, mirroring the ADR-0073/0075 fault-inject loops.
 _CAPABILITY_URL = (
     "https://store.example/t/runs/r1/kernel?X-Amz-Signature=deadbeefcafe&X-Amz-Expires=600"
+)
+_OTHER_CAPABILITY_URL = (
+    "https://store.example/t/runs/r2/kernel?X-Amz-Signature=beadfeedcafe&X-Amz-Expires=600"
 )
 
 
@@ -65,6 +68,20 @@ class _FailingExec:
         raise CategorizedError("guest agent unreachable", category=ErrorCategory.TRANSPORT_FAILURE)
 
 
+class _NestedExec:
+    """Reuses the same channel during run() to exercise independent per-call scopes."""
+
+    def __init__(self, channel_ref: list[InTargetArtifactChannel]) -> None:
+        self._channel_ref = channel_ref
+        self._nested = False
+
+    def run(self, domain: object, argv: list[str]) -> AgentExecResult:
+        if not self._nested:
+            self._nested = True
+            _run(self._channel_ref[0], capability_url=_OTHER_CAPABILITY_URL)
+        return AgentExecResult(0, f"used {argv[-1]}".encode(), b"")
+
+
 def _channel(registry: SecretRegistry, store: _FakeStore, agent_exec: Any, scope: object):
     return InTargetArtifactChannel(
         registry=registry,
@@ -74,11 +91,16 @@ def _channel(registry: SecretRegistry, store: _FakeStore, agent_exec: Any, scope
     )
 
 
-def _run(channel: InTargetArtifactChannel, *, system_id=None):
+def _run(
+    channel: InTargetArtifactChannel,
+    *,
+    system_id=None,
+    capability_url: str = _CAPABILITY_URL,
+):
     return channel.exec_with_capability(
         object(),
-        capability_url=_CAPABILITY_URL,
-        argv=["/usr/bin/curl", "-fsS", "-o", "/boot/vmlinuz", _CAPABILITY_URL],
+        capability_url=capability_url,
+        argv=["/usr/bin/curl", "-fsS", "-o", "/boot/vmlinuz", capability_url],
         owner_kind="systems",
         owner_id=str(system_id or uuid4()),
     )
@@ -141,3 +163,20 @@ def test_scope_released_even_when_the_exec_fails() -> None:
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
     assert _CAPABILITY_URL not in registry.snapshot()  # released despite the failure
     assert store.writes == []  # nothing persisted when the exec never produced a transcript
+
+
+def test_reusing_channel_does_not_release_another_call_scope() -> None:
+    registry = SecretRegistry()
+    store = _FakeStore()
+    channel_ref: list[InTargetArtifactChannel] = []
+    channel = _channel(registry, store, _NestedExec(channel_ref), object())
+    channel_ref.append(channel)
+
+    output = _run(channel)
+
+    assert len(store.writes) == 2
+    persisted = "\n".join(write.data.decode("utf-8") for write in store.writes)
+    assert _CAPABILITY_URL not in persisted
+    assert _OTHER_CAPABILITY_URL not in persisted
+    assert _CAPABILITY_URL not in output.transcript_snippet
+    assert _OTHER_CAPABILITY_URL not in registry.snapshot()

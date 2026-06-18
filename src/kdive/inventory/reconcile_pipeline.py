@@ -42,7 +42,6 @@ async def reconcile_all(
 
 
 def _extend(into: ReconcileDiff, part: ReconcileDiff) -> None:
-    """Fold one per-entity diff into the merged diff."""
     into.created.extend(part.created)
     into.updated.extend(part.updated)
     into.pruned.extend(part.pruned)

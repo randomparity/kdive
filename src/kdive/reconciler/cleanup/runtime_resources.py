@@ -31,9 +31,9 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.domain.catalog.resources import ManagedBy
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
-from kdive.domain.models import ManagedBy
+from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.inventory.reconcile import PruneOutcome
 
 _log = logging.getLogger(__name__)

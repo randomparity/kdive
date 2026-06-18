@@ -19,9 +19,9 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Job, JobAuthorizing, JobKind
-from kdive.domain.state import JobState
+from kdive.domain.operations.jobs import Job, JobAuthorizing, JobKind
 from kdive.jobs.payloads import (
     Authorizing,
     PayloadModel,

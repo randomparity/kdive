@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from kdive.domain.models import Job, JobKind
-from kdive.domain.state import JobState
+from kdive.domain.capacity.state import JobState
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import authorizing, context_from_job
 from kdive.security.authz.context import RequestContext
 

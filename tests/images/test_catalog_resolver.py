@@ -13,7 +13,7 @@ from uuid import uuid4
 import psycopg
 
 from kdive.db.repositories import IMAGE_CATALOG
-from kdive.domain.models import ImageCatalogEntry, ImageState, ImageVisibility
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.images.catalog import resolve_rootfs
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

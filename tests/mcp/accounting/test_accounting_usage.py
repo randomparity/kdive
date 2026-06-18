@@ -25,6 +25,13 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
+from kdive.domain.capacity.state import (
+    AllocationState,
+    InvestigationState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.models import (
     Allocation,
     Budget,
@@ -33,13 +40,6 @@ from kdive.domain.models import (
     ResourceKind,
     Run,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    InvestigationState,
-    ResourceStatus,
-    RunState,
-    SystemState,
 )
 from kdive.mcp.auth import AuthError, ProjectMembershipDenied, RequestContext
 from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project

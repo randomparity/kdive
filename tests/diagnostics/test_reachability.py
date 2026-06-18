@@ -21,9 +21,11 @@ from kdive.diagnostics.checks import (
     RemoteLibvirtReachabilityCheck,
     Vantage,
 )
-from kdive.diagnostics.reachability import remote_libvirt_reachability_probe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.diagnostics.reachability import (
+    remote_libvirt_reachability_probe,
+)
 
 _PROVIDER = "remote-libvirt"
 

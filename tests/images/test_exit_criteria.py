@@ -49,8 +49,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import storage as artifact_types
 from kdive.artifacts.storage import ObjectListing
+from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ImageVisibility, Sensitivity
 from kdive.images.catalog import resolve_rootfs
 from kdive.images.validation import GUEST_CONTRACT_PATHS, InspectSeam
 from kdive.reconciler.cleanup.images import (

@@ -21,7 +21,8 @@ from kdive.components.references import (
 )
 from kdive.db.build_hosts import BuildHostKind
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind, Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition
@@ -300,7 +301,7 @@ def test_default_resolver_registers_only_local_libvirt(
 ) -> None:
     monkeypatch.delenv("KDIVE_FAULT_INJECT", raising=False)  # default = opt-in OFF
     _declare_no_remote(tmp_path, monkeypatch)
-    resolver = composition.build_provider_resolver()
+    resolver = composition.ProviderComposition().build_provider_resolver()
     assert resolver.registered_kinds() == frozenset({ResourceKind.LOCAL_LIBVIRT})
     local = resolver.resolve(ResourceKind.LOCAL_LIBVIRT)
     assert local.component_sources.provider == "local-libvirt"
@@ -312,7 +313,7 @@ def test_enabling_fault_inject_registers_both_kinds(
     from kdive.domain.models import ResourceKind
 
     _declare_no_remote(tmp_path, monkeypatch)
-    resolver = composition.build_provider_resolver(enable_fault_inject=True)
+    resolver = composition.ProviderComposition().build_provider_resolver(enable_fault_inject=True)
 
     assert resolver.registered_kinds() == frozenset(
         {ResourceKind.LOCAL_LIBVIRT, ResourceKind.FAULT_INJECT}
@@ -467,7 +468,7 @@ def test_resolver_excludes_local_libvirt_when_disabled(
     # the reconciler's register_all_discovery never composes the local discovery registrar
     # (which would connect to a non-existent qemu:///system socket).
     _declare_remote(tmp_path, monkeypatch)
-    resolver = composition.build_provider_resolver(enable_local_libvirt=False)
+    resolver = composition.ProviderComposition().build_provider_resolver(enable_local_libvirt=False)
 
     assert ResourceKind.LOCAL_LIBVIRT not in resolver.registered_kinds()
     assert ResourceKind.REMOTE_LIBVIRT in resolver.registered_kinds()
@@ -479,7 +480,7 @@ def test_resolver_excludes_local_libvirt_via_env(
     monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
     _declare_remote(tmp_path, monkeypatch)
 
-    resolver = composition.build_provider_resolver()
+    resolver = composition.ProviderComposition().build_provider_resolver()
 
     assert ResourceKind.LOCAL_LIBVIRT not in resolver.registered_kinds()
 
@@ -498,7 +499,7 @@ def test_disabled_local_libvirt_does_not_compose_local_discovery(
         lambda: constructed.append("local") or _unreachable_target(),
     )
     _declare_remote(tmp_path, monkeypatch)
-    resolver = composition.build_provider_resolver(enable_local_libvirt=False)
+    resolver = composition.ProviderComposition().build_provider_resolver(enable_local_libvirt=False)
 
     asyncio.run(resolver.register_all_discovery(cast(AsyncConnectionPool, object())))
 
@@ -534,7 +535,7 @@ def test_dump_volume_reaper_is_null_without_remote() -> None:
 
 
 def test_dump_volume_reaper_is_remote_when_enabled() -> None:
-    from kdive.providers.remote_libvirt.dump_volume_reaper import RemoteLibvirtDumpVolumeReaper
+    from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 
     comp = composition.ProviderComposition()
     reaper = comp.build_reconciler_dump_volume_reaper(enable_remote_libvirt=True)
@@ -550,7 +551,7 @@ def test_build_vm_reaper_is_null_without_remote() -> None:
 
 
 def test_build_vm_reaper_is_remote_when_enabled() -> None:
-    from kdive.providers.remote_libvirt.build_vm_reaper import RemoteLibvirtBuildVmReaper
+    from kdive.providers.remote_libvirt.reaping.build_vm import RemoteLibvirtBuildVmReaper
 
     comp = composition.ProviderComposition()
     reaper = comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=True)
@@ -614,7 +615,7 @@ def test_fault_inject_opt_in_reads_the_environment(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
 
-    resolver = composition.build_provider_resolver()
+    resolver = composition.ProviderComposition().build_provider_resolver()
 
     assert ResourceKind.FAULT_INJECT in resolver.registered_kinds()
 
@@ -648,7 +649,7 @@ def test_remote_libvirt_registers_via_inventory_opt_in(
 ) -> None:
     _declare_remote(tmp_path, monkeypatch)
 
-    resolver = composition.build_provider_resolver()
+    resolver = composition.ProviderComposition().build_provider_resolver()
 
     assert ResourceKind.REMOTE_LIBVIRT in resolver.registered_kinds()
 
@@ -658,7 +659,9 @@ def test_remote_libvirt_explicit_flag_wins_over_inventory(
 ) -> None:
     _declare_remote(tmp_path, monkeypatch)
 
-    resolver = composition.build_provider_resolver(enable_remote_libvirt=False)
+    resolver = composition.ProviderComposition().build_provider_resolver(
+        enable_remote_libvirt=False
+    )
 
     assert ResourceKind.REMOTE_LIBVIRT not in resolver.registered_kinds()
 
@@ -666,7 +669,7 @@ def test_remote_libvirt_explicit_flag_wins_over_inventory(
 def test_remote_libvirt_absent_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _declare_no_remote(tmp_path, monkeypatch)
 
-    resolver = composition.build_provider_resolver()
+    resolver = composition.ProviderComposition().build_provider_resolver()
 
     assert ResourceKind.REMOTE_LIBVIRT not in resolver.registered_kinds()
 

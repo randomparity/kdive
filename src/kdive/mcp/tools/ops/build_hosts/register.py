@@ -178,12 +178,20 @@ async def _register_build_host(
     Args:
         pool: The shared async connection pool.
         ctx: The caller's request context (must hold ``platform_admin``).
+        tool: The public MCP tool name for this wrapper, either ``REGISTER_SSH_TOOL`` or
+            ``REGISTER_EPHEMERAL_LIBVIRT_TOOL``. The value is reused in authorization-denial
+            ``suggested_next_actions`` and as the ``platform_audit_log.tool`` value for the
+            successful registration audit row.
         request: Validated per-kind request model. SSH requests carry address and credential
             reference; ephemeral-libvirt requests carry the operator-staged base image volume.
+            ``ssh_credential_ref`` is only a secret reference string; this path never fetches
+            or stores SSH secret bytes.
 
     Returns:
-        A success envelope with the new host id and suggested next actions, or a
-        typed failure envelope (authorization_denied / conflict / configuration_error).
+        A success envelope with ``suggested_next_actions`` set to ``build_hosts.list`` and
+        ``runs.build``, plus ``data`` containing the new ``id`` and ``request.name``. Failures
+        use typed envelopes for ``authorization_denied``, ``conflict``,
+        ``configuration_error``, or ``infrastructure_failure``.
     """
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_ADMIN)

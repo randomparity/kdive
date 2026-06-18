@@ -14,12 +14,12 @@ Gated ``platform_operator`` (a cross-project control action) and audited to
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.config as config
-from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -37,12 +37,10 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.services.images.retention import ImageSweepStore
-from kdive.store.objectstore import ObjectStore
 
 # A module-level singleton so it can be a stateless default arg (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
 _NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
-_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
 _RECONCILE_TOOL = "ops.reconcile_now"
 _RECONCILE_OBJECT_ID = "reconcile"
@@ -50,15 +48,22 @@ _RECONCILE_OBJECT_ID = "reconcile"
 _RECONCILE_SCOPE = "all-projects"
 
 
+@dataclass(frozen=True, slots=True)
+class ReconcileRepairPorts:
+    """Repair dependencies used by one on-demand reconcile pass."""
+
+    reaper: InfraReaper
+    upload_store: UploadStore | None
+    image_store: ImageSweepStore | None = None
+    dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
+    build_vm_reaper: BuildVmReaper = _NULL_BUILD_VM_REAPER
+
+
 async def reconcile_now(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    reaper: InfraReaper,
-    upload_store: UploadStore | None,
-    image_store: ImageSweepStore | None = None,
-    dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER,
-    build_vm_reaper: BuildVmReaper = _NULL_BUILD_VM_REAPER,
+    ports: ReconcileRepairPorts,
 ) -> ToolResponse:
     """Run one ``reconcile_once`` pass on demand; return its per-class repair summary.
 
@@ -72,10 +77,14 @@ async def reconcile_now(
             from — the same pool the periodic reconciler uses, so the two passes share the
             advisory locks.
         ctx: The caller's request context; must hold ``platform_operator``.
-        reaper: The infra reaper the leaked-domain repair consumes; registration resolves
-            it through the same provider composition seam as the periodic loop.
-        upload_store: The object store the abandoned-upload reaper consumes, or ``None`` to
-            skip that repair (mirrors the periodic loop when ``KDIVE_S3_*`` is unconfigured).
+        ports: The assembled repair dependencies for this pass. ``ports.reaper`` handles
+            leaked-domain cleanup and is resolved through the same provider composition seam
+            as the periodic loop. ``ports.upload_store`` enables abandoned-upload repair;
+            ``None`` skips that repair, mirroring the periodic loop when ``KDIVE_S3_*`` is
+            unconfigured. ``ports.image_store`` enables leaked, dangling, and expired
+            private image sweeps; ``None`` skips those image repairs. ``ports`` also carries
+            the dump-volume and build-VM reapers; their null defaults skip those provider
+            cleanup classes when the deployment has no matching provider wiring.
 
     Returns:
         A success ``ToolResponse`` carrying the per-class counts and ``failures`` list, or a
@@ -102,12 +111,12 @@ async def reconcile_now(
         # error (e.g. pool acquisition) propagates, matching the periodic loop's contract.
         report = await reconcile_once(
             pool,
-            reaper,
+            ports.reaper,
             config=ReconcileConfig(
-                upload_store=upload_store,
-                image_store=image_store,
-                dump_volume_reaper=dump_volume_reaper,
-                build_vm_reaper=build_vm_reaper,
+                upload_store=ports.upload_store,
+                image_store=ports.image_store,
+                dump_volume_reaper=ports.dump_volume_reaper,
+                build_vm_reaper=ports.build_vm_reaper,
             ),
         )
         async with pool.connection() as conn, conn.transaction():
@@ -153,53 +162,13 @@ def _reconcile_response(report: ReconcileReport) -> ToolResponse:
     )
 
 
-def resolve_upload_store() -> UploadStore | None:
-    """Resolve the upload store from the ``KDIVE_S3_*`` env, or ``None`` if unconfigured.
-
-    Mirrors the periodic reconciler's wiring (``kdive.__main__._run_reconciler``): no S3
-    env means the abandoned-upload reaper stays off, exactly as it does for the periodic
-    pass. Partial/invalid S3 config raises the original categorized error instead of
-    silently disabling repairs.
-    """
-    return _optional_object_store()
-
-
-def resolve_image_store() -> ImageSweepStore | None:
-    """Resolve the image-sweep store from the ``KDIVE_S3_*`` env, or ``None`` if unconfigured.
-
-    Mirrors the periodic reconciler's wiring: no S3 env means the image sweeps stay off.
-    Partial/invalid S3 config raises the original categorized error instead of silently
-    disabling repairs.
-    """
-    return _optional_object_store()
-
-
-def _optional_object_store() -> ObjectStore | None:
-    from kdive.store.objectstore import object_store_from_env
-
-    try:
-        return object_store_from_env()
-    except CategorizedError:
-        if _s3_env_is_absent():
-            return None
-        raise
-
-
-def _s3_env_is_absent() -> bool:
-    return _S3_OPTIONAL_ENV_NAMES.isdisjoint(config.env_snapshot())
-
-
 def register(
     app: FastMCP,
     pool: AsyncConnectionPool,
     *,
-    reaper: InfraReaper,
-    upload_store: UploadStore | None,
-    image_store: ImageSweepStore | None = None,
-    dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER,
-    build_vm_reaper: BuildVmReaper = _NULL_BUILD_VM_REAPER,
+    ports: ReconcileRepairPorts,
 ) -> None:
-    """Register ``ops.reconcile_now`` with explicitly assembled repair ports."""
+    """Register ``ops.reconcile_now`` with one assembled repair-port bundle."""
 
     @app.tool(
         name=_RECONCILE_TOOL,
@@ -211,9 +180,5 @@ def register(
         return await reconcile_now(
             pool,
             current_context(),
-            reaper=reaper,
-            upload_store=upload_store,
-            image_store=image_store,
-            dump_volume_reaper=dump_volume_reaper,
-            build_vm_reaper=build_vm_reaper,
+            ports=ports,
         )

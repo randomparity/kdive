@@ -21,6 +21,13 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
+from kdive.domain.capacity.state import (
+    AllocationState,
+    DebugSessionState,
+    InvestigationState,
+    RunState,
+    SystemState,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -31,13 +38,6 @@ from kdive.domain.models import (
     PowerAction,
     Run,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    DebugSessionState,
-    InvestigationState,
-    RunState,
-    SystemState,
 )
 from kdive.jobs import queue
 from kdive.jobs.handlers import control as control_plane

@@ -26,9 +26,9 @@ from pydantic import Field, ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
+from kdive.domain.capacity.state import IllegalTransition, InvestigationState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import ExternalRef, Investigation
-from kdive.domain.state import IllegalTransition, InvestigationState
+from kdive.domain.lifecycle import ExternalRef, Investigation
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -42,6 +42,7 @@ from kdive.security.authz.rbac import Role, projects_with_role, require_role
 from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
+type InvestigationListItem = Investigation | ToolResponse
 
 _TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 
@@ -313,7 +314,6 @@ async def close_investigation(
 
 
 async def _get_for_update(conn: AsyncConnection, uid: UUID) -> Investigation | None:
-    """Read an Investigation row ``FOR UPDATE`` (held under the per-Investigation lock)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM investigations WHERE id = %s FOR UPDATE", (uid,))
         row = await cur.fetchone()
@@ -523,7 +523,7 @@ async def set_investigation(
 
 async def _fetch_investigation_rows(
     conn: AsyncConnection, projects: tuple[str, ...], state: InvestigationState | None
-) -> list[dict[str, Any]]:
+) -> list[InvestigationListItem]:
     query = "SELECT * FROM investigations WHERE project = ANY(%s)"
     params: list[object] = [list(projects)]
     if state is not None:
@@ -532,12 +532,24 @@ async def _fetch_investigation_rows(
     query += " ORDER BY created_at DESC, id DESC"
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
-        return await cur.fetchall()
+        rows = await cur.fetchall()
+    return [_investigation_list_item(row) for row in rows]
 
 
-def _investigation_row_error(row: dict[str, Any]) -> ToolResponse:
-    """Degraded envelope for a row that violates the model invariant (matches resources.list)."""
-    object_id = row.get("id")
+def _investigation_list_item(row: dict[str, Any]) -> InvestigationListItem:
+    try:
+        return Investigation.model_validate(row)
+    except ValueError:
+        object_id = row.get("id")
+        _log.warning(
+            "investigation %s violates the response invariant; degraded",
+            object_id if object_id is not None else "<missing>",
+            exc_info=True,
+        )
+        return _investigation_row_error(object_id)
+
+
+def _investigation_row_error(object_id: object | None) -> ToolResponse:
     return ToolResponse.failure(
         str(object_id) if object_id is not None else "investigations.list",
         ErrorCategory.CONFIGURATION_ERROR,
@@ -563,24 +575,14 @@ async def list_investigations(
         if project is not None:
             viewer_projects = tuple(p for p in viewer_projects if p == project)
         async with pool.connection() as conn:
-            rows = await _fetch_investigation_rows(conn, viewer_projects, resolved_state)
-            render_queue: list[ToolResponse | Investigation] = []
-            valid_investigations: list[Investigation] = []
-            for row in rows:
-                try:
-                    inv = Investigation.model_validate(row)
-                except ValueError:
-                    _log.warning(
-                        "investigation %s violates the response invariant; degraded",
-                        row.get("id", "<missing>"),
-                        exc_info=True,
-                    )
-                    render_queue.append(_investigation_row_error(row))
+            render_queue = await _fetch_investigation_rows(conn, viewer_projects, resolved_state)
+            investigations: list[Investigation] = []
+            for item in render_queue:
+                if isinstance(item, ToolResponse):
                     continue
-                valid_investigations.append(inv)
-                render_queue.append(inv)
+                investigations.append(item)
             attachments = await _attachments_for_investigations(
-                conn, [inv.id for inv in valid_investigations]
+                conn, [inv.id for inv in investigations]
             )
             items = [
                 item

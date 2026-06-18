@@ -9,9 +9,10 @@ from uuid import uuid4
 import pytest
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
+from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ImageVisibility, Job, JobKind, PowerAction
-from kdive.domain.state import JobState
+from kdive.domain.catalog.images import ImageVisibility
+from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs.payloads import (
     Authorizing,
     BuildPayload,

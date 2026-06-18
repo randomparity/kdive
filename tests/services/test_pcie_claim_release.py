@@ -23,11 +23,13 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
-from kdive.domain.cost import Selector
-from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
+from kdive.domain.accounting import Budget, Quota
+from kdive.domain.accounting.cost import Selector
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
-from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
-from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop

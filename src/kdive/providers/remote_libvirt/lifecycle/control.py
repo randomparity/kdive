@@ -23,7 +23,7 @@ from typing import Protocol
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import PowerAction
+from kdive.domain.operations.jobs import PowerAction
 from kdive.providers.ports import Controller as Controller
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection

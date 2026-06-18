@@ -21,9 +21,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import storage as artifact_types
 from kdive.db.repositories import IMAGE_CATALOG, JOBS
+from kdive.domain.capacity.state import JobState
+from kdive.domain.catalog.images import ImageState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ImageState, JobKind, ResourceKind
-from kdive.domain.state import JobState
+from kdive.domain.operations.jobs import JobKind
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
 from kdive.images.validation import GUEST_CONTRACT_PATHS
 from kdive.jobs import queue

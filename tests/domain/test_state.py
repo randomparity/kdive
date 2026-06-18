@@ -1,4 +1,4 @@
-"""Tests for the M0 object lifecycles (`kdive.domain.state`).
+"""Tests for the M0 object lifecycles (`kdive.domain.capacity.state`).
 
 The legal edges below are transcribed by hand from the spec's "Domain objects in
 M0" table so the tests check behavior against the spec rather than against the
@@ -12,7 +12,7 @@ from enum import StrEnum
 
 import pytest
 
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
     IllegalTransition,

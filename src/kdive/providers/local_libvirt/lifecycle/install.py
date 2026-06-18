@@ -32,8 +32,9 @@ import subprocess  # noqa: S404 - virsh domstate is invoked with a fixed argv, n
 import time
 import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned domain XML only
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal, NamedTuple, Protocol
+from typing import NamedTuple, Protocol
 from uuid import UUID
 
 import libvirt
@@ -74,7 +75,11 @@ _CRASH_SIGNATURE = re.compile(
     r"|detected stall"
 )
 
-ConsoleVerdict = Literal["ready", "crashed", "pending"]
+
+class ConsoleVerdict(StrEnum):
+    READY = "ready"
+    CRASHED = "crashed"
+    PENDING = "pending"
 
 
 class ReadinessResult(NamedTuple):
@@ -337,8 +342,8 @@ def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> Console
     marker_match = marker_re.search(text)
     region = text if marker_match is None else text[: marker_match.start()]
     if _CRASH_SIGNATURE.search(region):
-        return "crashed"
-    return "ready" if marker_match is not None else "pending"
+        return ConsoleVerdict.CRASHED
+    return ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING
 
 
 class _ObjectReader(Protocol):
@@ -415,7 +420,7 @@ def _domain_exit_probe(domain_name: str) -> _DomainExitProbe:  # pragma: no cove
     if virsh is None:
         return _DomainExitProbe(False, "virsh executable not found")
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        proc = subprocess.run(  # noqa: S603 - resolved virsh; URI/domain are argv data, no shell
             [virsh, "-c", uri, "domstate", domain_name],
             capture_output=True,
             text=True,
@@ -463,9 +468,9 @@ def _verdict_to_result(verdict: ConsoleVerdict, *, exited: bool) -> ReadinessRes
       without reaching the marker).
     - ``pending`` with the guest still running → ``None``, meaning "no answer yet, keep polling".
     """
-    if verdict == "ready":
+    if verdict is ConsoleVerdict.READY:
         return ReadinessResult(answered=True, ok=True)
-    if verdict == "crashed":
+    if verdict is ConsoleVerdict.CRASHED:
         return ReadinessResult(answered=True, ok=False)
     if exited:
         return ReadinessResult(answered=True, ok=False)

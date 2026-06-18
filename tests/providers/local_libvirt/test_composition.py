@@ -11,7 +11,7 @@ from kdive.components.references import (
     VMLINUX_COMPONENT,
 )
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.local_libvirt import composition
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.local_libvirt.debug.introspect import (

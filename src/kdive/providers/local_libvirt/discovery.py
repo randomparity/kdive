@@ -17,12 +17,12 @@ import libvirt
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 import kdive.config as config
-from kdive.domain.discovery import ResourceRecord
+from kdive.domain.capacity.state import ResourceStatus
+from kdive.domain.catalog.discovery import ResourceRecord
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
-from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
-from kdive.domain.state import ResourceStatus
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports import OwnedInfra
 from kdive.providers.shared.libvirt_xml import (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import psycopg
+import pytest
 
 from kdive.security.usage import UsageEvent, record_usage
 
@@ -26,12 +27,12 @@ def test_record_usage_writes_row(migrated_url: str) -> None:
             )
             await conn.commit()
             cur = await conn.execute(
-                "SELECT principal, tool, outcome, project, actor FROM tool_invocation "
-                "WHERE id = %s",
+                "SELECT principal, agent_session, project, tool, outcome, actor, client_id "
+                "FROM tool_invocation WHERE id = %s",
                 (rid,),
             )
             row = await cur.fetchone()
-        assert row == ("alice", "jobs.get", "ok", "proj-a", "agent")
+        assert row == ("alice", "s1", "proj-a", "jobs.get", "ok", "agent", None)
 
     asyncio.run(_run())
 
@@ -53,10 +54,12 @@ def test_record_usage_allows_null_project(migrated_url: str) -> None:
             )
             await conn.commit()
             cur = await conn.execute(
-                "SELECT project, outcome FROM tool_invocation WHERE id = %s", (rid,)
+                "SELECT principal, agent_session, project, tool, outcome, actor, client_id "
+                "FROM tool_invocation WHERE id = %s",
+                (rid,),
             )
             row = await cur.fetchone()
-        assert row == (None, "denied")
+        assert row == ("bob", None, None, "projects.list", "denied", "operator-cli", "cli-1")
 
     asyncio.run(_run())
 
@@ -64,7 +67,7 @@ def test_record_usage_allows_null_project(migrated_url: str) -> None:
 def test_record_usage_rejects_bad_outcome(migrated_url: str) -> None:
     async def _run() -> None:
         async with await psycopg.AsyncConnection.connect(migrated_url) as conn:
-            try:
+            with pytest.raises(psycopg.errors.CheckViolation):
                 await record_usage(
                     conn,
                     UsageEvent(
@@ -77,9 +80,5 @@ def test_record_usage_rejects_bad_outcome(migrated_url: str) -> None:
                         client_id=None,
                     ),
                 )
-                await conn.commit()
-                raise AssertionError("expected a CHECK violation on the outcome enum")
-            except psycopg.errors.CheckViolation:
-                pass
 
     asyncio.run(_run())

@@ -8,8 +8,8 @@ import ssl
 import pytest
 
 from kdive.diagnostics.checks import TlsProbeOutcome
-from kdive.diagnostics.provider_tls import provider_tls_probe, tls_endpoint
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.diagnostics.provider_tls import provider_tls_probe, tls_endpoint
 
 
 def _config(uri: str = "qemu+tls://host.example/system") -> RemoteLibvirtConfig:

@@ -115,10 +115,9 @@ in the [M2.5 capstone](remote-live-stack.md#6-four-method-capture-capstone-m25):
 | `console` | **B** (over the same boot lifetime) | `artifacts.list` for the console artifact after teardown/finalize |
 | `host_dump` | **A** (separate System, provisioned and crashed) | `control.force_crash` → `vmcore.fetch method=host_dump` via host-side `virDomainCoreDumpWithFormat` |
 
-`control.force_crash` is a destructive op: it requires the `admin` role plus the three-factor
-destructive-op gate (capability scope + RBAC role + the provisioning profile's `force_crash`
-opt-in). Provision Systems A and B from a profile that opts into `force_crash` and drive the
-crash with an admin token.
+`control.force_crash` is a destructive op: it requires the `admin` role and the provisioning
+profile's `force_crash` opt-in. Provision Systems A and B from a profile that opts into
+`force_crash` and drive the crash with an admin token.
 
 ### 4a. gdbstub
 

@@ -14,7 +14,7 @@ from kdive.build_configs.catalog import (
     upsert_operator_build_config,
     upsert_seed_build_config,
 )
-from kdive.domain.models import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.inventory.model import InventoryDoc
 from kdive.inventory.reconcile_build_configs import reconcile_build_configs
 

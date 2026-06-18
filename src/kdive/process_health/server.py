@@ -24,8 +24,6 @@ _OIDC_PROBE_TIMEOUT = 1.5
 
 
 def build_postgres_ping(pool: AsyncConnectionPool) -> Callable[[], Awaitable[None]]:
-    """Return a coroutine running ``SELECT 1`` over the shared pool (raises if down)."""
-
     async def ping() -> None:
         async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("SELECT 1")

@@ -180,15 +180,14 @@ def _keygen_executable() -> str:
 
 def _run_keygen(argv: list[str], *, purpose: str) -> str:
     try:
-        completed = subprocess.run(
-            # Fixed ssh-keygen executable from _keygen_executable(); key paths are KDIVE-owned.
+        completed = subprocess.run(  # noqa: S603 - fixed ssh-keygen argv; key paths are KDIVE-owned
             argv,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=False,
             timeout=SSH_KEYGEN_TIMEOUT_SEC,
-        )  # noqa: S603
+        )
     except FileNotFoundError as exc:
         raise ManagedKeyError(
             "ssh-keygen not found on PATH; install the OpenSSH client, or set "

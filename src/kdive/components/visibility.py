@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from enum import StrEnum
 
-type Visibility = Literal["public", "project", "host-policy"]
 
-PUBLIC_VISIBILITY: Visibility = "public"
+class Visibility(StrEnum):
+    """Provider component visibility scopes."""
+
+    PUBLIC = "public"
+    PROJECT = "project"
+    HOST_POLICY = "host-policy"
+
+
+PUBLIC_VISIBILITY = Visibility.PUBLIC

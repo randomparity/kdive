@@ -48,7 +48,6 @@ async def run(args: argparse.Namespace) -> int:
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
-    """Route a parsed invocation to its handler (errors propagate to :func:`run`)."""
     if args.command == "tool" and args.tool_command == "call":
         return await _tool_call(args)
     if args.command == "login":
@@ -72,12 +71,10 @@ def _login(args: argparse.Namespace) -> int:
 
 
 def _session_factory() -> Session:
-    """Build the authenticated session; overridden in tests with a fake."""
     return Session.from_env()
 
 
 def _max_tier(args: argparse.Namespace) -> ToolTier:
-    """Resolve the highest tier the caller authorized from the opt-in flags."""
     if args.allow_destructive:
         return ToolTier.DESTRUCTIVE
     if args.allow_mutating:
@@ -117,12 +114,10 @@ def _confirm_destructive(
 
 
 def _prompt_line(name: str) -> str:
-    """Print the destructive confirmation prompt and read one line from stdin."""
     return input(f"type 'yes' to call destructive tool {name!r}: ")
 
 
 async def _tool_call(args: argparse.Namespace) -> int:
-    """Run the tiered passthrough for ``tool call`` (ADR-0107)."""
     arguments = _parse_payload(args.payload)
     max_tier = _max_tier(args)
     session = _session_factory()

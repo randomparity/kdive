@@ -19,10 +19,12 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
-from kdive.domain.models import Allocation, Budget, Resource, ResourceKind
-from kdive.domain.state import AllocationState, ResourceStatus
+from kdive.domain.accounting import Budget
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.lifecycle import allocations as alloc_tools
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import renew_allocation
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.accounting import ledger as accounting
 from kdive.services.allocation.renew import _RENEW_KIND
@@ -140,7 +142,7 @@ def test_renew_extends_lease_and_writes_incremental_reserved(migrated_url: str) 
         async with _pool(migrated_url) as pool:
             res_id = await _seed_resource(pool)
             alloc_id, before = await _seed_metered_alloc(pool, res_id, lease_hours_from_now=2.0)
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), str(alloc_id), extend=3)
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=3)
             assert resp.status == "granted"
             rows = await _ledger_rows(pool, alloc_id)
             assert [r[0] for r in rows] == ["reserved", "reserved"]
@@ -158,13 +160,13 @@ def test_replayed_idempotency_key_neither_extends_nor_charges(migrated_url: str)
         async with _pool(migrated_url) as pool:
             res_id = await _seed_resource(pool)
             alloc_id, _ = await _seed_metered_alloc(pool, res_id)
-            first = await alloc_tools.renew_allocation(
+            first = await renew_allocation(
                 pool, _ctx(), str(alloc_id), extend=2, idempotency_key="k-1"
             )
             assert first.status == "granted"
             expiry_after_first = (await _alloc(pool, alloc_id)).lease_expiry
             spent_after_first = await _spent(pool)
-            second = await alloc_tools.renew_allocation(
+            second = await renew_allocation(
                 pool, _ctx(), str(alloc_id), extend=2, idempotency_key="k-1"
             )
             assert second.status == "granted"  # replay returns the prior result
@@ -184,7 +186,7 @@ def test_over_budget_renew_denies_window_unchanged(migrated_url: str) -> None:
             alloc_id, before = await _seed_metered_alloc(
                 pool, res_id, limit_kcu="9", estimate="9.0000"
             )
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), str(alloc_id), extend=3)
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=3)
             assert resp.status == "error"
             assert resp.error_category == "allocation_denied"
             assert (await _alloc(pool, alloc_id)).lease_expiry == before  # unchanged
@@ -202,7 +204,7 @@ def test_renew_terminal_allocation_is_stale_handle(migrated_url: str) -> None:
             alloc_id, before = await _seed_metered_alloc(
                 pool, res_id, state=AllocationState.RELEASED
             )
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), str(alloc_id), extend=2)
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=2)
             assert resp.status == "error"
             assert resp.error_category == "stale_handle"
             assert resp.data["current_status"] == "released"
@@ -216,7 +218,7 @@ def test_non_positive_extend_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _seed_resource(pool)
             alloc_id, before = await _seed_metered_alloc(pool, res_id)
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), str(alloc_id), extend=0)
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=0)
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
             assert (await _alloc(pool, alloc_id)).lease_expiry == before
@@ -231,7 +233,7 @@ def test_renew_at_cap_is_config_error_window_unchanged(migrated_url: str) -> Non
         async with _pool(migrated_url) as pool:
             res_id = await _seed_resource(pool)
             alloc_id, before = await _seed_metered_alloc(pool, res_id, lease_hours_from_now=25.0)
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), str(alloc_id), extend=5)
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=5)
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
             assert (await _alloc(pool, alloc_id)).lease_expiry == before
@@ -247,7 +249,7 @@ def test_renew_clamps_added_window_to_cap(migrated_url: str) -> None:
             res_id = await _seed_resource(pool)
             alloc_id, _ = await _seed_metered_alloc(pool, res_id, lease_hours_from_now=20.0)
             now = datetime.now(UTC)
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), str(alloc_id), extend=10)
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=10)
             assert resp.status == "granted"
             after = (await _alloc(pool, alloc_id)).lease_expiry
             assert after is not None
@@ -264,7 +266,7 @@ def test_renew_unknown_allocation_is_not_found(migrated_url: str) -> None:
     # failure (ADR-0097); the malformed-id case below stays configuration_error.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), str(uuid4()), extend=2)
+            resp = await renew_allocation(pool, _ctx(), str(uuid4()), extend=2)
             assert resp.status == "error"
             assert resp.error_category == "not_found"
 
@@ -274,7 +276,7 @@ def test_renew_unknown_allocation_is_not_found(migrated_url: str) -> None:
 def test_renew_malformed_id_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await alloc_tools.renew_allocation(pool, _ctx(), "not-a-uuid", extend=2)
+            resp = await renew_allocation(pool, _ctx(), "not-a-uuid", extend=2)
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
 
@@ -287,7 +289,7 @@ def test_renew_without_operator_raises(migrated_url: str) -> None:
             res_id = await _seed_resource(pool)
             alloc_id, _ = await _seed_metered_alloc(pool, res_id)
             try:
-                await alloc_tools.renew_allocation(pool, _ctx(Role.VIEWER), str(alloc_id), extend=2)
+                await renew_allocation(pool, _ctx(Role.VIEWER), str(alloc_id), extend=2)
                 raise AssertionError("expected AuthorizationError")
             except AuthorizationError:
                 pass
@@ -309,7 +311,7 @@ def test_key_reused_across_request_kind_is_rejected(migrated_url: str) -> None:
                     "VALUES (%s, %s, %s, %s, %s)",
                     ("dup", "user-1", "proj", "allocations.request", '{"allocation_id": "x"}'),
                 )
-            resp = await alloc_tools.renew_allocation(
+            resp = await renew_allocation(
                 pool, _ctx(), str(alloc_id), extend=2, idempotency_key="dup"
             )
             assert resp.status == "error"
@@ -326,9 +328,7 @@ def test_idempotency_key_scoped_to_renew_kind(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _seed_resource(pool)
             alloc_id, _ = await _seed_metered_alloc(pool, res_id)
-            await alloc_tools.renew_allocation(
-                pool, _ctx(), str(alloc_id), extend=2, idempotency_key="k-kind"
-            )
+            await renew_allocation(pool, _ctx(), str(alloc_id), extend=2, idempotency_key="k-kind")
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
                     "SELECT kind FROM idempotency_keys WHERE principal = %s AND key = %s",

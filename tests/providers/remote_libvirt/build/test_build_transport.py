@@ -25,7 +25,7 @@ from kdive.artifacts.storage import (
     StoredArtifact,
 )
 from kdive.build_artifacts.validation import parse_gnu_build_id
-from kdive.domain.models import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt import build as build_module
@@ -36,7 +36,7 @@ from kdive.providers.remote_libvirt.build import (
     transport_make_bundle,
     transport_vmlinux_source,
 )
-from kdive.providers.shared.build_host.transport_seams import (
+from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_read_build_id,
     transport_run_modules_install,
 )

@@ -18,7 +18,7 @@ from typing import Protocol, runtime_checkable
 
 from kdive.db.build_hosts import BuildHost
 from kdive.domain.errors import CategorizedError
-from kdive.providers.shared.build_host.ssh_transport import (
+from kdive.providers.shared.build_host.transports.ssh_transport import (
     SshBuildTransport,
     materialized_ssh_identity,
 )

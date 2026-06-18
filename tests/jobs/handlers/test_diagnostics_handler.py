@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 
@@ -15,9 +17,10 @@ from kdive.diagnostics.checks import (
     Vantage,
 )
 from kdive.diagnostics.result_codec import deserialize_results
+from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.diagnostics import diagnostics_worker_check_handler
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 
 
 class _FakeCheck(Check):
@@ -36,12 +39,18 @@ class _FakeCheck(Check):
         return self._result
 
 
-def _config() -> RemoteLibvirtConfig:
-    return RemoteLibvirtConfig(
-        uri="qemu+tls://host.example/system",
-        cert_refs=TlsCertRefs("c", "k", "ca"),
-        concurrent_allocation_cap=1,
-        gdb_addr="host.example",
+def _job(provider: str = "remote-libvirt") -> Job:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.DIAGNOSTICS_WORKER_CHECK,
+        payload={"provider": provider},
+        state=JobState.RUNNING,
+        max_attempts=1,
+        authorizing={"principal": "diagnostics", "agent_session": None, "project": provider},
+        dedup_key=f"diagnostics:{provider}:test",
     )
 
 
@@ -54,9 +63,8 @@ def test_handler_runs_checks_and_serializes_inline() -> None:
     async def _run() -> str | None:
         return await diagnostics_worker_check_handler(
             conn=None,
-            job=None,
-            config_factory=_config,
-            build_checks=lambda _config: [_FakeCheck(r) for r in results],
+            job=_job(),
+            worker_check_builders={"remote-libvirt": lambda: [_FakeCheck(r) for r in results]},
         )
 
     raw = asyncio.run(_run())
@@ -64,13 +72,30 @@ def test_handler_runs_checks_and_serializes_inline() -> None:
 
 
 def test_handler_propagates_config_error() -> None:
-    def boom() -> RemoteLibvirtConfig:
+    def boom() -> list[Check]:
         raise CategorizedError("bad inventory", category=ErrorCategory.CONFIGURATION_ERROR)
 
     async def _run() -> str | None:
         return await diagnostics_worker_check_handler(
-            conn=None, job=None, config_factory=boom, build_checks=lambda _c: []
+            conn=None,
+            job=_job(),
+            worker_check_builders={"remote-libvirt": boom},
         )
 
     with pytest.raises(CategorizedError):
         asyncio.run(_run())
+
+
+def test_handler_rejects_unregistered_provider() -> None:
+    async def _run() -> str | None:
+        return await diagnostics_worker_check_handler(
+            conn=None,
+            job=_job("other-provider"),
+            worker_check_builders={"remote-libvirt": lambda: []},
+        )
+
+    with pytest.raises(CategorizedError) as caught:
+        asyncio.run(_run())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details == {"provider": "other-provider"}

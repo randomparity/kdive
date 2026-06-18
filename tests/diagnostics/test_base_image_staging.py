@@ -14,7 +14,6 @@ import asyncio
 
 import libvirt
 
-from kdive.diagnostics.base_image_staging import base_image_staging_probe
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     BASE_VOLUME_NOT_STAGED_FIX,
@@ -25,6 +24,7 @@ from kdive.diagnostics.checks import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+from kdive.providers.remote_libvirt.diagnostics.base_image_staging import base_image_staging_probe
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
 _PROVIDER = "remote-libvirt"

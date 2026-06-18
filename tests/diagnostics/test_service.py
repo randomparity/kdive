@@ -16,7 +16,9 @@ from kdive.diagnostics.service import (
     WORKER_UNAVAILABLE_DETAIL,
     DiagnosticsService,
     WorkerVantageCheck,
+    WorkerVantageDispatchMode,
     WorkerVantageSubstitution,
+    WorkerVantageSubstitutionMode,
     worker_unavailable_results,
 )
 
@@ -147,10 +149,10 @@ def test_unavailable_worker_metadata_yields_error_without_runnable_check() -> No
     service = DiagnosticsService(
         checks=[],
         per_check_timeout=1.0,
-        substitution_reason=WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
-        unavailable_worker_checks=[
-            WorkerVantageCheck(id="provider_tls", provider="remote-libvirt")
-        ],
+        worker_mode=WorkerVantageSubstitutionMode(
+            WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
+            [WorkerVantageCheck(id="provider_tls", provider="remote-libvirt")],
+        ),
     )
     report = asyncio.run(service.run())
     result = report.results[0]
@@ -165,7 +167,7 @@ def test_service_substitutes_worker_results_when_worker_down() -> None:
     service = DiagnosticsService(
         checks=[_Fixed(_ok("a"), Vantage.WORKER)],
         per_check_timeout=1.0,
-        worker_available=False,
+        worker_mode=WorkerVantageSubstitutionMode(WorkerVantageSubstitution.WORKER_UNAVAILABLE),
     )
     report = asyncio.run(service.run())
     assert report.results[0].status is CheckStatus.ERROR
@@ -177,8 +179,7 @@ def test_service_substitution_reason_threads_into_results() -> None:
     service = DiagnosticsService(
         checks=[_Fixed(_ok("a"), Vantage.WORKER)],
         per_check_timeout=1.0,
-        worker_available=False,
-        substitution_reason=WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
+        worker_mode=WorkerVantageSubstitutionMode(WorkerVantageSubstitution.FEATURE_NOT_ENABLED),
     )
     report = asyncio.run(service.run())
     assert report.results[0].status is CheckStatus.ERROR
@@ -202,7 +203,11 @@ def test_dispatcher_results_replace_substitution() -> None:
     dispatcher = _FakeDispatcher(
         [CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt")]
     )
-    service = DiagnosticsService(checks=[], per_check_timeout=1.0, worker_dispatcher=dispatcher)
+    service = DiagnosticsService(
+        checks=[],
+        per_check_timeout=1.0,
+        worker_mode=WorkerVantageDispatchMode(dispatcher),
+    )
     report = asyncio.run(service.run())
     assert [r.check_id for r in report.results] == [PROVIDER_TLS_ID]
     assert not report.has_error
@@ -214,7 +219,7 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
     from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID, SECRET_REF_ID
     from kdive.diagnostics.result_codec import serialize_results
     from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
-    from kdive.domain.state import JobState
+    from kdive.domain.capacity.state import JobState
 
     class _Job:
         def __init__(self, state: JobState, result_ref: str | None) -> None:
@@ -245,6 +250,8 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
 
     dispatcher = JobWorkerCheckDispatcher(
         pool=None,
+        provider="remote-libvirt",
+        worker_check_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID),
         enqueue_fn=_enqueue,  # ty: ignore[invalid-argument-type]
         get_fn=_get,  # ty: ignore[invalid-argument-type]
         clock=lambda: 0.0,
@@ -253,7 +260,7 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
     service = DiagnosticsService(
         checks=[_Fixed(_ok(SECRET_REF_ID))],
         per_check_timeout=1.0,
-        worker_dispatcher=dispatcher,
+        worker_mode=WorkerVantageDispatchMode(dispatcher),
     )
     report = asyncio.run(service.run())
     by_id = {r.check_id: r for r in report.results}

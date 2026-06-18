@@ -19,12 +19,12 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
-from kdive.domain.models import Budget, Quota
+from kdive.domain.accounting import Budget, Quota
 from kdive.domain.pcie import PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
-from kdive.mcp.tools.lifecycle import allocations as alloc_tools
+from kdive.mcp.tools.lifecycle.allocations.request import request_allocation
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import Role
 from kdive.services.resources.discovery import register_discovered_resource
@@ -101,7 +101,7 @@ async def _request(
         "pcie_devices": pcie_devices,
         "on_capacity": on_capacity,
     }
-    return await alloc_tools.request_allocation(
+    return await request_allocation(
         pool,
         ctx,
         project="proj",

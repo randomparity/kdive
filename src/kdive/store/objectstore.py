@@ -30,8 +30,8 @@ from kdive.artifacts.storage import (
     owner_prefix as owner_prefix,
 )
 from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
+from kdive.domain.catalog.artifacts import Artifact, Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Artifact, Sensitivity
 
 # boto3 ships no inline types and boto3-stubs is not a dependency; alias the S3
 # client type to Any at this single site rather than add a stubs package.

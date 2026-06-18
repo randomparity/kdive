@@ -19,8 +19,6 @@ _SELECT = (
 
 @dataclass(frozen=True)
 class BuildConfigEntry:
-    """One build_config_catalog row."""
-
     name: str
     object_key: str
     sha256: str
@@ -46,7 +44,6 @@ class BuildConfigEntry:
 
 
 def parse_build_config_row(row: Mapping[str, object]) -> BuildConfigEntry:
-    """Map a DB row to a catalog entry."""
     return BuildConfigEntry(
         name=_required_str(row, "name"),
         object_key=_required_str(row, "object_key"),
@@ -68,7 +65,6 @@ def _required_str(row: Mapping[str, object], key: str) -> str:
 
 
 async def get_build_config(conn: AsyncConnection, name: str) -> BuildConfigEntry | None:
-    """Return the async MCP-tool catalog entry for ``name``, or ``None`` if absent."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_SELECT, {"name": name})
         row = await cur.fetchone()
@@ -76,7 +72,6 @@ async def get_build_config(conn: AsyncConnection, name: str) -> BuildConfigEntry
 
 
 def get_build_config_sync(conn: Connection, name: str) -> BuildConfigEntry | None:
-    """Return the sync build-path catalog entry for ``name``, or ``None`` if absent."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_SELECT, {"name": name})
         row = cur.fetchone()

@@ -27,7 +27,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator
-from kdive.providers.shared.build_host.transport_seams import (
+from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_git_checkout,
     transport_read_config,
     transport_run_make,

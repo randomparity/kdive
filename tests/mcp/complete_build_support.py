@@ -15,14 +15,15 @@ from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
-from kdive.domain.models import Allocation, Investigation, Resource, ResourceKind, Run, System
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     InvestigationState,
     ResourceStatus,
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import Role
 

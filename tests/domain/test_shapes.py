@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.domain.shapes import ResolvedSizing, ShapeSizing
+from kdive.domain.lifecycle.shapes import ResolvedSizing, ShapeSizing
 
 
 def test_shape_sizing_does_not_carry_cost_class() -> None:

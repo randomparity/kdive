@@ -26,10 +26,11 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
-from kdive.domain.cost import Selector, resolve_coeff
-from kdive.domain.models import Allocation, Resource, ResourceKind
-from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
-from kdive.domain.state import AllocationState, ResourceStatus
+from kdive.domain.accounting.cost import Selector, resolve_coeff
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.inventory.model import InventoryDoc
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import tuning

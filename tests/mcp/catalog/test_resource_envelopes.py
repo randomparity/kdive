@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
+from kdive.domain.capacity.state import ResourceStatus
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Resource, ResourceKind
-from kdive.domain.state import ResourceStatus
 from kdive.mcp.tools._resource_envelopes import (
     resource_capability_data,
     resource_config_error,

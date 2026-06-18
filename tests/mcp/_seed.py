@@ -16,13 +16,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.models import Allocation, Investigation, Run, System
-from kdive.domain.state import (
+from kdive.domain.capacity.state import (
     AllocationState,
     InvestigationState,
     RunState,
     SystemState,
 )
+from kdive.domain.lifecycle import Allocation, Investigation, Run, System
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn

@@ -36,28 +36,30 @@ from kdive.components.references import (
     ComponentRef,
 )
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
-from kdive.domain.models import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
-from kdive.providers.shared.build_host import config as _build_config
 from kdive.providers.shared.build_host import execution as _build_exec
-from kdive.providers.shared.build_host import workspace as _build_workspace
-from kdive.providers.shared.build_host.artifact_publish import (
+from kdive.providers.shared.build_host.configuration import config as _build_config
+from kdive.providers.shared.build_host.configuration.git_source import (
+    local_build_remote_allowlist_from_env,
+)
+from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
+from kdive.providers.shared.build_host.publishing.artifact_publish import (
     ArtifactBytes,
     ArtifactRemoteFile,
     ArtifactSource,
     StorePort,
     publish_artifact_source,
 )
-from kdive.providers.shared.build_host.git_source import local_build_remote_allowlist_from_env
-from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator, WorkspaceCleanup
-from kdive.providers.shared.build_host.transport_seams import (
+from kdive.providers.shared.build_host.transports.transport_seams import (
     transport_git_checkout,
     transport_read_build_id,
     transport_read_config,
     transport_run_make,
     transport_run_olddefconfig,
 )
+from kdive.providers.shared.build_host.workspaces import workspace as _build_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 

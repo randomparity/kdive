@@ -11,8 +11,8 @@ from uuid import UUID
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ResourceKind
 from kdive.providers.core.resolver import ProviderResolver
 
 

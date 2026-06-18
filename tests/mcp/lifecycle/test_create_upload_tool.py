@@ -16,6 +16,13 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
+from kdive.domain.capacity.state import (
+    AllocationState,
+    InvestigationState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -25,13 +32,6 @@ from kdive.domain.models import (
     Run,
     Sensitivity,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    InvestigationState,
-    ResourceStatus,
-    RunState,
-    SystemState,
 )
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
@@ -270,7 +270,7 @@ def test_create_upload_mints_presigned_puts_and_persists_manifest(migrated_url: 
             items = responses.items
             assert responses.object_id == run_id
             assert responses.status == "upload_ready"
-            assert responses.data["count"] == "2"
+            assert responses.data["count"] == 2
             assert [r.object_id for r in items] == [
                 f"local/runs/{run_id}/kernel",
                 f"local/runs/{run_id}/vmlinux",

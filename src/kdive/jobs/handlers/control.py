@@ -10,10 +10,11 @@ from psycopg import AsyncConnection
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import DebugSessionState, SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle_rules import TERMINAL_SYSTEM_STATES
-from kdive.domain.models import Job, JobKind, System
-from kdive.domain.state import DebugSessionState, SystemState
+from kdive.domain.lifecycle import System
+from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
@@ -27,7 +28,7 @@ class _ControlTarget(NamedTuple):
     project: str
 
 
-def domain_name(system: System) -> str:
+def _resolved_domain_name(system: System) -> str:
     return system.domain_name or domain_name_for(system.id)
 
 
@@ -40,7 +41,7 @@ async def _control_target(conn: AsyncConnection, system_id: UUID, *, op: str) ->
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
-        return _ControlTarget(domain_name(system), system.project)
+        return _ControlTarget(_resolved_domain_name(system), system.project)
 
 
 async def _controller(conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver):
@@ -112,7 +113,7 @@ async def _force_crash_target(conn: AsyncConnection, system_id: UUID) -> _Contro
             )
         if system.state in TERMINAL_SYSTEM_STATES:
             return None
-        return _ControlTarget(domain_name(system), system.project)
+        return _ControlTarget(_resolved_domain_name(system), system.project)
 
 
 async def _finalize_force_crash(

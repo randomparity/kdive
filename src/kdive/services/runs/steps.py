@@ -11,7 +11,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import Run, System
+from kdive.domain.lifecycle import Run, System
 from kdive.profiles.provider_policy import capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.runtime import ProfilePolicy

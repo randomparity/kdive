@@ -13,12 +13,14 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import HeadResult
+from kdive.components.references import ComponentKind
 from kdive.components.visibility import Visibility
 from kdive.db.provider_component_records import (
     ArtifactComponentRequest,
     ComponentRegistration,
     ComponentUploadIntentRequest,
     ComponentUploadRegistration,
+    ComponentUploadVisibility,
     LinkLocalComponentRequest,
     _component_from_row,
     component_upload_object_key,
@@ -49,13 +51,13 @@ def _component_file(tmp_path: Path, name: str = "component.img") -> tuple[Path, 
 
 def _registration(
     *,
-    visibility: Visibility = "project",
+    visibility: Visibility = Visibility.PROJECT,
     project: str | None = "proj-a",
     principal: str = "alice",
 ) -> ComponentRegistration:
     return ComponentRegistration(
         provider="local-libvirt",
-        component_kind="rootfs",
+        component_kind=ComponentKind.ROOTFS,
         visibility=visibility,
         project=project,
         principal=principal,
@@ -85,6 +87,12 @@ def test_component_row_rejects_invalid_component_kind() -> None:
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_component_row_parses_component_kind_as_enum() -> None:
+    component = _component_from_row(_component_row())
+
+    assert component.component_kind is ComponentKind.ROOTFS
+
+
 def test_component_row_rejects_invalid_visibility() -> None:
     with pytest.raises(CategorizedError) as caught:
         _component_from_row(_component_row(visibility="private"))
@@ -108,10 +116,16 @@ def test_project_component_visible_only_to_same_project(migrated_url: str, tmp_p
             )
 
             same_project = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-a",
             )
             other_project = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-b"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-b",
             )
 
         assert [component.id for component in same_project] == [component_id]
@@ -157,7 +171,7 @@ def test_host_policy_component_hidden_from_project_lookup(
             component_id = await link_local_component(
                 pool,
                 LinkLocalComponentRequest(
-                    registration=_registration(visibility="host-policy"),
+                    registration=_registration(visibility=Visibility.HOST_POLICY),
                     path=str(path),
                     sha256=sha256,
                     allowed_roots=[tmp_path],
@@ -165,7 +179,10 @@ def test_host_policy_component_hidden_from_project_lookup(
             )
 
             listed = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-a",
             )
             fetched = await get_visible_component(pool, component_id, project="proj-a")
 
@@ -202,7 +219,10 @@ def test_link_local_component_rejects_path_outside_allowed_roots(
                 raise AssertionError("outside local component path should be rejected")
 
             visible = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-a",
             )
 
         assert visible == []
@@ -233,7 +253,10 @@ def test_link_local_component_rejects_bad_sha_without_poisoning_listing(
                 raise AssertionError("bad local component sha should be rejected")
 
             visible = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-a",
             )
 
         assert visible == []
@@ -256,10 +279,16 @@ def test_artifact_component_visible_only_to_same_project(migrated_url: str) -> N
             )
 
             same_project = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-a",
             )
             other_project = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-b"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-b",
             )
 
         assert [component.id for component in same_project] == [component_id]
@@ -287,7 +316,10 @@ def test_create_artifact_component_rejects_bad_sha(migrated_url: str) -> None:
                 raise AssertionError("bad artifact component sha should be rejected")
 
             visible = await list_visible_components(
-                pool, provider="local-libvirt", component_kind="rootfs", project="proj-a"
+                pool,
+                provider="local-libvirt",
+                component_kind=ComponentKind.ROOTFS,
+                project="proj-a",
             )
 
         assert visible == []
@@ -305,8 +337,8 @@ def test_component_upload_finalization_is_idempotent(migrated_url: str) -> None:
                     registration=ComponentUploadRegistration(
                         tenant="proj-a",
                         provider="local-libvirt",
-                        component_kind="rootfs",
-                        visibility="project",
+                        component_kind=ComponentKind.ROOTFS,
+                        visibility=ComponentUploadVisibility.PROJECT,
                         project="proj-a",
                         principal="alice",
                     ),
@@ -318,7 +350,7 @@ def test_component_upload_finalization_is_idempotent(migrated_url: str) -> None:
             assert key == component_upload_object_key(
                 tenant="proj-a",
                 provider="local-libvirt",
-                component_kind="rootfs",
+                component_kind=ComponentKind.ROOTFS,
                 upload_id=upload_id,
             )
             head = HeadResult(size_bytes=42, checksum_sha256="sha256:" + "2" * 64, etag="e")
@@ -358,8 +390,8 @@ def test_expired_component_upload_cannot_finalize(migrated_url: str) -> None:
                     registration=ComponentUploadRegistration(
                         tenant="proj-a",
                         provider="local-libvirt",
-                        component_kind="rootfs",
-                        visibility="project",
+                        component_kind=ComponentKind.ROOTFS,
+                        visibility=ComponentUploadVisibility.PROJECT,
                         project="proj-a",
                         principal="alice",
                     ),
@@ -396,8 +428,8 @@ def test_failed_component_upload_cannot_finalize(migrated_url: str) -> None:
                     registration=ComponentUploadRegistration(
                         tenant="proj-a",
                         provider="local-libvirt",
-                        component_kind="rootfs",
-                        visibility="project",
+                        component_kind=ComponentKind.ROOTFS,
+                        visibility=ComponentUploadVisibility.PROJECT,
                         project="proj-a",
                         principal="alice",
                     ),
@@ -439,8 +471,8 @@ def test_component_upload_finalization_uses_persisted_tenant(migrated_url: str) 
                     registration=ComponentUploadRegistration(
                         tenant="local",
                         provider="local-libvirt",
-                        component_kind="rootfs",
-                        visibility="project",
+                        component_kind=ComponentKind.ROOTFS,
+                        visibility=ComponentUploadVisibility.PROJECT,
                         project="proj-a",
                         principal="alice",
                     ),
@@ -452,13 +484,13 @@ def test_component_upload_finalization_uses_persisted_tenant(migrated_url: str) 
             assert key == component_upload_object_key(
                 tenant="local",
                 provider="local-libvirt",
-                component_kind="rootfs",
+                component_kind=ComponentKind.ROOTFS,
                 upload_id=upload_id,
             )
             wrong_key = component_upload_object_key(
                 tenant="proj-a",
                 provider="local-libvirt",
-                component_kind="rootfs",
+                component_kind=ComponentKind.ROOTFS,
                 upload_id=upload_id,
             )
             store = _ObjectStore(
@@ -484,8 +516,8 @@ def test_component_upload_finalization_accepts_s3_base64_sha256(migrated_url: st
                     registration=ComponentUploadRegistration(
                         tenant="local",
                         provider="local-libvirt",
-                        component_kind="rootfs",
-                        visibility="project",
+                        component_kind=ComponentKind.ROOTFS,
+                        visibility=ComponentUploadVisibility.PROJECT,
                         project="proj-a",
                         principal="alice",
                     ),
@@ -525,8 +557,8 @@ def test_component_upload_finalization_rejects_s3_checksum_mismatch(
                     registration=ComponentUploadRegistration(
                         tenant="local",
                         provider="local-libvirt",
-                        component_kind="rootfs",
-                        visibility="project",
+                        component_kind=ComponentKind.ROOTFS,
+                        visibility=ComponentUploadVisibility.PROJECT,
                         project="proj-a",
                         principal="alice",
                     ),

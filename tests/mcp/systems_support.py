@@ -12,12 +12,16 @@ from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.components.references import ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
+from kdive.domain.accounting import Budget, Quota
+from kdive.domain.capacity.state import AllocationState
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, Budget, Job, JobKind, Quota, ResourceKind
-from kdive.domain.state import AllocationState
+from kdive.domain.lifecycle import Allocation
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload
 from kdive.mcp.auth import RequestContext
@@ -36,8 +40,8 @@ TEST_PROFILE_POLICY = LocalLibvirtProfilePolicy()
 TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
     accepted_component_sources={
-        "rootfs": frozenset({"catalog", "local"}),
-        "config": frozenset({"local"}),
+        ComponentKind.ROOTFS: frozenset({"catalog", "local"}),
+        ComponentKind.CONFIG: frozenset({"local"}),
     },
 )
 SYSTEM_PROVISION_HANDLERS = SystemProvisionHandlers(

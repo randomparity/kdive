@@ -26,8 +26,9 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
-from kdive.domain.models import Allocation, Resource, ResourceKind
-from kdive.domain.state import AllocationState, ResourceStatus
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.accounting.reports import report_all_projects, report_granted_set

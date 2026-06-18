@@ -15,21 +15,25 @@ primary test contract). These tests prove the three acceptance criteria:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
 import pytest
+from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.errors import CategorizedError
-from kdive.domain.state import AllocationState, SystemState
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops import reconcile as ops_reconcile
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
+from kdive.store.assembly import optional_object_store
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, seed_system
 
@@ -45,6 +49,10 @@ def _ctx(*, platform_roles: frozenset[PlatformRole] = frozenset()) -> RequestCon
 
 
 _OPERATOR = frozenset({PlatformRole.PLATFORM_OPERATOR})
+
+
+def _ports() -> ops_reconcile.ReconcileRepairPorts:
+    return ops_reconcile.ReconcileRepairPorts(reaper=NullReaper(), upload_store=None)
 
 
 @asynccontextmanager
@@ -92,7 +100,7 @@ def test_reconcile_now_resolves_orphaned_system_and_returns_summary(migrated_url
             )
         async with _pool(migrated_url) as pool:
             resp = await ops_reconcile.reconcile_now(
-                pool, _ctx(platform_roles=_OPERATOR), reaper=NullReaper(), upload_store=None
+                pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
             )
         assert resp.status == "ok"
         assert resp.data["orphaned_systems"] == "1"
@@ -118,8 +126,7 @@ def test_audit_records_all_held_platform_roles(migrated_url: str) -> None:
                         {PlatformRole.PLATFORM_OPERATOR, PlatformRole.PLATFORM_AUDITOR}
                     )
                 ),
-                reaper=NullReaper(),
-                upload_store=None,
+                ports=_ports(),
             )
         assert resp.status == "ok"
         rows = await _platform_audit_rows(migrated_url)
@@ -132,7 +139,7 @@ def test_reconcile_now_clean_state_returns_zero_summary(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await ops_reconcile.reconcile_now(
-                pool, _ctx(platform_roles=_OPERATOR), reaper=NullReaper(), upload_store=None
+                pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
             )
         assert resp.status == "ok"
         assert resp.data["orphaned_systems"] == "0"
@@ -157,9 +164,7 @@ def test_project_only_non_operator_is_denied_and_writes_no_audit_row(
                 seed, system_state=SystemState.READY, alloc_state=AllocationState.RELEASED
             )
         async with _pool(migrated_url) as pool:
-            resp = await ops_reconcile.reconcile_now(
-                pool, _ctx(), reaper=NullReaper(), upload_store=None
-            )
+            resp = await ops_reconcile.reconcile_now(pool, _ctx(), ports=_ports())
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
             assert resp.suggested_next_actions == ["ops.reconcile_now"]
@@ -180,8 +185,7 @@ def test_auditor_non_operator_denial_is_audited(migrated_url: str) -> None:
             resp = await ops_reconcile.reconcile_now(
                 pool,
                 _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR})),
-                reaper=NullReaper(),
-                upload_store=None,
+                ports=_ports(),
             )
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
@@ -200,8 +204,7 @@ def test_admin_does_not_satisfy_operator(migrated_url: str) -> None:
             resp = await ops_reconcile.reconcile_now(
                 pool,
                 _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN})),
-                reaper=NullReaper(),
-                upload_store=None,
+                ports=_ports(),
             )
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
@@ -232,7 +235,7 @@ def test_on_demand_pass_serializes_with_periodic_on_the_same_system_lock(
             ):
                 task = asyncio.create_task(
                     ops_reconcile.reconcile_now(
-                        pool, _ctx(platform_roles=_OPERATOR), reaper=NullReaper(), upload_store=None
+                        pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
                     )
                 )
                 await wait_until_any_backend_waiting(holder, locktype="advisory")
@@ -265,12 +268,65 @@ def test_concurrent_on_demand_and_periodic_pass_enqueue_one_teardown(migrated_ur
             )
         async with _pool(migrated_url) as pool:
             on_demand = ops_reconcile.reconcile_now(
-                pool, _ctx(platform_roles=_OPERATOR), reaper=NullReaper(), upload_store=None
+                pool, _ctx(platform_roles=_OPERATOR), ports=_ports()
             )
             periodic = reconcile_once(pool, NullReaper(), config=ReconcileConfig())
             results = await asyncio.gather(on_demand, periodic)
         assert results[0].status == "ok"
         assert await _teardown_job_count(migrated_url) == 1
+
+    asyncio.run(_run())
+
+
+class _FakeFastMCP:
+    def __init__(self) -> None:
+        self.tools: dict[str, Callable[[], Awaitable[ToolResponse]]] = {}
+
+    def tool(
+        self,
+        *,
+        name: str,
+        annotations: object,
+        meta: object,
+    ) -> Callable[[Callable[[], Awaitable[ToolResponse]]], Callable[[], Awaitable[ToolResponse]]]:
+        del annotations, meta
+
+        def _decorate(
+            function: Callable[[], Awaitable[ToolResponse]],
+        ) -> Callable[[], Awaitable[ToolResponse]]:
+            self.tools[name] = function
+            return function
+
+        return _decorate
+
+
+def test_register_forwards_repair_ports_to_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        app = _FakeFastMCP()
+        pool = cast(AsyncConnectionPool, object())
+        ctx = _ctx(platform_roles=_OPERATOR)
+        ports = _ports()
+        captured: dict[str, Any] = {}
+
+        async def _fake_reconcile_now(
+            handler_pool: AsyncConnectionPool,
+            handler_ctx: RequestContext,
+            *,
+            ports: ops_reconcile.ReconcileRepairPorts,
+        ) -> ToolResponse:
+            captured["pool"] = handler_pool
+            captured["ctx"] = handler_ctx
+            captured["ports"] = ports
+            return ToolResponse.success("reconcile", "ok")
+
+        monkeypatch.setattr(ops_reconcile, "current_context", lambda: ctx)
+        monkeypatch.setattr(ops_reconcile, "reconcile_now", _fake_reconcile_now)
+
+        ops_reconcile.register(cast(FastMCP, app), pool, ports=ports)
+
+        resp = await app.tools["ops.reconcile_now"]()
+        assert resp.status == "ok"
+        assert captured == {"pool": pool, "ctx": ctx, "ports": ports}
 
     asyncio.run(_run())
 
@@ -281,22 +337,14 @@ def test_register_resolves_upload_store_off_without_s3_env(monkeypatch: pytest.M
     # rather than raising, so the on-demand pass repairs the same set as the periodic one.
     monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
     monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    assert ops_reconcile.resolve_upload_store() is None
+    assert optional_object_store() is None
 
 
 @pytest.mark.usefixtures("migrated_url")
-def test_register_resolves_image_store_off_without_s3_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
-    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    assert ops_reconcile.resolve_image_store() is None
-
-
-@pytest.mark.parametrize("helper_name", ["resolve_upload_store", "resolve_image_store"])
-def test_register_reraises_partial_s3_config(helper_name: str) -> None:
+def test_register_reraises_partial_s3_config() -> None:
     try:
         config.load({"KDIVE_S3_ENDPOINT_URL": "http://localhost:9000"})
-        helper = getattr(ops_reconcile, helper_name)
         with pytest.raises(CategorizedError):
-            helper()
+            optional_object_store()
     finally:
         config.reset()

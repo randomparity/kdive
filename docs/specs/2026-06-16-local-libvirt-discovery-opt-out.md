@@ -46,25 +46,25 @@ gated on `_local_libvirt_enabled`) already honors.
 No change to `register_all_discovery`'s attempt-all-then-raise-first behavior: it already
 isolates per-runtime faults and registers remote-libvirt regardless of iteration order. The
 fix is the gate, not a re-raise change (which would weaken
-`admin/bootstrap.register_local_resource`'s fail-fast contract).
+`admin/bootstrap.register_discovered_resources`'s fail-fast contract).
 
 ## Scope of the gate
 
 The descriptor gate feeds every `build_provider_resolver` caller: reconciler
 (`__main__`), server (`mcp/app.py`), worker (`build_handler_registry`), and bootstrap
-(`admin/bootstrap.register_local_resource`). This is intentional — disabling local-libvirt
+(`admin/bootstrap.register_discovered_resources`). This is intentional — disabling local-libvirt
 declares the deployment has no local libvirt, so no plane should serve a local-libvirt
 System. A local-libvirt System on a local-disabled deploy now fails its post-System ops
 with `configuration_error` instead of a deep libvirt socket error. The default (flag absent
 or `true`) composes local-libvirt into every resolver exactly as today.
 
-`register_local_resource` (the `migrate`-time bootstrap step) is itself a
+`register_discovered_resources` (the `migrate`-time bootstrap step) is itself a
 `build_provider_resolver().register_all_discovery(pool)` call. With the flag false it
 registers **no** local-libvirt resource — only whatever other providers are enabled
 (remote-libvirt when configured). That is the correct k8s behavior (the migrate Job has no
 local libvirt socket), but the name now means "register this deployment's discoverable
-resources," not "always create a local-libvirt row." Renaming it is out of scope for #468;
-the behavior is captured here and asserted by a test.
+resources," not "always create a local-libvirt row." The behavior is captured here and
+asserted by a test.
 
 ## Tests
 
@@ -77,7 +77,7 @@ the behavior is captured here and asserted by a test.
   still raises `configuration_error`.
 - Env-driven gate: `KDIVE_LOCAL_LIBVIRT_ENABLED=false` excludes local from the default
   resolver.
-- `register_local_resource` on a local-disabled composition invokes no local-libvirt
+- `register_discovered_resources` on a local-disabled composition invokes no local-libvirt
   discovery registrar.
 
 ## Acceptance (from #468)

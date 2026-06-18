@@ -16,7 +16,7 @@ change per commit.
   `config-docs-check` recipe runs).
 - Tests: `tests/providers/test_composition.py`, `tests/providers/test_resolver.py`,
   `tests/reconciler/test_main.py` (if it asserts resolver shape), and a bootstrap test for
-  `register_local_resource` under the flag.
+  `register_discovered_resources` under the flag.
 
 No DB migration. No deploy/helm change (the chart already sets
 `KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`).
@@ -39,8 +39,8 @@ No DB migration. No deploy/helm change (the chart already sets
    In `tests/providers/test_resolver.py`: replace `test_empty_resolver_is_rejected` with
    `test_empty_resolver_is_allowed_and_fails_closed_at_resolve` — `ProviderResolver({})`
    constructs, `register_all_discovery` is a no-op, `resolve(<any kind>)` raises
-   `configuration_error`. Add a bootstrap test that `register_local_resource` on a
-   local-disabled composition does not call the local-libvirt discovery.
+     `configuration_error`. Add a bootstrap test that `register_discovered_resources` on a
+     local-disabled composition does not call the local-libvirt discovery.
    Confirm they fail for the right reason (the gate/guard not yet changed).
 
 2. **Resolver change.** Drop the constructor `ValueError`; add the `INFO` line in
@@ -64,5 +64,5 @@ No DB migration. No deploy/helm change (the chart already sets
 - `register_all_discovery`'s `INFO` line must not log secrets (it logs only `kind.value`
   strings — no connection data).
 - Other resolver call sites (`mcp/app.py`, `build_handler_registry`,
-  `register_local_resource`) call `build_provider_resolver()` with no args, so they inherit
+  `register_discovered_resources`) call `build_provider_resolver()` with no args, so they inherit
   the env-driven default — no signature break.

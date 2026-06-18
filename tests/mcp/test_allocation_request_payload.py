@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kdive.domain.models import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload, ResourceByKind
 
 

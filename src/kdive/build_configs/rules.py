@@ -6,7 +6,7 @@ from diverging -- and without ``inventory/`` importing ``mcp/`` (a core->tool la
 -- the rules live here, neutral. Each raises a bare :class:`ValueError`; callers map it
 (``InventoryError`` at file load, ``CONFIGURATION_ERROR`` for the tool). The byte cap is a pure
 predicate taking the cap as an argument, so this module imports no config singleton (mirrors
-``domain/cost_class_rules.py``).
+``domain/accounting/cost_class_rules.py``).
 """
 
 from __future__ import annotations
@@ -40,5 +40,4 @@ def validate_build_config_content(content: str) -> str:
 
 
 def exceeds_build_config_cap(data: bytes, cap: int) -> bool:
-    """Return ``True`` iff ``data`` is larger than ``cap`` bytes (the shared byte-cap predicate)."""
     return len(data) > cap

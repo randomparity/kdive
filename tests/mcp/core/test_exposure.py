@@ -19,13 +19,16 @@ from kdive.security.authz.rbac import PlatformRole, Role
 
 
 def _ctx(
-    *, roles: dict[str, Role] | None = None, platform: frozenset[PlatformRole] = frozenset()
+    *,
+    roles: dict[str, Role] | None = None,
+    projects: tuple[str, ...] | None = None,
+    platform: frozenset[PlatformRole] = frozenset(),
 ) -> RequestContext:
     roles = roles or {}
     return RequestContext(
         principal="p",
         agent_session=None,
-        projects=tuple(roles),
+        projects=tuple(roles) if projects is None else projects,
         roles=roles,
         platform_roles=platform,
     )
@@ -43,6 +46,16 @@ def test_viewer_only_does_not_satisfy_operator_or_admin() -> None:
     assert scope_satisfied(ExposureScope.PROJECT_VIEWER, viewer)
     assert not scope_satisfied(ExposureScope.PROJECT_OPERATOR, viewer)
     assert not scope_satisfied(ExposureScope.PROJECT_ADMIN, viewer)
+
+
+def test_project_roles_on_ungranted_projects_do_not_expose_project_tools() -> None:
+    ungranted = _ctx(roles={"a": Role.ADMIN}, projects=())
+    other_project = _ctx(roles={"a": Role.ADMIN}, projects=("b",))
+
+    assert not scope_satisfied(ExposureScope.PROJECT_VIEWER, ungranted)
+    assert not tool_visible("runs.build", ungranted)
+    assert visible_tool_names(ungranted, {"projects.list", "runs.build"}) == {"projects.list"}
+    assert not scope_satisfied(ExposureScope.PROJECT_ADMIN, other_project)
 
 
 def test_platform_admin_implies_auditor_only() -> None:
@@ -75,6 +88,70 @@ def test_drain_visible_to_operator_or_admin() -> None:
     admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
     assert tool_visible("resources.drain", op)
     assert tool_visible("resources.drain", admin)
+
+
+def test_build_host_list_visible_to_platform_auditor() -> None:
+    auditor = _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+
+    assert required_scopes("build_hosts.list") == frozenset({ExposureScope.PLATFORM_AUDITOR})
+    assert tool_visible("build_hosts.list", auditor)
+    assert not tool_visible("build_hosts.list", operator)
+
+
+def test_build_host_mutations_visible_to_platform_admin_only() -> None:
+    admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+    tools = {
+        "build_hosts.disable",
+        "build_hosts.remove",
+        "build_hosts.register_ssh",
+        "build_hosts.register_ephemeral_libvirt",
+    }
+
+    for tool in tools:
+        assert required_scopes(tool) == frozenset({ExposureScope.PLATFORM_ADMIN})
+        assert tool_visible(tool, admin)
+        assert not tool_visible(tool, operator)
+
+
+def test_image_retention_visible_to_platform_admin_only() -> None:
+    admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+
+    for tool in {"images.extend", "images.prune_expired"}:
+        assert required_scopes(tool) == frozenset({ExposureScope.PLATFORM_ADMIN})
+        assert tool_visible(tool, admin)
+        assert not tool_visible(tool, operator)
+
+
+def test_private_image_mutations_visible_to_project_operator_only() -> None:
+    project_operator = _ctx(roles={"project-a": Role.OPERATOR})
+    platform_operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+    ungranted_operator = _ctx(roles={"project-a": Role.OPERATOR}, projects=())
+
+    for tool in {"images.upload", "images.delete"}:
+        assert required_scopes(tool) == frozenset({ExposureScope.PROJECT_OPERATOR})
+        assert tool_visible(tool, project_operator)
+        assert not tool_visible(tool, platform_operator)
+        assert not tool_visible(tool, ungranted_operator)
+
+
+def test_resource_mutations_visible_to_platform_admin_only() -> None:
+    admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+    tools = {
+        "resources.deregister",
+        "resources.renew",
+        "resources.register_local_libvirt",
+        "resources.register_remote_libvirt",
+        "resources.register_fault_inject",
+    }
+
+    for tool in tools:
+        assert required_scopes(tool) == frozenset({ExposureScope.PLATFORM_ADMIN})
+        assert tool_visible(tool, admin)
+        assert not tool_visible(tool, operator)
 
 
 def test_no_grants_sees_only_public_subset() -> None:

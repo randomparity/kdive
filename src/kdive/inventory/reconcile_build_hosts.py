@@ -38,7 +38,9 @@ idle host's row is then pruned; a busy one is cordoned until its lease drains).
 from __future__ import annotations
 
 import logging
-from typing import Any, TypedDict
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -62,7 +64,8 @@ _log = logging.getLogger(__name__)
 _CONFIG_EXPRESSIBLE_KINDS = (BuildHostKind.LOCAL, BuildHostKind.EPHEMERAL_LIBVIRT)
 
 
-class _UpsertBuildHostRow(TypedDict):
+@dataclass(frozen=True)
+class _UpsertBuildHostRow:
     id: UUID
     kind: str
     base_image_volume: str | None
@@ -72,7 +75,8 @@ class _UpsertBuildHostRow(TypedDict):
     managed_by: str
 
 
-class _PruneBuildHostRow(TypedDict):
+@dataclass(frozen=True)
+class _PruneBuildHostRow:
     id: UUID
     name: str
 
@@ -180,12 +184,12 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
         return
     row = _upsert_row(raw_row)
     changed = (
-        row["kind"] != kind.value
-        or row["base_image_volume"] != base_image_volume
-        or row["workspace_root"] != inst.workspace_root
-        or row["max_concurrent"] != inst.max_concurrent
-        or row["enabled"] is not True
-        or str(row["managed_by"]) != CONFIG_MANAGED_BY
+        row.kind != kind.value
+        or row.base_image_volume != base_image_volume
+        or row.workspace_root != inst.workspace_root
+        or row.max_concurrent != inst.max_concurrent
+        or row.enabled is not True
+        or row.managed_by != CONFIG_MANAGED_BY
     )
     if changed:
         await cur.execute(
@@ -197,7 +201,7 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
                 inst.workspace_root,
                 inst.max_concurrent,
                 CONFIG_MANAGED_BY,
-                row["id"],
+                row.id,
             ),
         )
         diff.updated.append(_record(inst.name))
@@ -213,10 +217,10 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
         rows = await cur.fetchall()
     for raw_row in rows:
         row = _prune_row(raw_row)
-        name = row["name"]
+        name = row.name
         if name in declared:
             continue
-        outcome = await prune_or_cordon_build_host(conn, row["id"])
+        outcome = await prune_or_cordon_build_host(conn, row.id)
         record = ReconcileRecord(name=name, entry=f"build_host[{name}]")
         if outcome.cordoned:
             diff.cordoned.append(record)
@@ -232,51 +236,51 @@ def _record(name: str, detail: str = "") -> ReconcileRecord:
     return ReconcileRecord(name=name, entry=f"build_host[{name}]", detail=detail)
 
 
-def _upsert_row(row: dict[str, Any]) -> _UpsertBuildHostRow:
-    return {
-        "id": _expect_uuid(row, "id"),
-        "kind": _expect_str(row, "kind"),
-        "base_image_volume": _expect_optional_str(row, "base_image_volume"),
-        "workspace_root": _expect_str(row, "workspace_root"),
-        "max_concurrent": _expect_int(row, "max_concurrent"),
-        "enabled": _expect_bool(row, "enabled"),
-        "managed_by": _expect_str(row, "managed_by"),
-    }
+def _upsert_row(row: Mapping[str, object]) -> _UpsertBuildHostRow:
+    return _UpsertBuildHostRow(
+        id=_expect_uuid(row, "id"),
+        kind=_expect_str(row, "kind"),
+        base_image_volume=_expect_optional_str(row, "base_image_volume"),
+        workspace_root=_expect_str(row, "workspace_root"),
+        max_concurrent=_expect_int(row, "max_concurrent"),
+        enabled=_expect_bool(row, "enabled"),
+        managed_by=_expect_str(row, "managed_by"),
+    )
 
 
-def _prune_row(row: dict[str, Any]) -> _PruneBuildHostRow:
-    return {"id": _expect_uuid(row, "id"), "name": _expect_str(row, "name")}
+def _prune_row(row: Mapping[str, object]) -> _PruneBuildHostRow:
+    return _PruneBuildHostRow(id=_expect_uuid(row, "id"), name=_expect_str(row, "name"))
 
 
-def _expect_uuid(row: dict[str, Any], field: str) -> UUID:
+def _expect_uuid(row: Mapping[str, object], field: str) -> UUID:
     value = row[field]
     if not isinstance(value, UUID):
         raise _row_error(field, "uuid")
     return value
 
 
-def _expect_str(row: dict[str, Any], field: str) -> str:
+def _expect_str(row: Mapping[str, object], field: str) -> str:
     value = row[field]
     if not isinstance(value, str):
         raise _row_error(field, "str")
     return value
 
 
-def _expect_optional_str(row: dict[str, Any], field: str) -> str | None:
+def _expect_optional_str(row: Mapping[str, object], field: str) -> str | None:
     value = row[field]
     if value is not None and not isinstance(value, str):
         raise _row_error(field, "str or null")
     return value
 
 
-def _expect_int(row: dict[str, Any], field: str) -> int:
+def _expect_int(row: Mapping[str, object], field: str) -> int:
     value = row[field]
     if not isinstance(value, int) or isinstance(value, bool):
         raise _row_error(field, "int")
     return value
 
 
-def _expect_bool(row: dict[str, Any], field: str) -> bool:
+def _expect_bool(row: Mapping[str, object], field: str) -> bool:
     value = row[field]
     if not isinstance(value, bool):
         raise _row_error(field, "bool")

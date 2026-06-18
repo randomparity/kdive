@@ -51,7 +51,7 @@ def test_role_bearing_grant_names_project_role_and_platform_roles() -> None:
     assert _items(resp) == [{"project": "demo", "role": "admin"}]
     assert data_str(resp, "principal") == "kdive-demo"
     assert list(data_sequence(resp, "platform_roles")) == ["platform_admin"]
-    assert data_str(resp, "count") == "1"
+    assert resp.data["count"] == 1
     assert resp.suggested_next_actions == ["accounting.report_granted_set"]
 
 
@@ -71,7 +71,7 @@ def test_platform_only_token_has_no_items_but_reports_platform_roles() -> None:
     resp = whoami(ctx)
     assert resp.status == "ok"
     assert _items(resp) == []
-    assert data_str(resp, "count") == "0"
+    assert resp.data["count"] == 0
     assert list(data_sequence(resp, "platform_roles")) == ["platform_auditor"]
     assert data_str(resp, "principal") == "user-1"
 
@@ -95,7 +95,7 @@ def test_items_are_sorted_and_duplicates_collapse() -> None:
     )
     resp = whoami(ctx)
     assert [item["project"] for item in _items(resp)] == ["a", "b", "c"]
-    assert data_str(resp, "count") == "3"
+    assert resp.data["count"] == 3
 
 
 def test_platform_roles_serializes_as_a_json_list() -> None:

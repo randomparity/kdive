@@ -144,7 +144,10 @@ def test_premutation_bound_fires_returns_transport_failure_no_writes(migrated_ur
         release.set()
         assert isinstance(result, AdmissionFailure)
         assert result.category is ErrorCategory.TRANSPORT_FAILURE
-        assert result.detail is not None
+        assert result.failure_message is not None
+        assert not hasattr(result, "detail")
+        assert not hasattr(result, "suggested_next_actions")
+        assert not hasattr(result, "data")
         assert systems_n == 0
         assert jobs_n == 0
 
@@ -153,6 +156,7 @@ def test_premutation_bound_fires_returns_transport_failure_no_writes(migrated_ur
         assert envelope.error_category == "transport_failure"
         assert envelope.retryable is True
         assert envelope.detail
+        assert envelope.suggested_next_actions == ["systems.provision"]
 
     asyncio.run(_run())
 
@@ -203,7 +207,7 @@ def test_first_mutation_disables_the_deadline(migrated_url: str) -> None:
 
 def test_no_mutation_branch_never_disables_the_deadline(migrated_url: str) -> None:
     """Acceptance #4 corollary: a terminal-existing-System failure disables zero times."""
-    from kdive.domain.state import SystemState
+    from kdive.domain.capacity.state import SystemState
     from tests.mcp.lifecycle.test_systems_tools import _seed_system
 
     reschedules: list[float | None] = []

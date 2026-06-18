@@ -349,7 +349,7 @@ def test_expired_private_referenced_by_non_terminal_system_is_skipped(migrated_u
 
 def test_expired_private_referenced_by_terminal_system_is_deleted(migrated_url: str) -> None:
     async def _run() -> None:
-        from kdive.domain.state import SystemState
+        from kdive.domain.capacity.state import SystemState
 
         key = "images/local-libvirt__proj/dead/x86_64.qcow2"
         async with await connect(migrated_url) as seed:

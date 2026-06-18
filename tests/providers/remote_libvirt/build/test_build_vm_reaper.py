@@ -13,19 +13,21 @@ from typing import cast
 from uuid import UUID
 
 import libvirt
+import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import BuildVmReaper
-from kdive.providers.remote_libvirt.build_vm_reaper import (
-    OpenReaperConnection,
-    RemoteLibvirtBuildVmReaper,
-    run_id_from_build_vm_name,
-)
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
-from kdive.providers.remote_libvirt.dump_volume_reaper import system_id_from_dump_volume_name
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     build_domain_name,
     build_overlay_volume_name,
 )
+from kdive.providers.remote_libvirt.reaping.build_vm import (
+    OpenReaperConnection,
+    RemoteLibvirtBuildVmReaper,
+    run_id_from_build_vm_name,
+)
+from kdive.providers.remote_libvirt.reaping.dump_volume import system_id_from_dump_volume_name
 from kdive.providers.remote_libvirt.transport import remote_libvirt_connections
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -111,6 +113,21 @@ def test_delete_build_vm_treats_missing_domain_and_overlay_as_done(tmp_path) -> 
     assert conn.closed
 
 
+def test_delete_build_vm_preserves_non_absence_lookup_failures(tmp_path) -> None:
+    conn = _FakeConn(
+        domains=[],
+        lookup_error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR),
+    )
+    reaper = _reaper(conn, tmp_path)
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert conn.pool.lookups == []
+    assert conn.closed
+
+
 def test_delete_build_vm_tolerates_already_inactive_or_undefined_domain(tmp_path) -> None:
     domain = _FakeDomain(
         build_domain_name(_RID),
@@ -125,6 +142,35 @@ def test_delete_build_vm_tolerates_already_inactive_or_undefined_domain(tmp_path
     assert domain.destroyed == 1
     assert domain.undefined == 1
     assert conn.pool.lookups == [build_overlay_volume_name(_RID)]
+    assert conn.closed
+
+
+@pytest.mark.parametrize(
+    ("destroy_error", "undefine_error"),
+    [
+        (libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR), None),
+        (None, libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)),
+    ],
+)
+def test_delete_build_vm_preserves_non_benign_destroy_or_undefine_failures(
+    tmp_path,
+    destroy_error: libvirt.libvirtError | None,
+    undefine_error: libvirt.libvirtError | None,
+) -> None:
+    domain = _FakeDomain(
+        build_domain_name(_RID),
+        destroy_error=destroy_error,
+        undefine_error=undefine_error,
+    )
+    conn = _FakeConn(domains=[domain])
+    reaper = _reaper(conn, tmp_path)
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert isinstance(raised.value.__cause__, libvirt.libvirtError)
+    assert conn.pool.lookups == []
     assert conn.closed
 
 

@@ -18,9 +18,17 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.components.references import CatalogComponentRef
+from kdive.components.references import CatalogComponentRef, ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, JOBS, RESOURCES, RUNS, SYSTEMS
+from kdive.domain.capacity.state import (
+    AllocationState,
+    InvestigationState,
+    JobState,
+    ResourceStatus,
+    RunState,
+    SystemState,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -33,25 +41,18 @@ from kdive.domain.models import (
     System,
 )
 from kdive.domain.pcie import PCIeClaim
-from kdive.domain.state import (
-    AllocationState,
-    InvestigationState,
-    JobState,
-    ResourceStatus,
-    RunState,
-    SystemState,
-)
 from kdive.jobs.handlers import runs as runs_handlers
-from kdive.jobs.handlers import runs_shared
+from kdive.jobs.handlers import runs_boot, runs_shared
+from kdive.jobs.handlers import runs_common as run_handler_common
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
-from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
 from kdive.mcp.tools.lifecycle.runs.create import (
     RunCreateRequest,
     RunReuseRequirementInput,
     create_run,
 )
+from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.authz.rbac import AuthorizationError, Role
@@ -1281,13 +1282,13 @@ _VALID_BUILD: dict[str, Any] = {
 }
 _TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="test-provider",
-    accepted_component_sources={"config": frozenset({"local"})},
+    accepted_component_sources={ComponentKind.CONFIG: frozenset({"local"})},
 )
-_BUILD_HANDLERS = RunBuildHandlers(_TEST_COMPONENT_SOURCES)
+_BUILD_HANDLERS = BuildRunHandlers(_TEST_COMPONENT_SOURCES)
 # A provider that accepts the catalog config source (local-libvirt/remote-libvirt under ADR-0096).
 _CATALOG_COMPONENT_SOURCES = ComponentSourceCapabilities(
     provider="catalog-provider",
-    accepted_component_sources={"config": frozenset({"catalog", "local"})},
+    accepted_component_sources={ComponentKind.CONFIG: frozenset({"catalog", "local"})},
 )
 
 
@@ -1447,7 +1448,7 @@ def test_build_rejects_local_config_outside_provider_roots_before_state_change(
             }
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
 
-            resp = await RunBuildHandlers(
+            resp = await BuildRunHandlers(
                 _TEST_COMPONENT_SOURCES,
                 config_validator=_reject_config,
             ).build_run(
@@ -1487,7 +1488,7 @@ def test_build_omitted_config_validates_kdump_catalog_default(migrated_url: str)
             }
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
 
-            resp = await RunBuildHandlers(
+            resp = await BuildRunHandlers(
                 _CATALOG_COMPONENT_SOURCES,
                 config_validator=validated.append,
             ).build_run(pool, _ctx(Role.OPERATOR), run_id)
@@ -1533,6 +1534,32 @@ def test_build_on_terminal_run_is_config_error(migrated_url: str, state: RunStat
             resp = await _build(pool, _ctx(), run_id)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == state.value
+
+    asyncio.run(_run())
+
+
+def test_build_terminal_run_checks_state_before_capacity(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            host_id = await _insert_ssh_host(pool, name="full-terminal-host", max_concurrent=1)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO build_host_leases (run_id, build_host_id) VALUES (%s, %s)",
+                    (uuid4(), host_id),
+                )
+            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "full-terminal-host"}
+            run_id = await _seed_run(pool, state=RunState.FAILED, build_profile=profile)
+
+            resp = await _build(pool, _ctx(), run_id)
+            nleases = await _lease_count(pool, host_id)
+            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
+
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "failed"
+        assert "runs.build" not in resp.suggested_next_actions
+        assert nleases == 1
+        assert njobs == 0
 
     asyncio.run(_run())
 
@@ -1859,6 +1886,30 @@ def test_build_host_ephemeral_free_slot_lease_and_job_committed(migrated_url: st
         assert nleases == 1
         assert njobs == 1
         assert payload["build_host_id"] == str(host_id)
+
+    asyncio.run(_run())
+
+
+def test_build_running_replay_returns_existing_job_without_host_readmission(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            host_id = await _insert_ssh_host(pool, name="replay-host", max_concurrent=1)
+            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "replay-host"}
+            run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
+            first = await _build(pool, _ctx(), run_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE build_hosts SET enabled = false WHERE id = %s",
+                    (host_id,),
+                )
+            second = await _build(pool, _ctx(), run_id)
+            nleases = await _lease_count(pool, host_id)
+        assert first.status == "queued"
+        assert second.status == "queued"
+        assert second.object_id == first.object_id
+        assert nleases == 1
 
     asyncio.run(_run())
 
@@ -2400,8 +2451,10 @@ def test_register_handlers_binds_build() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
         registry,
-        resolver=provider_resolver(builder=_FakeBuilder()),
-        secret_registry=SecretRegistry(),
+        ports=runs_handlers.RunHandlerPorts(
+            resolver=provider_resolver(builder=_FakeBuilder()),
+            secret_registry=SecretRegistry(),
+        ),
     )
     assert registry.get(JobKind.BUILD) is not None
 
@@ -2955,7 +3008,7 @@ def test_install_handler_cleanup_failure_preserves_provider_category(
             run_id = await _seed_succeeded_run(pool)
             job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
             installer = _FakeInstaller(error=ErrorCategory.INSTALL_FAILURE)
-            monkeypatch.setattr(runs_handlers, "abandon_run_step", _fail_cleanup)
+            monkeypatch.setattr(run_handler_common, "abandon_run_step", _fail_cleanup)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
                     await runs_handlers.install_handler(
@@ -3088,7 +3141,7 @@ def test_boot_handler_cleanup_failure_preserves_provider_category(
             await _record_install_step(pool, run_id)
             job = await _enqueue_job(pool, JobKind.BOOT, run_id, "boot")
             booter = _FakeBooter(error=ErrorCategory.BOOT_TIMEOUT)
-            monkeypatch.setattr(runs_handlers, "abandon_run_step", _fail_cleanup)
+            monkeypatch.setattr(run_handler_common, "abandon_run_step", _fail_cleanup)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
                     await runs_handlers.boot_handler(
@@ -3107,13 +3160,15 @@ def test_register_handlers_binds_install_and_boot() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
         registry,
-        resolver=provider_resolver(
-            builder=_FakeBuilder(),
-            installer=_FakeInstaller(),
-            booter=_FakeBooter(),
-            profile_policy=_LOCAL_POLICY,
+        ports=runs_handlers.RunHandlerPorts(
+            resolver=provider_resolver(
+                builder=_FakeBuilder(),
+                installer=_FakeInstaller(),
+                booter=_FakeBooter(),
+                profile_policy=_LOCAL_POLICY,
+            ),
+            secret_registry=SecretRegistry(),
         ),
-        secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None
@@ -3128,8 +3183,7 @@ def test_boot_handler_registers_console_on_success(
     # The clean-boot console is the A/B baseline (the `ls /proc`-ran-without-panic
     # evidence) the feature exists to produce, so registration must fire on success too.
     # A real clean boot's console is non-empty (it prints the readiness marker).
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3145,6 +3199,7 @@ def test_boot_handler_registers_console_on_success(
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=minio_store,
                 )
             assert result == run_id
             nsteps = await _count(
@@ -3171,8 +3226,7 @@ def test_boot_handler_registers_console_even_on_failure(
 ) -> None:
     # On a crash the panic fires before readiness, but the oops console IS on disk — so a
     # non-empty console must still be captured even though the boot step raises.
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3189,6 +3243,7 @@ def test_boot_handler_registers_console_even_on_failure(
                         job,
                         resolver=provider_resolver(booter=booter),
                         secret_registry=SecretRegistry(),
+                        artifact_store=minio_store,
                     )
             n = await _count(
                 pool,
@@ -3206,8 +3261,7 @@ def test_boot_handler_records_expected_crash_observed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3224,6 +3278,7 @@ def test_boot_handler_records_expected_crash_observed(
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=minio_store,
                 )
             assert result == run_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -3252,8 +3307,7 @@ def test_expected_crash_observed_system_can_host_next_run(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3270,6 +3324,7 @@ def test_expected_crash_observed_system_can_host_next_run(
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=minio_store,
                 )
 
             inv_id = await _seed_investigation(pool)
@@ -3291,8 +3346,7 @@ def test_boot_handler_expected_crash_requires_matching_console(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3310,6 +3364,7 @@ def test_boot_handler_expected_crash_requires_matching_console(
                         job,
                         resolver=provider_resolver(booter=booter),
                         secret_registry=SecretRegistry(),
+                        artifact_store=minio_store,
                     )
             nsteps = await _count(
                 pool,
@@ -3331,8 +3386,7 @@ def test_boot_handler_skips_empty_console(
     # An empty/unreadable console means capture FAILED (a real boot's console is non-empty).
     # Registering empty bytes as an `available` artifact would be indistinguishable from a
     # crash-free console and could drive a false "fixed" A/B verdict, so it must NOT register.
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3346,6 +3400,7 @@ def test_boot_handler_skips_empty_console(
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=minio_store,
                 )
             assert result == run_id
             nsteps = await _count(
@@ -3369,7 +3424,6 @@ def test_boot_handler_preserves_console_read_failure(
     minio_store: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
 
     def fail_read_console_log(_path: Path) -> bytes:
         raise CategorizedError(
@@ -3382,7 +3436,7 @@ def test_boot_handler_preserves_console_read_failure(
             },
         )
 
-    monkeypatch.setattr(runs_handlers, "read_console_log", fail_read_console_log)
+    monkeypatch.setattr(runs_boot, "read_console_log", fail_read_console_log)
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3397,6 +3451,7 @@ def test_boot_handler_preserves_console_read_failure(
                         job,
                         resolver=provider_resolver(booter=booter),
                         secret_registry=SecretRegistry(),
+                        artifact_store=minio_store,
                     )
             nsteps = await _count(
                 pool,
@@ -3423,8 +3478,7 @@ def test_boot_handler_console_is_readable_via_artifacts(
     """
     from kdive.mcp.tools.catalog.artifacts.reads import artifacts_list
 
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3440,6 +3494,7 @@ def test_boot_handler_console_is_readable_via_artifacts(
                     job,
                     resolver=provider_resolver(booter=booter),
                     secret_registry=SecretRegistry(),
+                    artifact_store=minio_store,
                 )
             assert result == run_id
 
@@ -3473,8 +3528,7 @@ def test_boot_handler_reboot_refreshes_console_etag(
     The two boots run sequentially, matching M0 (a System's Runs boot one at a time). Two Runs
     booting one System *concurrently* is not serialized by boot_handler and is out of scope.
     """
-    monkeypatch.setattr(runs_handlers, "object_store_from_env", lambda: minio_store)
-    monkeypatch.setattr(runs_handlers, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    monkeypatch.setattr(runs_boot, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -3490,6 +3544,7 @@ def test_boot_handler_reboot_refreshes_console_etag(
                     job1,
                     resolver=provider_resolver(booter=_FakeBooter()),
                     secret_registry=SecretRegistry(),
+                    artifact_store=minio_store,
                 )
 
             # Second boot of the SAME System (new Run): the host console log is overwritten
@@ -3504,6 +3559,7 @@ def test_boot_handler_reboot_refreshes_console_etag(
                     job2,
                     resolver=provider_resolver(booter=_FakeBooter()),
                     secret_registry=SecretRegistry(),
+                    artifact_store=minio_store,
                 )
 
             n = await _count(

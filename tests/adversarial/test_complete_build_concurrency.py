@@ -14,20 +14,14 @@ from __future__ import annotations
 import asyncio
 
 from kdive.build_artifacts.results import BuildOutput
-from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import RUNS
-from kdive.domain.state import RunState
-from kdive.mcp.tools.lifecycle.runs.build import RunBuildHandlers
+from kdive.domain.capacity.state import RunState
+from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
 from tests.mcp.complete_build_support import (
     FakeValidator,
     ctx,
     pool,
     seed_external_run_with_manifest,
-)
-
-_TEST_COMPONENT_SOURCES = ComponentSourceCapabilities(
-    provider="test-provider",
-    accepted_component_sources={"config": frozenset({"local"})},
 )
 
 
@@ -48,8 +42,7 @@ def test_concurrent_complete_build_yields_one_ledger_row(migrated_url: str) -> N
         async with pool(migrated_url) as conn_pool:
             run_id = await seed_external_run_with_manifest(conn_pool)
             validator = _CountingValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
-            handlers = RunBuildHandlers(
-                _TEST_COMPONENT_SOURCES,
+            handlers = CompleteBuildHandlers(
                 validate_complete_build=validator,
             )
             results = await asyncio.gather(
@@ -155,8 +148,7 @@ def test_chunked_loser_returns_success_when_winner_already_finalized(migrated_ur
         async with pool(migrated_url) as conn_pool:
             run_id = await seed_external_run_with_manifest(conn_pool, entries=[_CHUNKED])
             store = _LoserStore(migrated_url, str(run_id))
-            handlers = RunBuildHandlers(
-                _TEST_COMPONENT_SOURCES,
+            handlers = CompleteBuildHandlers(
                 validate_complete_build=FakeValidator(
                     BuildOutput(f"local/runs/{run_id}/kernel", "", "")
                 ),

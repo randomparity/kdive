@@ -13,7 +13,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.state import InvestigationState
+from kdive.domain.capacity.state import InvestigationState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog import investigations as inv_tools
 from kdive.security.authz.rbac import AuthorizationError, Role
@@ -295,7 +295,7 @@ def test_close_backstop_maps_illegal_transition(
     # Force the IllegalTransition backstop: make update_state raise so the handler's
     # except-branch maps it to configuration_error rather than letting it escape.
     from kdive.db.repositories import INVESTIGATIONS
-    from kdive.domain.state import IllegalTransition
+    from kdive.domain.capacity.state import IllegalTransition
 
     async def _boom(*_a: object, **_k: object) -> object:
         raise IllegalTransition("forced")
@@ -667,8 +667,8 @@ async def _attach_run(
     from uuid import UUID, uuid4
 
     from kdive.db.repositories import RUNS
+    from kdive.domain.capacity.state import RunState
     from kdive.domain.models import Run
-    from kdive.domain.state import RunState
     from tests.mcp._seed import seed_crashed_system
 
     n = next(_ATTACH_SEQ)
@@ -784,7 +784,7 @@ def test_list_scopes_to_viewer_projects(migrated_url: str) -> None:
             await _open(pool, _ctx(), project="proj", title="a")
             await _open(pool, _ctx(), project="proj", title="b")
             resp = await inv_tools.list_investigations(pool, _ctx())
-            assert resp.data["count"] == "2"
+            assert resp.data["count"] == 2
             assert {i.data["title"] for i in resp.items} == {"a", "b"}
 
     asyncio.run(scenario())
@@ -796,7 +796,7 @@ def test_list_excludes_other_projects(migrated_url: str) -> None:
             await _open(pool, _ctx(), project="proj", title="mine")
             # A viewer of only "other" sees none of proj's investigations.
             resp = await inv_tools.list_investigations(pool, _ctx(projects=("other",)))
-            assert resp.data["count"] == "0"
+            assert resp.data["count"] == 0
 
     asyncio.run(scenario())
 
@@ -828,16 +828,15 @@ def test_list_requires_viewer_role(migrated_url: str) -> None:
             await _open(pool, _ctx(), project="proj", title="a")
             # A caller with no viewer role anywhere sees an empty collection.
             resp = await inv_tools.list_investigations(pool, _ctx(role=None))
-            assert resp.data["count"] == "0"
+            assert resp.data["count"] == 0
 
     asyncio.run(scenario())
 
 
 def test_investigation_row_error_envelope() -> None:
-    """The degraded-row helper yields a configuration_error envelope (no DB needed)."""
     from uuid import uuid4 as _u  # local import; module-level imports include only UUID
 
-    resp = inv_tools._investigation_row_error({"id": _u()})
+    resp = inv_tools._investigation_row_error(_u())
     assert resp.status == "error"
     assert resp.error_category == "configuration_error"
 
@@ -860,7 +859,7 @@ def test_list_degrades_one_invalid_row(migrated_url: str, monkeypatch: pytest.Mo
 
             monkeypatch.setattr(inv_tools.Investigation, "model_validate", staticmethod(flaky))
             resp = await inv_tools.list_investigations(pool, _ctx())
-            assert resp.data["count"] == "2"
+            assert resp.data["count"] == 2
             assert sorted(i.status for i in resp.items) == ["error", "open"]
 
     asyncio.run(scenario())

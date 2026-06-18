@@ -31,14 +31,14 @@ from kdive.components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
-from kdive.providers.shared.build_host import config as build_host_config
 from kdive.providers.shared.build_host import execution as build_host_execution
-from kdive.providers.shared.build_host import workspace as build_host_workspace
+from kdive.providers.shared.build_host.configuration import config as build_host_config
+from kdive.providers.shared.build_host.workspaces import workspace as build_host_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("33333333-3333-3333-3333-333333333333")

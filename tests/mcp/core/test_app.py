@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -12,11 +13,12 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.mcp.app as app_module
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import JobKind
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.app import build_app, build_handler_registry
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 
@@ -228,10 +230,18 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         captured["image_store"] = image_store
         captured["upload_store"] = upload_store
 
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _store_from_env)
     monkeypatch.setattr(app_module.ops_images_tools, "register", _register)
+    assembly = SimpleNamespace(
+        object_stores=ObjectStoreAssembly(
+            optional_upload_store=cast(Any, store),
+            optional_image_store=cast(Any, store),
+            optional_ops_image_store=cast(Any, store),
+            required_image_build_store=cast(Any, store),
+            request_time_store_factory=cast(Any, _store_from_env),
+        )
+    )
 
-    app_module._register_ops_images_tools(app, pool, cast(Any, None))
+    app_module._register_ops_images_tools(app, pool, cast(Any, assembly))
 
     assert not hasattr(app_module.ops_images_tools, "register_from_env")
     assert captured == {
@@ -242,7 +252,7 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
     }
 
 
-def test_ops_images_store_resolver_preserves_configured_store_error(
+def test_object_store_assembly_preserves_configured_store_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     error = CategorizedError(
@@ -255,10 +265,10 @@ def test_ops_images_store_resolver_preserves_configured_store_error(
         raise error
 
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "not-a-url")
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _raise_store)
+    monkeypatch.setattr("kdive.store.assembly.object_store_from_env", _raise_store)
 
     with pytest.raises(CategorizedError) as caught:
-        app_module._resolve_ops_images_store()
+        build_object_store_assembly()
 
     assert caught.value is error
 
@@ -297,13 +307,12 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     def _capture(
         _registry: HandlerRegistry,
-        provider_resolver: object,
-        secret_registry: SecretRegistry,
-        build_host_transport_factories: object | None,
+        assembly: app_module.WorkerHandlerAssembly,
     ) -> None:
-        captured["resolver"] = provider_resolver
-        captured["secret_registry"] = secret_registry
-        captured["transports"] = build_host_transport_factories
+        captured["resolver"] = assembly.resolver
+        captured["secret_registry"] = assembly.secret_registry
+        captured["transports"] = assembly.transport_factories
+        captured["object_stores"] = assembly.object_stores
 
     monkeypatch.setattr(app_module, "_HANDLER_REGISTRARS", (_capture,))
 
@@ -312,11 +321,15 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
         provider_composition=cast(Any, _FakeComposition()),
     )
 
-    assert captured == {
-        "resolver": resolver,
-        "secret_registry": caller_registry,
-        "transports": transports,
-    }
+    assert captured["resolver"] is resolver
+    assert captured["secret_registry"] is caller_registry
+    assert captured["transports"] is transports
+    object_stores = captured["object_stores"]
+    assert isinstance(object_stores, ObjectStoreAssembly)
+    assert object_stores.optional_upload_store is None
+    assert object_stores.optional_image_store is None
+    assert object_stores.optional_ops_image_store is None
+    assert isinstance(object_stores.required_image_build_store, CategorizedError)
 
 
 def test_image_build_handler_preserves_store_config_error(
@@ -332,9 +345,20 @@ def test_image_build_handler_preserves_store_config_error(
     def _raise_store() -> object:
         raise error
 
-    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _raise_store)
     app_module._register_image_build_handler(
-        registry, cast(Any, None), SecretRegistry(), cast(Any, None)
+        registry,
+        app_module.WorkerHandlerAssembly(
+            resolver=cast(Any, None),
+            secret_registry=SecretRegistry(),
+            transport_factories=cast(Any, None),
+            object_stores=ObjectStoreAssembly(
+                optional_upload_store=None,
+                optional_image_store=None,
+                optional_ops_image_store=None,
+                required_image_build_store=error,
+                request_time_store_factory=cast(Any, _raise_store),
+            ),
+        ),
     )
     handler = registry.get(JobKind.IMAGE_BUILD)
     assert handler is not None

@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import PydanticCustomError
 
-from kdive.domain.models import ResourceKind
+from kdive.domain.catalog.resources import ResourceKind
 
 _DEFAULT_COST_CLASS = "local"
 

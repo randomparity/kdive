@@ -15,17 +15,17 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import SYSTEMS
+from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import JobKind
-from kdive.domain.state import SystemState
+from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import CaptureVmcorePayload
 from kdive.log import bind_context
@@ -82,11 +82,12 @@ class VmcoreHandlers:
         ctx: RequestContext,
         *,
         system_id: str,
-        method: str = "host_dump",
+        method: CaptureMethod | str = CaptureMethod.HOST_DUMP,
     ) -> ToolResponse:
         return await with_runtime_for_system(
             pool,
             self.resolver,
+            ctx,
             system_id,
             lambda runtime: _fetch_vmcore(
                 pool,
@@ -95,6 +96,7 @@ class VmcoreHandlers:
                 method=method,
                 supported_methods=runtime.supported_capture_methods,
             ),
+            required_role=Role.OPERATOR,
         )
 
     async def postmortem_crash(
@@ -107,6 +109,7 @@ class VmcoreHandlers:
     ) -> ToolResponse:
         return await self._with_postmortem_crash_port(
             pool,
+            ctx,
             run_id,
             lambda crash, secret_registry: _postmortem_crash(
                 pool,
@@ -123,6 +126,7 @@ class VmcoreHandlers:
     ) -> ToolResponse:
         return await self._with_postmortem_crash_port(
             pool,
+            ctx,
             run_id,
             lambda crash, secret_registry: _postmortem_triage(
                 pool,
@@ -136,14 +140,17 @@ class VmcoreHandlers:
     async def _with_postmortem_crash_port(
         self,
         pool: AsyncConnectionPool,
+        ctx: RequestContext,
         run_id: str,
         run: Callable[[CrashPostmortem, SecretRegistry], Awaitable[ToolResponse]],
     ) -> ToolResponse:
         return await with_runtime_for_run(
             pool,
             self.resolver,
+            ctx,
             run_id,
             lambda runtime: run(runtime.crash_postmortem, self.secret_registry),
+            required_role=Role.VIEWER,
         )
 
 
@@ -152,7 +159,7 @@ async def _fetch_vmcore(
     ctx: RequestContext,
     *,
     system_id: str,
-    method: str = "host_dump",
+    method: CaptureMethod | str = CaptureMethod.HOST_DUMP,
     supported_methods: frozenset[CaptureMethod],
 ) -> ToolResponse:
     """Admit a `capture_vmcore` job on a `crashed` System (operator); return the job handle."""
@@ -160,7 +167,7 @@ async def _fetch_vmcore(
     if uid is None:
         return _config_error(system_id)
     try:
-        capture_method = CaptureMethod(method)
+        capture_method = method if isinstance(method, CaptureMethod) else CaptureMethod(method)
     except ValueError:
         return _config_error(system_id, data={"method": method, "reason": "unknown capture method"})
     if capture_method not in _VMCORE_METHODS:
@@ -308,9 +315,9 @@ def register(
     async def vmcore_fetch(
         system_id: Annotated[str, Field(description="The crashed System whose vmcore to capture.")],
         method: Annotated[
-            Literal["host_dump", "kdump"],
+            CaptureMethod,
             Field(description="Capture method; must be supported by the local-libvirt provider."),
-        ] = "host_dump",
+        ] = CaptureMethod.HOST_DUMP,
     ) -> ToolResponse:
         """Capture and persist a vmcore."""
         return await handlers.fetch_vmcore(

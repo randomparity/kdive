@@ -33,9 +33,11 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import SYSTEM_SHAPES
+from kdive.domain.capacity.state import AllocationState, ResourceStatus
+from kdive.domain.catalog.resources import Resource
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
-from kdive.domain.models import Resource, SystemShape
+from kdive.domain.lifecycle import SystemShape
+from kdive.domain.lifecycle.rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
 from kdive.domain.pcie import (
     MatchOutcome,
     PCIeClaim,
@@ -43,12 +45,6 @@ from kdive.domain.pcie import (
     parse_match_spec,
     resolve_spec,
 )
-from kdive.domain.resource_capabilities import (
-    CONCURRENT_ALLOCATION_CAP_KEY,
-    MEMORY_MB_KEY,
-    VCPUS_KEY,
-)
-from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
@@ -80,11 +76,7 @@ def _resolve_cap(resource: Resource) -> int | None:
     bad row, so it degrades that host to ``None`` and the caller flags it non-schedulable
     (never "fits now"), matching the admission verdict without raising.
     """
-    cap = resource.capabilities.get(CONCURRENT_ALLOCATION_CAP_KEY)
-    # bool is an int subclass — reject it explicitly so `True` is not read as cap 1.
-    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
-        return None
-    return cap
+    return resource.capability_view.allocation_cap()
 
 
 def _size_ceiling(resource: Resource) -> tuple[int | None, int | None]:
@@ -95,15 +87,10 @@ def _size_ceiling(resource: Resource) -> tuple[int | None, int | None]:
     un-grantable. Availability mirrors that verdict without raising: a ``None`` here flags the
     host non-schedulable (never "fits now"), so the two surfaces agree on what can be allocated.
     """
-    return _int_cap(resource, VCPUS_KEY), _int_cap(resource, MEMORY_MB_KEY)
-
-
-def _int_cap(resource: Resource, key: str) -> int | None:
-    value = resource.capabilities.get(key)
-    # bool is an int subclass — reject it explicitly so `True` is not read as a ceiling of 1.
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return None
-    return value
+    ceiling = resource.capability_view.size_ceiling()
+    if ceiling is None:
+        return None, None
+    return ceiling
 
 
 def _resource_id(value: object) -> UUID:

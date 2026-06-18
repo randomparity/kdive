@@ -23,6 +23,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
+from kdive.domain.capacity.state import (
+    AllocationState,
+    DebugSessionState,
+    InvestigationState,
+    RunState,
+    SystemState,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import (
     Allocation,
@@ -30,13 +37,6 @@ from kdive.domain.models import (
     Investigation,
     Run,
     System,
-)
-from kdive.domain.state import (
-    AllocationState,
-    DebugSessionState,
-    InvestigationState,
-    RunState,
-    SystemState,
 )
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools

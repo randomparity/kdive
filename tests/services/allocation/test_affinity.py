@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from kdive.domain.models import Resource, ResourceKind
-from kdive.domain.state import ResourceStatus
+from kdive.domain.capacity.state import ResourceStatus
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.services.allocation.admission.affinity import project_may_place
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

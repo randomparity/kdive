@@ -5,7 +5,7 @@ from __future__ import annotations
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import JOBS, RUNS, SYSTEMS
-from kdive.domain.state import RunState
+from kdive.domain.capacity.state import RunState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid

@@ -32,8 +32,9 @@ from pydantic import Field
 
 import kdive.config as config
 from kdive.config.core_settings import DEBUG_DIR
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import DebugSession, ResourceKind
+from kdive.domain.lifecycle import DebugSession
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -253,7 +254,7 @@ def _list_breakpoints_op(session_id: str) -> _EngineOp:
             session_id,
             "listed",
             suggested_next_actions=["debug.set_breakpoint", "debug.continue"],
-            data={"count": str(len(refs))},
+            data={"count": len(refs)},
         )
 
     return op

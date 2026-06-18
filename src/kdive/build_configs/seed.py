@@ -19,7 +19,7 @@ from psycopg import AsyncConnection
 from kdive.artifacts.storage import ArtifactWriteRequest
 from kdive.build_configs.catalog import read_build_config_provenance, upsert_seed_build_config
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.models import Sensitivity
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.store.objectstore import ObjectStore
 
 KDUMP_FRAGMENT_PATH = Path(__file__).parent / "data" / "kdump.config"

@@ -41,22 +41,24 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.cost import cost, quantize_kcu, rate
-from kdive.domain.models import Allocation, Investigation, Job, Run, System
-from kdive.domain.state import (
+from kdive.domain.accounting.cost import cost, quantize_kcu, rate
+from kdive.domain.capacity.state import (
     AllocationState,
     InvestigationState,
     RunState,
     SystemState,
 )
+from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.operations.jobs import Job
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.mcp.auth import AuthError
 from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload
 from kdive.mcp.tools.accounting.admin import QuotaSetRequest, set_budget, set_quota
 from kdive.mcp.tools.accounting.estimate import estimate
 from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project
-from kdive.mcp.tools.lifecycle import allocations as alloc_tools
 from kdive.mcp.tools.lifecycle import control as control_tools
+from kdive.mcp.tools.lifecycle.allocations.lifecycle import release_allocation, renew_allocation
+from kdive.mcp.tools.lifecycle.allocations.request import request_allocation
 from kdive.mcp.tools.lifecycle.systems.admin import SystemAdminHandlers, teardown_system
 from kdive.mcp.tools.lifecycle.systems.provision import SystemProvisionHandlers
 from kdive.providers.infra.reaping import NullReaper
@@ -123,7 +125,7 @@ async def _request_allocation(
         if resource_id is not None
         else {"mode": "kind", "kind": kind or "local-libvirt"}
     )
-    return await alloc_tools.request_allocation(
+    return await request_allocation(
         pool,
         ctx,
         project=project,
@@ -542,7 +544,7 @@ def test_c3_reconciliation_nets_to_actual_and_usage_matches(migrated_url: str) -
                     "UPDATE allocations SET active_started_at = %s WHERE id = %s",
                     (datetime.now(UTC) - timedelta(hours=2), alloc_id),
                 )
-            resp = await alloc_tools.release_allocation(pool, op, grant.object_id)
+            resp = await release_allocation(pool, op, grant.object_id)
             assert resp.status == "released"
             events = await _ledger_events(pool, alloc_id)
             assert [e[0] for e in events] == ["reserved", "reconciled"]
@@ -567,7 +569,7 @@ def test_c3_release_from_granted_credits_full_reservation(migrated_url: str) -> 
             grant = await _request_allocation(
                 pool, _operator_ctx(), project="proj", vcpus=2, memory_gb=4, window=3
             )
-            resp = await alloc_tools.release_allocation(pool, _operator_ctx(), grant.object_id)
+            resp = await release_allocation(pool, _operator_ctx(), grant.object_id)
             assert resp.status == "released"
             net = sum((e[1] for e in await _ledger_events(pool, UUID(grant.object_id))), Decimal(0))
             assert net == Decimal(0)  # active_hours = 0 -> full credit
@@ -821,9 +823,7 @@ def test_c5_renew_extends_window_and_charges(migrated_url: str) -> None:
             )
             alloc_id = UUID(grant.object_id)
             before = (await _alloc(pool, alloc_id)).lease_expiry
-            resp = await alloc_tools.renew_allocation(
-                pool, _operator_ctx(), str(alloc_id), extend=3
-            )
+            resp = await renew_allocation(pool, _operator_ctx(), str(alloc_id), extend=3)
             assert resp.status == "granted"
             events = await _ledger_events(pool, alloc_id)
             assert [e[0] for e in events] == ["reserved", "reserved"]
@@ -849,9 +849,7 @@ def test_c5_over_budget_renew_denied_window_unchanged(migrated_url: str) -> None
             )
             alloc_id = UUID(grant.object_id)
             before = (await _alloc(pool, alloc_id)).lease_expiry
-            resp = await alloc_tools.renew_allocation(
-                pool, _operator_ctx(), str(alloc_id), extend=3
-            )
+            resp = await renew_allocation(pool, _operator_ctx(), str(alloc_id), extend=3)
             assert resp.status == "error"
             assert resp.error_category == "allocation_denied"
             assert (await _alloc(pool, alloc_id)).lease_expiry == before  # unchanged
