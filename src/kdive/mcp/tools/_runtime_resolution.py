@@ -41,12 +41,12 @@ _AUTHORIZED_SYSTEM_KIND: LiteralString = (
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE s.id = %s"
 )
+# A Run's runtime is selected by its committed ``target_kind`` and authorized by its own
+# ``project`` column — never the System join, so an unbound Run (ADR-0169, ``system_id IS NULL``)
+# resolves for ``runs.build`` / ``runs.complete_build`` before any System exists. For a bound Run
+# ``target_kind`` equals the System's resource kind by construction, so this is equivalent there.
 _AUTHORIZED_RUN_KIND: LiteralString = (
-    "SELECT rn.project, r.kind AS kind FROM runs rn "
-    "JOIN systems s ON s.id = rn.system_id "
-    "JOIN allocations a ON a.id = s.allocation_id "
-    "JOIN resources r ON r.id = a.resource_id "
-    "WHERE rn.id = %s"
+    "SELECT rn.project, rn.target_kind AS kind FROM runs rn WHERE rn.id = %s"
 )
 
 

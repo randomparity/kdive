@@ -45,6 +45,8 @@ from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.handlers import runs_boot, runs_shared
 from kdive.jobs.handlers import runs_common as run_handler_common
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.lifecycle.runs import common as runs_common
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
 from kdive.mcp.tools.lifecycle.runs.cancel import cancel_run
@@ -424,6 +426,47 @@ def test_cancel_unbound_run_succeeds(migrated_url: str) -> None:
                 row = await cur.fetchone()
         assert resp.status == "canceled"
         assert row is not None and row["state"] == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_with_runtime_for_run_resolves_unbound_run(migrated_url: str) -> None:
+    """The runs.build / runs.complete_build admission path resolves an unbound Run (ADR-0169).
+
+    Regression: with_runtime_for_run formerly joined runs->systems->resources, so an unbound Run
+    (system_id IS NULL) was NOT_FOUND and the whole create-unbound -> build flow failed at the
+    tool boundary. The runtime is now selected from the Run's committed target_kind.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            unbound = await _seed_unbound_run(pool, state=RunState.CREATED)
+            bound = await _seed_run(pool, state=RunState.CREATED)
+            seen: list[str] = []
+
+            async def _cb(rid: str) -> ToolResponse:
+                seen.append(rid)
+                return ToolResponse.success(rid, "ok")
+
+            unbound_resp = await with_runtime_for_run(
+                pool,
+                provider_resolver(),
+                _ctx(),
+                unbound,
+                lambda _r: _cb(unbound),
+                required_role=Role.OPERATOR,
+            )
+            bound_resp = await with_runtime_for_run(
+                pool,
+                provider_resolver(),
+                _ctx(),
+                bound,
+                lambda _r: _cb(bound),
+                required_role=Role.OPERATOR,
+            )
+        assert unbound_resp.status == "ok"
+        assert bound_resp.status == "ok"
+        assert set(seen) == {unbound, bound}
 
     asyncio.run(_run())
 
