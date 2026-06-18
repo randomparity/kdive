@@ -546,11 +546,11 @@ def test_artifact_upload_wrapper_roundtrips_and_validates_through_fastmcp(
     assert store.calls == [(upload.items[0].object_id, "checksum", 10)]
 
 
-def test_real_build_app_tools_advertise_flat_output_schema() -> None:
-    """Every build_app tool advertises the flat envelope schema (#404, end-to-end enumeration).
+def test_real_build_app_tools_advertise_envelope_output_schema() -> None:
+    """Every build_app tool advertises the fielded envelope schema (#565, end-to-end enumeration).
 
-    Exercises build_app's real registry sweep (ADR-0113): a renamed registry accessor makes
-    build_app raise via the zero-count guard, and a non-flat schema fails this assertion. No DB
+    Exercises build_app's real registry sweep (ADR-0170): a renamed registry accessor makes
+    build_app raise via the zero-count guard, and a non-fielded schema fails this assertion. No DB
     is needed — list_tools does not touch the pool — so the app is built on an unopened pool.
     """
     pool = AsyncConnectionPool("postgresql://unused", open=False)
@@ -562,4 +562,7 @@ def test_real_build_app_tools_advertise_flat_output_schema() -> None:
 
     schemas = asyncio.run(_schemas())
     assert schemas, "build_app registered no tools"
-    assert all(schema == {"type": "object"} for schema in schemas)
+    expected = set(ToolResponse.model_fields)
+    for schema in schemas:
+        assert schema is not None
+        assert set(schema["properties"]) == expected

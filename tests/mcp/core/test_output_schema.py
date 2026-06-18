@@ -1,8 +1,9 @@
-"""The flat-outputSchema sweep that fixes the recursive ToolResponse schema (#404, ADR-0113)."""
+"""The fielded-outputSchema sweep that documents the ToolResponse envelope (#565, ADR-0170)."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -10,7 +11,7 @@ import pytest
 from fastmcp import Client, FastMCP
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.app import ENVELOPE_OUTPUT_SCHEMA, _advertise_flat_output_schema
+from kdive.mcp.app import ENVELOPE_OUTPUT_SCHEMA, _advertise_envelope_output_schema
 from kdive.mcp.responses import ToolResponse
 
 
@@ -43,55 +44,61 @@ class _ErrorCollector(logging.Handler):
         self.records.append(record)
 
 
-def _call_and_capture(app: FastMCP, tool: str) -> tuple[dict[str, Any] | None, list[str]]:
-    """Call ``tool`` on ``app``; return (``.data``, structured-content parse-error messages)."""
+def _call_and_capture(
+    app: FastMCP, tool: str
+) -> tuple[object | None, list[str], dict[str, Any] | None]:
+    """Call ``tool`` on ``app``.
+
+    Returns ``(.data, structured-content parse-error messages, .structured_content)``. With the
+    fielded schema ``.data`` is a pydantic model (not a dict); ``structured_content`` is the
+    byte-stable envelope dict.
+    """
     logger = logging.getLogger("fastmcp")
     handler = _ErrorCollector()
     logger.addHandler(handler)
     try:
 
-        async def _call() -> dict[str, Any] | None:
+        async def _call() -> tuple[object | None, dict[str, Any] | None]:
             async with Client(app) as client:
                 result = await client.call_tool(tool, {})
-                return result.data
+                return result.data, result.structured_content
 
-        data = asyncio.run(_call())
+        data, structured = asyncio.run(_call())
     finally:
         logger.removeHandler(handler)
     errors = [r.getMessage() for r in handler.records if "structured content" in r.getMessage()]
-    return data, errors
+    return data, errors, structured
 
 
-def test_sweep_advertises_flat_object_schema() -> None:
+def test_schema_advertises_every_envelope_field() -> None:
+    # AC#1 + AC#3 drift guard: the advertised properties are exactly the model fields.
+    assert ENVELOPE_OUTPUT_SCHEMA["type"] == "object"
+    assert set(ENVELOPE_OUTPUT_SCHEMA["properties"]) == set(ToolResponse.model_fields)
+
+
+def test_schema_is_ref_free() -> None:
+    # AC#2: no recursion — the constant carries no $ref/$defs.
+    serialized = json.dumps(ENVELOPE_OUTPUT_SCHEMA)
+    assert "$ref" not in serialized
+    assert "$defs" not in serialized
+
+
+def test_sweep_advertises_fielded_schema() -> None:
     app = _probe_app()
-    swept = _advertise_flat_output_schema(app)
+    swept = _advertise_envelope_output_schema(app)
     assert swept == 2
 
-    async def _run() -> list[dict[str, object] | None]:
-        async with Client(app) as client:
-            return [t.outputSchema for t in await client.list_tools()]
-
-    schemas = asyncio.run(_run())
-    assert schemas == [ENVELOPE_OUTPUT_SCHEMA, ENVELOPE_OUTPUT_SCHEMA]
-
-
-def test_detail_field_is_not_an_advertised_output_property() -> None:
-    # AC#4 (#450, ADR-0123): adding the `detail` envelope field must not surface it as a distinct
-    # advertised output property; the schema stays the flat untyped object.
-    app = _probe_app()
-    _advertise_flat_output_schema(app)
-
-    async def _run() -> list[dict[str, object] | None]:
+    async def _run() -> list[dict[str, Any] | None]:
         async with Client(app) as client:
             return [t.outputSchema for t in await client.list_tools()]
 
     for schema in asyncio.run(_run()):
         assert schema is not None
-        assert "properties" not in schema
+        assert set(schema["properties"]) == set(ToolResponse.model_fields)
 
 
 def test_failure_detail_round_trips_through_client() -> None:
-    # AC#1 surface: the new `detail` field rides the structured-content payload unchanged.
+    # AC#2 surface: the `detail` field rides the structured-content payload unchanged.
     app: FastMCP = FastMCP(name="detail-probe")
 
     @app.tool(name="fail.one")
@@ -101,20 +108,34 @@ def test_failure_detail_round_trips_through_client() -> None:
         )
         return ToolResponse.failure_from_error("obj-1", exc)
 
-    _advertise_flat_output_schema(app)
-    data, errors = _call_and_capture(app, "fail.one")
-    assert isinstance(data, dict)
-    assert data["detail"] == "invalid provisioning profile"
+    _advertise_envelope_output_schema(app)
+    data, errors, structured = _call_and_capture(app, "fail.one")
+    assert data is not None
+    assert structured is not None
+    assert structured["detail"] == "invalid provisioning profile"
     assert errors == []
 
 
 def test_sweep_restores_data_and_logs_no_parse_error() -> None:
     app = _probe_app()
-    _advertise_flat_output_schema(app)
-    data, errors = _call_and_capture(app, "scalar.one")
-    assert isinstance(data, dict)
-    assert data["object_id"] == "obj-1"  # S1b: .data restored
-    assert errors == []  # S1a: no parse-error log
+    _advertise_envelope_output_schema(app)
+    data, errors, structured = _call_and_capture(app, "scalar.one")
+    assert data is not None  # parse succeeded (model instance), not nulled
+    assert structured is not None
+    assert structured["object_id"] == "obj-1"  # structured_content restored
+    assert errors == []  # no parse-error log
+
+
+def test_collection_round_trips_through_client() -> None:
+    # AC#2: a non-empty `items` envelope parses; structured_content keeps the nested list.
+    app = _probe_app()
+    _advertise_envelope_output_schema(app)
+    data, errors, structured = _call_and_capture(app, "list.coll")
+    assert data is not None
+    assert structured is not None
+    assert isinstance(structured["items"], list)
+    assert structured["items"]  # non-empty
+    assert errors == []
 
 
 def test_unswept_recursive_schema_fails_to_parse() -> None:
@@ -124,7 +145,7 @@ def test_unswept_recursive_schema_fails_to_parse() -> None:
     ``$ref`` would make this auto-schema parse cleanly and is the expected reason to revisit it.
     """
     app = _probe_app()  # NOT swept
-    data, errors = _call_and_capture(app, "scalar.one")
+    data, errors, _structured = _call_and_capture(app, "scalar.one")
     assert data is None  # the failed validator nulls .data
     assert errors  # the parse error is logged
 
@@ -133,4 +154,4 @@ def test_sweep_raises_on_empty_tool_surface() -> None:
     """A zero count means the registry accessor broke — fail loud, don't ship recursive schemas."""
     empty: FastMCP = FastMCP(name="empty")
     with pytest.raises(RuntimeError):
-        _advertise_flat_output_schema(empty)
+        _advertise_envelope_output_schema(empty)
