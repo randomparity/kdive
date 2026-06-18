@@ -125,6 +125,18 @@ def test_image_retention_visible_to_platform_admin_only() -> None:
         assert not tool_visible(tool, operator)
 
 
+def test_private_image_mutations_visible_to_project_operator_only() -> None:
+    project_operator = _ctx(roles={"project-a": Role.OPERATOR})
+    platform_operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+    ungranted_operator = _ctx(roles={"project-a": Role.OPERATOR}, projects=())
+
+    for tool in {"images.upload", "images.delete"}:
+        assert required_scopes(tool) == frozenset({ExposureScope.PROJECT_OPERATOR})
+        assert tool_visible(tool, project_operator)
+        assert not tool_visible(tool, platform_operator)
+        assert not tool_visible(tool, ungranted_operator)
+
+
 def test_resource_mutations_visible_to_platform_admin_only() -> None:
     admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
     operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))

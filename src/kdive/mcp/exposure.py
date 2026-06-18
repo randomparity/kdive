@@ -115,8 +115,8 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # images
     "images.build": _PLAT_OP,
     "images.publish": _PLAT_OP,
-    "images.upload": _PLAT_OP,
-    "images.delete": _PLAT_OP,
+    "images.upload": _OPERATOR,
+    "images.delete": _OPERATOR,
     "images.extend": _PLAT_ADMIN,
     "images.prune_expired": _PLAT_ADMIN,
     # introspect
