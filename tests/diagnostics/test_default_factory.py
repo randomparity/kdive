@@ -114,6 +114,15 @@ def test_factory_builds_a_service_with_a_secret_ref_check(monkeypatch, tmp_path:
     assert "secret_ref" in ids
 
 
+def test_provider_diagnostics_registration_includes_remote_libvirt() -> None:
+    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
+
+    contributions = diagnostic_provider_contributions()
+    assert len(contributions) == 1
+    assert contributions[0].checks
+    assert contributions[0].unavailable_worker_checks
+
+
 def test_secret_ref_passes_when_no_ref_is_required(monkeypatch, tmp_path: Path) -> None:
     # The default registry has no conditionally-required secret refs (the remote mTLS refs that
     # used to drive this moved to systems.toml, #395), so the assembled check resolves the empty
