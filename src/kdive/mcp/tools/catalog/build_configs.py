@@ -37,7 +37,7 @@ from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, hel
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
-from kdive.store.objectstore import ObjectStore
+from kdive.store.objectstore import ObjectStore, object_store_from_env
 
 _TOOL = "buildconfig.get"
 _SET_TOOL = "buildconfig.set"
@@ -199,21 +199,19 @@ async def set_build_config(
         )
 
 
-def _resolve_store() -> ObjectStore:
-    """Resolve the object store from env; deferred so registration never fails without S3."""
-    from kdive.store.objectstore import object_store_from_env
-
-    return object_store_from_env()
-
-
-def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def register(
+    app: FastMCP,
+    pool: AsyncConnectionPool,
+    store_factory: Callable[[], ObjectStore] | None = None,
+) -> None:
     """Register the ``buildconfig.get`` / ``buildconfig.set`` tools, bound to ``pool``."""
+    store_factory = store_factory or object_store_from_env
     _store: ObjectStore | None = None
 
     def _resolved_store() -> ObjectStore:
         nonlocal _store
         if _store is None:
-            _store = _resolve_store()
+            _store = store_factory()
         return _store
 
     _register_buildconfig_get(app, pool, _resolved_store)

@@ -88,7 +88,6 @@ def test_buildconfig_get_tool_maps_unknown_name_to_failure_envelope(
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            monkeypatch.setattr(build_configs, "_resolve_store", lambda: minio_store)
             monkeypatch.setattr(
                 build_configs,
                 "current_context",
@@ -101,7 +100,7 @@ def test_buildconfig_get_tool_maps_unknown_name_to_failure_envelope(
                 ),
             )
             app = FastMCP("build-config-test")
-            build_configs.register(app, pool)
+            build_configs.register(app, pool, store_factory=lambda: minio_store)
             tools = {tool.name: tool for tool in await app.list_tools()}
             result = await cast(Any, tools["buildconfig.get"]).fn("nope")
 
@@ -123,7 +122,6 @@ def test_buildconfig_get_tool_maps_store_resolution_error(
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            monkeypatch.setattr(build_configs, "_resolve_store", _raise_store)
             monkeypatch.setattr(
                 build_configs,
                 "current_context",
@@ -136,7 +134,7 @@ def test_buildconfig_get_tool_maps_store_resolution_error(
                 ),
             )
             app = FastMCP("build-config-test")
-            build_configs.register(app, pool)
+            build_configs.register(app, pool, store_factory=_raise_store)
             tools = {tool.name: tool for tool in await app.list_tools()}
             result = await cast(Any, tools["buildconfig.get"]).fn("kdump")
 

@@ -20,8 +20,6 @@ from opentelemetry import metrics, trace
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.config as config
-from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
 from kdive.diagnostics.service import DiagnosticsService, default_service_factory
 from kdive.domain.errors import CategorizedError
 from kdive.domain.jobs import Job, JobKind
@@ -78,9 +76,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import ObjectStore
-
-_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
+from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +88,7 @@ class AppAssembly:
     reaper: InfraReaper
     dump_volume_reaper: DumpVolumeReaper
     build_vm_reaper: BuildVmReaper
+    object_stores: ObjectStoreAssembly
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +98,7 @@ class WorkerHandlerAssembly:
     resolver: ProviderResolver
     secret_registry: SecretRegistry
     transport_factories: BuildHostTransportFactories | None
-    artifact_store: ObjectStore | None
+    object_stores: ObjectStoreAssembly
 
 
 type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool, AppAssembly], None]
@@ -126,8 +123,8 @@ def _register_reconcile_tools(
 ) -> None:
     ports = ops_reconcile_tools.ReconcileRepairPorts(
         reaper=assembly.reaper,
-        upload_store=ops_reconcile_tools.resolve_upload_store(),
-        image_store=ops_reconcile_tools.resolve_image_store(),
+        upload_store=assembly.object_stores.optional_upload_store,
+        image_store=assembly.object_stores.optional_image_store,
         dump_volume_reaper=assembly.dump_volume_reaper,
         build_vm_reaper=assembly.build_vm_reaper,
     )
@@ -139,10 +136,10 @@ def _register_reconcile_tools(
 
 
 def _register_reconcile_systems_tools(
-    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
+    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
     ops_reconcile_systems_tools.register(
-        app, pool, image_store=ops_reconcile_tools.resolve_image_store()
+        app, pool, image_store=assembly.object_stores.optional_image_store
     )
 
 
@@ -174,6 +171,16 @@ def _register_artifact_tools(
     app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
     artifacts_tools.register(app, pool, resolver=assembly.resolver)
+
+
+def _register_build_config_tools(
+    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
+) -> None:
+    build_configs.register(
+        app,
+        pool,
+        store_factory=assembly.object_stores.request_time_store_factory,
+    )
 
 
 def _register_vmcore_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
@@ -221,22 +228,10 @@ def _register_ops_build_hosts_tools(
 
 
 def _register_ops_images_tools(
-    app: FastMCP, pool: AsyncConnectionPool, _assembly: AppAssembly
+    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
-    store = _resolve_ops_images_store()
+    store = assembly.object_stores.optional_ops_image_store
     ops_images_tools.register(app, pool, image_store=store, upload_store=store)
-
-
-def _resolve_ops_images_store() -> ObjectStore | None:
-    """Resolve the shared object store for ops image tools, or ``None`` when unconfigured."""
-    from kdive.store.objectstore import object_store_from_env
-
-    try:
-        return object_store_from_env()
-    except CategorizedError:
-        if _S3_OPTIONAL_ENV_NAMES.isdisjoint(config.env_snapshot()):
-            return None
-        raise
 
 
 def _register_ops_secrets_tools(
@@ -261,7 +256,9 @@ def _register_system_handlers(
     assembly: WorkerHandlerAssembly,
 ) -> None:
     systems.register_handlers(
-        registry, resolver=assembly.resolver, artifact_store=assembly.artifact_store
+        registry,
+        resolver=assembly.resolver,
+        artifact_store=assembly.object_stores.optional_upload_store,
     )
 
 
@@ -275,7 +272,7 @@ def _register_run_handlers(
             resolver=assembly.resolver,
             secret_registry=assembly.secret_registry,
             transport_factories=assembly.transport_factories,
-            artifact_store=assembly.artifact_store,
+            artifact_store=assembly.object_stores.optional_upload_store,
         ),
     )
 
@@ -325,7 +322,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_runs_tools,
     _register_control_tools,
     _register_artifact_tools,
-    _pool_only_plane_registrar(build_configs.register),
+    _register_build_config_tools,
     _register_vmcore_tools,
     _register_debug_tools,
     _register_introspection_tools,
@@ -354,12 +351,9 @@ def _register_image_build_handler(
     env still binds IMAGE_BUILD so queued jobs fail with the original configuration category
     instead of falling through to ``not_implemented``.
     """
-    from kdive.store.objectstore import object_store_from_env
-
-    try:
-        store = object_store_from_env()
-    except CategorizedError as exc:
-        registry.register(JobKind.IMAGE_BUILD, _unconfigured_image_build_handler(exc))
+    store = assembly.object_stores.required_image_build_store
+    if isinstance(store, CategorizedError):
+        registry.register(JobKind.IMAGE_BUILD, _unconfigured_image_build_handler(store))
         return
     image_build.register_handlers(
         registry,
@@ -473,6 +467,7 @@ def build_app(
         reaper=composition.build_reconciler_reaper(),
         dump_volume_reaper=composition.build_reconciler_dump_volume_reaper(),
         build_vm_reaper=composition.build_reconciler_build_vm_reaper(),
+        object_stores=build_object_store_assembly(),
     )
     for register in _PLANE_REGISTRARS:
         register(app, pool, assembly)
@@ -498,7 +493,7 @@ def build_handler_registry(
         resolver=composition.build_provider_resolver(),
         secret_registry=secret_registry,
         transport_factories=composition.build_build_host_transport_factories(),
-        artifact_store=_resolve_ops_images_store(),
+        object_stores=build_object_store_assembly(),
     )
     for register in _HANDLER_REGISTRARS:
         register(registry, assembly)

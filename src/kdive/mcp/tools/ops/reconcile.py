@@ -19,9 +19,7 @@ from dataclasses import dataclass
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.config as config
-from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -39,12 +37,10 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
 from kdive.services.images.retention import ImageSweepStore
-from kdive.store.objectstore import ObjectStore
 
 # A module-level singleton so it can be a stateless default arg (ruff B008).
 _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
 _NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
-_S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
 _RECONCILE_TOOL = "ops.reconcile_now"
 _RECONCILE_OBJECT_ID = "reconcile"
@@ -164,42 +160,6 @@ def _reconcile_response(report: ReconcileReport) -> ToolResponse:
             "failures": ",".join(report.failures),
         },
     )
-
-
-def resolve_upload_store() -> UploadStore | None:
-    """Resolve the upload store from the ``KDIVE_S3_*`` env, or ``None`` if unconfigured.
-
-    Mirrors the periodic reconciler's wiring (``kdive.__main__._run_reconciler``): no S3
-    env means the abandoned-upload reaper stays off, exactly as it does for the periodic
-    pass. Partial/invalid S3 config raises the original categorized error instead of
-    silently disabling repairs.
-    """
-    return _optional_object_store()
-
-
-def resolve_image_store() -> ImageSweepStore | None:
-    """Resolve the image-sweep store from the ``KDIVE_S3_*`` env, or ``None`` if unconfigured.
-
-    Mirrors the periodic reconciler's wiring: no S3 env means the image sweeps stay off.
-    Partial/invalid S3 config raises the original categorized error instead of silently
-    disabling repairs.
-    """
-    return _optional_object_store()
-
-
-def _optional_object_store() -> ObjectStore | None:
-    from kdive.store.objectstore import object_store_from_env
-
-    try:
-        return object_store_from_env()
-    except CategorizedError:
-        if _s3_env_is_absent():
-            return None
-        raise
-
-
-def _s3_env_is_absent() -> bool:
-    return _S3_OPTIONAL_ENV_NAMES.isdisjoint(config.env_snapshot())
 
 
 def register(

@@ -33,6 +33,7 @@ from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
+from kdive.store.assembly import optional_object_store
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.reconciler.conftest import connect, seed_system
 
@@ -336,22 +337,14 @@ def test_register_resolves_upload_store_off_without_s3_env(monkeypatch: pytest.M
     # rather than raising, so the on-demand pass repairs the same set as the periodic one.
     monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
     monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    assert ops_reconcile.resolve_upload_store() is None
+    assert optional_object_store() is None
 
 
 @pytest.mark.usefixtures("migrated_url")
-def test_register_resolves_image_store_off_without_s3_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
-    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    assert ops_reconcile.resolve_image_store() is None
-
-
-@pytest.mark.parametrize("helper_name", ["resolve_upload_store", "resolve_image_store"])
-def test_register_reraises_partial_s3_config(helper_name: str) -> None:
+def test_register_reraises_partial_s3_config() -> None:
     try:
         config.load({"KDIVE_S3_ENDPOINT_URL": "http://localhost:9000"})
-        helper = getattr(ops_reconcile, helper_name)
         with pytest.raises(CategorizedError):
-            helper()
+            optional_object_store()
     finally:
         config.reset()
