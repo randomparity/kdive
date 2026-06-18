@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -22,6 +22,8 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import resources as catalog_resources_tools
 from kdive.mcp.tools.ops.resources import host_ops as resources_tools
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
@@ -65,6 +67,27 @@ async def _register(pool: AsyncConnectionPool, *, host_uri: str = "qemu:///syste
             cost_class="local",
         )
     return str(res.id)
+
+
+def _resolver_with_staged_probe(
+    probe: catalog_resources_tools.StagedVolumeProbe,
+) -> ProviderResolver:
+    unused_port = cast(Any, object())
+    runtime = ProviderRuntime(
+        profile_policy=unused_port,
+        provisioner=unused_port,
+        builder=unused_port,
+        installer=unused_port,
+        booter=unused_port,
+        connector=unused_port,
+        controller=unused_port,
+        retriever=unused_port,
+        crash_postmortem=unused_port,
+        vmcore_introspector=unused_port,
+        live_introspector=unused_port,
+        staged_volume_probe=probe,
+    )
+    return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: runtime})
 
 
 async def _set_affinity(pool: AsyncConnectionPool, res_id: str, *, owner_project: str) -> None:
@@ -268,6 +291,30 @@ def test_describe_remote_reports_staged_base_images(migrated_url: str) -> None:
         ("dbg", "dbg.qcow2", "absent"),
         ("fedora", "fedora.qcow2", "staged"),
     }
+
+
+def test_describe_remote_uses_provider_runtime_staged_probe(migrated_url: str) -> None:
+    calls: list[list[str]] = []
+
+    async def runtime_probe(volumes: list[str]) -> dict[str, str]:
+        calls.append(volumes)
+        return {"fedora.qcow2": "staged"}
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool)
+            await _insert_remote_image(pool, name="fedora", volume="fedora.qcow2")
+            return await catalog_resources_tools.describe_resource(
+                pool,
+                CTX,
+                res_id,
+                resolver=_resolver_with_staged_probe(runtime_probe),
+            )
+
+    resp = asyncio.run(_run())
+    staged = [json_mapping(r) for r in data_sequence(resp, "staged_base_images")]
+    assert calls == [["fedora.qcow2"]]
+    assert staged == [{"name": "fedora", "volume": "fedora.qcow2", "staged": "staged"}]
 
 
 def test_describe_remote_probe_degraded_does_not_fail_describe(migrated_url: str) -> None:

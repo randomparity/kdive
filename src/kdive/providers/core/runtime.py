@@ -37,6 +37,7 @@ from kdive.providers.ports import (
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
 type BuildConfigValidator = Callable[[ComponentRef], None]
 type RootfsValidator = Callable[[RootfsSource], None]
+type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
 
 
 def _unconfigured_component_sources() -> ComponentSourceCapabilities:
@@ -99,6 +100,7 @@ class ProviderRuntime:
     build_config_validator: BuildConfigValidator | None = None
     rootfs_validator: RootfsValidator | None = None
     rootfs_build_plane: RootfsBuildPlane | None = None
+    staged_volume_probe: StagedVolumeProbe | None = None
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:

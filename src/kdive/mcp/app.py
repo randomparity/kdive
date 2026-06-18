@@ -146,6 +146,12 @@ def _register_systems_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: A
     systems_tools.register(app, pool, resolver=assembly.resolver)
 
 
+def _register_catalog_resources(
+    app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
+) -> None:
+    resources.register(app, pool, resolver=assembly.resolver)
+
+
 def _register_runs_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly) -> None:
     runs_tools.register(app, pool, resolver=assembly.resolver)
 
@@ -290,7 +296,7 @@ def _register_diagnostics_handlers(
 # Tool seam: each plane exposes register(app, pool); provider-aware planes receive AppAssembly.
 _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(jobs.register),
-    _pool_only_plane_registrar(resources.register),
+    _register_catalog_resources,
     _pool_only_plane_registrar(availability.register),
     _pool_only_plane_registrar(projects.register),
     _pool_only_plane_registrar(shapes.register),

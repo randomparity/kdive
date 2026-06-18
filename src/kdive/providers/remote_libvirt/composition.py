@@ -61,6 +61,7 @@ from kdive.providers.remote_libvirt.reaping.build_vm import RemoteLibvirtBuildVm
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
+from kdive.providers.remote_libvirt.staged_volumes import probe_staged_volumes
 from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTransportResetter
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
@@ -223,4 +224,5 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         build_config_validator=builder.validate_config_ref,
         rootfs_validator=lambda _rootfs: None,
         rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
+        staged_volume_probe=probe_staged_volumes,
     )
