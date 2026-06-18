@@ -119,6 +119,31 @@ def test_param_description_with_pipe_raises() -> None:
         tool_docs([_tool("runs.get", parameters=params)])
 
 
+def test_param_examples_render_as_json_block() -> None:
+    params = {
+        "properties": {
+            "artifacts": {
+                "type": "array",
+                "description": "Declared artifacts.",
+                "examples": [
+                    [{"name": "kernel", "sha256": "AA==", "size_bytes": 10}],
+                    [{"name": "rootfs", "sha256": "BB==", "size_bytes": 20, "chunks": []}],
+                ],
+            }
+        }
+    }
+    docs = tool_docs([_tool("artifacts.create_run_upload", parameters=params)])
+    assert docs[0].params[0].examples
+    md = render_namespace("artifacts", docs)
+    assert "Examples" in md
+    assert "```json" in md
+    # Both declared examples render verbatim into the fenced block.
+    assert '"name": "kernel"' in md
+    assert '"chunks": []' in md
+    # The examples block sits after the parameter table, not inside a table cell.
+    assert md.index("| Parameter |") < md.index("Examples")
+
+
 def test_write_reference_writes_namespace_and_index_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

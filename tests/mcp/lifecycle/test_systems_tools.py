@@ -198,6 +198,9 @@ def test_get_malformed_uuid_is_config_error(migrated_url: str) -> None:
             resp = await get_system(pool, _ctx(), "not-a-uuid")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 

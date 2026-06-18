@@ -786,6 +786,10 @@ def test_get_cross_project_is_not_found(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.CREATED)
             resp = await get_run(pool, _ctx(projects=("other",)), run_id)
         assert resp.status == "error" and resp.error_category == "not_found"
+        # ADR-0174 / AC#5: a valid id outside the caller's visibility stays a bare no-leak
+        # not_found — no reason key, the suppressed-constant detail, identical to an absent id.
+        assert "reason" not in resp.data
+        assert resp.detail == "not found"
 
     asyncio.run(_run())
 
@@ -795,6 +799,9 @@ def test_get_malformed_uuid_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await get_run(pool, _ctx(), "not-a-uuid")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 
