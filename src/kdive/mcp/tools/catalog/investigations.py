@@ -314,7 +314,6 @@ async def close_investigation(
 
 
 async def _get_for_update(conn: AsyncConnection, uid: UUID) -> Investigation | None:
-    """Read an Investigation row ``FOR UPDATE`` (held under the per-Investigation lock)."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM investigations WHERE id = %s FOR UPDATE", (uid,))
         row = await cur.fetchone()

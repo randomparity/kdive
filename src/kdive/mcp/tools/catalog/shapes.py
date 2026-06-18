@@ -196,7 +196,6 @@ def _shape_envelope(shape: SystemShape) -> ToolResponse:
 
 
 def _shape_args(shape: SystemShape) -> dict[str, str]:
-    """Flatten a shape to the string-valued envelope/audit payload (ADR-0019 data is str)."""
     data = {
         "name": shape.name,
         "vcpus": str(shape.vcpus),
