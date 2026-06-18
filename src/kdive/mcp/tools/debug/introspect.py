@@ -35,6 +35,7 @@ from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import DebugTransportKind, LiveIntrospector, VmcoreIntrospector
 from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
 
 # The fixed live-helper set (ADR-0033 §2 / ADR-0039 §3): the same three in-tree helpers as the
 # offline path. There is no caller-supplied drgn script — an unknown helper is rejected.
@@ -209,16 +210,19 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         ],
     ) -> ToolResponse:
         """Run offline drgn introspection over a Run's captured core; returns redacted report."""
+        ctx = current_context()
         return await with_runtime_for_run(
             pool,
             resolver,
+            ctx,
             run_id,
             lambda runtime: introspect_from_vmcore(
                 pool,
-                current_context(),
+                ctx,
                 run_id=run_id,
                 introspector=runtime.vmcore_introspector,
             ),
+            required_role=Role.VIEWER,
         )
 
     @app.tool(

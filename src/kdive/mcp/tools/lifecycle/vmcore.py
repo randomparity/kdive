@@ -87,6 +87,7 @@ class VmcoreHandlers:
         return await with_runtime_for_system(
             pool,
             self.resolver,
+            ctx,
             system_id,
             lambda runtime: _fetch_vmcore(
                 pool,
@@ -95,6 +96,7 @@ class VmcoreHandlers:
                 method=method,
                 supported_methods=runtime.supported_capture_methods,
             ),
+            required_role=Role.OPERATOR,
         )
 
     async def postmortem_crash(
@@ -107,6 +109,7 @@ class VmcoreHandlers:
     ) -> ToolResponse:
         return await self._with_postmortem_crash_port(
             pool,
+            ctx,
             run_id,
             lambda crash, secret_registry: _postmortem_crash(
                 pool,
@@ -123,6 +126,7 @@ class VmcoreHandlers:
     ) -> ToolResponse:
         return await self._with_postmortem_crash_port(
             pool,
+            ctx,
             run_id,
             lambda crash, secret_registry: _postmortem_triage(
                 pool,
@@ -136,14 +140,17 @@ class VmcoreHandlers:
     async def _with_postmortem_crash_port(
         self,
         pool: AsyncConnectionPool,
+        ctx: RequestContext,
         run_id: str,
         run: Callable[[CrashPostmortem, SecretRegistry], Awaitable[ToolResponse]],
     ) -> ToolResponse:
         return await with_runtime_for_run(
             pool,
             self.resolver,
+            ctx,
             run_id,
             lambda runtime: run(runtime.crash_postmortem, self.secret_registry),
+            required_role=Role.VIEWER,
         )
 
 

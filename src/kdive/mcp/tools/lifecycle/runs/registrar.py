@@ -39,6 +39,7 @@ from kdive.profiles.build import (
 from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.security.authz.rbac import Role
 
 
 def register(
@@ -168,16 +169,19 @@ def _register_runs_build(
         ] = None,
     ) -> ToolResponse:
         """Enqueue a kernel build for a run."""
+        ctx = current_context()
         return await with_runtime_for_run(
             pool,
             resolver,
+            ctx,
             run_id,
             lambda runtime: _build_handlers(runtime).build_run(
                 pool,
-                current_context(),
+                ctx,
                 run_id,
                 cmdline=cmdline,
             ),
+            required_role=Role.OPERATOR,
         )
 
 
@@ -208,13 +212,16 @@ def _register_runs_complete_build(
         ] = None,
     ) -> ToolResponse:
         """Complete an externally built run."""
+        ctx = current_context()
         return await with_runtime_for_run(
             pool,
             resolver,
+            ctx,
             run_id,
             lambda _runtime: _complete_build_handlers().complete_build(
-                pool, current_context(), run_id, build_id=build_id, cmdline=cmdline
+                pool, ctx, run_id, build_id=build_id, cmdline=cmdline
             ),
+            required_role=Role.OPERATOR,
         )
 
 

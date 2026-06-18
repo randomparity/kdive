@@ -41,6 +41,7 @@ from kdive.mcp.tools.lifecycle.systems.view import (
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.security.authz.rbac import Role
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
@@ -97,16 +98,19 @@ def _register_systems_define(
         rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
         Use `systems.provision` instead when the profile needs no upload window. Operator only.
         """
+        ctx = current_context()
         return await with_runtime_for_allocation(
             pool,
             resolver,
+            ctx,
             allocation_id,
             lambda runtime: _provision_handlers(runtime).define_system(
                 pool,
-                current_context(),
+                ctx,
                 allocation_id=allocation_id,
                 profile=dump_profile(profile),
             ),
+            required_role=Role.OPERATOR,
         )
 
 
@@ -134,16 +138,19 @@ def _register_systems_provision(
         request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
         System. Operator only.
         """
+        ctx = current_context()
         return await with_runtime_for_allocation(
             pool,
             resolver,
+            ctx,
             allocation_id,
             lambda runtime: _provision_handlers(runtime).provision_system(
                 pool,
-                current_context(),
+                ctx,
                 allocation_id=allocation_id,
                 profile=dump_profile(profile),
             ),
+            required_role=Role.OPERATOR,
         )
 
 
@@ -165,15 +172,18 @@ def _register_systems_provision_defined(
         create it with `systems.define` first (this is the second step of that lane).
         Requires operator.
         """
+        ctx = current_context()
         return await with_runtime_for_system(
             pool,
             resolver,
+            ctx,
             system_id,
             lambda runtime: _provision_handlers(runtime).provision_defined_system(
                 pool,
-                current_context(),
+                ctx,
                 system_id=system_id,
             ),
+            required_role=Role.OPERATOR,
         )
 
 
@@ -282,14 +292,17 @@ def _register_systems_reprovision(
         """Enqueue in-place reprovision for a ready System; not for creating a new System —
         use `systems.provision` instead. Requires operator and opt-in.
         """
+        ctx = current_context()
         return await with_runtime_for_system(
             pool,
             resolver,
+            ctx,
             system_id,
             lambda runtime: _admin_handlers(runtime).reprovision_system(
                 pool,
-                current_context(),
+                ctx,
                 system_id=system_id,
                 profile=dump_profile(profile),
             ),
+            required_role=Role.OPERATOR,
         )
