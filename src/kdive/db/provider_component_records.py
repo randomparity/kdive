@@ -7,8 +7,9 @@ import binascii
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from enum import StrEnum
 from pathlib import Path
-from typing import Literal, NamedTuple, Protocol, cast, get_args
+from typing import NamedTuple, Protocol, cast
 from uuid import UUID
 
 from psycopg.rows import dict_row
@@ -20,21 +21,23 @@ from kdive.components.references import ComponentKind, ComponentRef, parse_compo
 from kdive.components.visibility import Visibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-type UploadVisibility = Literal["public", "project"]
+
+class ComponentUploadVisibility(StrEnum):
+    """Visibility scopes accepted for uploaded provider components."""
+
+    PUBLIC = "public"
+    PROJECT = "project"
 
 
-def _literal_args(alias: object) -> tuple[str, ...]:
-    args = get_args(getattr(alias, "__value__", alias))
-    if not all(isinstance(arg, str) for arg in args):
-        raise RuntimeError("provider component Literal alias contains non-string values")
-    return cast(tuple[str, ...], args)
+class ComponentUploadState(StrEnum):
+    """Internal component-upload lifecycle states stored in the database."""
+
+    PENDING = "pending"
+    FINALIZED = "finalized"
 
 
 _COMPONENT_KINDS: frozenset[ComponentKind] = frozenset(
-    cast(tuple[ComponentKind, ...], _literal_args(ComponentKind))
-)
-_VISIBILITIES: frozenset[Visibility] = frozenset(
-    cast(tuple[Visibility, ...], _literal_args(Visibility))
+    {"rootfs", "kernel", "initrd", "config", "patch", "vmlinux"}
 )
 
 
@@ -67,7 +70,7 @@ class ComponentUploadRegistration:
     tenant: str
     provider: str
     component_kind: ComponentKind
-    visibility: UploadVisibility
+    visibility: ComponentUploadVisibility
     project: str
     principal: str
 
@@ -127,7 +130,7 @@ async def link_local_component(
                 registration.provider,
                 registration.component_kind,
                 Jsonb(source.model_dump(mode="json")),
-                registration.visibility,
+                registration.visibility.value,
                 registration.project,
                 registration.principal,
                 request.sha256,
@@ -161,7 +164,7 @@ async def create_artifact_component(
                 registration.component_kind,
                 Jsonb(source.model_dump(mode="json")),
                 request.artifact_id,
-                registration.visibility,
+                registration.visibility.value,
                 registration.project,
                 registration.principal,
                 request.sha256,
@@ -221,16 +224,17 @@ async def create_component_upload_intent(
             "INSERT INTO component_uploads "
             "(tenant, provider, component_kind, sha256, size_bytes, visibility, project, "
             "principal, state, deadline) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', now() + %s) RETURNING id",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now() + %s) RETURNING id",
             (
                 registration.tenant,
                 registration.provider,
                 registration.component_kind,
                 request.sha256,
                 request.size_bytes,
-                registration.visibility,
+                registration.visibility.value,
                 registration.project,
                 registration.principal,
+                ComponentUploadState.PENDING.value,
                 request.ttl,
             ),
         )
@@ -275,7 +279,7 @@ async def finalize_component_upload(
         existing = upload["component_id"]
         if existing is not None:
             return existing
-        if upload["state"] != "pending" or upload["expired"]:
+        if upload["state"] != ComponentUploadState.PENDING.value or upload["expired"]:
             raise CategorizedError(
                 "component upload is not pending or has expired",
                 category=ErrorCategory.CONFIGURATION_ERROR,
@@ -305,6 +309,7 @@ async def finalize_component_upload(
             "upload_id": str(upload_id),
             "sha256": upload["sha256"],
         }
+        visibility = _component_upload_visibility_from_row(upload["visibility"])
         row = await conn.execute(
             "INSERT INTO provider_components "
             "(provider, component_kind, source, visibility, project, principal, sha256) "
@@ -313,7 +318,7 @@ async def finalize_component_upload(
                 upload["provider"],
                 upload["component_kind"],
                 Jsonb(source),
-                upload["visibility"],
+                visibility.value,
                 upload["project"],
                 upload["principal"],
                 upload["sha256"],
@@ -322,8 +327,8 @@ async def finalize_component_upload(
         inserted = await row.fetchone()
         component_id = _inserted_id(inserted)
         await conn.execute(
-            "UPDATE component_uploads SET component_id = %s, state = 'finalized' WHERE id = %s",
-            (component_id, upload_id),
+            "UPDATE component_uploads SET component_id = %s, state = %s WHERE id = %s",
+            (component_id, ComponentUploadState.FINALIZED.value, upload_id),
         )
         return component_id
 
@@ -397,9 +402,20 @@ def _component_kind_from_row(value: object) -> ComponentKind:
 
 
 def _visibility_from_row(value: object) -> Visibility:
-    if isinstance(value, str) and value in _VISIBILITIES:
-        return cast(Visibility, value)
-    raise CategorizedError(
-        "stored provider component visibility is invalid",
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-    )
+    try:
+        return Visibility(str(value))
+    except ValueError:
+        raise CategorizedError(
+            "stored provider component visibility is invalid",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from None
+
+
+def _component_upload_visibility_from_row(value: object) -> ComponentUploadVisibility:
+    try:
+        return ComponentUploadVisibility(str(value))
+    except ValueError:
+        raise CategorizedError(
+            "stored component upload visibility is invalid",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from None
