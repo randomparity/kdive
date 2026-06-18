@@ -64,8 +64,12 @@ precedent for aggregating many sub-probes into one verdict):
 | Per-host observation | Outcome | Aggregate effect |
 |---|---|---|
 | agent connected + trivial command `rc 0` | `AGENT_READY` | contributes to `pass` |
-| builder started but the guest agent never connected (`PROVISIONING_FAILURE` from `session`) | `AGENT_UNREACHABLE` | forces `fail` |
-| host/config could not be reached (`CONFIGURATION_ERROR` / `TRANSPORT_FAILURE` / `INFRASTRUCTURE_FAILURE`, or no staged base image) | `HOST_UNREACHABLE` | `error` unless a `fail` dominates |
+| builder started but the guest agent never connected (`PROVISIONING_FAILURE` from `session`), or the agent connected but the trivial command returned `rc != 0` or dropped mid-exec | `AGENT_UNREACHABLE` | forces `fail` |
+| host/config could not be reached **before** the agent connected (`CONFIGURATION_ERROR` / `TRANSPORT_FAILURE` / `INFRASTRUCTURE_FAILURE`, or no staged base image, or a probe already in flight) | `HOST_UNREACHABLE` | `error` unless a `fail` dominates |
+
+The adapter's agent-vs-host discriminator is **whether `wait_for_agent` returned**: a failure at or
+after it is `AGENT_UNREACHABLE` (a reachable host with a broken builder is a contract violation, not
+an indeterminate run); a failure before it is `HOST_UNREACHABLE`.
 
 Aggregation precedence (mirrors `secret_ref`'s "any unresolved → fail; backend down → error"):
 
@@ -102,15 +106,24 @@ preflight is already skipped (the probe passes `source=None`). The trivial comma
   reaper-visible marker (`buildhost_agent_probe_guests`: `run_id`, `heartbeat_at`, `ttl_deadline`)
   before it provisions and advances the heartbeat for the probe's whole duration; `reap_orphan_build_vms`
   gains one new live-holder clause — a build VM whose `run_id` has a **fresh** probe heartbeat is
-  live and is not reaped. When the `doctor` process dies mid-probe, the heartbeat goes stale and the
-  **existing** sweep reaps the leaked builder (no BUILD job, no fresh heartbeat); the `ttl_deadline`
-  is the hard backstop. No new reconciler sweep is needed — the build VM already has a reaper; this
-  teaches it one signal.
+  live and is not reaped. The staleness/TTL predicate evaluates `now()` **in Postgres**, matching
+  `provider_reaping`'s clock-in-DB convention. When the `doctor` process dies mid-probe, the
+  heartbeat goes stale and the **existing** sweep reaps the leaked builder (no BUILD job, no fresh
+  heartbeat); the `ttl_deadline` is the hard backstop. No new reconciler sweep is needed — the build
+  VM already has a reaper; this teaches it one signal. Because `session()` is a synchronous
+  (uncancellable-thread) contextmanager run via `asyncio.to_thread`, the heartbeat-cancel and
+  marker-release live in the probe **coroutine's** `finally`, so a `run_check` timeout that cancels
+  the coroutine still stops the heartbeat and frees the marker (or leaves it to TTL).
 - **Single-flight per host.** Concurrent `doctor` runs do not each spin a builder on the same host:
-  an in-process per-host `SingleFlight` (reused from `egress_probe`) shares one in-flight probe,
-  backstopped by the DB partial-unique index on `build_host_id` (live rows only) — a second
-  *process* that cannot share the coalescer hits the index and reports `error`
-  ("a probe is already in flight for this host"), still exactly one builder.
+  a **module-level** per-host `SingleFlight` (reused from `egress_probe`) shares one in-flight probe,
+  backstopped by the DB partial-unique index on `build_host_id` (live rows only). It must be a
+  process-level singleton, not built per factory call — `default_service_factory` runs fresh on every
+  `ops.diagnostics` call, so a per-assembly coalescer coalesces nothing (`egress_probe`'s own
+  `SingleFlight` docstring calls this out). A second *process* that cannot share the coalescer hits
+  the index and reports `error` ("a probe is already in flight for this host"), still exactly one
+  builder. The probe takes **no** build-host lease (it is not a BUILD job), so it does not count
+  against `max_concurrent`: an operator-initiated probe may transiently over-subscribe a saturated
+  host by one builder, which is accepted (single-flighted, transient, operator-initiated).
 - **Operator-staged base build image required, fail honestly otherwise.** A builder needs the
   operator-staged base image volume (the M2.4 constraint, ADR-0080). It is a per-host DB column
   (`build_hosts.base_image_volume`), so — unlike `guest_egress`, whose probe-guest seam is missing
