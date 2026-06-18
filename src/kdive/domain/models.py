@@ -24,15 +24,36 @@ on every field assignment under ``validate_assignment`` and break incremental up
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal, TypedDict
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
+from kdive.domain._records import DomainBase as _DomainBase
+from kdive.domain._records import DomainModel
+from kdive.domain.accounting import (
+    Budget as Budget,
+)
+from kdive.domain.accounting import (
+    CostClassCoefficient as CostClassCoefficient,
+)
+from kdive.domain.accounting import (
+    LedgerEntry as LedgerEntry,
+)
+from kdive.domain.accounting import (
+    LedgerEventType as LedgerEventType,
+)
+from kdive.domain.accounting import (
+    Quota as Quota,
+)
+from kdive.domain.artifacts import Artifact as Artifact
+from kdive.domain.artifacts import Sensitivity as Sensitivity
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.image_format import ImageFormat
+from kdive.domain.images import ImageCatalogEntry as ImageCatalogEntry
+from kdive.domain.images import ImageState as ImageState
+from kdive.domain.images import ImageVisibility as ImageVisibility
+from kdive.domain.ownership import ManagedBy
 from kdive.domain.pcie import PCIeClaim
 from kdive.domain.profile_documents import (
     SerializedBuildProfile,
@@ -101,44 +122,6 @@ DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
 """Runtime set mirroring the ``DestructiveJobKind`` Literal (ADR-0130 token validation)."""
 
 
-class ImageVisibility(StrEnum):
-    """Resolution scope of an image_catalog row (ADR-0092/0093).
-
-    ``PUBLIC`` images resolve for every project; a ``PRIVATE`` image resolves only within
-    its owning project and shadows a same-identity public image there.
-    """
-
-    PUBLIC = "public"
-    PRIVATE = "private"
-
-
-class ImageState(StrEnum):
-    """Publish lifecycle of an image_catalog row (ADR-0092).
-
-    ``DEFINED`` is seeded baseline metadata with no object yet; ``PENDING`` is a publish in
-    flight (row written, object not yet HEAD-confirmed); ``REGISTERED`` is bootable.
-    Resolution returns only ``REGISTERED`` rows.
-    """
-
-    DEFINED = "defined"
-    PENDING = "pending"
-    REGISTERED = "registered"
-
-
-class ManagedBy(StrEnum):
-    """Row-ownership partition for reconciled inventory tables (ADR-0112).
-
-    ``CONFIG`` rows are owned by declarative ``systems.toml`` bring-up; ``DISCOVERY`` rows are
-    owned by provider discovery; ``RUNTIME`` rows are owned by imperative agent tools. The
-    partition keeps declarative reconcile and imperative registration from pruning or
-    overwriting each other's rows.
-    """
-
-    CONFIG = "config"
-    DISCOVERY = "discovery"
-    RUNTIME = "runtime"
-
-
 class PowerAction(StrEnum):
     """Power operations accepted by the durable control-plane job contract."""
 
@@ -152,44 +135,6 @@ class JobAuthorizing(TypedDict):
     principal: str
     agent_session: str | None
     project: str
-
-
-class Sensitivity(StrEnum):
-    """Artifact sensitivity — only a ``redacted`` derivative is response-eligible.
-
-    ``quarantined`` is a raw artifact written before secret registration completed
-    (ADR-0075): excluded from every serve gate exactly like ``sensitive``, but marking an
-    unfulfilled redaction obligation the op heals to a ``redacted`` sibling before release.
-    """
-
-    SENSITIVE = "sensitive"
-    REDACTED = "redacted"
-    QUARANTINED = "quarantined"
-
-
-class LedgerEventType(StrEnum):
-    """The two signed metering events on the ledger (ADR-0007 §3).
-
-    ``reserved`` is the at-grant debit (`+estimate`); ``reconciled`` is the
-    at-release/expiry adjustment (`actual − Σ reserved`, which may be negative — a
-    credit for an unused reservation window). The signed ``event_type`` column leaves
-    room for later per-operation surcharges without a migration.
-    """
-
-    RESERVED = "reserved"
-    RECONCILED = "reconciled"
-
-
-class _DomainBase(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-
-class DomainModel(_DomainBase):
-    """Identity and timestamps common to every durable object."""
-
-    id: UUID
-    created_at: datetime
-    updated_at: datetime
 
 
 class _Attribution(_DomainBase):
@@ -377,98 +322,6 @@ class Job(DomainModel):
     dedup_key: str
 
 
-class Artifact(DomainModel):
-    """A stored object referenced by a System or Run; write-once."""
-
-    owner_kind: str
-    owner_id: UUID
-    object_key: str
-    etag: str
-    sensitivity: Sensitivity
-    retention_class: str
-
-
-class ImageCatalogEntry(DomainModel):
-    """One catalog image row — the single source of truth for a bootable rootfs (ADR-0092).
-
-    Identity is ``(provider, name, arch)`` plus the boot layout (``format``, ``root_device``).
-    ``object_key`` is the object-store key of the qcow2 — ``None`` for a ``DEFINED`` row whose
-    bytes are not built yet — and ``digest`` is the qcow2 content digest (a rootfs image has no
-    kernel ``build_id``), ``None`` until built. ``visibility``/``owner``/``expires_at`` express
-    the public-vs-project-private scope (ADR-0093); the DB ``CHECK`` constraints tie ``owner``
-    and ``expires_at`` to the private case and ``object_key`` to the non-``DEFINED`` case.
-    ``pending_since`` backs the publish-deadline grace window the reconciler keys off.
-    """
-
-    provider: str
-    name: str
-    arch: str
-    format: ImageFormat
-    root_device: str
-    object_key: str | None = None
-    digest: str | None = None
-    capabilities: list[str] = Field(default_factory=list)
-    provenance: dict[str, Any] = Field(default_factory=dict)
-    visibility: ImageVisibility
-    owner: str | None = None
-    expires_at: datetime | None = None
-    state: ImageState = ImageState.DEFINED
-    pending_since: datetime
-    managed_by: ManagedBy = ManagedBy.RUNTIME
-    volume: str | None = None
-
-
-class CostClassCoefficient(_DomainBase):
-    """One row of the per-``cost_class`` cost multiplier table (ADR-0007 §1).
-
-    Keyed by ``cost_class`` (PK), seeded with ``('local', 1.0)`` by migration 0002.
-    Adding a future provider adds a row, not a cost-model branch. ``coeff`` is
-    ``numeric`` in Postgres, carried as :class:`~decimal.Decimal` so cost arithmetic
-    stays exact.
-    """
-
-    cost_class: str
-    coeff: Decimal
-    updated_at: datetime
-
-
-class Budget(_DomainBase):
-    """A project's spend budget with the O(1) running spent total (ADR-0007 §3).
-
-    Keyed by ``project`` (PK). ``budget_remaining = limit_kcu − spent_kcu``; ``spent_kcu``
-    is the running total every ledger write adjusts under the project lock, so admission
-    reads it without summing the append-only ledger. No budget row → the project is
-    denied (read as ``limit_kcu = 0``); a deployment seeds it explicitly.
-    """
-
-    project: str
-    limit_kcu: Decimal
-    spent_kcu: Decimal = Decimal(0)
-    updated_at: datetime
-
-
-class Quota(_DomainBase):
-    """A project's two concurrency caps (ADR-0007 §4).
-
-    Keyed by ``project`` (PK). ``max_concurrent_allocations`` is checked at
-    ``allocations.request``; ``max_concurrent_systems`` at ``systems.provision``. No
-    quota row → the project is denied (``quota_exceeded``); a deployment seeds it
-    explicitly.
-
-    ``max_pending_allocations`` is a distinct per-project cap on queued ``requested`` rows
-    (ADR-0069), bounding how deep one project can fill the backlog with
-    ``on_capacity=queue``. It is separate from ``max_concurrent_allocations``, which does not
-    count queued requests; the default 0 keeps queueing opt-in and fail-closed until an
-    operator raises it.
-    """
-
-    project: str
-    max_concurrent_allocations: int
-    max_concurrent_systems: int
-    max_pending_allocations: int = 0
-    updated_at: datetime
-
-
 class SystemShape(_DomainBase):
     """One named sizing preset in the shapes catalog (ADR-0067).
 
@@ -493,24 +346,3 @@ class SystemShape(_DomainBase):
         if value % MB_PER_GB != 0:
             raise ValueError(f"memory_mb {value} must be a whole-GB multiple of {MB_PER_GB}")
         return value
-
-
-class LedgerEntry(_DomainBase):
-    """One append-only, signed metering row (ADR-0007 §3).
-
-    The ledger is the audit trail and the ``by_cost_class`` source for
-    ``accounting.usage``. ``kcu_delta`` is signed (a ``reconciled`` credit is negative);
-    rows are immutable and ordered by ``ts`` (no ``updated_at``). ``resource_id`` is
-    nullable for a credit that reconciles an allocation released before any System was
-    provisioned.
-    """
-
-    id: UUID
-    ts: datetime
-    project: str
-    allocation_id: UUID
-    resource_id: UUID | None = None
-    cost_class: str
-    event_type: LedgerEventType
-    kcu_delta: Decimal
-    note: str | None = None
