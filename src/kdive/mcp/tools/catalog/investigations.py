@@ -33,8 +33,10 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
@@ -60,6 +62,26 @@ def _validate_text(title: str | None, description: str | None) -> bool:
     if title is not None and not (1 <= len(title) <= _TITLE_MAX):
         return False
     return description is None or len(description) <= _DESCRIPTION_MAX
+
+
+def _invalid_uuid_error(investigation_id: str) -> ToolResponse:
+    """A ``configuration_error`` for a malformed ``investigation_id`` (ADR-0174)."""
+    return _config_error_reason(
+        investigation_id,
+        ConfigErrorReason.INVALID_UUID,
+        detail=f"investigation_id {investigation_id!r} is not a valid UUID",
+    )
+
+
+def _invalid_text_error(object_id: str) -> ToolResponse:
+    """A ``configuration_error`` for an out-of-bounds title/description (ADR-0174)."""
+    return _config_error_reason(
+        object_id,
+        ConfigErrorReason.INVALID_TEXT,
+        detail=(
+            f"title must be 1..{_TITLE_MAX} chars and description at most {_DESCRIPTION_MAX} chars"
+        ),
+    )
 
 
 class ExternalRefInput(TypedDict):
@@ -196,12 +218,16 @@ async def open_investigation(
     require_role(ctx, project, Role.OPERATOR)
     with bind_context(principal=ctx.principal):
         if not _validate_text(title, description):
-            return _config_error(project)
+            return _invalid_text_error(project)
         normalized_description = description or None  # "" -> None on open (ADR-0135 §2)
         try:
             refs = _parse_external_refs(external_refs)
         except ValidationError, TypeError:
-            return _config_error(project)
+            return _config_error_reason(
+                project,
+                ConfigErrorReason.INVALID_EXTERNAL_REF,
+                detail="each external_refs entry must carry a tracker, id, and url",
+            )
         now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
         async with pool.connection() as conn, conn.transaction():
             inv = await INVESTIGATIONS.insert(
@@ -240,7 +266,7 @@ async def get_investigation(
     """Return an Investigation the caller's project owns, or a not-found-shaped error."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _config_error(investigation_id)
+        return _invalid_uuid_error(investigation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await INVESTIGATIONS.get(conn, uid)
@@ -271,7 +297,11 @@ async def _close_locked(
         if current.state is InvestigationState.CLOSED:
             return await _envelope_for_investigation(conn, current)  # idempotent: already closed
         if current.state is InvestigationState.ABANDONED:
-            return _config_error(str(uid), data={"current_status": "abandoned"})
+            return _config_error(
+                str(uid),
+                detail="cannot close an abandoned Investigation",
+                data={"current_status": "abandoned"},
+            )
         old = current.state
         updated = await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)
         await audit.record(
@@ -295,7 +325,7 @@ async def close_investigation(
     """Drive an Investigation to `closed` (idempotent on an already-`closed` row)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _config_error(investigation_id)
+        return _invalid_uuid_error(investigation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
@@ -310,7 +340,11 @@ async def close_investigation(
                     latest = await INVESTIGATIONS.get(conn2, uid)
                 if latest is None:
                     return _not_found(investigation_id)
-                return _config_error(investigation_id, data={"current_status": latest.state.value})
+                return _config_error(
+                    investigation_id,
+                    detail=f"Investigation is {latest.state.value}, not closable",
+                    data={"current_status": latest.state.value},
+                )
 
 
 async def _get_for_update(conn: AsyncConnection, uid: UUID) -> Investigation | None:
@@ -326,9 +360,13 @@ async def _get_mutable_investigation_locked(
     """Return a locked non-terminal Investigation, or the mutation config error."""
     current = await _get_for_update(conn, uid)
     if current is None:
-        return _config_error(str(uid))
+        return _config_error(str(uid), detail="Investigation no longer exists")
     if current.state in _TERMINAL_INVESTIGATION:
-        return _config_error(str(uid), data={"current_status": current.state.value})
+        return _config_error(
+            str(uid),
+            detail=f"Investigation is {current.state.value}; it cannot be edited",
+            data={"current_status": current.state.value},
+        )
     return current
 
 
@@ -418,11 +456,15 @@ async def link_external_ref(
     """Upsert an external ref onto an Investigation (keyed on `(tracker, id)`)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _config_error(investigation_id)
+        return _invalid_uuid_error(investigation_id)
     try:
         parsed = ExternalRef.model_validate(ref)
     except ValidationError:
-        return _config_error(investigation_id)
+        return _config_error_reason(
+            investigation_id,
+            ConfigErrorReason.INVALID_EXTERNAL_REF,
+            detail="ref must carry a tracker, id, and url",
+        )
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
@@ -437,10 +479,14 @@ async def unlink_external_ref(
     """Remove an external ref by its `(tracker, id)` key (idempotent; `url` ignored)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _config_error(investigation_id)
+        return _invalid_uuid_error(investigation_id)
     key = _natural_key(ref)
     if key is None:
-        return _config_error(investigation_id)
+        return _config_error_reason(
+            investigation_id,
+            ConfigErrorReason.INVALID_EXTERNAL_REF,
+            detail="ref key must carry a non-empty tracker and id",
+        )
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
@@ -506,11 +552,15 @@ async def set_investigation(
     """Edit an Investigation's title and/or description (partial, value-based; ADR-0135)."""
     uid = _as_uuid(investigation_id)
     if uid is None:
-        return _config_error(investigation_id)
+        return _invalid_uuid_error(investigation_id)
     if title is None and description is None:
-        return _config_error(investigation_id)
+        return _config_error_reason(
+            investigation_id,
+            ConfigErrorReason.MISSING_REQUIRED_FIELD,
+            detail="set requires at least one of title or description",
+        )
     if not _validate_text(title, description):
-        return _config_error(investigation_id)
+        return _invalid_text_error(investigation_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await _resolve_operator_investigation(conn, ctx, uid, investigation_id)
@@ -569,7 +619,12 @@ async def list_investigations(
         try:
             resolved_state = InvestigationState(state)
         except ValueError:
-            return _config_error("investigations.list")
+            return _config_error_reason(
+                "investigations.list",
+                ConfigErrorReason.INVALID_STATE,
+                accepted_values=[s.value for s in InvestigationState],
+                detail=f"state {state!r} is not a valid Investigation state",
+            )
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         if project is not None:

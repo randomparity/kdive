@@ -16,10 +16,10 @@ from kdive.domain.lifecycle import System
 from kdive.domain.pcie import parse_match_spec
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
-from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
@@ -78,7 +78,11 @@ async def get_system(
     """Return a System the caller's project owns, or a not-found-shaped error."""
     uid = _as_uuid(system_id)
     if uid is None:
-        return _config_error(system_id)
+        return _config_error_reason(
+            system_id,
+            ConfigErrorReason.INVALID_UUID,
+            detail=f"system_id {system_id!r} is not a valid UUID",
+        )
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             system = await SYSTEMS.get(conn, uid)
@@ -115,14 +119,23 @@ def _build_filters(
     if allocation_id is not None:
         uid = _as_uuid(allocation_id)
         if uid is None:
-            return _config_error(allocation_id)
+            return _config_error_reason(
+                allocation_id,
+                ConfigErrorReason.INVALID_UUID,
+                detail=f"allocation_id {allocation_id!r} is not a valid UUID",
+            )
         clauses.append(sql.SQL("s.allocation_id = %s"))
         params.append(uid)
     if state is not None:
         try:
             resolved = SystemState(state)
         except ValueError:
-            return _config_error(state)
+            return _config_error_reason(
+                state,
+                ConfigErrorReason.INVALID_STATE,
+                accepted_values=[s.value for s in SystemState],
+                detail=f"state {state!r} is not a valid System state",
+            )
         clauses.append(sql.SQL("s.state = %s"))
         params.append(resolved.value)
     if shape is not None:
@@ -146,7 +159,11 @@ def _pcie_clause(pcie: str, params: list[object]) -> Composable | ToolResponse:
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(pcie, exc)
     if spec.vendor_id is None or spec.device_id is None:
-        return _config_error(pcie)
+        return _config_error_reason(
+            pcie,
+            ConfigErrorReason.INVALID_PCIE_MATCH,
+            detail="pcie match must specify both a vendor id and a device id",
+        )
     params.extend([spec.vendor_id, spec.device_id])
     return sql.SQL(
         "EXISTS (SELECT 1 FROM jsonb_array_elements(a.pcie_claim) e "
