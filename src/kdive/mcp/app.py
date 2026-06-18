@@ -93,17 +93,18 @@ class AppAssembly:
     build_vm_reaper: BuildVmReaper
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerHandlerAssembly:
+    """Provider/env ports assembled once for worker handler registration."""
+
+    resolver: ProviderResolver
+    secret_registry: SecretRegistry
+    transport_factories: BuildHostTransportFactories | None
+    artifact_store: ObjectStore | None
+
+
 type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool, AppAssembly], None]
-type HandlerRegistrar = Callable[
-    [
-        HandlerRegistry,
-        ProviderResolver,
-        SecretRegistry,
-        BuildHostTransportFactories | None,
-        ObjectStore | None,
-    ],
-    None,
-]
+type HandlerRegistrar = Callable[[HandlerRegistry, WorkerHandlerAssembly], None]
 
 
 def _pool_only_plane_registrar(
@@ -251,58 +252,45 @@ def _register_doc_resources(
 
 def _register_system_handlers(
     registry: HandlerRegistry,
-    resolver: ProviderResolver,
-    _secret_registry: SecretRegistry,
-    _transport_factories: BuildHostTransportFactories | None,
-    artifact_store: ObjectStore | None,
+    assembly: WorkerHandlerAssembly,
 ) -> None:
-    systems.register_handlers(registry, resolver=resolver, artifact_store=artifact_store)
+    systems.register_handlers(
+        registry, resolver=assembly.resolver, artifact_store=assembly.artifact_store
+    )
 
 
 def _register_run_handlers(
     registry: HandlerRegistry,
-    resolver: ProviderResolver,
-    secret_registry: SecretRegistry,
-    transport_factories: BuildHostTransportFactories | None,
-    artifact_store: ObjectStore | None,
+    assembly: WorkerHandlerAssembly,
 ) -> None:
     runs.register_handlers(
         registry,
         ports=runs.RunHandlerPorts(
-            resolver=resolver,
-            secret_registry=secret_registry,
-            transport_factories=transport_factories,
-            artifact_store=artifact_store,
+            resolver=assembly.resolver,
+            secret_registry=assembly.secret_registry,
+            transport_factories=assembly.transport_factories,
+            artifact_store=assembly.artifact_store,
         ),
     )
 
 
 def _register_control_handlers(
     registry: HandlerRegistry,
-    resolver: ProviderResolver,
-    _secret_registry: SecretRegistry,
-    _transport_factories: BuildHostTransportFactories | None,
-    _artifact_store: ObjectStore | None,
+    assembly: WorkerHandlerAssembly,
 ) -> None:
-    control.register_handlers(registry, resolver=resolver)
+    control.register_handlers(registry, resolver=assembly.resolver)
 
 
 def _register_vmcore_handlers(
     registry: HandlerRegistry,
-    resolver: ProviderResolver,
-    _secret_registry: SecretRegistry,
-    _transport_factories: BuildHostTransportFactories | None,
-    _artifact_store: ObjectStore | None,
+    assembly: WorkerHandlerAssembly,
 ) -> None:
-    vmcore.register_handlers(registry, resolver=resolver)
+    vmcore.register_handlers(registry, resolver=assembly.resolver)
 
 
 def _register_diagnostics_handlers(
     registry: HandlerRegistry,
-    _resolver: ProviderResolver,
-    _secret_registry: SecretRegistry,
-    _transport_factories: BuildHostTransportFactories | None,
-    _artifact_store: ObjectStore | None,
+    _assembly: WorkerHandlerAssembly,
 ) -> None:
     from kdive.jobs.handlers import diagnostics as diagnostics_handler
 
@@ -351,10 +339,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
 
 def _register_image_build_handler(
     registry: HandlerRegistry,
-    resolver: ProviderResolver,
-    _secret_registry: SecretRegistry,
-    _transport_factories: BuildHostTransportFactories | None,
-    _artifact_store: ObjectStore | None,
+    assembly: WorkerHandlerAssembly,
 ) -> None:
     """Bind the IMAGE_BUILD handler, preserving setup errors as job failures.
 
@@ -372,7 +357,7 @@ def _register_image_build_handler(
         return
     image_build.register_handlers(
         registry,
-        resolver=resolver,
+        resolver=assembly.resolver,
         store=store,
     )
 
@@ -503,9 +488,12 @@ def build_handler_registry(
     """
     registry = HandlerRegistry()
     composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
-    resolver = composition.build_provider_resolver()
-    transport_factories = composition.build_build_host_transport_factories()
-    artifact_store = _resolve_ops_images_store()
+    assembly = WorkerHandlerAssembly(
+        resolver=composition.build_provider_resolver(),
+        secret_registry=secret_registry,
+        transport_factories=composition.build_build_host_transport_factories(),
+        artifact_store=_resolve_ops_images_store(),
+    )
     for register in _HANDLER_REGISTRARS:
-        register(registry, resolver, secret_registry, transport_factories, artifact_store)
+        register(registry, assembly)
     return registry

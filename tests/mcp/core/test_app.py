@@ -297,15 +297,12 @@ def test_build_handler_registry_derives_worker_ports_from_one_composition(
 
     def _capture(
         _registry: HandlerRegistry,
-        provider_resolver: object,
-        secret_registry: SecretRegistry,
-        build_host_transport_factories: object | None,
-        artifact_store: object | None,
+        assembly: app_module.WorkerHandlerAssembly,
     ) -> None:
-        captured["resolver"] = provider_resolver
-        captured["secret_registry"] = secret_registry
-        captured["transports"] = build_host_transport_factories
-        captured["artifact_store"] = artifact_store
+        captured["resolver"] = assembly.resolver
+        captured["secret_registry"] = assembly.secret_registry
+        captured["transports"] = assembly.transport_factories
+        captured["artifact_store"] = assembly.artifact_store
 
     monkeypatch.setattr(app_module, "_HANDLER_REGISTRARS", (_capture,))
 
@@ -337,7 +334,13 @@ def test_image_build_handler_preserves_store_config_error(
 
     monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _raise_store)
     app_module._register_image_build_handler(
-        registry, cast(Any, None), SecretRegistry(), cast(Any, None), None
+        registry,
+        app_module.WorkerHandlerAssembly(
+            resolver=cast(Any, None),
+            secret_registry=SecretRegistry(),
+            transport_factories=cast(Any, None),
+            artifact_store=None,
+        ),
     )
     handler = registry.get(JobKind.IMAGE_BUILD)
     assert handler is not None
