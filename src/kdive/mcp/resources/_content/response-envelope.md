@@ -42,10 +42,11 @@ See [errors](errors.md) for the taxonomy and recovery guidance.
 ## References, not log dumps
 
 The `refs` field carries object-store keys, not raw artifact bytes or console
-transcripts. The `data` field is constrained to `str → str` scalars. There is no
-field for inline log text — this is structural: a tool cannot accidentally return
-a raw transcript or vmcore dump in the envelope. Artifact bytes are fetched
-separately via `artifacts.get` after the agent inspects the reference.
+transcripts. The `data` field holds JSON values (`dict[str, JsonValue]`), checked
+by `validate_json_value` at construction. There is no field for inline log text —
+this is structural: a tool cannot accidentally return a raw transcript or vmcore
+dump in the envelope. Artifact bytes are fetched separately via `artifacts.get`
+after the agent inspects the reference.
 
 All guest output, gdb/SoL transcripts, and console logs pass through the redactor
 before persistence and before any response snippet. See [safety and RBAC](safety-and-rbac.md)
