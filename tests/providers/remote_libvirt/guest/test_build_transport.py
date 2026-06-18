@@ -12,12 +12,14 @@ import base64
 import json
 from typing import Any
 
+import libvirt
 import pytest
 
 from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.providers.remote_libvirt.conftest import libvirt_error
 
 
 class _FakeAgent:
@@ -106,6 +108,32 @@ def test_run_timeout_maps_to_transport_failure() -> None:
     agent = _FakeAgent(never_exits=True)
     with pytest.raises(CategorizedError) as exc:
         _transport(agent).run(["make"], cwd="/ws", timeout_s=3)
+    assert exc.value.category == ErrorCategory.TRANSPORT_FAILURE
+
+
+def _raising_agent(exc: BaseException) -> Any:
+    def _agent(domain: Any, command: str, timeout: int, flags: int) -> str:
+        raise exc
+
+    return _agent
+
+
+def test_post_readiness_code_86_maps_to_non_retryable_configuration_error() -> None:
+    # The build session runs the guest-ping readiness gate before binding this transport, so a
+    # subsequent AGENT_UNRESPONSIVE (code 86) is a deterministic dead agent for the build path —
+    # the transport classifies it CONFIGURATION_ERROR (retryable=false), not transport_failure.
+    agent = _raising_agent(libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE))
+    with pytest.raises(CategorizedError) as exc:
+        _transport(agent).run(["make"], cwd="/ws", timeout_s=10)
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["libvirt_error_code"] == libvirt.VIR_ERR_AGENT_UNRESPONSIVE
+
+
+def test_transient_non_86_error_stays_transport_failure() -> None:
+    # A non-deterministic libvirt error on the build transport still maps to retryable transport.
+    agent = _raising_agent(libvirt_error(libvirt.VIR_ERR_OPERATION_FAILED))
+    with pytest.raises(CategorizedError) as exc:
+        _transport(agent).run(["make"], cwd="/ws", timeout_s=10)
     assert exc.value.category == ErrorCategory.TRANSPORT_FAILURE
 
 

@@ -26,6 +26,7 @@ from kdive.diagnostics.egress_probe import redact_presigned
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt.guest.agent import (
+    BUILD_DETERMINISTIC_CONFIG_CODES,
     AgentCommand,
     GuestAgentExec,
     Monotonic,
@@ -78,6 +79,9 @@ class GuestExecBuildTransport(ShellBuildTransport):
         return GuestAgentExec(
             agent_command=self._agent_command,
             allowed_programs=frozenset({_SHELL}),
+            # This transport binds only after the build session's guest-ping readiness gate
+            # (ADR-0168), so a post-readiness AGENT_UNRESPONSIVE is a deterministic dead agent.
+            deterministic_codes=BUILD_DETERMINISTIC_CONFIG_CODES,
             timeout_s=float(timeout_s),
             poll_s=self._poll_s,
             sleep=self._sleep,
