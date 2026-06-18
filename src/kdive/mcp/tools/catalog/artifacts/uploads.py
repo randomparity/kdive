@@ -40,6 +40,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.serialization import JsonValue
 from kdive.store.objectstore import (
     artifact_key,
     chunk_key,
@@ -50,12 +51,23 @@ from kdive.store.objectstore import (
 _log = logging.getLogger(__name__)
 
 _TENANT = "local"
-_CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
-_CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
-_BUILD_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux"})
+# Literal upload tool names and accepted artifact-name vocabularies. Public so the
+# ``artifacts.expected_uploads`` discovery tool (ADR-0166) projects the same sets the
+# validator below enforces — the advertisement can never drift from the accepted names.
+CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
+CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
+RUN_ARTIFACT_NAMES = frozenset({"effective_config", "kernel", "initrd", "vmlinux"})
 _ROOTFS_NAME = "rootfs"
+SYSTEM_ARTIFACT_NAMES = frozenset({_ROOTFS_NAME})
 _RETENTION_CLASS = "build"
 _EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES = 1024 * 1024
+
+# Upper bound on an offending artifact-name string echoed back in an error's ``data.value``
+# (ADR-0166). The name is user-supplied; echoing a short string makes the rejection
+# self-correcting, but a longer or non-string value is never reflected so no large or
+# binary payload can ride the error envelope back to the client.
+_MAX_ECHOED_NAME_LEN = 64
+_REQUIRED_DECLARATION_FIELDS = ("name", "sha256", "size_bytes")
 
 
 def _upload_ttl() -> timedelta:
@@ -95,22 +107,67 @@ class _UploadOwnerSpec:
     accepts_upload: Callable[[AsyncConnection, UUID, ProviderResolver], Awaitable[bool]]
 
 
+def _bad_declaration(
+    object_id: str, allowed: frozenset[str], *, field: str, value: object = None
+) -> ToolResponse:
+    """Build a self-correcting ``bad_artifact_declaration`` rejection (ADR-0166).
+
+    Names the failing ``field`` and lists the accepted artifact-name vocabulary so the
+    response is self-correcting from a black-box client. The offending ``value`` is
+    echoed in ``data.value`` only for a name rejection and only when it is a short string
+    (``<= _MAX_ECHOED_NAME_LEN``); a non-string or oversized value is never reflected, so
+    no large or binary payload rides the error envelope back.
+
+    Args:
+        object_id: The owner id the failed declaration targets.
+        allowed: The accepted artifact-name set for this owner kind.
+        field: Which declared field failed (``name``/``sha256``/``size_bytes``/``chunks``).
+        value: The offending value; echoed only when ``field == "name"`` and it is a
+            short string.
+
+    Returns:
+        A ``configuration_error`` :class:`ToolResponse` with structured ``data`` and a
+        non-null human-readable ``detail``.
+    """
+    accepted = sorted(allowed)
+    accepted_names: list[JsonValue] = list(accepted)
+    data: dict[str, JsonValue] = {
+        "reason": "bad_artifact_declaration",
+        "field": field,
+        "accepted_names": accepted_names,
+    }
+    if field == "name" and isinstance(value, str) and len(value) <= _MAX_ECHOED_NAME_LEN:
+        data["value"] = value
+    detail = f"artifact declaration rejected: field {field!r} must be one of {', '.join(accepted)}"
+    return _config_error(object_id, detail=detail, data=data)
+
+
+def _validate_one_declaration(
+    object_id: str, art: ArtifactDeclaration, allowed: frozenset[str]
+) -> tuple[str, str, int] | ToolResponse:
+    """Validate one declaration's required fields, naming the specific failure (ADR-0166)."""
+    for key in _REQUIRED_DECLARATION_FIELDS:
+        if key not in art:
+            return _bad_declaration(object_id, allowed, field=key)
+    name, sha256, size = art["name"], art["sha256"], art["size_bytes"]
+    if not isinstance(name, str) or name not in allowed:
+        return _bad_declaration(object_id, allowed, field="name", value=name)
+    if not isinstance(sha256, str):
+        return _bad_declaration(object_id, allowed, field="sha256")
+    if not isinstance(size, int):
+        return _bad_declaration(object_id, allowed, field="size_bytes")
+    return name, sha256, size
+
+
 def _validate_artifact_declarations(
     object_id: str, artifacts: Sequence[ArtifactDeclaration], allowed: frozenset[str], cap: int
 ) -> list[ManifestEntry] | ToolResponse:
     entries: list[ManifestEntry] = []
     for art in artifacts:
-        try:
-            name, sha256, size = art["name"], art["sha256"], art["size_bytes"]
-        except KeyError:
-            return _config_error(object_id, data={"reason": "bad_artifact_declaration"})
-        if (
-            not isinstance(name, str)
-            or name not in allowed
-            or not isinstance(sha256, str)
-            or not isinstance(size, int)
-        ):
-            return _config_error(object_id, data={"reason": "bad_artifact_declaration"})
+        validated_decl = _validate_one_declaration(object_id, art, allowed)
+        if isinstance(validated_decl, ToolResponse):
+            return validated_decl
+        name, sha256, size = validated_decl
         artifact_cap = _EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES if name == "effective_config" else cap
         raw_chunks = art.get("chunks")
         if raw_chunks is None:
@@ -120,7 +177,7 @@ def _validate_artifact_declarations(
             continue
         if name == "effective_config":
             return _config_error(object_id, data={"reason": "size_out_of_range"})
-        validated = _validate_chunks(object_id, raw_chunks, size, artifact_cap)
+        validated = _validate_chunks(object_id, raw_chunks, size, artifact_cap, allowed)
         if isinstance(validated, ToolResponse):
             return validated
         entries.append(ManifestEntry(name=name, sha256=sha256, size_bytes=size, chunks=validated))
@@ -130,7 +187,7 @@ def _validate_artifact_declarations(
 
 
 def _validate_chunks(
-    object_id: str, raw_chunks: object, declared_total: int, cap: int
+    object_id: str, raw_chunks: object, declared_total: int, cap: int, allowed: frozenset[str]
 ) -> tuple[ChunkEntry, ...] | ToolResponse:
     if not isinstance(raw_chunks, list) or not (1 <= len(raw_chunks) <= MAX_PARTS):
         return _config_error(object_id, data={"reason": "too_many_chunks"})
@@ -139,11 +196,11 @@ def _validate_chunks(
     last = len(raw_chunks) - 1
     for i, chunk in enumerate(raw_chunks):
         if not isinstance(chunk, Mapping):
-            return _config_error(object_id, data={"reason": "bad_artifact_declaration"})
+            return _bad_declaration(object_id, allowed, field="chunks")
         chunk_map = cast("Mapping[str, object]", chunk)
         csha, csize = chunk_map.get("sha256"), chunk_map.get("size_bytes")
         if not isinstance(csha, str) or not isinstance(csize, int) or csize <= 0:
-            return _config_error(object_id, data={"reason": "bad_artifact_declaration"})
+            return _bad_declaration(object_id, allowed, field="chunks")
         if csize > MAX_PART_BYTES:
             return _config_error(object_id, data={"reason": "size_out_of_range"})
         if i != last and csize < MIN_PART_BYTES:
@@ -244,7 +301,7 @@ async def _system_accepts_upload(
 _RUN_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.RUN_UPLOAD_OWNER,
     lock_scope=LockScope.RUN,
-    allowed_names=_BUILD_ARTIFACT_NAMES,
+    allowed_names=RUN_ARTIFACT_NAMES,
     next_action="runs.complete_build",
     project=_run_project,
     accepts_upload=_run_accepts_upload,
@@ -252,7 +309,7 @@ _RUN_UPLOAD = _UploadOwnerSpec(
 _SYSTEM_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.SYSTEM_UPLOAD_OWNER,
     lock_scope=LockScope.SYSTEM,
-    allowed_names=frozenset({_ROOTFS_NAME}),
+    allowed_names=SYSTEM_ARTIFACT_NAMES,
     next_action="systems.provision_defined",
     project=_system_project,
     accepts_upload=_system_accepts_upload,
@@ -348,8 +405,8 @@ def _upload_response(upload: _MaterializedUpload, *, next_action: str) -> ToolRe
 
 def _upload_tool_name(spec: _UploadOwnerSpec) -> str:
     if spec.owner_kind == upload_manifest.RUN_UPLOAD_OWNER:
-        return _CREATE_RUN_UPLOAD_TOOL
-    return _CREATE_SYSTEM_UPLOAD_TOOL
+        return CREATE_RUN_UPLOAD_TOOL
+    return CREATE_SYSTEM_UPLOAD_TOOL
 
 
 async def create_run_upload(

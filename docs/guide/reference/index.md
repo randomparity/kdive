@@ -19,6 +19,7 @@
 | [`allocations.wait`](allocations.md#allocationswait) | `implemented` |
 | [`artifacts.create_run_upload`](artifacts.md#artifactscreate_run_upload) | `implemented` |
 | [`artifacts.create_system_upload`](artifacts.md#artifactscreate_system_upload) | `implemented` |
+| [`artifacts.expected_uploads`](artifacts.md#artifactsexpected_uploads) | `implemented` |
 | [`artifacts.get`](artifacts.md#artifactsget) | `partial` |
 | [`artifacts.list`](artifacts.md#artifactslist) | `partial` |
 | [`artifacts.search_text`](artifacts.md#artifactssearch_text) | `partial` |

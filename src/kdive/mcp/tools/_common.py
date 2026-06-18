@@ -25,8 +25,12 @@ def clamp_list_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIST_LIMIT))
 
 
-def config_error(object_id: str, *, data: ResponseDataInput | None = None) -> ToolResponse:
-    return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, data=data or {})
+def config_error(
+    object_id: str, *, detail: str | None = None, data: ResponseDataInput | None = None
+) -> ToolResponse:
+    return ToolResponse.failure(
+        object_id, ErrorCategory.CONFIGURATION_ERROR, detail=detail, data=data or {}
+    )
 
 
 def not_found(object_id: str, *, data: ResponseDataInput | None = None) -> ToolResponse:

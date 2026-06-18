@@ -193,6 +193,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
 #: hiding it would be wrong. ``CLASSIFIED_TOOLS | PUBLIC_TOOLS`` must equal the live registry.
 PUBLIC_TOOLS: frozenset[str] = frozenset(
     {
+        "artifacts.expected_uploads",
         "buildconfig.get",
         "fixtures.list",
         "fixtures.validate",

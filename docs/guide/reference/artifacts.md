@@ -24,6 +24,12 @@ Mint a presigned PUT for a DEFINED System's rootfs. Requires operator.
 | `artifacts` | `array` | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. |
 | `system_id` | `string` | yes | The DEFINED System id. |
 
+## `artifacts.expected_uploads`
+
+`implemented` · `read-only`
+
+Return the accepted upload-artifact names per owner-kind. Requires a token.
+
 ## `artifacts.get`
 
 `partial` · `read-only`
