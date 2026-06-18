@@ -145,6 +145,35 @@ def test_delete_build_vm_tolerates_already_inactive_or_undefined_domain(tmp_path
     assert conn.closed
 
 
+@pytest.mark.parametrize(
+    ("destroy_error", "undefine_error"),
+    [
+        (libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR), None),
+        (None, libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)),
+    ],
+)
+def test_delete_build_vm_preserves_non_benign_destroy_or_undefine_failures(
+    tmp_path,
+    destroy_error: libvirt.libvirtError | None,
+    undefine_error: libvirt.libvirtError | None,
+) -> None:
+    domain = _FakeDomain(
+        build_domain_name(_RID),
+        destroy_error=destroy_error,
+        undefine_error=undefine_error,
+    )
+    conn = _FakeConn(domains=[domain])
+    reaper = _reaper(conn, tmp_path)
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert isinstance(raised.value.__cause__, libvirt.libvirtError)
+    assert conn.pool.lookups == []
+    assert conn.closed
+
+
 def test_delete_build_vm_skips_overlay_delete_for_malformed_build_name(tmp_path) -> None:
     domain = _FakeDomain("kdive-build-not-a-uuid")
     conn = _FakeConn(domains=[domain])

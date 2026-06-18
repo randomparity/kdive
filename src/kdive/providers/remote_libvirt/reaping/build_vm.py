@@ -134,12 +134,12 @@ class RemoteLibvirtBuildVmReaper:
             domain.destroy()
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID:
-                _log.warning("build VM %s destroy failed during reap", domain_name)
+                raise _infra("destroying build VM domain", domain=domain_name) from exc
         try:
             domain.undefine()
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
-                _log.warning("build VM %s undefine failed during reap", domain_name)
+                raise _infra("undefining build VM domain", domain=domain_name) from exc
 
 
 def _infra(verb: str, **details: str) -> CategorizedError:
