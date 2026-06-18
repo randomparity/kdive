@@ -178,26 +178,27 @@ class EgressProbeRegistry:
             )
 
 
-class SingleFlight:
+class SingleFlight[T]:
     """Per-key in-process single-flight: concurrent callers share one in-flight coroutine.
 
     A second ``run`` for a key whose probe is in flight awaits the first call's result instead
     of spawning a second guest — the ADR-0091 §3 "attaches to the in-flight result" contract.
-    This holds within one process, so a production probe-guest factory **must share one
-    process-level ``SingleFlight``** across ``doctor`` calls (not build a fresh one per call) or
-    single-flight degrades to the DB fence alone. The DB partial unique index is the
-    cross-process backstop: a second *process* cannot share this coalescer, so its ``register``
-    raises :class:`ProbeInFlightError` and the check reports "a probe is already in flight"
-    (still exactly one guest, reported as ``error`` rather than the shared result).
+    This holds within one process, so a production probe factory **must share one process-level
+    ``SingleFlight``** across ``doctor`` calls (not build a fresh one per call) or single-flight
+    degrades to the DB fence alone. The DB partial unique index is the cross-process backstop: a
+    second *process* cannot share this coalescer, so its ``register`` raises
+    :class:`ProbeInFlightError` and the check reports "a probe is already in flight" (still exactly
+    one guest, reported as ``error`` rather than the shared result).
+
+    Generic over the result type so both the egress check (``SingleFlight[CheckResult]``) and the
+    build-host agent probe (``SingleFlight[BuildHostProbeResult]``, ADR-0167) reuse it.
     """
 
     def __init__(self) -> None:
-        self._inflight: dict[str, asyncio.Task[CheckResult]] = {}
+        self._inflight: dict[str, asyncio.Task[T]] = {}
         self._lock = asyncio.Lock()
 
-    async def run(
-        self, key: str, factory: Callable[[], Coroutine[Any, Any, CheckResult]]
-    ) -> CheckResult:
+    async def run(self, key: str, factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
         """Run ``factory`` for ``key`` once; concurrent callers attach to the in-flight task."""
         async with self._lock:
             task = self._inflight.get(key)
@@ -207,7 +208,7 @@ class SingleFlight:
                 task.add_done_callback(lambda done: asyncio.create_task(self._cleanup(key, done)))
         return await asyncio.shield(task)
 
-    async def _cleanup(self, key: str, task: asyncio.Task[CheckResult]) -> None:
+    async def _cleanup(self, key: str, task: asyncio.Task[T]) -> None:
         async with self._lock:
             if self._inflight.get(key) is task:
                 del self._inflight[key]
@@ -230,7 +231,7 @@ class GuestEgressCheck(Check):
         guest: ProbeGuest,
         presigned_url: PresignedUrlSource,
         registry: EgressProbeRegistry,
-        single_flight: SingleFlight,
+        single_flight: SingleFlight[CheckResult],
         heartbeat_interval: timedelta = DEFAULT_PROBE_HEARTBEAT_INTERVAL,
     ) -> None:
         self._provider = provider
