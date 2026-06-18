@@ -34,3 +34,13 @@ def test_artifact_get_retrieval_settings_present() -> None:
     names = {s.name for s in config.all_settings()}
     assert "KDIVE_ARTIFACT_INLINE_MAX_BYTES" in names
     assert "KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS" in names
+
+
+def test_local_build_remote_allowlist_setting_registered() -> None:
+    # Local git-clone build lane allowlist (#530, ADR-0162): worker-scoped, build group.
+    from kdive.config.core_settings import LOCAL_BUILD_REMOTE_ALLOWLIST, SETTINGS
+
+    assert LOCAL_BUILD_REMOTE_ALLOWLIST in SETTINGS
+    assert LOCAL_BUILD_REMOTE_ALLOWLIST.name == "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST"
+    assert LOCAL_BUILD_REMOTE_ALLOWLIST.processes == frozenset({"worker"})
+    assert LOCAL_BUILD_REMOTE_ALLOWLIST.group == "build"

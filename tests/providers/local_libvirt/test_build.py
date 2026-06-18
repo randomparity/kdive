@@ -5,9 +5,10 @@ from __future__ import annotations
 import shutil
 import struct
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -21,7 +22,12 @@ from kdive.components.references import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.models import Sensitivity
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.profiles.build import (
+    BuildProfile,
+    GitKernelSource,
+    GitSourceRef,
+    ServerBuildProfile,
+)
 from kdive.providers.local_libvirt import build as build_module
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.shared.build_host import config as build_host_config
@@ -1509,3 +1515,154 @@ def test_real_checkout_skips_patch_when_absent(
     )
 
     assert order == ["sync", "merge"]  # no patch step
+
+
+def test_from_env_threads_remote_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("KDIVE_BUILD_WORKSPACE", "/tmp/ws")
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", "/srv/linux")
+    monkeypatch.setenv("KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST", "github.com/myorg, git.example.com")
+
+    def _fake_make_checkout(
+        kernel_src: str, secret_registry: SecretRegistry, *, allowlist: Sequence[str]
+    ) -> object:
+        del kernel_src, secret_registry
+        captured["allow"] = tuple(allowlist)
+        return lambda *_a, **_k: None
+
+    monkeypatch.setattr(build_module._build_workspace, "make_checkout", _fake_make_checkout)
+    LocalLibvirtBuild.from_env(secret_registry=SecretRegistry())
+    assert captured["allow"] == ("github.com/myorg", "git.example.com")
+
+
+# --- clone_tree (local git lane) + provenance dispatch (ADR-0162) -------------------
+
+
+def _git_profile() -> ServerBuildProfile:
+    return ServerBuildProfile(
+        schema_version=1,
+        kernel_source_ref=GitKernelSource(
+            git=GitSourceRef(remote="https://github.com/myorg/linux", ref="v6.9")
+        ),
+    )
+
+
+def test_real_checkout_git_source_invokes_clone_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _clone(
+        source: GitSourceRef,
+        ws: Path,
+        allow: Sequence[str],
+        *,
+        run_id: UUID,
+        secret_registry: SecretRegistry,
+    ) -> None:
+        del ws, run_id, secret_registry
+        seen["remote"] = source.remote
+        seen["allow"] = tuple(allow)
+
+    monkeypatch.setattr(build_host_workspace, "clone_tree", _clone)
+    monkeypatch.setattr(build_host_workspace, "sync_tree", lambda *_: seen.setdefault("sync", True))
+    monkeypatch.setattr(build_host_workspace, "merge_config", lambda *_, **__: None)
+
+    build_host_workspace.real_checkout(
+        "/unused",
+        _git_profile(),
+        tmp_path / "ws",
+        b"",
+        run_id=_RUN,
+        secret_registry=SecretRegistry(),
+        allowlist=("github.com/myorg",),
+    )
+
+    assert seen["remote"] == "https://github.com/myorg/linux"
+    assert seen["allow"] == ("github.com/myorg",)
+    assert "sync" not in seen  # the warm-tree lane is not taken for a git source
+
+
+def test_clone_tree_rejects_disallowed_remote(tmp_path: Path) -> None:
+    source = GitSourceRef(remote="https://gitlab.com/x/linux", ref="v6.9")
+    with pytest.raises(CategorizedError) as exc:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("github.com/myorg",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # No URL echo into either the message or the details (details may be None).
+    assert "gitlab.com" not in str(exc.value)
+    assert "gitlab.com" not in repr(exc.value.details)
+
+
+def test_clone_tree_empty_allowlist_reports_lane_disabled(tmp_path: Path) -> None:
+    source = GitSourceRef(remote="https://github.com/myorg/linux", ref="v6.9")
+    with pytest.raises(CategorizedError) as exc:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            (),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "disabled" in str(exc.value).lower()
+
+
+def test_clone_tree_cleans_workspace_and_runs_git_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    stale = workspace / "stale.txt"
+    stale.write_text("leftover from a prior run")
+    calls: list[list[str]] = []
+
+    def _fake_run_git(
+        args: list[str], *, cwd: Path | None, run_id: UUID
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, run_id
+        calls.append(args)
+        return subprocess.CompletedProcess(args=["git", *args], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    monkeypatch.setattr(build_host_workspace, "_run_git", _fake_run_git)
+
+    build_host_workspace.clone_tree(
+        GitSourceRef(remote="https://github.com/myorg/linux", ref="v6.9"),
+        workspace,
+        ("github.com/myorg",),
+        run_id=_RUN,
+        secret_registry=SecretRegistry(),
+    )
+
+    assert not stale.exists()  # workspace was cleaned before init
+    assert calls[0][0] == "init"
+    assert calls[1][:4] == ["-C", str(workspace), "fetch", "--depth"]
+    assert ["-C", str(workspace), "rev-parse", "--verify", "--quiet", "FETCH_HEAD"] in calls
+    assert calls[-1] == ["-C", str(workspace), "checkout", "FETCH_HEAD"]
+
+
+def test_run_git_passes_hardened_flags_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_subprocess_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _fake_subprocess_run)
+    build_host_workspace._run_git(["init", str(tmp_path)], cwd=None, run_id=_RUN)
+
+    args = cast("list[str]", captured["args"])
+    assert "-c" in args and "http.followRedirects=false" in args
+    assert "protocol.allow=never" in args
+    env = cast("dict[str, str]", captured["env"])
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"

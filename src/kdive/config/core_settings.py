@@ -292,6 +292,17 @@ BUILD_COMPONENT_ROOTS = Setting(
     processes=_WORKER,
     help="Colon-separated extra component roots merged into a build.",
 )
+LOCAL_BUILD_REMOTE_ALLOWLIST = Setting(
+    name="KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST",
+    parse=_str,
+    group="build",
+    processes=_WORKER,
+    help=(
+        "Comma-separated allowlist of git remotes the local (worker-local) build host may "
+        "clone for a git kernel_source_ref. Each entry is a host (github.com) or host/path "
+        "prefix (github.com/myorg). Empty/unset disables local git builds (deny by default)."
+    ),
+)
 INSTALL_STAGING = Setting(
     name="KDIVE_INSTALL_STAGING",
     parse=_str,
@@ -504,6 +515,7 @@ SETTINGS = [
     BUILD_WORKSPACE,
     KERNEL_SRC,
     BUILD_COMPONENT_ROOTS,
+    LOCAL_BUILD_REMOTE_ALLOWLIST,
     INSTALL_STAGING,
     FIXTURE_CATALOG_PATH,
     IMAGE_PUBLISH_GRACE,

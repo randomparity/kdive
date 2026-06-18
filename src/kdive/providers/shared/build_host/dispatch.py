@@ -10,7 +10,7 @@ from uuid import UUID
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import BuildHost, BuildHostKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.build import GitKernelSource, GitSourceRef, ServerBuildProfile
+from kdive.profiles.build import GitKernelSource, GitSourceRef, ServerBuildProfile, is_git_source
 from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.ssh_transport import SshBuildTransport
@@ -55,14 +55,19 @@ async def run_build_on_host(
 ) -> BuildOutput:
     """Run ``builder`` on the selected build host.
 
-    For a ``LOCAL`` host the warm-tree ``KDIVE_KERNEL_SRC`` (``kernel_src``, resolved by
+    For a ``LOCAL`` **warm-tree** build the ``KDIVE_KERNEL_SRC`` (``kernel_src``, resolved by
     the worker BUILD handler) is admitted before the build runs (ADR-0161), so an
     unset/invalid tree fails before any workspace side effect; ``sync_tree`` keeps the
     backstop. The admission runs off the event loop because its usability probe stats
-    the path. ``kernel_src`` is ignored for non-``LOCAL`` (git/remote) hosts.
+    the path. A ``LOCAL`` **git** build (ADR-0162) clones its allowlisted remote instead of
+    mirroring the warm tree, so it does not read ``KDIVE_KERNEL_SRC`` and skips the warm-tree
+    admission. ``kernel_src`` is ignored for non-``LOCAL`` (git/remote) hosts.
     """
     if host.kind is BuildHostKind.LOCAL:
-        await asyncio.to_thread(check_warm_tree_source_admission, kernel_src, host_kind=host.kind)
+        if not is_git_source(parsed):
+            await asyncio.to_thread(
+                check_warm_tree_source_admission, kernel_src, host_kind=host.kind
+            )
         return await asyncio.to_thread(builder.build, run_id, parsed)
     capable = _require_transport_capable(builder, host, run_id)
     factories = _transport_factories(transport_factories)
