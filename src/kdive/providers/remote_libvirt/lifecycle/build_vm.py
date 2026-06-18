@@ -208,7 +208,12 @@ class EphemeralBuildVm:
 
     @contextmanager
     def session(
-        self, base_image_volume: str, *, run_id: UUID, source: GitSourceRef | None = None
+        self,
+        base_image_volume: str,
+        *,
+        run_id: UUID,
+        source: GitSourceRef | None = None,
+        wait_network: bool = True,
     ) -> Iterator[GuestExecBuildTransport]:
         """Provision the build VM, yield a transport bound to it, tear it down on exit.
 
@@ -220,6 +225,11 @@ class EphemeralBuildVm:
                 yielding, so an unreachable source fails the gate naming the source rather than the
                 clone (ADR-0155). ``None`` (a warm-tree source, or a caller that supplies none)
                 keeps the route-only behavior.
+            wait_network: When ``True`` (the BUILD default), block until the guest has a default
+                route before yielding — the clone needs working network. The
+                ``ephemeral_libvirt_buildhost_agent`` diagnostic passes ``False`` (ADR-0167): it
+                asserts only guest-agent reachability, so it must not wait for — or fail on — the
+                network, and the trivial command it runs needs none.
 
         Yields:
             A :class:`GuestExecBuildTransport` bound to the live build VM's domain.
@@ -251,7 +261,8 @@ class EphemeralBuildVm:
                     agent_command=self._agent_command,
                     secret_registry=self._secret_registry,
                 )
-                self._wait_for_network(transport, domain_name)
+                if wait_network:
+                    self._wait_for_network(transport, domain_name)
                 if source is not None:
                     self._preflight_egress(transport, source)
                 yield transport
@@ -394,14 +405,18 @@ def ephemeral_build_session(
     *,
     run_id: UUID,
     source: GitSourceRef | None = None,
+    wait_network: bool = True,
 ) -> Iterator[GuestExecBuildTransport]:
     """Module-level seam: build a default :class:`EphemeralBuildVm` and run its session.
 
     The BUILD handler imports this so a test can substitute a fake session without a libvirt
     host; production delegates to a default-seam :class:`EphemeralBuildVm`. ``source`` is the
     configured git build source for the pre-clone egress preflight (ADR-0155); ``None`` keeps the
-    route-only readiness behavior.
+    route-only readiness behavior. ``wait_network=False`` is the agent-reachability diagnostic's
+    seam (ADR-0167): provision + wait-for-agent + yield, without the network gate.
     """
     vm = EphemeralBuildVm(secret_registry=secret_registry)
-    with vm.session(base_image_volume, run_id=run_id, source=source) as transport:
+    with vm.session(
+        base_image_volume, run_id=run_id, source=source, wait_network=wait_network
+    ) as transport:
         yield transport
