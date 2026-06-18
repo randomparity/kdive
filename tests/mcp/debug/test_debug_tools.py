@@ -561,6 +561,10 @@ def test_start_session_bad_transport_is_config_error(migrated_url: str) -> None:
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # ADR-0174: an unknown transport names its reason + enumerates the accepted set.
+        assert resp.data["reason"] == "invalid_transport"
+        assert "gdbstub" in cast(list[str], resp.data["accepted_values"])
+        assert resp.detail is not None
         assert count == 0
         assert conn_fake.opened == []
 
@@ -615,6 +619,9 @@ def test_start_session_cross_project_is_config_error(migrated_url: str) -> None:
                 connector=_FakeConnector(),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # ADR-0174 / AC#5: the cross-project run-resolution branch stays bare so it carries no
+        # existence signal (identical envelope whether the run is absent or in another project).
+        assert "reason" not in resp.data
 
     asyncio.run(_run())
 
@@ -626,6 +633,9 @@ def test_start_session_malformed_uuid_is_config_error(migrated_url: str) -> None
                 pool, _ctx(), run_id="not-a-uuid", transport="gdbstub", connector=_FakeConnector()
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 
@@ -1344,6 +1354,9 @@ def test_end_session_malformed_uuid_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await _end_session(pool, _ctx(), "not-a-uuid", connector=_FakeConnector())
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 

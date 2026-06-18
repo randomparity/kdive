@@ -94,6 +94,9 @@ def test_open_malformed_external_ref_is_config_error_no_row(migrated_url: str) -
                 await cur.execute("SELECT count(*) AS n FROM investigations")
                 n = await cur.fetchone()
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # ADR-0174: a malformed external ref names its reason.
+        assert resp.data["reason"] == "invalid_external_ref"
+        assert resp.detail is not None
         assert n is not None and n["n"] == 0
 
     asyncio.run(_run())
@@ -160,6 +163,9 @@ def test_get_malformed_uuid_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await inv_tools.get_investigation(pool, _ctx(), "not-a-uuid")
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "not-a-uuid" in resp.detail
 
     asyncio.run(_run())
 
@@ -400,6 +406,8 @@ def test_unlink_malformed_ref_key_is_config_error(migrated_url: str) -> None:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
             resp = await inv_tools.unlink_external_ref(pool, _ctx(), inv_id, {"tracker": "bz"})
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_external_ref"
+        assert resp.detail is not None
 
     asyncio.run(_run())
 
@@ -428,6 +436,8 @@ def test_link_malformed_ref_is_config_error(migrated_url: str) -> None:
                 cast(inv_tools.ExternalRefInput, {"tracker": "bz"}),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_external_ref"
+        assert resp.detail is not None
 
     asyncio.run(_run())
 
@@ -553,6 +563,9 @@ def test_set_requires_at_least_one_field(migrated_url: str) -> None:
             opened = await _open(pool, _ctx(), project="proj", title="t")
             resp = await inv_tools.set_investigation(pool, _ctx(), opened.object_id)
             assert resp.error_category == "configuration_error"
+            # ADR-0174: an empty set payload names the missing-field reason.
+            assert resp.data["reason"] == "missing_required_field"
+            assert resp.detail is not None
 
     asyncio.run(scenario())
 
@@ -565,6 +578,9 @@ def test_set_overlong_title_is_config_error(migrated_url: str) -> None:
                 pool, _ctx(), opened.object_id, title="x" * 201
             )
             assert resp.error_category == "configuration_error"
+            # ADR-0174: an out-of-bounds title names the invalid-text reason.
+            assert resp.data["reason"] == "invalid_text"
+            assert resp.detail is not None
 
     asyncio.run(scenario())
 
@@ -820,6 +836,9 @@ def test_list_bad_state_is_config_error(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await inv_tools.list_investigations(pool, _ctx(), state="nonsense")
             assert resp.error_category == "configuration_error"
+            # ADR-0174: an unknown state filter enumerates the accepted Investigation states.
+            assert resp.data["reason"] == "invalid_state"
+            assert "open" in cast(list[str], resp.data["accepted_values"])
 
     asyncio.run(scenario())
 
