@@ -2427,8 +2427,10 @@ def test_register_handlers_binds_build() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
         registry,
-        resolver=provider_resolver(builder=_FakeBuilder()),
-        secret_registry=SecretRegistry(),
+        ports=runs_handlers.RunHandlerPorts(
+            resolver=provider_resolver(builder=_FakeBuilder()),
+            secret_registry=SecretRegistry(),
+        ),
     )
     assert registry.get(JobKind.BUILD) is not None
 
@@ -3134,13 +3136,15 @@ def test_register_handlers_binds_install_and_boot() -> None:
     registry = HandlerRegistry()
     runs_handlers.register_handlers(
         registry,
-        resolver=provider_resolver(
-            builder=_FakeBuilder(),
-            installer=_FakeInstaller(),
-            booter=_FakeBooter(),
-            profile_policy=_LOCAL_POLICY,
+        ports=runs_handlers.RunHandlerPorts(
+            resolver=provider_resolver(
+                builder=_FakeBuilder(),
+                installer=_FakeInstaller(),
+                booter=_FakeBooter(),
+                profile_policy=_LOCAL_POLICY,
+            ),
+            secret_registry=SecretRegistry(),
         ),
-        secret_registry=SecretRegistry(),
     )
     assert registry.get(JobKind.INSTALL) is not None
     assert registry.get(JobKind.BOOT) is not None

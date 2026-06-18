@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from kdive.domain.models import JobKind
 from kdive.jobs.handlers.runs_boot import boot_handler
 from kdive.jobs.handlers.runs_build import (
@@ -20,6 +22,7 @@ from kdive.store.objectstore import ObjectStore
 __all__ = [
     "BuildProfile",
     "BuildHostTransportFactories",
+    "RunHandlerPorts",
     "ServerBuildProfile",
     "_run_build",
     "boot_handler",
@@ -29,13 +32,20 @@ __all__ = [
 ]
 
 
+@dataclass(frozen=True, slots=True)
+class RunHandlerPorts:
+    """Dependencies shared by the build, install, and boot job handlers."""
+
+    resolver: ProviderResolver
+    secret_registry: SecretRegistry
+    transport_factories: BuildHostTransportFactories | None = None
+    artifact_store: ObjectStore | None = None
+
+
 def register_handlers(
     registry: HandlerRegistry,
     *,
-    resolver: ProviderResolver,
-    secret_registry: SecretRegistry,
-    transport_factories: BuildHostTransportFactories | None = None,
-    artifact_store: ObjectStore | None = None,
+    ports: RunHandlerPorts,
 ) -> None:
     """Bind the `build`/`install`/`boot` job handlers."""
     registry.register(
@@ -43,22 +53,22 @@ def register_handlers(
         lambda conn, job: build_handler(
             conn,
             job,
-            resolver=resolver,
-            secret_registry=secret_registry,
-            transport_factories=transport_factories,
+            resolver=ports.resolver,
+            secret_registry=ports.secret_registry,
+            transport_factories=ports.transport_factories,
         ),
     )
     registry.register(
         JobKind.INSTALL,
-        lambda conn, job: install_handler(conn, job, resolver=resolver),
+        lambda conn, job: install_handler(conn, job, resolver=ports.resolver),
     )
     registry.register(
         JobKind.BOOT,
         lambda conn, job: boot_handler(
             conn,
             job,
-            resolver=resolver,
-            secret_registry=secret_registry,
-            artifact_store=artifact_store,
+            resolver=ports.resolver,
+            secret_registry=ports.secret_registry,
+            artifact_store=ports.artifact_store,
         ),
     )

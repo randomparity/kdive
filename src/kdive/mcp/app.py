@@ -268,10 +268,12 @@ def _register_run_handlers(
 ) -> None:
     runs.register_handlers(
         registry,
-        resolver=resolver,
-        secret_registry=secret_registry,
-        transport_factories=transport_factories,
-        artifact_store=artifact_store,
+        ports=runs.RunHandlerPorts(
+            resolver=resolver,
+            secret_registry=secret_registry,
+            transport_factories=transport_factories,
+            artifact_store=artifact_store,
+        ),
     )
 
 
