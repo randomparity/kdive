@@ -1,5 +1,5 @@
 [build-system]
-requires = ["uv_build==0.11.19"]
+requires = ["uv_build==0.11.20"]
 build-backend = "uv_build"
 
 [project]
@@ -11,14 +11,14 @@ authors = [{ name = "David Christensen" }]
 readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
-  "fastmcp-slim[server,client]==3.4.0",
+  "fastmcp-slim[server,client]==3.4.2",
   "psycopg[binary]==3.3.4",
   "psycopg-pool==3.3.1",
   "boto3==1.43.21",
-  "botocore==1.43.21",
+  "botocore==1.43.27",
   "defusedxml==0.7.1",
   "httpx==0.28.1",
-  "libvirt-python==12.3.0",
+  "libvirt-python==12.4.0",
   "mcp==1.27.2",
   "opentelemetry-api==1.42.1",
   "opentelemetry-sdk==1.42.1",
@@ -39,11 +39,11 @@ Changelog = "https://github.com/randomparity/kdive/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-  "ruff==0.15.15",
-  "ty==0.0.42",
+  "ruff==0.15.16",
+  "ty==0.0.48",
   "pytest==9.0.3",
   "testcontainers==4.14.2",
-  "hypothesis==6.142.4",
+  "hypothesis==6.155.2",
 ]
 live = [
   "drgn==0.2.0",
