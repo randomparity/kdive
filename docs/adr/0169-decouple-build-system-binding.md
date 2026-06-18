@@ -88,6 +88,12 @@ lifecycle `create (system_id) → build → install → boot` is unchanged.
 - The Run's identity now spans `created`-while-unbound; `system_id` is meaningful only from
   `bind` onward. The one-Run-per-System invariant is enforced at `bind` (and still at the bound
   `create`) rather than only at create.
+- An unbound Run is not auto-reaped. The reconciler fails a Run when its System's Allocation is
+  torn down; an unbound Run has neither, so it terminates only through its own lane (build
+  failure or explicit `runs.cancel`) and keeps its Investigation `active` until then — the same
+  way a bound non-terminal Run does. Artifact retention is unchanged: a `succeeded` unbound Run
+  holds its `kernel_ref` exactly as a `succeeded` bound Run does. No separate unbound-Run quota
+  is added; the build-host capacity lease already bounds the work a Run can do.
 - `target_kind` is a new required field on every Run and a new contract: the eventual System
   must match it. A Run that commits to a kind no System of that kind ever becomes available is
   buildable but not bootable — the agent observes this via `systems.list` returning no ready
