@@ -18,17 +18,12 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.diagnostics.checks import (
-    GDBSTUB_ACL_ID,
-    PROVIDER_TLS_ID,
-    CheckResult,
-    CheckStatus,
-)
+from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.result_codec import ResultCodecError, deserialize_results
 from kdive.diagnostics.service import WORKER_UNAVAILABLE_DETAIL
 from kdive.domain.models import Job, JobKind
@@ -36,14 +31,12 @@ from kdive.domain.state import JobState
 from kdive.jobs import queue as job_queue
 from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 
-_REMOTE_PROVIDER = "remote-libvirt"
 WORKER_DISPATCH_BUDGET = 15.0
 _POLL_INTERVAL_S = 0.25
 # Plain failure_category labels mirroring checks.py (no ErrorCategory import in this layer).
 _TRANSPORT_FAILURE = "transport_failure"
 _INFRASTRUCTURE_FAILURE = "infrastructure_failure"
 _TERMINAL = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
-_WORKER_CHECK_IDS = (PROVIDER_TLS_ID, GDBSTUB_ACL_ID)
 _log = logging.getLogger(__name__)
 
 EnqueueFn = Callable[[str, DiagnosticsWorkerCheckPayload, Authorizing], Awaitable[Job]]
@@ -56,16 +49,18 @@ class WorkerCheckDispatcher(Protocol):
     async def run_worker_checks(self) -> list[CheckResult]: ...
 
 
-def _unavailable(detail: str, category: str) -> list[CheckResult]:
+def _unavailable(
+    detail: str, category: str, *, provider: str, check_ids: Sequence[str]
+) -> list[CheckResult]:
     return [
         CheckResult(
             check_id=cid,
             status=CheckStatus.ERROR,
             detail=detail,
-            provider=_REMOTE_PROVIDER,
+            provider=provider,
             failure_category=category,
         )
-        for cid in _WORKER_CHECK_IDS
+        for cid in check_ids
     ]
 
 
@@ -76,6 +71,8 @@ class JobWorkerCheckDispatcher:
         self,
         pool: AsyncConnectionPool | None,
         *,
+        provider: str,
+        worker_check_ids: Sequence[str],
         budget: float = WORKER_DISPATCH_BUDGET,
         poll_interval: float = _POLL_INTERVAL_S,
         enqueue_fn: EnqueueFn | None = None,
@@ -85,6 +82,8 @@ class JobWorkerCheckDispatcher:
         dedup_suffix: str | None = None,
     ) -> None:
         self._pool = pool
+        self._provider = provider
+        self._worker_check_ids = tuple(worker_check_ids)
         self._budget = budget
         self._poll_interval = poll_interval
         self._enqueue = enqueue_fn or self._pool_enqueue
@@ -116,7 +115,7 @@ class JobWorkerCheckDispatcher:
             return await job_queue.get_by_dedup_key(conn, dedup_key)
 
     def _dedup_key(self) -> str:
-        return f"diagnostics:{_REMOTE_PROVIDER}:{self._dedup_suffix or uuid.uuid4()}"
+        return f"diagnostics:{self._provider}:{self._dedup_suffix or uuid.uuid4()}"
 
     async def run_worker_checks(self) -> list[CheckResult]:
         dedup_key = self._dedup_key()
@@ -127,8 +126,8 @@ class JobWorkerCheckDispatcher:
         # project so the row is not scoped to any real project's `recent_jobs` view.
         job = await self._enqueue(
             dedup_key,
-            DiagnosticsWorkerCheckPayload(provider=_REMOTE_PROVIDER),
-            Authorizing(principal="diagnostics", project=_REMOTE_PROVIDER),
+            DiagnosticsWorkerCheckPayload(provider=self._provider),
+            Authorizing(principal="diagnostics", project=self._provider),
         )
         _log.info("diagnostics worker-check job %s enqueued (dedup_key=%s)", job.id, dedup_key)
         start = self._clock()
@@ -138,7 +137,12 @@ class JobWorkerCheckDispatcher:
                 return self._from_terminal(current)
             if self._clock() - start >= self._budget:
                 _log.warning("diagnostics job %s not picked up within %ss", dedup_key, self._budget)
-                return _unavailable(WORKER_UNAVAILABLE_DETAIL, _TRANSPORT_FAILURE)
+                return _unavailable(
+                    WORKER_UNAVAILABLE_DETAIL,
+                    _TRANSPORT_FAILURE,
+                    provider=self._provider,
+                    check_ids=self._worker_check_ids,
+                )
             await self._sleep(self._poll_interval)
 
     def _from_terminal(self, job: Job) -> list[CheckResult]:
@@ -148,10 +152,18 @@ class JobWorkerCheckDispatcher:
             except ResultCodecError as exc:
                 _log.error("diagnostics job %s returned a malformed result: %s", job.id, exc)
                 return _unavailable(
-                    "diagnostics worker returned a malformed result", _INFRASTRUCTURE_FAILURE
+                    "diagnostics worker returned a malformed result",
+                    _INFRASTRUCTURE_FAILURE,
+                    provider=self._provider,
+                    check_ids=self._worker_check_ids,
                 )
             _log.info("diagnostics job %s succeeded", job.id)
             return results
         category = job.error_category.value if job.error_category else _INFRASTRUCTURE_FAILURE
         _log.warning("diagnostics job %s ended %s (%s)", job.id, job.state.value, category)
-        return _unavailable("diagnostics worker job failed", category)
+        return _unavailable(
+            "diagnostics worker job failed",
+            category,
+            provider=self._provider,
+            check_ids=self._worker_check_ids,
+        )

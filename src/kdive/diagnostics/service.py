@@ -373,7 +373,11 @@ def default_service_factory(
             # module, so a top-level import here would be a cycle (ADR-0164).
             from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 
-            worker_dispatcher = JobWorkerCheckDispatcher(pool)
+            worker_dispatcher = JobWorkerCheckDispatcher(
+                pool,
+                provider=contribution.provider,
+                worker_check_ids=tuple(descriptor.id for descriptor in unavailable),
+            )
         else:
             unavailable_worker_checks.extend(_worker_vantage_checks(unavailable))
     # When a dispatcher is wired it owns the worker-vantage outcome; otherwise FEATURE_NOT_ENABLED

@@ -245,6 +245,8 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
 
     dispatcher = JobWorkerCheckDispatcher(
         pool=None,
+        provider="remote-libvirt",
+        worker_check_ids=(PROVIDER_TLS_ID, GDBSTUB_ACL_ID),
         enqueue_fn=_enqueue,  # ty: ignore[invalid-argument-type]
         get_fn=_get,  # ty: ignore[invalid-argument-type]
         clock=lambda: 0.0,

@@ -20,6 +20,8 @@ class WorkerVantageDescriptor:
 class DiagnosticProviderContribution:
     """Provider-owned diagnostics assembly hooks."""
 
+    provider: str
     enabled: Callable[[], bool]
     checks: Callable[[], Sequence[Check]]
     unavailable_worker_checks: Callable[[], Sequence[WorkerVantageDescriptor]]
+    worker_checks: Callable[[], Sequence[Check]]
