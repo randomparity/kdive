@@ -50,7 +50,7 @@ _TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
 
 
 def _error(object_id: str, category: ErrorCategory) -> ToolResponse:
-    return ToolResponse(object_id=object_id, status="error", error_category=category.value)
+    return ToolResponse.failure(object_id, category)
 
 
 def _job_response(job: Job) -> ToolResponse:
@@ -197,12 +197,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
             async with pool.connection() as conn:
                 current = await JOBS.get(conn, uid)
             data: dict[str, JsonValue] = {"current_status": current.state.value} if current else {}
-            return ToolResponse(
-                object_id=job_id,
-                status="error",
-                error_category=ErrorCategory.CONFIGURATION_ERROR.value,
-                data=data,
-            )
+            return ToolResponse.failure(job_id, ErrorCategory.CONFIGURATION_ERROR, data=data)
         return ToolResponse.from_job(job)
 
 
