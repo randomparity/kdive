@@ -36,8 +36,11 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import DebugSession, Run, System
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools._common import ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.debug.ops import DebugEngineRuntime, DebugRuntimeResolver
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -275,9 +278,14 @@ class DebugSessionHandlers:
         """
         uid = _as_uuid(run_id)
         if uid is None:
-            return _config_error(run_id)
+            return _invalid_uuid_error("run_id", run_id)
         if transport not in DEBUG_TRANSPORT_KINDS:
-            return _config_error(run_id)
+            return _config_error_reason(
+                run_id,
+                ConfigErrorReason.INVALID_TRANSPORT,
+                accepted_values=sorted(DEBUG_TRANSPORT_KINDS),
+                detail=f"transport {transport!r} is not a supported debug transport",
+            )
         transport_kind = cast(DebugTransportKind, transport)
         session_id = uuid4()
         secret_scope = _secret_scope(session_id)
@@ -359,7 +367,7 @@ class DebugSessionHandlers:
         """
         uid = _as_uuid(session_id)
         if uid is None:
-            return _config_error(session_id)
+            return _invalid_uuid_error("session_id", session_id)
         with bind_context(principal=ctx.principal):
             resources: _DetachResources
             async with pool.connection() as conn:
@@ -369,7 +377,10 @@ class DebugSessionHandlers:
                 if isinstance(resolved_session, ToolResponse):
                     return resolved_session
                 if resolved_session.system_id is None:
-                    return _config_error(session_id)
+                    return _config_error(
+                        session_id,
+                        detail="debug session has no associated System to detach from",
+                    )
                 resources_or_response = await self._detach_resources(conn, uid)
                 if isinstance(resources_or_response, ToolResponse):
                     return resources_or_response

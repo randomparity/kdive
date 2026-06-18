@@ -12,6 +12,7 @@ import psycopg
 import pytest
 
 from kdive.db import idempotency, migrate
+from kdive.db.provider_component_records import ComponentUploadState
 from kdive.domain import errors, models
 from kdive.domain.capacity import state
 
@@ -34,6 +35,7 @@ CHECK_ENUMS = [
     ("resources_managed_by_check", models.ManagedBy),
     ("build_hosts_managed_by_check", models.ManagedBy),
     ("run_steps_state_check", idempotency._RunStepState),
+    ("component_uploads_state_check", ComponentUploadState),
 ]
 
 OBJECT_TABLES = {
@@ -141,6 +143,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0041",
         "0042",
         "0043",
+        "0044",
     ]
     assert second == []
 
@@ -220,6 +223,45 @@ def test_run_steps_state_check_admits_exactly_the_enum(pg_conn: psycopg.Connecti
     # ::text casts sit outside the quotes, so the quoted tokens are exactly the values.
     admitted = set(re.findall(r"'([^']+)'", row[0]))
     assert admitted == {s.value for s in idempotency._RunStepState}
+
+
+def test_component_uploads_state_check_admits_exactly_the_enum(pg_conn: psycopg.Connection) -> None:
+    """The CHECK's admitted set equals ComponentUploadState exactly — no SQL-only extras.
+
+    Closes the direction CHECK_ENUMS cannot check: a value present in SQL but absent
+    from the enum (the schema-only `failed` value removed by 0044, ADR-0172).
+    """
+    migrate.apply_migrations(pg_conn)
+    row = pg_conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'component_uploads_state_check'"
+    ).fetchone()
+    assert row is not None, "component_uploads_state_check constraint is missing"
+    admitted = set(re.findall(r"'([^']+)'", row[0]))
+    assert admitted == {s.value for s in ComponentUploadState}
+
+
+def test_component_uploads_state_check_rejects_removed_failed_value(
+    pg_conn: psycopg.Connection,
+) -> None:
+    """The recreated CHECK (0044) admits the enum states and rejects the removed `failed`."""
+    migrate.apply_migrations(pg_conn)
+    for valid in ("pending", "finalized"):
+        pg_conn.execute(
+            "INSERT INTO component_uploads (tenant, provider, component_kind, sha256, "
+            "size_bytes, visibility, project, principal, state, deadline) "
+            "VALUES ('t', 'local-libvirt', 'rootfs', %s, 1, 'project', 'proj', 'alice', %s, "
+            "now() + interval '1 hour')",
+            ("sha256:" + "a" * 64, valid),
+        )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute(
+            "INSERT INTO component_uploads (tenant, provider, component_kind, sha256, "
+            "size_bytes, visibility, project, principal, state, deadline) "
+            "VALUES ('t', 'local-libvirt', 'rootfs', %s, 1, 'project', 'proj', 'alice', "
+            "'failed', now() + interval '1 hour')",
+            ("sha256:" + "a" * 64,),
+        )
 
 
 def test_runs_expected_boot_failure_column(pg_conn: psycopg.Connection) -> None:
@@ -429,7 +471,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
 
     monkeypatch.setattr(migrate, "discover_migrations", lambda: full)
     applied = migrate.apply_migrations(pg_conn)
-    assert applied == ["0042", "0043"]
+    assert applied == ["0042", "0043", "0044"]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
 
@@ -744,6 +786,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0041",
         "0042",
         "0043",
+        "0044",
     ]
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from uuid import UUID
 
 from kdive.domain.errors import ErrorCategory
@@ -14,11 +15,58 @@ DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
 
 
+class ConfigErrorReason(StrEnum):
+    """Closed vocabulary of machine-readable `configuration_error` reasons (ADR-0174).
+
+    Surfaced under ``data.reason`` so a black-box MCP client can self-correct a
+    parse/validation failure. A closed enum (not bare literals) so a call site can only emit a
+    known token and a typo is a type error rather than a silently-shipped string.
+    """
+
+    INVALID_UUID = "invalid_uuid"
+    INVALID_STATE = "invalid_state"
+    INVALID_TRANSPORT = "invalid_transport"
+    INVALID_EXTERNAL_REF = "invalid_external_ref"
+    MISSING_REQUIRED_FIELD = "missing_required_field"
+    INVALID_TIMEOUT = "invalid_timeout"
+    INVALID_TEXT = "invalid_text"
+    INVALID_PCIE_MATCH = "invalid_pcie_match"
+
+
+_MAX_ECHOED_ID = 64
+"""Cap on a caller-supplied id echoed into ``detail`` (ADR-0166/0174 echo rule)."""
+
+
 def as_uuid(value: str) -> UUID | None:
     try:
         return UUID(value)
     except ValueError:
         return None
+
+
+def _short_id(value: str) -> str:
+    """Bound a caller-supplied id for safe echo into ``detail`` (ADR-0166/0174).
+
+    A malformed id is unbounded caller input; echoing it whole would let a hostile caller
+    reflect an arbitrarily large string into the response. Truncate to ``_MAX_ECHOED_ID`` with
+    an ellipsis marker so the surfaced value stays short and bounded.
+    """
+    if len(value) <= _MAX_ECHOED_ID:
+        return value
+    return f"{value[:_MAX_ECHOED_ID]}…"
+
+
+def invalid_uuid_error(field: str, raw_id: str) -> ToolResponse:
+    """A ``configuration_error`` naming a malformed ``field`` id (ADR-0174).
+
+    The echoed id is bounded (``_short_id``) so an oversized malformed id cannot blow up
+    ``detail``. The full (unbounded) value remains the envelope ``object_id`` as before.
+    """
+    return config_error_reason(
+        raw_id,
+        ConfigErrorReason.INVALID_UUID,
+        detail=f"{field} {_short_id(raw_id)!r} is not a valid UUID",
+    )
 
 
 def clamp_list_limit(limit: int) -> int:
@@ -30,6 +78,29 @@ def config_error(
 ) -> ToolResponse:
     return ToolResponse.failure(
         object_id, ErrorCategory.CONFIGURATION_ERROR, detail=detail, data=data or {}
+    )
+
+
+def config_error_reason(
+    object_id: str,
+    reason: ConfigErrorReason,
+    *,
+    accepted_values: list[str] | None = None,
+    detail: str | None = None,
+) -> ToolResponse:
+    """Build a ``configuration_error`` carrying a machine-readable reason (ADR-0174).
+
+    ``reason`` lands in ``data.reason``; a finite valid set lands in ``data.accepted_values``
+    (sorted for a stable wire order). ``detail`` is a fixed-template human one-liner — it must
+    not interpolate secrets, secret-ref paths, internal hostnames, object-store keys, or a
+    resource name the caller did not supply (ADR-0123). ``configuration_error`` is not a
+    suppressed category, so both ``detail`` and ``data`` pass through unchanged.
+    """
+    data: dict[str, JsonValue] = {"reason": reason.value}
+    if accepted_values is not None:
+        data["accepted_values"] = [value for value in sorted(accepted_values)]
+    return ToolResponse.failure(
+        object_id, ErrorCategory.CONFIGURATION_ERROR, detail=detail, data=data
     )
 
 
@@ -72,12 +143,15 @@ def job_envelope(job: Job, object_key: str, object_id: UUID) -> ToolResponse:
 __all__ = [
     "DEFAULT_LIST_LIMIT",
     "MAX_LIST_LIMIT",
+    "ConfigErrorReason",
     "as_uuid",
     "authorizing",
     "authz_denied",
     "clamp_list_limit",
     "config_error",
+    "config_error_reason",
     "context_from_job",
+    "invalid_uuid_error",
     "job_envelope",
     "not_found",
     "stale_handle",

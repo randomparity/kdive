@@ -395,6 +395,9 @@ def test_get_malformed_allocation_is_config_error(migrated_url: str) -> None:
             resp = await get_allocation(pool, _ctx(), "nope")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
+        assert resp.data["reason"] == "invalid_uuid"
+        assert resp.detail is not None and "nope" in resp.detail
 
     asyncio.run(_run())
 
@@ -935,6 +938,9 @@ def test_wait_not_found_for_absent_and_malformed(migrated_url: str) -> None:
             bad = await wait_allocation(pool, _ctx(), "not-a-uuid", timeout_s=0.0)
         assert absent.error_category == "not_found"
         assert bad.error_category == "configuration_error"
+        # ADR-0174: the malformed-id branch is actionable; the no-leak not_found stays bare.
+        assert bad.data["reason"] == "invalid_uuid"
+        assert absent.detail == "not found" and "reason" not in absent.data
 
     asyncio.run(_run())
 
@@ -950,6 +956,9 @@ def test_wait_non_finite_timeout_is_configuration_error(
             resp = await wait_allocation(pool, _ctx(), queued, timeout_s=timeout_s)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        # ADR-0174: a non-finite timeout names its own reason.
+        assert resp.data["reason"] == "invalid_timeout"
+        assert resp.detail is not None
 
     asyncio.run(_run())
 

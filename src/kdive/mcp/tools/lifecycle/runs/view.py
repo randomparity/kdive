@@ -9,7 +9,7 @@ from kdive.domain.capacity.state import RunState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
-from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools.debug.sessions_read import active_session_ids_for_run
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
@@ -30,7 +30,7 @@ async def get_run(
     """Return a Run the caller's project owns, advertising the boot's required cmdline."""
     uid = _as_uuid(run_id)
     if uid is None:
-        return _config_error(run_id)
+        return _invalid_uuid_error("run_id", run_id)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             run = await RUNS.get(conn, uid)
