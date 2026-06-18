@@ -150,4 +150,4 @@ def _infra(verb: str, **details: str) -> CategorizedError:
     )
 
 
-__all__ = ["RemoteLibvirtBuildVmReaper", "run_id_from_build_vm_name"]
+__all__ = ["RemoteLibvirtBuildVmReaper", "OpenReaperConnection", "run_id_from_build_vm_name"]
