@@ -13,6 +13,38 @@ Mint presigned PUTs for an external Run's build artifacts. Requires operator.
 | `artifacts` | `array` | yes | Declared build artifacts: [{name, sha256 (base64), size_bytes}]. |
 | `run_id` | `string` | yes | The external-build Run id. |
 
+Examples for `artifacts`:
+
+```json
+[
+  {
+    "name": "kernel",
+    "sha256": "rL0Y20zC...base64...",
+    "size_bytes": 12582912
+  }
+]
+```
+
+```json
+[
+  {
+    "chunks": [
+      {
+        "sha256": "p1...base64...",
+        "size_bytes": 5242880
+      },
+      {
+        "sha256": "p2...base64...",
+        "size_bytes": 2097152
+      }
+    ],
+    "name": "vmlinux",
+    "sha256": "kZ8s1f9q...base64...",
+    "size_bytes": 7340032
+  }
+]
+```
+
 ## `artifacts.create_system_upload`
 
 `implemented`
@@ -23,6 +55,38 @@ Mint a presigned PUT for a DEFINED System's rootfs. Requires operator.
 |---|---|---|---|
 | `artifacts` | `array` | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. |
 | `system_id` | `string` | yes | The DEFINED System id. |
+
+Examples for `artifacts`:
+
+```json
+[
+  {
+    "name": "rootfs",
+    "sha256": "rL0Y20zC...base64...",
+    "size_bytes": 12582912
+  }
+]
+```
+
+```json
+[
+  {
+    "chunks": [
+      {
+        "sha256": "p1...base64...",
+        "size_bytes": 5242880
+      },
+      {
+        "sha256": "p2...base64...",
+        "size_bytes": 2097152
+      }
+    ],
+    "name": "rootfs",
+    "sha256": "kZ8s1f9q...base64...",
+    "size_bytes": 7340032
+  }
+]
+```
 
 ## `artifacts.expected_uploads`
 

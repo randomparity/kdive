@@ -8,6 +8,7 @@ metadata rather than emitting blanks.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ class ParamDoc:
     type: str
     required: bool
     description: str
+    examples: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,12 +50,14 @@ def _params(schema: dict[str, Any]) -> tuple[ParamDoc, ...]:
     required = set((schema or {}).get("required", []))
     out: list[ParamDoc] = []
     for name, spec in props.items():
+        examples = spec.get("examples")
         out.append(
             ParamDoc(
                 name=name,
                 type=str(spec.get("type", "any")),
                 required=name in required,
                 description=(spec.get("description") or "").strip(),
+                examples=tuple(examples) if isinstance(examples, list) else (),
             )
         )
     return tuple(out)
@@ -100,6 +104,23 @@ def _badges(d: ToolDoc) -> str:
     return " · ".join(f"`{f}`" for f in flags)
 
 
+def _example_lines(params: tuple[ParamDoc, ...]) -> list[str]:
+    """Render an Examples block for any parameter carrying schema ``examples``.
+
+    The block sits below the parameter table (never inside a table cell), so a
+    multi-line JSON example cannot break the Markdown table the way a piped or
+    newline-bearing description would.
+    """
+    lines: list[str] = []
+    for p in sorted(params, key=lambda x: x.name):
+        if not p.examples:
+            continue
+        lines += [f"Examples for `{p.name}`:", ""]
+        for example in p.examples:
+            lines += ["```json", json.dumps(example, indent=2), "```", ""]
+    return lines
+
+
 def render_namespace(namespace: str, docs: list[ToolDoc]) -> str:
     lines = [_HEADER, "", f"# `{namespace}` tools", ""]
     for d in sorted(docs, key=lambda x: x.name):
@@ -110,6 +131,7 @@ def render_namespace(namespace: str, docs: list[ToolDoc]) -> str:
                 req = "yes" if p.required else "no"
                 lines.append(f"| `{p.name}` | `{p.type}` | {req} | {p.description} |")
             lines.append("")
+            lines += _example_lines(d.params)
     return "\n".join(lines).rstrip() + "\n"
 
 
