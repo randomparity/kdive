@@ -47,7 +47,7 @@ def test_seed_project_sql_params_are_parameterized() -> None:
     assert any("demo'; drop table budgets; --" in params for _statement, params in statements)
 
 
-def test_seed_demo_registers_local_resource(
+def test_seed_demo_registers_discovered_resources(
     monkeypatch: pytest.MonkeyPatch, migrated_url: str
 ) -> None:
     calls: list[str] = []
@@ -58,7 +58,7 @@ def test_seed_demo_registers_local_resource(
 
     monkeypatch.setenv("KDIVE_DATABASE_URL", migrated_url)
     monkeypatch.setattr(
-        "kdive.admin.bootstrap.register_local_resource",
+        "kdive.admin.bootstrap.register_discovered_resources",
         fake_register,
     )
 
@@ -74,16 +74,16 @@ def test_seed_demo_registers_local_resource(
     assert calls == ["registered"]
 
 
-def test_register_local_resource_skips_local_when_disabled(
+def test_register_discovered_resources_skips_local_when_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # ADR-0131: the migrate-time register_local_resource step is a
+    # ADR-0131: the migrate-time resource discovery step is a
     # build_provider_resolver().register_all_discovery() call. With local-libvirt disabled and
     # no other provider configured the resolver is empty, so it registers nothing local and
     # never constructs the local discovery target (which would open the libvirt socket).
     from psycopg_pool import AsyncConnectionPool
 
-    from kdive.admin.bootstrap import register_local_resource
+    from kdive.admin.bootstrap import register_discovered_resources
 
     monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", "false")
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
@@ -93,7 +93,7 @@ def test_register_local_resource_skips_local_when_disabled(
         _fail_local_discovery_target,
     )
 
-    asyncio.run(register_local_resource(cast(AsyncConnectionPool, object())))
+    asyncio.run(register_discovered_resources(cast(AsyncConnectionPool, object())))
 
 
 def _fail_local_discovery_target() -> object:

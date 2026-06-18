@@ -166,7 +166,7 @@ async def seed_demo(
     max_concurrent_allocations: int,
     max_concurrent_systems: int,
 ) -> None:
-    """Seed budget/quota rows and register the local provider resource.
+    """Seed budget/quota rows and register discoverable resources for enabled providers.
 
     A bootstrap convenience for demos and local stacks, not the production onboarding path:
     the writes bypass the audited admin tools (see :func:`seed_project_statements`).
@@ -184,12 +184,12 @@ async def seed_demo(
                 max_concurrent_systems=max_concurrent_systems,
             ):
                 await conn.execute(statement.encode(), params)
-        await register_local_resource(pool)
+        await register_discovered_resources(pool)
     finally:
         await pool.close()
 
 
-async def register_local_resource(pool: AsyncConnectionPool) -> None:
+async def register_discovered_resources(pool: AsyncConnectionPool) -> None:
     from kdive.providers.assembly.composition import ProviderComposition
 
     await ProviderComposition().build_provider_resolver().register_all_discovery(pool)
