@@ -24,7 +24,7 @@ from kdive.domain.state import AllocationState, ResourceStatus, SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.payloads import Authorizing, SystemPayload
-from kdive.providers.assembly.composition import build_provider_resolver
+from kdive.providers.assembly.composition import ProviderComposition
 from tests.integration._seed import provisioning_profile
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -100,7 +100,7 @@ def test_provision_routes_to_the_fault_inject_runtime_and_records_its_domain(
                 )
             # The handler resolves the System's runtime by its Resource kind (fault-inject)
             # through the opt-in resolver.
-            resolver = build_provider_resolver(enable_fault_inject=True)
+            resolver = ProviderComposition().build_provider_resolver(enable_fault_inject=True)
             async with pool.connection() as conn:
                 await systems_handlers.provision_handler(conn, job, resolver=resolver)
 

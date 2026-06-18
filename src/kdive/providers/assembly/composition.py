@@ -417,25 +417,9 @@ class ProviderComposition:
         return None
 
 
-def build_provider_resolver(
-    *,
-    enable_fault_inject: bool | None = None,
-    enable_remote_libvirt: bool | None = None,
-    enable_local_libvirt: bool | None = None,
-    secret_registry: SecretRegistry | None = None,
-) -> ProviderResolver:
-    """Assemble the per-deployment ``ResourceKind -> ProviderRuntime`` registry."""
-    return ProviderComposition(secret_registry=secret_registry).build_provider_resolver(
-        enable_fault_inject=enable_fault_inject,
-        enable_remote_libvirt=enable_remote_libvirt,
-        enable_local_libvirt=enable_local_libvirt,
-    )
-
-
 __all__ = [
     "build_fault_inject_runtime",
     "build_local_runtime",
-    "build_provider_resolver",
     "build_remote_runtime",
     "ensure_local_host_registered",
     "ProviderComposition",

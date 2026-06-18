@@ -64,7 +64,8 @@ class ProviderBinding:
 class ProviderResolver:
     """A static ``ResourceKind -> ProviderRuntime`` registry.
 
-    Built per deployment by :func:`kdive.providers.assembly.composition.build_provider_resolver`.
+    Built per deployment by
+    :meth:`kdive.providers.assembly.composition.ProviderComposition.build_provider_resolver`.
     Selection is exhaustive and fail-closed: an unregistered kind raises
     ``configuration_error`` at resolution. The map may be empty (a deployment that disables
     every provider, ADR-0131); resolution then fails closed for every kind and discovery

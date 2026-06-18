@@ -190,6 +190,6 @@ async def seed_demo(
 
 
 async def register_local_resource(pool: AsyncConnectionPool) -> None:
-    from kdive.providers.assembly.composition import build_provider_resolver
+    from kdive.providers.assembly.composition import ProviderComposition
 
-    await build_provider_resolver().register_all_discovery(pool)
+    await ProviderComposition().build_provider_resolver().register_all_discovery(pool)
