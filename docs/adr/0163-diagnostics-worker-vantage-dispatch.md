@@ -45,33 +45,46 @@ hang."
    `provider`; the handler re-resolves `remote_config_from_inventory()` at probe time on the worker,
    so no host identity or secret material rides on the queue.
 
-2. **The worker handler runs the two real checks and returns their results as an object-store
-   blob.** It builds `ProviderTlsCheck` + `GdbstubAclCheck` with production probes, runs each
-   through `run_check` (per-check timeout → an unreachable host is an `error`, never a hang),
-   serializes the `CheckResult`s to a small JSON blob, and returns its key as `result_ref` — the
-   queue's existing result channel. The blob is operator-config-derived only and passes the
-   redactor before storage as a defense-in-depth backstop.
+2. **The worker handler runs the two real checks and returns their results inline.** It builds
+   `ProviderTlsCheck` + `GdbstubAclCheck` with production probes, runs each through `run_check`
+   (per-check timeout → an unreachable host is an `error`, never a hang), serializes the
+   `CheckResult`s to a compact JSON string, and returns it inline as `result_ref`. The verdict is
+   small, operator-config-derived (no tenant data, no secret material), and read only by the
+   dispatcher, so it rides inline rather than as an object-store blob — which avoids an unreaped
+   per-run blob (every `doctor` run uses a unique `dedup_key`) and keeps the object store out of the
+   diagnostics path. The probes never place secret material in `detail`/`fix` (asserted by test);
+   that is the control, not an op-scoped redactor over a result that holds no secrets.
 
-3. **The probes.** `provider_tls` opens the `qemu+tls://` connection over the same path reachability
-   uses: a clean open validates the chain → `pass`; a cert-verification failure → `fail` (reissue /
-   `KDIVE_PROVIDER_CA`); a transport failure → `error`. `gdbstub_acl` is a *policy* check with no
-   live listener: the worker attempts a TCP connect to `gdb_addr:<lowest port in range>` — success
-   or a fast `ECONNREFUSED` means the ACL admits the range (`pass`); a connect timeout means the
-   firewall drops it (`fail`); any other error is indeterminate (`error`). An unset `gdb_addr` is an
-   `error` (cannot probe an unset address), not a guess.
+3. **The probes.** `provider_tls` does a direct TLS handshake (Python `ssl`) to the libvirt TLS
+   endpoint with the materialized client cert/key and the configured CA — *not* a libvirt open,
+   because `remote_connection` wraps a failed qemu+tls open opaquely as `TRANSPORT_FAILURE`, which
+   cannot tell a bad cert from a down host (the distinction this check exists to make). Handshake OK
+   → `pass`; `ssl.SSLCertVerificationError` → `fail` (reissue / set the provider CA); refused /
+   timeout / other `SSLError` → `error` (the safe direction — an ambiguous handshake is "could not
+   validate," never a fabricated `fail`). Classifying on the typed `ssl` exception keeps the verdict
+   stable across libvirt versions. `gdbstub_acl` is a *policy* check with no live listener: the
+   worker attempts a TCP connect to `gdb_addr:<lowest port in range>` — connect or fast
+   `ECONNREFUSED` → `pass` (the SYN reached the host TCP stack, excluding the M2 `DROP`/blackhole
+   fault); connect timeout → `fail` (the firewall drops it); any other error → `error`. An unset
+   `gdb_addr` is an `error`, not a guess.
 
 4. **The server dispatches and bounded-waits behind a `WorkerCheckDispatcher` port.** The
-   production dispatcher enqueues the job with a per-call-unique `dedup_key` (no single-flight —
-   these are cheap reads, unlike the guest-provisioning egress probe), polls the job row until
-   terminal or the remaining overall deadline elapses, then maps: succeeded → the real results;
-   dead-lettered → `error` carrying the job's `error_category`; deadline-with-no-pickup →
-   `WORKER_UNAVAILABLE` (`transport_failure`, the `/livez`/`/readyz` detail). The dispatcher owns
-   the entire worker-vantage outcome, keeping `DiagnosticsService.run()` a simple merge.
+   production dispatcher enqueues the job with a per-call-unique `dedup_key` and `max_attempts=1`
+   (no single-flight — these are cheap reads, unlike the guest-provisioning egress probe; no retry —
+   a transient failure dead-letters to a clean `error` instead of cycling the job under the
+   dispatcher's poll), polls the job row until terminal or the **reserved dispatch budget** elapses,
+   then maps: succeeded → the real results (malformed inline result → `error`); dead-lettered →
+   `error` carrying the job's `error_category`; budget-with-no-pickup → `WORKER_UNAVAILABLE`
+   (`transport_failure`, the `/livez`/`/readyz` detail). The dispatcher gets a budget floor
+   (`max(remaining_overall, WORKER_DISPATCH_BUDGET)`) so a slow server-vantage check cannot starve
+   it to near-zero and manufacture a spurious `WORKER_UNAVAILABLE` on a healthy worker; the overall
+   deadline is sized to cover the server checks plus that floor. The dispatcher owns the entire
+   worker-vantage outcome, keeping `DiagnosticsService.run()` a simple merge.
 
-5. **`default_service_factory` wires the dispatcher when remote-libvirt is configured and a store is
-   available.** When the object store is unconfigured the factory passes `worker_dispatcher=None`
-   and the service falls back to today's `FEATURE_NOT_ENABLED` substitution rather than crashing —
-   so the honest non-hang signal is preserved across every degraded state.
+5. **`default_service_factory` wires the dispatcher when remote-libvirt is configured.** It captures
+   the pool (no object store). When remote-libvirt is not configured the factory passes
+   `worker_dispatcher=None` and the service keeps today's `FEATURE_NOT_ENABLED` substitution — so
+   the honest non-hang signal is preserved across every degraded state.
 
 ## Consequences
 
@@ -85,7 +98,12 @@ hang."
 - New surface: a `JobKind` value + migration `0040`, a payload model, a worker handler
   (`jobs/handlers/diagnostics.py`) registered in `_HANDLER_REGISTRARS`, two probe adapters, a
   dispatcher module, and an optional `DiagnosticsService` constructor argument. No change to the
-  provider seam, the agent-facing tool surface, or the `ops.diagnostics` request/response shape.
+  provider seam, the agent-facing tool surface, the object store, or the `ops.diagnostics`
+  request/response shape.
+- `gdbstub_acl` catches a `DROP`/blackholed range (the observed M2 fault) and the no-rule case, but
+  a fast `ECONNREFUSED` cannot distinguish "no listener" from an iptables `-j REJECT` rule, so a
+  REJECT-style block reads as `pass`. This is an accepted limitation; the `pass` detail is worded
+  "host TCP stack reachable on the gdbstub range," not "the ACL fully admits it."
 - The live worker→host probe is hardware-gated (like reachability/base-image-staging); CI verifies
   the three-state mapping against injected fakes, and an OPERATOR-TODO records the live run.
 
@@ -105,6 +123,16 @@ hang."
 - **Single-flight the diagnostics job per provider** (as the egress probe is). Rejected as
   unneeded: these checks only read, so two concurrent `doctor` runs enqueuing two jobs costs
   nothing — the single-flight guard exists for the egress probe because it provisions a guest.
+- **Return the worker result as an object-store blob** (the usual `result_ref` = object key
+  convention). Rejected: with a per-call-unique `dedup_key` every `doctor` run would leave a blob
+  and nothing reaps diagnostics blobs (unbounded orphan growth), and it would drag the object store
+  into the server-side diagnostics path. The verdict is two small, non-secret `CheckResult`s read
+  only by the dispatcher, so it rides inline in `result_ref` — a deliberate, scoped exception.
+- **Classify `provider_tls` by libvirt's connection-open outcome / error message.** Rejected: a
+  failed qemu+tls open is wrapped opaquely as `TRANSPORT_FAILURE`, so a bad cert and a down host are
+  indistinguishable there, and error-string matching is version-fragile. A direct `ssl` handshake
+  yields a typed `SSLCertVerificationError` that separates `fail` (bad cert) from `error` (host
+  down) unambiguously.
 - **A live-port `gdbstub_acl` check against a running debug target.** Rejected by ADR-0091 §2: the
   gdbstub port is per-domain and a cold preflight has no concrete port; the range/policy check
   catches the closed-ACL fault without provisioning a guest.

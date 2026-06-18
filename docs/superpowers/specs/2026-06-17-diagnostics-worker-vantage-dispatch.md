@@ -65,38 +65,65 @@ and no secret material on the queue.
 
 Resolves the remote-libvirt config, builds `ProviderTlsCheck` + `GdbstubAclCheck` with the
 production probes, runs each through `run_check` (per-check timeout, so a black-holing host is an
-`error`, never a hang), serializes the resulting `CheckResult`s to a small JSON blob in the object
-store, and returns its key as the job's `result_ref`.
+`error`, never a hang), serializes the resulting `CheckResult`s to a compact JSON string, and
+returns that string **inline** as the job's `result_ref`.
+
+`result_ref` is a nullable `text` column with no "is an object-store key" enforcement
+(`domain/models.py:372`), and the diagnostics dispatcher is the *only* reader of this job kind's
+result, so the verdict rides inline rather than as an object reference. This is a deliberate,
+scoped exception to the usual "`result_ref` is an object key" convention: it avoids a per-run
+object-store blob that nothing reaps (every `doctor` run uses a unique `dedup_key`, so a blob per
+run would orphan unboundedly — there is no diagnostics-blob reaper), and it keeps the object store
+out of the server-side `ops.diagnostics` path entirely. The payload is small (two `CheckResult`s)
+and bounded.
 
 - **Config resolution failure** (no/many `[[remote_libvirt]]` instances, malformed inventory)
   raises `CategorizedError(CONFIGURATION_ERROR)` from `remote_config_from_inventory()`; the handler
   lets it propagate so the job dead-letters and the dispatcher maps it to an `error` verdict.
-- **Result blob** is operator-config-derived only (provider name, `gdb_addr`, port range, a CA
-  label). It carries no tenant data and no secret material; the probes are written to never place
-  secret material in `detail`/`fix`. A redaction pass over the serialized blob is applied before it
-  is stored, as a defense-in-depth backstop consistent with the redaction invariant.
+- **No secret material on the wire.** The inline result is operator-config-derived only (provider
+  name, `gdb_addr`, port range, a CA label) — no tenant data, no secret material. The probes are
+  written to never place secret material in `detail`/`fix`, asserted by a test; this is the actual
+  control (the result is not a secret-bearing surface, so no op-scoped redactor is relied on).
 
 ### 3. Production probe adapters
 
-`diagnostics/provider_tls.py` — `provider_tls_probe()` builds a `TlsProbe`. It opens the
-`qemu+tls://` connection over the same `remote_connection` path reachability uses (blocking work
-offloaded with `asyncio.to_thread`), with a fresh per-probe `SecretRegistry` for TLS
-materialization:
-- connection opens and `getInfo()` returns → `TlsProbeOutcome.VALID` (libvirt validated the chain
-  against the configured CA) → `pass`.
-- libvirt error whose category is `CONFIGURATION_ERROR` arising from cert verification, or a raw
-  `libvirt.libvirtError` whose message indicates a TLS/cert verification failure → `INVALID` →
-  `fail` (reissue / set `KDIVE_PROVIDER_CA`).
-- `TRANSPORT_FAILURE` (TLS connect failed, host down/port closed) → `UNREACHABLE` → `error`.
+`diagnostics/provider_tls.py` — `provider_tls_probe()` builds a `TlsProbe`. It does **not**
+piggy-back on libvirt's connection open: a qemu+tls open failure is wrapped opaquely as
+`TRANSPORT_FAILURE` by `remote_connection` (`transport.py`), so a cert-verification failure is
+indistinguishable from host-down there — and the check's whole value is telling those two apart.
+Instead the probe does a direct TLS handshake (Python `ssl`) to the libvirt TLS endpoint
+(`host:16514`) using the materialized client cert/key and the configured CA, classifying via `ssl`
+exceptions:
+- handshake completes → `TlsProbeOutcome.VALID` → `pass`.
+- `ssl.SSLCertVerificationError` (server cert not signed by the configured CA, or otherwise fails
+  verification) → `INVALID` → `fail` (reissue / set the provider CA).
+- `ConnectionRefusedError` / `socket.timeout` / `OSError` (host down, port closed, network drop) →
+  `UNREACHABLE` → `error`.
+- any other `ssl.SSLError` that is **not** a verification failure (protocol mismatch, etc.) →
+  `UNREACHABLE` → `error` (the safe direction: an ambiguous handshake failure is reported as
+  "could not validate," never a fabricated `fail`).
+
+Classifying on the typed `ssl` exception (not a libvirt error string) keeps the verdict stable
+across libvirt versions; a unit test pins the cert-verification shape so a future regression fails
+CI. The TLS materialization reuses the transport's secret-ref → pkipath path; blocking work is
+offloaded with `asyncio.to_thread`.
 
 `diagnostics/gdbstub_acl.py` — `gdbstub_acl_probe()` builds a `GdbstubAclProbe`. A policy check, no
 live listener (ADR-0091 §2): it attempts a TCP connect from the worker to `host:port` for the
 lowest port in the configured range (one representative port — the ACL admits a range, not a single
 port), with a short connect timeout:
-- connect succeeds, **or** is refused fast (`ECONNREFUSED` — port reachable, nothing listening) →
-  `True` (ACL admits) → `pass`.
-- connect times out (firewall `DROP`) → `False` (blocked) → `fail` (open the host firewall/ACL).
+- connect succeeds, **or** is refused fast (`ECONNREFUSED`) → `True` → `pass`. A fast refusal proves
+  the SYN reached the host's TCP stack, which excludes the M2 fault (a path-level `DROP`/blackhole).
+- connect times out (firewall `DROP`/blackhole) → `False` (blocked) → `fail` (open the host
+  firewall/ACL).
 - any other error (DNS failure, unexpected `OSError`) → `None` (indeterminate) → `error`.
+
+**Known limitation:** the fast-refusal signal cannot distinguish "no listener" from an iptables
+`-j REJECT` rule (both return `ECONNREFUSED` promptly), so a REJECT-style block reads as `pass`.
+The check catches the M2 fault class (a `DROP`/blackholed range, the observed failure) and the
+common no-rule-at-all case; it does not catch a deliberate REJECT. The `pass` detail is therefore
+worded "host TCP stack reachable on the gdbstub range" rather than asserting the ACL fully admits
+it, and the ADR records this as an accepted limitation.
 
 `gdb_addr` is required for the probe; when the resolved config has `gdb_addr is None` the handler
 reports `gdbstub_acl` as `error` (cannot probe an unset address) rather than guessing.
@@ -115,22 +142,41 @@ async def run_worker_checks(
 ) -> list[CheckResult]: ...
 ```
 
-The production `JobWorkerCheckDispatcher` captures the pool + object store. It:
+The production `JobWorkerCheckDispatcher` captures the pool only (no object store — the result is
+inline). It:
 
 1. Enqueues a `DIAGNOSTICS_WORKER_CHECK` job with a **per-call unique `dedup_key`**
-   (`f"diagnostics:{provider}:{uuid4}"`) — no single-flight, because (unlike the egress probe)
-   these are cheap reads, so two concurrent `doctor` runs harmlessly enqueue two jobs.
-2. Polls `get_by_dedup_key` on a short interval until the job reaches a terminal state or the
-   remaining deadline elapses.
-3. On **succeeded** → reads + deserializes the `result_ref` blob into `CheckResult`s.
+   (`f"diagnostics:{provider}:{uuid4}"`) and **`max_attempts=1`** — no single-flight (unlike the
+   egress probe, these are cheap reads, so two concurrent `doctor` runs harmlessly enqueue two
+   jobs), and no retry (a transient probe failure dead-letters immediately to a clean `error`
+   verdict rather than re-opening TLS / re-probing the ACL and cycling the job queued→running→queued
+   under the dispatcher's poll, which would make the bounded wait race against the retry).
+2. Polls `get_by_dedup_key` every ~0.25s until the job reaches a terminal state or the dispatch
+   budget elapses.
+3. On **succeeded** → parses the inline `result_ref` JSON into `CheckResult`s (a malformed/empty
+   `result_ref` → an `error` verdict, never a crash).
 4. On **failed** → returns one `error` `CheckResult` per worker-vantage check, carrying the job's
    `error_category` (e.g. `configuration_error` for a bad inventory).
-5. On **deadline reached with the job still queued/running** → returns `WORKER_UNAVAILABLE`
+5. On **budget reached with the job still queued/running** → returns `WORKER_UNAVAILABLE`
    substitutions (`transport_failure`, the `/livez`/`/readyz` detail) — the exact signal ADR-0139
    reserved for "dispatch exists but the worker cannot pick the job up." Never a hang.
 
 The dispatcher owns the full worker-vantage outcome (run or substitute), keeping
 `DiagnosticsService.run()` a simple merge.
+
+#### Timing budget
+
+The worker polls the queue every 1s (`WorkerConfig.poll_interval`) and runs two bounded probes, so
+the dispatch needs a window comfortably above ~2s to avoid a spurious `WORKER_UNAVAILABLE` on a
+healthy worker. A naive "give the dispatcher whatever overall budget remains after the
+server-vantage checks" is unsafe: three server checks can each burn up to the 10s per-check timeout
+against a slow host and starve the dispatcher to near-zero. So the dispatcher is given a **reserved
+floor** (`WORKER_DISPATCH_BUDGET`, ~15s): the service runs the server-vantage checks first, then
+calls the dispatcher with `max(remaining_overall, WORKER_DISPATCH_BUDGET)`, and the overall timeout
+is sized to cover both phases (server checks + the worker floor). This guarantees a healthy worker
+always gets enough time, so a `WORKER_UNAVAILABLE` verdict means a genuine pickup failure, not a
+server-check that ran long. The per-probe timeouts on the worker side still bound a black-holing
+host within that floor.
 
 ### 5. Service + factory wiring
 
@@ -140,20 +186,21 @@ present it is called with the remaining overall budget and its results are merge
 the legacy `unavailable_worker_checks` + `substitution_reason` path is **only** used when
 `worker_dispatcher is None`.
 
-`default_service_factory` constructs the production `JobWorkerCheckDispatcher` (pool + store) and
-passes it when `is_remote_libvirt_configured()`. The factory therefore needs the pool and an object
-store; `ops.diagnostics.register` already has the pool, and resolves the store the same way the
-other ops tools do (`object_store_from_env`, degrading to a `None` dispatcher when S3 is
-unconfigured so the service falls back to the honest substitution rather than crashing).
+`default_service_factory` constructs the production `JobWorkerCheckDispatcher` (pool only) and
+passes it when `is_remote_libvirt_configured()`. The factory therefore needs the pool, which
+`ops.diagnostics.register` already has — so the factory closure captures it. When remote-libvirt is
+not configured, the factory passes `worker_dispatcher=None` and the service keeps today's
+`FEATURE_NOT_ENABLED` substitution (there are no worker-vantage checks to dispatch anyway). No
+object store is involved in the diagnostics path.
 
 ### Substitution semantics (acceptance criterion 2)
 
 | Deployment state | worker-vantage result |
 |---|---|
-| No dispatch wired (`worker_dispatcher is None`: S3 unconfigured, or remote-libvirt not configured) | `FEATURE_NOT_ENABLED` → `not_implemented` (unchanged) |
+| No dispatch wired (`worker_dispatcher is None`: remote-libvirt not configured) | `FEATURE_NOT_ENABLED` → `not_implemented` (unchanged) |
 | Dispatch wired, worker runs the job | real `pass`/`fail`/`error` from the probes |
-| Dispatch wired, job dead-letters (bad config) | `error` with the job's `error_category` |
-| Dispatch wired, worker never picks the job up within the deadline | `WORKER_UNAVAILABLE` → `transport_failure`, "check /livez/readyz" |
+| Dispatch wired, job dead-letters (bad config / malformed result) | `error` with the job's `error_category` |
+| Dispatch wired, worker never picks the job up within the dispatch budget | `WORKER_UNAVAILABLE` → `transport_failure`, "check /livez/readyz" |
 
 This honors the AC's intent — no hang, no fabricated `fail`, an honest three-state `error` when the
 check cannot run — and uses ADR-0139's `WORKER_UNAVAILABLE` for the genuine worker-down case (the
@@ -162,19 +209,23 @@ deployments that wire no dispatch.
 
 ## Testing
 
-- **Probe units** — each probe maps its three observable conditions to the right outcome, with a
-  fake connection/socket: TLS valid/invalid/unreachable; ACL admit (connect + refused-fast) /
-  blocked (timeout) / indeterminate; `gdb_addr is None`.
-- **Handler unit** — builds both checks, runs them, serializes/round-trips the blob; a
-  config-resolution failure propagates (job dead-letters); the blob carries no secret material.
-- **Dispatcher unit** — fake pool/store + a seeded job row: succeeded → real results; failed →
-  `error` with category; deadline-with-no-pickup → `WORKER_UNAVAILABLE`. No real DB needed beyond
-  the existing queue test harness; a DB-backed test exercises enqueue→poll once.
+- **Probe units** — each probe maps its observable conditions to the right outcome with a fake
+  socket/TLS connector: TLS handshake-ok → valid, `SSLCertVerificationError` → invalid,
+  refused/timeout/other-`SSLError` → unreachable; ACL connect-ok/refused-fast → admit, timeout →
+  blocked, other → indeterminate; `gdb_addr is None`.
+- **Handler unit** — builds both checks, runs them, serializes + round-trips the inline JSON; a
+  config-resolution failure propagates (job dead-letters); the serialized result contains no secret
+  material (asserted against a registry seeded with a sentinel secret).
+- **Dispatcher unit** — fake pool + a seeded job row: succeeded (inline result) → real results;
+  failed → `error` with category; malformed `result_ref` → `error`; budget-with-no-pickup →
+  `WORKER_UNAVAILABLE`; budget floor is honored when the passed-in remaining budget is near zero. A
+  DB-backed test exercises enqueue→poll→complete once through the real queue.
 - **Service unit** — with a fake dispatcher returning a fixed list, the report merges
   server-vantage + worker-vantage results; with `worker_dispatcher=None`, the legacy substitution
   is unchanged.
-- **Default-factory unit** — remote-libvirt configured + store present → a dispatcher-backed
-  service; store absent → `None` dispatcher → substitution retained.
+- **Default-factory unit** — remote-libvirt configured → a dispatcher-backed service (worker-vantage
+  checks run/substitute via the dispatcher, not the static `FEATURE_NOT_ENABLED` path); not
+  configured → `None` dispatcher → substitution retained.
 - **Migration** — `test_migrate.py` already asserts the `jobs_kind_check`↔`JobKind` tie; the new
   value flows through it.
 - **No live-hardware test.** Like reachability and base-image-staging, the live worker→host probe
