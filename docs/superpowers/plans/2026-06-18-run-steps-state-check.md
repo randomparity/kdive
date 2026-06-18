@@ -223,15 +223,21 @@ from kdive.db.idempotency import (
 
 Tests:
 
+Every `claim_run_step` call is wrapped in `asyncio.wait_for(..., timeout=5)`. The
+pre-guard failure mode for an unknown state is an unbounded poll loop, and a
+mis-staged stale row would also leave `claim_run_step` waiting forever; `wait_for`
+turns either hang into a deterministic `TimeoutError` so the suite never stalls
+(`pytest-timeout` / the `--timeout` flag is not a dependency of this repo).
+
 ```python
 def test_claim_run_step_replays_succeeded(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             run_id = await _seed_run(conn)
-            claim = await claim_run_step(conn, run_id, "s")
+            claim = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
             assert claim.claimed is True
             await complete_run_step(conn, run_id, "s", {"v": 1})
-            replay = await claim_run_step(conn, run_id, "s")
+            replay = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
             assert replay.claimed is False
             assert replay.result == {"v": 1}
 
@@ -244,13 +250,14 @@ def test_claim_run_step_reclaims_stale_running(migrated_url: str) -> None:
             run_id = await _seed_run(conn)
             # Stage a running row aged past the 30-minute stale interval. The
             # run_steps_set_updated_at trigger fires BEFORE UPDATE only, so an INSERT
-            # with an explicit old updated_at is not rewritten to now().
+            # with an explicit old updated_at is not rewritten to now(). wait_for bounds
+            # the call so a non-aged row surfaces as TimeoutError, not a hang.
             await conn.execute(
                 "INSERT INTO run_steps (run_id, step, state, updated_at) "
                 "VALUES (%s, 's', 'running', now() - interval '31 minutes')",
                 (run_id,),
             )
-            claim = await claim_run_step(conn, run_id, "s")
+            claim = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
             assert claim.claimed is True  # stale row deleted, freshly re-claimed
 
     asyncio.run(_run())
@@ -270,18 +277,19 @@ def test_claim_run_step_raises_on_unknown_state(migrated_url: str) -> None:
                 "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 's', 'bogus')",
                 (run_id,),
             )
+            # Without the guard, claim_run_step polls forever -> wait_for raises
+            # TimeoutError (not RuntimeError), so pytest.raises fails: the red signal.
+            # With the guard it raises RuntimeError before the timeout.
             with pytest.raises(RuntimeError, match="unknown state"):
-                await claim_run_step(conn, run_id, "s")
+                await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
 
     asyncio.run(_run())
 ```
 
-- [ ] **Step 2: Run the tests to verify the unknown-state one fails (hangs/does-not-raise)**
+- [ ] **Step 2: Run the tests to verify the unknown-state one fails**
 
-Run: `uv run python -m pytest tests/db/test_idempotency.py::test_claim_run_step_raises_on_unknown_state -q --timeout=15`
-Expected: FAIL — without the guard, `claim_run_step` loops on the unknown row (the `--timeout` aborts the hang, or `pytest.raises` fails if it somehow returns). The replay and stale tests should already PASS (they exercise existing behavior).
-
-Note: if `pytest-timeout` is not installed, instead confirm the test hangs by interrupting after a few seconds, then proceed; the guard makes it deterministic. Check availability with `uv run python -m pytest --help | rg timeout`.
+Run: `uv run python -m pytest tests/db/test_idempotency.py::test_claim_run_step_raises_on_unknown_state -q`
+Expected: FAIL in ~5s — without the guard, `claim_run_step` loops, so `asyncio.wait_for` raises `TimeoutError` and `pytest.raises(RuntimeError)` fails (it caught the wrong exception type). No hang, no `--timeout` flag needed. The replay and stale tests should already PASS (they exercise existing behavior).
 
 - [ ] **Step 3: Add the read-path guard**
 
