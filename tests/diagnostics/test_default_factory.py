@@ -27,6 +27,7 @@ from kdive.diagnostics.checks import (
     CheckStatus,
     ReachabilityOutcome,
     SecretRefCheck,
+    TlsProbeOutcome,
 )
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
@@ -38,6 +39,7 @@ from kdive.diagnostics.service import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
+from kdive.providers.remote_libvirt.diagnostics import contribution as remote_contribution
 
 
 def _factory(
@@ -142,6 +144,34 @@ def test_provider_diagnostics_registration_includes_remote_libvirt() -> None:
     assert len(contributions) == 1
     assert contributions[0].checks
     assert contributions[0].unavailable_worker_checks
+
+
+def test_remote_worker_checks_build_runnable_tls_and_gdbstub_checks(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _with_remote_instance(monkeypatch, tmp_path)
+
+    async def tls_probe(ca_path: str) -> TlsProbeOutcome:
+        assert ca_path == "remote/cacert.pem"
+        return TlsProbeOutcome.VALID
+
+    async def acl_probe(host: str, port_range: str) -> bool | None:
+        assert host == "192.168.10.20"
+        assert port_range == "47000-47099"
+        return True
+
+    monkeypatch.setattr(remote_contribution, "provider_tls_probe", lambda _config: tls_probe)
+    monkeypatch.setattr(remote_contribution, "gdbstub_acl_probe", lambda: acl_probe)
+
+    checks = remote_contribution.diagnostic_contribution().worker_checks()
+    assert {check.id for check in checks} == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
+    results = [asyncio.run(check.run()) for check in checks]
+    by_id = {result.check_id: result for result in results}
+
+    assert by_id[PROVIDER_TLS_ID].status is CheckStatus.PASS
+    assert by_id[PROVIDER_TLS_ID].provider == "remote-libvirt"
+    assert by_id[GDBSTUB_ACL_ID].status is CheckStatus.PASS
+    assert by_id[GDBSTUB_ACL_ID].provider == "remote-libvirt"
 
 
 def test_secret_ref_passes_when_no_ref_is_required(monkeypatch, tmp_path: Path) -> None:
