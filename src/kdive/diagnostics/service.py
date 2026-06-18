@@ -71,8 +71,7 @@ class WorkerVantageSubstitution(StrEnum):
     and a programmatic caller — can tell them apart without parsing prose:
 
     - ``WORKER_UNAVAILABLE`` — dispatch exists but the worker cannot pick the job up; the detail
-      points at the health endpoints (ADR-0090). This is the historical meaning of a bare
-      ``worker_available=False`` and stays the default.
+      points at the health endpoints (ADR-0090). This is the default substitution cause.
     - ``FEATURE_NOT_ENABLED`` — no worker-job dispatch is wired in this deployment, so the check
       cannot run regardless of worker health (#484). Pointing at ``/livez``/``/readyz`` here is
       misleading (it reads as a worker outage); the detail says the feature is not enabled.
@@ -102,6 +101,24 @@ class WorkerVantageCheck:
 
     id: str
     provider: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerVantageSubstitutionMode:
+    """Report worker-vantage checks as substituted errors instead of running them."""
+
+    reason: WorkerVantageSubstitution
+    checks: Sequence[WorkerVantageCheck] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerVantageDispatchMode:
+    """Delegate all worker-vantage outcomes to a dispatcher."""
+
+    dispatcher: WorkerCheckDispatcher
+
+
+type WorkerVantageMode = WorkerVantageSubstitutionMode | WorkerVantageDispatchMode
 
 
 def worker_unavailable_results(
@@ -154,12 +171,7 @@ class DiagnosticsService:
         checks: Sequence[Check],
         per_check_timeout: float,
         overall_timeout: float | None = None,
-        worker_available: bool = True,
-        substitution_reason: WorkerVantageSubstitution = (
-            WorkerVantageSubstitution.WORKER_UNAVAILABLE
-        ),
-        unavailable_worker_checks: Sequence[WorkerVantageCheck] = (),
-        worker_dispatcher: WorkerCheckDispatcher | None = None,
+        worker_mode: WorkerVantageMode | None = None,
     ) -> None:
         """Build the service.
 
@@ -171,29 +183,16 @@ class DiagnosticsService:
                 exhausted, every not-yet-run check is reported ``error`` instead of being
                 run, so used as a gate ``doctor`` reports a clean ``error`` rather than
                 hanging on a black-holed host. ``None`` bounds the run only per check.
-            worker_available: Whether the worker can pick up worker-vantage jobs. When
-                ``False``, worker-vantage checks are not run — they surface as a substituted
-                ``error`` whose cause is named by ``substitution_reason`` (ADR-0091 §1).
-            substitution_reason: Why a worker-vantage check is substituted when
-                ``worker_available`` is ``False`` (ADR-0139). Defaults to ``WORKER_UNAVAILABLE``
-                (the health-endpoint detail), preserving the historical meaning of a bare
-                ``worker_available=False``; pass ``FEATURE_NOT_ENABLED`` when no worker-job
-                dispatch is wired so the detail does not misread as a worker outage.
-            unavailable_worker_checks: Worker-vantage diagnostics that this deployment cannot
-                run at all. They are explicit result metadata, not runnable ``Check`` objects.
-            worker_dispatcher: When set, owns the worker-vantage outcome (ADR-0164): ``run`` calls
-                it to obtain real ``provider_tls``/``gdbstub_acl`` results (or a substituted
-                ``error`` on a worker that does not pick the job up in time) instead of the static
-                ``unavailable_worker_checks`` substitution. ``None`` keeps the legacy substitution
-                path unchanged.
+            worker_mode: How worker-vantage checks are handled. ``None`` runs worker-vantage
+                ``Check`` objects directly when they are in ``checks``. Substitution mode reports
+                skipped worker checks and declared unavailable checks as explicit errors with a
+                named cause. Dispatch mode delegates the worker-vantage outcome to the worker-job
+                dispatcher (ADR-0164).
         """
         self._checks = list(checks)
         self._timeout = per_check_timeout
         self._overall_timeout = overall_timeout
-        self._worker_available = worker_available
-        self._substitution_reason = substitution_reason
-        self._unavailable_worker_checks = list(unavailable_worker_checks)
-        self._worker_dispatcher = worker_dispatcher
+        self._worker_mode = worker_mode
 
     async def run(self) -> DiagnosticsReport:
         """Run every check and return the aggregated report.
@@ -206,16 +205,16 @@ class DiagnosticsService:
         runnable = [c for c in self._checks if self._can_run(c)]
         skipped = [c for c in self._checks if not self._can_run(c)]
         results = await self._run_within_budget(runnable)
-        if self._worker_dispatcher is not None:
+        if isinstance(self._worker_mode, WorkerVantageDispatchMode):
             # The dispatcher owns the entire worker-vantage outcome (run on the worker, or a
             # substituted error on a worker that does not pick the job up in time) — ADR-0164.
-            results.extend(await self._worker_dispatcher.run_worker_checks())
-        else:
-            results.extend(worker_unavailable_results(skipped, self._substitution_reason))
+            results.extend(await self._worker_mode.dispatcher.run_worker_checks())
+        elif isinstance(self._worker_mode, WorkerVantageSubstitutionMode):
+            results.extend(worker_unavailable_results(skipped, self._worker_mode.reason))
             results.extend(
                 worker_unavailable_results(
-                    self._unavailable_worker_checks,
-                    self._substitution_reason,
+                    self._worker_mode.checks,
+                    self._worker_mode.reason,
                 )
             )
         return DiagnosticsReport(results=results)
@@ -254,7 +253,9 @@ class DiagnosticsService:
         ]
 
     def _can_run(self, check: Check) -> bool:
-        return self._worker_available or check.vantage is not Vantage.WORKER
+        if self._worker_mode is None:
+            return True
+        return check.vantage is not Vantage.WORKER
 
 
 def _configured_secret_refs() -> list[tuple[str, bool]]:
@@ -360,7 +361,7 @@ def default_service_factory(
         )
     checks: list[Check] = [_secret_ref_check(), *_build_host_checks()]
     unavailable_worker_checks: list[WorkerVantageCheck] = []
-    worker_dispatcher: WorkerCheckDispatcher | None = None
+    worker_mode: WorkerVantageMode | None = None
     from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 
     for contribution in diagnostic_provider_contributions():
@@ -373,13 +374,19 @@ def default_service_factory(
             # module, so a top-level import here would be a cycle (ADR-0164).
             from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 
-            worker_dispatcher = JobWorkerCheckDispatcher(
-                pool,
-                provider=contribution.provider,
-                worker_check_ids=tuple(descriptor.id for descriptor in unavailable),
+            worker_mode = WorkerVantageDispatchMode(
+                JobWorkerCheckDispatcher(
+                    pool,
+                    provider=contribution.provider,
+                    worker_check_ids=tuple(descriptor.id for descriptor in unavailable),
+                )
             )
         else:
             unavailable_worker_checks.extend(_worker_vantage_checks(unavailable))
+            worker_mode = WorkerVantageSubstitutionMode(
+                WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
+                unavailable_worker_checks,
+            )
     # When a dispatcher is wired it owns the worker-vantage outcome; otherwise FEATURE_NOT_ENABLED
     # keeps the substituted detail honest (provider_tls/gdbstub_acl are unwired here, not a worker
     # outage) — ADR-0139.
@@ -387,8 +394,5 @@ def default_service_factory(
         checks=checks,
         per_check_timeout=_DEFAULT_PER_CHECK_TIMEOUT,
         overall_timeout=_DEFAULT_OVERALL_TIMEOUT,
-        worker_available=False,
-        substitution_reason=WorkerVantageSubstitution.FEATURE_NOT_ENABLED,
-        unavailable_worker_checks=unavailable_worker_checks,
-        worker_dispatcher=worker_dispatcher,
+        worker_mode=worker_mode,
     )

@@ -30,6 +30,8 @@ from kdive.diagnostics.checks import (
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
     WORKER_UNAVAILABLE_DETAIL,
+    WorkerVantageDispatchMode,
+    WorkerVantageSubstitutionMode,
     default_service_factory,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -151,7 +153,8 @@ def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configur
     _with_remote_instance(monkeypatch, tmp_path)
     service = default_service_factory(None)
     runnable_ids = {c.id for c in service._checks}  # noqa: SLF001
-    unavailable_ids = {c.id for c in service._unavailable_worker_checks}  # noqa: SLF001
+    assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
+    unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
     assert {SECRET_REF_ID, REACHABILITY_ID, BASE_IMAGE_STAGING_ID} <= runnable_ids
     assert {PROVIDER_TLS_ID, GDBSTUB_ACL_ID} == unavailable_ids
     assert PROVIDER_TLS_ID not in runnable_ids
@@ -163,7 +166,7 @@ def test_factory_service_is_worker_unavailable_when_remote_configured(
 ) -> None:
     _with_remote_instance(monkeypatch, tmp_path)
     service = default_service_factory(None)
-    assert service._worker_available is False  # noqa: SLF001
+    assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
 
 
 def test_factory_omits_remote_checks_when_not_configured(monkeypatch, tmp_path: Path) -> None:
@@ -191,7 +194,7 @@ def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
         assert WORKER_UNAVAILABLE_DETAIL not in by_id[worker_id].detail
         assert by_id[worker_id].failure_category == "not_implemented"
 
-    # Server-vantage checks still RUN under worker_available=False.
+    # Server-vantage checks still run when worker-vantage checks are substituted.
     assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
     assert by_id[SECRET_REF_ID].status is CheckStatus.PASS
     assert FEATURE_NOT_ENABLED_DETAIL not in by_id[SECRET_REF_ID].detail
@@ -310,16 +313,14 @@ def test_factory_wires_dispatcher_when_pool_and_remote_configured(
 
     _with_remote_instance(monkeypatch, tmp_path)
     service = default_service_factory(None, pool=cast(AsyncConnectionPool, object()))
-    assert service._worker_dispatcher is not None  # noqa: SLF001
-    # The dispatcher owns the worker-vantage outcome, so no static unavailable metadata is emitted.
-    assert service._unavailable_worker_checks == []  # noqa: SLF001
+    assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
 
 
 def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) -> None:
     _with_remote_instance(monkeypatch, tmp_path)
     service = default_service_factory(None)
-    assert service._worker_dispatcher is None  # noqa: SLF001
-    unavailable_ids = {c.id for c in service._unavailable_worker_checks}  # noqa: SLF001
+    assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
+    unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
     assert unavailable_ids == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
 
 
@@ -332,4 +333,4 @@ def test_factory_no_dispatcher_when_pool_but_remote_not_configured(
 
     _no_remote_instance(monkeypatch, tmp_path)
     service = default_service_factory(None, pool=cast(AsyncConnectionPool, object()))
-    assert service._worker_dispatcher is None  # noqa: SLF001
+    assert service._worker_mode is None  # noqa: SLF001
