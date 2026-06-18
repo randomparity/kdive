@@ -20,12 +20,10 @@ from kdive.cli.transport import Session, tool_envelope
 
 
 def _session_factory() -> Session:
-    """Build the authenticated session; overridden in tests with a fake."""
     return Session.from_env()
 
 
 async def _fetch(name: str, arguments: Mapping[str, object]) -> Mapping[str, object]:
-    """Call read-only tool ``name`` with ``arguments`` and return its envelope dict."""
     session = _session_factory()
     async with session.client() as client:
         result = await client.call_tool(name, dict(arguments))
@@ -33,7 +31,6 @@ async def _fetch(name: str, arguments: Mapping[str, object]) -> Mapping[str, obj
 
 
 async def fetch_read_envelope(name: str, arguments: Mapping[str, object]) -> Mapping[str, object]:
-    """Call read-only tool ``name`` for sibling command modules."""
     return await _fetch(name, arguments)
 
 
@@ -55,7 +52,6 @@ def _flatten(envelope: object) -> dict[str, object]:
 
 
 def _rows(envelope: Mapping[str, object]) -> list[dict[str, object]]:
-    """Flatten a collection envelope's nested item envelopes into a list of rows."""
     items = envelope.get("items")
     if not isinstance(items, list):
         return []
@@ -63,12 +59,10 @@ def _rows(envelope: Mapping[str, object]) -> list[dict[str, object]]:
 
 
 def flatten_collection_rows(envelope: Mapping[str, object]) -> list[dict[str, object]]:
-    """Flatten a collection response envelope for sibling command modules."""
     return _rows(envelope)
 
 
 def _payload(args: argparse.Namespace, *names: str) -> dict[str, object]:
-    """Collect the named, non-``None`` attributes of ``args`` into a tool payload."""
     payload: dict[str, object] = {}
     for name in names:
         value = getattr(args, name, None)
@@ -78,14 +72,12 @@ def _payload(args: argparse.Namespace, *names: str) -> dict[str, object]:
 
 
 async def _list(name: str, args: argparse.Namespace, columns: list[str], *params: str) -> int:
-    """Run a list verb: fetch, flatten items to rows, render the column projection."""
     envelope = await _fetch(name, _payload(args, *params))
     render(_rows(envelope), columns=columns, as_json=args.json)
     return exit_code_for_envelope(envelope)
 
 
 async def _record(name: str, args: argparse.Namespace, payload: Mapping[str, object]) -> int:
-    """Run a single-record verb: fetch, flatten the one envelope, render the record."""
     envelope = await _fetch(name, payload)
     render_record(_flatten(envelope), as_json=args.json)
     return exit_code_for_envelope(envelope)
