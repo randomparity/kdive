@@ -790,11 +790,10 @@ async def _insert_provisioning_system(
         tool="systems.provision",
         transition="->provisioning",
     )
-    job = await queue.enqueue(
+    return await _enqueue_provision_job(
         conn,
-        JobKind.PROVISION,
-        SystemPayload(system_id=str(system.id)),
-        job_authorizing(ctx, alloc.project),
-        f"{alloc.id}:provision",
+        ctx,
+        project=alloc.project,
+        allocation_id=alloc.id,
+        system_id=system.id,
     )
-    return ProvisionJobAdmitted(job=job, system_id=system.id)
