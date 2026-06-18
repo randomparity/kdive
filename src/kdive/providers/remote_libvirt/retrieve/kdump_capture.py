@@ -11,9 +11,9 @@ from typing import Any
 from uuid import UUID
 
 from kdive.artifacts.storage import PresignPutRequest, StoredArtifact, artifact_key
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.ports import CaptureOutput
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.endpoint_preflight import validate_guest_routable_endpoint

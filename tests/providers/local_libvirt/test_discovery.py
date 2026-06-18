@@ -8,9 +8,9 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import ResourceKind
 from kdive.domain.pcie import PCIE_DEVICES_KEY
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resources import ResourceKind
 from kdive.domain.state import ResourceStatus
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from tests.providers.local_libvirt.fakes import (

@@ -31,8 +31,8 @@ from kdive.components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild

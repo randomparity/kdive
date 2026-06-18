@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ResourceKind
+from kdive.domain.resources import ResourceKind
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid, config_error
 from kdive.providers.core.resolver import ProviderResolver

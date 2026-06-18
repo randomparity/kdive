@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, System
+from kdive.domain.lifecycle import Allocation, System
 from kdive.domain.pcie import PCIeClaim, parse_match_spec
 from kdive.domain.sizing import MB_PER_GB, AllocationSizing, concrete_sizing_from_mapping
 

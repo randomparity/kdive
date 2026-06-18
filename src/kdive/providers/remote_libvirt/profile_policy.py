@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import DestructiveJobKind
+from kdive.domain.jobs import DestructiveJobKind
 from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 
 

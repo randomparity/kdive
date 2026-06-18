@@ -15,7 +15,7 @@ from kdive.components.references import (
     VMLINUX_COMPONENT,
 )
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import ResourceKind
+from kdive.domain.resources import ResourceKind
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject import composition
 from kdive.providers.fault_inject.build import FaultInjectBuild

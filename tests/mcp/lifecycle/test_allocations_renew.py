@@ -19,7 +19,9 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
-from kdive.domain.models import Allocation, Budget, Resource, ResourceKind
+from kdive.domain.accounting import Budget
+from kdive.domain.lifecycle import Allocation
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle import allocations as alloc_tools

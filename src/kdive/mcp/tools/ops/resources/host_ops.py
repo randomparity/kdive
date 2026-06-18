@@ -19,7 +19,8 @@ from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Allocation, Resource
+from kdive.domain.lifecycle import Allocation
+from kdive.domain.resources import Resource
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context

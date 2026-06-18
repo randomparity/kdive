@@ -37,7 +37,7 @@ from kdive.domain.sizing import MB_PER_GB
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
-    from kdive.domain.models import Resource
+    from kdive.domain.resources import Resource
 
 # Resource-capabilities keys advertising the host's billable size ceiling (the discovery
 # provider populates them). A selector may not exceed these — the admission-only

@@ -7,7 +7,8 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.domain.models import Allocation, JobKind
+from kdive.domain.jobs import JobKind
+from kdive.domain.lifecycle import Allocation
 from kdive.domain.state import AllocationState
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed

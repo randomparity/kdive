@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.jobs.models import DuplicateHandler, HandlerRegistry
 
 

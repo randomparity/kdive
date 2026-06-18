@@ -40,12 +40,12 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.repositories import LEDGER
+from kdive.domain.accounting import LedgerEntry, LedgerEventType
 from kdive.domain.cost import cost, quantize_kcu, rate, resolve_coeff
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import LedgerEntry, LedgerEventType
 
 if TYPE_CHECKING:
-    from kdive.domain.models import Allocation
+    from kdive.domain.lifecycle import Allocation
 
 _SECONDS_PER_HOUR = Decimal(3600)
 

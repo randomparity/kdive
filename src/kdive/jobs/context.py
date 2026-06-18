@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.domain.models import Job
+from kdive.domain.jobs import Job
 from kdive.jobs.payloads import Authorizing, load_authorizing
 from kdive.security.authz.context import RequestContext
 

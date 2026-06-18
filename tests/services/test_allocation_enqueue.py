@@ -21,11 +21,13 @@ import pytest
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
+from kdive.domain.accounting import Budget, Quota
 from kdive.domain.cost import Selector
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.services.allocation.admission.core import AllocationRequest, admit

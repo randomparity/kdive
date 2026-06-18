@@ -32,7 +32,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.models import DebugSession, Investigation, Run, System
+from kdive.domain.lifecycle import DebugSession, Investigation, Run, System
 from kdive.domain.state import (
     AllocationState,
     DebugSessionState,

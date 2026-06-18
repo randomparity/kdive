@@ -24,7 +24,7 @@ import kdive.config as config
 from kdive.config.core_settings import S3_BUCKET, S3_ENDPOINT_URL, S3_REGION
 from kdive.diagnostics.service import DiagnosticsService, default_service_factory
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import Job, JobKind
+from kdive.domain.jobs import Job, JobKind
 from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.mcp.auth import build_verifier

@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import JOBS, RUNS
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Run
+from kdive.domain.lifecycle import Run
 from kdive.domain.state import IllegalTransition, JobState, RunState
 from kdive.jobs import queue
 from kdive.log import bind_context

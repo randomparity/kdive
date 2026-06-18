@@ -19,7 +19,7 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
-from kdive.domain.models import Budget, Quota
+from kdive.domain.accounting import Budget, Quota
 from kdive.domain.pcie import PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse

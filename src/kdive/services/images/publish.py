@@ -34,14 +34,10 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.artifacts import storage as artifact_types
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.image_format import ImageFormat
-from kdive.domain.models import (
-    ImageCatalogEntry,
-    ImageState,
-    ImageVisibility,
-    Sensitivity,
-)
+from kdive.domain.images import ImageCatalogEntry, ImageState, ImageVisibility
 
 _RETENTION_CLASS = "image"
 

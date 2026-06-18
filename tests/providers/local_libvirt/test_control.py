@@ -6,7 +6,7 @@ import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import PowerAction
+from kdive.domain.jobs import PowerAction
 from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 

@@ -12,7 +12,7 @@ from psycopg.rows import dict_row
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.domain.state import AllocationState, JobState, SystemState
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting

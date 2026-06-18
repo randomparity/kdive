@@ -9,7 +9,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from kdive.domain.models import ImageVisibility
+from kdive.domain.images import ImageVisibility
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
     BuildSource,

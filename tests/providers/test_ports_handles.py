@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kdive.domain.discovery import ResourceRecord
-from kdive.domain.models import ResourceKind
+from kdive.domain.resources import ResourceKind
 from kdive.domain.state import ResourceStatus
 from kdive.providers.ports import SystemHandle, TransportHandle
 

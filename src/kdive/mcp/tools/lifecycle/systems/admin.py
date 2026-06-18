@@ -14,7 +14,8 @@ from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import DestructiveJobKind, Job, JobKind, System
+from kdive.domain.jobs import DestructiveJobKind, Job, JobKind
+from kdive.domain.lifecycle import System
 from kdive.domain.state import IllegalTransition, RunState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload

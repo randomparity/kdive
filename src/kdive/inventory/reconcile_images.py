@@ -36,7 +36,7 @@ from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import ImageState
+from kdive.domain.images import ImageState
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import (
     BuildSource,

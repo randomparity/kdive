@@ -11,7 +11,8 @@ import psycopg
 import pytest
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
-from kdive.domain.models import Allocation, Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import AuthError, RequestContext
 from kdive.security.audit import (

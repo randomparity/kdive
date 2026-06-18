@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, System
+from kdive.domain.lifecycle import Allocation, System
 from kdive.domain.pcie import PCIeClaim
 from kdive.domain.sizing import AllocationSizing
 from kdive.domain.state import AllocationState, SystemState

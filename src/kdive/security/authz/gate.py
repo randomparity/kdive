@@ -21,11 +21,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from kdive.domain.models import DestructiveJobKind
+from kdive.domain.jobs import DestructiveJobKind
 from kdive.security.authz.rbac import AuthorizationError, Role, require_role
 
 if TYPE_CHECKING:
-    from kdive.domain.models import Allocation
+    from kdive.domain.lifecycle import Allocation
     from kdive.security.authz.context import RequestContext
 
 

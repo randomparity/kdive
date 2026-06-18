@@ -27,7 +27,7 @@ from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Job, JobKind
+from kdive.domain.jobs import Job, JobKind
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import runs as runs_handlers

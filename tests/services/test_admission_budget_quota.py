@@ -21,10 +21,11 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from kdive.db.repositories import BUDGETS, QUOTAS, RESOURCES
+from kdive.domain.accounting import Budget, Quota
 from kdive.domain.cost import Selector
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Budget, Quota, Resource, ResourceKind
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.mcp.auth import RequestContext
 from kdive.services.allocation import idempotency as allocation_idempotency

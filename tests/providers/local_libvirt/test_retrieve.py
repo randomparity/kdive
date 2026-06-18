@@ -8,9 +8,9 @@ from uuid import UUID
 import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason

@@ -20,7 +20,8 @@ from uuid import UUID, uuid4
 import psycopg
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
-from kdive.domain.models import Allocation, Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.services.accounting import ledger as accounting
 

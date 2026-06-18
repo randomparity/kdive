@@ -34,8 +34,8 @@ from pydantic import Field
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle import SystemShape
 from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
-from kdive.domain.models import Resource, SystemShape
 from kdive.domain.pcie import (
     MatchOutcome,
     PCIeClaim,
@@ -48,6 +48,7 @@ from kdive.domain.resource_capabilities import (
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
+from kdive.domain.resources import Resource
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context

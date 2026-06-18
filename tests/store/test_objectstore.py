@@ -20,8 +20,8 @@ from kdive.artifacts.storage import (
     ArtifactWriteRequest,
     StoredArtifact,
 )
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.store.objectstore import (
     ObjectStore,
     _normalize_etag,

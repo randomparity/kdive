@@ -18,9 +18,11 @@ import psycopg
 from psycopg import sql
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
+from kdive.domain.accounting import Budget, Quota
 from kdive.domain.cost import Selector
-from kdive.domain.models import Allocation, Budget, Quota, Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.providers.fault_inject.capabilities import (
     FAULT_RATE_KEY,

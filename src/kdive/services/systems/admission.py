@@ -29,7 +29,8 @@ from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, Job, JobKind, System
+from kdive.domain.jobs import Job, JobKind
+from kdive.domain.lifecycle import Allocation, System
 from kdive.domain.sizing import MB_PER_GB, AllocationSizing
 from kdive.domain.state import AllocationState, IllegalTransition, JobState, SystemState
 from kdive.jobs import queue

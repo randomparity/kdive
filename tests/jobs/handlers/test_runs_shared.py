@@ -12,7 +12,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.db.repositories import RUNS
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.domain.state import RunState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers.runs_shared import finalize_build

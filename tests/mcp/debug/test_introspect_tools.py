@@ -17,7 +17,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import DEBUG_SESSIONS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import DebugSession, ResourceKind
+from kdive.domain.lifecycle import DebugSession
+from kdive.domain.resources import ResourceKind
 from kdive.domain.state import DebugSessionState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse

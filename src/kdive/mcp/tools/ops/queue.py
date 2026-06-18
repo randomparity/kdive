@@ -19,7 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Job
+from kdive.domain.jobs import Job
 from kdive.domain.state import JobState
 from kdive.jobs import queue
 from kdive.log import bind_context

@@ -21,7 +21,7 @@ from kdive.db.locks import CONSOLE_HOSTING_LEADER, SessionAdvisoryLock
 from kdive.db.pool import create_pool, database_url
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ResourceKind
+from kdive.domain.resources import ResourceKind
 from kdive.profiles.build import GitSourceRef
 from kdive.providers.core.discovery_registration import (
     DiscoveryRegistrationTarget,

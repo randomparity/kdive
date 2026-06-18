@@ -27,7 +27,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ManagedBy
+from kdive.domain.resources import ManagedBy
 from kdive.domain.state import AllocationState
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse

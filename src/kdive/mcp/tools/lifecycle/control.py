@@ -24,7 +24,8 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
-from kdive.domain.models import DestructiveJobKind, JobKind, PowerAction, System
+from kdive.domain.jobs import DestructiveJobKind, JobKind, PowerAction
+from kdive.domain.lifecycle import System
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import PowerPayload, SystemPayload

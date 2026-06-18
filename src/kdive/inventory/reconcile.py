@@ -32,7 +32,7 @@ from kdive.db.locks import (
     session_advisory_lock,
 )
 from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
-from kdive.domain.models import ManagedBy, ResourceKind
+from kdive.domain.resources import ManagedBy, ResourceKind
 from kdive.services.images.retention import image_referenced_by_live_system
 
 __all__ = [

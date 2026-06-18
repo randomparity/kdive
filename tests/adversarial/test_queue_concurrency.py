@@ -21,7 +21,7 @@ import pytest
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.domain.state import JobState
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload

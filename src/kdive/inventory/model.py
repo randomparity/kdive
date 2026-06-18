@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from kdive.build_configs.rules import validate_build_config_content, validate_build_config_name
 from kdive.domain.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.image_format import ImageFormat
-from kdive.domain.models import ImageVisibility
+from kdive.domain.images import ImageVisibility
 from kdive.inventory.errors import InventoryError
 
 

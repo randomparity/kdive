@@ -16,7 +16,8 @@ import asyncio
 from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Job, JobKind, ResourceKind
+from kdive.domain.jobs import Job, JobKind
+from kdive.domain.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane, RootfsBuildSpec
 from kdive.images.validation import DEFAULT_INSPECT, InspectSeam, validate_guest_contract
 from kdive.jobs.models import HandlerRegistry

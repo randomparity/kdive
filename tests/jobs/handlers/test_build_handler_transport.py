@@ -34,7 +34,7 @@ from kdive.db.build_hosts import (
 )
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import runs as runs_handlers

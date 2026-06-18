@@ -7,7 +7,7 @@ from uuid import UUID
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.build_artifacts.results import BuildOutput
-from kdive.domain.models import Sensitivity
+from kdive.domain.artifacts import Sensitivity
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT, StorePort
 

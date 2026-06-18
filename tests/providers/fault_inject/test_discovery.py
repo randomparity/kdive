@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from kdive.domain.models import ResourceKind
 from kdive.domain.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
     VCPUS_KEY,
 )
+from kdive.domain.resources import ResourceKind
 from kdive.domain.state import ResourceStatus
 from kdive.providers.fault_inject.capabilities import (
     FAULT_RATE_KEY,

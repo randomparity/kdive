@@ -48,9 +48,10 @@ from kdive.domain.cost import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lease import resolve_window_hours
-from kdive.domain.models import Allocation, Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.domain.pcie import MatchOutcome, PCIeClaim, PCIeDescriptor
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState
 from kdive.security import audit
 from kdive.services.accounting import ledger as accounting

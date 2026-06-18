@@ -6,8 +6,8 @@ import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
 from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.store.objectstore import (
     ObjectStore,
     artifact_key,

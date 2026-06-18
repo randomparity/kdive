@@ -23,8 +23,8 @@ from kdive.artifacts.storage import (
     artifact_key,
 )
 from kdive.config.core_settings import UPLOAD_TTL_SECONDS
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.ports.build_transport import BuildTransport
 
 _MAX_PRESIGN_TTL_S = 3600

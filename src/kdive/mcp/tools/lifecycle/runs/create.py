@@ -16,7 +16,7 @@ from kdive.db.build_hosts import get_by_name
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, ExpectedBootFailure, Investigation, Run, System
+from kdive.domain.lifecycle import Allocation, ExpectedBootFailure, Investigation, Run, System
 from kdive.domain.profile_documents import SerializedExpectedBootFailure
 from kdive.domain.state import InvestigationState, RunState
 from kdive.domain.system_reuse import ReuseRequirement, read_system_sizing, snapshot_satisfies

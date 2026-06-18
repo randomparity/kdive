@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kdive.domain.models import PowerAction
+from kdive.domain.jobs import PowerAction
 
 
 class FaultInjectControl:

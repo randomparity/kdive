@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Job, JobKind
+from kdive.domain.jobs import Job, JobKind
 from kdive.domain.state import JobState
 from kdive.mcp.responses import (
     _RETRYABLE_BY_CATEGORY,

@@ -15,7 +15,8 @@ from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, RUNS, SYSTEMS
-from kdive.domain.models import Allocation, Investigation, Resource, ResourceKind, Run, System
+from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import (
     AllocationState,
     InvestigationState,

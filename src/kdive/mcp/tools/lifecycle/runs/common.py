@@ -6,7 +6,8 @@ from typing import cast
 from uuid import UUID
 
 from kdive.domain.errors import ErrorCategory, suppressed_detail
-from kdive.domain.models import Job, Run
+from kdive.domain.jobs import Job
+from kdive.domain.lifecycle import Run
 from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope

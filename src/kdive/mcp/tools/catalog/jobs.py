@@ -27,7 +27,7 @@ from pydantic import Field
 
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Job
+from kdive.domain.jobs import Job
 from kdive.domain.state import IllegalTransition, JobState
 from kdive.jobs import queue
 from kdive.log import bind_context

@@ -24,7 +24,7 @@ from kdive.artifacts.storage import (
     FetchedArtifact,
     StoredArtifact,
 )
-from kdive.domain.models import Sensitivity
+from kdive.domain.artifacts import Sensitivity
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import (

@@ -21,7 +21,7 @@ from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import ResourceKind
+from kdive.domain.resources import ResourceKind
 from kdive.mcp.responses import ToolResponse
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file

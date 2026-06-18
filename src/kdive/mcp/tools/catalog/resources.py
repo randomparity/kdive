@@ -22,7 +22,8 @@ from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ImageVisibility, Resource, ResourceKind
+from kdive.domain.images import ImageVisibility
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse

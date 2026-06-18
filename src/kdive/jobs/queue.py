@@ -20,7 +20,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Job, JobAuthorizing, JobKind
+from kdive.domain.jobs import Job, JobAuthorizing, JobKind
 from kdive.domain.state import JobState
 from kdive.jobs.payloads import (
     Authorizing,

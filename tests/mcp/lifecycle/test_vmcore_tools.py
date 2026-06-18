@@ -12,9 +12,10 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import StoredArtifact
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Job, JobKind, Sensitivity
+from kdive.domain.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import vmcore as vmcore_plane
 from kdive.jobs.models import HandlerRegistry

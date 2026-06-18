@@ -26,7 +26,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.result_codec import ResultCodecError, deserialize_results
 from kdive.diagnostics.service import WORKER_UNAVAILABLE_DETAIL
-from kdive.domain.models import Job, JobKind
+from kdive.domain.jobs import Job, JobKind
 from kdive.domain.state import JobState
 from kdive.jobs import queue as job_queue
 from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload

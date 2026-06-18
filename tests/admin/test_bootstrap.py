@@ -16,7 +16,7 @@ from kdive.admin.bootstrap import (
     seed_project_statements,
 )
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
-from kdive.domain.models import Sensitivity
+from kdive.domain.artifacts import Sensitivity
 
 
 def test_seed_project_sql_contains_budget_and_quota_upserts() -> None:

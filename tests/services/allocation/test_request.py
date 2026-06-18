@@ -11,7 +11,8 @@ import pytest
 from psycopg import AsyncConnection
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.shapes import ResolvedSizing
 from kdive.domain.state import AllocationState, ResourceStatus
 from kdive.security.authz.context import RequestContext

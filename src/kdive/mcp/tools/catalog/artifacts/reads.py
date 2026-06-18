@@ -18,8 +18,8 @@ from kdive.config.core_settings import (
     ARTIFACT_DOWNLOAD_TTL_SECONDS,
     ARTIFACT_INLINE_MAX_BYTES,
 )
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import Sensitivity
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid

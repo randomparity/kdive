@@ -27,7 +27,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Job
+from kdive.domain.jobs import Job
 from kdive.domain.state import JobState, RunState
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry, JobHandler

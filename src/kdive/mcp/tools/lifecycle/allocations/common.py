@@ -5,7 +5,7 @@ from __future__ import annotations
 from psycopg import AsyncConnection
 
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Allocation
+from kdive.domain.lifecycle import Allocation
 from kdive.domain.state import AllocationState
 from kdive.mcp.responses import JsonValue, ToolResponse
 

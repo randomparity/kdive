@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from psycopg import AsyncConnection
 
-from kdive.domain.models import Job, JobKind
+from kdive.domain.jobs import Job, JobKind
 
 type JobHandler = Callable[[AsyncConnection, Job], Awaitable[str | None]]
 

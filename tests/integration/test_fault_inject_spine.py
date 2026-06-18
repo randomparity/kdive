@@ -18,8 +18,10 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
-from kdive.domain.models import Allocation, JobKind, Resource, ResourceKind, System
+from kdive.domain.jobs import JobKind
+from kdive.domain.lifecycle import Allocation, System
 from kdive.domain.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import AllocationState, ResourceStatus, SystemState
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers

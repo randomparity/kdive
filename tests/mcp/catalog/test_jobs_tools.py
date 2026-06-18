@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import Authorizing, BuildPayload
 from kdive.mcp.auth import RequestContext

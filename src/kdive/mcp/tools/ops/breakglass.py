@@ -32,7 +32,7 @@ from pydantic import Field
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import Job, JobKind
+from kdive.domain.jobs import Job, JobKind
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload

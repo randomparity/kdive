@@ -27,7 +27,7 @@ from kdive.domain.cost import (
     validate_window,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Resource, ResourceKind
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.state import ResourceStatus
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

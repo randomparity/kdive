@@ -25,7 +25,7 @@ from kdive.artifacts.storage import (
     artifact_key,
     owner_prefix,
 )
-from kdive.domain.models import Sensitivity
+from kdive.domain.artifacts import Sensitivity
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.console.collector import ConsoleStream
 from kdive.providers.remote_libvirt.transport import remote_connection

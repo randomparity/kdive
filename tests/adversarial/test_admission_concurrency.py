@@ -14,7 +14,7 @@ import asyncio
 import psycopg
 import pytest
 
-from kdive.domain.models import Resource
+from kdive.domain.resources import Resource
 from kdive.domain.state import AllocationState
 from kdive.mcp.auth import RequestContext
 from kdive.services.allocation.admission.core import AllocationRequest, admit

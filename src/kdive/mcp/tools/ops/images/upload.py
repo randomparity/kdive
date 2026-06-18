@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PRIVATE_LIFETIME_DEFAULT
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import ImageCatalogEntry
+from kdive.domain.images import ImageCatalogEntry
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import config_error as _config_error

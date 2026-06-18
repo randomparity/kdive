@@ -18,9 +18,9 @@ from kdive.artifacts.storage import (
     PresignPutRequest,
     StoredArtifact,
 )
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection

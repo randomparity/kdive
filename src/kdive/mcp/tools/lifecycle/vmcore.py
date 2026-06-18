@@ -24,7 +24,7 @@ from pydantic import Field
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.domain.state import SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import CaptureVmcorePayload

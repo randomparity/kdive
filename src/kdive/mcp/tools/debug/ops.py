@@ -33,7 +33,8 @@ from pydantic import Field
 import kdive.config as config
 from kdive.config.core_settings import DEBUG_DIR
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import DebugSession, ResourceKind
+from kdive.domain.lifecycle import DebugSession
+from kdive.domain.resources import ResourceKind
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse

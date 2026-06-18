@@ -5,7 +5,7 @@ from __future__ import annotations
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
 from kdive.jobs.payloads import ImageBuildPayload

@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.discovery import DiscoverySource, ResourceRecord
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ManagedBy, Resource, ResourceKind
+from kdive.domain.resources import ManagedBy, Resource, ResourceKind
 
 
 async def register_discovered_resource(

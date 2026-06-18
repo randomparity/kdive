@@ -10,8 +10,9 @@ from psycopg import AsyncConnection
 
 from kdive.domain.cost import Selector
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Allocation, Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation
 from kdive.domain.pcie import parse_match_spec
+from kdive.domain.resources import Resource, ResourceKind
 from kdive.domain.shapes import ResolvedSizing
 from kdive.security.authz.context import RequestContext
 from kdive.services.allocation.admission.core import (

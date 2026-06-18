@@ -9,7 +9,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.domain.state import AllocationState, SystemState
 from kdive.jobs import queue
 from kdive.jobs.payloads import SystemPayload

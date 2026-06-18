@@ -8,7 +8,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.models import JobKind
+from kdive.domain.jobs import JobKind
 from kdive.domain.state import JobState, RunState
 from kdive.jobs.payloads import PayloadValidationError, run_id_from_payload
 

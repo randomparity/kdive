@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
-from kdive.domain.models import Job
+from kdive.domain.jobs import Job
 from kdive.domain.state import JobState
 from kdive.serialization import JsonValue, safe_error_details, validate_json_value
 

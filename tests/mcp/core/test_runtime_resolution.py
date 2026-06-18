@@ -11,7 +11,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import ResourceKind
+from kdive.domain.resources import ResourceKind
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import (
     RuntimeCallback,

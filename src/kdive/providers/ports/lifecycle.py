@@ -7,7 +7,7 @@ from typing import Literal, NamedTuple, Protocol, cast
 from uuid import UUID
 
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.models import PowerAction
+from kdive.domain.jobs import PowerAction
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports._common import config_error
 from kdive.providers.ports.handles import SystemHandle, TransportHandle

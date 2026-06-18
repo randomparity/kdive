@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kdive.db.repositories import SYSTEM_SHAPES
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import SystemShape
+from kdive.domain.lifecycle import SystemShape
 from kdive.domain.pcie import parse_match_spec
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context

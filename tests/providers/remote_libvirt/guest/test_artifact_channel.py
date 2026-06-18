@@ -16,8 +16,8 @@ from uuid import uuid4
 import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.domain.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import Sensitivity
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.security.secrets.redaction import REDACTION

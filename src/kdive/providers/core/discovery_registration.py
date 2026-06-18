@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from kdive.domain.discovery import DiscoverySource
-from kdive.domain.models import ResourceKind
+from kdive.domain.resources import ResourceKind
 
 
 @dataclass(frozen=True, slots=True)
