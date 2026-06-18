@@ -22,6 +22,20 @@ updates:
         patterns:
           - "*"
 
+  # The root Dockerfile and docker-compose.yml pin base images (python, postgres,
+  # minio, mock-oauth2-server). The docker ecosystem keeps those FROM/image pins
+  # current on the same weekly, grouped, 7-day-cooldown cadence as the product code.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      docker-images:
+        patterns:
+          - "*"
+
   # The browserless mermaid checker (.github/scripts/mermaid-check) pins its own
   # npm lockfile. It is dev/CI-only tooling that never ships, so it rides a
   # slower monthly cadence than the product-facing uv and github-actions
