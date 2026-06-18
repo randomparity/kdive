@@ -11,6 +11,10 @@
 ## Global Constraints
 
 - ADR: **0167**. Migration: **0041**. Use these exact numbers; do not pick "next free".
+- **Test harness facts (verified against the tree — use these, the prose below sometimes wrote earlier guesses):**
+  - DB fixtures are `migrated_url` (a URL string) and `pg_conn`, re-exported from `tests/db/conftest.py`. There is **no** `migrated_pool`/`a_pool` fixture. DB-backed tests build their own pool: `async with AsyncConnectionPool(migrated_url, open=False) as pool: await pool.open()`, wrapped in `asyncio.run(...)` (see `tests/diagnostics/test_worker_dispatch_db.py`).
+  - Real test module paths: build-host check policy → **new** `tests/diagnostics/test_buildhost_agent_check.py`; `local_kernel_src` enabled-gate → `tests/diagnostics/test_local_kernel_src.py`; probe adapter → **new** `tests/diagnostics/test_buildhost_agent.py`; service assembly → `tests/diagnostics/test_service.py` **and** the exact-assembled-set assertion in `tests/diagnostics/test_default_factory.py`; `wait_network` → `tests/providers/remote_libvirt/lifecycle/test_build_vm.py`; reaper → `tests/reconciler/test_build_hosts.py`; tool → `tests/mcp/ops/test_diagnostics.py`; CLI → `tests/cli/test_doctor_verb.py`; marker repo → **new** `tests/db/test_buildhost_agent_probes.py`.
+  - `CategorizedError.category` is the attribute (`domain/errors.py`). `db.build_hosts.get_by_id` + `WORKER_LOCAL_ID` exist.
 - Cite the ADR in new-module docstrings; pick the most specific existing `ErrorCategory`/`failure_category` string — never invent.
 - Three-state `CheckResult` rules (enforced in `__post_init__`): a `fail` **must** carry a `fix`; only a `fail` may carry a `fix`; a `pass` must **not** carry a `failure_category`.
 - `diagnostics → providers` and `diagnostics → db` are the only legal import directions out of diagnostics; `checks.py` must stay free of `libvirt`/provider/DB imports (policy only, via injected probes).
@@ -289,7 +293,7 @@ git commit -m "feat(db): buildhost agent probe marker repo (ADR-0167)"
 
 **Files:**
 - Modify: `src/kdive/providers/remote_libvirt/lifecycle/build_vm.py:209-260` (the `session` method) and `:390-408` (`ephemeral_build_session`)
-- Test: `tests/providers/remote_libvirt/test_build_vm.py` (existing test module for build_vm)
+- Test: `tests/providers/remote_libvirt/lifecycle/test_build_vm.py` (existing test module for build_vm)
 
 **Interfaces:**
 - Produces: `EphemeralBuildVm.session(base_image_volume, *, run_id, source=None, wait_network=True)` — when `wait_network=False`, skip `_wait_for_network` (and the egress preflight is already skipped because `source=None`). `ephemeral_build_session(..., wait_network=True)` forwards it.
@@ -310,7 +314,7 @@ If the existing test module drives `session()` with a fake that records the netw
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/providers/remote_libvirt/test_build_vm.py -k network -q`
+Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_build_vm.py -k network -q`
 Expected: FAIL (`session() got an unexpected keyword argument 'wait_network'`).
 
 - [ ] **Step 3: Implement — add the kwarg, gate the network wait**
@@ -357,13 +361,13 @@ In `ephemeral_build_session`, add `wait_network: bool = True` and forward it to 
 
 - [ ] **Step 4: Run tests**
 
-Run: `uv run python -m pytest tests/providers/remote_libvirt/test_build_vm.py -q && just type`
+Run: `uv run python -m pytest tests/providers/remote_libvirt/lifecycle/test_build_vm.py -q && just type`
 Expected: PASS (existing tests still green — default `True` preserves BUILD behavior), ty clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/providers/remote_libvirt/lifecycle/build_vm.py tests/providers/remote_libvirt/test_build_vm.py
+git add src/kdive/providers/remote_libvirt/lifecycle/build_vm.py tests/providers/remote_libvirt/lifecycle/test_build_vm.py
 git commit -m "feat(build-vm): add wait_network kwarg to EphemeralBuildVm.session (ADR-0167)"
 ```
 
@@ -373,7 +377,7 @@ git commit -m "feat(build-vm): add wait_network kwarg to EphemeralBuildVm.sessio
 
 **Files:**
 - Modify: `src/kdive/diagnostics/checks.py` (add after the existing build-host check region)
-- Test: `tests/diagnostics/test_checks.py` (existing)
+- Test: `tests/diagnostics/test_buildhost_agent_check.py` (existing)
 
 **Interfaces:**
 - Consumes: `Check`, `CheckResult`, `CheckStatus`, `Vantage`, `_CONFIGURATION_ERROR`, `_TRANSPORT_FAILURE` (existing in this module).
@@ -389,7 +393,7 @@ git commit -m "feat(build-vm): add wait_network kwarg to EphemeralBuildVm.sessio
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-# tests/diagnostics/test_checks.py (append)
+# tests/diagnostics/test_buildhost_agent_check.py (append)
 import pytest
 from kdive.diagnostics.checks import (
     BUILDHOST_AGENT_FIX, BuildHostAgentOutcome, BuildHostProbeResult,
@@ -487,7 +491,7 @@ Note the `_outcome`/`_enabled` helpers above return the probe coroutine-factory;
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/diagnostics/test_checks.py -k "buildhost_agent or local_kernel_src_disabled" -q`
+Run: `uv run python -m pytest tests/diagnostics/test_buildhost_agent_check.py -k "buildhost_agent or local_kernel_src_disabled" -q`
 Expected: FAIL (names not defined; `LocalKernelSrcCheck` has no `enabled_probe`).
 
 - [ ] **Step 3: Implement**
@@ -638,13 +642,13 @@ class EphemeralLibvirtBuildHostAgentCheck(Check):
 
 - [ ] **Step 4: Run tests**
 
-Run: `uv run python -m pytest tests/diagnostics/test_checks.py -q && just type`
+Run: `uv run python -m pytest tests/diagnostics/test_buildhost_agent_check.py -q && just type`
 Expected: PASS, ty clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/diagnostics/checks.py tests/diagnostics/test_checks.py
+git add src/kdive/diagnostics/checks.py tests/diagnostics/test_buildhost_agent_check.py
 git commit -m "feat(diagnostics): build-host agent check + local_kernel_src enabled-gate (ADR-0167)"
 ```
 
@@ -655,7 +659,7 @@ git commit -m "feat(diagnostics): build-host agent check + local_kernel_src enab
 **Files:**
 - Create: `src/kdive/diagnostics/buildhost_agent.py`
 - Modify: `src/kdive/diagnostics/kernel_src.py` (add `local_host_enabled_probe(pool)`)
-- Test: `tests/diagnostics/test_buildhost_agent.py`, extend `tests/diagnostics/test_kernel_src.py`
+- Test: `tests/diagnostics/test_buildhost_agent.py`, extend `tests/diagnostics/test_local_kernel_src.py`
 
 **Interfaces:**
 - Consumes: `AsyncConnectionPool`; `db.build_hosts.list_all_hosts` + `BuildHostKind`; `db.buildhost_agent_probes`; `egress_probe.SingleFlight`; `providers.remote_libvirt.lifecycle.build_vm.EphemeralBuildVm`; `security.secrets.secret_registry.SecretRegistry`; `checks.BuildHostAgentOutcome`/`BuildHostProbeResult`/`BuildHostAgentProbe`.
@@ -947,13 +951,13 @@ def local_host_enabled_probe(
 
 - [ ] **Step 4: Run tests**
 
-Run: `uv run python -m pytest tests/diagnostics/test_buildhost_agent.py tests/diagnostics/test_kernel_src.py -q && just type`
+Run: `uv run python -m pytest tests/diagnostics/test_buildhost_agent.py tests/diagnostics/test_local_kernel_src.py -q && just type`
 Expected: PASS, ty clean. If ty rejects `SingleFlight.run` reuse, generalize `SingleFlight` to `SingleFlight[T]` (sub-step) and re-run.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/diagnostics/buildhost_agent.py src/kdive/diagnostics/kernel_src.py tests/diagnostics/test_buildhost_agent.py tests/diagnostics/test_kernel_src.py
+git add src/kdive/diagnostics/buildhost_agent.py src/kdive/diagnostics/kernel_src.py tests/diagnostics/test_buildhost_agent.py tests/diagnostics/test_local_kernel_src.py
 git commit -m "feat(diagnostics): production build-host agent probe + enabled probe (ADR-0167)"
 ```
 
@@ -963,7 +967,7 @@ git commit -m "feat(diagnostics): production build-host agent probe + enabled pr
 
 **Files:**
 - Modify: `src/kdive/diagnostics/service.py` (`_build_host_checks`, `default_service_factory`, timeout constants)
-- Test: `tests/diagnostics/test_service.py` (existing — has the "assembled set is exactly {...}" tests)
+- Test: `tests/diagnostics/test_service.py` (existing) **and** `tests/diagnostics/test_default_factory.py` (existing — holds the "assembled set is exactly {secret_ref, local_kernel_src}" assertion ADR-0163 referenced; update it in THIS task so the cross-file regression is caught and committed where it is caused, not deferred to Task 10).
 
 **Interfaces:**
 - Consumes: Task 4/5 outputs.
@@ -1072,13 +1076,13 @@ Add imports: `EphemeralLibvirtBuildHostAgentCheck` from `kdive.diagnostics.check
 
 - [ ] **Step 4: Run tests**
 
-Run: `uv run python -m pytest tests/diagnostics/test_service.py -q && just type`
+Run: `uv run python -m pytest tests/diagnostics/test_service.py tests/diagnostics/test_default_factory.py -q && just type`
 Expected: PASS, ty clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/diagnostics/service.py tests/diagnostics/test_service.py
+git add src/kdive/diagnostics/service.py tests/diagnostics/test_service.py tests/diagnostics/test_default_factory.py
 git commit -m "feat(diagnostics): assemble build-host agent check under with_buildhost_agent (ADR-0167)"
 ```
 
@@ -1088,7 +1092,7 @@ git commit -m "feat(diagnostics): assemble build-host agent check under with_bui
 
 **Files:**
 - Modify: `src/kdive/reconciler/repairs/build_hosts.py` (`reap_orphan_build_vms`, line ~93-110)
-- Test: `tests/reconciler/test_build_host_repairs.py` (existing reaper tests)
+- Test: `tests/reconciler/test_build_hosts.py` (existing reaper tests)
 
 **Interfaces:**
 - Consumes: `db.buildhost_agent_probes.is_probe_live`.
@@ -1120,7 +1124,7 @@ async def test_reaper_reaps_build_vm_with_stale_probe_and_no_job(migrated_pool, 
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/reconciler/test_build_host_repairs.py -k probe -q`
+Run: `uv run python -m pytest tests/reconciler/test_build_hosts.py -k probe -q`
 Expected: FAIL (live-probe VM is reaped — the guard does not yet exist).
 
 - [ ] **Step 3: Implement — extend the liveness guard**
@@ -1146,13 +1150,13 @@ Update the docstring to note the new live-holder clause (a fresh doctor-probe he
 
 - [ ] **Step 4: Run tests**
 
-Run: `uv run python -m pytest tests/reconciler/test_build_host_repairs.py -q && just type`
+Run: `uv run python -m pytest tests/reconciler/test_build_hosts.py -q && just type`
 Expected: PASS, ty clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/reconciler/repairs/build_hosts.py tests/reconciler/test_build_host_repairs.py
+git add src/kdive/reconciler/repairs/build_hosts.py tests/reconciler/test_build_hosts.py
 git commit -m "feat(reconciler): keep build VMs with a live doctor-probe heartbeat (ADR-0167)"
 ```
 
@@ -1162,7 +1166,7 @@ git commit -m "feat(reconciler): keep build VMs with a live doctor-probe heartbe
 
 **Files:**
 - Modify: `src/kdive/mcp/tools/ops/diagnostics.py` (ServiceFactory protocol, `run_diagnostics`, `_audit_run`, `_audit_args`, the `@app.tool` wrapper, the `_BUILDHOST_TOOL` audit constant)
-- Test: `tests/mcp/test_diagnostics_tool.py` (or the existing diagnostics-tool test module)
+- Test: `tests/mcp/ops/test_diagnostics.py` (or the existing diagnostics-tool test module)
 
 **Interfaces:**
 - Produces: `ops.diagnostics(provider=None, with_egress=False, with_buildhost_agent=False)`; audits `ops.diagnostics.buildhost_agent` distinctly when `with_buildhost_agent` is set; `ServiceFactory.__call__(provider, *, with_egress=False, with_buildhost_agent=False)`.
@@ -1188,7 +1192,7 @@ Mirror the existing `with_egress` tests in this module exactly (they already cov
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/mcp/test_diagnostics_tool.py -k buildhost -q`
+Run: `uv run python -m pytest tests/mcp/ops/test_diagnostics.py -k buildhost -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
@@ -1220,13 +1224,13 @@ Also thread `with_buildhost_agent` through the audit-denial path's `args=_audit_
 
 - [ ] **Step 4: Run tests**
 
-Run: `uv run python -m pytest tests/mcp/test_diagnostics_tool.py -q && just type`
+Run: `uv run python -m pytest tests/mcp/ops/test_diagnostics.py -q && just type`
 Expected: PASS, ty clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/mcp/tools/ops/diagnostics.py tests/mcp/test_diagnostics_tool.py
+git add src/kdive/mcp/tools/ops/diagnostics.py tests/mcp/ops/test_diagnostics.py
 git commit -m "feat(mcp): ops.diagnostics with_buildhost_agent param + distinct audit (ADR-0167)"
 ```
 
@@ -1236,7 +1240,7 @@ git commit -m "feat(mcp): ops.diagnostics with_buildhost_agent param + distinct 
 
 **Files:**
 - Modify: `src/kdive/cli/commands/registry.py` (`_doctor_parser`), `src/kdive/cli/commands/doctor.py` (payload), `src/kdive/mcp/app.py` (`_service_factory` closure)
-- Test: `tests/cli/test_doctor.py` (existing), `tests/mcp/test_app.py` if it asserts factory wiring
+- Test: `tests/cli/test_doctor_verb.py` (existing), `tests/mcp/test_app.py` if it asserts factory wiring
 
 **Interfaces:**
 - Produces: `--with-buildhost-agent` flag → `payload["with_buildhost_agent"] = True` when set; `_service_factory(provider, *, with_egress=False, with_buildhost_agent=False)` forwards both to `default_service_factory(..., pool=pool, ...)`.
@@ -1255,7 +1259,7 @@ def test_doctor_payload_omits_buildhost_agent_by_default():
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/cli/test_doctor.py -k buildhost -q`
+Run: `uv run python -m pytest tests/cli/test_doctor_verb.py -k buildhost -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
@@ -1292,13 +1296,13 @@ In `mcp/app.py` `_register_diagnostics_tools._service_factory`:
 
 - [ ] **Step 4: Run tests + full diagnostics/cli slice**
 
-Run: `uv run python -m pytest tests/cli/test_doctor.py tests/diagnostics tests/mcp -q && just type`
+Run: `uv run python -m pytest tests/cli/test_doctor_verb.py tests/diagnostics tests/mcp -q && just type`
 Expected: PASS, ty clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/cli/commands/registry.py src/kdive/cli/commands/doctor.py src/kdive/mcp/app.py tests/cli/test_doctor.py
+git add src/kdive/cli/commands/registry.py src/kdive/cli/commands/doctor.py src/kdive/mcp/app.py tests/cli/test_doctor_verb.py
 git commit -m "feat(cli): --with-buildhost-agent flag wired to ops.diagnostics (ADR-0167)"
 ```
 
