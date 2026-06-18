@@ -12,13 +12,16 @@ import asyncio
 import contextlib
 from typing import Any
 
+from fastmcp.tools.base import ToolResult
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware import TelemetryMiddleware
+from kdive.mcp.responses import ToolResponse
 
 
 class _FakeMessage:
@@ -98,6 +101,25 @@ def test_failing_call_records_error_and_reraises() -> None:
         points = _metric_points(reader)
         error_points = [p for name, pts in points.items() if "error" in name for p in pts]
         assert error_points, "a failing call must increment an error counter"
+
+    asyncio.run(_run())
+
+
+def test_failure_envelope_records_error_metrics() -> None:
+    async def _run() -> None:
+        mw, spans, reader = _harness()
+
+        async def _call_next(_ctx: Any) -> ToolResult:
+            envelope = ToolResponse.failure("resources.list", ErrorCategory.INFRASTRUCTURE_FAILURE)
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+        result = await mw.on_call_tool(_FakeContext("resources.list"), _call_next)
+        assert isinstance(result, ToolResult)
+        attrs = _attrs(spans.get_finished_spans()[0])
+        assert attrs["outcome"] == "error"
+        points = _metric_points(reader)
+        error_points = [p for name, pts in points.items() if "error" in name for p in pts]
+        assert any(dict(p.attributes or {}).get("outcome") == "error" for p in error_points)
 
     asyncio.run(_run())
 

@@ -526,7 +526,11 @@ class TelemetryMiddleware(Middleware):
                 span.record_exception(exc)
                 span.set_status(Status(StatusCode.ERROR))
                 raise
-            self._finish(span, tool, "ok", started)
+            outcome = "error" if _result_error_category(result) is not None else "ok"
+            self._finish(span, tool, outcome, started)
+            if outcome == "error":
+                self._errors.add(1, {"tool": tool, "outcome": outcome})
+                span.set_status(Status(StatusCode.ERROR))
             return result
 
     def _finish(self, span: Any, tool: str, outcome: str, started: float) -> None:
