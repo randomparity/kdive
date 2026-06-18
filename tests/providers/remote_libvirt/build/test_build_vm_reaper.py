@@ -13,7 +13,9 @@ from typing import cast
 from uuid import UUID
 
 import libvirt
+import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import BuildVmReaper
 from kdive.providers.remote_libvirt.build_vm_reaper import (
     OpenReaperConnection,
@@ -108,6 +110,21 @@ def test_delete_build_vm_treats_missing_domain_and_overlay_as_done(tmp_path) -> 
     asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
 
     assert conn.pool.lookups == [build_overlay_volume_name(_RID)]
+    assert conn.closed
+
+
+def test_delete_build_vm_preserves_non_absence_lookup_failures(tmp_path) -> None:
+    conn = _FakeConn(
+        domains=[],
+        lookup_error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR),
+    )
+    reaper = _reaper(conn, tmp_path)
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert conn.pool.lookups == []
     assert conn.closed
 
 

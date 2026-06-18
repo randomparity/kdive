@@ -20,6 +20,7 @@ from uuid import UUID
 
 import libvirt
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import BuildVm
 from kdive.providers.remote_libvirt.lifecycle.build_vm import (
     BUILD_DOMAIN_PREFIX,
@@ -116,8 +117,11 @@ class RemoteLibvirtBuildVmReaper:
         with self._connections.connection(config) as conn:
             try:
                 domain = conn.lookupByName(domain_name)
-            except libvirt.libvirtError:
-                domain = None
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                    domain = None
+                else:
+                    raise _infra("looking up build VM domain", domain=domain_name) from exc
             if domain is not None:
                 self._destroy_undefine(domain, domain_name)
             if run_id is not None:
@@ -136,6 +140,14 @@ class RemoteLibvirtBuildVmReaper:
         except libvirt.libvirtError as exc:
             if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
                 _log.warning("build VM %s undefine failed during reap", domain_name)
+
+
+def _infra(verb: str, **details: str) -> CategorizedError:
+    return CategorizedError(
+        f"libvirt error {verb}",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details=dict(details),
+    )
 
 
 __all__ = ["RemoteLibvirtBuildVmReaper", "run_id_from_build_vm_name"]
