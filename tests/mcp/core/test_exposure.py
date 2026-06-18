@@ -102,6 +102,33 @@ def test_build_host_mutations_visible_to_platform_admin_only() -> None:
         assert not tool_visible(tool, operator)
 
 
+def test_image_retention_visible_to_platform_admin_only() -> None:
+    admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+
+    for tool in {"images.extend", "images.prune_expired"}:
+        assert required_scopes(tool) == frozenset({ExposureScope.PLATFORM_ADMIN})
+        assert tool_visible(tool, admin)
+        assert not tool_visible(tool, operator)
+
+
+def test_resource_mutations_visible_to_platform_admin_only() -> None:
+    admin = _ctx(platform=frozenset({PlatformRole.PLATFORM_ADMIN}))
+    operator = _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR}))
+    tools = {
+        "resources.deregister",
+        "resources.renew",
+        "resources.register_local_libvirt",
+        "resources.register_remote_libvirt",
+        "resources.register_fault_inject",
+    }
+
+    for tool in tools:
+        assert required_scopes(tool) == frozenset({ExposureScope.PLATFORM_ADMIN})
+        assert tool_visible(tool, admin)
+        assert not tool_visible(tool, operator)
+
+
 def test_no_grants_sees_only_public_subset() -> None:
     bare = _ctx()
     names = {

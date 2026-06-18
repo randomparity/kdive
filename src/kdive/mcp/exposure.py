@@ -112,13 +112,13 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "debug.clear_breakpoint": _OPERATOR,
     "debug.read_memory": _OPERATOR,
     "debug.read_registers": _OPERATOR,
-    # images (platform operator)
+    # images
     "images.build": _PLAT_OP,
     "images.publish": _PLAT_OP,
     "images.upload": _PLAT_OP,
     "images.delete": _PLAT_OP,
-    "images.extend": _PLAT_OP,
-    "images.prune_expired": _PLAT_OP,
+    "images.extend": _PLAT_ADMIN,
+    "images.prune_expired": _PLAT_ADMIN,
     # introspect
     "introspect.from_vmcore": _VIEWER,
     "introspect.run": _VIEWER,
@@ -152,15 +152,15 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # postmortem
     "postmortem.crash": _OPERATOR,
     "postmortem.triage": _OPERATOR,
-    # resources (platform operator; drain is dual: operator or admin)
+    # resources (drain is dual: operator or admin)
     "resources.cordon": _PLAT_OP,
     "resources.uncordon": _PLAT_OP,
     "resources.set_status": _PLAT_OP,
-    "resources.deregister": _PLAT_OP,
-    "resources.renew": _PLAT_OP,
-    "resources.register_local_libvirt": _PLAT_OP,
-    "resources.register_remote_libvirt": _PLAT_OP,
-    "resources.register_fault_inject": _PLAT_OP,
+    "resources.deregister": _PLAT_ADMIN,
+    "resources.renew": _PLAT_ADMIN,
+    "resources.register_local_libvirt": _PLAT_ADMIN,
+    "resources.register_remote_libvirt": _PLAT_ADMIN,
+    "resources.register_fault_inject": _PLAT_ADMIN,
     "resources.drain": frozenset({ExposureScope.PLATFORM_OPERATOR, ExposureScope.PLATFORM_ADMIN}),
     # runs
     "runs.get": _VIEWER,
