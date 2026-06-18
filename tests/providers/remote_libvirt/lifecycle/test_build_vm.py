@@ -322,6 +322,19 @@ def test_session_skips_preflight_when_no_source(tmp_path: Any) -> None:
     assert DOMAIN_NAME not in conn.domains
 
 
+def test_session_skips_network_wait_when_disabled(tmp_path: Any) -> None:
+    conn = _conn_with_base()
+    # Route never appears, but wait_network=False must not poll it or raise — the agent-reachability
+    # probe (ADR-0167) needs only the guest agent, which _agent_route_after already binds.
+    agent, state = _agent_route_after(10_000)
+    vm = _build_vm_with_agent(conn, tmp_path, agent, network_timeout_s=5.0, network_poll_s=1.0)
+
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID, wait_network=False) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+    assert state["checks"] == 0  # the network gate never ran
+    assert DOMAIN_NAME not in conn.domains  # teardown still happened
+
+
 def test_session_redacts_credential_in_unreachable_source(tmp_path: Any) -> None:
     conn = _conn_with_base()
     agent = _EgressAgent(route_rc=0, egress_rc=128)

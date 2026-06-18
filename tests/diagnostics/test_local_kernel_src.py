@@ -33,6 +33,13 @@ def _probe(outcome: WarmTreeSourceOutcome) -> WarmTreeSourceProbe:
     return probe
 
 
+def _enabled(value: bool):
+    async def probe() -> bool:
+        return value
+
+    return probe
+
+
 def _run_probe(probe: WarmTreeSourceProbe) -> WarmTreeSourceOutcome:
     async def _drive() -> WarmTreeSourceOutcome:
         return await probe()
@@ -91,6 +98,38 @@ def test_fix_names_both_build_lanes() -> None:
     # verdict alone: stage a warm tree + set KDIVE_KERNEL_SRC, or register a git build host.
     assert "KDIVE_KERNEL_SRC" in LOCAL_KERNEL_SRC_FIX
     assert "build_hosts.register" in LOCAL_KERNEL_SRC_FIX
+
+
+# ---- enabled-gate (ADR-0167) --------------------------------------------------------
+
+
+def test_disabled_local_host_is_na_pass_even_when_source_unset() -> None:
+    # When the seeded worker-local host is disabled, the local warm-tree lane has no contract to
+    # violate, so an unset KDIVE_KERNEL_SRC is a pass (n/a), not a fail — clears the ADR-0163
+    # exit-code regression for git/SSH/ephemeral-only deployments.
+    check = LocalKernelSrcCheck(
+        probe=_probe(WarmTreeSourceOutcome.UNSET), enabled_probe=_enabled(False)
+    )
+    result = asyncio.run(check.run())
+    assert result.status is CheckStatus.PASS
+    assert result.fix is None
+    assert result.failure_category is None
+    assert "disabled" in result.detail.lower()
+
+
+def test_enabled_local_host_unset_still_fails() -> None:
+    check = LocalKernelSrcCheck(
+        probe=_probe(WarmTreeSourceOutcome.UNSET), enabled_probe=_enabled(True)
+    )
+    result = asyncio.run(check.run())
+    assert result.status is CheckStatus.FAIL
+
+
+def test_default_enabled_probe_runs_the_warm_tree_verdict() -> None:
+    # No enabled_probe supplied → default always-enabled → existing behavior unchanged.
+    check = LocalKernelSrcCheck(probe=_probe(WarmTreeSourceOutcome.UNSET))
+    result = asyncio.run(check.run())
+    assert result.status is CheckStatus.FAIL
 
 
 # ---- probe adapter (source injected) ------------------------------------------------

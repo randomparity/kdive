@@ -91,6 +91,7 @@ def _args(**kwargs: object) -> argparse.Namespace:
     kwargs.setdefault("json", False)
     kwargs.setdefault("provider", None)
     kwargs.setdefault("with_egress", False)
+    kwargs.setdefault("with_buildhost_agent", False)
     return argparse.Namespace(**kwargs)
 
 
@@ -290,12 +291,21 @@ def test_with_egress_flag_is_threaded_to_the_tool(monkeypatch: pytest.MonkeyPatc
     assert client.calls == [("ops.diagnostics", {"with_egress": True})]
 
 
+def test_with_buildhost_agent_flag_is_threaded_to_the_tool(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    client = _install_session(monkeypatch, _verdict([], has_failure=False, has_error=False))
+    asyncio.run(doctor.doctor(_args(with_buildhost_agent=True)))
+    assert client.calls == [("ops.diagnostics", {"with_buildhost_agent": True})]
+
+
 def test_doctor_is_a_known_subcommand() -> None:
     from kdive.cli.__main__ import build_parser
 
     args = build_parser().parse_args(["doctor"])
     assert args.command == "doctor"
     assert args.provider is None and args.with_egress is False
+    assert args.with_buildhost_agent is False
 
 
 def test_doctor_parses_provider_and_egress_flags() -> None:
@@ -303,6 +313,13 @@ def test_doctor_parses_provider_and_egress_flags() -> None:
 
     args = build_parser().parse_args(["doctor", "--provider", "remote-libvirt", "--with-egress"])
     assert args.provider == "remote-libvirt" and args.with_egress is True
+
+
+def test_doctor_parses_with_buildhost_agent_flag() -> None:
+    from kdive.cli.__main__ import build_parser
+
+    args = build_parser().parse_args(["doctor", "--with-buildhost-agent"])
+    assert args.with_buildhost_agent is True
 
 
 def test_doctor_json_flag_accepted_after_the_verb() -> None:

@@ -46,6 +46,7 @@ def _factory(
     provider: str | None,
     *,
     with_egress: bool = False,
+    with_buildhost_agent: bool = False,
     pool: AsyncConnectionPool | None = None,
 ) -> DiagnosticsService:
     from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
@@ -53,6 +54,7 @@ def _factory(
     return default_service_factory(
         provider,
         with_egress=with_egress,
+        with_buildhost_agent=with_buildhost_agent,
         pool=pool,
         provider_contributions=diagnostic_provider_contributions(),
     )
@@ -348,6 +350,51 @@ def test_local_kernel_src_passes_when_usable(monkeypatch, tmp_path: Path) -> Non
     assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.PASS
     assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
     assert report.has_failure is False
+
+
+# ---- ephemeral build-host agent check opt-in (ADR-0167, #544/#531) -------------------
+
+
+def test_buildhost_agent_check_assembled_only_when_opted_in_with_pool(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from typing import cast
+
+    from kdive.diagnostics.checks import BUILDHOST_AGENT_ID
+
+    _no_remote_instance(monkeypatch, tmp_path)
+    # Off by default: not assembled.
+    assert BUILDHOST_AGENT_ID not in {c.id for c in _factory(None)._checks}  # noqa: SLF001
+    # Opted in with a pool: assembled.
+    service = _factory(None, with_buildhost_agent=True, pool=cast(AsyncConnectionPool, object()))
+    assert BUILDHOST_AGENT_ID in {c.id for c in service._checks}  # noqa: SLF001
+
+
+def test_buildhost_agent_without_pool_fails_fast(monkeypatch, tmp_path: Path) -> None:
+    _no_remote_instance(monkeypatch, tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        _factory(None, with_buildhost_agent=True)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_buildhost_agent_service_uses_generous_per_check_timeout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from typing import cast
+
+    _no_remote_instance(monkeypatch, tmp_path)
+    service = _factory(None, with_buildhost_agent=True, pool=cast(AsyncConnectionPool, object()))
+    # The builder's wait_for_agent bound is 180s; the per-check timeout must exceed it so the probe
+    # can reach a pass/fail verdict rather than always timing out to error.
+    assert service._timeout >= 180.0  # noqa: SLF001
+    assert service._overall_timeout is None  # noqa: SLF001
+
+
+def test_default_factory_keeps_tight_timeouts_without_the_flag(monkeypatch, tmp_path: Path) -> None:
+    _set_env(monkeypatch, tmp_path)
+    service = _factory(None)
+    assert service._timeout == 10.0  # noqa: SLF001
+    assert service._overall_timeout == 30.0  # noqa: SLF001
 
 
 # ---- worker-vantage dispatch wiring (ADR-0164, #514) ---------------------------------

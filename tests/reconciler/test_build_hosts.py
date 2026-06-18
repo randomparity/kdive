@@ -329,6 +329,59 @@ def test_build_vm_reaped_when_no_job_row(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _seed_ephemeral_host(conn: psycopg.AsyncConnection) -> UUID:
+    host_id = uuid4()
+    await conn.execute(
+        "INSERT INTO build_hosts (id, name, kind, workspace_root, max_concurrent, "
+        "base_image_volume) VALUES (%s, %s, 'ephemeral_libvirt', %s, %s, %s)",
+        (host_id, f"eph-{host_id}", "/build", 1, "base.qcow2"),
+    )
+    return host_id
+
+
+def test_build_vm_not_reaped_when_doctor_probe_heartbeat_is_live(migrated_url: str) -> None:
+    """A kdive-build-<run_id> with a fresh doctor-probe heartbeat is live and is NOT reaped."""
+
+    async def _run() -> None:
+        from kdive.db import buildhost_agent_probes as probes
+
+        run_id = uuid4()  # no BUILD job, but a live probe marker holds it
+        async with await connect(migrated_url) as seed, seed.transaction():
+            host_id = await _seed_ephemeral_host(seed)
+        reaper = _FakeBuildVmReaper([_build_vm(run_id)])
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            await probes.register(pool, build_host_id=host_id, run_id=run_id)
+            count = await run_repair(pool, lambda conn: reap_orphan_build_vms(conn, reaper))
+
+        assert count == 0
+        assert reaper.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_build_vm_reaped_when_doctor_probe_heartbeat_released(migrated_url: str) -> None:
+    """A kdive-build-<run_id> with no live job and a released probe marker is reaped."""
+
+    async def _run() -> None:
+        from kdive.db import buildhost_agent_probes as probes
+
+        run_id = uuid4()
+        async with await connect(migrated_url) as seed, seed.transaction():
+            host_id = await _seed_ephemeral_host(seed)
+        reaper = _FakeBuildVmReaper([_build_vm(run_id)])
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            probe_id = await probes.register(pool, build_host_id=host_id, run_id=run_id)
+            await probes.release(pool, probe_id)  # released → not live
+            count = await run_repair(pool, lambda conn: reap_orphan_build_vms(conn, reaper))
+
+        assert count == 1
+        assert reaper.deleted == [f"kdive-build-{run_id}"]
+
+    asyncio.run(_run())
+
+
 def test_build_vm_reap_runs_before_lease_reclaim_in_repair_plan() -> None:
     """The reaped_build_vms repair must precede reclaimed_build_host_leases (reap before reclaim).
 
