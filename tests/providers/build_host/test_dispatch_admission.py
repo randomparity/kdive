@@ -86,3 +86,32 @@ def test_usable_kernel_src_runs_builder(tmp_path: object) -> None:
     )
     assert builder.called is True
     assert out.kernel_ref == "k"
+
+
+def test_local_git_build_skips_warm_tree_admission() -> None:
+    # ADR-0162: a LOCAL git build clones its allowlisted remote and never reads
+    # KDIVE_KERNEL_SRC, so an empty kernel_src must NOT block it (the allowlist is enforced
+    # inside the builder's clone_tree, not by the warm-tree admission).
+    git_profile = BuildProfile.parse(
+        {
+            "schema_version": 1,
+            "kernel_source_ref": {
+                "git": {"remote": "https://github.com/myorg/linux", "ref": "v6.9"}
+            },
+            "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+        }
+    )
+    assert isinstance(git_profile, ServerBuildProfile)
+    builder = _RecordingBuilder()
+    out = asyncio.run(
+        run_build_on_host(
+            builder,
+            _local_host(),
+            _RUN_ID,
+            git_profile,
+            secret_registry=SecretRegistry(),
+            kernel_src="",
+        )
+    )
+    assert builder.called is True
+    assert out.kernel_ref == "k"

@@ -83,10 +83,13 @@ def _example_profile(host: BuildHost) -> dict[str, JsonValue]:
 
     The ``kernel_source_ref`` shape is derived from
     :func:`accepted_source_kinds` (not a second ``if host.kind`` branch), so the example
-    can never advertise a lane the validator rejects.
+    can never advertise a lane the validator rejects. A host that accepts more than one
+    source kind (e.g. a local host after ADR-0161) gets an example for its **primary**
+    (first-listed) kind — warm-tree for local, which needs no allowlist — while its other
+    accepted kinds are still advertised in ``supported_source_kinds``.
     """
     kernel_source_ref: JsonValue
-    if SourceKind.GIT in accepted_source_kinds(host.kind):
+    if accepted_source_kinds(host.kind)[0] is SourceKind.GIT:
         kernel_source_ref = {
             "git": {"remote": _PLACEHOLDER_GIT_REMOTE, "ref": _PLACEHOLDER_GIT_REF}
         }

@@ -99,8 +99,10 @@ def test_source_form_matches_advertised_kind() -> None:
     for data in _items(resp).values():
         parsed = BuildProfile.parse(_profile_of(data))
         assert isinstance(parsed, ServerBuildProfile)
-        advertised_git = "git" in data["supported_source_kinds"]
-        assert is_git_source(parsed) is advertised_git
+        # The example's source kind must be one the host advertises (a host may accept more
+        # than one kind — e.g. a local host after ADR-0162 — and the example shows one of them).
+        example_kind = "git" if is_git_source(parsed) else "warm-tree"
+        assert example_kind in data["supported_source_kinds"]
 
 
 def test_advertised_kinds_match_shared_helper() -> None:
@@ -217,7 +219,7 @@ def test_runs_profile_examples_registered_read_only_and_auth_only(
         assert "worker-local" in names  # the always-present seed
         assert "examples-ssh" in names
         items = {item.object_id: cast(dict[str, Any], item.data) for item in resp.items}
-        assert items["worker-local"]["supported_source_kinds"] == ["warm-tree"]
+        assert items["worker-local"]["supported_source_kinds"] == ["warm-tree", "git"]
         assert items["examples-ssh"]["supported_source_kinds"] == ["git"]
         # auth-only: the wrapper consulted the request context.
         assert seen == [True]

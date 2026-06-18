@@ -17,8 +17,16 @@ from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.shell_transport import (
     _MAX_REMOTE_READ_B64_BYTES,
     ShellBuildTransport,
+    _validate_url,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+
+def test_validate_url_still_rejects_control_char_after_relocation() -> None:
+    # _validate_url reads _UNSAFE_CHARS now imported from git_source (ADR-0162 relocation).
+    with pytest.raises(CategorizedError) as exc:
+        _validate_url("https://example.com/x\n")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 class _RecordingTransport(ShellBuildTransport):

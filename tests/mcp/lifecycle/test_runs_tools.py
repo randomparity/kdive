@@ -1737,18 +1737,20 @@ def test_build_host_provenance_mismatch_ssh_with_warm_tree_is_config_error(
     asyncio.run(_run())
 
 
-def test_build_host_provenance_mismatch_local_with_git_ref_is_config_error(
-    migrated_url: str,
-) -> None:
-    # worker-local (local kind) + git kernel_source_ref → configuration_error.
+def test_build_host_local_with_git_ref_is_admitted(migrated_url: str) -> None:
+    # ADR-0162: worker-local (local kind) + git kernel_source_ref is now admitted (the remote
+    # allowlist is enforced at build time on the worker, not at admission). The build job is
+    # enqueued and no capacity lease is taken for a local host.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             profile = copy.deepcopy(_GIT_BUILD)  # no build_host → resolves worker-local
             run_id = await _seed_run(pool, state=RunState.CREATED, build_profile=profile)
             resp = await _build(pool, _ctx(), run_id)
             njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert njobs == 0
+            nleases = await _count(pool, "SELECT count(*) AS n FROM build_host_leases", ())
+        assert resp.status == "queued"
+        assert njobs == 1
+        assert nleases == 0  # local builds take no capacity lease
 
     asyncio.run(_run())
 
@@ -1905,8 +1907,9 @@ def test_create_ephemeral_host_with_warm_tree_is_config_error_no_run(migrated_ur
     asyncio.run(_run())
 
 
-def test_create_local_host_with_git_ref_is_config_error_no_run(migrated_url: str) -> None:
-    # default worker-local (kind local) + git kernel_source_ref → rejected AT create.
+def test_create_local_host_with_git_ref_succeeds(migrated_url: str) -> None:
+    # ADR-0162: default worker-local (kind local) + git kernel_source_ref is now compatible at
+    # create (the remote is gated by the build-time allowlist); the run is created.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
@@ -1914,11 +1917,8 @@ def test_create_local_host_with_git_ref_is_config_error_no_run(migrated_url: str
             profile = copy.deepcopy(_GIT_BUILD)  # no build_host → resolves worker-local
             resp = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
             nruns = await _run_count_on_system(pool, sys_id)
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.detail == (
-            "a local build host requires a warm-tree kernel_source_ref, not a git ref"
-        )
-        assert nruns == 0
+        assert resp.status == "created"
+        assert nruns == 1
 
     asyncio.run(_run())
 
@@ -2006,28 +2006,27 @@ def test_create_live_run_precedes_compat_check(migrated_url: str) -> None:
 
 
 def test_build_backstop_rejects_when_host_kind_flips_after_create(migrated_url: str) -> None:
-    # Create-valid (ssh + git) then flip the host to local before build: the build-time
-    # check is the defense-in-depth backstop and still rejects, with no build job.
+    # Create-valid (local + warm-tree) then flip the host to ssh before build: the build-time
+    # check is the defense-in-depth backstop and still rejects an ssh+warm-tree pairing, with
+    # no build job. (ADR-0162 makes local+git valid, so the still-incompatible direction is a
+    # non-local host with a warm-tree source.)
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            await _insert_ssh_host(pool, name="ssh-flip")
             inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
             sys_id = await _seed_system(pool)
-            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "ssh-flip"}
+            profile = copy.deepcopy(_VALID_BUILD)  # warm-tree → resolves worker-local (local)
             created = await _create(pool, _ctx(), inv_id, sys_id, profile=profile)
             assert created.status == "created"
             async with pool.connection() as conn:
                 await conn.execute(
-                    "UPDATE build_hosts SET kind = 'local', address = NULL, "
-                    "ssh_credential_ref = NULL WHERE name = %s",
-                    ("ssh-flip",),
+                    "UPDATE build_hosts SET kind = 'ssh', address = 'builder.example', "
+                    "ssh_credential_ref = 'ssh://builder' WHERE name = %s",
+                    ("worker-local",),
                 )
             resp = await _build(pool, _ctx(), created.object_id)
             njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
         assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.detail == (
-            "a local build host requires a warm-tree kernel_source_ref, not a git ref"
-        )
+        assert resp.detail == "a remote build host requires a git kernel_source_ref"
         assert njobs == 0
 
     asyncio.run(_run())

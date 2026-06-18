@@ -113,6 +113,46 @@ def test_remote_host_requires_git_source_and_acquires_lease(
     asyncio.run(_run())
 
 
+def test_git_source_on_local_host_is_admitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR-0162: a git kernel_source_ref is now admitted on the local host (allowlist is
+    # enforced at build time on the worker, not here); no capacity lease for a local host.
+    async def _run() -> None:
+        host = _host()
+        acquired: list[BuildHost] = []
+        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
+        monkeypatch.setattr(
+            build_host_selection,
+            "try_acquire_lease",
+            lambda _conn, lease_host, _run_id: _record_async(acquired, lease_host, True),
+        )
+
+        selected = await build_host_selection.resolve_and_admit(
+            cast(AsyncConnection, object()), _profile(git=True), _RUN_ID
+        )
+
+        assert selected is host
+        assert acquired == []  # local builds take no lease
+
+    asyncio.run(_run())
+
+
+def test_warm_tree_on_remote_host_still_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        host = _host(name="builder", kind=BuildHostKind.SSH)
+        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
+
+        with pytest.raises(CategorizedError) as exc:
+            await build_host_selection.resolve_and_admit(
+                cast(AsyncConnection, object()),
+                _profile(build_host="builder", git=False),
+                _RUN_ID,
+            )
+
+        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+    asyncio.run(_run())
+
+
 def test_missing_host_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _run() -> None:
         monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(None))
@@ -154,16 +194,15 @@ def test_remote_host_at_capacity_is_capacity_exhausted(
     asyncio.run(_run())
 
 
-def test_compat_local_with_git_raises_config_error() -> None:
-    with pytest.raises(CategorizedError) as exc:
+def test_compat_local_with_git_ok() -> None:
+    # ADR-0162: a local host accepts a git source (the remote is gated by the build-time
+    # allowlist), so the shared compatibility check no longer rejects local+git.
+    assert (
         build_host_selection.check_source_kind_compatibility(
             host_kind=BuildHostKind.LOCAL, is_git=True, build_host="worker-local"
         )
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert str(exc.value) == (
-        "a local build host requires a warm-tree kernel_source_ref, not a git ref"
+        is None
     )
-    assert exc.value.details == {"build_host": "worker-local", "host_kind": "local"}
 
 
 def test_compat_remote_with_warm_tree_raises_config_error() -> None:
@@ -213,7 +252,8 @@ def test_compat_remote_with_git_ok() -> None:
 def test_accepted_source_kinds_matrix() -> None:
     from kdive.services.runs.build_host_selection import SourceKind, accepted_source_kinds
 
-    assert accepted_source_kinds(BuildHostKind.LOCAL) == (SourceKind.WARM_TREE,)
+    # ADR-0162: a local host accepts both warm-tree and git (the local git-clone lane).
+    assert accepted_source_kinds(BuildHostKind.LOCAL) == (SourceKind.WARM_TREE, SourceKind.GIT)
     assert accepted_source_kinds(BuildHostKind.SSH) == (SourceKind.GIT,)
     assert accepted_source_kinds(BuildHostKind.EPHEMERAL_LIBVIRT) == (SourceKind.GIT,)
 
