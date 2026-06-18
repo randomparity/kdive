@@ -254,7 +254,7 @@ def _list_breakpoints_op(session_id: str) -> _EngineOp:
             session_id,
             "listed",
             suggested_next_actions=["debug.set_breakpoint", "debug.continue"],
-            data={"count": str(len(refs))},
+            data={"count": len(refs)},
         )
 
     return op

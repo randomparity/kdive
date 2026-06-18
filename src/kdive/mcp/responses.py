@@ -153,7 +153,7 @@ class ToolResponse(BaseModel):
     ) -> ToolResponse:
         """Build one envelope for a collection-returning tool."""
         payload = dict(data or {})
-        payload["count"] = str(len(items))
+        payload["count"] = len(items)
         return cls(
             object_id=object_id,
             status=status,

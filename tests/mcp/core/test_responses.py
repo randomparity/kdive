@@ -116,6 +116,14 @@ def test_success_factory_builds_non_failure_envelope() -> None:
     assert resp.data == {"k": "v"}
 
 
+def test_collection_count_is_numeric_json() -> None:
+    item = ToolResponse.success("item-1", "ok")
+
+    resp = ToolResponse.collection("items", "ok", [item], data={"source": "test"})
+
+    assert resp.data == {"source": "test", "count": 1}
+
+
 def test_data_accepts_nested_json_values_and_rejects_other_objects() -> None:
     resp = ToolResponse.success(
         "inventory",
@@ -343,7 +351,7 @@ def test_collection_factory_wraps_item_envelopes() -> None:
 
     assert resp.object_id == "artifacts"
     assert resp.status == "ok"
-    assert resp.data["count"] == "2"
+    assert resp.data["count"] == 2
     assert resp.data["owner"] == "system-1"
     assert resp.suggested_next_actions == ["artifacts.get"]
     assert resp.items == [first, second]

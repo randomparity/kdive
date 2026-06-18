@@ -53,7 +53,7 @@ def _install_session(monkeypatch: pytest.MonkeyPatch, payload: dict) -> _FakeCli
 
 
 def _collection(items: list[dict]) -> dict:
-    return {"object_id": "x", "status": "ok", "data": {"count": str(len(items))}, "items": items}
+    return {"object_id": "x", "status": "ok", "data": {"count": len(items)}, "items": items}
 
 
 def _item(object_id: str, status: str, data: dict) -> dict:

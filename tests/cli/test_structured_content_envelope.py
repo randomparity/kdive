@@ -71,7 +71,7 @@ def test_resources_list_renders_from_structured_content_when_data_is_none(
     envelope = {
         "object_id": "resources",
         "status": "ok",
-        "data": {"count": "1"},
+        "data": {"count": 1},
         "items": [
             {
                 "object_id": "r1",
