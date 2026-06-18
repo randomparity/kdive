@@ -102,37 +102,10 @@ async def _build_locked(
     cmdline: str | None,
     parsed_profile: ServerBuildProfile,
 ) -> ToolResponse:
-    """Admit the build under the per-Run lock: select host, flip `created -> running`, enqueue.
-
-    Host selection and capacity admission run FIRST inside the transaction so that a
-    capacity failure raises before any state mutation; the transaction rolls back on any
-    exception, leaving no lease, no job, and no state change.
-
-    Args:
-        conn: An async psycopg connection (no active transaction yet).
-        ctx: The request authorization context.
-        run: The Run being admitted for build.
-        cmdline: Optional caller-supplied extra kernel cmdline tokens.
-        parsed_profile: The pre-validated server-build profile (avoids re-parsing).
-
-    Returns:
-        A :class:`~kdive.mcp.responses.ToolResponse` queued on success, or a failure envelope.
-    """
     try:
         async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+            state = await _locked_build_state(conn, run)
             host = await resolve_and_admit(conn, parsed_profile, run.id)
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM runs WHERE id = %s FOR UPDATE", (run.id,))
-                row = await cur.fetchone()
-            if row is None:
-                raise CategorizedError(str(run.id), category=ErrorCategory.CONFIGURATION_ERROR)
-            state = RunState(row["state"])
-            if state in RUN_BUILD_TERMINAL:
-                raise CategorizedError(
-                    str(run.id),
-                    category=ErrorCategory.CONFIGURATION_ERROR,
-                    details={"current_status": state.value},
-                )
             if state is RunState.CREATED:
                 await conn.execute(
                     "UPDATE runs SET state = %s WHERE id = %s AND state = %s",
@@ -157,6 +130,22 @@ async def _build_locked(
             str(run.id), exc, suggested_next_actions=next_actions
         )
     return run_job_envelope(job, run.id)
+
+
+async def _locked_build_state(conn: AsyncConnection, run: Run) -> RunState:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT state FROM runs WHERE id = %s FOR UPDATE", (run.id,))
+        row = await cur.fetchone()
+    if row is None:
+        raise CategorizedError(str(run.id), category=ErrorCategory.CONFIGURATION_ERROR)
+    state = RunState(row["state"])
+    if state in RUN_BUILD_TERMINAL:
+        raise CategorizedError(
+            str(run.id),
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"current_status": state.value},
+        )
+    return state
 
 
 async def _enqueue_build(

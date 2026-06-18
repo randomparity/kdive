@@ -1537,6 +1537,32 @@ def test_build_on_terminal_run_is_config_error(migrated_url: str, state: RunStat
     asyncio.run(_run())
 
 
+def test_build_terminal_run_checks_state_before_capacity(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            host_id = await _insert_ssh_host(pool, name="full-terminal-host", max_concurrent=1)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO build_host_leases (run_id, build_host_id) VALUES (%s, %s)",
+                    (uuid4(), host_id),
+                )
+            profile = {**copy.deepcopy(_GIT_BUILD), "build_host": "full-terminal-host"}
+            run_id = await _seed_run(pool, state=RunState.FAILED, build_profile=profile)
+
+            resp = await _build(pool, _ctx(), run_id)
+            nleases = await _lease_count(pool, host_id)
+            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
+
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "failed"
+        assert "runs.build" not in resp.suggested_next_actions
+        assert nleases == 1
+        assert njobs == 0
+
+    asyncio.run(_run())
+
+
 def test_build_missing_run_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
