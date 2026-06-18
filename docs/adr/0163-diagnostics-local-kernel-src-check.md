@@ -49,7 +49,10 @@ and reports three-state over the **single shared** `warm_tree_source_error` pred
 (`providers/shared/build_host/workspace.py`) — the same rule `sync_tree` (build-time) and
 `check_warm_tree_source_admission` (admission-time, ADR-0161) enforce:
 
-- **`PASS`** — `KDIVE_KERNEL_SRC` is an existing absolute directory.
+- **`PASS`** — `KDIVE_KERNEL_SRC` points at an existing absolute directory. This asserts
+  source-path usability, not that the directory is a valid/buildable kernel tree — the check
+  reuses ADR-0161's bounded predicate (absolute + existing dir), which does not inspect the
+  tree's contents.
 - **`FAIL`** — it is unset/empty/whitespace, or set but not an existing absolute tree. `fix`
   is the `LOCAL_KERNEL_SRC_FIX` constant (stage a kernel tree + set `KDIVE_KERNEL_SRC`, or
   route builds to a registered git build host). `failure_category = configuration_error`. The
@@ -109,6 +112,16 @@ synchronous and pool-free.
   `local_kernel_src` `FAIL`. This is acceptable: the seeded `LOCAL` lane is selectable, so an
   unusable warm-tree source is a real latent failure; respecting an operator's choice to
   disable local builds is the DB-`enabled`-gating refinement (see below).
+- **Exit-code regression for `doctor`-as-gate on git/SSH-only deployments.** A `FAIL` sets
+  `has_failure`, which `doctor` maps to exit code `1` (`cli/commands/doctor.py`). A deployment
+  that builds only through registered git/SSH/ephemeral hosts (a supported, healthy
+  configuration per `accepted_source_kinds`) never needs `KDIVE_KERNEL_SRC`, yet still carries
+  the seeded `worker-local` host — so on upgrade its `doctor` exit flips `0` → `1`, breaking any
+  pipeline that gates on `doctor`'s status. The supported interim responses are the two the
+  `fix` already names: set `KDIVE_KERNEL_SRC` to a real tree, or — for an operator who genuinely
+  never builds locally — disable the seeded `worker-local` host, which the DB-`enabled`-gating
+  follow-up (below) will then honor by suppressing the check. Until that follow-up lands, the
+  honest default is to surface the latent local-lane failure rather than hide it.
 
 ## Considered & rejected
 

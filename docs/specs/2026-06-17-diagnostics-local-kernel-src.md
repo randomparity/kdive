@@ -65,7 +65,9 @@ class WarmTreeSourceOutcome(StrEnum):
 constant), `vantage = Vantage.SERVER`. `run()` maps:
 
 - `USABLE` → `pass`, detail "warm-tree kernel source is set on the build worker
-  (KDIVE_KERNEL_SRC is an existing absolute tree)".
+  (KDIVE_KERNEL_SRC points at an existing absolute tree)". This asserts source-path usability,
+  not that the directory is a valid/buildable kernel tree (the ADR-0161 predicate does not
+  inspect tree contents).
 - `UNSET` → `fail`, `failure_category=configuration_error`, fix = `LOCAL_KERNEL_SRC_FIX`,
   detail "the local build worker has no warm-tree kernel source: KDIVE_KERNEL_SRC is unset,
   so every local warm-tree build fails".
