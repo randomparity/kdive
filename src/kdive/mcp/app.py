@@ -390,24 +390,45 @@ _HANDLER_REGISTRARS: tuple[HandlerRegistrar, ...] = (
 )
 
 
-# A flat, non-recursive output schema advertised for every tool (ADR-0113). Every tool returns
-# the self-referential `ToolResponse` (`items: list[ToolResponse]` + recursive `JsonValue` data),
-# so FastMCP would auto-derive a recursive `$ref` schema that the FastMCP 3.4.0 client cannot
-# build a validator for — it logs a per-call parse error and nulls `CallToolResult.data`.
-# Advertising a flat object removes the recursion while keeping the `structured_content` wire
-# payload unchanged (no `x-fastmcp-wrap-result` key). Typed `dict[str, Any]` to match FastMCP's
+# A fielded, non-recursive output schema advertised for every tool (ADR-0170, revisiting
+# ADR-0113). Every tool returns the self-referential `ToolResponse` (`items: list[ToolResponse]` +
+# recursive `JsonValue` data), so FastMCP would auto-derive a recursive `$ref` schema that the
+# FastMCP 3.4.0 client cannot build a validator for — it logs a per-call parse error and nulls
+# `CallToolResult.data`. This schema documents every top-level envelope field while collapsing the
+# two recursive fields — `data` to a bare object and `items` to an array of bare objects — so it
+# carries no self-`$ref` and the client builds a validator. No field is `required` and
+# `additionalProperties` is left permissive, so the client never rejects a real payload; a new
+# envelope field is caught by the drift-guard test, not silently. The `structured_content` wire
+# payload is unchanged (no `x-fastmcp-wrap-result` key). Typed `dict[str, Any]` to match FastMCP's
 # `Tool.output_schema` and because a JSON schema nests non-str values.
-ENVELOPE_OUTPUT_SCHEMA: dict[str, Any] = {"type": "object"}
+ENVELOPE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "The uniform kdive ToolResponse envelope (ADR-0019). `data` and `items` are "
+        "intentionally open; see resource://kdive/docs/guide/response-envelope.md."
+    ),
+    "properties": {
+        "object_id": {"type": "string"},
+        "status": {"type": "string"},
+        "suggested_next_actions": {"type": "array", "items": {"type": "string"}},
+        "refs": {"type": "object", "additionalProperties": {"type": "string"}},
+        "error_category": {"type": ["string", "null"]},
+        "retryable": {"type": ["boolean", "null"]},
+        "detail": {"type": ["string", "null"]},
+        "data": {"type": "object"},
+        "items": {"type": "array", "items": {"type": "object"}},
+    },
+}
 
 
-def _advertise_flat_output_schema(app: FastMCP) -> int:
-    """Override every registered tool's advertised `outputSchema` with the flat envelope schema.
+def _advertise_envelope_output_schema(app: FastMCP) -> int:
+    """Override every registered tool's advertised `outputSchema` with the envelope schema.
 
     Mutates the *live* registered `Tool` instances (the `Tool`-typed values in the local
     provider's component store); `app.list_tools()` returns copies whose mutation would not change
     what the server advertises. Raises if no tools are found: `build_app` always registers a
     non-empty surface, so a zero count means the FastMCP registry accessor changed under us and
-    the app must not silently fall back to advertising the recursive schema (ADR-0113).
+    the app must not silently fall back to advertising the recursive auto-schema (ADR-0170).
 
     Returns the number of tools swept.
     """
@@ -418,8 +439,8 @@ def _advertise_flat_output_schema(app: FastMCP) -> int:
             swept += 1
     if swept == 0:
         raise RuntimeError(
-            "no tools found to advertise a flat outputSchema for; the FastMCP registry accessor "
-            "(app.local_provider._components) may have changed (ADR-0113)"
+            "no tools found to advertise an envelope outputSchema for; the FastMCP registry "
+            "accessor (app.local_provider._components) may have changed (ADR-0170)"
         )
     return swept
 
@@ -474,7 +495,7 @@ def build_app(
     )
     for register in _PLANE_REGISTRARS:
         register(app, pool, assembly)
-    _advertise_flat_output_schema(app)
+    _advertise_envelope_output_schema(app)
     return app
 
 

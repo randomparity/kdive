@@ -254,7 +254,7 @@ def test_field_level_error_on_allocations_request_is_reraised_not_collapsed() ->
 def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     # The integration proof: a typed-profile tool behind the middleware returns the envelope for a
     # malformed profile rather than raising a client-side ToolError.
-    from kdive.mcp.app import _advertise_flat_output_schema
+    from kdive.mcp.app import _advertise_envelope_output_schema
 
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())
@@ -263,10 +263,11 @@ def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     async def _define(allocation_id: str, profile: ProvisioningProfile) -> ToolResponse:
         return ToolResponse.success(allocation_id, "ok")
 
-    # The real build_app sweeps every tool to a flat output schema (ADR-0113); apply it here so the
-    # client can parse the structured envelope (the recursive ToolResponse schema would otherwise
-    # break the per-call TypeAdapter).
-    _advertise_flat_output_schema(app)
+    # The real build_app sweeps every tool to the fielded envelope output schema (ADR-0170); apply
+    # it here so the client can parse the structured envelope (the recursive ToolResponse schema
+    # would otherwise break the per-call TypeAdapter). The fielded schema makes `result.data` a
+    # pydantic model, so read the byte-stable envelope off `structured_content`.
+    _advertise_envelope_output_schema(app)
 
     async def _run() -> dict[str, Any] | None:
         async with Client(app) as client:
@@ -274,7 +275,7 @@ def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
                 "systems.define",
                 {"allocation_id": "alloc-1", "profile": {"schema_version": 1}},
             )
-            return result.data
+            return result.structured_content
 
     data = asyncio.run(_run())
     assert data is not None
@@ -287,7 +288,7 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
     # The integration proof for #482: runs.create with a typed `build_profile` union publishes the
     # anyOf input schema, accepts a valid profile, and returns the envelope (not a ToolError) for a
     # malformed one — exercising the real _BINDING_CONVERSIONS["runs.create"] entry.
-    from kdive.mcp.app import _advertise_flat_output_schema
+    from kdive.mcp.app import _advertise_envelope_output_schema
 
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())
@@ -298,7 +299,7 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
     ) -> ToolResponse:
         return ToolResponse.success(system_id, "created", data={"source": build_profile.source})
 
-    _advertise_flat_output_schema(app)
+    _advertise_envelope_output_schema(app)
 
     async def _run() -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
         async with Client(app) as client:
@@ -315,7 +316,7 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
                 "runs.create",
                 {"system_id": "sys-1", "build_profile": {"schema_version": 1}},
             )
-            return schema, valid.data, malformed.data
+            return schema, valid.structured_content, malformed.structured_content
 
     schema, valid_data, malformed_data = asyncio.run(_run())
     assert "anyOf" in schema  # both build lanes published, discoverable from the tool surface
