@@ -8,16 +8,18 @@ from uuid import UUID
 from kdive.domain.errors import ErrorCategory, suppressed_detail
 from kdive.domain.jobs import Job
 from kdive.domain.lifecycle import Run
-from kdive.domain.state import AllocationState, InvestigationState, RunState, SystemState
+from kdive.domain.state import RunState
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
+from kdive.services.runs import states as run_states
 
-RUN_HOSTABLE = frozenset({SystemState.READY})
-SYSTEM_GONE = frozenset({SystemState.TORN_DOWN, SystemState.FAILED, SystemState.CRASHED})
-ALLOC_HOSTABLE = frozenset({AllocationState.ACTIVE})
-INVESTIGATION_OPEN_FOR_RUN = frozenset({InvestigationState.OPEN, InvestigationState.ACTIVE})
-RUN_BUILD_TERMINAL = frozenset({RunState.FAILED, RunState.CANCELED})
-RUN_NON_TERMINAL = frozenset({RunState.CREATED, RunState.RUNNING})
+ALLOC_HOSTABLE = run_states.ALLOC_HOSTABLE
+INVESTIGATION_OPEN_FOR_RUN = run_states.INVESTIGATION_OPEN_FOR_RUN
+RUN_BUILD_TERMINAL = run_states.RUN_BUILD_TERMINAL
+RUN_HOSTABLE = run_states.RUN_HOSTABLE
+RUN_NON_TERMINAL = run_states.RUN_NON_TERMINAL
+SYSTEM_GONE = run_states.SYSTEM_GONE
+
 # A Run holds its System until terminal; at most one non-terminal Run per System.
 
 # A failed Run with no linked job (e.g. a reconciler-driven failure on a torn-down System,
