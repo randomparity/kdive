@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import LiteralString
@@ -10,7 +11,7 @@ from typing import LiteralString
 import psycopg
 import pytest
 
-from kdive.db import migrate
+from kdive.db import idempotency, migrate
 from kdive.domain import errors, models
 from kdive.domain.capacity import state
 
@@ -32,6 +33,7 @@ CHECK_ENUMS = [
     ("image_catalog_managed_by_check", models.ManagedBy),
     ("resources_managed_by_check", models.ManagedBy),
     ("build_hosts_managed_by_check", models.ManagedBy),
+    ("run_steps_state_check", idempotency._RunStepState),
 ]
 
 OBJECT_TABLES = {
@@ -203,6 +205,21 @@ def test_run_steps_state_check_admits_enum_values_and_rejects_others(
             "INSERT INTO run_steps (run_id, step, state) VALUES (%s, 'bad', 'bogus')",
             (run_id,),
         )
+
+
+def test_run_steps_state_check_admits_exactly_the_enum(pg_conn: psycopg.Connection) -> None:
+    """The CHECK's admitted set equals _RunStepState exactly — no SQL-only extras."""
+    migrate.apply_migrations(pg_conn)
+    row = pg_conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'run_steps_state_check'"
+    ).fetchone()
+    assert row is not None, "run_steps_state_check constraint is missing"
+    # pg renders the CHECK with the admitted values as single-quoted literals
+    # (state = ANY (ARRAY['running'::text, ...]) or state IN ('running', ...)); the
+    # ::text casts sit outside the quotes, so the quoted tokens are exactly the values.
+    admitted = set(re.findall(r"'([^']+)'", row[0]))
+    assert admitted == {s.value for s in idempotency._RunStepState}
 
 
 def test_runs_expected_boot_failure_column(pg_conn: psycopg.Connection) -> None:
