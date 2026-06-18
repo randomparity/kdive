@@ -69,6 +69,68 @@ _EFFECTIVE_CONFIG_MAX_UPLOAD_BYTES = 1024 * 1024
 _MAX_ECHOED_NAME_LEN = 64
 _REQUIRED_DECLARATION_FIELDS = ("name", "sha256", "size_bytes")
 
+# JSON Schema for one upload-declaration item, advertised to MCP clients via the
+# registrar's ``json_schema_extra`` (ADR-0173). It is *advertisement only*: the registrar
+# keeps the runtime parameter type a permissive ``Mapping`` so a malformed declaration
+# still reaches ``_validate_one_declaration`` and gets ADR-0166's self-correcting
+# ``bad_artifact_declaration`` rejection instead of a generic pydantic boundary error. The
+# ``required`` list is derived from ``_REQUIRED_DECLARATION_FIELDS`` so the advertised
+# shape can never drift from what the validator enforces.
+_CHUNK_ITEM_SCHEMA: dict[str, JsonValue] = {
+    "type": "object",
+    "required": ["sha256", "size_bytes"],
+    "properties": {
+        "sha256": {"type": "string", "description": "Base64-encoded SHA-256 of this chunk."},
+        "size_bytes": {"type": "integer", "description": "This chunk's size in bytes."},
+    },
+}
+UPLOAD_DECLARATION_ITEM_SCHEMA: dict[str, JsonValue] = {
+    "type": "object",
+    "required": list(_REQUIRED_DECLARATION_FIELDS),
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Accepted artifact name (see artifacts.expected_uploads).",
+        },
+        "sha256": {
+            "type": "string",
+            "description": "Base64-encoded SHA-256 of the whole object.",
+        },
+        "size_bytes": {"type": "integer", "description": "Total object size in bytes."},
+        "chunks": {
+            "type": "array",
+            "description": "Optional chunked-upload parts; omit for a single PUT.",
+            "items": _CHUNK_ITEM_SCHEMA,
+        },
+    },
+}
+
+
+# One single-PUT and one chunked declaration per owner-kind, rendered into the generated
+# tool reference (ADR-0047/0173). The item *shape* is shared, but the example artifact
+# names match each tool's accepted vocabulary (run: kernel/…; system: rootfs). The chunked
+# example's chunk sizes sum to ``size_bytes`` with the non-final part at the 5 MiB minimum,
+# mirroring the validator's contract.
+def _declaration_examples(single_name: str, chunked_name: str) -> list[JsonValue]:
+    return [
+        [{"name": single_name, "sha256": "rL0Y20zC...base64...", "size_bytes": 12582912}],
+        [
+            {
+                "name": chunked_name,
+                "sha256": "kZ8s1f9q...base64...",
+                "size_bytes": 7340032,
+                "chunks": [
+                    {"sha256": "p1...base64...", "size_bytes": 5242880},
+                    {"sha256": "p2...base64...", "size_bytes": 2097152},
+                ],
+            }
+        ],
+    ]
+
+
+RUN_DECLARATION_EXAMPLES: list[JsonValue] = _declaration_examples("kernel", "vmlinux")
+SYSTEM_DECLARATION_EXAMPLES: list[JsonValue] = _declaration_examples("rootfs", "rootfs")
+
 
 def _upload_ttl() -> timedelta:
     return timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
