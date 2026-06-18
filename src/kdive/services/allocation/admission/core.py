@@ -37,7 +37,6 @@ from psycopg import AsyncConnection
 import kdive.services.allocation.admission.pcie_claim as pcie_claim
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS
-from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.cost import (
     Selector,
@@ -513,15 +512,7 @@ async def _host_cap_check(conn: AsyncConnection, resource: Resource) -> Admissio
 
 def _resolve_cap(resource: Resource) -> int:
     """Read and validate the per-host cap; fail closed on anything invalid."""
-    cap = resource.capabilities.get(CONCURRENT_ALLOCATION_CAP_KEY)
-    # bool is an int subclass — reject it explicitly so `True` is not read as cap 1.
-    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
-        raise CategorizedError(
-            f"resource {resource.id} has no valid {CONCURRENT_ALLOCATION_CAP_KEY!r}",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"resource_id": str(resource.id), "cap": repr(cap)},
-        )
-    return cap
+    return resource.capability_view.require_allocation_cap(resource_id=resource.id)
 
 
 async def _count_occupying(conn: AsyncConnection, resource_id: object) -> int:

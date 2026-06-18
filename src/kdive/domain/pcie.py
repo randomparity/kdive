@@ -22,9 +22,10 @@ from dataclasses import dataclass
 from enum import StrEnum, auto
 from typing import Literal, TypedDict
 
+from kdive.domain.catalog.resource_capabilities import PCIE_DEVICES_KEY as _PCIE_DEVICES_KEY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-PCIE_DEVICES_KEY = "pcie_devices"
+PCIE_DEVICES_KEY = _PCIE_DEVICES_KEY
 """The Resource ``capabilities`` key carrying the static PCIe descriptor list."""
 
 

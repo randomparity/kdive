@@ -25,20 +25,12 @@ from typing import TYPE_CHECKING
 from psycopg import AsyncConnection
 
 from kdive.domain.lifecycle_rules import NON_TERMINAL_ALLOCATION_STATE_VALUES
-from kdive.domain.pcie import (
-    PCIE_DEVICES_KEY,
-    MultisetResolution,
-    PCIeClaim,
-    PCIeDescriptor,
-    resolve_multiset,
-)
+from kdive.domain.pcie import MultisetResolution, PCIeClaim, PCIeDescriptor, resolve_multiset
 
 if TYPE_CHECKING:
     from uuid import UUID
 
     from kdive.domain.catalog.resources import Resource
-
-_DESCRIPTOR_FIELDS = ("bdf", "vendor_id", "device_id", "class_code", "label")
 
 
 def descriptors_for(resource: Resource) -> list[PCIeDescriptor]:
@@ -50,25 +42,7 @@ def descriptors_for(resource: Resource) -> list[PCIeDescriptor]:
     blanks the inventory or feeds a non-string into the matcher. Returns the well-formed
     descriptors in their advertised order.
     """
-    raw = resource.capabilities.get(PCIE_DEVICES_KEY)
-    if not isinstance(raw, list):
-        return []
-    descriptors: list[PCIeDescriptor] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        if any(not isinstance(entry.get(field), str) for field in _DESCRIPTOR_FIELDS):
-            continue
-        descriptors.append(
-            PCIeDescriptor(
-                bdf=entry["bdf"],
-                vendor_id=entry["vendor_id"],
-                device_id=entry["device_id"],
-                class_code=entry["class_code"],
-                label=entry["label"],
-            )
-        )
-    return descriptors
+    return resource.capability_view.pcie_descriptors()
 
 
 async def active_claims(conn: AsyncConnection, resource_id: UUID) -> list[PCIeClaim]:

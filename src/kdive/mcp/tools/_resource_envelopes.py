@@ -20,12 +20,13 @@ def resource_config_error(object_id: str) -> ToolResponse:
 
 def resource_capability_data(resource: Resource) -> dict[str, str]:
     """Flatten the capabilities jsonb to string values for the envelope."""
-    caps = resource.capabilities
+    caps = resource.capability_view
     data: dict[str, str] = {"kind": resource.kind.value}
     for key in _FLAT_CAP_KEYS:
-        if key in caps:
-            data[key] = str(caps[key])
-    transports = caps.get("transports")
+        value = caps.scalar(key)
+        if value is not None:
+            data[key] = str(value)
+    transports = caps.scalar("transports")
     if isinstance(transports, (list, tuple)):
         data["transports"] = ",".join(str(t) for t in transports)
     return data

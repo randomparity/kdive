@@ -10,6 +10,7 @@ from pydantic import Field
 
 from kdive.domain._records import DomainModel
 from kdive.domain.catalog.ownership import ManagedBy
+from kdive.domain.catalog.resource_capabilities import ResourceCapabilities
 from kdive.domain.state import ResourceStatus
 
 
@@ -36,6 +37,10 @@ class Resource(DomainModel):
     owner_project: str | None = None
     affinity_allowlist: list[str] = Field(default_factory=list)
     lease_expires_at: datetime | None = None
+
+    @property
+    def capability_view(self) -> ResourceCapabilities:
+        return ResourceCapabilities.from_mapping(self.capabilities)
 
 
 __all__ = ["ManagedBy", "Resource", "ResourceKind"]
