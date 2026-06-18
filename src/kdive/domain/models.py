@@ -1,348 +1,81 @@
-"""Typed records for KDIVE durable objects (ADR-0003, ADR-0005).
+"""Compatibility facade for durable domain records.
 
-Pydantic models matching the Postgres schema. Every tenant object carries the
-common identity/timestamp fields
-(:class:`DomainModel`) and the ``(principal, agent_session, project)`` attribution
-tuple (:class:`_Attribution`). Three objects deviate, per their schema rows:
+The bounded domain modules own their records and enums:
 
-* :class:`Resource` is infrastructure — it has a health ``status`` (not a tenant
-  ``state``) and no attribution.
-* :class:`Job` records its authorizing tuple in the ``authorizing`` jsonb column
-  rather than as attribution columns.
-* :class:`Artifact` is a write-once record — no lifecycle ``state``.
+* :mod:`kdive.domain.resources` owns resources.
+* :mod:`kdive.domain.lifecycle` owns allocations, systems, runs, and investigations.
+* :mod:`kdive.domain.jobs` owns jobs and power/job vocabulary.
+* :mod:`kdive.domain.accounting`, :mod:`kdive.domain.images`, and
+  :mod:`kdive.domain.artifacts` own their respective catalog records.
 
-``jsonb`` columns whose interior shape is open-ended (capabilities, job payload,
-authorizing tuple) remain typed as ``dict[str, Any]`` here. Profile-owned JSON
-columns use profile document aliases and are parsed by their owning profile modules.
-
-The "failure category set iff the object reached a failure state" invariant on
-:class:`Run` and :class:`Job` is enforced by the repository transition helpers, which set the
-category atomically with the terminal transition. A model-level cross-field check would fire
-on every field assignment under ``validate_assignment`` and break incremental updates.
+This module remains as the legacy aggregate import surface for repository code and tests while
+call sites move to the bounded modules.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
-from enum import StrEnum
-from typing import Any, Literal, TypedDict
-from uuid import UUID
-
-from pydantic import Field, field_validator
-
-from kdive.domain._records import DomainBase as _DomainBase
-from kdive.domain._records import DomainModel
-from kdive.domain.accounting import (
-    Budget as Budget,
-)
-from kdive.domain.accounting import (
-    CostClassCoefficient as CostClassCoefficient,
-)
-from kdive.domain.accounting import (
-    LedgerEntry as LedgerEntry,
-)
-from kdive.domain.accounting import (
-    LedgerEventType as LedgerEventType,
-)
-from kdive.domain.accounting import (
-    Quota as Quota,
-)
+from kdive.domain._records import DomainBase as DomainBase
+from kdive.domain._records import DomainModel as DomainModel
+from kdive.domain.accounting import Budget as Budget
+from kdive.domain.accounting import CostClassCoefficient as CostClassCoefficient
+from kdive.domain.accounting import LedgerEntry as LedgerEntry
+from kdive.domain.accounting import LedgerEventType as LedgerEventType
+from kdive.domain.accounting import Quota as Quota
 from kdive.domain.artifacts import Artifact as Artifact
 from kdive.domain.artifacts import Sensitivity as Sensitivity
-from kdive.domain.errors import ErrorCategory
 from kdive.domain.images import ImageCatalogEntry as ImageCatalogEntry
 from kdive.domain.images import ImageState as ImageState
 from kdive.domain.images import ImageVisibility as ImageVisibility
-from kdive.domain.ownership import ManagedBy
-from kdive.domain.pcie import PCIeClaim
-from kdive.domain.profile_documents import (
-    SerializedBuildProfile,
-    SerializedExpectedBootFailure,
-    SerializedProvisioningProfile,
-)
-from kdive.domain.sizing import MB_PER_GB
-from kdive.domain.state import (
-    AllocationState,
-    DebugSessionState,
-    InvestigationState,
-    JobState,
-    ResourceStatus,
-    RunState,
-    SystemState,
-)
+from kdive.domain.jobs import DESTRUCTIVE_JOB_KINDS as DESTRUCTIVE_JOB_KINDS
+from kdive.domain.jobs import DestructiveJobKind as DestructiveJobKind
+from kdive.domain.jobs import Job as Job
+from kdive.domain.jobs import JobAuthorizing as JobAuthorizing
+from kdive.domain.jobs import JobKind as JobKind
+from kdive.domain.jobs import PowerAction as PowerAction
+from kdive.domain.lifecycle import Allocation as Allocation
+from kdive.domain.lifecycle import Attribution as Attribution
+from kdive.domain.lifecycle import DebugSession as DebugSession
+from kdive.domain.lifecycle import ExpectedBootFailure as ExpectedBootFailure
+from kdive.domain.lifecycle import ExternalRef as ExternalRef
+from kdive.domain.lifecycle import Investigation as Investigation
+from kdive.domain.lifecycle import Run as Run
+from kdive.domain.lifecycle import System as System
+from kdive.domain.lifecycle import SystemShape as SystemShape
+from kdive.domain.pcie import PCIeClaim as PCIeClaim
+from kdive.domain.resources import ManagedBy as ManagedBy
+from kdive.domain.resources import Resource as Resource
+from kdive.domain.resources import ResourceKind as ResourceKind
 
-
-class ResourceKind(StrEnum):
-    """The provider resource kinds.
-
-    Production defaults to ``LOCAL_LIBVIRT``. ``FAULT_INJECT`` is a concrete opt-in mock
-    provider behind the same ``ProviderResolver`` seam and is absent from default
-    production composition. ``REMOTE_LIBVIRT`` (ADR-0076) is the M2 remote provider,
-    opt-in by operator config (a ``qemu+tls://`` host URI + TLS cert refs).
-    """
-
-    LOCAL_LIBVIRT = "local-libvirt"
-    FAULT_INJECT = "fault-inject"
-    REMOTE_LIBVIRT = "remote-libvirt"
-
-
-class JobKind(StrEnum):
-    """The async job kinds — every tool that returns a ``{job_id}`` handle.
-
-    The spec's "Job queue" section names the long-running provider ops;
-    ``teardown``/``force_crash``/``power`` are also job-dispatched per the tool
-    surface (``systems.teardown``/``control.*`` return ``{job_id}``) and the
-    persisted ``dedup_key`` contract. ``reprovision`` is the in-place reprovision op
-    (ADR-0038), long-running like ``provision``.
-    """
-
-    PROVISION = "provision"
-    REPROVISION = "reprovision"
-    TEARDOWN = "teardown"
-    BUILD = "build"
-    INSTALL = "install"
-    BOOT = "boot"
-    FORCE_CRASH = "force_crash"
-    POWER = "power"
-    CAPTURE_VMCORE = "capture_vmcore"
-    IMAGE_BUILD = "image_build"
-    DIAGNOSTICS_WORKER_CHECK = "diagnostics_worker_check"
-
-
-type DestructiveJobKind = Literal[
-    JobKind.REPROVISION,
-    JobKind.TEARDOWN,
-    JobKind.FORCE_CRASH,
-    JobKind.POWER,
+__all__ = [
+    "DESTRUCTIVE_JOB_KINDS",
+    "Allocation",
+    "Artifact",
+    "Attribution",
+    "Budget",
+    "CostClassCoefficient",
+    "DebugSession",
+    "DestructiveJobKind",
+    "DomainBase",
+    "DomainModel",
+    "ExpectedBootFailure",
+    "ExternalRef",
+    "ImageCatalogEntry",
+    "ImageState",
+    "ImageVisibility",
+    "Investigation",
+    "Job",
+    "JobAuthorizing",
+    "JobKind",
+    "LedgerEntry",
+    "LedgerEventType",
+    "ManagedBy",
+    "PCIeClaim",
+    "PowerAction",
+    "Quota",
+    "Resource",
+    "ResourceKind",
+    "Run",
+    "Sensitivity",
+    "System",
+    "SystemShape",
 ]
-
-DESTRUCTIVE_JOB_KINDS: frozenset[JobKind] = frozenset(
-    {JobKind.REPROVISION, JobKind.TEARDOWN, JobKind.FORCE_CRASH, JobKind.POWER}
-)
-"""Runtime set mirroring the ``DestructiveJobKind`` Literal (ADR-0130 token validation)."""
-
-
-class PowerAction(StrEnum):
-    """Power operations accepted by the durable control-plane job contract."""
-
-    ON = "on"
-    OFF = "off"
-    CYCLE = "cycle"
-    RESET = "reset"
-
-
-class JobAuthorizing(TypedDict):
-    principal: str
-    agent_session: str | None
-    project: str
-
-
-class _Attribution(_DomainBase):
-    """The attribution tuple recorded for tenant-owned objects."""
-
-    principal: str
-    agent_session: str | None = None
-    project: str
-
-
-class ExternalRef(_DomainBase):
-    """A mutable link to an external tracker (e.g. bugzilla, jira)."""
-
-    tracker: str
-    id: str
-    url: str
-
-
-class Resource(DomainModel):
-    """A registered provider resource host.
-
-    ``managed_by`` partitions ownership between declarative bring-up (``config``), discovery
-    (``discovery``), and imperative agent tools (``runtime``) so the inventory reconciler and
-    runtime registration own disjoint row-sets (ADR-0112). ``name`` is a mutable stable
-    identity (unique per ``kind`` when present; the ``id`` UUID stays the PK). ``owner_project``
-    (``None`` = global) with ``affinity_allowlist`` scopes a resource to specific projects, and
-    ``lease_expires_at`` backs leak-reaping of runtime-registered resources.
-    """
-
-    kind: ResourceKind
-    capabilities: dict[str, Any] = Field(default_factory=dict)
-    pool: str
-    cost_class: str
-    status: ResourceStatus
-    host_uri: str
-    cordoned: bool = False
-    managed_by: ManagedBy = ManagedBy.RUNTIME
-    name: str | None = None
-    owner_project: str | None = None
-    affinity_allowlist: list[str] = Field(default_factory=list)
-    lease_expires_at: datetime | None = None
-
-
-class Allocation(DomainModel, _Attribution):
-    """A capacity- and budget-checked booking of a Resource.
-
-    The selector size is persisted at grant (``requested_vcpus``,
-    ``requested_memory_gb``, and ``requested_disk_gb``) so accounting, availability, and reuse
-    do not depend on mutable catalog state. The billing interval is ``active_started_at`` to
-    ``active_ended_at`` and is never derived from ``updated_at`` (ADR-0007 §3).
-
-    ``shape`` records the named preset a shape-sized request resolved from (``None`` for
-    full-custom). It is a label, not a foreign key: later shape edits cannot re-size a
-    stamped row because sizing reads from this persisted snapshot (ADR-0067).
-
-    ``pcie_claim`` is the resolved list of ``(vendor_id, device_id, bdf)`` devices held by
-    this allocation (ADR-0068). Occupancy is derived from this column on non-terminal
-    allocations, so the claim frees on terminal transition while the historical row keeps
-    the snapshot.
-
-    ``requested`` is the durable queue state for capacity-denied requests (ADR-0069). A
-    queued row holds only queue position: ``resource_id`` is ``None``, no reserve or lease is
-    held, ``pcie_claim`` is empty, and the original request inputs are persisted for
-    promotion re-admission.
-
-    ``failure_category`` records the terminal cause of a ``failed`` allocation (ADR-0118):
-    ``allocation_denied`` for a budget terminate, ``queue_timeout`` for a reap; ``None`` for
-    any other failed path (the response envelope then falls back to ``infrastructure_failure``).
-    """
-
-    resource_id: UUID | None = None
-    state: AllocationState
-    lease_expiry: datetime | None = None
-    requested_vcpus: int | None = None
-    requested_memory_gb: int | None = None
-    requested_disk_gb: int | None = None
-    shape: str | None = None
-    active_started_at: datetime | None = None
-    active_ended_at: datetime | None = None
-    pcie_claim: list[PCIeClaim] = Field(default_factory=list)
-    requested_pcie_specs: list[str] = Field(default_factory=list)
-    requested_kind: ResourceKind | None = None
-    requested_resource_id: UUID | None = None
-    failure_category: ErrorCategory | None = None
-
-
-class System(DomainModel, _Attribution):
-    """A provisioned target; one per Allocation.
-
-    The nullable ``shape`` label is ``None`` for full-custom allocations (ADR-0067). The
-    System's size of record lives in ``provisioning_profile`` (vcpu/memory_mb/disk_gb), so a
-    catalog change never re-sizes it.
-    """
-
-    allocation_id: UUID
-    state: SystemState
-    provisioning_profile: SerializedProvisioningProfile
-    target_fingerprint: str | None = None
-    domain_name: str | None = None
-    shape: str | None = None
-
-
-class Investigation(DomainModel, _Attribution):
-    """A project-scoped campaign grouping Runs toward a goal.
-
-    ``title`` and ``description`` are agent-settable for reporting (ADR-0135). Length bounds are
-    enforced at the write boundary (the ``investigations.open``/``set`` handlers), not as ``Field``
-    constraints, so deserializing a pre-existing row (``title`` had no bound before ADR-0135) never
-    raises on read.
-    """
-
-    title: str
-    description: str | None = None
-    external_refs: list[ExternalRef] = Field(default_factory=list)
-    state: InvestigationState
-    last_run_at: datetime | None = None
-
-
-class ExpectedBootFailure(_DomainBase):
-    """Run-scoped expected boot failure metadata (ADR-0064)."""
-
-    kind: Literal["console_crash"]
-    pattern: str = Field(min_length=1, max_length=256)
-    description: str | None = Field(default=None, max_length=256)
-
-    @field_validator("pattern")
-    @classmethod
-    def _literal_or_pattern(cls, value: str) -> str:
-        if "\x00" in value:
-            raise ValueError("pattern must not contain NUL")
-        terms = value.split("|")
-        if any(term == "" for term in terms):
-            raise ValueError("pattern contains an empty term")
-        if len(terms) > 16:
-            raise ValueError("pattern has too many terms")
-        return value
-
-
-class Run(DomainModel, _Attribution):
-    """One build/install/boot attempt — the join of a System and an Investigation.
-
-    ``failing_job_id`` links a ``failed`` Run to the job that carries its human-readable
-    reason (ADR-0141). It is set in ``_fail_build`` atomically with the ``running -> failed``
-    transition and is ``None`` for a non-failed Run or a failed path with no job (e.g. a Run
-    failed by the reconciler on a torn-down System). Not a foreign key: ``jobs`` rows are never
-    deleted, so the reference cannot dangle.
-    """
-
-    investigation_id: UUID
-    system_id: UUID
-    state: RunState
-    build_profile: SerializedBuildProfile
-    expected_boot_failure: SerializedExpectedBootFailure | None = None
-    kernel_ref: str | None = None
-    debuginfo_ref: str | None = None
-    failure_category: ErrorCategory | None = None
-    failing_job_id: UUID | None = None
-
-
-class DebugSession(DomainModel, _Attribution):
-    """One boot's debug attachment over a transport."""
-
-    run_id: UUID
-    state: DebugSessionState
-    transport: str
-    transport_handle: str | None = None
-    worker_heartbeat_at: datetime | None = None
-
-
-class Job(DomainModel):
-    """A durable unit of async work; the ``jobs`` table is the queue."""
-
-    kind: JobKind
-    payload: dict[str, Any] = Field(default_factory=dict)
-    state: JobState
-    attempt: int = 0
-    max_attempts: int
-    worker_id: str | None = None
-    lease_expires_at: datetime | None = None
-    heartbeat_at: datetime | None = None
-    result_ref: str | None = None
-    error_category: ErrorCategory | None = None
-    failure_context: dict[str, str] = Field(default_factory=dict)
-    authorizing: JobAuthorizing
-    dedup_key: str
-
-
-class SystemShape(_DomainBase):
-    """One named sizing preset in the shapes catalog (ADR-0067).
-
-    Keyed by ``name`` (PK), seeded by migration 0013 with ``small`` / ``medium`` /
-    ``large`` / ``max``. A shape fixes **size only** — ``vcpus`` / ``memory_mb`` /
-    ``disk_gb`` plus an optional ``pcie_match``; ``cost_class`` is resolved host-side at
-    admission, not carried here. ``memory_mb`` is constrained to whole-GB multiples so the
-    resolver maps ``memory_mb → memory_gb`` exactly (the same constraint the migration's
-    CHECK enforces). ``pcie_match`` is stored opaquely until the matcher grammar lands.
-    """
-
-    name: str
-    vcpus: int = Field(gt=0, strict=True)
-    memory_mb: int = Field(gt=0, strict=True)
-    disk_gb: int = Field(gt=0, strict=True)
-    pcie_match: str | None = None
-    updated_at: datetime
-
-    @field_validator("memory_mb")
-    @classmethod
-    def _whole_gb(cls, value: int) -> int:
-        if value % MB_PER_GB != 0:
-            raise ValueError(f"memory_mb {value} must be a whole-GB multiple of {MB_PER_GB}")
-        return value
