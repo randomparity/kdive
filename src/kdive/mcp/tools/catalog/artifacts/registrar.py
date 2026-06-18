@@ -13,6 +13,9 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools.catalog.artifacts import reads as artifact_reads
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_uploads
+from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
+    expected_uploads as _expected_uploads,
+)
 from kdive.providers.core.resolver import ProviderResolver
 
 
@@ -23,6 +26,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_artifacts_search_text(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_system_upload(app, pool, resolver)
+    _register_artifacts_expected_uploads(app)
 
 
 def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -142,3 +146,18 @@ def _register_artifacts_create_system_upload(
             artifacts=artifacts,
             resolver=resolver,
         )
+
+
+def _register_artifacts_expected_uploads(app: FastMCP) -> None:
+    @app.tool(
+        name="artifacts.expected_uploads",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def artifacts_expected_uploads() -> ToolResponse:
+        """Return the accepted upload-artifact names per owner-kind. Requires a token."""
+        # Auth-only (ADR-0117): the verifier already gated the transport; enforce token
+        # presence as defence-in-depth. No platform/project gate, no audit — the
+        # projection is the public upload-name vocabulary only (ADR-0166).
+        current_context()
+        return _expected_uploads()

@@ -360,6 +360,106 @@ def test_create_upload_rejects_unknown_artifact_name_for_run(migrated_url: str) 
     asyncio.run(_run())
 
 
+def test_create_upload_unaccepted_name_names_value_and_accepted_set(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            store = _FakeStore()
+            out = await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[{"name": "bzImage", "sha256": "aaa", "size_bytes": 100}],
+                store=store,
+            )
+            assert store.calls == []
+            return out
+
+    out = asyncio.run(_run())
+    assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    assert out.data["reason"] == "bad_artifact_declaration"
+    assert out.data["field"] == "name"
+    assert out.data["value"] == "bzImage"
+    assert out.data["accepted_names"] == ["effective_config", "initrd", "kernel", "vmlinux"]
+    assert out.detail is not None
+    assert "kernel" in out.detail
+
+
+def test_create_upload_oversize_name_is_not_echoed(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            return await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[{"name": "z" * 200, "sha256": "aaa", "size_bytes": 100}],
+                store=_FakeStore(),
+            )
+
+    out = asyncio.run(_run())
+    assert out.data["reason"] == "bad_artifact_declaration"
+    assert out.data["field"] == "name"
+    assert "value" not in out.data  # an oversized name is never reflected back
+
+
+def test_create_upload_non_string_name_omits_value_keeps_accepted(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            return await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[{"name": 7, "sha256": "aaa", "size_bytes": 100}],
+                store=_FakeStore(),
+            )
+
+    out = asyncio.run(_run())
+    assert out.data["reason"] == "bad_artifact_declaration"
+    assert out.data["field"] == "name"
+    assert "value" not in out.data  # a non-string name is never reflected back
+    assert out.data["accepted_names"] == ["effective_config", "initrd", "kernel", "vmlinux"]
+
+
+def test_create_upload_missing_key_names_the_field(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            return await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[{"name": "kernel", "size_bytes": 100}],
+                store=_FakeStore(),
+            )
+
+    out = asyncio.run(_run())
+    assert out.data["reason"] == "bad_artifact_declaration"
+    assert out.data["field"] == "sha256"
+    assert out.detail is not None
+
+
+def test_system_upload_unaccepted_name_lists_rootfs_only(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            return await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
+                resolver=provider_resolver(),
+                store=_FakeStore(),
+            )
+
+    out = asyncio.run(_run())
+    assert out.data["reason"] == "bad_artifact_declaration"
+    assert out.data["field"] == "name"
+    assert out.data["value"] == "kernel"
+    assert out.data["accepted_names"] == ["rootfs"]  # each owner advertises its own set
+
+
 def test_create_upload_rejects_missing_artifact_key_before_minting(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -724,6 +824,20 @@ def test_chunked_sum_mismatch_rejected() -> None:
     out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
     assert isinstance(out, ToolResponse)
     assert out.data["reason"] == "chunk_size_mismatch"
+
+
+def test_chunked_malformed_chunk_names_chunks_field() -> None:
+    decl = {
+        "name": "vmlinux",
+        "sha256": "w",
+        "size_bytes": 100,
+        "chunks": [{"size_bytes": 100}],  # missing sha256
+    }
+    out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "bad_artifact_declaration"
+    assert out.data["field"] == "chunks"
+    assert out.data["accepted_names"] == ["kernel", "vmlinux"]
 
 
 def test_chunked_effective_config_rejected() -> None:
