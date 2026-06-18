@@ -40,5 +40,4 @@ class HandlerRegistry:
         self._handlers[kind] = handler
 
     def get(self, kind: JobKind) -> JobHandler | None:
-        """Return the handler for ``kind``, or ``None`` if none is registered."""
         return self._handlers.get(kind)

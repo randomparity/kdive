@@ -404,7 +404,6 @@ async def _cancel(*tasks: asyncio.Task[None]) -> None:
 
 
 async def _tick_heartbeat(heartbeat: Heartbeat) -> None:
-    """Bump the server heartbeat each tick so /livez tracks event-loop responsiveness."""
     while True:
         heartbeat.tick()
         await asyncio.sleep(_HEARTBEAT_TICK_SECONDS)

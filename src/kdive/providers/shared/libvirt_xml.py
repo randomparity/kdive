@@ -15,7 +15,6 @@ _qemu_namespace_registered = False
 
 
 def register_kdive_namespace() -> None:
-    """Register the ``kdive`` XML prefix before rendering domain metadata."""
     global _kdive_namespace_registered
     if _kdive_namespace_registered:
         return
@@ -24,7 +23,6 @@ def register_kdive_namespace() -> None:
 
 
 def register_qemu_namespace() -> None:
-    """Register the ``qemu`` XML prefix before rendering qemu commandline elements."""
     global _qemu_namespace_registered
     if _qemu_namespace_registered:
         return
