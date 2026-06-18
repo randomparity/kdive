@@ -73,32 +73,61 @@ plus a kind-match contract. `install`/`boot` reject an unbound Run.
   join; `DO $$` guard raising if any `target_kind IS NULL` remains; `SET NOT NULL`). Header
   comment cites ADR-0169.
 
-- [ ] **Step 2: Write the failing migration test.** Add a test that applies migrations to a fresh
-  testcontainer DB, inserts a Resource→Allocation→System→Run chain *before* 0042 is applied is
-  not possible (migrations apply in order); instead assert post-migration: `runs.target_kind` is
-  NOT NULL and `runs.system_id` is nullable (query `information_schema.columns`), and a Run
-  inserted with a System gets a non-null `target_kind` via the domain insert path (Task covered
-  by Task 3 — here assert the column shape only). Reuse the existing list-twice idempotency test
-  pattern in the migration test module.
+- [ ] **Step 2: Write the failing migration tests (two).**
+  - *Backfill test* (the load-bearing one): apply migrations through `0041` only —
+    `mig = migrate.discover_migrations(); apply each m with m.version <= "0041"` (run each
+    `m.sql` under `pg_conn`, mirroring `apply_migrations`' execute) — then insert a
+    Resource→Allocation→System→Run chain directly with raw SQL (the `0041` schema has no
+    `target_kind` column, and `runs.system_id` is still `NOT NULL`). Apply `0042`. Assert the
+    Run's `target_kind` now equals the backing resource's `kind`, and that the `DO $$` guard did
+    not raise.
+  - *Column-shape test*: after a full `apply_migrations(pg_conn)`, query
+    `information_schema.columns` to assert `runs.target_kind` is `NOT NULL` and `runs.system_id`
+    is nullable.
+  - Reuse the existing list-twice idempotency pattern and `discover_migrations()` usage already
+    in the migration test module.
 
 - [ ] **Step 3: Run it — expect FAIL** (column `target_kind` absent / `system_id` still NOT NULL).
   `uv run python -m pytest tests/db/test_migrate.py -q` (set `KDIVE_REQUIRE_DOCKER=1`).
 
-- [ ] **Step 4: Update the domain model.** In `domain/lifecycle/__init__.py`, change
-  `system_id: UUID` → `system_id: UUID | None = None` and add `target_kind: ResourceKind`
-  (import from `kdive.domain.catalog.resources`). Update `db/repositories.py` RUNS
-  insert/select to read/write `target_kind` and tolerate NULL `system_id`.
+- [ ] **Step 4: Update the domain model + a bound-access helper.** In
+  `domain/lifecycle/__init__.py`, change `system_id: UUID` → `system_id: UUID | None = None`,
+  add `target_kind: ResourceKind` (import from `kdive.domain.catalog.resources`), and add a
+  helper that keeps the tree type-checking immediately:
 
-- [ ] **Step 5: Run — expect PASS.** Also run `just type` (the Optional change ripples through
-  every `run.system_id` consumer; fix each `ty` error by guarding `None` — these become Tasks
-  3/5 guards, so at this step add narrow `assert run.system_id is not None` only where a caller
-  is already guaranteed bound, else defer to the consuming task).
+  ```python
+  def require_system_id(self) -> UUID:
+      """Return the bound System id, or fail closed for an unbound Run.
+
+      Consumers that structurally require a bound System (install/boot/the system-join
+      lookups) call this; the unbound lanes (build, create, bind) never do.
+      """
+      if self.system_id is None:
+          raise CategorizedError(
+              "run is not bound to a system",
+              category=ErrorCategory.CONFIGURATION_ERROR,
+              details={"run_id": str(self.id), "reason": "run_not_bound"},
+          )
+      return self.system_id
+  ```
+
+  Update `db/repositories.py` RUNS insert/select to read/write `target_kind` and tolerate NULL
+  `system_id`.
+
+- [ ] **Step 5: Route every existing bound consumer through the helper in THIS commit.**
+  `git grep -n "\.system_id" src/kdive` and, at each site that currently assumes a bound System
+  (`runs_install.py`, `runs_boot.py`, `cancel.py`, `view.py`, the resolver join callers), replace
+  `run.system_id` with `run.require_system_id()` so `just type` passes now. Tasks 2 and 5 later
+  replace these helper calls with real unbound handling where decoupling applies (the install/boot
+  guard, the cancel tolerance); until then the helper preserves today's behavior and keeps the
+  tree green. Run `just type` — **expected: passes** (zero errors). Run the migration tests —
+  expected PASS.
 
 - [ ] **Step 6: Commit.** `feat(runs): add nullable system_id + target_kind (migration 0042)`
 
-> Note: Step 5's `ty` ripple is expected and large. Where a consumer genuinely needs a bound
-> system (install/boot/build-via-system), the real guard is added in its own task; do not paper
-> over with `cast`. Use `git grep -n "\.system_id" src/kdive` to enumerate consumers.
+> Note: do not paper over the Optional with `cast` or bare `assert`. The `require_system_id()`
+> helper is the single, audited bound-access seam; every later guard either keeps it (genuinely
+> bound paths) or replaces it with an unbound-aware branch (Tasks 2, 5).
 
 ---
 
@@ -200,8 +229,9 @@ plus a kind-match contract. `install`/`boot` reject an unbound Run.
 - Create: `src/kdive/services/runs/bind.py` (`bind_run`)
 - Create: `src/kdive/mcp/tools/lifecycle/runs/bind.py` (tool handler `bind_run` wrapper)
 - Modify: `src/kdive/mcp/tools/lifecycle/runs/registrar.py` (register `runs.bind`)
-- Modify: `src/kdive/mcp/exposure.py` (`PUBLIC_TOOLS` + RBAC `_OPERATOR`/appropriate), and
-  `tests/mcp/test_tool_docs.py`
+- Modify: `src/kdive/mcp/exposure.py` (`PUBLIC_TOOLS["runs.bind"] = _OPERATOR` — the same
+  `ExposureScope.PROJECT_OPERATOR` constant `runs.create`/`runs.build` use, exposure.py:167-169),
+  and `tests/mcp/test_tool_docs.py`
 - Test: `tests/services/runs/test_bind.py`, `tests/adversarial/test_runs_bind_races.py`
 
 **Interfaces:**
