@@ -29,6 +29,16 @@ GDBSTUB_ACL_ID = "gdbstub_acl"
 REACHABILITY_ID = "remote_libvirt_reachability"
 BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
 LOCAL_KERNEL_SRC_ID = "local_kernel_src"
+BUILDHOST_AGENT_ID = "ephemeral_libvirt_buildhost_agent"
+
+# The remediation the ephemeral build-host agent check surfaces as its ``fix`` (ADR-0167). Owned in
+# diagnostics (diagnostic-output policy), like LOCAL_KERNEL_SRC_FIX / BASE_VOLUME_NOT_STAGED_FIX:
+# the only legal import direction out of diagnostics is to providers/db, so the policy lives here.
+BUILDHOST_AGENT_FIX = (
+    "an ephemeral_libvirt build host's throwaway builder boots but its qemu-guest-agent never "
+    "becomes usable; rebuild or repair the operator-staged base build image so its guest agent "
+    "starts (docs/operating/build-source-staging.md), then re-run doctor --with-buildhost-agent"
+)
 
 # The build-lane remediation the local-kernel-src check surfaces as its ``fix`` (ADR-0163). It is
 # owned here, not in the provider's ``workspace.py``: ``diagnostics → providers`` is the only legal
@@ -577,6 +587,15 @@ class WarmTreeSourceOutcome(StrEnum):
 WarmTreeSourceProbe = Callable[[], Awaitable[WarmTreeSourceOutcome]]
 
 
+async def _always_enabled() -> bool:
+    """Default enabled probe: assume the local build host is enabled (ADR-0167).
+
+    Keeps `LocalKernelSrcCheck`'s prior behavior for unit tests and any pool-free assembly; the
+    production factory injects a probe that reads the seeded host's `enabled` flag via the pool.
+    """
+    return True
+
+
 class LocalKernelSrcCheck(Check):
     """Server-vantage: the seeded local build host's warm-tree source is usable (ADR-0163).
 
@@ -597,8 +616,14 @@ class LocalKernelSrcCheck(Check):
     worker-vantage refinement (ADR-0163 "Considered & rejected").
     """
 
-    def __init__(self, *, probe: WarmTreeSourceProbe) -> None:
+    def __init__(
+        self,
+        *,
+        probe: WarmTreeSourceProbe,
+        enabled_probe: Callable[[], Awaitable[bool]] = _always_enabled,
+    ) -> None:
         self._probe = probe
+        self._enabled_probe = enabled_probe
 
     @property
     def id(self) -> str:
@@ -609,6 +634,13 @@ class LocalKernelSrcCheck(Check):
         return Vantage.SERVER
 
     async def run(self) -> CheckResult:
+        if not await self._enabled_probe():
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail="the seeded local build host is disabled; KDIVE_KERNEL_SRC is not required "
+                "(n/a — no local warm-tree lane to validate)",
+            )
         outcome = await self._probe()
         if outcome is WarmTreeSourceOutcome.USABLE:
             return CheckResult(
@@ -634,3 +666,105 @@ class LocalKernelSrcCheck(Check):
             fix=LOCAL_KERNEL_SRC_FIX,
             failure_category=_CONFIGURATION_ERROR,
         )
+
+
+class BuildHostAgentOutcome(StrEnum):
+    """The per-host observable outcomes of the ephemeral build-host agent probe (ADR-0167).
+
+    ``AGENT_READY`` — the builder booted, its guest agent connected, and a trivial command ran.
+    ``AGENT_UNREACHABLE`` — the builder started but never reached a usable agent (the agent never
+    connected, the trivial command returned non-zero, or the agent dropped mid-exec): a contract
+    ``fail``. ``HOST_UNREACHABLE`` — the host/config could not be reached before the agent connected
+    (TLS down, missing pool/base image, a probe already in flight): an ``error``, never a confident
+    "agent broken".
+    """
+
+    AGENT_READY = "agent_ready"
+    AGENT_UNREACHABLE = "agent_unreachable"
+    HOST_UNREACHABLE = "host_unreachable"
+
+
+@dataclass(frozen=True, slots=True)
+class BuildHostProbeResult:
+    """One probed host's outcome.
+
+    Args:
+        host_name: The build host's name (named in a ``fail``/``error`` detail).
+        outcome: The per-host three-state outcome.
+        transport_error: Marks a ``HOST_UNREACHABLE`` that was a transport drop (vs a config cause),
+            for the deterministic aggregate ``failure_category`` rule. Ignored for other outcomes.
+    """
+
+    host_name: str
+    outcome: BuildHostAgentOutcome
+    transport_error: bool = False
+
+
+BuildHostAgentProbe = Callable[[], Awaitable[list[BuildHostProbeResult]]]
+
+
+class EphemeralLibvirtBuildHostAgentCheck(Check):
+    """Server-vantage: every ephemeral_libvirt build host's builder reaches its guest agent.
+
+    Aggregates the per-host outcomes from an injected probe into one three-state verdict (the
+    ``secret_ref`` precedent for many sub-probes → one result): any ``AGENT_UNREACHABLE`` →
+    ``fail`` (a build routed there fails deterministically); else any ``HOST_UNREACHABLE`` or no
+    hosts → ``error`` (an indeterminate or absent target is never a confident ``fail`` and never a
+    silent ``pass``); else ``pass``. The aggregate ``error`` ``failure_category`` is
+    ``transport_failure`` only when every error cause was a transport drop, else
+    ``configuration_error`` — a fixed rule, so the category is stable for programmatic triage.
+    """
+
+    def __init__(self, *, probe: BuildHostAgentProbe) -> None:
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return BUILDHOST_AGENT_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.SERVER
+
+    async def run(self) -> CheckResult:
+        results = await self._probe()
+        failed = sorted(
+            r.host_name for r in results if r.outcome is BuildHostAgentOutcome.AGENT_UNREACHABLE
+        )
+        if failed:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.FAIL,
+                detail="ephemeral_libvirt build host(s) reachable but their guest agent never "
+                f"became usable: {', '.join(failed)}",
+                fix=BUILDHOST_AGENT_FIX,
+                failure_category=_CONFIGURATION_ERROR,
+            )
+        unreachable = [r for r in results if r.outcome is BuildHostAgentOutcome.HOST_UNREACHABLE]
+        if unreachable or not results:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.ERROR,
+                detail=self._error_detail(unreachable, results),
+                failure_category=self._error_category(unreachable),
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.PASS,
+            detail=f"all {len(results)} ephemeral_libvirt build host(s) reached their guest agent",
+        )
+
+    @staticmethod
+    def _error_detail(
+        unreachable: list[BuildHostProbeResult], results: list[BuildHostProbeResult]
+    ) -> str:
+        if not results:
+            return "no ephemeral_libvirt build host is registered; nothing to probe"
+        names = ", ".join(sorted(r.host_name for r in unreachable))
+        return f"ephemeral_libvirt build host(s) could not be reached: {names}"
+
+    @staticmethod
+    def _error_category(unreachable: list[BuildHostProbeResult]) -> str:
+        if unreachable and all(r.transport_error for r in unreachable):
+            return _TRANSPORT_FAILURE
+        return _CONFIGURATION_ERROR
