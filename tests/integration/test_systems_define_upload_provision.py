@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 from psycopg.rows import dict_row
 
 from kdive.artifacts.storage import ArtifactWriteRequest
@@ -48,10 +47,8 @@ from tests.mcp.systems_support import (
 
 
 def test_define_upload_provision_reaches_ready_with_committed_rootfs(
-    migrated_url: str, minio_store: ObjectStore, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, minio_store: ObjectStore
 ) -> None:
-    monkeypatch.setattr(systems_handlers, "object_store_from_env", lambda: minio_store)
-
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -95,7 +92,10 @@ def test_define_upload_provision_reaches_ready_with_committed_rootfs(
             job = await _enqueue_provision(pool, sys_id, alloc_id)
             async with pool.connection() as conn:
                 await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=_FakeProvisioning())
+                    conn,
+                    job,
+                    resolver=_provider_resolver(provisioner=_FakeProvisioning()),
+                    artifact_store=minio_store,
                 )
 
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

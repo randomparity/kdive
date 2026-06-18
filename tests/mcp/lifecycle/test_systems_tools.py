@@ -1058,13 +1058,11 @@ async def _seed_system_with_profile(
 
 
 def test_provision_handler_commits_uploaded_rootfs_artifact(
-    migrated_url: str, minio_store: ObjectStore, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, minio_store: ObjectStore
 ) -> None:
     # An upload-kind rootfs whose object is present: the provisioning->ready transition
     # writes one systems-owned write-once artifacts row and deletes the upload manifest
     # (so the reaper exempts the object).
-    monkeypatch.setattr(systems_handlers, "object_store_from_env", lambda: minio_store)
-
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -1097,7 +1095,10 @@ def test_provision_handler_commits_uploaded_rootfs_artifact(
             job = await _enqueue_provision(pool, sys_id, alloc_id)
             async with pool.connection() as conn:
                 await systems_handlers.provision_handler(
-                    conn, job, resolver=_provider_resolver(provisioner=_FakeProvisioning())
+                    conn,
+                    job,
+                    resolver=_provider_resolver(provisioner=_FakeProvisioning()),
+                    artifact_store=minio_store,
                 )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
@@ -1122,13 +1123,11 @@ def test_provision_handler_commits_uploaded_rootfs_artifact(
 
 
 def test_provision_handler_absent_uploaded_rootfs_fails_config_error(
-    migrated_url: str, minio_store: ObjectStore, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str, minio_store: ObjectStore
 ) -> None:
     # An upload-kind rootfs whose object was never uploaded: the commit raises
     # configuration_error inside the ready transition, which rolls back — the System stays
     # provisioning (a retry re-checks) and no artifacts row is written.
-    monkeypatch.setattr(systems_handlers, "object_store_from_env", lambda: minio_store)
-
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -1140,7 +1139,10 @@ def test_provision_handler_absent_uploaded_rootfs_fails_config_error(
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as caught:
                     await systems_handlers.provision_handler(
-                        conn, job, resolver=_provider_resolver(provisioner=prov)
+                        conn,
+                        job,
+                        resolver=_provider_resolver(provisioner=prov),
+                        artifact_store=minio_store,
                     )
             assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
             # The System rolls back to provisioning (not terminal), so the terminal-teardown

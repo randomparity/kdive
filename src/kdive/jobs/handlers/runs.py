@@ -49,7 +49,7 @@ from kdive.services.runs.steps import (
     installed_initrd_ref,
 )
 from kdive.store.objectstore import (
-    object_store_from_env,
+    ObjectStore,
     register_artifact_row,
 )
 
@@ -387,13 +387,18 @@ async def _existing_console_row(conn: AsyncConnection, system_id: UUID) -> _Cons
 
 
 async def _capture_console_artifact(
-    conn: AsyncConnection, system_id: UUID, secret_registry: SecretRegistry
+    conn: AsyncConnection,
+    system_id: UUID,
+    secret_registry: SecretRegistry,
+    artifact_store: ObjectStore | None,
 ) -> _ConsoleArtifact | None:
     try:
+        if artifact_store is None:
+            return None
         redacted = await _read_redacted_console(system_id, secret_registry)
         if redacted is None:
             return None
-        stored = await _store_console_artifact(system_id, redacted)
+        stored = await _store_console_artifact(artifact_store, system_id, redacted)
         return await _upsert_console_artifact_row(conn, system_id, stored, redacted)
     except CategorizedError as exc:
         if exc.details.get("operation") == "read_console_log":
@@ -428,9 +433,11 @@ async def _read_redacted_console(system_id: UUID, secret_registry: SecretRegistr
     )
 
 
-async def _store_console_artifact(system_id: UUID, redacted: bytes) -> StoredArtifact:
+async def _store_console_artifact(
+    artifact_store: ObjectStore, system_id: UUID, redacted: bytes
+) -> StoredArtifact:
     def _put() -> StoredArtifact:
-        return object_store_from_env().put_artifact(
+        return artifact_store.put_artifact(
             ArtifactWriteRequest(
                 tenant="local",
                 owner_kind="systems",
@@ -510,6 +517,7 @@ async def _run_boot_and_capture_outcome(
     run: Run,
     booter: Booter,
     secret_registry: SecretRegistry,
+    artifact_store: ObjectStore | None,
 ) -> dict[str, Any]:
     try:
         await asyncio.to_thread(booter.boot, run.system_id)
@@ -519,7 +527,9 @@ async def _run_boot_and_capture_outcome(
             exc.category is ErrorCategory.READINESS_FAILURE
             and run.expected_boot_failure is not None
         ):
-            artifact = await _capture_console_artifact(conn, run.system_id, secret_registry)
+            artifact = await _capture_console_artifact(
+                conn, run.system_id, secret_registry, artifact_store
+            )
         if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
             await _record_boot_audit(conn, job_ctx, run)
             return {
@@ -530,7 +540,7 @@ async def _run_boot_and_capture_outcome(
                 "evidence_artifact_id": str(artifact.id),
             }
         raise
-    artifact = await _capture_console_artifact(conn, run.system_id, secret_registry)
+    artifact = await _capture_console_artifact(conn, run.system_id, secret_registry, artifact_store)
     await _record_boot_audit(conn, job_ctx, run)
     return {
         "system_id": str(run.system_id),
@@ -545,6 +555,7 @@ async def boot_handler(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
+    artifact_store: ObjectStore | None = None,
 ) -> str | None:
     """Boot the installed kernel and confirm run-readiness, recording the `boot` step."""
     run_id = UUID(load_payload(job, RunPayload).run_id)
@@ -562,11 +573,13 @@ async def boot_handler(
     booter = (await _run_runtime(conn, run_id, resolver)).booter
 
     try:
-        result = await _run_boot_and_capture_outcome(conn, job_ctx, run, booter, secret_registry)
+        result = await _run_boot_and_capture_outcome(
+            conn, job_ctx, run, booter, secret_registry, artifact_store
+        )
     except CategorizedError:
         await _abandon_run_step_best_effort(conn, run_id, "boot")
         try:
-            await _capture_console_artifact(conn, run.system_id, secret_registry)
+            await _capture_console_artifact(conn, run.system_id, secret_registry, artifact_store)
         finally:
             raise
     except Exception:
@@ -587,6 +600,7 @@ def register_handlers(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     transport_factories: BuildHostTransportFactories | None = None,
+    artifact_store: ObjectStore | None = None,
 ) -> None:
     """Bind the `build`/`install`/`boot` job handlers."""
     registry.register(
@@ -606,6 +620,10 @@ def register_handlers(
     registry.register(
         JobKind.BOOT,
         lambda conn, job: boot_handler(
-            conn, job, resolver=resolver, secret_registry=secret_registry
+            conn,
+            job,
+            resolver=resolver,
+            secret_registry=secret_registry,
+            artifact_store=artifact_store,
         ),
     )

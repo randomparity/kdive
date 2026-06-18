@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
@@ -77,9 +77,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
 from kdive.security.secrets.secret_registry import SecretRegistry
-
-if TYPE_CHECKING:
-    from kdive.store.objectstore import ObjectStore
+from kdive.store.objectstore import ObjectStore
 
 _S3_OPTIONAL_ENV_NAMES = frozenset({S3_ENDPOINT_URL.name, S3_BUCKET.name, S3_REGION.name})
 
@@ -97,7 +95,14 @@ class AppAssembly:
 
 type PlaneRegistrar = Callable[[FastMCP, AsyncConnectionPool, AppAssembly], None]
 type HandlerRegistrar = Callable[
-    [HandlerRegistry, ProviderResolver, SecretRegistry, BuildHostTransportFactories | None], None
+    [
+        HandlerRegistry,
+        ProviderResolver,
+        SecretRegistry,
+        BuildHostTransportFactories | None,
+        ObjectStore | None,
+    ],
+    None,
 ]
 
 
@@ -246,8 +251,9 @@ def _register_system_handlers(
     resolver: ProviderResolver,
     _secret_registry: SecretRegistry,
     _transport_factories: BuildHostTransportFactories | None,
+    artifact_store: ObjectStore | None,
 ) -> None:
-    systems.register_handlers(registry, resolver=resolver)
+    systems.register_handlers(registry, resolver=resolver, artifact_store=artifact_store)
 
 
 def _register_run_handlers(
@@ -255,12 +261,14 @@ def _register_run_handlers(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     transport_factories: BuildHostTransportFactories | None,
+    artifact_store: ObjectStore | None,
 ) -> None:
     runs.register_handlers(
         registry,
         resolver=resolver,
         secret_registry=secret_registry,
         transport_factories=transport_factories,
+        artifact_store=artifact_store,
     )
 
 
@@ -269,6 +277,7 @@ def _register_control_handlers(
     resolver: ProviderResolver,
     _secret_registry: SecretRegistry,
     _transport_factories: BuildHostTransportFactories | None,
+    _artifact_store: ObjectStore | None,
 ) -> None:
     control.register_handlers(registry, resolver=resolver)
 
@@ -278,6 +287,7 @@ def _register_vmcore_handlers(
     resolver: ProviderResolver,
     _secret_registry: SecretRegistry,
     _transport_factories: BuildHostTransportFactories | None,
+    _artifact_store: ObjectStore | None,
 ) -> None:
     vmcore.register_handlers(registry, resolver=resolver)
 
@@ -287,6 +297,7 @@ def _register_diagnostics_handlers(
     _resolver: ProviderResolver,
     _secret_registry: SecretRegistry,
     _transport_factories: BuildHostTransportFactories | None,
+    _artifact_store: ObjectStore | None,
 ) -> None:
     from kdive.jobs.handlers import diagnostics as diagnostics_handler
 
@@ -338,6 +349,7 @@ def _register_image_build_handler(
     resolver: ProviderResolver,
     _secret_registry: SecretRegistry,
     _transport_factories: BuildHostTransportFactories | None,
+    _artifact_store: ObjectStore | None,
 ) -> None:
     """Bind the IMAGE_BUILD handler, preserving setup errors as job failures.
 
@@ -488,6 +500,7 @@ def build_handler_registry(
     composition = provider_composition or ProviderComposition(secret_registry=secret_registry)
     resolver = composition.build_provider_resolver()
     transport_factories = composition.build_build_host_transport_factories()
+    artifact_store = _resolve_ops_images_store()
     for register in _HANDLER_REGISTRARS:
-        register(registry, resolver, secret_registry, transport_factories)
+        register(registry, resolver, secret_registry, transport_factories, artifact_store)
     return registry
