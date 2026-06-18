@@ -772,10 +772,10 @@ git commit -m "feat(diagnostics): worker handler for diagnostics_worker_check"
 - Test: `tests/diagnostics/test_worker_dispatch.py`
 
 **Interfaces:**
-- Consumes: `enqueue`, `get_by_dedup_key` from `kdive.jobs.queue`; `Authorizing`, `DiagnosticsWorkerCheckPayload`; `JobState`; `deserialize_results`, `ResultCodecError`; `worker_unavailable_results`/`WorkerVantageCheck`/`WorkerVantageSubstitution` from `kdive.diagnostics.service` (or move those to checks — see note); `CheckResult`.
-- Produces: `WorkerCheckDispatcher` protocol with `async def run_worker_checks(self, *, deadline: float) -> list[CheckResult]`; `JobWorkerCheckDispatcher(pool, *, clock=..., poll_interval=0.25, job_factory=...)`. On timeout returns `WORKER_UNAVAILABLE` substitutions for `provider_tls`/`gdbstub_acl`.
+- Consumes: `enqueue`, `get_by_dedup_key` from `kdive.jobs.queue`; `Authorizing`, `DiagnosticsWorkerCheckPayload`; `Job`, `JobKind`; `JobState`; `deserialize_results`, `ResultCodecError`; `CheckResult`, `CheckStatus`, `GDBSTUB_ACL_ID`, `PROVIDER_TLS_ID`; `WORKER_UNAVAILABLE_DETAIL` from `kdive.diagnostics.service`.
+- Produces: `WorkerCheckDispatcher` protocol with `async def run_worker_checks(self) -> list[CheckResult]` (no `deadline` arg — the dispatcher owns `WORKER_DISPATCH_BUDGET`); `JobWorkerCheckDispatcher(pool, *, budget=WORKER_DISPATCH_BUDGET, poll_interval=0.25, enqueue_fn=None, get_fn=None, clock=time.monotonic, sleep_fn=asyncio.sleep, dedup_suffix=None)`; module constant `WORKER_DISPATCH_BUDGET = 15.0`. On budget-with-no-pickup returns `WORKER_UNAVAILABLE` substitutions for `provider_tls`/`gdbstub_acl`.
 
-> **Refactor note:** `worker_unavailable_results`, `WorkerVantageCheck`, and `WorkerVantageSubstitution` currently live in `service.py`. The dispatcher needs them and `service.py` will import the dispatcher — avoid the cycle by leaving them in `service.py` and having the dispatcher import from `service` is a cycle risk; instead, the dispatcher builds the substitution `CheckResult`s directly (it already imports `CheckResult`/`CheckStatus`). Keep the `WORKER_UNAVAILABLE` detail string as a shared constant imported from `service.py` if no cycle, else define the substitution inline in the dispatcher and have `service.py` import the dispatcher. Decide by running `just type` after wiring; if a cycle appears, the dispatcher owns the substitution constants and `service` imports them.
+> **Cycle resolution (decided, not deferred):** `WORKER_UNAVAILABLE_DETAIL` has ONE home — `service.py` (its ADR-0139 home; `tests/diagnostics/test_service.py:16` imports it there). `worker_dispatch.py` imports it from `service.py` at module level. The reverse dependency is broken because `service.py` does **not** import `worker_dispatch` at runtime: it references the `WorkerCheckDispatcher` Protocol only under `if TYPE_CHECKING:` (works via `from __future__ import annotations`), and `default_service_factory` imports `JobWorkerCheckDispatcher` **function-locally**. So importing `service` pulls in nothing from `worker_dispatch`, and importing `worker_dispatch` pulls in a fully-loadable `service`. No duplicate constant, no cycle. `WORKER_DISPATCH_BUDGET` lives only in `worker_dispatch` (the dispatcher owns its budget; `service` never sees it, since `run_worker_checks()` takes no deadline).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -799,25 +799,36 @@ class _FakeJob:
 
 
 class _FakeQueue:
-    """Drives a scripted sequence of job states the dispatcher observes via get_by_dedup_key."""
+    """Drives a scripted sequence of job states the dispatcher observes via get_by_dedup_key.
+
+    The fake matches the injected-seam contract exactly:
+    `enqueue_fn(dedup_key, payload, authorizing) -> Job` and `get_fn(dedup_key) -> Job | None`.
+    """
 
     def __init__(self, sequence):
         self._sequence = list(sequence)
+        self._last = _FakeJob(JobState.QUEUED)
         self.enqueued = None
 
-    async def enqueue(self, dedup_key, payload, authorizing, max_attempts):
-        self.enqueued = (dedup_key, payload, max_attempts)
+    async def enqueue(self, dedup_key, payload, authorizing):
+        self.enqueued = (dedup_key, payload, authorizing)
         return _FakeJob(JobState.QUEUED)
 
     async def get_by_dedup_key(self, dedup_key):
-        return self._sequence.pop(0) if self._sequence else self._sequence[-1]
+        if self._sequence:
+            self._last = self._sequence.pop(0)
+        return self._last
 
 
-def _dispatcher(queue, *, deadline_steps):
-    # clock returns increasing values so the bounded wait terminates deterministically.
-    ticks = iter(deadline_steps)
+async def _noop_sleep(_seconds):
+    return None
+
+
+def _dispatcher(queue, *, clock_ticks):
+    ticks = iter(clock_ticks)  # increasing values -> the bounded wait terminates deterministically
     return JobWorkerCheckDispatcher(
         pool=None,
+        budget=15.0,
         enqueue_fn=queue.enqueue,
         get_fn=queue.get_by_dedup_key,
         clock=lambda: next(ticks),
@@ -826,36 +837,30 @@ def _dispatcher(queue, *, deadline_steps):
     )
 
 
-async def _noop_sleep(_seconds):
-    return None
-
-
 async def test_succeeded_returns_real_results():
     out = serialize_results([
         CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
         CheckResult(GDBSTUB_ACL_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
     ])
     queue = _FakeQueue([_FakeJob(JobState.SUCCEEDED, result_ref=out)])
-    results = await _dispatcher(queue, deadline_steps=[0.0, 0.1]).run_worker_checks(deadline=15.0)
+    results = await _dispatcher(queue, clock_ticks=[0.0, 0.1]).run_worker_checks()
     assert {r.status for r in results} == {CheckStatus.PASS}
 
 
 async def test_failed_maps_to_error_with_category():
     queue = _FakeQueue([_FakeJob(JobState.FAILED, error_category=ErrorCategory.CONFIGURATION_ERROR)])
-    results = await _dispatcher(queue, deadline_steps=[0.0, 0.1]).run_worker_checks(deadline=15.0)
+    results = await _dispatcher(queue, clock_ticks=[0.0, 0.1]).run_worker_checks()
     assert all(r.status is CheckStatus.ERROR for r in results)
     assert {r.check_id for r in results} == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
 
 
-async def test_timeout_returns_worker_unavailable():
-    queue = _FakeQueue([_FakeJob(JobState.QUEUED), _FakeJob(JobState.QUEUED)])
-    # clock exceeds the deadline on the second read -> WORKER_UNAVAILABLE
-    results = await _dispatcher(queue, deadline_steps=[0.0, 100.0]).run_worker_checks(deadline=15.0)
+async def test_pending_then_budget_exhausted_returns_worker_unavailable():
+    queue = _FakeQueue([_FakeJob(JobState.QUEUED)])
+    # start clock=0.0; after one pending read, clock=100.0 exceeds budget -> WORKER_UNAVAILABLE
+    results = await _dispatcher(queue, clock_ticks=[0.0, 100.0]).run_worker_checks()
     assert all(r.status is CheckStatus.ERROR for r in results)
     assert all("livez" in r.detail for r in results)
 ```
-
-> Match the real `enqueue` signature when wiring `enqueue_fn` (`enqueue(conn, kind, payload, authorizing, dedup_key, *, max_attempts)`); the dispatcher wraps it with the pool connection. The test injects a simplified `enqueue_fn`/`get_fn` so it needs no DB.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -873,6 +878,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Protocol
@@ -886,25 +892,27 @@ from kdive.diagnostics.checks import (
     CheckStatus,
 )
 from kdive.diagnostics.result_codec import ResultCodecError, deserialize_results
+from kdive.diagnostics.service import WORKER_UNAVAILABLE_DETAIL  # single home (ADR-0139)
 from kdive.domain.models import Job, JobKind
 from kdive.domain.state import JobState
-from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 from kdive.jobs import queue as job_queue
+from kdive.jobs.payloads import Authorizing, DiagnosticsWorkerCheckPayload
 
 _REMOTE_PROVIDER = "remote-libvirt"
 WORKER_DISPATCH_BUDGET = 15.0
-WORKER_UNAVAILABLE_DETAIL = (
-    "worker did not pick up the diagnostic job in time; check that the worker is up "
-    "(/livez, /readyz) and not saturated"
-)
 _POLL_INTERVAL_S = 0.25
+_TRANSPORT_FAILURE = "transport_failure"  # plain label, mirroring checks.py (no ErrorCategory import)
+_INTERNAL_ERROR = "internal_error"
 _TERMINAL = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
 _WORKER_CHECK_IDS = (PROVIDER_TLS_ID, GDBSTUB_ACL_ID)
 _log = logging.getLogger(__name__)
 
+EnqueueFn = Callable[[str, DiagnosticsWorkerCheckPayload, Authorizing], Awaitable[Job]]
+GetFn = Callable[[str], Awaitable[Job | None]]
+
 
 class WorkerCheckDispatcher(Protocol):
-    async def run_worker_checks(self, *, deadline: float) -> list[CheckResult]: ...
+    async def run_worker_checks(self) -> list[CheckResult]: ...
 
 
 def _unavailable(detail: str, category: str) -> list[CheckResult]:
@@ -918,37 +926,84 @@ def _unavailable(detail: str, category: str) -> list[CheckResult]:
 class JobWorkerCheckDispatcher:
     """Enqueues the diagnostics job and bounded-waits for its inline result."""
 
-    def __init__(self, pool: AsyncConnectionPool | None, *, ...):
-        ...  # store pool + injected enqueue_fn/get_fn/clock/sleep_fn/dedup_suffix
+    def __init__(
+        self,
+        pool: AsyncConnectionPool | None,
+        *,
+        budget: float = WORKER_DISPATCH_BUDGET,
+        poll_interval: float = _POLL_INTERVAL_S,
+        enqueue_fn: EnqueueFn | None = None,
+        get_fn: GetFn | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        dedup_suffix: str | None = None,
+    ) -> None:
+        self._pool = pool
+        self._budget = budget
+        self._poll_interval = poll_interval
+        self._enqueue = enqueue_fn or self._pool_enqueue
+        self._get = get_fn or self._pool_get
+        self._clock = clock
+        self._sleep = sleep_fn
+        self._dedup_suffix = dedup_suffix
 
-    async def run_worker_checks(self, *, deadline: float) -> list[CheckResult]:
-        dedup_key = f"diagnostics:{_REMOTE_PROVIDER}:{self._dedup_suffix or uuid.uuid4()}"
-        payload = DiagnosticsWorkerCheckPayload(provider=_REMOTE_PROVIDER)
-        authorizing = Authorizing(principal="diagnostics", project=_REMOTE_PROVIDER)
-        job = await self._enqueue(dedup_key, payload, authorizing)
-        _log.info("diagnostics job %s enqueued", job.id)
+    def _require_pool(self) -> AsyncConnectionPool:
+        if self._pool is None:
+            raise RuntimeError("JobWorkerCheckDispatcher needs a pool or an injected seam")
+        return self._pool
+
+    async def _pool_enqueue(
+        self, dedup_key: str, payload: DiagnosticsWorkerCheckPayload, authorizing: Authorizing
+    ) -> Job:
+        async with self._require_pool().connection() as conn:
+            return await job_queue.enqueue(
+                conn, JobKind.DIAGNOSTICS_WORKER_CHECK, payload, authorizing, dedup_key,
+                max_attempts=1,
+            )
+
+    async def _pool_get(self, dedup_key: str) -> Job | None:
+        async with self._require_pool().connection() as conn:
+            return await job_queue.get_by_dedup_key(conn, dedup_key)
+
+    def _dedup_key(self) -> str:
+        return f"diagnostics:{_REMOTE_PROVIDER}:{self._dedup_suffix or uuid.uuid4()}"
+
+    async def run_worker_checks(self) -> list[CheckResult]:
+        dedup_key = self._dedup_key()
+        job = await self._enqueue(
+            dedup_key,
+            DiagnosticsWorkerCheckPayload(provider=_REMOTE_PROVIDER),
+            Authorizing(principal="diagnostics", project=_REMOTE_PROVIDER),
+        )
+        _log.info("diagnostics worker-check job %s enqueued (dedup_key=%s)", job.id, dedup_key)
         start = self._clock()
         while True:
-            job = await self._get(dedup_key)
-            if job.state in _TERMINAL:
-                return self._from_terminal(job)
-            if self._clock() - start >= deadline:
-                _log.warning("diagnostics job %s not picked up within %ss", dedup_key, deadline)
-                return _unavailable(WORKER_UNAVAILABLE_DETAIL, "transport_failure")
+            current = await self._get(dedup_key)
+            if current is not None and current.state in _TERMINAL:
+                return self._from_terminal(current)
+            if self._clock() - start >= self._budget:
+                _log.warning("diagnostics job %s not picked up within %ss", dedup_key, self._budget)
+                return _unavailable(WORKER_UNAVAILABLE_DETAIL, _TRANSPORT_FAILURE)
             await self._sleep(self._poll_interval)
 
     def _from_terminal(self, job: Job) -> list[CheckResult]:
         if job.state is JobState.SUCCEEDED:
             try:
-                return deserialize_results(job.result_ref)
+                results = deserialize_results(job.result_ref)
             except ResultCodecError as exc:
                 _log.error("diagnostics job %s returned a malformed result: %s", job.id, exc)
-                return _unavailable("diagnostics worker returned a malformed result", "internal_error")
-        category = job.error_category.value if job.error_category else "internal_error"
+                return _unavailable("diagnostics worker returned a malformed result", _INTERNAL_ERROR)
+            _log.info("diagnostics job %s succeeded", job.id)
+            return results
+        category = job.error_category.value if job.error_category else _INTERNAL_ERROR
+        _log.warning("diagnostics job %s ended %s (%s)", job.id, job.state.value, category)
         return _unavailable("diagnostics worker job failed", category)
 ```
 
-Fill the `__init__` and the enqueue/get wrappers (production: `async with pool.connection() as conn: await job_queue.enqueue(conn, JobKind.DIAGNOSTICS_WORKER_CHECK, payload, authorizing, dedup_key, max_attempts=1)`; `get`: `async with pool.connection() as conn: return await job_queue.get_by_dedup_key(conn, dedup_key)`). Use the injected `enqueue_fn`/`get_fn` when provided (tests), else the pool path. Confirm `internal_error`/`transport_failure` are valid `ErrorCategory` values; map to the closest existing ones.
+Notes for the implementer:
+- `WORKER_UNAVAILABLE_DETAIL` is imported from `service.py` (single home); do **not** redefine it here.
+- The `failure_category` strings are plain labels mirroring `checks.py` (`transport_failure` already used by the reachability check; `internal_error` mirrors `ErrorCategory.INTERNAL_ERROR`). Confirm `ErrorCategory.INTERNAL_ERROR` exists; if it is named differently, use that value verbatim.
+- The production `_pool_enqueue`/`_pool_get` open one short pool connection each; the tests inject `enqueue_fn`/`get_fn` so they need no DB.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -976,10 +1031,10 @@ git commit -m "feat(diagnostics): bounded-wait worker-check dispatcher"
 - Test: `tests/diagnostics/test_service.py`
 
 **Interfaces:**
-- Consumes: `WorkerCheckDispatcher` from `kdive.diagnostics.worker_dispatch`.
-- Produces: `DiagnosticsService(..., worker_dispatcher: WorkerCheckDispatcher | None = None)`. When set, `run()` calls `await worker_dispatcher.run_worker_checks(deadline=WORKER_DISPATCH_BUDGET)` and appends; the legacy `unavailable_worker_checks` path runs only when `worker_dispatcher is None`.
+- Consumes: `WorkerCheckDispatcher` from `kdive.diagnostics.worker_dispatch` (TYPE_CHECKING only).
+- Produces: `DiagnosticsService(..., worker_dispatcher: "WorkerCheckDispatcher | None" = None)`. When set, `run()` calls `await worker_dispatcher.run_worker_checks()` (no deadline — the dispatcher owns its budget) and appends; the legacy `unavailable_worker_checks` path runs only when `worker_dispatcher is None`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests (merge + composition)**
 
 Add to `tests/diagnostics/test_service.py`:
 
@@ -989,7 +1044,7 @@ async def test_dispatcher_results_replace_substitution():
     from kdive.diagnostics.service import DiagnosticsService
 
     class _FakeDispatcher:
-        async def run_worker_checks(self, *, deadline):
+        async def run_worker_checks(self):
             return [CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt")]
 
     service = DiagnosticsService(
@@ -998,34 +1053,94 @@ async def test_dispatcher_results_replace_substitution():
     report = await service.run()
     assert [r.check_id for r in report.results] == [PROVIDER_TLS_ID]
     assert not report.has_error
+
+
+async def test_server_and_real_worker_results_compose_into_one_verdict():
+    # Composition: a server-vantage check + a JobWorkerCheckDispatcher whose job SUCCEEDS with
+    # serialized real results -> one verdict carrying both, no substitution (acceptance criterion 1).
+    from kdive.diagnostics.checks import (
+        CheckResult, CheckStatus, GDBSTUB_ACL_ID, PROVIDER_TLS_ID, SECRET_REF_ID, Vantage,
+    )
+    from kdive.diagnostics.result_codec import serialize_results
+    from kdive.diagnostics.service import DiagnosticsService
+    from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
+    from kdive.domain.state import JobState
+
+    class _ServerCheck:
+        id = SECRET_REF_ID
+        vantage = Vantage.SERVER
+
+        async def run(self):
+            return CheckResult(SECRET_REF_ID, CheckStatus.PASS, "all refs resolve")
+
+    class _Job:
+        def __init__(self, state, result_ref):
+            self.id, self.state, self.result_ref, self.error_category = "j", state, result_ref, None
+
+    serialized = serialize_results([
+        CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt"),
+        CheckResult(GDBSTUB_ACL_ID, CheckStatus.FAIL, "blocked", fix="open the ACL",
+                    provider="remote-libvirt", failure_category="configuration_error"),
+    ])
+
+    async def _enqueue(dedup_key, payload, authorizing):
+        return _Job(JobState.QUEUED, None)
+
+    async def _get(dedup_key):
+        return _Job(JobState.SUCCEEDED, serialized)
+
+    dispatcher = JobWorkerCheckDispatcher(
+        pool=None, enqueue_fn=_enqueue, get_fn=_get, clock=lambda: 0.0, dedup_suffix="x",
+    )
+    report = await DiagnosticsService(
+        checks=[_ServerCheck()], per_check_timeout=1.0, worker_dispatcher=dispatcher,
+    ).run()
+    by_id = {r.check_id: r for r in report.results}
+    assert set(by_id) == {SECRET_REF_ID, PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
+    assert by_id[GDBSTUB_ACL_ID].status is CheckStatus.FAIL  # real result, not a substitution
+    assert report.has_failure
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `uv run python -m pytest tests/diagnostics/test_service.py::test_dispatcher_results_replace_substitution -q`
+Run: `uv run python -m pytest tests/diagnostics/test_service.py -k "substitution or compose" -q`
 Expected: FAIL (`unexpected keyword argument 'worker_dispatcher'`).
 
 - [ ] **Step 3: Implement**
 
-In `service.py`: update `WORKER_UNAVAILABLE_DETAIL` to the saturation-aware wording (keep `/livez`/`/readyz`); add the `worker_dispatcher` constructor arg; in `run()`, after the server-vantage `results`, branch:
+In `service.py`:
+- Refine the `WORKER_UNAVAILABLE_DETAIL` constant (its single home) to the saturation-aware wording, keeping `/livez`/`/readyz`: `"worker did not pick up the diagnostic job in time; check that the worker is up (/livez, /readyz) and not saturated"`.
+- Add the dispatcher type under TYPE_CHECKING and the constructor arg:
+
+```python
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from kdive.diagnostics.worker_dispatch import WorkerCheckDispatcher
+```
+
+```python
+    def __init__(self, *, ..., worker_dispatcher: "WorkerCheckDispatcher | None" = None) -> None:
+        ...
+        self._worker_dispatcher = worker_dispatcher
+```
+
+- In `run()`, after the server-vantage `results` are gathered, branch:
 
 ```python
         if self._worker_dispatcher is not None:
-            results.extend(
-                await self._worker_dispatcher.run_worker_checks(deadline=WORKER_DISPATCH_BUDGET)
-            )
+            results.extend(await self._worker_dispatcher.run_worker_checks())
         else:
             results.extend(
                 worker_unavailable_results(self._unavailable_worker_checks, self._substitution_reason)
             )
 ```
 
-Import `WORKER_DISPATCH_BUDGET` (and `WORKER_UNAVAILABLE_DETAIL` if it moved) from `worker_dispatch`. Resolve any import cycle per Task 6's refactor note.
+Do **not** import `worker_dispatch` at module level (TYPE_CHECKING only) — the dispatcher imports `WORKER_UNAVAILABLE_DETAIL` from here, so a runtime import would be a cycle.
 
 - [ ] **Step 4: Run the full diagnostics suite**
 
 Run: `uv run python -m pytest tests/diagnostics/test_service.py -q`
-Expected: PASS (existing `WORKER_UNAVAILABLE_DETAIL` assertions still pass because they check substring membership of the constant).
+Expected: PASS (existing `WORKER_UNAVAILABLE_DETAIL` assertions still pass — they check substring membership of the constant, which still contains `/livez`/`/readyz`).
 
 - [ ] **Step 5: Lint/type + commit**
 
