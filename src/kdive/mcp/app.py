@@ -122,14 +122,17 @@ def _pool_only_plane_registrar(
 def _register_reconcile_tools(
     app: FastMCP, pool: AsyncConnectionPool, assembly: AppAssembly
 ) -> None:
-    ops_reconcile_tools.register(
-        app,
-        pool,
+    ports = ops_reconcile_tools.ReconcileRepairPorts(
         reaper=assembly.reaper,
         upload_store=ops_reconcile_tools.resolve_upload_store(),
         image_store=ops_reconcile_tools.resolve_image_store(),
         dump_volume_reaper=assembly.dump_volume_reaper,
         build_vm_reaper=assembly.build_vm_reaper,
+    )
+    ops_reconcile_tools.register(
+        app,
+        pool,
+        ports=ports,
     )
 
 
