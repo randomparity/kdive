@@ -10,7 +10,7 @@ Return one allocation visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `string` | yes | The Allocation to render. |
+| `allocation_id` | string | yes | The Allocation to render. |
 
 ## `allocations.list`
 
@@ -20,8 +20,8 @@ List allocations visible in a project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | `integer` | no | Maximum rows returned (capped at 200). |
-| `project` | `string` | yes | Project whose allocations to list. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
+| `project` | string | yes | Project whose allocations to list. |
 
 ## `allocations.release`
 
@@ -31,7 +31,7 @@ Release an active allocation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `string` | yes | The Allocation to release. |
+| `allocation_id` | string | yes | The Allocation to release. |
 
 ## `allocations.renew`
 
@@ -41,9 +41,9 @@ Extend an allocation lease window.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `string` | yes | The Allocation to renew. |
-| `extend` | `any` | yes | Additional hours to add (number or decimal string, > 0). |
-| `idempotency_key` | `any` | no | Replay-safe key; a repeated key returns the prior renewal. |
+| `allocation_id` | string | yes | The Allocation to renew. |
+| `extend` | number \| string | yes | Additional hours to add (number or decimal string, > 0). |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior renewal. |
 
 ## `allocations.request`
 
@@ -53,9 +53,26 @@ Request capacity and create an allocation grant.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `idempotency_key` | `any` | no | Replay-safe key; a repeated key returns the prior grant. |
-| `project` | `string` | yes | Project to admit the allocation for. |
-| `request` | `object` | yes | Allocation request payload: size, lease window, resource selector. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior grant. |
+| `project` | string | yes | Project to admit the allocation for. |
+| `request` | object | yes | Allocation request payload: size, lease window, resource selector. |
+
+`request` fields:
+
+- `vcpus` (`integer (nullable)`, optional)
+- `memory_gb` (`integer (nullable)`, optional)
+- `window` (`any (nullable)`, optional)
+- `shape` (`string (nullable)`, optional) — Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb (supply exactly one sizing source).
+- `disk_gb` (`integer (nullable)`, optional)
+- `resource` (`object(mode=id) \| object(mode=kind)`, optional)
+  - _variant object(mode=id):_
+    - `mode` (``=id``, required)
+    - `resource_id` (`string`, required)
+  - _variant object(mode=kind):_
+    - `mode` (``=kind``, optional)
+    - `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt``, optional) — The provider resource kinds.
+- `pcie_devices` (`array<string>`, optional) — PCIe match specs ('vendor:device' or 'class=NN') to resolve + claim.
+- `on_capacity` (``deny`, `queue``, optional) — On a capacity denial (host cap / concurrency quota): 'deny' (default) returns the denial; 'queue' enqueues a durable 'requested' allocation holding a queue position (no budget/lease/occupancy). Budget and configuration denials always hard-deny.
 
 ## `allocations.wait`
 
@@ -65,5 +82,5 @@ Poll until the allocation leaves the queued state or the deadline elapses.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | `string` | yes | The Allocation to poll until it leaves the requested (queued) state. |
-| `timeout_s` | `number` | no | Maximum seconds to wait (capped at 300). |
+| `allocation_id` | string | yes | The Allocation to poll until it leaves the requested (queued) state. |
+| `timeout_s` | number | no | Maximum seconds to wait (capped at 300). |

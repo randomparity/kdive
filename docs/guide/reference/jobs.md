@@ -10,7 +10,7 @@ Cancel a queued or running job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `job_id` | `string` | yes | The Job to cancel. |
+| `job_id` | string | yes | The Job to cancel. |
 
 ## `jobs.get`
 
@@ -20,7 +20,7 @@ Return one durable job visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `job_id` | `string` | yes | The Job to render. |
+| `job_id` | string | yes | The Job to render. |
 
 ## `jobs.list`
 
@@ -30,7 +30,7 @@ List jobs visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `limit` | `integer` | no | Maximum rows returned (capped at 200). |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
 
 ## `jobs.wait`
 
@@ -40,5 +40,5 @@ Poll one durable job until it is terminal or the timeout elapses.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `job_id` | `string` | yes | The Job to poll until terminal. |
-| `timeout_s` | `number` | no | Maximum seconds to wait (capped at 300). |
+| `job_id` | string | yes | The Job to poll until terminal. |
+| `timeout_s` | number | no | Maximum seconds to wait (capped at 300). |

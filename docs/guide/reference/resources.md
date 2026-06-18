@@ -12,8 +12,8 @@ A point-in-time hint, not a reservation; the admission path stays the authority.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `pcie` | `any` | no | Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); narrows to hosts with a free matching device. |
-| `shape` | `any` | no | Optional shape name; restricts the fitting computation to it. |
+| `pcie` | string (nullable) | no | Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex); narrows to hosts with a free matching device. |
+| `shape` | string (nullable) | no | Optional shape name; restricts the fitting computation to it. |
 
 ## `resources.cordon`
 
@@ -23,7 +23,7 @@ Mark a host unschedulable; placement skips/rejects it. Requires platform operato
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `resource_id` | `string` | yes | The host Resource UUID to cordon. |
+| `resource_id` | string | yes | The host Resource UUID to cordon. |
 
 ## `resources.deregister`
 
@@ -33,8 +33,8 @@ Deregister a runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `force` | `boolean` | no | Typed confirmation required to deregister a resource with live allocations (destructive-tier). |
-| `resource_id` | `string` | yes | The runtime Resource UUID to deregister. |
+| `force` | boolean | no | Typed confirmation required to deregister a resource with live allocations (destructive-tier). |
+| `resource_id` | string | yes | The runtime Resource UUID to deregister. |
 
 ## `resources.describe`
 
@@ -44,7 +44,7 @@ Return one runtime resource visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `resource_id` | `string` | yes | The Resource UUID to describe. |
+| `resource_id` | string | yes | The Resource UUID to describe. |
 
 ## `resources.drain`
 
@@ -54,9 +54,9 @@ Cordon a host, then report or force-release its allocations.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `mode` | `string` | no | 'passive' (operator: cordon + report) or 'force_release' (admin). |
-| `reason` | `string` | no | Mandatory non-blank justification for 'force_release' (audited). |
-| `resource_id` | `string` | yes | The host Resource UUID to drain. |
+| `mode` | string | no | 'passive' (operator: cordon + report) or 'force_release' (admin). |
+| `reason` | string | no | Mandatory non-blank justification for 'force_release' (audited). |
+| `resource_id` | string | yes | The host Resource UUID to drain. |
 
 ## `resources.list`
 
@@ -66,7 +66,7 @@ List runtime resources visible to the caller.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `kind` | `any` | no | Filter by resource kind (e.g. 'local-libvirt'); omit for all. |
+| `kind` | string (nullable) | no | Filter by resource kind (e.g. 'local-libvirt'); omit for all. |
 
 ## `resources.register_fault_inject`
 
@@ -76,7 +76,17 @@ Register a fault-inject runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | Fault-inject runtime resource registration request. |
+| `request` | object | yes | Fault-inject runtime resource registration request. |
+
+`request` fields:
+
+- `name` (`string`, required) — The (kind, name) identity for the new resource.
+- `cost_class` (`string`, required) — The cost class for pricing.
+- `concurrent_allocation_cap` (`integer`, optional) — Per-host concurrent-allocation cap (> 0).
+- `vcpus` (`integer`, required) — The host's vCPU size ceiling. Admission rejects a selector larger than this (ADR-0007 §2), so a host registered without it is un-grantable.
+- `memory_mb` (`integer`, required) — The host's memory size ceiling in MiB (admission ≤-resource-caps check).
+- `secret_refs` (`array<string>`, optional) — Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged.
+- `owner_project` (`string (nullable)`, optional) — Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource.
 
 ## `resources.register_local_libvirt`
 
@@ -86,7 +96,18 @@ Register a local-libvirt runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | Local-libvirt runtime resource registration request. |
+| `request` | object | yes | Local-libvirt runtime resource registration request. |
+
+`request` fields:
+
+- `name` (`string`, required) — The (kind, name) identity for the new resource.
+- `cost_class` (`string`, required) — The cost class for pricing.
+- `concurrent_allocation_cap` (`integer`, optional) — Per-host concurrent-allocation cap (> 0).
+- `vcpus` (`integer`, required) — The host's vCPU size ceiling. Admission rejects a selector larger than this (ADR-0007 §2), so a host registered without it is un-grantable.
+- `memory_mb` (`integer`, required) — The host's memory size ceiling in MiB (admission ≤-resource-caps check).
+- `secret_refs` (`array<string>`, optional) — Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged.
+- `owner_project` (`string (nullable)`, optional) — Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource.
+- `host_uri` (`string`, required) — Local-libvirt provider host URI.
 
 ## `resources.register_remote_libvirt`
 
@@ -96,7 +117,19 @@ Register a remote-libvirt runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | Remote-libvirt runtime resource registration request. |
+| `request` | object | yes | Remote-libvirt runtime resource registration request. |
+
+`request` fields:
+
+- `name` (`string`, required) — The (kind, name) identity for the new resource.
+- `cost_class` (`string`, required) — The cost class for pricing.
+- `concurrent_allocation_cap` (`integer`, optional) — Per-host concurrent-allocation cap (> 0).
+- `vcpus` (`integer`, required) — The host's vCPU size ceiling. Admission rejects a selector larger than this (ADR-0007 §2), so a host registered without it is un-grantable.
+- `memory_mb` (`integer`, required) — The host's memory size ceiling in MiB (admission ≤-resource-caps check).
+- `secret_refs` (`array<string>`, optional) — Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged.
+- `owner_project` (`string (nullable)`, optional) — Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource.
+- `host_uri` (`string`, required) — Remote-libvirt provider host URI.
+- `base_image` (`string`, required) — Registered remote-libvirt base image name.
 
 ## `resources.renew`
 
@@ -106,7 +139,7 @@ Renew a runtime resource lease.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `resource_id` | `string` | yes | The runtime Resource UUID whose lease to renew. |
+| `resource_id` | string | yes | The runtime Resource UUID whose lease to renew. |
 
 ## `resources.set_status`
 
@@ -116,8 +149,8 @@ Set a host's health status; leaves cordoned unchanged. Requires platform operato
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `resource_id` | `string` | yes | The host Resource UUID. |
-| `status` | `string` | yes | Health: 'available', 'degraded', or 'offline'. |
+| `resource_id` | string | yes | The host Resource UUID. |
+| `status` | string | yes | Health: 'available', 'degraded', or 'offline'. |
 
 ## `resources.uncordon`
 
@@ -127,4 +160,4 @@ Restore a host to schedulable; leaves status unchanged. Requires platform operat
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `resource_id` | `string` | yes | The host Resource UUID to uncordon. |
+| `resource_id` | string | yes | The host Resource UUID to uncordon. |

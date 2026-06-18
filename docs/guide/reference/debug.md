@@ -10,8 +10,8 @@ Clear a breakpoint by number on a live DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `number` | `string` | yes | Breakpoint number to clear (from debug.list_breakpoints). |
-| `session_id` | `string` | yes | The live DebugSession whose breakpoint to clear. |
+| `number` | string | yes | Breakpoint number to clear (from debug.list_breakpoints). |
+| `session_id` | string | yes | The live DebugSession whose breakpoint to clear. |
 
 ## `debug.continue`
 
@@ -21,8 +21,8 @@ Resume execution on a live DebugSession and wait for a stop event. Operator only
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | `string` | yes | The live DebugSession to continue execution on. |
-| `timeout_sec` | `number` | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
+| `session_id` | string | yes | The live DebugSession to continue execution on. |
+| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
 
 ## `debug.end_session`
 
@@ -32,7 +32,7 @@ Drive a live/attach DebugSession to detached; close its transport. Requires oper
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | `string` | yes | The DebugSession to detach and close. |
+| `session_id` | string | yes | The DebugSession to detach and close. |
 
 ## `debug.interrupt`
 
@@ -42,7 +42,7 @@ Send an interrupt to halt a running live DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | `string` | yes | The live DebugSession to interrupt. |
+| `session_id` | string | yes | The live DebugSession to interrupt. |
 
 ## `debug.list_breakpoints`
 
@@ -52,7 +52,7 @@ List all breakpoints on a live DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | `string` | yes | The live DebugSession whose breakpoints to list. |
+| `session_id` | string | yes | The live DebugSession whose breakpoints to list. |
 
 ## `debug.read_memory`
 
@@ -62,9 +62,9 @@ Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires oper
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `address` | `integer` | yes | Start address (integer) to read from. |
-| `byte_count` | `integer` | yes | Number of bytes to read (capped at 4096). |
-| `session_id` | `string` | yes | The live DebugSession to read memory from. |
+| `address` | integer | yes | Start address (integer) to read from. |
+| `byte_count` | integer | yes | Number of bytes to read (capped at 4096). |
+| `session_id` | string | yes | The live DebugSession to read memory from. |
 
 ## `debug.read_registers`
 
@@ -74,8 +74,8 @@ Read named registers from a live DebugSession. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `registers` | `array` | yes | Register names to read (e.g. ["rip", "rsp"]). |
-| `session_id` | `string` | yes | The live DebugSession to read registers from. |
+| `registers` | array<string> | yes | Register names to read (e.g. ["rip", "rsp"]). |
+| `session_id` | string | yes | The live DebugSession to read registers from. |
 
 ## `debug.set_breakpoint`
 
@@ -85,8 +85,8 @@ Set a breakpoint on a live DebugSession via gdb-MI. Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `location` | `string` | yes | Bare C function or symbol name to break at. |
-| `session_id` | `string` | yes | The live DebugSession to set a breakpoint on. |
+| `location` | string | yes | Bare C function or symbol name to break at. |
+| `session_id` | string | yes | The live DebugSession to set a breakpoint on. |
 
 ## `debug.start_session`
 
@@ -96,5 +96,5 @@ Open a single-attach transport and insert a live DebugSession. Requires operator
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `run_id` | `string` | yes | The booted Run to attach a debug session to. |
-| `transport` | `string` | no | Transport kind: `gdbstub` (default) or `drgn-live`. |
+| `run_id` | string | yes | The booted Run to attach a debug session to. |
+| `transport` | string | no | Transport kind: `gdbstub` (default) or `drgn-live`. |

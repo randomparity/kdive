@@ -10,7 +10,18 @@ Enqueue an image build job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | Public image build request. |
+| `request` | object(format=qcow2) | yes | Public image build request. |
+
+`request` fields:
+
+- `provider` (`string`, required) — The provider whose plane builds or built the image.
+- `name` (`string`, required) — The catalog image name.
+- `arch` (`string`, required) — The target architecture.
+- `releasever` (`string`, required) — The distro release version.
+- `source_image_digest` (`string`, required) — The base image content digest.
+- `capabilities` (`array<string>`, optional) — The guest-contract tags the image must satisfy.
+- `format` (``=qcow2``, optional) — The image format.
+- `root_device` (`string`, optional) — The guest root device path.
 
 ## `images.delete`
 
@@ -20,7 +31,7 @@ Delete an image catalog entry.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `image_id` | `string` | yes | The private catalog image to delete. |
+| `image_id` | string | yes | The private catalog image to delete. |
 
 ## `images.extend`
 
@@ -30,9 +41,9 @@ Extend an image catalog entry lease.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `image_id` | `string` | yes | The private image whose lifetime to extend. |
-| `reason` | `string` | yes | Mandatory non-blank break-glass justification (audited). |
-| `seconds` | `integer` | yes | Seconds from now (clamped to the ceiling). |
+| `image_id` | string | yes | The private image whose lifetime to extend. |
+| `reason` | string | yes | Mandatory non-blank break-glass justification (audited). |
+| `seconds` | integer | yes | Seconds from now (clamped to the ceiling). |
 
 ## `images.list`
 
@@ -48,7 +59,7 @@ Prune expired image catalog entries.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `reason` | `string` | yes | Mandatory non-blank break-glass justification (audited). |
+| `reason` | string | yes | Mandatory non-blank break-glass justification (audited). |
 
 ## `images.publish`
 
@@ -58,7 +69,18 @@ Publish a built image into the catalog.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | Public image publish request. |
+| `request` | object(format=qcow2) | yes | Public image publish request. |
+
+`request` fields:
+
+- `provider` (`string`, required) — The provider whose plane builds or built the image.
+- `name` (`string`, required) — The catalog image name.
+- `arch` (`string`, required) — The target architecture.
+- `releasever` (`string`, required) — The distro release version.
+- `source_image_digest` (`string`, required) — The base image content digest.
+- `capabilities` (`array<string>`, optional) — The guest-contract tags the image must satisfy.
+- `format` (``=qcow2``, optional) — The image format.
+- `root_device` (`string`, optional) — The guest root device path.
 
 ## `images.upload`
 
@@ -68,4 +90,12 @@ Create an image upload request.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | Private image upload registration request. |
+| `request` | object | yes | Private image upload registration request. |
+
+`request` fields:
+
+- `project` (`string`, required) — The owning project for the private image.
+- `name` (`string`, required) — The catalog image name.
+- `arch` (`string`, required) — The target architecture.
+- `quarantine_key` (`string`, required) — The object-store key of the quarantined upload.
+- `lifetime_seconds` (`integer (nullable)`, optional) — TTL seconds (clamped to the ceiling); default applies.

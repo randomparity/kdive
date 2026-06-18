@@ -10,7 +10,7 @@ Delete a system shape.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `name` | `string` | yes | Shape name to remove. |
+| `name` | string | yes | Shape name to remove. |
 
 ## `shapes.list`
 
@@ -26,8 +26,8 @@ Create or update a system shape.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `disk_gb` | `integer` | yes | Disk size in GiB (> 0). |
-| `memory_mb` | `integer` | yes | Memory in MiB, a whole-GB multiple (> 0). |
-| `name` | `string` | yes | Shape name to upsert (e.g. 'medium'). |
-| `pcie_match` | `any` | no | Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex). |
-| `vcpus` | `integer` | yes | Virtual CPU count (> 0). |
+| `disk_gb` | integer | yes | Disk size in GiB (> 0). |
+| `memory_mb` | integer | yes | Memory in MiB, a whole-GB multiple (> 0). |
+| `name` | string | yes | Shape name to upsert (e.g. 'medium'). |
+| `pcie_match` | string (nullable) | no | Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex). |
+| `vcpus` | integer | yes | Virtual CPU count (> 0). |

@@ -10,7 +10,7 @@ Disable a registered build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `name` | `string` | yes | The build host name to disable. |
+| `name` | string | yes | The build host name to disable. |
 
 ## `build_hosts.list`
 
@@ -26,7 +26,14 @@ Register an ephemeral-libvirt build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | Ephemeral-libvirt build-host registration request. |
+| `request` | object | yes | Ephemeral-libvirt build-host registration request. |
+
+`request` fields:
+
+- `name` (`string`, required) — Unique human-readable identifier for the new host.
+- `workspace_root` (`string`, required) — Absolute path where builds are staged.
+- `max_concurrent` (`integer`, required) — Maximum simultaneous build leases this host may hold (> 0).
+- `base_image_volume` (`string`, required) — Base build-image volume name in the remote storage pool.
 
 ## `build_hosts.register_ssh`
 
@@ -36,7 +43,15 @@ Register an SSH build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | `object` | yes | SSH build-host registration request. |
+| `request` | object | yes | SSH build-host registration request. |
+
+`request` fields:
+
+- `name` (`string`, required) — Unique human-readable identifier for the new host.
+- `workspace_root` (`string`, required) — Absolute path where builds are staged.
+- `max_concurrent` (`integer`, required) — Maximum simultaneous build leases this host may hold (> 0).
+- `address` (`string`, required) — SSH hostname or IP address.
+- `ssh_credential_ref` (`string`, required) — Credential secret reference, e.g. 'ssh://build-host-key'. Only the reference string is stored; secret bytes are never fetched.
 
 ## `build_hosts.remove`
 
@@ -46,4 +61,4 @@ Remove a registered build host.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `name` | `string` | yes | The build host name to remove. |
+| `name` | string | yes | The build host name to remove. |

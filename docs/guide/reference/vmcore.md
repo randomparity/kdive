@@ -10,8 +10,8 @@ Capture and persist a vmcore.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `method` | `string` | no | Capture method; must be supported by the local-libvirt provider. |
-| `system_id` | `string` | yes | The crashed System whose vmcore to capture. |
+| `method` | `console`, `host_dump`, `gdbstub`, `kdump` | no | Capture method; must be supported by the local-libvirt provider. |
+| `system_id` | string | yes | The crashed System whose vmcore to capture. |
 
 ## `vmcore.list`
 
@@ -21,4 +21,4 @@ List vmcore artifacts for one system.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `system_id` | `string` | yes | The System whose redacted vmcore artifacts to list. |
+| `system_id` | string | yes | The System whose redacted vmcore artifacts to list. |

@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast, get_type_hints
 
+import pytest
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.tools.function_tool import FunctionTool
 from psycopg_pool import AsyncConnectionPool
@@ -24,7 +25,15 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.app import build_app
 from kdive.mcp.tools import _docmeta
+from kdive.profiles.build import BuildProfile
 from kdive.security.secrets.secret_registry import SecretRegistry
+from scripts.gen_tool_reference import (
+    _BUILD_PROFILE_EXAMPLES,
+    _MAX_SCHEMA_DEPTH,
+    _is_structured,
+    render_param_detail,
+    render_schema_type,
+)
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 _HERE = Path(__file__).resolve()
@@ -487,3 +496,98 @@ def test_active_tools_have_a_covering_test() -> None:
                 live_only_files.append(f"{tool}: {rel_path}")
     assert not missing_files, f"mapped behavior test files do not exist: {missing_files}"
     assert not live_only_files, f"mapped behavior tests must be non-live: {live_only_files}"
+
+
+def _rendered_detail(spec: dict[str, Any]) -> str:
+    """The full rendered detail for a parameter: inline type plus the sub-list lines."""
+    return render_schema_type(spec) + "\n" + "\n".join(render_param_detail(spec))
+
+
+def _semantic_depth(spec: Any) -> int:
+    """Deepest semantic recursion the renderer performs: properties / items / union members."""
+    if not isinstance(spec, dict):
+        return 0
+    children: list[Any] = list((spec.get("properties") or {}).values())
+    items = spec.get("items")
+    if isinstance(items, dict):
+        children.append(items)
+    for union_key in ("anyOf", "oneOf"):
+        members = spec.get(union_key)
+        if isinstance(members, list):
+            children.extend(members)
+    return 1 + max((_semantic_depth(c) for c in children), default=-1)
+
+
+_UNINFORMATIVE_RENDERS = frozenset({"any", "object", "array", "array<any>", "array<object>"})
+
+
+def test_structured_params_render_nested_detail() -> None:
+    # ADR-0177 docs guard: a structured parameter (one carrying properties / items / enum /
+    # anyOf / oneOf) must not collapse to a bare `any`/`object`/`array` with no field
+    # sub-list. A render that resolves the shape — a scalar token, `(nullable)`, an enum
+    # value list, an `array<string>`, a union with `|`, or a `… fields:` sub-list — is
+    # informative and passes. Legitimately-scalar params (`string`/`integer`/...) are not
+    # `_is_structured`, so they are exempt and the guard does not false-positive on them.
+    offenders: list[str] = []
+    for t in TOOLS:
+        for name, spec in (t.parameters or {}).get("properties", {}).items():
+            if not _is_structured(spec):
+                continue
+            inline = render_schema_type(spec)
+            detail = render_param_detail(spec)
+            if inline in _UNINFORMATIVE_RENDERS and not detail:
+                offenders.append(f"{t.name}:{name} -> {inline!r}")
+    assert not offenders, f"structured params collapsed to a bare type with no detail: {offenders}"
+
+
+def test_build_profile_examples_are_valid() -> None:
+    # ADR-0177 decision 2: every documented runs.create build_profile example must parse,
+    # and the set must cover both source lanes, so a schema change that invalidates a
+    # documented example fails here rather than drifting silently.
+    assert _BUILD_PROFILE_EXAMPLES, "build_profile examples must be non-empty"
+    sources = set()
+    for label, payload in _BUILD_PROFILE_EXAMPLES:
+        parsed = BuildProfile.parse(payload)  # raises CategorizedError on an invalid example
+        sources.add(parsed.source)
+        assert label.strip(), "each example needs a human label"
+    assert sources == {"server", "external"}, f"examples must cover both lanes, got {sources}"
+
+
+def test_schema_renderer_rejects_unresolved_ref() -> None:
+    # ADR-0177: an unresolved $ref/$defs is not a walkable shape; the renderer must raise
+    # rather than fall through to a silent bare `object`/`any`.
+    with pytest.raises(ValueError, match="ref"):
+        render_schema_type({"$ref": "#/$defs/Foo"})
+    with pytest.raises(ValueError, match="ref"):
+        render_schema_type({"$defs": {"Foo": {"type": "string"}}, "type": "object"})
+
+
+def test_schema_renderer_depth_bound_fails_loud() -> None:
+    # ADR-0177: a schema deeper than _MAX_SCHEMA_DEPTH fails loud, not silently truncated.
+    # render_param_detail recurses through nested object fields; render_schema_type recurses
+    # through array items — exercise each on a chain past the bound.
+    object_chain: dict[str, Any] = {"type": "string"}
+    array_chain: dict[str, Any] = {"type": "string"}
+    for _ in range(_MAX_SCHEMA_DEPTH + 2):
+        object_chain = {"type": "object", "properties": {"child": object_chain}}
+        array_chain = {"type": "array", "items": array_chain}
+    with pytest.raises(ValueError, match="_MAX_SCHEMA_DEPTH"):
+        render_param_detail(object_chain)
+    with pytest.raises(ValueError, match="_MAX_SCHEMA_DEPTH"):
+        render_schema_type(array_chain)
+
+
+def test_max_schema_depth_clears_live_schemas() -> None:
+    # ADR-0177: the bound must exceed the deepest live tool-param schema, so a future deeper
+    # schema trips this test before it trips CI doc-gen, and the bound keeps headroom.
+    deepest = 0
+    deepest_param = ""
+    for t in TOOLS:
+        for name, spec in (t.parameters or {}).get("properties", {}).items():
+            d = _semantic_depth(spec)
+            if d > deepest:
+                deepest, deepest_param = d, f"{t.name}:{name}"
+    assert deepest < _MAX_SCHEMA_DEPTH, (
+        f"deepest live param {deepest_param} is {deepest} levels; "
+        f"_MAX_SCHEMA_DEPTH={_MAX_SCHEMA_DEPTH} has no headroom — raise the bound"
+    )
