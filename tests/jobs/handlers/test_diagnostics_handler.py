@@ -1,4 +1,4 @@
-"""Tests for the diagnostics_worker_check job handler (ADR-0163)."""
+"""Tests for the diagnostics_worker_check job handler (ADR-0164)."""
 
 from __future__ import annotations
 

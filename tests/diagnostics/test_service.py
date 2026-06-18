@@ -187,7 +187,7 @@ def test_service_substitution_reason_threads_into_results() -> None:
 
 
 class _FakeDispatcher:
-    """A worker-check dispatcher stub returning a fixed result list (ADR-0163)."""
+    """A worker-check dispatcher stub returning a fixed result list (ADR-0164)."""
 
     def __init__(self, results: list[CheckResult]) -> None:
         self._results = results

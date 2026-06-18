@@ -1,4 +1,4 @@
-"""Inline (de)serialization of worker-vantage CheckResults carried in a job's result_ref (ADR-0163).
+"""Inline (de)serialization of worker-vantage CheckResults carried in a job's result_ref (ADR-0164).
 
 The diagnostics worker job returns its two CheckResults as a compact JSON string inline in
 ``result_ref`` (the verdict is small, non-secret, and read only by the dispatcher). The dispatcher

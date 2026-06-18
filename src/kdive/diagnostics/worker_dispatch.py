@@ -1,4 +1,4 @@
-"""Server-side bounded-wait dispatcher for the worker-vantage diagnostic checks (ADR-0163).
+"""Server-side bounded-wait dispatcher for the worker-vantage diagnostic checks (ADR-0164).
 
 ``ops.diagnostics`` runs in the server process; the worker-vantage checks must run on the worker
 (ADR-0083), and the durable job queue is the only server->worker handoff. This dispatcher enqueues

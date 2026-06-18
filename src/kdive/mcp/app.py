@@ -186,7 +186,7 @@ def _register_diagnostics_tools(
 ) -> None:
     # Bind the pool into the factory with an explicit closure (not functools.partial, which strict
     # ty rejects against the parameterized ServiceFactory Protocol) so worker-vantage checks can
-    # dispatch to the worker (ADR-0163).
+    # dispatch to the worker (ADR-0164).
     def _service_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
         return default_service_factory(provider, with_egress=with_egress, pool=pool)
 

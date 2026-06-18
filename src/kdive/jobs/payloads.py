@@ -120,7 +120,7 @@ class ImageBuildPayload(_PayloadBase):
 
 
 class DiagnosticsWorkerCheckPayload(_PayloadBase):
-    """The inputs a ``DIAGNOSTICS_WORKER_CHECK`` job carries (ADR-0163).
+    """The inputs a ``DIAGNOSTICS_WORKER_CHECK`` job carries (ADR-0164).
 
     Only the concrete provider id (``remote-libvirt``); the handler re-resolves the host config
     from the inventory at probe time, so no host identity or secret rides on the queue.

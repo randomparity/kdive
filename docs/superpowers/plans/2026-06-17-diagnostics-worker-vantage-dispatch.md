@@ -9,7 +9,7 @@
 **Tech Stack:** Python 3.13, `uv`, `ruff`, `ty`, `pytest`. Postgres durable job queue (`jobs/queue.py`), libvirt, Python `ssl`/`socket`.
 
 **Spec:** `docs/superpowers/specs/2026-06-17-diagnostics-worker-vantage-dispatch.md`
-**ADR:** `docs/adr/0163-diagnostics-worker-vantage-dispatch.md`
+**ADR:** `docs/adr/0164-diagnostics-worker-vantage-dispatch.md`
 
 ## Global Constraints
 
@@ -102,7 +102,7 @@ Add `DiagnosticsWorkerCheckPayload` to both the `_PayloadModel` and `PayloadMode
 Create `src/kdive/db/schema/0040_diagnostics_worker_check_job_kind.sql`:
 
 ```sql
--- 0040_diagnostics_worker_check_job_kind.sql — diagnostics worker-vantage dispatch (ADR-0163, #514).
+-- 0040_diagnostics_worker_check_job_kind.sql — diagnostics worker-vantage dispatch (ADR-0164, #514).
 -- Additive to 0003/0024 (forward-only, ADR-0015). Widens the jobs.kind CHECK to admit the
 -- `diagnostics_worker_check` op (ops.diagnostics enqueues it to run provider_tls/gdbstub_acl on
 -- the worker); mirrors JobKind in domain/models.py. Drop-and-recreate keeps the constraint name
@@ -198,7 +198,7 @@ Expected: FAIL (module missing).
 `src/kdive/diagnostics/result_codec.py`:
 
 ```python
-"""Inline (de)serialization of worker-vantage CheckResults carried in a job's result_ref (ADR-0163).
+"""Inline (de)serialization of worker-vantage CheckResults carried in a job's result_ref (ADR-0164).
 
 The diagnostics worker job returns its two CheckResults as a compact JSON string inline in
 `result_ref` (the verdict is small, non-secret, and read only by the dispatcher). The dispatcher
@@ -370,7 +370,7 @@ Expected: FAIL (module missing).
 `src/kdive/diagnostics/provider_tls.py`:
 
 ```python
-"""Direct-TLS provider_tls probe for the remote-libvirt worker-vantage check (ADR-0163).
+"""Direct-TLS provider_tls probe for the remote-libvirt worker-vantage check (ADR-0164).
 
 A failed libvirt qemu+tls *open* is wrapped opaquely as TRANSPORT_FAILURE by the transport, so a
 bad cert is indistinguishable from a down host there — the exact distinction this check exists to
@@ -536,14 +536,14 @@ Expected: FAIL (module missing).
 `src/kdive/diagnostics/gdbstub_acl.py`:
 
 ```python
-"""TCP-connect gdbstub_acl probe for the remote-libvirt worker-vantage check (ADR-0163).
+"""TCP-connect gdbstub_acl probe for the remote-libvirt worker-vantage check (ADR-0164).
 
 A *policy* check with no live listener (ADR-0091 §2): the worker attempts a TCP connect to the
 lowest port of the configured gdbstub range. A connect or a fast ECONNREFUSED means the SYN reached
 the host's TCP stack (the M2 DROP/blackhole fault is excluded) -> admits; a connect timeout means
 the firewall drops it -> blocked; any other error is indeterminate. Known limitation: a fast
 ECONNREFUSED cannot distinguish 'no listener' from an iptables -j REJECT rule, so a REJECT-style
-block reads as admit (documented in ADR-0163).
+block reads as admit (documented in ADR-0164).
 """
 
 from __future__ import annotations
@@ -672,7 +672,7 @@ Expected: FAIL (module missing).
 `src/kdive/jobs/handlers/diagnostics.py`:
 
 ```python
-"""Worker handler for the diagnostics_worker_check job (ADR-0163).
+"""Worker handler for the diagnostics_worker_check job (ADR-0164).
 
 Resolves the remote-libvirt config at probe time, builds the two worker-vantage checks with their
 production probes, runs each through `run_check` (per-check timeout -> an unreachable host is an
@@ -872,7 +872,7 @@ Expected: FAIL (module missing).
 `src/kdive/diagnostics/worker_dispatch.py` (sketch — fill from the interfaces; keep `run_worker_checks` ≤100 lines, complexity ≤8):
 
 ```python
-"""Server-side bounded-wait dispatcher for the worker-vantage diagnostic checks (ADR-0163)."""
+"""Server-side bounded-wait dispatcher for the worker-vantage diagnostic checks (ADR-0164)."""
 
 from __future__ import annotations
 

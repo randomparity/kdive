@@ -1,4 +1,4 @@
-"""Tests for the inline worker-result codec (ADR-0163)."""
+"""Tests for the inline worker-result codec (ADR-0164)."""
 
 from __future__ import annotations
 

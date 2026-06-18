@@ -239,7 +239,7 @@ def test_multiple_instances_are_not_configured_so_no_reachability_check(
     assert ids == {SECRET_REF_ID}
 
 
-# ---- worker-vantage dispatch wiring (ADR-0163, #514) ---------------------------------
+# ---- worker-vantage dispatch wiring (ADR-0164, #514) ---------------------------------
 
 
 def test_factory_wires_dispatcher_when_pool_and_remote_configured(

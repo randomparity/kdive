@@ -1,4 +1,4 @@
-"""Tests for the bounded-wait worker-check dispatcher (ADR-0163)."""
+"""Tests for the bounded-wait worker-check dispatcher (ADR-0164)."""
 
 from __future__ import annotations
 

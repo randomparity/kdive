@@ -3,7 +3,7 @@
 - **Date:** 2026-06-17
 - **Issue:** #514 — `ops.diagnostics`: wire worker-vantage checks (`provider_tls`,
   `gdbstub_acl`) so they run instead of `not_implemented`.
-- **ADR:** [ADR-0163](../../adr/0163-diagnostics-worker-vantage-dispatch.md)
+- **ADR:** [ADR-0164](../../adr/0164-diagnostics-worker-vantage-dispatch.md)
 - **Builds on:** ADR-0091 (the `Check`/three-state/vantage model), ADR-0125 (the server-vantage
   reachability probe whose connection lifecycle the TLS probe reuses), ADR-0139 (the
   feature-not-enabled vs worker-unavailable substitution honesty this work replaces with real

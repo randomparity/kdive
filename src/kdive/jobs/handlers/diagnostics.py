@@ -1,4 +1,4 @@
-"""Worker handler for the diagnostics_worker_check job (ADR-0163).
+"""Worker handler for the diagnostics_worker_check job (ADR-0164).
 
 Resolves the remote-libvirt config at probe time, builds the two worker-vantage checks with their
 production probes, runs each through :func:`run_check` (per-check timeout -> an unreachable host is

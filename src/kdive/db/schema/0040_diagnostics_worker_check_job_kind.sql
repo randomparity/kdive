@@ -1,4 +1,4 @@
--- 0040_diagnostics_worker_check_job_kind.sql — diagnostics worker-vantage dispatch (ADR-0163, #514).
+-- 0040_diagnostics_worker_check_job_kind.sql — diagnostics worker-vantage dispatch (ADR-0164, #514).
 -- Additive to 0003/0024 (forward-only, ADR-0015). Widens the jobs.kind CHECK to admit the
 -- `diagnostics_worker_check` op (ops.diagnostics enqueues it to run provider_tls/gdbstub_acl on the
 -- worker); mirrors JobKind in domain/models.py. Drop-and-recreate keeps the constraint name stable

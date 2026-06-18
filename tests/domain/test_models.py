@@ -235,7 +235,7 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         "capture_vmcore",
         "image_build",
         # Server-internal (not agent-facing): ops.diagnostics enqueues it to run the
-        # worker-vantage checks and bounded-waits for the inline result (ADR-0163).
+        # worker-vantage checks and bounded-waits for the inline result (ADR-0164).
         "diagnostics_worker_check",
     }
 

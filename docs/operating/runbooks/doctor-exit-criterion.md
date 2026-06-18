@@ -79,7 +79,7 @@ process **exit code** for each — both are independently-checkable evidence. Th
 are seeded on the deployment (not in kdive); after recording each, restore the healthy
 configuration before seeding the next so the runs are independent.
 
-### Worker-vantage dispatch prerequisite (ADR-0163)
+### Worker-vantage dispatch prerequisite (ADR-0164)
 
 `provider_tls` and `gdbstub_acl` are **worker-vantage**: `doctor` enqueues a
 `diagnostics_worker_check` job and the worker runs the real probes (the worker is the host the

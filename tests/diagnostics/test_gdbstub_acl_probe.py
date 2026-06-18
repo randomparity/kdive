@@ -1,4 +1,4 @@
-"""Tests for the TCP-connect gdbstub_acl probe (ADR-0163)."""
+"""Tests for the TCP-connect gdbstub_acl probe (ADR-0164)."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def test_probe_classifies(raiser: Exception | None, expected: bool | None) -> No
 
 
 def test_empty_host_is_indeterminate_without_connecting() -> None:
-    # An unset gdb_addr ("") must report error (None), not silently probe localhost (ADR-0163).
+    # An unset gdb_addr ("") must report error (None), not silently probe localhost (ADR-0164).
     called = False
 
     def fake_connector(host: str, port: int) -> None:

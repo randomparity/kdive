@@ -1,4 +1,4 @@
-"""DB-backed happy-path test for the worker-check dispatcher (ADR-0163).
+"""DB-backed happy-path test for the worker-check dispatcher (ADR-0164).
 
 Exercises the production pool wrappers (`_pool_enqueue`/`_pool_get`) and the real queue once:
 the dispatcher enqueues a `diagnostics_worker_check` job, a concurrent stand-in worker claims and

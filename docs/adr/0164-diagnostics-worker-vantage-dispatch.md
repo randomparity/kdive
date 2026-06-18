@@ -1,4 +1,4 @@
-# ADR 0163 — Diagnostics worker-vantage dispatch (`provider_tls`, `gdbstub_acl`)
+# ADR 0164 — Diagnostics worker-vantage dispatch (`provider_tls`, `gdbstub_acl`)
 
 - **Status:** Accepted
 - **Date:** 2026-06-17

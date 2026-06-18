@@ -1,4 +1,4 @@
-"""Tests for the direct-TLS provider_tls probe (ADR-0163)."""
+"""Tests for the direct-TLS provider_tls probe (ADR-0164)."""
 
 from __future__ import annotations
 

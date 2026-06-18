@@ -1,4 +1,4 @@
-"""Direct-TLS provider_tls probe for the remote-libvirt worker-vantage check (ADR-0163).
+"""Direct-TLS provider_tls probe for the remote-libvirt worker-vantage check (ADR-0164).
 
 A failed libvirt qemu+tls *open* is wrapped opaquely as ``TRANSPORT_FAILURE`` by the transport, so
 a bad cert is indistinguishable from a down host there — the exact distinction this check exists to

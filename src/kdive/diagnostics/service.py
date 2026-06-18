@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
 
     # Runtime-import only inside default_service_factory to avoid a cycle: worker_dispatch imports
-    # WORKER_UNAVAILABLE_DETAIL from this module (ADR-0163).
+    # WORKER_UNAVAILABLE_DETAIL from this module (ADR-0164).
     from kdive.diagnostics.worker_dispatch import WorkerCheckDispatcher
 
 _REMOTE_PROVIDER = "remote-libvirt"
@@ -187,7 +187,7 @@ class DiagnosticsService:
                 dispatch is wired so the detail does not misread as a worker outage.
             unavailable_worker_checks: Worker-vantage diagnostics that this deployment cannot
                 run at all. They are explicit result metadata, not runnable ``Check`` objects.
-            worker_dispatcher: When set, owns the worker-vantage outcome (ADR-0163): ``run`` calls
+            worker_dispatcher: When set, owns the worker-vantage outcome (ADR-0164): ``run`` calls
                 it to obtain real ``provider_tls``/``gdbstub_acl`` results (or a substituted
                 ``error`` on a worker that does not pick the job up in time) instead of the static
                 ``unavailable_worker_checks`` substitution. ``None`` keeps the legacy substitution
@@ -214,7 +214,7 @@ class DiagnosticsService:
         results = await self._run_within_budget(runnable)
         if self._worker_dispatcher is not None:
             # The dispatcher owns the entire worker-vantage outcome (run on the worker, or a
-            # substituted error on a worker that does not pick the job up in time) — ADR-0163.
+            # substituted error on a worker that does not pick the job up in time) — ADR-0164.
             results.extend(await self._worker_dispatcher.run_worker_checks())
         else:
             results.extend(worker_unavailable_results(skipped, self._substitution_reason))
@@ -346,7 +346,7 @@ def default_service_factory(
 
     The worker-vantage ``provider_tls``/``gdbstub_acl`` checks run on the worker via a
     :class:`~kdive.diagnostics.worker_dispatch.JobWorkerCheckDispatcher` when ``pool`` is supplied
-    and remote-libvirt is configured (ADR-0163): the service bounded-waits for the dispatched job
+    and remote-libvirt is configured (ADR-0164): the service bounded-waits for the dispatched job
     and merges its real three-state results, surfacing ``WORKER_UNAVAILABLE`` only when the worker
     does not pick the job up in time. When no ``pool`` is supplied (no dispatch wired), the
     worker-vantage checks keep the honest ``FEATURE_NOT_ENABLED`` substitution
@@ -376,7 +376,7 @@ def default_service_factory(
         checks.extend(_remote_libvirt_checks())
         if pool is not None:
             # Function-local import: worker_dispatch imports WORKER_UNAVAILABLE_DETAIL from this
-            # module, so a top-level import here would be a cycle (ADR-0163).
+            # module, so a top-level import here would be a cycle (ADR-0164).
             from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
 
             worker_dispatcher = JobWorkerCheckDispatcher(pool)
