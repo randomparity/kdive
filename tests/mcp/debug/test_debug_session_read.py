@@ -30,9 +30,12 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.models import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions_read
+from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
+from kdive.mcp.tools.lifecycle.systems.view import get_system as _get_system
 from kdive.providers.ports import TransportHandleData, TransportHandleKind
 from kdive.security.authz.rbac import Role
 from kdive.services.resources.discovery import register_discovered_resource
+from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery  # isort: skip
@@ -403,5 +406,35 @@ def test_active_session_ids_exclude_detached(migrated_url: str) -> None:
                 by_system = await sessions_read.active_session_ids_for_system(conn, UUID(sys_id))
         assert by_run == []
         assert by_system == []
+
+    asyncio.run(_run())
+
+
+def test_runs_get_surfaces_active_debug_session_ids(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id, run_id, _ = await _seeded_session(pool, DebugSessionState.LIVE)
+            resp = await _get_run(pool, _ctx(), run_id, resolver=provider_resolver())
+        assert resp.data["active_debug_session_ids"] == [session_id]
+
+    asyncio.run(_run())
+
+
+def test_systems_get_surfaces_active_debug_session_ids(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id, _, sys_id = await _seeded_session(pool, DebugSessionState.LIVE)
+            resp = await _get_system(pool, _ctx(), sys_id)
+        assert resp.data["active_debug_session_ids"] == [session_id]
+
+    asyncio.run(_run())
+
+
+def test_runs_get_active_debug_session_ids_empty_when_detached(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _, run_id, _ = await _seeded_session(pool, DebugSessionState.DETACHED)
+            resp = await _get_run(pool, _ctx(), run_id, resolver=provider_resolver())
+        assert resp.data["active_debug_session_ids"] == []
 
     asyncio.run(_run())
