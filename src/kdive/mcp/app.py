@@ -73,6 +73,7 @@ from kdive.mcp.tools.ops.images import registrar as ops_images_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
 from kdive.providers.assembly.composition import ProviderComposition
+from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper, InfraReaper
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactories
@@ -203,7 +204,12 @@ def _register_diagnostics_tools(
     # ty rejects against the parameterized ServiceFactory Protocol) so worker-vantage checks can
     # dispatch to the worker (ADR-0164).
     def _service_factory(provider: str | None, *, with_egress: bool = False) -> DiagnosticsService:
-        return default_service_factory(provider, with_egress=with_egress, pool=pool)
+        return default_service_factory(
+            provider,
+            with_egress=with_egress,
+            pool=pool,
+            provider_contributions=diagnostic_provider_contributions(),
+        )
 
     ops_diagnostics_tools.register(app, pool, _service_factory)
 

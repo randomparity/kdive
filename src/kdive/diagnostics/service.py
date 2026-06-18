@@ -34,7 +34,10 @@ from kdive.diagnostics.checks import (
     Vantage,
     run_check,
 )
-from kdive.diagnostics.provider_contracts import WorkerVantageDescriptor
+from kdive.diagnostics.provider_contracts import (
+    DiagnosticProviderContribution,
+    WorkerVantageDescriptor,
+)
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
@@ -322,7 +325,11 @@ def _worker_vantage_checks(
 
 
 def default_service_factory(
-    provider: str | None, *, with_egress: bool = False, pool: AsyncConnectionPool | None = None
+    provider: str | None,
+    *,
+    with_egress: bool = False,
+    pool: AsyncConnectionPool | None = None,
+    provider_contributions: Sequence[DiagnosticProviderContribution] = (),
 ) -> DiagnosticsService:
     """Build the production read-only diagnostics service for ``provider``.
 
@@ -362,9 +369,7 @@ def default_service_factory(
     checks: list[Check] = [_secret_ref_check(), *_build_host_checks()]
     unavailable_worker_checks: list[WorkerVantageCheck] = []
     worker_mode: WorkerVantageMode | None = None
-    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
-
-    for contribution in diagnostic_provider_contributions():
+    for contribution in provider_contributions:
         if not contribution.enabled():
             continue
         checks.extend(contribution.checks())

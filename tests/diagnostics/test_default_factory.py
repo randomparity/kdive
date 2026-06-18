@@ -12,6 +12,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.diagnostics.checks import (
@@ -30,12 +31,30 @@ from kdive.diagnostics.checks import (
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
     WORKER_UNAVAILABLE_DETAIL,
+    DiagnosticsService,
     WorkerVantageDispatchMode,
     WorkerVantageSubstitutionMode,
     default_service_factory,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
+
+
+def _factory(
+    provider: str | None,
+    *,
+    with_egress: bool = False,
+    pool: AsyncConnectionPool | None = None,
+) -> DiagnosticsService:
+    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
+
+    return default_service_factory(
+        provider,
+        with_egress=with_egress,
+        pool=pool,
+        provider_contributions=diagnostic_provider_contributions(),
+    )
+
 
 _INSTANCE = """
 [[remote_libvirt]]
@@ -111,7 +130,7 @@ def _force_staging_probe(monkeypatch, outcome: BaseImageStagingOutcome) -> None:
 
 def test_factory_builds_a_service_with_a_secret_ref_check(monkeypatch, tmp_path: Path) -> None:
     _set_env(monkeypatch, tmp_path)
-    service = default_service_factory(None)
+    service = _factory(None)
     ids = {c.id for c in service._checks}  # noqa: SLF001 - assert the assembled check set
     assert "secret_ref" in ids
 
@@ -130,7 +149,7 @@ def test_secret_ref_passes_when_no_ref_is_required(monkeypatch, tmp_path: Path) 
     # used to drive this moved to systems.toml, #395), so the assembled check resolves the empty
     # set and passes. The FAIL behavior is unit-covered in test_secret_ref.py with injected refs.
     _set_env(monkeypatch, tmp_path)
-    check = next(c for c in default_service_factory(None)._checks if isinstance(c, SecretRefCheck))
+    check = next(c for c in _factory(None)._checks if isinstance(c, SecretRefCheck))
     result = asyncio.run(check.run())
     assert result.status is CheckStatus.PASS
 
@@ -140,7 +159,7 @@ def test_with_egress_fails_fast_when_no_probe_image_is_wired(monkeypatch, tmp_pa
     # M2.4, ADR-0091), so opting into egress fails fast rather than silently dropping the check.
     _set_env(monkeypatch, tmp_path)
     with pytest.raises(CategorizedError) as exc:
-        default_service_factory(None, with_egress=True)
+        _factory(None, with_egress=True)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -151,7 +170,7 @@ def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configur
     monkeypatch, tmp_path: Path
 ) -> None:
     _with_remote_instance(monkeypatch, tmp_path)
-    service = default_service_factory(None)
+    service = _factory(None)
     runnable_ids = {c.id for c in service._checks}  # noqa: SLF001
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
     unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
@@ -165,13 +184,13 @@ def test_factory_service_is_worker_unavailable_when_remote_configured(
     monkeypatch, tmp_path: Path
 ) -> None:
     _with_remote_instance(monkeypatch, tmp_path)
-    service = default_service_factory(None)
+    service = _factory(None)
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
 
 
 def test_factory_omits_remote_checks_when_not_configured(monkeypatch, tmp_path: Path) -> None:
     _no_remote_instance(monkeypatch, tmp_path)
-    ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+    ids = {c.id for c in _factory(None)._checks}  # noqa: SLF001
     assert ids == {SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}
 
 
@@ -180,7 +199,7 @@ def test_run_substitutes_tls_acl_and_runs_reachability_and_secret_ref(
 ) -> None:
     _with_remote_instance(monkeypatch, tmp_path)
     _force_probe(monkeypatch, ReachabilityOutcome.REACHABLE)
-    report = asyncio.run(default_service_factory(None).run())
+    report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
 
     # Worker-vantage checks are substituted with the honest feature-not-enabled error — the
@@ -208,7 +227,7 @@ def test_run_reports_configuration_error_when_config_unresolvable_at_run_time(
     # configuration_error, with no connection attempt (config resolved before any open).
     bad = _INSTANCE.replace('gdbstub_range = "47000:47099"', 'gdbstub_range = "47099:47000"')
     _with_remote_instance(monkeypatch, tmp_path, instances=bad)
-    report = asyncio.run(default_service_factory(None).run())
+    report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[REACHABILITY_ID].status is CheckStatus.ERROR
     assert by_id[REACHABILITY_ID].failure_category == "configuration_error"
@@ -219,7 +238,7 @@ def test_base_image_staging_passes_when_volume_staged(monkeypatch, tmp_path: Pat
     _with_remote_instance(monkeypatch, tmp_path)
     _force_probe(monkeypatch, ReachabilityOutcome.REACHABLE)
     _force_staging_probe(monkeypatch, BaseImageStagingOutcome.STAGED)
-    report = asyncio.run(default_service_factory(None).run())
+    report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[BASE_IMAGE_STAGING_ID].status is CheckStatus.PASS
     assert by_id[BASE_IMAGE_STAGING_ID].provider == "remote-libvirt"
@@ -233,7 +252,7 @@ def test_base_image_staging_fails_when_volume_absent(monkeypatch, tmp_path: Path
     _with_remote_instance(monkeypatch, tmp_path)
     _force_probe(monkeypatch, ReachabilityOutcome.REACHABLE)
     _force_staging_probe(monkeypatch, BaseImageStagingOutcome.NOT_STAGED)
-    report = asyncio.run(default_service_factory(None).run())
+    report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[REACHABILITY_ID].status is CheckStatus.PASS
     assert by_id[BASE_IMAGE_STAGING_ID].status is CheckStatus.FAIL
@@ -244,7 +263,7 @@ def test_base_image_staging_fails_when_volume_absent(monkeypatch, tmp_path: Path
 
 def test_base_image_staging_absent_when_not_configured(monkeypatch, tmp_path: Path) -> None:
     _no_remote_instance(monkeypatch, tmp_path)
-    ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+    ids = {c.id for c in _factory(None)._checks}  # noqa: SLF001
     assert BASE_IMAGE_STAGING_ID not in ids
 
 
@@ -255,7 +274,7 @@ def test_multiple_instances_are_not_configured_so_no_reachability_check(
     # degrades to False and no remote check is assembled — one MCP call cannot fan out across hosts.
     two = _INSTANCE + _INSTANCE.replace('"ub24-big"', '"second-host"')
     _with_remote_instance(monkeypatch, tmp_path, instances=two)
-    ids = {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+    ids = {c.id for c in _factory(None)._checks}  # noqa: SLF001
     assert ids == {SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}
 
 
@@ -266,9 +285,9 @@ def test_factory_always_includes_local_kernel_src(monkeypatch, tmp_path: Path) -
     # The seeded worker-local LOCAL host is a DB invariant, so local_kernel_src is always
     # assembled — remote configured or not.
     _no_remote_instance(monkeypatch, tmp_path)
-    assert LOCAL_KERNEL_SRC_ID in {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+    assert LOCAL_KERNEL_SRC_ID in {c.id for c in _factory(None)._checks}  # noqa: SLF001
     _with_remote_instance(monkeypatch, tmp_path)
-    assert LOCAL_KERNEL_SRC_ID in {c.id for c in default_service_factory(None)._checks}  # noqa: SLF001
+    assert LOCAL_KERNEL_SRC_ID in {c.id for c in _factory(None)._checks}  # noqa: SLF001
 
 
 def test_local_kernel_src_fails_when_unset(monkeypatch, tmp_path: Path) -> None:
@@ -280,7 +299,7 @@ def test_local_kernel_src_fails_when_unset(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
     monkeypatch.delenv("KDIVE_KERNEL_SRC", raising=False)
     config.load()
-    report = asyncio.run(default_service_factory(None).run())
+    report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.FAIL
     assert by_id[LOCAL_KERNEL_SRC_ID].failure_category == "configuration_error"
@@ -294,7 +313,7 @@ def test_local_kernel_src_passes_when_usable(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
     monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
     config.load()
-    report = asyncio.run(default_service_factory(None).run())
+    report = asyncio.run(_factory(None).run())
     by_id = {r.check_id: r for r in report.results}
     assert by_id[LOCAL_KERNEL_SRC_ID].status is CheckStatus.PASS
     assert by_id[LOCAL_KERNEL_SRC_ID].provider is None
@@ -312,13 +331,13 @@ def test_factory_wires_dispatcher_when_pool_and_remote_configured(
     from psycopg_pool import AsyncConnectionPool
 
     _with_remote_instance(monkeypatch, tmp_path)
-    service = default_service_factory(None, pool=cast(AsyncConnectionPool, object()))
+    service = _factory(None, pool=cast(AsyncConnectionPool, object()))
     assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
 
 
 def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) -> None:
     _with_remote_instance(monkeypatch, tmp_path)
-    service = default_service_factory(None)
+    service = _factory(None)
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
     unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
     assert unavailable_ids == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
@@ -332,5 +351,5 @@ def test_factory_no_dispatcher_when_pool_but_remote_not_configured(
     from psycopg_pool import AsyncConnectionPool
 
     _no_remote_instance(monkeypatch, tmp_path)
-    service = default_service_factory(None, pool=cast(AsyncConnectionPool, object()))
+    service = _factory(None, pool=cast(AsyncConnectionPool, object()))
     assert service._worker_mode is None  # noqa: SLF001
