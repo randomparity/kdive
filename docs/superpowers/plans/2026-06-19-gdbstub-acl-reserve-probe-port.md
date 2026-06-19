@@ -63,10 +63,16 @@ TDD order:
    - `test_provision_skips_ports_recorded_by_other_domains`: set the foreign domain at `47001`
      (an assignable port, not the reserved one) and expect the new System at `47002`, preserving the
      test's "skip a port another domain holds" intent (lines ~790-806).
-   - **New regression test** (spec criterion b): a foreign domain records the reserved port
-     `47000`; assert the new System is still allocated `47001` — i.e. the reserved port is excluded
-     by the floor, not merely because it is "taken".
-   - Confirm `test_provision_retry_reuses_own_recorded_port` (own at 47001) is unaffected.
+   - **New regression test** (spec criterion b — the reuse-own-recorded-port fast-path): seed the
+     System's **own** domain with a recorded gdb port of `47000` (the reserved port, as a pre-fix
+     System would have), then provision and assert the next port is `47001` — i.e. the reuse
+     fast-path (`allocate_gdb_port`'s `port_min <= own <= port_max` guard) does **not** reuse the
+     reserved port because `47000` now falls outside `[assignable_gdb_port_min, gdb_port_max]`. This
+     is the high-value guard: a regression that left `port_min=gdb_port_min` in the reuse path would
+     reuse `47000` and this test would catch it. (The fresh-host test in test 1 is the companion
+     "floor excludes a *free* reserved port" case.)
+   - Confirm `test_provision_retry_reuses_own_recorded_port` (own at 47001, in-range) still reuses
+     47001 unaffected.
 2. **Implementation:** in `_define_and_start`, change the `allocate_gdb_port(...)` call to pass
    `port_min=config.assignable_gdb_port_min` (was `config.gdb_port_min`). `port_max` stays
    `config.gdb_port_max`. Do **not** change `allocate_gdb_port` itself — it stays a pure
