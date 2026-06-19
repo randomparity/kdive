@@ -47,8 +47,10 @@ ansible-playbook playbooks/image.yml
 `disable_security_driver` defaults **false** (opt-in; try the SELinux/AppArmor label
 fix first). `include_kernel_debuginfo` defaults **false**. `base_image_source` is
 `virt-builder` (default) or `cloud-image`. `vcpus`/`memory_mb` are the required
-billable ceiling. `gdb_addr` has no default — set it per host (provisioning fails
-closed without it).
+billable ceiling. `gdb_addr` defaults to an empty string in `group_vars/all.yml` but is functionally
+required — both `playbooks/pki.yml` (generate mode) and the `remote_libvirt_facts`
+role assert it is non-empty and fail fast with a clear message if it is not set
+in `host_vars/`.
 
 ## Verification
 

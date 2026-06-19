@@ -1,4 +1,12 @@
 ---
+- name: Assert gdb_addr is set for this host
+  ansible.builtin.assert:
+    that:
+      - gdb_addr | default('', true) | length > 0
+    fail_msg: >-
+      Host '{{ inventory_hostname }}' is missing gdb_addr.
+      Set it in inventory/host_vars/{{ inventory_hostname }}.yml.
+
 - name: Ensure the controller artifacts dir exists
   ansible.builtin.file:
     path: "{{ pki_artifacts_dir }}"

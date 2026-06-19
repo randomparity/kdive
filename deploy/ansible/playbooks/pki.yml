@@ -69,6 +69,17 @@
         mode: "0644"
       when: pki_mode == 'generate'
 
+    - name: Assert per-host gdb_addr and remote_host_fqdn are set
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].gdb_addr | default('', true) | length > 0
+          - hostvars[item].remote_host_fqdn | default('', true) | length > 0
+        fail_msg: >-
+          Host '{{ item }}' is missing required host_vars.
+          Set gdb_addr and remote_host_fqdn in inventory/host_vars/{{ item }}.yml.
+      loop: "{{ groups['remote_libvirt_hosts'] }}"
+      when: pki_mode == 'generate'
+
     - name: Generate per-host server keys
       community.crypto.openssl_privatekey:
         path: "{{ pki_artifacts_dir }}/{{ item }}/serverkey.pem"
