@@ -1,8 +1,10 @@
 """TCP-connect gdbstub_acl probe for the remote-libvirt worker-vantage check (ADR-0164).
 
 A *policy* check with no live listener (ADR-0091 §2): the worker attempts a TCP connect to the
-lowest port of the configured gdbstub range. A connect or a fast ``ECONNREFUSED`` means the SYN
-reached the host's TCP stack (the M2 ``DROP``/blackhole fault is excluded) -> admits; a connect
+lowest port of the configured gdbstub range. That lowest port is the reserved ACL-probe port
+(``RemoteLibvirtConfig.acl_probe_port``, ADR-0184) — no System is ever assigned it, so the connect
+never attaches to and pauses a live guest's gdbstub. A connect or a fast ``ECONNREFUSED`` means the
+SYN reached the host's TCP stack (the M2 ``DROP``/blackhole fault is excluded) -> admits; a connect
 timeout means the firewall drops it -> blocked; any other error is indeterminate. Known limitation:
 a fast ``ECONNREFUSED`` cannot distinguish "no listener" from an iptables ``-j REJECT`` rule, so a
 REJECT-style block reads as admit (documented in ADR-0164).

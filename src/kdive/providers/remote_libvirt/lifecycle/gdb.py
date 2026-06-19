@@ -34,11 +34,16 @@ def allocate_gdb_port(
     port_max: int,
     exclude: set[int] | None = None,
 ) -> int:
-    """Pick the System's gdbstub port from the configured range (ADR-0080 §2).
+    """Pick the System's gdbstub port from the assignable range (ADR-0080 §2).
 
     Reuses the System's own recorded in-range port (stable across retries); otherwise
     the lowest port not recorded by another defined kdive domain and not in
     ``exclude`` (ports already tried in this attempt's bounded start-failure advance).
+
+    Callers pass ``config.assignable_gdb_port_min`` for ``port_min`` (not ``gdb_port_min``):
+    the lowest configured port is reserved for the gdbstub_acl ACL probe and is never assigned
+    to a System (ADR-0184). This is a pure lowest-free-in-``[port_min, port_max]`` helper; the
+    reservation is policy applied at the call site.
 
     Raises:
         CategorizedError: ``PROVISIONING_FAILURE`` when the range is exhausted.
