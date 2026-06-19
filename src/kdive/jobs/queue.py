@@ -83,7 +83,7 @@ async def enqueue(
             await cur.execute(
                 "UPDATE jobs SET state = %s, attempt = 0, worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
-                "    failure_context = '{}'::jsonb, result_ref = NULL "
+                "    failure_context = '{}'::jsonb "
                 "WHERE dedup_key = %s AND state = %s",
                 (JobState.QUEUED.value, dedup_key, JobState.FAILED.value),
             )
