@@ -7,17 +7,22 @@ instance. The libvirt storage-pool / network / machine knobs stay operational en
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 import kdive.config as config
+from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
+    RemoteLibvirtConfig,
+    TlsCertRefs,
     is_remote_libvirt_configured,
     remote_config_from_inventory,
     resolve_base_image_staged_volume,
 )
+from kdive.providers.remote_libvirt.lifecycle.gdb import allocate_gdb_port
 
 _INSTANCE = """
 name = "ub24-big"
@@ -278,3 +283,38 @@ def test_acl_probe_port_and_assignable_floor(
     assert cfg.acl_probe_port == cfg.gdb_port_min == 47000
     assert cfg.assignable_gdb_port_min == cfg.gdb_port_min + 1 == 47001
     assert cfg.assignable_gdb_port_min <= cfg.gdb_port_max
+
+
+def test_probe_target_is_the_reserved_never_allocated_port() -> None:
+    # End-to-end invariant (ADR-0184): the port the gdbstub_acl probe actually connects to is
+    # exactly the reserved acl_probe_port, AND the System allocator (driven from the assignable
+    # floor) never hands that port out. Pins all three facts to one config so a later divergence
+    # — a changed range-string format, a probe that targeted a different port, or an allocator
+    # passed the wrong floor — fails here, not silently in production.
+    cfg = RemoteLibvirtConfig(
+        uri="qemu+tls://host.example/system",
+        cert_refs=TlsCertRefs("c", "k", "ca"),  # pragma: allowlist secret
+        concurrent_allocation_cap=1,
+        gdb_addr="10.0.0.5",
+        gdb_port_min=47000,
+        gdb_port_max=47099,
+    )
+    # The contribution formats the probe's range exactly this way (contribution.py).
+    port_range = f"{cfg.gdb_port_min}-{cfg.gdb_port_max}"
+
+    captured: dict[str, int] = {}
+
+    def fake_connector(host: str, port: int) -> None:
+        captured["port"] = port
+
+    probe = gdbstub_acl_probe(connector=fake_connector)
+    asyncio.run(probe(cfg.gdb_addr or "", port_range))
+
+    assert captured["port"] == cfg.acl_probe_port
+    allocated = allocate_gdb_port(
+        {},
+        own_name="kdive-x",
+        port_min=cfg.assignable_gdb_port_min,
+        port_max=cfg.gdb_port_max,
+    )
+    assert allocated != cfg.acl_probe_port
