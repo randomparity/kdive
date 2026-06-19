@@ -6,6 +6,10 @@ libvirt_stack_packages_debian:
   - libguestfs-tools
   - virtinst
   - gnutls-bin
+  # community.libvirt modules run on the target and import these; Ubuntu does not
+  # pull them in transitively the way Fedora's libvirt packages do.
+  - python3-libvirt
+  - python3-lxml
 libvirt_stack_packages_redhat:
   - libvirt
   - libvirt-client
@@ -13,6 +17,8 @@ libvirt_stack_packages_redhat:
   - libguestfs-tools-c
   - virt-install
   - gnutls-utils
+  - python3-libvirt
+  - python3-lxml
 
 # qemu emulator package by os_family + arch.
 libvirt_stack_qemu_package_map:

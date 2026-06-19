@@ -1,4 +1,14 @@
 ---
+# The daemon that owns the qemu+tls listener differs by distro: Fedora/RHEL use the
+# modular virtproxyd (virtproxyd.conf + virtproxyd-tls.socket); Ubuntu/Debian use the
+# monolithic libvirtd (libvirtd.conf + libvirtd-tls.socket), since the modular daemons
+# are not packaged there. The TLS settings themselves are identical.
+- name: Resolve the per-distro TLS daemon, socket, and config file
+  ansible.builtin.set_fact:
+    libvirt_tls_daemon: "{{ 'virtproxyd.service' if ansible_os_family == 'RedHat' else 'libvirtd.service' }}"
+    libvirt_tls_socket: "{{ 'virtproxyd-tls.socket' if ansible_os_family == 'RedHat' else 'libvirtd-tls.socket' }}"
+    libvirt_tls_conf_file: "{{ '/etc/libvirt/virtproxyd.conf' if ansible_os_family == 'RedHat' else '/etc/libvirt/libvirtd.conf' }}"
+
 - name: Create the PKI directories
   ansible.builtin.file:
     path: "{{ item.path }}"
@@ -15,28 +25,37 @@
     src: "{{ pki_artifacts_dir }}/cacert.pem"
     dest: "{{ libvirt_tls_pki_ca_dir }}/cacert.pem"
     mode: "0644"
-  notify: Restart virtproxyd
+  notify: Restart the TLS daemon
 
 - name: Install the server certificate
   ansible.builtin.copy:
     src: "{{ pki_artifacts_dir }}/{{ inventory_hostname }}/servercert.pem"
     dest: "{{ libvirt_tls_pki_libvirt_dir }}/servercert.pem"
     mode: "0644"
-  notify: Restart virtproxyd
+  notify: Restart the TLS daemon
 
 - name: Install the server private key
   ansible.builtin.copy:
     src: "{{ pki_artifacts_dir }}/{{ inventory_hostname }}/serverkey.pem"
     dest: "{{ libvirt_tls_pki_libvirt_dir }}/private/serverkey.pem"
     mode: "0600"
-  notify: Restart virtproxyd
+  notify: Restart the TLS daemon
 
-- name: Render /etc/libvirt/virtproxyd.conf
-  ansible.builtin.template:
-    src: virtproxyd.conf.j2
-    dest: /etc/libvirt/virtproxyd.conf
-    mode: "0600"
-  notify: Restart virtproxyd
+# Set the three listen settings in-place (preserving the rest of the shipped conf)
+# in whichever daemon's config file owns the listener on this distro.
+- name: Configure the TLS listener settings
+  ansible.builtin.lineinfile:
+    path: "{{ libvirt_tls_conf_file }}"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - regexp: '^#*\s*listen_tls\s*='
+      line: listen_tls = 1
+    - regexp: '^#*\s*listen_tcp\s*='
+      line: listen_tcp = 0
+    - regexp: '^#*\s*auth_tls\s*='
+      line: auth_tls = "none"
+  notify: Restart the TLS daemon
 
 - name: Disable the libvirt security driver (opt-in only)
   ansible.builtin.lineinfile:
@@ -44,34 +63,68 @@
     # Default keeps SELinux/AppArmor on; flip only when disable_security_driver is set,
     # and only after the narrow label fix (pool labeling / virt_use_* booleans) is tried.
     regexp: '^#*\s*security_driver\s*='
-    line: 'security_driver = "none"'
+    line: security_driver = "none"
   when: disable_security_driver | bool
-  notify: Restart virtproxyd
+  notify: Restart the TLS daemon
 
-- name: Enable and start virtproxyd-tls.socket
+- name: Ensure the TLS socket is enabled (persists across reboot)
   ansible.builtin.systemd_service:
-    name: virtproxyd-tls.socket
+    name: "{{ libvirt_tls_socket }}"
     enabled: true
-    state: started
     masked: false
-  notify: Restart virtproxyd
 
-- name: Apply pending restarts before the verification gate
+- name: Apply cert/config restarts before probing the listener
   ansible.builtin.meta: flush_handlers
 
-# --- verification gate: :16514 LISTEN owned by virtproxyd-tls.socket ---
+- name: Probe whether the TLS port is already listening
+  ansible.builtin.command: "ss -ltn sport = :{{ libvirt_tls_tls_port }}"
+  register: libvirt_tls_port_probe
+  changed_when: false
+
+# libvirt socket activation refuses to start a *-tls.socket while its daemon is
+# already running ("Socket service ... already active, refusing"). Stop the daemon,
+# start the socket so it binds :16514, then let the daemon socket-activate. Gated on
+# the LISTEN probe so an already-configured host is a no-op (idempotent second run).
+- name: Bind the TLS socket (only when the port is not already listening)
+  when: "'LISTEN' not in libvirt_tls_port_probe.stdout"
+  block:
+    - name: Stop the TLS daemon so the TLS socket can bind
+      ansible.builtin.systemd_service:
+        name: "{{ libvirt_tls_daemon }}"
+        state: stopped
+
+    - name: Start the TLS socket
+      ansible.builtin.systemd_service:
+        name: "{{ libvirt_tls_socket }}"
+        state: started
+
+    - name: Start the TLS daemon (now socket-activated with TLS)
+      ansible.builtin.systemd_service:
+        name: "{{ libvirt_tls_daemon }}"
+        state: started
+
+# --- verification gate: the TLS socket unit owns :16514. Check the SOCKET UNIT, not
+# --- the process: with socket activation, an idle daemon hands the socket back to
+# --- systemd (pid 1), so a process-name check is timing-dependent and unreliable. ---
+- name: Read the TLS socket unit state  # noqa: command-instead-of-module
+  # Reading a unit's active state (not mutating it); the systemd_service module sets
+  # state, it does not return a clean is-active value. `is-active` is a pure read.
+  ansible.builtin.command: "systemctl is-active {{ libvirt_tls_socket }}"
+  register: libvirt_tls_socket_state
+  changed_when: false
+  failed_when: false
+
 - name: Read the listener on the TLS port
-  ansible.builtin.command: "ss -ltnp sport = :{{ libvirt_tls_tls_port }}"
+  ansible.builtin.command: "ss -ltn sport = :{{ libvirt_tls_tls_port }}"
   register: libvirt_tls_tls_listener
   changed_when: false
 
-- name: Assert :16514 is LISTEN and owned by virtproxyd
+- name: Assert the TLS socket is active and the port is listening
   ansible.builtin.assert:
     that:
+      - libvirt_tls_socket_state.stdout == 'active'
       - "'LISTEN' in libvirt_tls_tls_listener.stdout"
-      - "'virtproxyd' in libvirt_tls_tls_listener.stdout"
-      - "'libvirtd' not in libvirt_tls_tls_listener.stdout"
     fail_msg: >-
-      :{{ libvirt_tls_tls_port }} is not owned by virtproxyd-tls.socket:
-      {{ libvirt_tls_tls_listener.stdout }}
-    success_msg: ":{{ libvirt_tls_tls_port }} LISTEN owned by virtproxyd-tls.socket."
+      {{ libvirt_tls_socket }} is not active / :{{ libvirt_tls_tls_port }} not listening
+      (socket={{ libvirt_tls_socket_state.stdout }}): {{ libvirt_tls_tls_listener.stdout }}
+    success_msg: "{{ libvirt_tls_socket }} active; :{{ libvirt_tls_tls_port }} LISTEN."

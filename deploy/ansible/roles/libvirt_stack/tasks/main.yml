@@ -16,29 +16,52 @@
     state: present
   when: ansible_os_family == 'RedHat'
 
-# switch-to-modular: required even on Ubuntu (boots monolithic by default
-# but ships the modular daemons in libvirt-daemon-system).
-- name: Stop the monolithic libvirt units (best effort; may be absent)
-  ansible.builtin.systemd_service:
-    name: "{{ item }}"
-    state: stopped
-  loop: "{{ libvirt_stack_monolithic_units }}"
-  failed_when: false
+# Daemon model is PER-DISTRO. Fedora/RHEL ship the modular daemons (virtqemud,
+# virtproxyd, ...) and we switch fully to them. Ubuntu/Debian do NOT package the
+# modular daemons — the libvirt-daemon-driver-* packages are connection-driver
+# plugins for the monolithic libvirtd, and there is no virtqemud/virtproxyd binary
+# or socket unit (verified on Ubuntu 26.04). So Debian stays monolithic, matching
+# the proven runbook. Masking libvirtd there would leave the host with no libvirt.
+- name: Switch to the modular libvirt daemons (Fedora/RHEL)
+  when: ansible_os_family == 'RedHat'
+  block:
+    - name: Stop the monolithic libvirt units (best effort; may be absent)
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop: "{{ libvirt_stack_monolithic_units }}"
+      failed_when: false
 
-- name: Disable and mask the monolithic libvirt units
-  ansible.builtin.systemd_service:
-    name: "{{ item }}"
-    enabled: false
-    masked: true
-  loop: "{{ libvirt_stack_monolithic_units }}"
+    - name: Disable and mask the monolithic libvirt units
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: false
+        masked: true
+      loop: "{{ libvirt_stack_monolithic_units }}"
 
-- name: Enable and start the modular libvirt sockets
-  ansible.builtin.systemd_service:
-    name: "{{ item }}"
-    enabled: true
-    state: started
-    masked: false
-  loop: "{{ libvirt_stack_modular_sockets }}"
+    - name: Enable and start the modular libvirt sockets
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        masked: false
+      loop: "{{ libvirt_stack_modular_sockets }}"
+
+- name: Use the monolithic libvirtd (Ubuntu/Debian — no modular daemons packaged)
+  when: ansible_os_family == 'Debian'
+  block:
+    - name: Ensure the monolithic libvirt units are not masked
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        masked: false
+      loop: "{{ libvirt_stack_monolithic_units }}"
+      failed_when: false
+
+    - name: Enable and start libvirtd via its socket
+      ansible.builtin.systemd_service:
+        name: libvirtd.socket
+        enabled: true
+        state: started
 
 - name: Add the login user to the kvm and libvirt groups
   ansible.builtin.user:

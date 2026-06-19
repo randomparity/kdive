@@ -1,5 +1,5 @@
 ---
-- name: Restart virtproxyd
+- name: Restart the TLS daemon
   ansible.builtin.systemd_service:
-    name: virtproxyd.service
+    name: "{{ libvirt_tls_daemon }}"
     state: restarted
