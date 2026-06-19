@@ -1,5 +1,8 @@
 # MCP Tool Coverage Campaign — Rerun 2026-06-14
 
+> **Superseded by [`mcp-coverage-campaign-2026-06-18.md`](mcp-coverage-campaign-2026-06-18.md)**
+> (current 112-tool surface). Kept for history.
+
 Rerun of the MCP tool coverage campaign per `docs/runbooks/mcp-coverage-campaign-rerun.md`.
 Drives every reachable MCP tool over the live transport across the three providers
 (`local-libvirt`, `remote-libvirt` @ ub24-big, `fault-inject`) on two deployments

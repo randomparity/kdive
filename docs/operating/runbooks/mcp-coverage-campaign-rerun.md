@@ -1,7 +1,7 @@
 # MCP Tool Coverage Campaign — Rerun Runbook
 
 Repeatable procedure to re-run the MCP tool coverage campaign
-(`docs/archive/reports/mcp-coverage-campaign-2026-06-13.md`). Drives every reachable MCP tool over the
+(latest: `docs/archive/reports/mcp-coverage-campaign-2026-06-18.md`). Drives every reachable MCP tool over the
 live transport across local-libvirt, remote-libvirt, and fault-inject, records per-cell
 verdicts, and renders the coverage grid. Companion setup reference:
 `docs/archive/reports/provider-configuration-requirements.md`.
