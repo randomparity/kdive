@@ -1002,6 +1002,7 @@ def test_fault_inject_resource_is_admitted_not_configuration_error(
                     spec=AdmissionRequestSpec(
                         resource_id=None,
                         kind=ResourceKind.FAULT_INJECT,
+                        pool=None,
                         shape="small",
                         vcpus=None,
                         memory_gb=None,
@@ -1076,6 +1077,7 @@ def test_remote_libvirt_resource_is_admitted_not_configuration_error(
                     spec=AdmissionRequestSpec(
                         resource_id=None,
                         kind=ResourceKind.REMOTE_LIBVIRT,
+                        pool=None,
                         shape="small",
                         vcpus=None,
                         memory_gb=None,
@@ -1420,6 +1422,7 @@ def test_two_fault_inject_instances_are_each_independently_allocatable(
                             spec=AdmissionRequestSpec(
                                 resource_id=cast(UUID, resource_id),
                                 kind=ResourceKind.FAULT_INJECT,
+                                pool=None,
                                 shape="small",
                                 vcpus=None,
                                 memory_gb=None,

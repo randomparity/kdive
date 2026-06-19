@@ -8,12 +8,12 @@ from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import AllocationState
-from kdive.domain.catalog.resources import Resource
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByKind
+from kdive.mcp.tool_payloads import AllocationRequestPayload, ResourceById, ResourceByPool
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools.lifecycle.allocations.common import allocation_next_actions
@@ -37,16 +37,21 @@ _DISCOVERY_NEXT_ACTIONS = ["resources.list", "shapes.list"]
 
 def _spec_from_payload(payload: AllocationRequestPayload) -> AdmissionRequestSpec | ToolResponse:
     resolved_id: UUID | None = None
-    kind = ResourceByKind().kind
-    if isinstance(payload.resource, ResourceById):
-        resolved_id = _as_uuid(payload.resource.resource_id)
+    kind: ResourceKind | None = None
+    pool: str | None = None
+    resource = payload.resource
+    if isinstance(resource, ResourceById):
+        resolved_id = _as_uuid(resource.resource_id)
         if resolved_id is None:
-            return _config_error(payload.resource.resource_id)
+            return _config_error(resource.resource_id)
+    elif isinstance(resource, ResourceByPool):
+        pool = resource.pool
     else:
-        kind = payload.resource.kind
+        kind = resource.kind
     return AdmissionRequestSpec(
         resource_id=resolved_id,
         kind=kind,
+        pool=pool,
         shape=payload.shape,
         vcpus=payload.vcpus,
         memory_gb=payload.memory_gb,
@@ -102,6 +107,10 @@ def _no_resource_response(result: RequestAdmissionResult) -> ToolResponse:
         else:
             available = "no resource kinds are registered"
         detail = f"no schedulable {result.object_id!r} resource is registered; {available}"
+    elif result.selector == "pool":
+        # Generic detail: a by-pool denial never enumerates pools (ADR-0186 — pool names are
+        # operator labels on affinity-scoped resources; a fleet list would leak across tenants).
+        detail = f"no schedulable resource in pool {result.object_id!r} is registered"
     else:
         detail = f"no schedulable resource {result.object_id!r} is registered"
     return ToolResponse.failure(
