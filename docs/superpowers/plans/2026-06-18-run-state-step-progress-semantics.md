@@ -18,6 +18,7 @@
 - Absolute imports only. Ruff line length 100. Lint set `E,F,I,UP,B,SIM`. `ty` strict, whole-tree.
 - Guardrail commands (run before each commit): `just lint`, `just type`, and the focused test for the file you touched (`uv run python -m pytest <path>::<test> -q`). Before the first push, run the full `just ci` and `just docs-check`.
 - Commit trailer required: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
+- **Prerequisite — observable TDD:** the new tests are db-backed (disposable Postgres via testcontainers). Ensure a Docker daemon is running and `export KDIVE_REQUIRE_DOCKER=1` for the session, so a missing backend hard-fails instead of skipping. Without this, each "verify it fails"/"verify it passes" step reports SKIP, not a real red/green signal — do not commit on skip-only results.
 
 ---
 
