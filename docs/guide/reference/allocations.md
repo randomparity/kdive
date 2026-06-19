@@ -64,13 +64,16 @@ Request capacity and create an allocation grant.
 - `window` (`any (nullable)`, optional)
 - `shape` (`string (nullable)`, optional) — Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb (supply exactly one sizing source).
 - `disk_gb` (`integer (nullable)`, optional)
-- `resource` (`object(mode=id) \| object(mode=kind)`, optional)
+- `resource` (`object(mode=id) \| object(mode=kind) \| object(mode=pool)`, optional)
   - _variant object(mode=id):_
     - `mode` (``=id``, required)
     - `resource_id` (`string`, required)
   - _variant object(mode=kind):_
     - `mode` (``=kind``, optional)
     - `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt``, optional) — The provider resource kinds.
+  - _variant object(mode=pool):_
+    - `mode` (``=pool``, optional)
+    - `pool` (`string`, required)
 - `pcie_devices` (`array<string>`, optional) — PCIe match specs ('vendor:device' or 'class=NN') to resolve + claim.
 - `on_capacity` (``deny`, `queue``, optional) — On a capacity denial (host cap / concurrency quota): 'deny' (default) returns the denial; 'queue' enqueues a durable 'requested' allocation holding a queue position (no budget/lease/occupancy). Budget and configuration denials always hard-deny.
 

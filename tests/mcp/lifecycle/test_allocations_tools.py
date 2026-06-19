@@ -1037,6 +1037,22 @@ def test_envelope_surfaces_recovery_context_on_granted() -> None:
     assert data["lease_expiry"] is None
 
 
+def test_envelope_surfaces_requested_pool() -> None:
+    alloc = Allocation(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        resource_id=None,
+        state=AllocationState.REQUESTED,
+        requested_pool="big-remote",
+    )
+    data = _envelope_for_allocation(alloc).data
+    assert data["requested_pool"] == "big-remote"
+    assert data["requested_kind"] is None
+
+
 def test_envelope_surfaces_selector_on_failed() -> None:
     alloc = Allocation(
         id=uuid4(),
