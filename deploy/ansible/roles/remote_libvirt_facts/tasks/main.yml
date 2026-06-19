@@ -1,0 +1,15 @@
+---
+- name: Ensure the controller artifacts dir exists
+  ansible.builtin.file:
+    path: "{{ pki_artifacts_dir }}"
+    state: directory
+    mode: "0750"
+  delegate_to: localhost
+  run_once: false
+
+- name: Render the systems.toml block for this host (controller-side)
+  ansible.builtin.template:
+    src: systems_toml_block.j2
+    dest: "{{ pki_artifacts_dir }}/{{ inventory_hostname }}-systems.toml"
+    mode: "0640"
+  delegate_to: localhost

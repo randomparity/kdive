@@ -82,6 +82,10 @@ jobs:
       - name: Lint shell scripts
         run: just lint-shell
 
+      - name: Lint Ansible
+        # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
+        run: just lint-ansible
+
       - name: Type check
         run: just type
 

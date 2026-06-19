@@ -1,0 +1,6 @@
+---
+- name: Emit remote-libvirt facts (controller-side)
+  hosts: remote_libvirt_hosts
+  gather_facts: true
+  roles:
+    - remote_libvirt_facts

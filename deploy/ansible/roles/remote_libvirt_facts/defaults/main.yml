@@ -1,0 +1,5 @@
+---
+# Secret-ref filenames the SecretRegistry resolves (never secret material).
+remote_libvirt_facts_ca_cert_ref: cacert.pem
+remote_libvirt_facts_client_cert_ref: clientcert.pem
+remote_libvirt_facts_client_key_ref: clientkey.pem  # pragma: allowlist secret - filename ref

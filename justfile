@@ -143,6 +143,13 @@ lint-shell:
     shfmt -f scripts deploy/remote-libvirt-guest-helpers | xargs shellcheck
     shfmt -i 2 -d scripts deploy/remote-libvirt-guest-helpers
 
+# Lint and syntax-check the Ansible automation (deploy/ansible).
+lint-ansible:
+    uv run --with 'ansible-lint==26.4.0' --with 'ansible-core>=2.17' \
+        yamllint -c deploy/ansible/.yamllint deploy/ansible
+    uv run --with 'ansible-lint==26.4.0' --with 'ansible-core>=2.17' \
+        ansible-lint -c deploy/ansible/.ansible-lint deploy/ansible
+
 # Lint and security-scan the GitHub Actions workflows.
 lint-workflows:
     uv run --with 'zizmor==1.25.2' zizmor .github/workflows
