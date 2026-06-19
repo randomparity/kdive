@@ -1,0 +1,3 @@
+---
+remote_host_fqdn: rock10-big.example
+gdb_addr: 192.168.10.22

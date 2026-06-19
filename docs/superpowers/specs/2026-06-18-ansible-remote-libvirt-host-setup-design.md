@@ -1,6 +1,6 @@
 # Design: Ansible roles for remote-libvirt host bring-up
 
-**Status:** Implemented + verified on real hardware (Ubuntu 26.04 + Fedora 44, 2026-06-19); x86_64 only, ppc64le unvalidated
+**Status:** Implemented + verified on real hardware (Ubuntu 26.04, Fedora 44, Rocky 10.2; 2026-06-19); x86_64 only, ppc64le unvalidated
 **Date:** 2026-06-18 (rev. 2026-06-19 — per-distro daemon model after live findings)
 **Worktree/branch:** `feat/ansible-remote-libvirt`
 **Ground truth:** `docs/operating/runbooks/remote-libvirt-host-setup.md` (steps 1–6)
@@ -248,15 +248,17 @@ host's pool/network names aligned with those values and document them in the emi
   named here as implementation obligations.
 - **Idempotence bar:** read-only/assert/command tasks set `changed_when:` honestly (above), so
   the second-run-0-changed measure reflects real drift, not command-task noise.
-- **Acceptance (real hosts) — DONE 2026-06-19** on `ub26-big.dev` (Ubuntu 26.04, monolithic)
-  and `fed44-big.dev` (Fedora 44, modular): `site.yml` applied, the **second run reported 0
-  changed** on both, `:16514` was served by the right socket unit, and a worker→host **mutual
-  TLS handshake succeeded** with the generated PKI. The gdbstub/TLS ACL was **enforced on both**
-  (off-CIDR connect to `:16514` refused, in-CIDR allowed) — firewalld on Fedora, ufw (enabled by
-  the role, SSH allowed first) on Ubuntu. Several runtime bugs that the lint/syntax gates could
-  not catch were found and fixed during these runs (removed `yaml` callback; KVM-assert quote;
-  the per-distro daemon model itself; the Ubuntu ufw ACL was left unenforced until a follow-up
-  `/challenge` — now enabled + asserted), plus the `python3-libvirt`/`python3-lxml` target deps.
+- **Acceptance (real hosts) — DONE 2026-06-19** on `ub26-big.dev` (Ubuntu 26.04, monolithic),
+  `fed44-big.dev` (Fedora 44, modular), and `rock10-big.dev` (Rocky 10.2, modular): `site.yml`
+  applied, the **second run reported 0 changed** on all three, `:16514` was served by the right
+  socket unit, and a worker→host **mutual TLS handshake succeeded** with the generated PKI. The
+  gdbstub/TLS ACL was **enforced on all** (off-CIDR connect to `:16514` refused, in-CIDR
+  allowed) — firewalld on Fedora/Rocky, ufw (enabled by the role, SSH allowed first) on Ubuntu.
+  Rocky 10.2 needed **no code changes** (the RedHat package set + modular/firewalld path applied
+  identically to Fedora). Several runtime bugs that the lint/syntax gates could not catch were
+  found and fixed during these runs (removed `yaml` callback; KVM-assert quote; the per-distro
+  daemon model itself; the Ubuntu ufw ACL was left unenforced until a follow-up `/challenge` —
+  now enabled + asserted), plus the `python3-libvirt`/`python3-lxml` target deps.
 - **Structural test:** a `tests/deploy/` test (mirroring `tests/deploy/test_systemd_units.py`)
   asserts the rendered `systems.toml` block carries the full `systems.toml.example` field set and
   validates the role-var surface.
