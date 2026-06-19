@@ -156,12 +156,12 @@ class _RemoteConsoleStream:
         self._stream = stream
         self._closer = closer
 
-    def recv(self, nbytes: int) -> bytes:
+    def recv(self, nbytes: int) -> bytes | None:
         got = self._stream.recv(nbytes)
         if got is None or got == -1:
             raise ConnectionError("console stream recv failed")
-        if got == -2:  # would-block on a non-blocking stream: no data this read
-            return b""
+        if got == -2:  # would-block on a non-blocking stream: no data this read (ADR-0182)
+            return None
         return got
 
     def close(self) -> None:

@@ -6,10 +6,14 @@ import asyncio
 from uuid import uuid4
 
 import psycopg
+import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.providers.remote_libvirt.console.wiring import RemoteConsolePartStore
+from kdive.providers.remote_libvirt.console.wiring import (
+    RemoteConsolePartStore,
+    _RemoteConsoleStream,
+)
 
 
 class FakeObjectStore:
@@ -97,3 +101,35 @@ def test_write_console_artifact_refreshes_etag_on_reassembly(migrated_url: str) 
         assert row is not None and row[0] == 1  # one row, etag refreshed not duplicated
 
     asyncio.run(_check())
+
+
+class _FakeLibvirtStream:
+    """A libvirt-stream double whose recv returns one scripted value (int sentinel or bytes)."""
+
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    def recv(self, nbytes: int) -> object:
+        return self._value
+
+
+def _wrapped(value: object) -> _RemoteConsoleStream:
+    stream = _FakeLibvirtStream(value)
+    return _RemoteConsoleStream(conn=object(), stream=stream, closer=lambda: None)
+
+
+def test_recv_maps_would_block_to_none() -> None:
+    # libvirt returns -2 for a would-block on a non-blocking stream; the wrapper must signal
+    # "no data this read" as None so the collector keeps the stream open (ADR-0182).
+    assert _wrapped(-2).recv(8192) is None
+
+
+def test_recv_returns_bytes_and_eof() -> None:
+    assert _wrapped(b"data").recv(8192) == b"data"
+    assert _wrapped(b"").recv(8192) == b""  # clean end-of-stream stays b""
+
+
+def test_recv_raises_on_error_sentinels() -> None:
+    for bad in (-1, None):
+        with pytest.raises(ConnectionError):
+            _wrapped(bad).recv(8192)
