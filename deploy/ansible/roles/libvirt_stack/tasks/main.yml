@@ -56,6 +56,8 @@
   ansible.builtin.assert:
     that:
       - libvirt_stack_virt_host_validate.stdout is search('hardware virtualization\s*:\s*PASS')
-      - libvirt_stack_virt_host_validate.stdout is search('/dev/kvm exists\s*:\s*PASS')
+      # virt-host-validate prints the device single-quoted: "device '/dev/kvm' exists".
+      # The `.?` tolerates that quote (and the unquoted form on older releases).
+      - libvirt_stack_virt_host_validate.stdout is search('/dev/kvm.? exists\s*:\s*PASS')
     fail_msg: "KVM not usable on {{ inventory_hostname }}:\n{{ libvirt_stack_virt_host_validate.stdout }}"
     success_msg: "KVM acceleration and /dev/kvm present."

@@ -41,8 +41,16 @@
         fail_msg: >-
           No default-drop rich rule for :{{ gdbstub_acl_tls_port }} or gdbstub range — port is world-open.
 
-# --- Ubuntu: ufw default-deny inbound is the drop; ordered allow-from rules open
-# --- only the worker CIDR. ---
+# --- Ubuntu: PORT-SPECIFIC allow-from-CIDR + deny rules (matching the iptables
+# --- runbook). ufw is first-match, so the allow-from rules are added before the
+# --- broad deny rules for the same ports. We do NOT set a global `default deny
+# --- incoming` — that would also block SSH (no SSH allow rule exists) and violate
+# --- the "leave SSH untouched" constraint. Only :16514 and the gdbstub range are
+# --- governed; every other port (incl. SSH/22) is left exactly as it was.
+# --- NOTE: ufw enforces these only when active; this role does not enable ufw
+# --- (enabling it changes the host's whole firewall posture and needs an explicit
+# --- SSH allow first). On a host where ufw is inactive the rules are staged but
+# --- inert — enable ufw deliberately, with an SSH allow, as a separate operator step.
 - name: Configure ufw ACL (Debian)
   when: ansible_os_family == 'Debian'
   block:
@@ -63,7 +71,16 @@
         # ufw wants the COLON form — use gdbstub_range, NOT the dash var.
         to_port: "{{ gdbstub_range }}"
 
-    - name: Set the default inbound policy to deny (the drop)
+    - name: Deny TLS from any other source (port-specific; SSH untouched)
       community.general.ufw:
-        default: deny
-        direction: incoming
+        rule: deny
+        direction: in
+        proto: tcp
+        to_port: "{{ gdbstub_acl_tls_port }}"
+
+    - name: Deny gdbstub range from any other source (port-specific; SSH untouched)
+      community.general.ufw:
+        rule: deny
+        direction: in
+        proto: tcp
+        to_port: "{{ gdbstub_range }}"
