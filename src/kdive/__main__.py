@@ -479,9 +479,15 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
     from kdive.process_health.server import build_postgres_ping
     from kdive.process_health.worker import build_worker_probe
     from kdive.providers.assembly.composition import ProviderComposition
+    from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
     from kdive.reconciler.loop import ReconcileConfig, Reconciler
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
     from kdive.store.objectstore import object_store_from_env
+
+    # Before any libvirt connection opens: libvirt services stream events only on connections
+    # opened after the event loop is registered, and remote console capture polls a non-blocking
+    # stream that the event loop must pump (ADR-0182).
+    ensure_libvirt_event_loop()
 
     stop = _install_stop()
 
