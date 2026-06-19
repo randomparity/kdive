@@ -80,6 +80,29 @@ def _agent_route_after(polls: int) -> tuple[Any, dict[str, int]]:
     return _agent, state
 
 
+def _agent_route_drops_then_ready(drops: int) -> tuple[Any, dict[str, int]]:
+    """Route probe whose agent raises code 86 for the first `drops` checks, then the route appears.
+
+    Models NetworkManager briefly dropping the build VM's virtio-serial agent channel while it
+    brings the interface up (#584): a ``VIR_ERR_AGENT_UNRESPONSIVE`` during the network gate is
+    transient and must be tolerated (keep polling), unlike a drop during the build itself.
+    """
+    state = {"checks": 0}
+
+    def _agent(domain: Any, command: str, timeout: int, flags: int) -> str:
+        msg = json.loads(command)
+        if msg["execute"] == "guest-ping":
+            return json.dumps({"return": {}})
+        if msg["execute"] == "guest-exec":
+            state["checks"] += 1
+            if state["checks"] <= drops:
+                raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+            return json.dumps({"return": {"pid": 1}})
+        return json.dumps({"return": {"exited": True, "exitcode": 0}})
+
+    return _agent, state
+
+
 _ROUTE_MARKER = "/proc/net/route"
 _LS_REMOTE_MARKER = "ls-remote"
 
@@ -304,6 +327,20 @@ def test_session_network_never_ready_raises_and_tears_down(tmp_path: Any) -> Non
     # Teardown still ran.
     assert DOMAIN_NAME not in conn.domains
     assert OVERLAY in conn.pools["default"].deleted
+
+
+def test_session_tolerates_transient_agent_drop_during_network_gate(tmp_path: Any) -> None:
+    """A code-86 agent drop while the network comes up is transient: keep polling, yield (#584)."""
+    conn = _conn_with_base()
+    agent, state = _agent_route_drops_then_ready(2)
+    vm = _build_vm_with_agent(conn, tmp_path, agent, network_timeout_s=30.0, network_poll_s=1.0)
+
+    with vm.session(_BASE_VOLUME, run_id=RUN_ID) as transport:
+        assert isinstance(transport, GuestExecBuildTransport)
+        assert conn.domains[DOMAIN_NAME].active
+        # Two drops were tolerated, then the route appeared on the third check.
+        assert state["checks"] == 3
+    assert DOMAIN_NAME not in conn.domains
 
 
 # --- egress preflight to the configured source (ADR-0155) ----------------------------
