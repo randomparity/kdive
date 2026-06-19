@@ -140,7 +140,7 @@ def system_required_cmdline(method: CaptureMethod, root_cmdline: str | None) -> 
     crashkernel reservation is last. Tokens are emitted in this fixed order, dropping ``None``.
     """
     tokens = [_REQUIRED_CONSOLE]
-    if root_cmdline is not None:
+    if root_cmdline:
         tokens.append(root_cmdline)
     if method is CaptureMethod.KDUMP:
         tokens.append(_KDUMP_CRASHKERNEL)

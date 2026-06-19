@@ -24,6 +24,12 @@ def test_remote_none_root_console_is_console_only() -> None:
     assert system_required_cmdline(CaptureMethod.CONSOLE, None) == "console=ttyS0"
 
 
+def test_empty_root_is_treated_as_no_root_not_a_stray_token() -> None:
+    # An empty root device means the platform injects none; it must not leave a stray empty token.
+    assert system_required_cmdline(CaptureMethod.CONSOLE, "") == "console=ttyS0"
+    assert system_required_cmdline(CaptureMethod.KDUMP, "") == "console=ttyS0 crashkernel=256M"
+
+
 def test_local_root_console_omits_crashkernel() -> None:
     assert (
         system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT) == "console=ttyS0 root=/dev/vda"
