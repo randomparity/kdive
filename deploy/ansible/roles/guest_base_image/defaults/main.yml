@@ -1,0 +1,12 @@
+---
+guest_base_image_build_workdir: "{{ ansible_env.HOME }}/kdive-image-build"
+guest_base_image_helpers:
+  - kdive-install-kernel
+  - kdive-capture-vmcore
+  - kdive-drgn
+# Cloud-image fallback: a downloadable Fedora cloud qcow2 for the host arch.
+# Set when base_image_source == 'cloud-image'; pin a real URL when executing.
+guest_base_image_cloud_image_url: >-
+  https://download.fedoraproject.org/pub/fedora/linux/releases/{{ base_image_version
+  }}/Cloud/{{ ansible_architecture }}/images/Fedora-Cloud-Base-{{ base_image_version
+  }}.qcow2

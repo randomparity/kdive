@@ -5,3 +5,4 @@
   gather_facts: true
   roles:
     - guest_image_prereqs
+    - guest_base_image
