@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -214,6 +215,60 @@ def test_jobs_list_filters_by_state(migrated_url: str) -> None:
         assert depth == {"queued": 1, "running": 1}  # depth still spans all states
 
     asyncio.run(_run())
+
+
+def test_jobs_list_renders_failed_job_with_category(migrated_url: str) -> None:
+    # A failed job carries an error_category; the per-job item must thread it so the
+    # category-iff-failure envelope invariant (ADR-0019) renders instead of raising (#582).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                failed = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-f"
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', error_category = 'build_failure' "
+                    "WHERE id = %s",
+                    (failed.id,),
+                )
+            resp = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR))
+        assert resp.status == "ok"
+        items = {item.object_id: item for item in resp.items}
+        item = items[str(failed.id)]
+        assert item.status == "failed"
+        assert item.error_category == "build_failure"
+        assert item.retryable is False  # derived from the category (ADR-0118)
+        assert item.data["state"] == "failed"
+
+    asyncio.run(_run())
+
+
+def test_jobs_list_degrades_failed_job_missing_category(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The schema permits a failed job with a null error_category; rendering must degrade
+    # to a categorized failure rather than crash the whole list, and log the malformed
+    # row so the silent normalization is observable (#582).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                failed = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-n"
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', error_category = NULL WHERE id = %s",
+                    (failed.id,),
+                )
+            resp = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR))
+        assert resp.status == "ok"  # the list renders despite the malformed row
+        item = {i.object_id: i for i in resp.items}[str(failed.id)]
+        assert item.status == "failed"
+        assert item.error_category == "infrastructure_failure"
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any(str(failed.id) in r.getMessage() for r in warnings)
+
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.tools.ops.queue"):
+        asyncio.run(_run())
 
 
 def test_jobs_list_rejects_unknown_state(migrated_url: str) -> None:
