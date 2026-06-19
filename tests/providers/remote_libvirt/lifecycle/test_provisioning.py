@@ -708,7 +708,10 @@ def _config(**overrides: Any) -> RemoteLibvirtConfig:
         "storage_pool": "default",
         "gdb_addr": "10.0.0.5",
         "gdb_port_min": 47000,
-        "gdb_port_max": 47002,
+        # 47000 is reserved for the ACL probe (ADR-0184), so the assignable range is
+        # [47001, 47003] — three ports, matching _START_ATTEMPTS so the bounded-attempt
+        # exhaustion test still exercises the attempt cap, not range exhaustion.
+        "gdb_port_max": 47003,
         **overrides,
     }
     return RemoteLibvirtConfig(**values)
@@ -767,7 +770,8 @@ def test_provision_defines_starts_and_waits_for_agent(tmp_path: Path) -> None:
     assert name == DOMAIN_NAME
     domain = conn.domains[DOMAIN_NAME]
     assert domain.active
-    assert recorded_gdb_port(domain.xml) == 47000
+    # 47000 is reserved for the ACL probe; the first System gets the assignable floor (ADR-0184).
+    assert recorded_gdb_port(domain.xml) == 47001
     overlay = overlay_volume_name(SYSTEM_ID)
     assert overlay in conn.pools["default"].volumes
     [volume_xml] = conn.pools["default"].created_xml
@@ -795,7 +799,7 @@ def test_provision_skips_ports_recorded_by_other_domains(tmp_path: Path) -> None
         pool="default",
         volume="other-overlay",
         gdb_addr="10.0.0.5",
-        gdb_port=47000,
+        gdb_port=47001,  # the assignable floor; the new System must skip past it
     )
     conn.defineXML(other)
     conn.defined_xml.clear()
@@ -803,7 +807,7 @@ def test_provision_skips_ports_recorded_by_other_domains(tmp_path: Path) -> None
 
     provisioner.provision(SYSTEM_ID, _remote_profile())
 
-    assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47001
+    assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47002
 
 
 def test_provision_retry_reuses_own_recorded_port(tmp_path: Path) -> None:
@@ -829,6 +833,28 @@ def test_provision_retry_reuses_own_recorded_port(tmp_path: Path) -> None:
     assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47001
 
 
+def test_provision_does_not_reuse_own_recorded_reserved_probe_port(tmp_path: Path) -> None:
+    # A pre-fix System recorded the now-reserved probe port (47000). The reuse-own-port fast-path
+    # must NOT re-hand it out: 47000 is below the assignable floor, so the System is moved to
+    # 47001 — guarding the probe port across the reuse path, not just on a fresh host (ADR-0184).
+    conn = _conn_with_base()
+    own = render_domain_xml(
+        SYSTEM_ID,
+        _remote_profile(),
+        pool="default",
+        volume=overlay_volume_name(SYSTEM_ID),
+        gdb_addr="10.0.0.5",
+        gdb_port=47000,
+    )
+    conn.defineXML(own)
+    conn.defined_xml.clear()
+    provisioner, _ = _provisioner(conn, tmp_path)
+
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+
+    assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47001
+
+
 def test_provision_start_failure_advances_to_next_port(tmp_path: Path) -> None:
     conn = _conn_with_base()
     conn.create_results = [libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR), None]
@@ -836,9 +862,9 @@ def test_provision_start_failure_advances_to_next_port(tmp_path: Path) -> None:
 
     provisioner.provision(SYSTEM_ID, _remote_profile())
 
-    assert recorded_gdb_port(conn.defined_xml[0]) == 47000
-    assert recorded_gdb_port(conn.defined_xml[1]) == 47001
-    assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47001
+    assert recorded_gdb_port(conn.defined_xml[0]) == 47001
+    assert recorded_gdb_port(conn.defined_xml[1]) == 47002
+    assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47002
 
 
 def test_provision_start_failures_exhaust_bounded_attempts(tmp_path: Path) -> None:
@@ -896,7 +922,7 @@ def test_provision_skips_domain_vanishing_during_enumeration(tmp_path: Path) -> 
         pool="default",
         volume="other-overlay",
         gdb_addr="10.0.0.5",
-        gdb_port=47000,
+        gdb_port=47001,  # an assignable port (47000 is the reserved ACL-probe port)
     )
     conn.defineXML(other)
     conn.domains[f"kdive-{UUID(int=2)}"].xml_error = libvirt_error(libvirt.VIR_ERR_NO_DOMAIN)
@@ -905,8 +931,9 @@ def test_provision_skips_domain_vanishing_during_enumeration(tmp_path: Path) -> 
 
     provisioner.provision(SYSTEM_ID, _remote_profile())
 
-    # The vanished domain's port is treated as free (it is being released).
-    assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47000
+    # The vanished domain's port is treated as free (it is being released), so the new System
+    # reuses the assignable floor rather than skipping past it.
+    assert recorded_gdb_port(conn.domains[DOMAIN_NAME].xml) == 47001
 
 
 def test_provision_without_remote_section_opens_no_connection(tmp_path: Path) -> None:

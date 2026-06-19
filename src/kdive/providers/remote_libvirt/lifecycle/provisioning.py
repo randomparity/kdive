@@ -266,7 +266,9 @@ class RemoteLibvirtProvisioning:
             port = allocate_gdb_port(
                 used,
                 own_name=domain_name,
-                port_min=config.gdb_port_min,
+                # Reserve gdb_port_min as the ACL-probe port; Systems start one above it so the
+                # gdbstub_acl diagnostic never attaches to a live guest (ADR-0184).
+                port_min=config.assignable_gdb_port_min,
                 port_max=config.gdb_port_max,
                 exclude=tried,
             )
