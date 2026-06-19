@@ -213,11 +213,15 @@ host's pool/network names aligned with those values and document them in the emi
   socket-activated daemon hands the socket back to `systemd`). The TLS socket is bound with a
   stop-daemon-first step gated on a LISTEN probe (socket activation refuses to start a
   `*-tls.socket` while its daemon runs), keeping the second run idempotent.
-- Firewall ACL: on **Fedora/RHEL** firewalld is active by default, so the rich-rules enforce
-  immediately (verified: off-CIDR refused, in-CIDR allowed). On **Ubuntu** the role stages the
-  ufw allow/deny rules but does **not** enable ufw — enabling it changes the host's whole
-  inbound posture and needs an explicit SSH allow first, so on a host with ufw inactive the
-  gdbstub ACL is staged-but-inert until the operator enables ufw deliberately.
+- Firewall ACL — **enforced on both distros** (the gdbstub tier is raw TCP with no TLS, so the
+  ACL is its only auth; leaving it unenforced = unauthenticated full-VM-memory access). Fedora/
+  RHEL: firewalld rich-rules (active by default). Ubuntu: the role allows the SSH/management
+  port first, adds the allow-from-CIDR + deny rules, then **enables ufw** (`gdbstub_acl_ufw_enable`,
+  default true — enabling ufw applies a global deny, acceptable on a dedicated host, and SSH is
+  allowed first so it cannot lock out). The role then **asserts ufw is active** and fails closed
+  rather than reporting success with open debug ports. (Verified both: off-CIDR refused, in-CIDR
+  allowed, IPv4 + IPv6.) Set the var false only when enforcing by other means — the assert still
+  guards against a silently-open host.
 - `virt-builder` guarded by volume-exists + checksum; pool/net via `community.libvirt`.
 - Secrets: CA + client private keys vaulted; artifacts dir gitignored; hosts only ever
   receive the public CA cert + their own server cert (no host→controller `fetch`).
@@ -243,11 +247,12 @@ host's pool/network names aligned with those values and document them in the emi
 - **Acceptance (real hosts) — DONE 2026-06-19** on `ub26-big.dev` (Ubuntu 26.04, monolithic)
   and `fed44-big.dev` (Fedora 44, modular): `site.yml` applied, the **second run reported 0
   changed** on both, `:16514` was served by the right socket unit, and a worker→host **mutual
-  TLS handshake succeeded** with the generated PKI. firewalld enforced the ACL on Fedora
-  (off-CIDR refused, in-CIDR allowed); the ufw ACL on Ubuntu is staged-but-inert (ufw not
-  enabled). Four runtime bugs that the lint/syntax gates could not catch were found and fixed
-  during this run (removed `yaml` callback; ufw global-deny → port-specific; KVM-assert quote;
-  the per-distro daemon model itself), plus the `python3-libvirt`/`python3-lxml` target deps.
+  TLS handshake succeeded** with the generated PKI. The gdbstub/TLS ACL was **enforced on both**
+  (off-CIDR connect to `:16514` refused, in-CIDR allowed) — firewalld on Fedora, ufw (enabled by
+  the role, SSH allowed first) on Ubuntu. Several runtime bugs that the lint/syntax gates could
+  not catch were found and fixed during these runs (removed `yaml` callback; KVM-assert quote;
+  the per-distro daemon model itself; the Ubuntu ufw ACL was left unenforced until a follow-up
+  `/challenge` — now enabled + asserted), plus the `python3-libvirt`/`python3-lxml` target deps.
 - **Structural test:** a `tests/deploy/` test (mirroring `tests/deploy/test_systemd_units.py`)
   asserts the rendered `systems.toml` block carries the full `systems.toml.example` field set and
   validates the role-var surface.

@@ -11,9 +11,12 @@ x86_64 or ppc64le). Design: `docs/superpowers/specs/2026-06-18-ansible-remote-li
   `virtproxyd-tls.socket`); Ubuntu/Debian keep the **monolithic** `libvirtd`
   (`libvirtd-tls.socket`) — Ubuntu does not package the modular daemons.
 - A `dir` storage pool + the `default` network.
-- A firewalld/ufw ACL restricting `:16514` and the gdbstub range to `worker_cidr`.
-  (firewalld enforces immediately on Fedora/RHEL; on Ubuntu the ufw rules are staged
-  but **not** enforced until you enable ufw deliberately, with an SSH allow.)
+- A firewalld/ufw ACL restricting `:16514` and the gdbstub range to `worker_cidr`,
+  **enforced** on both distros (the gdbstub tier is raw TCP — the ACL is its only auth).
+  Fedora/RHEL use firewalld; on Ubuntu the role allows SSH then enables ufw
+  (`gdbstub_acl_ufw_enable`, default true) and asserts it is active — failing closed
+  rather than leaving the debug ports open. Set the var false only if you enforce by
+  other means.
 - An operator-staged base image carrying the in-guest helpers (optional; `image.yml`).
 - A controller-side `systems.toml` `[[remote_libvirt]]`/`[[image]]` block per host.
 
@@ -59,10 +62,11 @@ in `host_vars/`.
 ## Verification
 
 - Idempotence: `ansible-playbook site.yml` twice → the second run reports **0 changed**.
-- The off-CIDR ACL refusal (the firewalld assertion is the in-play proxy): from a host
-  **outside** `worker_cidr`, a TCP connect to `:16514` must be refused/timed out, while
-  the worker connects. Then `just check-remote-libvirt <host>` and the runbook step-8
-  worker→host TLS connect confirm the path end-to-end.
+- Off-CIDR ACL refusal: from a host **outside** `worker_cidr`, a TCP connect to `:16514`
+  (and the gdbstub range) must be refused/timed out, while an in-CIDR worker connects.
+  The role asserts enforcement in-play (firewalld drop-rules present on Fedora; ufw active
+  on Ubuntu). Then `just check-remote-libvirt <host>` and the runbook step-8 worker→host
+  TLS connect confirm the path end-to-end. (Verified on both distros 2026-06-19.)
 - Only **one** host's `[[remote_libvirt]]` block may be loaded into a given
   `systems.toml` (the reconciler is singleton until multi-instance remote selection lands).
 
