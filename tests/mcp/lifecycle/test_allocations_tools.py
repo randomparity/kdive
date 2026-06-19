@@ -963,6 +963,52 @@ def test_wait_non_finite_timeout_is_configuration_error(
     asyncio.run(_run())
 
 
+def test_envelope_surfaces_recovery_context_on_granted() -> None:
+    res = uuid4()
+    alloc = Allocation(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        resource_id=res,
+        state=AllocationState.GRANTED,
+        requested_kind=ResourceKind.LOCAL_LIBVIRT,
+        requested_vcpus=4,
+        requested_memory_gb=8,
+        requested_disk_gb=40,
+        shape="small",
+    )
+    data = _envelope_for_allocation(alloc).data
+    assert data["resource_id"] == str(res)
+    assert data["requested_kind"] == ResourceKind.LOCAL_LIBVIRT.value
+    assert data["requested_vcpus"] == 4
+    assert data["requested_memory_gb"] == 8
+    assert data["requested_disk_gb"] == 40
+    assert data["shape"] == "small"
+    assert data["created_at"] == _DT.isoformat()
+    assert data["requested_pcie_specs"] == []
+    assert data["lease_expiry"] is None
+
+
+def test_envelope_surfaces_selector_on_failed() -> None:
+    alloc = Allocation(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        resource_id=None,
+        state=AllocationState.FAILED,
+        requested_kind=ResourceKind.LOCAL_LIBVIRT,
+        failure_category=ErrorCategory.ALLOCATION_DENIED,
+    )
+    resp = _envelope_for_allocation(alloc)
+    assert resp.status == "error"
+    assert resp.data["requested_kind"] == ResourceKind.LOCAL_LIBVIRT.value
+    assert resp.data["resource_id"] is None
+
+
 def test_shapes_set_after_stamping_does_not_resize_allocation(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

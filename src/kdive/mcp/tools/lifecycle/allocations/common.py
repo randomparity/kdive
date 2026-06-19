@@ -8,6 +8,7 @@ from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
 from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.tools.lifecycle._recovery import iso
 
 POLL_INTERVAL_S = 0.5
 MAX_WAIT_S = 300.0
@@ -45,18 +46,40 @@ async def queue_position(conn: AsyncConnection, alloc: Allocation) -> int:
     return ahead + 1
 
 
+def _allocation_recovery(alloc: Allocation) -> dict[str, JsonValue]:
+    """Selector, sizing, placement, and timing already on the Allocation row (#568)."""
+    return {
+        "requested_kind": alloc.requested_kind.value if alloc.requested_kind else None,
+        "requested_resource_id": (
+            str(alloc.requested_resource_id) if alloc.requested_resource_id else None
+        ),
+        "requested_pcie_specs": list(alloc.requested_pcie_specs),
+        "shape": alloc.shape,
+        "requested_vcpus": alloc.requested_vcpus,
+        "requested_memory_gb": alloc.requested_memory_gb,
+        "requested_disk_gb": alloc.requested_disk_gb,
+        "resource_id": str(alloc.resource_id) if alloc.resource_id else None,
+        "lease_expiry": iso(alloc.lease_expiry),
+        "active_started_at": iso(alloc.active_started_at),
+        "active_ended_at": iso(alloc.active_ended_at),
+        "created_at": iso(alloc.created_at),
+        "updated_at": iso(alloc.updated_at),
+    }
+
+
 def envelope_for_allocation(
     alloc: Allocation, *, queue_position: int | None = None
 ) -> ToolResponse:
     """Render an allocation as the public MCP response envelope."""
+    recovery = _allocation_recovery(alloc)
     if alloc.state is AllocationState.FAILED:
         category = alloc.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
         return ToolResponse.failure(
             str(alloc.id),
             category,
-            data={"current_status": alloc.state.value},
+            data={"current_status": alloc.state.value, **recovery},
         )
-    data: dict[str, JsonValue] = {"project": alloc.project}
+    data: dict[str, JsonValue] = {"project": alloc.project, **recovery}
     if alloc.state is AllocationState.REQUESTED and queue_position is not None:
         data["queue_position"] = queue_position
         data["queue_ahead"] = queue_position - 1
