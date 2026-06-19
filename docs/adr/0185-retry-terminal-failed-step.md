@@ -30,8 +30,7 @@ a terminally-failed row for that dedup key back to a fresh queued state:
 ```sql
 UPDATE jobs
    SET state = 'queued', attempt = 0, worker_id = NULL, lease_expires_at = NULL,
-       heartbeat_at = NULL, error_category = NULL, failure_context = '{}'::jsonb,
-       result_ref = NULL
+       heartbeat_at = NULL, error_category = NULL, failure_context = '{}'::jsonb
  WHERE dedup_key = %s AND state = 'failed'
 ```
 
