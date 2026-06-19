@@ -26,6 +26,8 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.infra.reaping import DumpVolume
 from kdive.providers.remote_libvirt.reaping.connections import (
+    find_over_fleet,
+    map_over_fleet,
     open_libvirt_reaper,
     remote_libvirt_reaper_connections,
 )
@@ -124,11 +126,12 @@ class RemoteLibvirtDumpVolumeReaper:
         await asyncio.to_thread(self._delete_blocking, name)
 
     def _list_blocking(self) -> list[DumpVolume]:  # pragma: no cover - live_vm
-        volumes: list[DumpVolume] = []
-        for config in self._connections.configs():
-            with self._connections.connection(config) as conn:
-                volumes.extend(self._list_host(conn, config.storage_pool))
-        return volumes
+        per_host = map_over_fleet(
+            self._connections,
+            lambda conn, config: self._list_host(conn, config.storage_pool),
+            operation="dump-volume list",
+        )
+        return [vol for host in per_host for vol in host]
 
     @staticmethod
     def _list_host(conn: _ReaperConn, storage_pool: str) -> list[DumpVolume]:  # pragma: no cover
@@ -151,12 +154,14 @@ class RemoteLibvirtDumpVolumeReaper:
 
     def _delete_blocking(self, name: str) -> None:  # pragma: no cover - live_vm
         # A dump-volume name encodes the owning System but not its host, so the reconciler calls
-        # delete-by-name with no host. Try each declared host: the volume lives on exactly one,
-        # and an already-gone (or not-on-this-host) volume is benign — never an error.
-        for config in self._connections.configs():
-            with self._connections.connection(config) as conn:
-                if self._delete_on_host(conn, config.storage_pool, name):
-                    return
+        # delete-by-name with no host. find_over_fleet tries each declared host (isolating an
+        # unreachable one) and stops at the one that has the volume; an already-gone or
+        # not-on-this-host volume is benign — never an error.
+        find_over_fleet(
+            self._connections,
+            lambda conn, config: self._delete_on_host(conn, config.storage_pool, name),
+            operation="dump-volume delete",
+        )
 
     @staticmethod
     def _delete_on_host(  # pragma: no cover - live_vm

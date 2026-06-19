@@ -28,6 +28,8 @@ from kdive.providers.remote_libvirt.lifecycle.build_vm import (
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import delete_volume
 from kdive.providers.remote_libvirt.reaping.connections import (
+    find_over_fleet,
+    map_over_fleet,
     open_libvirt_reaper,
     remote_libvirt_reaper_connections,
 )
@@ -101,28 +103,38 @@ class RemoteLibvirtBuildVmReaper:
         await asyncio.to_thread(self._delete_blocking, domain_name)
 
     def _list_blocking(self) -> list[BuildVm]:  # pragma: no cover - live_vm
+        per_host = map_over_fleet(
+            self._connections,
+            lambda conn, _config: self._list_host(conn),
+            operation="build-VM list",
+        )
+        return [vm for host in per_host for vm in host]
+
+    @staticmethod
+    def _list_host(conn: _ReaperConn) -> list[BuildVm]:  # pragma: no cover - live_vm
         vms: list[BuildVm] = []
-        for config in self._connections.configs():
-            with self._connections.connection(config) as conn:
-                for domain in conn.listAllDomains(0):
-                    name = domain.name()
-                    if not name.startswith(BUILD_DOMAIN_PREFIX):
-                        continue
-                    vms.append(BuildVm(domain_name=name, run_id=run_id_from_build_vm_name(name)))
+        for domain in conn.listAllDomains(0):
+            name = domain.name()
+            if not name.startswith(BUILD_DOMAIN_PREFIX):
+                continue
+            vms.append(BuildVm(domain_name=name, run_id=run_id_from_build_vm_name(name)))
         return vms
 
     def _delete_blocking(self, domain_name: str) -> None:  # pragma: no cover - live_vm
         # A build-domain name encodes the owning Run but not its host, so the reconciler calls
-        # delete-by-name with no host. Visit each declared host: destroy the domain where it lives
-        # and delete the overlay (absent-tolerant) — a leaked overlay can outlive its domain, so the
-        # overlay is swept on every host. Stop once the host that owned the domain is reached.
+        # delete-by-name with no host. find_over_fleet visits each declared host (isolating an
+        # unreachable one) and stops at the host that owns the domain; the overlay (absent-tolerant)
+        # is deleted on each host visited, since a leaked overlay can outlive its domain.
         run_id = run_id_from_build_vm_name(domain_name)
-        for config in self._connections.configs():
-            with self._connections.connection(config) as conn:
-                found = self._delete_on_host(conn, config.storage_pool, domain_name, run_id)
-            if found:
-                _log.info("reconciler: reaped leaked build VM %s", domain_name)
-                return
+        found = find_over_fleet(
+            self._connections,
+            lambda conn, config: self._delete_on_host(
+                conn, config.storage_pool, domain_name, run_id
+            ),
+            operation="build-VM delete",
+        )
+        if found:
+            _log.info("reconciler: reaped leaked build VM %s", domain_name)
 
     def _delete_on_host(  # pragma: no cover - live_vm
         self, conn: _ReaperConn, storage_pool: str, domain_name: str, run_id: UUID | None
