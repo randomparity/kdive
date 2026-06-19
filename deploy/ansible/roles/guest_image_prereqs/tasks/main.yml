@@ -1,0 +1,53 @@
+---
+- name: Libguestfs appliance fixes
+  when: ansible_os_family == 'Debian'
+  block:
+    - name: (a) The appliance must read the host kernel
+      ansible.builtin.file:
+        path: "/boot/vmlinuz-{{ ansible_kernel }}"
+        mode: "0644"
+
+    - name: (b1) Relax the global unprivileged-userns restriction for passt
+      ansible.posix.sysctl:
+        name: kernel.apparmor_restrict_unprivileged_userns
+        value: "0"
+        sysctl_file: /etc/sysctl.d/60-kdive-userns.conf
+        state: present
+        reload: true
+
+    - name: (b2) Disable the per-binary AppArmor profile for passt
+      ansible.builtin.file:
+        src: /etc/apparmor.d/usr.bin.passt
+        dest: /etc/apparmor.d/disable/usr.bin.passt
+        state: link
+        force: true
+      register: guest_image_prereqs_passt_profile
+
+    - name: (b2) Unload the passt AppArmor profile
+      ansible.builtin.command: apparmor_parser -R /etc/apparmor.d/usr.bin.passt
+      when: guest_image_prereqs_passt_profile is changed  # noqa: no-handler
+      # Sequential appliance fix within a block — not handler-appropriate; the
+      # unload must run immediately after the symlink lands, not at play end.
+      changed_when: guest_image_prereqs_passt_profile is changed
+      failed_when: false
+
+    - name: (c) Install a DHCP client for the appliance
+      ansible.builtin.apt:
+        name: isc-dhcp-client
+        state: present
+      register: guest_image_prereqs_dhcp_client
+
+    - name: (c) Drop the stale supermin cache so it rebuilds with dhclient
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      # image.yml runs become:true, so virt-builder/virt-customize execute as ROOT
+      # — the cache to invalidate is root's (uid 0 + /root), NOT the login user's.
+      # Clearing the login user's cache would leave root's dhclient-less cache live
+      # and the appliance would still fail to get an IP (the exact step-4 symptom).
+      loop:
+        - "/var/tmp/.guestfs-0"
+        - "/root/.cache/libguestfs"
+      when: guest_image_prereqs_dhcp_client is changed  # noqa: no-handler
+      # Sequential cache invalidation — must follow the apt task immediately, not
+      # deferred to a handler that runs after all tasks complete.

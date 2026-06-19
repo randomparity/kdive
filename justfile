@@ -147,7 +147,8 @@ lint-shell:
 lint-ansible:
     uv run --with 'ansible-lint==26.4.0' --with 'ansible-core==2.21.1' \
         yamllint -c deploy/ansible/.yamllint deploy/ansible
-    uv run --with 'ansible-lint==26.4.0' --with 'ansible-core==2.21.1' \
+    ANSIBLE_CONFIG=deploy/ansible/ansible.cfg \
+        uv run --with 'ansible-lint==26.4.0' --with 'ansible-core==2.21.1' \
         ansible-lint -c deploy/ansible/.ansible-lint deploy/ansible
 
 # Lint and security-scan the GitHub Actions workflows.
