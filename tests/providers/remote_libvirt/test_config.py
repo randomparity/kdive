@@ -235,7 +235,7 @@ object_key = "images/fedora.qcow2"
     assert "staged" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("bad", ["low:47099", "47000", "0:47099", "47099:47000"])
+@pytest.mark.parametrize("bad", ["low:47099", "47000", "0:47099", "47099:47000", "47000:47000"])
 def test_bad_gdbstub_range_is_configuration_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
@@ -244,3 +244,37 @@ def test_bad_gdbstub_range_is_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_from_inventory()
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_single_port_range_names_the_reserved_probe_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A one-port range leaves nothing assignable once the lowest port is reserved for the ACL
+    # probe; the error must say so actionably (ADR-0184).
+    instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', 'gdbstub_range = "47000:47000"')
+    _write_inventory(tmp_path, monkeypatch, instances=instance)
+    with pytest.raises(CategorizedError) as excinfo:
+        remote_config_from_inventory()
+    message = str(excinfo.value)
+    assert "at least 2 ports" in message
+    assert "reserved for the ACL probe" in message
+
+
+def test_two_port_range_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Boundary: exactly one reserved probe port + one assignable System port.
+    instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', 'gdbstub_range = "47000:47001"')
+    _write_inventory(tmp_path, monkeypatch, instances=instance)
+    cfg = remote_config_from_inventory()
+    assert (cfg.gdb_port_min, cfg.gdb_port_max) == (47000, 47001)
+
+
+def test_acl_probe_port_and_assignable_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The lowest port is the reserved ACL probe port; System allocation starts one above it
+    # (ADR-0184).
+    _write_inventory(tmp_path, monkeypatch)
+    cfg = remote_config_from_inventory()
+    assert cfg.acl_probe_port == cfg.gdb_port_min == 47000
+    assert cfg.assignable_gdb_port_min == cfg.gdb_port_min + 1 == 47001
+    assert cfg.assignable_gdb_port_min <= cfg.gdb_port_max

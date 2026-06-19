@@ -73,6 +73,20 @@ class RemoteLibvirtConfig:
     gdb_port_min: int = 47000
     gdb_port_max: int = 47099
 
+    @property
+    def acl_probe_port(self) -> int:
+        """The lowest gdbstub port, reserved for the ACL probe and never assigned to a System.
+
+        The ``gdbstub_acl`` diagnostic TCP-connects to this port (ADR-0184); reserving it keeps the
+        port listener-free so the probe never attaches to — and pauses — a live System's gdbstub.
+        """
+        return self.gdb_port_min
+
+    @property
+    def assignable_gdb_port_min(self) -> int:
+        """The lowest gdbstub port a System may be assigned (one above the reserved probe port)."""
+        return self.gdb_port_min + 1
+
 
 def _systems_toml_path() -> Path:
     return Path(config.get(SYSTEMS_TOML) or "./systems.toml")
@@ -188,7 +202,9 @@ def _parse_gdbstub_range(instance: RemoteLibvirtInstance) -> tuple[int, int]:
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the range is not ``min:max`` of integers,
-            a port is outside 1..65535, or the range is inverted.
+            a port is outside 1..65535, the range is inverted, or it spans fewer than two ports
+            (the lowest is reserved for the ACL probe per ADR-0184, so a one-port range leaves
+            nothing assignable to a System).
     """
     raw = instance.gdbstub_range
     parts = raw.split(":")
@@ -213,6 +229,12 @@ def _parse_gdbstub_range(instance: RemoteLibvirtInstance) -> tuple[int, int]:
     if low > high:
         raise CategorizedError(
             f"remote_libvirt[{instance.name}].gdbstub_range={raw!r} is inverted",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    if low == high:
+        raise CategorizedError(
+            f"remote_libvirt[{instance.name}].gdbstub_range={raw!r} must span at least 2 ports "
+            "(the lowest is reserved for the ACL probe; the rest are assignable to Systems)",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     return low, high
