@@ -2594,7 +2594,10 @@ def test_system_envelope_surfaces_placement_and_profile_summary() -> None:
     assert data["arch"] == "x86_64"
     assert data["boot_method"] == "direct-kernel"
     assert data["memory_mb"] == 8192
+    assert data["vcpu"] == 4
+    assert data["disk_gb"] == 40
     assert data["shape"] == "small"
     assert data["created_at"] == dt.isoformat()
+    assert data["updated_at"] == dt.isoformat()
     assert data["active_run"] == {"id": str(run_id), "state": "running"}
     assert "secret-tree" not in str(data)

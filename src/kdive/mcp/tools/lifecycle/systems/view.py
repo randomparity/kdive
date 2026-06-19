@@ -119,6 +119,8 @@ async def _active_run_for_system(
     conn: AsyncConnection, system_id: UUID
 ) -> dict[str, JsonValue] | None:
     """The most-recent non-terminal run holding the System, or ``None`` (#568)."""
+    # SUCCEEDED is intentionally excluded from terminal: per ADR-0179 it means the build
+    # succeeded and the run continues through install/boot while still holding the System.
     terminal = [RunState.FAILED.value, RunState.CANCELED.value]
     async with conn.cursor() as cur:
         await cur.execute(
