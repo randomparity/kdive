@@ -42,6 +42,12 @@ Token order for the required cmdline is fixed and deterministic: `console=ttyS0`
 capture parity), and `_PLATFORM_OWNED_CMDLINE_TOKENS` (`root=`/`console=`/`crashkernel=`) still rejects a
 user build cmdline that sets any of them, on every provider.
 
+`grubby --args` appends rather than de-duping (the #587 console proves this — the failed entry carried
+both `root=UUID=…` and `root=/dev/vda`). So injecting `console=ttyS0` on remote appends to the base
+default's `console=tty0 console=ttyS0,115200`, leaving multiple `console=` tokens — harmless, since the
+kernel accepts several `console=` directives (the last is the primary). Removing the platform `root=` for
+remote is what matters: the only remaining `root=` is the base default's correct `root=UUID=…`.
+
 ### Part 2 — XFS in the kdump fragment
 
 Add to both copies of the `kdump` build-config fragment:
@@ -79,8 +85,9 @@ CONFIG_XFS_POSIX_ACL=y
 
 - A dedicated always-applied remote-rootfs build-config fragment (revisit if non-kdump remote configs
   become common).
-- Regenerating the guest initramfs inside the install plane (`=y` makes it unnecessary for the root
-  driver).
+- Changing how the install plane regenerates the guest initramfs. The helper already runs
+  `dracut --force` on every install; `=y` is chosen because a built-in driver is guaranteed present
+  regardless of dracut's host-config module-selection heuristics, not because no initramfs is generated.
 - A new `configuration_error` that distinguishes emergency-mode from a slow boot (a separate observability
   improvement the issue lists as optional).
 

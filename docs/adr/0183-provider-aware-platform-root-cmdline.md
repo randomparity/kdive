@@ -64,17 +64,22 @@ platform must not inject one*. `system_required_cmdline` and `cmdline_for` take 
   agent-visible required cmdline matches what the provider actually injects.
 
 `console=ttyS0` is still injected everywhere (kdive's serial console capture parity, ADR-0095, depends
-on it; the remote base image already lists `console=ttyS0,115200`, so grubby de-dupes the key
-harmlessly). `crashkernel=256M` remains gated on `CaptureMethod.KDUMP`. The `_PLATFORM_OWNED_CMDLINE_TOKENS`
+on it). `grubby --args` appends rather than de-duping — the #587 console proves it (the failed entry
+carried both `root=UUID=…` and `root=/dev/vda`) — so the injected `console=ttyS0` lands alongside the
+base default's `console=tty0 console=ttyS0,115200`; multiple `console=` is harmless because the kernel
+accepts several console directives (last is primary). `crashkernel=256M` remains gated on
+`CaptureMethod.KDUMP`. The `_PLATFORM_OWNED_CMDLINE_TOKENS`
 admission set (`root=`/`console=`/`crashkernel=`, which rejects a user build cmdline that sets them) is
 **unchanged** — a user must never set `root=` on any provider; only what the *platform* injects becomes
 provider-aware.
 
 **2. Add `CONFIG_XFS_FS=y` and `CONFIG_XFS_POSIX_ACL=y` to the `kdump` build-config fragment** in both
 the file-authoritative `systems.toml` (`source='config'`, ADR-0122) and the packaged seed
-`src/kdive/build_configs/data/kdump.config`. `=y` (not `=m`) so the driver is built into the kernel and
-does not depend on a regenerated initramfs carrying the module. This is the fragment the #587 remote arc
-applies; it is where the remote root-fs driver requirement is satisfied today.
+`src/kdive/build_configs/data/kdump.config`. `=y` (not `=m`): the in-guest helper already regenerates the
+initramfs (`dracut --force`) on every install, but a built-in driver is guaranteed present regardless of
+dracut's host-config module-selection heuristics, so `=y` is the safer guarantee the XFS root mounts. This
+is the fragment the #587 remote arc applies; it is where the remote root-fs driver requirement is
+satisfied today.
 
 ## Consequences
 
