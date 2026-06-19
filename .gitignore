@@ -51,3 +51,5 @@ scorecard.png
 
 # Coverage-campaign run-local result artifacts (results.jsonl, grid.md, drivers, fetched certs)
 /artifacts/coverage-campaign/
+
+deploy/ansible/artifacts/

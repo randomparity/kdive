@@ -1,0 +1,86 @@
+---
+- name: Install virtualization packages (Debian)
+  ansible.builtin.apt:
+    name: >-
+      {{ libvirt_stack_packages_debian
+         + [libvirt_stack_qemu_package_map['Debian'][ansible_architecture]] }}
+    state: present
+    update_cache: true
+  when: ansible_os_family == 'Debian'
+
+- name: Install virtualization packages (RedHat)
+  ansible.builtin.dnf:
+    name: >-
+      {{ libvirt_stack_packages_redhat
+         + [libvirt_stack_qemu_package_map['RedHat'][ansible_architecture]] }}
+    state: present
+  when: ansible_os_family == 'RedHat'
+
+# Daemon model is PER-DISTRO. Fedora/RHEL ship the modular daemons (virtqemud,
+# virtproxyd, ...) and we switch fully to them. Ubuntu/Debian do NOT package the
+# modular daemons — the libvirt-daemon-driver-* packages are connection-driver
+# plugins for the monolithic libvirtd, and there is no virtqemud/virtproxyd binary
+# or socket unit (verified on Ubuntu 26.04). So Debian stays monolithic, matching
+# the proven runbook. Masking libvirtd there would leave the host with no libvirt.
+- name: Switch to the modular libvirt daemons (Fedora/RHEL)
+  when: ansible_os_family == 'RedHat'
+  block:
+    - name: Stop the monolithic libvirt units (best effort; may be absent)
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop: "{{ libvirt_stack_monolithic_units }}"
+      failed_when: false
+
+    - name: Disable and mask the monolithic libvirt units
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: false
+        masked: true
+      loop: "{{ libvirt_stack_monolithic_units }}"
+
+    - name: Enable and start the modular libvirt sockets
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        masked: false
+      loop: "{{ libvirt_stack_modular_sockets }}"
+
+- name: Use the monolithic libvirtd (Ubuntu/Debian — no modular daemons packaged)
+  when: ansible_os_family == 'Debian'
+  block:
+    - name: Ensure the monolithic libvirt units are not masked
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        masked: false
+      loop: "{{ libvirt_stack_monolithic_units }}"
+      failed_when: false
+
+    - name: Enable and start libvirtd via its socket
+      ansible.builtin.systemd_service:
+        name: libvirtd.socket
+        enabled: true
+        state: started
+
+- name: Add the login user to the kvm and libvirt groups
+  ansible.builtin.user:
+    name: "{{ ansible_user_id }}"
+    groups: [kvm, libvirt]
+    append: true
+
+- name: Run virt-host-validate (read-only)
+  ansible.builtin.command: virt-host-validate qemu
+  register: libvirt_stack_virt_host_validate
+  changed_when: false
+  failed_when: false
+
+- name: Assert hardware virtualization and /dev/kvm pass
+  ansible.builtin.assert:
+    that:
+      - libvirt_stack_virt_host_validate.stdout is search('hardware virtualization\s*:\s*PASS')
+      # virt-host-validate prints the device single-quoted: "device '/dev/kvm' exists".
+      # The `.?` tolerates that quote (and the unquoted form on older releases).
+      - libvirt_stack_virt_host_validate.stdout is search('/dev/kvm.? exists\s*:\s*PASS')
+    fail_msg: "KVM not usable on {{ inventory_hostname }}:\n{{ libvirt_stack_virt_host_validate.stdout }}"
+    success_msg: "KVM acceleration and /dev/kvm present."

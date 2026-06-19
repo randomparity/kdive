@@ -1,0 +1,5 @@
+---
+- name: Restart the TLS daemon
+  ansible.builtin.systemd_service:
+    name: "{{ libvirt_tls_daemon }}"
+    state: restarted

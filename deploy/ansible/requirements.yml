@@ -1,0 +1,10 @@
+---
+collections:
+  - name: community.crypto
+    version: "==3.2.2"
+  - name: community.general
+    version: "==13.1.0"
+  - name: ansible.posix
+    version: "==2.2.0"
+  - name: community.libvirt
+    version: "==2.2.0"

@@ -46,3 +46,10 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: lint-ansible
+        name: lint-ansible
+        # Delegates to the justfile recipe so there is one definition shared with CI.
+        entry: just lint-ansible
+        language: system
+        files: ^deploy/ansible/
+        pass_filenames: false

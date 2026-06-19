@@ -1,0 +1,134 @@
+---
+# --- Fedora / RHEL: firewalld rich rules with explicit source address. A plain
+# --- port-open would open the port to the whole zone; rich rules restrict the source. ---
+- name: Configure firewalld rich-rule ACL (RedHat)
+  when: ansible_os_family == 'RedHat'
+  block:
+    - name: Accept TLS + gdbstub from the worker CIDR
+      ansible.posix.firewalld:
+        rich_rule: >-
+          rule family="ipv4" source address="{{ worker_cidr }}"
+          port port="{{ item }}" protocol="tcp" accept
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - "{{ gdbstub_acl_tls_port }}"
+        - "{{ gdbstub_acl_gdbstub_port_range_dash }}"
+
+    - name: Drop TLS + gdbstub from any other source (lower priority)
+      ansible.posix.firewalld:
+        rich_rule: >-
+          rule priority="100" family="ipv4"
+          port port="{{ item }}" protocol="tcp" drop
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - "{{ gdbstub_acl_tls_port }}"
+        - "{{ gdbstub_acl_gdbstub_port_range_dash }}"
+
+    - name: Read back the rich rules (read-only)
+      ansible.builtin.command: firewall-cmd --list-rich-rules
+      register: gdbstub_acl_firewalld_rules
+      changed_when: false
+
+    - name: Assert the default-drop rules are present (off-CIDR refused)
+      ansible.builtin.assert:
+        that:
+          - gdbstub_acl_firewalld_rules.stdout is search('port="' ~ gdbstub_acl_tls_port ~ '"\s+protocol="tcp"\s+drop')
+          - gdbstub_acl_firewalld_rules.stdout is search('port="' ~ gdbstub_acl_gdbstub_port_range_dash ~ '"\s+protocol="tcp"\s+drop')
+        fail_msg: >-
+          No default-drop rich rule for :{{ gdbstub_acl_tls_port }} or gdbstub range — port is world-open.
+
+# --- Ubuntu/Debian: ufw. The gdbstub tier is raw-TCP with NO TLS, so this ACL is the
+# --- ONLY auth for those ports — leaving it unenforced means unauthenticated full-VM
+# --- memory access. ufw enforces only when ACTIVE, and activating ufw applies a global
+# --- "deny incoming", so we MUST allow the SSH/management port first (or enabling ufw
+# --- locks the host out), then add the port-specific allow-from-CIDR + deny rules, then
+# --- enable ufw. The role asserts ufw ends up active — it fails closed rather than
+# --- reporting success with the debug ports world-open. Set gdbstub_acl_ufw_enable=false
+# --- only if you enforce these ports by other means (the assert still guards you).
+- name: Configure ufw ACL (Debian)
+  when: ansible_os_family == 'Debian'
+  block:
+    - name: Allow the SSH/management port (so enabling ufw cannot lock the host out)
+      community.general.ufw:
+        rule: allow
+        direction: in
+        proto: tcp
+        to_port: "{{ ansible_port | default(22) }}"
+
+    - name: Allow TLS from the worker CIDR
+      community.general.ufw:
+        rule: allow
+        direction: in
+        proto: tcp
+        from_ip: "{{ worker_cidr }}"
+        to_port: "{{ gdbstub_acl_tls_port }}"
+
+    - name: Allow gdbstub range from the worker CIDR
+      community.general.ufw:
+        rule: allow
+        direction: in
+        proto: tcp
+        from_ip: "{{ worker_cidr }}"
+        # ufw wants the COLON form — use gdbstub_range, NOT the dash var.
+        to_port: "{{ gdbstub_range }}"
+
+    - name: Deny TLS from any other source
+      community.general.ufw:
+        rule: deny
+        direction: in
+        proto: tcp
+        to_port: "{{ gdbstub_acl_tls_port }}"
+
+    - name: Deny gdbstub range from any other source
+      community.general.ufw:
+        rule: deny
+        direction: in
+        proto: tcp
+        to_port: "{{ gdbstub_range }}"
+
+    # ufw enabling sets DEFAULT_FORWARD_POLICY=DROP, which would block libvirt's guest
+    # NAT forwarding — and the remote-libvirt install/kdump-capture planes need the guest
+    # to egress to the object store. FORWARD is routed-through traffic, independent of the
+    # INPUT-chain gdbstub/TLS ACL, so allowing it does NOT weaken this role's protection;
+    # it just preserves the forwarding behavior that existed before ufw was enabled.
+    - name: Allow forwarded traffic so enabling ufw does not break libvirt guest egress
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: DEFAULT_FORWARD_POLICY="ACCEPT"
+      register: gdbstub_acl_ufw_forward_policy
+      when: gdbstub_acl_ufw_enable | bool
+
+    - name: Enable ufw so the ACL is enforced (SSH already allowed above)
+      community.general.ufw:
+        state: enabled
+      when: gdbstub_acl_ufw_enable | bool
+
+    - name: Reload ufw if the forward policy changed under an active ufw  # noqa: command-instead-of-module
+      # state:enabled does not reload an already-active ufw, so a forward-policy edit on a
+      # re-run needs an explicit reload; on the first run `enable` already read the new file.
+      ansible.builtin.command: ufw reload
+      when:
+        - gdbstub_acl_ufw_enable | bool
+        - gdbstub_acl_ufw_forward_policy.changed
+      changed_when: true
+
+    - name: Read ufw status  # noqa: command-instead-of-module
+      # Reading enforcement state; the ufw module sets rules, it has no is-active read.
+      ansible.builtin.command: ufw status
+      register: gdbstub_acl_ufw_status
+      changed_when: false
+
+    - name: Assert ufw is active so the gdbstub/TLS ACL is actually enforced
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in gdbstub_acl_ufw_status.stdout"
+        fail_msg: >-
+          ufw is INACTIVE — the gdbstub/TLS ACL is not enforced and the raw-TCP debug
+          ports are world-open. Set gdbstub_acl_ufw_enable=true (default) or enable ufw
+          (with an SSH allow) by other means before registering this host.
+        success_msg: "ufw active; gdbstub/TLS ACL enforced."

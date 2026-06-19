@@ -1,0 +1,167 @@
+---
+- name: Generate the fleet CA and per-host certs (controller-side)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    pki_artifacts_dir: "{{ playbook_dir }}/../artifacts"
+    # Declared here (not relied on from group_vars/all) so it resolves on the
+    # implicit localhost; `-e pki_mode=byo` still overrides (extra-vars win).
+    pki_mode: generate
+  tasks:
+    - name: Ensure the artifacts directory exists
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - "{{ pki_artifacts_dir }}"
+        - "{{ pki_artifacts_dir }}/client"
+
+    - name: Ensure per-host PKI subdirectories exist
+      ansible.builtin.file:
+        path: "{{ pki_artifacts_dir }}/{{ item }}"
+        state: directory
+        mode: "0750"
+      loop: "{{ groups['remote_libvirt_hosts'] }}"
+
+    # --- byo: install operator-supplied PEMs and skip generation ---
+    - name: BYO mode — verify operator PEMs are present
+      ansible.builtin.stat:
+        path: "{{ pki_artifacts_dir }}/cacert.pem"
+      register: byo_ca
+      when: pki_mode == 'byo'
+
+    - name: BYO mode — fail if the CA is missing
+      ansible.builtin.assert:
+        that:
+          - byo_ca.stat.exists
+        fail_msg: "pki_mode=byo but {{ pki_artifacts_dir }}/cacert.pem is absent."
+      when: pki_mode == 'byo'
+
+    # --- generate mode (default) ---
+    - name: Generate the CA private key
+      community.crypto.openssl_privatekey:
+        path: "{{ pki_artifacts_dir }}/cakey.pem"
+        mode: "0600"
+      when: pki_mode == 'generate'
+
+    - name: Generate the CA CSR
+      community.crypto.openssl_csr:
+        path: "{{ pki_artifacts_dir }}/ca.csr"
+        privatekey_path: "{{ pki_artifacts_dir }}/cakey.pem"
+        common_name: kdive remote-libvirt CA
+        basic_constraints:
+          - "CA:TRUE"
+        basic_constraints_critical: true
+        key_usage:
+          - "keyCertSign"
+          - "cRLSign"
+        key_usage_critical: true
+      when: pki_mode == 'generate'
+
+    - name: Self-sign the CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ pki_artifacts_dir }}/cacert.pem"
+        privatekey_path: "{{ pki_artifacts_dir }}/cakey.pem"
+        csr_path: "{{ pki_artifacts_dir }}/ca.csr"
+        provider: selfsigned
+        mode: "0644"
+      when: pki_mode == 'generate'
+
+    - name: Assert per-host gdb_addr and remote_host_fqdn are set
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].gdb_addr | default('', true) | length > 0
+          - hostvars[item].remote_host_fqdn | default('', true) | length > 0
+        fail_msg: >-
+          Host '{{ item }}' is missing required host_vars.
+          Set gdb_addr and remote_host_fqdn in inventory/host_vars/{{ item }}.yml.
+      loop: "{{ groups['remote_libvirt_hosts'] }}"
+      when: pki_mode == 'generate'
+
+    - name: Generate per-host server keys
+      community.crypto.openssl_privatekey:
+        path: "{{ pki_artifacts_dir }}/{{ item }}/serverkey.pem"
+        mode: "0600"
+      loop: "{{ groups['remote_libvirt_hosts'] }}"
+      when: pki_mode == 'generate'
+
+    - name: Generate per-host server CSRs (SAN = FQDN + IP)
+      community.crypto.openssl_csr:
+        path: "{{ pki_artifacts_dir }}/{{ item }}/server.csr"
+        privatekey_path: "{{ pki_artifacts_dir }}/{{ item }}/serverkey.pem"
+        common_name: "{{ hostvars[item].remote_host_fqdn }}"
+        subject_alt_name:
+          - "DNS:{{ hostvars[item].remote_host_fqdn }}"
+          - "IP:{{ hostvars[item].gdb_addr }}"
+        extended_key_usage:
+          - "serverAuth"
+      loop: "{{ groups['remote_libvirt_hosts'] }}"
+      when: pki_mode == 'generate'
+
+    - name: Sign per-host server certs with the CA
+      community.crypto.x509_certificate:
+        path: "{{ pki_artifacts_dir }}/{{ item }}/servercert.pem"
+        csr_path: "{{ pki_artifacts_dir }}/{{ item }}/server.csr"
+        provider: ownca
+        ownca_path: "{{ pki_artifacts_dir }}/cacert.pem"
+        ownca_privatekey_path: "{{ pki_artifacts_dir }}/cakey.pem"
+        mode: "0644"
+      loop: "{{ groups['remote_libvirt_hosts'] }}"
+      when: pki_mode == 'generate'
+
+    # --- the worker client bundle: born controller-side, never fetched ---
+    - name: Generate the worker client key
+      community.crypto.openssl_privatekey:
+        path: "{{ pki_artifacts_dir }}/client/clientkey.pem"
+        mode: "0600"
+      when: pki_mode == 'generate'
+
+    - name: Generate the worker client CSR
+      community.crypto.openssl_csr:
+        path: "{{ pki_artifacts_dir }}/client/client.csr"
+        privatekey_path: "{{ pki_artifacts_dir }}/client/clientkey.pem"
+        common_name: kdive-worker
+        extended_key_usage:
+          - "clientAuth"
+      when: pki_mode == 'generate'
+
+    - name: Sign the worker client cert with the CA
+      community.crypto.x509_certificate:
+        path: "{{ pki_artifacts_dir }}/client/clientcert.pem"
+        csr_path: "{{ pki_artifacts_dir }}/client/client.csr"
+        provider: ownca
+        ownca_path: "{{ pki_artifacts_dir }}/cacert.pem"
+        ownca_privatekey_path: "{{ pki_artifacts_dir }}/cakey.pem"
+        mode: "0644"
+      when: pki_mode == 'generate'
+
+    - name: Copy the CA cert into the client bundle dir
+      ansible.builtin.copy:
+        src: "{{ pki_artifacts_dir }}/cacert.pem"
+        dest: "{{ pki_artifacts_dir }}/client/cacert.pem"
+        mode: "0644"
+      when: pki_mode == 'generate'
+
+    # --- Optional encryption-at-rest for the private keys. Off by default so the
+    # --- bring-up flow can read them; flip vault_keys_at_rest=true (and supply a
+    # --- vault password) to satisfy the "vaulted" posture. Without this, the keys
+    # --- are plaintext-but-gitignored and at-rest encryption is the operator's job.
+    - name: Encrypt the private keys at rest (opt-in)  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        argv:
+          - ansible-vault
+          - encrypt
+          - "{{ pki_artifacts_dir }}/cakey.pem"
+          - "{{ pki_artifacts_dir }}/client/clientkey.pem"
+      register: vault_encrypt
+      changed_when: >-
+        'Encryption successful' in vault_encrypt.stdout or
+        'Encryption successful' in vault_encrypt.stderr
+      failed_when:
+        - vault_encrypt.rc != 0
+        - "'is already encrypted' not in vault_encrypt.stderr"
+      when:
+        - pki_mode == 'generate'
+        - vault_keys_at_rest | default(false) | bool

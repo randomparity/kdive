@@ -1,0 +1,34 @@
+---
+- name: Install the virtualization stack (switch-to-modular)
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - libvirt_stack
+
+- name: Configure mutual-TLS listener
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - libvirt_tls
+
+- name: Define the storage pool and network
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - libvirt_pool_net
+
+- name: Apply the gdbstub-port ACL
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - gdbstub_acl
+
+- name: Emit remote-libvirt facts (controller-side)
+  hosts: remote_libvirt_hosts
+  gather_facts: true
+  roles:
+    - remote_libvirt_facts

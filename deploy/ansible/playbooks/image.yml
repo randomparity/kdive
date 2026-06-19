@@ -1,0 +1,8 @@
+---
+- name: Build the operator-staged base image (slow; opt-in)
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - guest_image_prereqs
+    - guest_base_image

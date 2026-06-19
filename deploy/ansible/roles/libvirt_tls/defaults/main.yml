@@ -1,0 +1,4 @@
+---
+libvirt_tls_tls_port: 16514
+libvirt_tls_pki_ca_dir: /etc/pki/CA
+libvirt_tls_pki_libvirt_dir: /etc/pki/libvirt

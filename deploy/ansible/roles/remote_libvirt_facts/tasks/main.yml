@@ -1,0 +1,23 @@
+---
+- name: Assert gdb_addr is set for this host
+  ansible.builtin.assert:
+    that:
+      - gdb_addr | default('', true) | length > 0
+    fail_msg: >-
+      Host '{{ inventory_hostname }}' is missing gdb_addr.
+      Set it in inventory/host_vars/{{ inventory_hostname }}.yml.
+
+- name: Ensure the controller artifacts dir exists
+  ansible.builtin.file:
+    path: "{{ pki_artifacts_dir }}"
+    state: directory
+    mode: "0750"
+  delegate_to: localhost
+  run_once: false
+
+- name: Render the systems.toml block for this host (controller-side)
+  ansible.builtin.template:
+    src: systems_toml_block.j2
+    dest: "{{ pki_artifacts_dir }}/{{ inventory_hostname }}-systems.toml"
+    mode: "0640"
+  delegate_to: localhost

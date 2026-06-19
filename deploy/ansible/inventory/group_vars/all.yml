@@ -1,0 +1,48 @@
+---
+# --- storage / network (KDIVE_REMOTE_LIBVIRT_{STORAGE_POOL,NETWORK} aligned) ---
+storage_pool_target: /var/lib/libvirt/images
+libvirt_network: default
+
+# --- gdbstub ACL ---
+worker_cidr: "192.168.16.0/24"
+gdbstub_range: "47000:47099"
+gdb_addr: ""  # REQUIRED per host; provisioning fails closed without it (set in host_vars)
+
+# --- base image ---
+base_image_distro: fedora
+base_image_version: "43"
+base_image_name: "fedora-kdive-remote-base-{{ base_image_version }}"
+base_image_source: virt-builder  # virt-builder | cloud-image
+helper_src: "{{ playbook_dir }}/../remote-libvirt-guest-helpers"
+build_packages:
+  - qemu-guest-agent
+  - drgn
+  - kexec-tools
+  - makedumpfile
+  - kdump-utils
+  - curl
+  - tar
+  - openssl
+  - python3
+include_kernel_debuginfo: false
+crashkernel_value: "256M"  # applied only when include_kernel_debuginfo | bool
+force_image_rebuild: false
+
+# --- billable ceiling (required by the [[remote_libvirt]] schema) ---
+vcpus: 16
+memory_mb: 65536
+concurrent_allocation_cap: 1
+shapes: ["small", "medium", "large", "max"]
+cost_class: remote
+
+# --- security driver (opt-in; default keeps SELinux/AppArmor on) ---
+disable_security_driver: false
+
+# --- PKI ---
+pki_mode: generate  # generate | byo
+pki_artifacts_dir: "{{ playbook_dir }}/artifacts"
+
+# --- machine type by arch (env knob KDIVE_REMOTE_LIBVIRT_MACHINE) ---
+machine_type:
+  x86_64: pc
+  ppc64le: pseries
