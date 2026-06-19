@@ -1,7 +1,7 @@
 # Design: Ansible roles for remote-libvirt host bring-up
 
-**Status:** Approved (brainstorm) — pending implementation plan
-**Date:** 2026-06-18
+**Status:** Implemented + verified on real hardware (Ubuntu 26.04 + Fedora 44, 2026-06-19); x86_64 only, ppc64le unvalidated
+**Date:** 2026-06-18 (rev. 2026-06-19 — per-distro daemon model after live findings)
 **Worktree/branch:** `feat/ansible-remote-libvirt`
 **Ground truth:** `docs/operating/runbooks/remote-libvirt-host-setup.md` (steps 1–6)
 
@@ -37,7 +37,7 @@ onboarding/quota/budget, and ephemeral build-host (`runs.build`) registration.
 | Axis | Decision | Rationale |
 |---|---|---|
 | Boundary | Host config **+** base image (steps 1–6); emit `systems.toml` block | Produces a host ready for the provision/`host_dump` path without coupling to a live cluster. Live-drgn and kdump additionally need `include_kernel_debuginfo`/crashkernel set (default off) — see `guest_base_image` |
-| Daemon model | **Modular only** via an explicit *switch-to-modular* (`virtqemud`/`virtnetworkd`/`virtstoraged`/`virtnodedevd`/`virtsecretd` + `virtproxyd`); mask all `libvirtd*` units | Fedora 44 / RHEL 10 default to modular; **Ubuntu still starts monolithic `libvirtd` by default but ships the modular daemons in `libvirt-daemon-system`**, so the switch is implementable everywhere. The role masks the monolithic units and enables the modular socket set on every distro (one uniform code path), so monolithic `libvirtd` never owns the TLS listener — that is `virtproxyd-tls.socket`. (Source: libvirt.org daemons.html; Fedora `Changes/LibvirtModularDaemons`) |
+| Daemon model | **Per-distro.** Fedora/RHEL: modular — switch-to-modular (mask `libvirtd*`, enable `virtqemud`/`virtnetworkd`/`virtstoraged`/`virtnodedevd`/`virtsecretd` + `virtproxyd`); TLS via `virtproxyd-tls.socket`. Ubuntu/Debian: monolithic `libvirtd`; TLS via `libvirtd-tls.socket`; never mask | **Verified on Ubuntu 26.04 (2026-06-19): Ubuntu does NOT package the modular daemons** — there is no `virtqemud`/`virtproxyd` binary or socket unit, and the `libvirt-daemon-driver-*` packages are connection-driver plugins for the monolithic `libvirtd`, not standalone daemons. The earlier "modular everywhere" assumption was wrong; masking `libvirtd` on Ubuntu left the host with no libvirt. The runbook's monolithic Ubuntu path is correct. Fedora 44 is modular by default (no `libvirtd` unit exists). |
 | Architecture | Parameterize all paths via `ansible_architecture`; **validate x86_64 now**, ppc64le designed-in but unvalidated | Both named test hosts are x86_64; a KVM host serves only its own-arch guests, so arch is a per-host property and the image is always native-built |
 | PKI | **Shared fleet CA on the controller** (`community.crypto`); per-host server cert; one worker client cert; `pki_mode: generate\|byo` | With `auth_tls="none"` the CA is the authz boundary; one shared CA means the worker presents one client identity all hosts trust |
 | Firewall | **Native per-distro**: `ansible.posix.firewalld` (Fedora/RHEL) + `community.general.ufw` (Ubuntu) | Each host's default manager; idempotent, persistent, no conflict with an existing ACL |
@@ -83,27 +83,34 @@ should not run on every converge.
 Each role has one purpose; all distro/arch divergence is pushed into variables.
 
 1. **`libvirt_stack`** — install virt packages (per-`os_family` lists; qemu chosen by arch:
-   `qemu-system-x86` vs `qemu-system-ppc`), then run the explicit **switch-to-modular**
-   sub-procedure on every distro (uniform code path): stop + `disable` + `mask` the monolithic
-   units (`libvirtd.service` and `libvirtd{,-ro,-admin,-tls,-tcp}.socket`), then `enable` the
-   modular socket set (`virtqemud.socket`, `virtnetworkd.socket`, `virtstoraged.socket`,
-   `virtnodedevd.socket`, `virtsecretd.socket`, `virtproxyd.socket`). This is required even on
-   Ubuntu, which boots monolithic `libvirtd` by default yet ships the modular daemons in
-   `libvirt-daemon-system` (so the mask is a real state change there, a no-op where already
-   modular). Add the login user to `kvm`/`libvirt`, assert `virt-host-validate qemu` passes the
-   KVM + `/dev/kvm` checks (fail fast otherwise). (`virtproxyd-tls.socket` is enabled by
-   `libvirt_tls`, which owns the TLS listener.)
+   `qemu-system-x86` vs `qemu-system-ppc`; plus `python3-libvirt` + `python3-lxml`, which the
+   `community.libvirt` modules import on the target — Ubuntu does not pull them in
+   transitively). Then set the daemon model **per distro**: on **Fedora/RHEL** run the
+   switch-to-modular sub-procedure — stop + `disable` + `mask` the monolithic units
+   (`libvirtd.service` and `libvirtd{,-ro,-admin,-tls,-tcp}.socket`), then `enable` the modular
+   socket set (`virtqemud.socket`, `virtnetworkd.socket`, `virtstoraged.socket`,
+   `virtnodedevd.socket`, `virtsecretd.socket`, `virtproxyd.socket`); on **Ubuntu/Debian** keep
+   the monolithic daemon — ensure `libvirtd*` is **not** masked and enable `libvirtd.socket`
+   (the modular daemons are not packaged on Ubuntu, so masking `libvirtd` would leave no
+   libvirt at all). Add the login user to `kvm`/`libvirt`, assert `virt-host-validate qemu`
+   passes the KVM + `/dev/kvm` checks (the assert regex tolerates the single-quoted
+   `'/dev/kvm'` device name the tool prints). The TLS socket is enabled by `libvirt_tls`.
 
 2. **`libvirt_tls`** — install the server cert/key + CA cert (from the PKI step) into
-   `/etc/pki/{CA,libvirt}`; write `/etc/libvirt/virtproxyd.conf` (`listen_tls=1`,
-   `listen_tcp=0`, `auth_tls="none"`); enable `virtproxyd-tls.socket`. Security driver is left
-   **on** by default: set `security_driver="none"` in `qemu.conf` only when
-   `disable_security_driver` (default **`false`**) is opted in per host; the default path keeps
-   the per-distro driver (AppArmor/SELinux) and relies on the narrow label fix (correct pool
-   labeling / `virt_use_*` booleans) tried first — `none` is the documented last resort, with
-   the overlay-backing-file permission rationale in a comment. Restart via handler, then a
-   **verification gate**: assert `:16514` is `LISTEN` *and* that the listener is owned by
-   `virtproxyd-tls.socket` (not a `libvirtd*` socket) before the role reports success.
+   `/etc/pki/{CA,libvirt}`. Resolve the TLS daemon/socket/config-file **per `os_family`**:
+   Fedora/RHEL → `virtproxyd` + `/etc/libvirt/virtproxyd.conf` + `virtproxyd-tls.socket`;
+   Ubuntu/Debian → `libvirtd` + `/etc/libvirt/libvirtd.conf` + `libvirtd-tls.socket`. Set the
+   three listen settings (`listen_tls=1`, `listen_tcp=0`, `auth_tls="none"`) **in place** via
+   `lineinfile` in that file (preserving the shipped conf). Security driver is left **on** by
+   default: set `security_driver="none"` in `qemu.conf` only when `disable_security_driver`
+   (default **`false`**) is opted in per host; the default path keeps the per-distro driver
+   (AppArmor/SELinux) and relies on the narrow label fix (correct pool labeling / `virt_use_*`
+   booleans) tried first — `none` is the documented last resort. Bind the TLS socket with a
+   **stop-daemon-first** step gated on a `:16514` LISTEN probe (libvirt socket activation
+   refuses to start a `*-tls.socket` while its daemon is already running, and the probe keeps
+   the second run idempotent). **Verification gate:** assert the per-distro **TLS socket unit**
+   is `active` and `:16514` is `LISTEN` — check the *socket unit*, not the process name, since
+   an idle socket-activated daemon hands the socket back to `systemd` (pid 1).
 
 3. **`libvirt_pool_net`** — define/build/start/autostart the storage pool (`dir`, target a
    var) and the `default` network via `community.libvirt` modules (idempotent).
@@ -191,7 +198,8 @@ host's pool/network names aligned with those values and document them in the emi
 |---|---|---|---|---|
 | Pkg manager | `apt` | `dnf` | `dnf` | — |
 | qemu pkg | `qemu-system-{x86\|ppc}` | `qemu-system-{x86\|ppc}` | `qemu-kvm` + arch | arch-selected |
-| Daemons | switch-to-modular | modular | modular | same |
+| Daemons | **monolithic `libvirtd`** | modular (switch) | modular (switch) | same |
+| TLS socket | `libvirtd-tls.socket` | `virtproxyd-tls.socket` | `virtproxyd-tls.socket` | same |
 | Security driver | AppArmor → label fix first; `none` opt-in | SELinux → label fix first; `none` opt-in | SELinux → label fix first; `none` opt-in | same |
 | libguestfs fixes | **yes** (step 4) | no | no | same |
 | Firewall | `ufw` | `firewalld` | `firewalld` | same |
@@ -200,8 +208,16 @@ host's pool/network names aligned with those values and document them in the emi
 
 ## Idempotency & safety
 
-- Daemon/socket/config changes via handlers; verify `:16514` `LISTEN` *and*
-  `virtproxyd-tls.socket` ownership after restart.
+- Daemon/socket/config changes via handlers; verify the per-distro **TLS socket unit** is
+  `active` *and* `:16514` is `LISTEN` (the socket unit, not the process — an idle
+  socket-activated daemon hands the socket back to `systemd`). The TLS socket is bound with a
+  stop-daemon-first step gated on a LISTEN probe (socket activation refuses to start a
+  `*-tls.socket` while its daemon runs), keeping the second run idempotent.
+- Firewall ACL: on **Fedora/RHEL** firewalld is active by default, so the rich-rules enforce
+  immediately (verified: off-CIDR refused, in-CIDR allowed). On **Ubuntu** the role stages the
+  ufw allow/deny rules but does **not** enable ufw — enabling it changes the host's whole
+  inbound posture and needs an explicit SSH allow first, so on a host with ufw inactive the
+  gdbstub ACL is staged-but-inert until the operator enables ufw deliberately.
 - `virt-builder` guarded by volume-exists + checksum; pool/net via `community.libvirt`.
 - Secrets: CA + client private keys vaulted; artifacts dir gitignored; hosts only ever
   receive the public CA cert + their own server cert (no host→controller `fetch`).
@@ -224,9 +240,14 @@ host's pool/network names aligned with those values and document them in the emi
   named here as implementation obligations.
 - **Idempotence bar:** read-only/assert/command tasks set `changed_when:` honestly (above), so
   the second-run-0-changed measure reflects real drift, not command-task noise.
-- **Acceptance (real hosts):** idempotence run — apply `site.yml` twice against `ub26-big`
-  and `fed44-big`; the second run reports **0 changed**. Then `just check-remote-libvirt` and
-  the runbook step-8 worker→host TLS connect confirm the path end-to-end.
+- **Acceptance (real hosts) — DONE 2026-06-19** on `ub26-big.dev` (Ubuntu 26.04, monolithic)
+  and `fed44-big.dev` (Fedora 44, modular): `site.yml` applied, the **second run reported 0
+  changed** on both, `:16514` was served by the right socket unit, and a worker→host **mutual
+  TLS handshake succeeded** with the generated PKI. firewalld enforced the ACL on Fedora
+  (off-CIDR refused, in-CIDR allowed); the ufw ACL on Ubuntu is staged-but-inert (ufw not
+  enabled). Four runtime bugs that the lint/syntax gates could not catch were found and fixed
+  during this run (removed `yaml` callback; ufw global-deny → port-specific; KVM-assert quote;
+  the per-distro daemon model itself), plus the `python3-libvirt`/`python3-lxml` target deps.
 - **Structural test:** a `tests/deploy/` test (mirroring `tests/deploy/test_systemd_units.py`)
   asserts the rendered `systems.toml` block carries the full `systems.toml.example` field set and
   validates the role-var surface.

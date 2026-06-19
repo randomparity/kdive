@@ -6,10 +6,14 @@ x86_64 or ppc64le). Design: `docs/superpowers/specs/2026-06-18-ansible-remote-li
 
 ## What it produces
 
-- A host running the **modular** libvirt daemons (all `libvirtd*` masked) with a
-  `qemu+tls` mutual-TLS listener on `:16514` owned by `virtproxyd-tls.socket`.
+- A host serving a `qemu+tls` mutual-TLS listener on `:16514`, via the **per-distro**
+  daemon model: Fedora/RHEL run the **modular** daemons (`libvirtd*` masked,
+  `virtproxyd-tls.socket`); Ubuntu/Debian keep the **monolithic** `libvirtd`
+  (`libvirtd-tls.socket`) — Ubuntu does not package the modular daemons.
 - A `dir` storage pool + the `default` network.
 - A firewalld/ufw ACL restricting `:16514` and the gdbstub range to `worker_cidr`.
+  (firewalld enforces immediately on Fedora/RHEL; on Ubuntu the ufw rules are staged
+  but **not** enforced until you enable ufw deliberately, with an SSH allow.)
 - An operator-staged base image carrying the in-guest helpers (optional; `image.yml`).
 - A controller-side `systems.toml` `[[remote_libvirt]]`/`[[image]]` block per host.
 
