@@ -2,8 +2,9 @@
 
 Rerun of the MCP tool coverage campaign per
 `docs/operating/runbooks/mcp-coverage-campaign-rerun.md`, against the **current 112-tool
-surface** (image `ghcr.io/randomparity/kdive:sha-b45aa02`). Supersedes
-`mcp-coverage-campaign-2026-06-14.md` (which covered an older 91-tool surface). Closes #572.
+surface** (image `ghcr.io/randomparity/kdive:sha-b45aa02`, then `sha-56a3f16` after the
+in-campaign #584 fix). Supersedes `mcp-coverage-campaign-2026-06-14.md` (older 91-tool surface).
+Campaign tracked by #572 (closed via PR #585); this revision records the post-#584 arc.
 
 ## Deployments
 
@@ -26,11 +27,19 @@ mints a test-keypair token the k8s demo issuer does not trust, so a small run-lo
 
 | Provider | pass | fail | blocked | cells driven |
 |---|---|---|---|---|
-| remote-libvirt | 47 | 2 | 5 | 54 |
+| remote-libvirt | 46 | 2 | 6 | 54 |
 
 54 distinct `(tool, remote-libvirt)` cells driven of the 112-tool census (86 implemented,
 26 partial — every `partial` tool now carries an ADR-0175 `maturity_detail`, new this surface).
 Full grid below (driven rows only; ★ = destructive-capable).
+
+> **Updated after the in-campaign #584 fix + redeploy.** The first pass of this campaign blocked
+> at `runs.build` (#583/#584). Those were fixed (#584 merged as ADR-0178, worker rolled to
+> `sha-56a3f16`; #583 worked around by raising the worker liveness `failureThreshold` during the
+> build), the build base image's `ens2` DHCP was repaired on the host, and the kernel ref was
+> moved to **v6.15** (v6.9 does not compile with the Fedora 43 build image's gcc). The arc then
+> advanced all the way through **build and install** — the install frontier (#386) that was open
+> in every prior campaign — and now blocks one step further on, at **boot** (#587).
 
 ### Arc status
 
@@ -40,11 +49,12 @@ Full grid below (driven rows only; ★ = destructive-capable).
   #571 `debug.get_session` / `debug.list_sessions` and the #566/#567 discoverability tools
   (`runs.profile_examples`, `systems.profile_examples`) are present and answer.
 - **remote-libvirt lifecycle (Arc 2):** `allocations.request` → `systems.provision` (System
-  reaches **ready**) → `investigations.open` → `runs.create` all **pass**. The arc then blocks
-  at **`runs.build`** (#584); install / boot / capture / debug-attach are blocked behind it.
-  This is a regression in reachability versus 2026-06-14 (where the build plane was proven and
-  install was the open frontier) — and the cause is infrastructure state, not the tool surface:
-  see findings #583 / #584.
+  reaches **ready**) → `investigations.open` → `runs.create` → **`runs.build`** (real v6.15
+  kernel compile on the ephemeral build host) → **`runs.install`** all **pass** — the first time
+  build *and* install have been green over MCP (install was the open frontier, #386). The arc
+  now blocks at **`runs.boot`**: the System reboots but drops into systemd emergency mode (the
+  installed kernel cannot mount root), so the guest agent never starts and boot-readiness times
+  out (`boot_timeout`, #587). Crash / capture / postmortem / debug-attach are blocked behind boot.
 - **fault-inject / local-libvirt lifecycle:** not configured on this deployment; not driven.
 
 ### Lifecycle arc trace (remote-libvirt)
@@ -55,11 +65,12 @@ Full grid below (driven rows only; ★ = destructive-capable).
 | provision | `systems.provision` | ✅ System → `ready` |
 | open | `investigations.open` | ✅ |
 | create | `runs.create` | ✅ |
-| build | `runs.build` | ❌ `configuration_error` (#584) |
-| install/boot | `runs.install` / `runs.boot` | ⏭ blocked behind build (#584) |
-| attach | `debug.start_session` | ⏭ blocked behind boot (#584) |
-| crash | `control.force_crash` | ⏭ blocked behind boot (#584) |
-| capture | `vmcore.fetch` | ⏭ blocked behind crash (#584) |
+| build | `runs.build` | ✅ real v6.15 kernel compile (after #584 fix) |
+| install | `runs.install` | ✅ first green install over MCP (#386 frontier) |
+| boot | `runs.boot` | ❌ `boot_timeout` — System drops to emergency mode (#587) |
+| attach | `debug.start_session` | ⏭ blocked behind boot (#587) |
+| crash | `control.force_crash` | ⏭ blocked behind boot (#587) |
+| capture | `vmcore.fetch` | ⏭ blocked behind crash (#587) |
 
 ## Findings
 
@@ -73,12 +84,27 @@ Full grid below (driven rows only; ★ = destructive-capable).
   blocking on the build hot path), so the chart's liveness probe (~30s grace) SIGKILLs the
   worker (`exit=137`) and crash-loops it mid-build. Worked around for this run by patching the
   live worker deployment's liveness `failureThreshold` to 180 (reverted afterward).
-- **#584** — after the worker is killed mid-build, the ephemeral build VM `kdive-build-<run_id>`
-  is **not reaped** (the build-session cleanup runs in `__exit__`, skipped by SIGKILL).
-  Subsequent `runs.build` jobs fail in `_wait_for_network` with `qemu-guest-agent is not
-  usable on this build host` and `Storage volume not found: kdive-build-<run_id>.qcow2`. The
-  remote build plane stays wedged until the host is cleaned by hand. Same class as #372, for
-  *build* VMs. `runs.build` also returns an empty-`detail` `configuration_error` to the client.
+- **#584 (FIXED this campaign, ADR-0178)** — the build-VM network-readiness gate ran its route
+  probe through the build transport, which marks `VIR_ERR_AGENT_UNRESPONSIVE` (code 86)
+  deterministic-fatal (ADR-0168). NetworkManager briefly churns the build VM's agent channel
+  while bringing the interface up, so a transient code-86 mid-probe aborted the build inside the
+  120s window. The gate now treats a transient agent drop as "keep polling"; the build phase
+  keeps code-86-fatal. Merged (PR #586) and redeployed (`sha-56a3f16`) mid-campaign — this is
+  what carried the arc into build+install.
+- **#587 (new frontier)** — with build+install green, `runs.boot` fails `boot_timeout`: the
+  System reboots but the freshly-installed kernel drops into systemd **emergency mode** (cannot
+  mount root — likely the install does not regenerate a guest initramfs for the new kernel, or
+  the built kernel lacks the storage/virtio drivers to mount root). The guest agent never starts,
+  so the agent/boot_id readiness times out. Console shows the maintenance-mode prompt.
+
+### Host-side fixes applied to unblock the campaign (operator environment, not kdive code)
+
+- The build base image (`fedora-kdive-build-43.qcow2`) did not bring `ens2` up, so build VMs had
+  no network to clone the kernel; added a high-priority NetworkManager DHCP keyfile for `ens2`.
+- v6.9 does not compile with the Fedora 43 build image's gcc; the campaign uses **v6.15**.
+- #583 (worker `/livez` starved during the multi-minute build → kubelet SIGKILL crash-loop) was
+  worked around by raising the worker liveness `failureThreshold` for the build, then reverted.
+  The underlying event-loop-starvation fix remains open (#583).
 
 ### Positive signals worth recording
 
@@ -132,17 +158,17 @@ Full coverage grid (driven rows; remote-libvirt the only configured provider):
 | `audit.query` | audit | implemented | read_only | — | ✅ | — |
 | `build_hosts.list` | build_hosts | implemented | read_only | — | ✅ | — |
 | `buildconfig.get` | buildconfig | implemented | read_only | — | ✅ | — |
-| `control.force_crash`★ | control | partial | destructive | — | ⏭(#584) | — |
+| `control.force_crash`★ | control | partial | destructive | — | ⏭(#587) | — |
 | `debug.get_session` | debug | implemented | read_only | — | ✅ | — |
 | `debug.list_breakpoints` | debug | partial | read_only | — | ✅ | — |
 | `debug.list_sessions` | debug | implemented | read_only | — | ✅ | — |
 | `debug.read_memory` | debug | partial | read_only | — | ✅ | — |
 | `debug.read_registers` | debug | partial | read_only | — | ✅ | — |
-| `debug.start_session` | debug | partial | mutating | — | ⏭(#584) | — |
+| `debug.start_session` | debug | partial | mutating | — | ⏭(#587) | — |
 | `fixtures.list` | fixtures | implemented | read_only | — | ✅ | — |
 | `fixtures.validate` | fixtures | implemented | read_only | — | ✅ | — |
 | `images.list` | images | implemented | read_only | — | ✅ | — |
-| `introspect.from_vmcore` | introspect | partial | read_only | — | ✅ | — |
+| `introspect.from_vmcore` | introspect | partial | read_only | — | ⏭(#587) | — |
 | `introspect.run` | introspect | partial | read_only | — | ✅ | — |
 | `inventory.list` | inventory | implemented | read_only | — | ✅ | — |
 | `investigations.get` | investigations | implemented | read_only | — | ✅ | — |
@@ -152,17 +178,17 @@ Full coverage grid (driven rows; remote-libvirt the only configured provider):
 | `jobs.list` | jobs | implemented | read_only | — | ✅ | — |
 | `ops.export_cost_classes` | ops | implemented | read_only | — | ✅ | — |
 | `ops.jobs_list` | ops | implemented | read_only | — | ❌(#582) | — |
-| `postmortem.crash` | postmortem | partial | read_only | — | ✅ | — |
-| `postmortem.triage` | postmortem | partial | read_only | — | ✅ | — |
+| `postmortem.crash` | postmortem | partial | read_only | — | ⏭(#587) | — |
+| `postmortem.triage` | postmortem | partial | read_only | — | ⏭(#587) | — |
 | `projects.list` | projects | implemented | read_only | — | ✅ | — |
 | `resources.availability` | resources | implemented | read_only | — | ✅ | — |
 | `resources.describe` | resources | implemented | read_only | — | ✅ | — |
 | `resources.list` | resources | implemented | read_only | — | ✅ | — |
-| `runs.boot` | runs | partial | mutating | — | ⏭(#584) | — |
-| `runs.build` | runs | partial | mutating | — | ❌(#584) | — |
+| `runs.boot` | runs | partial | mutating | — | ❌(#587) | — |
+| `runs.build` | runs | partial | mutating | — | ✅ | — |
 | `runs.create` | runs | implemented | mutating | — | ✅ | — |
 | `runs.get` | runs | implemented | read_only | — | ✅ | — |
-| `runs.install` | runs | partial | mutating | — | ⏭(#584) | — |
+| `runs.install` | runs | partial | mutating | — | ✅ | — |
 | `runs.profile_examples` | runs | implemented | read_only | — | ✅ | — |
 | `secrets.list` | secrets | implemented | read_only | — | ✅ | — |
 | `shapes.list` | shapes | implemented | read_only | — | ✅ | — |
@@ -170,5 +196,5 @@ Full coverage grid (driven rows; remote-libvirt the only configured provider):
 | `systems.list` | systems | implemented | read_only | — | ✅ | — |
 | `systems.profile_examples` | systems | implemented | read_only | — | ✅ | — |
 | `systems.provision` | systems | partial | mutating | — | ✅ | — |
-| `vmcore.fetch` | vmcore | partial | mutating | — | ⏭(#584) | — |
+| `vmcore.fetch` | vmcore | partial | mutating | — | ⏭(#587) | — |
 | `vmcore.list` | vmcore | partial | read_only | — | ✅ | — |
