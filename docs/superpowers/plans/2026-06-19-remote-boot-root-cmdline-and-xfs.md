@@ -13,6 +13,13 @@ the two call sites that already hold the runtime. Add `CONFIG_XFS_FS=y`/`CONFIG_
 
 **Tech Stack:** Python 3.14, `uv`, `ruff`, `ty`, `pytest`.
 
+**Execution note (ordering):** Tasks 1–3 are a single atomic change — changing the
+`system_required_cmdline`/`cmdline_for` signatures (Task 1) without updating both callers (Task 3) leaves
+the tree red. Implement Tasks 1–3 (runtime field + helper signatures + both call sites + their tests) in
+**one** commit so every commit is green; Task 4 (XFS) is a separate commit. The default `"root=/dev/vda"`
+lives only on the `ProviderRuntime.platform_root_cmdline` field — `steps.py` never hardcodes a root device,
+so there is one source of the default.
+
 Authoritative design: [ADR-0183](../../adr/0183-provider-aware-platform-root-cmdline.md),
 [spec](../../design/remote-boot-root-cmdline-and-xfs.md).
 
