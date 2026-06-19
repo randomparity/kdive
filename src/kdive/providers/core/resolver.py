@@ -26,25 +26,25 @@ from kdive.providers.core.runtime import ProviderRuntime
 _log = logging.getLogger(__name__)
 
 _KIND_FOR_SYSTEM: LiteralString = (
-    "SELECT r.kind AS kind FROM systems s "
+    "SELECT r.kind AS kind, r.name AS name FROM systems s "
     "JOIN allocations a ON a.id = s.allocation_id "
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE s.id = %s"
 )
 _KIND_FOR_RUN: LiteralString = (
-    "SELECT r.kind AS kind FROM runs rn "
+    "SELECT r.kind AS kind, r.name AS name FROM runs rn "
     "JOIN systems s ON s.id = rn.system_id "
     "JOIN allocations a ON a.id = s.allocation_id "
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE rn.id = %s"
 )
 _KIND_FOR_ALLOCATION: LiteralString = (
-    "SELECT r.kind AS kind FROM allocations a "
+    "SELECT r.kind AS kind, r.name AS name FROM allocations a "
     "JOIN resources r ON r.id = a.resource_id "
     "WHERE a.id = %s"
 )
 _KIND_FOR_SESSION: LiteralString = (
-    "SELECT res.kind AS kind FROM debug_sessions ds "
+    "SELECT res.kind AS kind, res.name AS name FROM debug_sessions ds "
     "JOIN runs rn ON rn.id = ds.run_id "
     "JOIN systems s ON s.id = rn.system_id "
     "JOIN allocations a ON a.id = s.allocation_id "
@@ -134,27 +134,32 @@ class ProviderResolver:
             raise first_failure
 
     async def runtime_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderRuntime:
-        return self.resolve(await self._kind(conn, _KIND_FOR_SYSTEM, system_id, "system"))
+        kind, name = await self._kind_and_name(conn, _KIND_FOR_SYSTEM, system_id, "system")
+        return self.resolve(kind).for_resource(name)
 
     async def runtime_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderRuntime:
-        return self.resolve(await self._kind(conn, _KIND_FOR_RUN, run_id, "run"))
+        kind, name = await self._kind_and_name(conn, _KIND_FOR_RUN, run_id, "run")
+        return self.resolve(kind).for_resource(name)
 
     async def runtime_for_allocation(
         self, conn: AsyncConnection, allocation_id: UUID
     ) -> ProviderRuntime:
-        kind = await self._kind(conn, _KIND_FOR_ALLOCATION, allocation_id, "allocation")
-        return self.resolve(kind)
+        kind, name = await self._kind_and_name(
+            conn, _KIND_FOR_ALLOCATION, allocation_id, "allocation"
+        )
+        return self.resolve(kind).for_resource(name)
 
     async def runtime_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderRuntime:
         return (await self.binding_for_session(conn, session_id)).runtime
 
     async def binding_for_session(self, conn: AsyncConnection, session_id: UUID) -> ProviderBinding:
-        kind = await self._kind(conn, _KIND_FOR_SESSION, session_id, "session")
-        return ProviderBinding(kind=kind, runtime=self.resolve(kind))
+        kind, name = await self._kind_and_name(conn, _KIND_FOR_SESSION, session_id, "session")
+        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
 
-    async def _kind(
+    async def _kind_and_name(
         self, conn: AsyncConnection, sql: LiteralString, object_id: UUID, object_kind: str
-    ) -> ResourceKind:
+    ) -> tuple[ResourceKind, str]:
+        """Resolve the object's Resource ``(kind, name)``; name threads per-op identity (#395)."""
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(sql, (object_id,))
             row = await cur.fetchone()
@@ -164,4 +169,4 @@ class ProviderResolver:
                 category=ErrorCategory.NOT_FOUND,
                 details={"object_kind": object_kind, "object_id": str(object_id)},
             )
-        return ResourceKind(row["kind"])
+        return ResourceKind(row["kind"]), row["name"]
