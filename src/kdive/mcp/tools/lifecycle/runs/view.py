@@ -17,6 +17,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.runs.steps import install_method_for as _install_method_for
+from kdive.services.runs.steps import step_progress as _step_progress
 from kdive.services.runs.steps import system_required_cmdline
 
 
@@ -45,6 +46,9 @@ async def get_run(
                 else None
             )
             active_sessions = await active_session_ids_for_run(conn, run.id)
+            progress = (
+                await _step_progress(conn, run.id) if run.state is RunState.SUCCEEDED else None
+            )
         required = (
             system_required_cmdline(_install_method_for(system, runtime.profile_policy))
             if system is not None and runtime is not None
@@ -55,4 +59,5 @@ async def get_run(
             required_cmdline=required,
             failing_job=failing_job,
             active_debug_session_ids=active_sessions,
+            step_progress=progress,
         )

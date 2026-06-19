@@ -12,6 +12,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
 from kdive.services.runs import states as run_states
+from kdive.services.runs.steps import StepProgress
 
 ALLOC_HOSTABLE = run_states.ALLOC_HOSTABLE
 INVESTIGATION_OPEN_FOR_RUN = run_states.INVESTIGATION_OPEN_FOR_RUN
@@ -56,12 +57,33 @@ def no_job_failure_detail(category: ErrorCategory) -> str:
     return _NO_JOB_DETAIL.get(category, _NO_JOB_FALLBACK)
 
 
+def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
+    """Second action(s) for a `SUCCEEDED` Run, walking the real progression (ADR-0179).
+
+    Keys the booted-run branch on the observed `boot_outcome` (from the boot step result),
+    not the Run's create-time `expected_boot_failure`: a Run that expected a crash but booted
+    normally is live-debuggable. The `postmortem.triage` / `vmcore.fetch` pair matches the
+    failure `sessions_lifecycle.py` returns for a live attach on an `expected_crash_observed`
+    boot.
+    """
+    if run.system_id is None:
+        return ["runs.bind"]
+    if progress is None or progress.install != "succeeded":
+        return ["runs.install"]
+    if progress.boot != "succeeded":
+        return ["runs.boot"]
+    if progress.boot_outcome == "expected_crash_observed":
+        return ["postmortem.triage", "vmcore.fetch"]
+    return ["debug.start_session"]
+
+
 def envelope_for_run(
     run: Run,
     *,
     required_cmdline: str | None = None,
     failing_job: Job | None = None,
     active_debug_session_ids: list[str] | None = None,
+    step_progress: StepProgress | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -80,12 +102,15 @@ def envelope_for_run(
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
         return _failed_envelope(run, category, failing_job)
+    steps: dict[str, str] | None = None
     if run.state in (RunState.CREATED, RunState.RUNNING):
         actions = ["runs.get", "runs.build"]
     elif run.state is RunState.SUCCEEDED:
-        # A built but unbound Run (ADR-0169) binds a System before it can install.
-        next_step = "runs.bind" if run.system_id is None else "runs.install"
-        actions = ["runs.get", next_step]
+        # Build-succeeded; install/boot live in run_steps (ADR-0179). Walk the progression
+        # and surface the per-step map so a caller need not infer it from Run.state.
+        actions = ["runs.get", *_succeeded_next_step(run, step_progress)]
+        if step_progress is not None:
+            steps = step_progress.steps_map()
     else:  # CANCELED — terminal, nothing to advance.
         actions = ["runs.get"]
     data: dict[str, JsonValue] = {
@@ -94,6 +119,8 @@ def envelope_for_run(
         "system_id": str(run.system_id) if run.system_id is not None else None,
         "active_debug_session_ids": list(active_debug_session_ids or []),
     }
+    if steps is not None:
+        data["steps"] = cast(JsonValue, steps)
     if required_cmdline is not None:
         data["required_cmdline"] = required_cmdline
     if run.expected_boot_failure is not None:
