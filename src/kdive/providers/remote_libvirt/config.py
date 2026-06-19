@@ -23,7 +23,7 @@ from kdive.config.core_settings import SYSTEMS_TOML
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
-from kdive.inventory.model import InventoryDoc, RemoteLibvirtInstance, StagedSource
+from kdive.inventory.model import ImageEntry, InventoryDoc, RemoteLibvirtInstance, StagedSource
 from kdive.providers.remote_libvirt.settings import (
     REMOTE_LIBVIRT_MACHINE,
     REMOTE_LIBVIRT_NETWORK,
@@ -181,6 +181,35 @@ def resolve_base_image_staged_volume() -> str:
     doc = _load_inventory_doc()
     images = doc.image if doc is not None else []
     instance = _require_single_instance(list(doc.remote_libvirt) if doc is not None else [])
+    return _staged_volume_for_instance(instance, images)
+
+
+def resolve_base_image_staged_volume_for(resource_name: str) -> str:
+    """Return the staged base-image volume for the named ``[[remote_libvirt]]`` instance.
+
+    The by-name variant of :func:`resolve_base_image_staged_volume` for fleets with more than one
+    declared remote host (ADR-0187, #395).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when no instance named ``resource_name`` is
+            declared, the inventory is malformed, the ``base_image`` names no declared
+            ``[[image]]``, or that image's source is not ``staged``.
+    """
+    doc = _load_inventory_doc()
+    images = doc.image if doc is not None else []
+    instances = list(doc.remote_libvirt) if doc is not None else []
+    instance = next((inst for inst in instances if inst.name == resource_name), None)
+    if instance is None:
+        names = sorted(inst.name for inst in instances)
+        raise CategorizedError(
+            f"no [[remote_libvirt]] instance named {resource_name!r} is declared in systems.toml "
+            f"(declared: {names})",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return _staged_volume_for_instance(instance, images)
+
+
+def _staged_volume_for_instance(instance: RemoteLibvirtInstance, images: list[ImageEntry]) -> str:
     image = next((img for img in images if img.name == instance.base_image), None)
     if image is None:
         raise CategorizedError(
@@ -240,22 +269,18 @@ def _parse_gdbstub_range(instance: RemoteLibvirtInstance) -> tuple[int, int]:
     return low, high
 
 
-def remote_config_from_inventory() -> RemoteLibvirtConfig:
-    """Resolve the remote-libvirt connection config from the ``systems.toml`` instance.
+def _build_config(instance: RemoteLibvirtInstance) -> RemoteLibvirtConfig:
+    """Map one validated ``[[remote_libvirt]]`` instance onto :class:`RemoteLibvirtConfig`.
 
-    Maps the declared ``[[remote_libvirt]]`` instance onto :class:`RemoteLibvirtConfig`: ``uri``
-    (validated mutual-TLS-safe), the three TLS cert/key/CA refs, ``gdb_addr``, the
-    ``gdbstub_range`` parsed into the port bounds, and ``concurrent_allocation_cap``. The libvirt
-    storage pool / network / machine knobs come from the operational env settings (they are not in
-    the v2 inventory model).
+    Validates the URI (mutual-TLS-safe) and the gdbstub range, then fills the host-topology knobs
+    (storage pool / network / machine) from the operational env settings (they are not in the v2
+    inventory model).
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when no instance (or more than one) is declared,
-            the inventory file is malformed, the URI is not mutual-TLS-safe (wrong scheme,
-            ``no_verify``, or an operator-set ``pkipath``), or the gdbstub range is malformed,
-            out of range, or inverted.
+        CategorizedError: ``CONFIGURATION_ERROR`` when the URI is not mutual-TLS-safe (wrong
+            scheme, ``no_verify``, or an operator-set ``pkipath``) or the gdbstub range is
+            malformed, out of range, or inverted.
     """
-    instance = _resolve_instance()
     validate_remote_uri(instance.uri)
     gdb_port_min, gdb_port_max = _parse_gdbstub_range(instance)
     return RemoteLibvirtConfig(
@@ -273,3 +298,54 @@ def remote_config_from_inventory() -> RemoteLibvirtConfig:
         gdb_port_min=gdb_port_min,
         gdb_port_max=gdb_port_max,
     )
+
+
+def remote_config_for_resource(resource_name: str) -> RemoteLibvirtConfig:
+    """Resolve the remote-libvirt connection config for the resource named ``resource_name``.
+
+    The reconcile keys config-owned resources on ``(kind, name)``, so a remote resource row's
+    ``name`` is its ``[[remote_libvirt]]`` instance name (ADR-0112/0187). Selecting by name lets a
+    per-op call resolve the *allocated* host instead of the lone declared one (#395).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when no instance named ``resource_name`` is
+            declared, the inventory is malformed, or the selected instance fails validation.
+    """
+    instances = _load_remote_instances()
+    instance = next((inst for inst in instances if inst.name == resource_name), None)
+    if instance is None:
+        names = sorted(inst.name for inst in instances)
+        raise CategorizedError(
+            f"no [[remote_libvirt]] instance named {resource_name!r} is declared in systems.toml "
+            f"(declared: {names})",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return _build_config(instance)
+
+
+def all_remote_configs() -> list[RemoteLibvirtConfig]:
+    """Resolve every declared ``[[remote_libvirt]]`` instance's config (fleet-wide callers).
+
+    For host-agnostic callers that operate over the whole fleet — discovery enumeration, the
+    console-hosting bootstrap, and fan-out diagnostics/reapers (ADR-0187) — rather than a single
+    allocated host.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the inventory is malformed or any declared
+            instance fails validation.
+    """
+    return [_build_config(inst) for inst in _load_remote_instances()]
+
+
+def remote_config_from_inventory() -> RemoteLibvirtConfig:
+    """Resolve the remote-libvirt connection config from the single ``systems.toml`` instance.
+
+    Retained for the not-yet-migrated singleton callers; per-op callers resolve by resource via
+    :func:`remote_config_for_resource` (#395).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when no instance (or more than one) is declared,
+            the inventory file is malformed, the URI is not mutual-TLS-safe, or the gdbstub range
+            is malformed, out of range, or inverted.
+    """
+    return _build_config(_resolve_instance())

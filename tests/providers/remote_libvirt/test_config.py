@@ -13,12 +13,16 @@ from pathlib import Path
 import pytest
 
 import kdive.config as config
+import kdive.providers.remote_libvirt.config as config_module
 from kdive.diagnostics.gdbstub_acl import gdbstub_acl_probe
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.inventory.model import RemoteLibvirtInstance
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     TlsCertRefs,
+    all_remote_configs,
     is_remote_libvirt_configured,
+    remote_config_for_resource,
     remote_config_from_inventory,
     resolve_base_image_staged_volume,
 )
@@ -134,6 +138,62 @@ def test_malformed_inventory_is_configuration_error(
     config.load()
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_from_inventory()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def _instance(name: str, uri: str) -> RemoteLibvirtInstance:
+    return RemoteLibvirtInstance(
+        name=name,
+        uri=uri,
+        gdb_addr="192.168.10.20",
+        gdbstub_range="47000:47099",
+        client_cert_ref="remote/clientcert.pem",
+        client_key_ref="remote/clientkey.pem",  # pragma: allowlist secret
+        ca_cert_ref="remote/cacert.pem",
+        base_image="base",
+        cost_class="remote",
+        vcpus=16,
+        memory_mb=65536,
+    )
+
+
+def _two_instances() -> list[RemoteLibvirtInstance]:
+    return [
+        _instance("host-a", "qemu+tls://a.example/system"),
+        _instance("host-b", "qemu+tls://b.example/system"),
+    ]
+
+
+def test_remote_config_for_resource_selects_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config_module, "_load_remote_instances", _two_instances)
+    assert remote_config_for_resource("host-b").uri == "qemu+tls://b.example/system"
+    assert remote_config_for_resource("host-a").uri == "qemu+tls://a.example/system"
+
+
+def test_remote_config_for_resource_unknown_name_is_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config_module, "_load_remote_instances", _two_instances)
+    with pytest.raises(CategorizedError) as excinfo:
+        remote_config_for_resource("nope")
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "nope" in str(excinfo.value)
+
+
+def test_all_remote_configs_returns_every_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config_module, "_load_remote_instances", _two_instances)
+    uris = sorted(cfg.uri for cfg in all_remote_configs())
+    assert uris == ["qemu+tls://a.example/system", "qemu+tls://b.example/system"]
+
+
+def test_remote_config_for_resource_validates_selected_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bad = _two_instances()
+    bad[1] = bad[1].model_copy(update={"uri": "qemu+tls://b.example/system?no_verify=1"})
+    monkeypatch.setattr(config_module, "_load_remote_instances", lambda: bad)
+    with pytest.raises(CategorizedError) as excinfo:
+        remote_config_for_resource("host-b")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
