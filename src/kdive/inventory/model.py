@@ -86,6 +86,9 @@ class _Instance(BaseModel):
     name: str
     cost_class: str
     concurrent_allocation_cap: int = 1
+    # The pool label written to resources.pool; groups interchangeable hosts for first-available
+    # by-pool allocation (ADR-0186). Absent → 'default'.
+    pool: str = "default"
 
 
 class RemoteLibvirtInstance(_Instance):
