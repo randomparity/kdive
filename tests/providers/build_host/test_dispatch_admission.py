@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -11,6 +15,7 @@ from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.dispatch import run_build_on_host
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs.build_host_policy import KERNEL_SRC_UNSET_DETAIL
@@ -20,6 +25,12 @@ _RUN_ID = UUID("00000000-0000-0000-0000-0000000000d1")
 _WARM_PROFILE = {
     "schema_version": 1,
     "kernel_source_ref": "linux-6.9",
+    "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+}
+
+_GIT_PROFILE = {
+    "schema_version": 1,
+    "kernel_source_ref": {"git": {"remote": "https://git.example/linux.git", "ref": "v6.9"}},
     "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
 }
 
@@ -86,6 +97,95 @@ def test_usable_kernel_src_runs_builder(tmp_path: object) -> None:
     )
     assert builder.called is True
     assert out.kernel_ref == "k"
+
+
+class _ThreadRecordingBuilder:
+    """A transport-capable builder that records the thread ``build()`` runs on.
+
+    Advertising ``over_transport`` makes ``run_build_on_host`` treat it as remote-capable
+    (the ``TransportCapableBuilder`` structural check), and ``build`` records its thread so the
+    test can assert the build did not run on the event-loop thread.
+    """
+
+    def __init__(self) -> None:
+        self.build_thread: threading.Thread | None = None
+
+    def over_transport(self, transport: object, **_kw: object) -> _ThreadRecordingBuilder:
+        return self
+
+    def build(self, run_id: UUID, profile: object) -> BuildOutput:
+        self.build_thread = threading.current_thread()
+        return BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
+
+
+def _ephemeral_host() -> BuildHost:
+    return BuildHost(
+        id=UUID("00000000-0000-0000-0000-0000000000e1"),
+        name="eph",
+        kind=BuildHostKind.EPHEMERAL_LIBVIRT,
+        address=None,
+        ssh_credential_ref=None,
+        base_image_volume="kdive-build-base.qcow2",
+        workspace_root="/build",
+        max_concurrent=2,
+        enabled=True,
+        state=BuildHostState.READY,
+    )
+
+
+def _git_parsed() -> ServerBuildProfile:
+    parsed = BuildProfile.parse(_GIT_PROFILE)
+    assert isinstance(parsed, ServerBuildProfile)
+    return parsed
+
+
+def test_transport_session_runs_off_event_loop_thread() -> None:
+    """The whole transport session (factory __enter__, build, __exit__) runs off the loop thread.
+
+    The ephemeral-libvirt factory's __enter__ provisions a VM and blocks for minutes on
+    synchronous readiness waits; __exit__ tears it down. If any of that runs on the asyncio loop
+    thread it freezes the worker's /livez heartbeat ticker and aux server, and the kubelet
+    SIGKILLs the worker mid-build (#583, ADR-0181). asyncio.run runs the loop on this (the test's)
+    thread, so the session's threads must all differ from it.
+    """
+    enter_thread: list[threading.Thread] = []
+    exit_thread: list[threading.Thread] = []
+
+    @contextmanager
+    def _factory(
+        _host: BuildHost, _registry: SecretRegistry, _run_id: UUID, _source: object
+    ) -> Iterator[BuildTransport]:
+        enter_thread.append(threading.current_thread())
+        try:
+            yield cast(BuildTransport, _FakeTransport())
+        finally:
+            exit_thread.append(threading.current_thread())
+
+    builder = _ThreadRecordingBuilder()
+    loop_thread = threading.current_thread()
+    out = asyncio.run(
+        run_build_on_host(
+            builder,
+            _ephemeral_host(),
+            _RUN_ID,
+            _git_parsed(),
+            secret_registry=SecretRegistry(),
+            kernel_src="",
+            transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
+        )
+    )
+
+    assert out.kernel_ref == "k"
+    assert len(enter_thread) == 1
+    assert len(exit_thread) == 1
+    assert builder.build_thread is not None
+    assert enter_thread[0] is not loop_thread, "factory __enter__ ran on the event-loop thread"
+    assert builder.build_thread is not loop_thread, "build ran on the event-loop thread"
+    assert exit_thread[0] is not loop_thread, "factory __exit__ teardown ran on the loop thread"
+
+
+class _FakeTransport:
+    """A no-op transport stand-in; never used for real ssh or a build VM in this test."""
 
 
 def test_local_git_build_skips_warm_tree_admission() -> None:

@@ -72,25 +72,31 @@ async def run_build_on_host(
     capable = _require_transport_capable(builder, host, run_id)
     factories = _transport_factories(transport_factories)
     factory = factories.get(host.kind)
-    if factory is not None:
-        source = _git_source(parsed)
-        with factory(host, secret_registry, run_id, source) as transport:
-            return await _run_over_transport(
-                capable,
-                transport,
-                host=host,
-                run_id=run_id,
-                parsed=parsed,
-                secret_registry=secret_registry,
-            )
-    raise CategorizedError(
-        "unsupported build host kind",
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        details={
-            "run_id": str(run_id),
-            "build_host": host.name,
-            "build_host_kind": str(host.kind),
-        },
+    if factory is None:
+        raise CategorizedError(
+            "unsupported build host kind",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "run_id": str(run_id),
+                "build_host": host.name,
+                "build_host_kind": str(host.kind),
+            },
+        )
+    # The transport session — factory __enter__ (VM provision + minutes-long synchronous
+    # readiness waits, or SSH identity materialization), bind, the synchronous build, and
+    # __exit__ teardown — runs entirely off the event loop in one worker thread. Entering it on
+    # the loop froze the /livez heartbeat ticker and aux server so the kubelet SIGKILLed the
+    # worker mid-build (#583, ADR-0181). The unsupported-kind error above is raised before any
+    # offload so it stays a synchronous configuration failure.
+    return await asyncio.to_thread(
+        _build_over_transport_session,
+        capable,
+        factory,
+        host=host,
+        run_id=run_id,
+        parsed=parsed,
+        source=_git_source(parsed),
+        secret_registry=secret_registry,
     )
 
 
@@ -122,25 +128,35 @@ def bind_over_transport(
     )
 
 
-async def _run_over_transport(
+def _build_over_transport_session(
     builder: TransportCapableBuilder,
-    transport: BuildTransport,
+    factory: BuildHostTransportFactory,
     *,
     host: BuildHost,
     run_id: UUID,
     parsed: ServerBuildProfile,
+    source: GitSourceRef | None,
     secret_registry: SecretRegistry,
 ) -> BuildOutput:
-    git_remote, git_ref = _git_coords(parsed, run_id)
-    bound = bind_over_transport(
-        builder,
-        transport,
-        host_workspace_root=host.workspace_root,
-        git_remote=git_remote,
-        git_ref=git_ref,
-        secret_registry=secret_registry,
-    )
-    return await asyncio.to_thread(bound.build, run_id, parsed)
+    """Run the whole transport-session lifecycle synchronously (caller offloads it to a thread).
+
+    Opens the transport ``factory`` context manager (its ``__enter__`` provisions/materializes the
+    host and its ``__exit__`` tears it down), binds the builder onto the transport, and runs the
+    synchronous build inside the ``with`` block. ``bind_over_transport`` is referenced by its
+    module-global name so a test monkeypatching it on this module still applies inside the worker
+    thread (ADR-0181).
+    """
+    with factory(host, secret_registry, run_id, source) as transport:
+        git_remote, git_ref = _git_coords(parsed, run_id)
+        bound = bind_over_transport(
+            builder,
+            transport,
+            host_workspace_root=host.workspace_root,
+            git_remote=git_remote,
+            git_ref=git_ref,
+            secret_registry=secret_registry,
+        )
+        return bound.build(run_id, parsed)
 
 
 def _git_coords(parsed: ServerBuildProfile, run_id: UUID) -> tuple[str, str]:
