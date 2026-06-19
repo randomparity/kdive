@@ -43,7 +43,7 @@ from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     is_remote_libvirt_configured,
     remote_config_for_resource,
-    remote_config_from_inventory,
+    unbound_remote_config,
 )
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
 from kdive.providers.remote_libvirt.console.wiring import (
@@ -55,7 +55,6 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtLiveIntrospect,
     RemoteLibvirtVmcoreIntrospect,
 )
-from kdive.providers.remote_libvirt.discovery import RemoteLibvirtDiscovery
 from kdive.providers.remote_libvirt.lifecycle.build_vm import ephemeral_build_session
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
@@ -223,8 +222,13 @@ async def build_console_hosting(
 
 
 def discovery_registration(*, secret_registry: SecretRegistry) -> ProviderDiscoveryRegistration:
+    # Remote-libvirt resource rows are created by reconcile_resources from the systems.toml overlay
+    # (ADR-0112), never by discovery — the registration is creates=False, so the registrar is a
+    # bind-only no-op and never resolves the target. The fleet is multi-host (ADR-0187), so there
+    # is no single host to enumerate here; the target factory fails loudly if it is ever reached.
+    del secret_registry
     return ProviderDiscoveryRegistration(
-        target_factory=lambda: _discovery_target(secret_registry),
+        target_factory=_no_discovery_target,
         kind=ResourceKind.REMOTE_LIBVIRT,
         pool_name=_POOL,
         cost_class=_COST_CLASS,
@@ -232,23 +236,27 @@ def discovery_registration(*, secret_registry: SecretRegistry) -> ProviderDiscov
     )
 
 
-def _discovery_target(secret_registry: SecretRegistry) -> DiscoveryRegistrationTarget:
-    discovery = RemoteLibvirtDiscovery.from_env(secret_registry=secret_registry)
-    return DiscoveryRegistrationTarget(discovery=discovery, resource_id=discovery.host_uri)
+def _no_discovery_target() -> DiscoveryRegistrationTarget:
+    raise CategorizedError(
+        "remote-libvirt discovery does not create resource rows (creates=False); the fleet is "
+        "registered by reconcile_resources from systems.toml",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+    )
 
 
 def build_runtime(
     *,
     secret_registry: SecretRegistry,
-    config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+    config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
 ) -> ProviderRuntime:
     """Build remote-libvirt ports; buildable without operator config (ADR-0076).
 
     ``config_factory`` resolves the remote host's connection config. By default it is the
-    singleton resolver (one declared host); the resolver rebinds the runtime per granted Resource
-    via ``rebind_for_resource`` so a per-op call reaches the *allocated* host (ADR-0187, #395).
-    The ``builder`` and ``vmcore_introspector`` ports take no remote config — they build on a
-    build-host transport / operate on a fetched vmcore, not the remote libvirt host.
+    unbound resolver, which raises if a per-op port is reached without binding: the resolver
+    rebinds the runtime per granted Resource via ``rebind_for_resource`` so a per-op call reaches
+    the *allocated* host (ADR-0187, #395). The ``builder`` and ``vmcore_introspector`` ports take
+    no remote config — they build on a build-host transport / operate on a fetched vmcore, not the
+    remote libvirt host.
     """
     builder = RemoteLibvirtBuild.from_env(secret_registry=secret_registry)
     installer = RemoteLibvirtInstall.from_env(

@@ -23,7 +23,7 @@ import libvirt
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
-    remote_config_from_inventory,
+    unbound_remote_config,
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     StorageConn,
@@ -65,7 +65,7 @@ def _default_secret_backend() -> SecretBackend:
 async def probe_staged_volumes(
     volumes: list[str],
     *,
-    config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+    config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     open_connection: Callable[[str], _StorageProbeConn] = _open_storage_connection,
     secret_backend_factory: Callable[[], SecretBackend] = _default_secret_backend,
     timeout: float = _STAGED_PROBE_TIMEOUT_SECONDS,

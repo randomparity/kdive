@@ -305,7 +305,7 @@ def test_run_reports_configuration_error_when_config_unresolvable_at_run_time(
     monkeypatch, tmp_path: Path
 ) -> None:
     # An instance that passes the inventory loader / gate (so the check is assembled) but fails
-    # remote_config_from_inventory at run time (inverted gdbstub range) → error +
+    # remote_config_for_resource at probe time (inverted gdbstub range) → error +
     # configuration_error, with no connection attempt (config resolved before any open).
     bad = _INSTANCE.replace('gdbstub_range = "47000:47099"', 'gdbstub_range = "47099:47000"')
     _with_remote_instance(monkeypatch, tmp_path, instances=bad)

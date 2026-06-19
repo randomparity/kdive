@@ -25,7 +25,7 @@ import libvirt
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import PowerAction
 from kdive.providers.ports import Controller as Controller
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
@@ -61,7 +61,7 @@ class RemoteLibvirtControl:
         self,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         open_connection: OpenControlConnection = open_libvirt_control,
         secret_backend_factory: Callable[[], SecretBackend] | None = None,
         pki_base_dir: Path | None = None,
@@ -78,7 +78,7 @@ class RemoteLibvirtControl:
         cls,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     ) -> RemoteLibvirtControl:
         """Build from the shared worker env; opens no connection here."""
         return cls(secret_registry=secret_registry, config_factory=config_factory)

@@ -34,11 +34,7 @@ import libvirt
 
 from kdive.diagnostics.checks import BaseImageStagingOutcome, BaseImageStagingProbe
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.remote_libvirt.config import (
-    RemoteLibvirtConfig,
-    remote_config_from_inventory,
-    resolve_base_image_staged_volume,
-)
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     StorageConn,
     VolumeStaging,
@@ -70,8 +66,8 @@ def _default_secret_backend() -> SecretBackend:
 
 def base_image_staging_probe(
     *,
-    config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
-    volume_factory: Callable[[], str] = resolve_base_image_staged_volume,
+    config_factory: Callable[[], RemoteLibvirtConfig],
+    volume_factory: Callable[[], str],
     open_connection: Callable[[str], _StorageProbeConn] = _open_storage_connection,
     secret_backend_factory: Callable[[], SecretBackend] = _default_secret_backend,
     pki_base_dir: Path | None = None,

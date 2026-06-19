@@ -124,7 +124,7 @@ def is_remote_libvirt_configured() -> bool:
     present-but-malformed file is treated as not-configured here too — so a bad operator edit to
     the shared ``systems.toml`` cannot crash the whole MCP server or the unrelated providers
     (ADR-0112's fault-isolation contract). The precise parse error still surfaces fail-closed at
-    op time via :func:`remote_config_from_inventory`.
+    op time via :func:`remote_config_for_resource`.
     """
     try:
         return bool(_load_remote_instances())
@@ -132,63 +132,31 @@ def is_remote_libvirt_configured() -> bool:
         return False
 
 
-def _resolve_instance() -> RemoteLibvirtInstance:
-    """Resolve the single declared remote-libvirt instance for a per-op connection.
+def unbound_remote_config() -> RemoteLibvirtConfig:
+    """The default per-op ``config_factory``: a remote port used without a bound host.
+
+    Every per-op remote-libvirt port resolves its host config from the granted Resource's name
+    (the resolver binds it via ``ProviderRuntime.rebind_for_resource``, ADR-0187, #395). A port
+    that reaches this default was used unbound — a wiring bug, not an operator error — so it fails
+    loudly rather than guessing a host.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when no ``[[remote_libvirt]]`` instance is
-            declared, or when more than one is — the per-op call path carries no resource
-            identity, so it cannot select among multiple remote-libvirt hosts (the
-            allocation → resource → instance threading is future work). Failing closed here is
-            safer than silently dispatching an op to the wrong host.
+        CategorizedError: ``CONFIGURATION_ERROR`` always.
     """
-    return _require_single_instance(_load_remote_instances())
-
-
-def _require_single_instance(
-    instances: list[RemoteLibvirtInstance],
-) -> RemoteLibvirtInstance:
-    """Return the one declared instance, or fail closed for zero/many (the single guard home)."""
-    if not instances:
-        raise CategorizedError(
-            "no [[remote_libvirt]] instance is declared in systems.toml; the remote-libvirt "
-            "provider needs one",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    if len(instances) > 1:
-        names = sorted(inst.name for inst in instances)
-        raise CategorizedError(
-            "multiple [[remote_libvirt]] instances are declared "
-            f"({names}); per-op selection among multiple remote-libvirt hosts is not wired",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    return instances[0]
-
-
-def resolve_base_image_staged_volume() -> str:
-    """Return the staged base-image volume name for the single ``[[remote_libvirt]]`` instance.
-
-    Resolves the instance's ``base_image`` cross-reference to its ``[[image]]`` entry and returns
-    that image's operator-staged ``volume``. This is the name the provider looks up on the host's
-    storage pool at provision time, and the same name the base-image-staging diagnostic probes.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when no ``[[remote_libvirt]]`` instance (or more
-            than one) is declared, the inventory is malformed, the ``base_image`` names no declared
-            ``[[image]]``, or that image's source is not ``staged`` (a build/S3 image has no
-            operator-staged volume to look up).
-    """
-    doc = _load_inventory_doc()
-    images = doc.image if doc is not None else []
-    instance = _require_single_instance(list(doc.remote_libvirt) if doc is not None else [])
-    return _staged_volume_for_instance(instance, images)
+    raise CategorizedError(
+        "remote-libvirt port used without a bound host; the runtime must be rebound to the "
+        "granted resource (ProviderRuntime.for_resource) before a per-op call",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+    )
 
 
 def resolve_base_image_staged_volume_for(resource_name: str) -> str:
     """Return the staged base-image volume for the named ``[[remote_libvirt]]`` instance.
 
-    The by-name variant of :func:`resolve_base_image_staged_volume` for fleets with more than one
-    declared remote host (ADR-0187, #395).
+    Resolves the named instance's ``base_image`` cross-reference to its ``[[image]]`` entry and
+    returns that image's operator-staged ``volume`` — the name the provider looks up on the host's
+    storage pool at provision time, and the same name the base-image-staging diagnostic probes
+    (ADR-0187, #395).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when no instance named ``resource_name`` is
@@ -362,17 +330,3 @@ def all_remote_configs_by_name() -> list[tuple[str, RemoteLibvirtConfig]]:
             instance fails validation.
     """
     return [(inst.name, _build_config(inst)) for inst in _load_remote_instances()]
-
-
-def remote_config_from_inventory() -> RemoteLibvirtConfig:
-    """Resolve the remote-libvirt connection config from the single ``systems.toml`` instance.
-
-    Retained for the not-yet-migrated singleton callers; per-op callers resolve by resource via
-    :func:`remote_config_for_resource` (#395).
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when no instance (or more than one) is declared,
-            the inventory file is malformed, the URI is not mutual-TLS-safe, or the gdbstub range
-            is malformed, out of range, or inverted.
-    """
-    return _build_config(_resolve_instance())

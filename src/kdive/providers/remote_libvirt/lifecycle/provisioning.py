@@ -31,7 +31,7 @@ from kdive.profiles.provisioning import (
     RemoteLibvirtProfile,
     require_concrete_sizing,
 )
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.lifecycle.gdb import (
     DOMAIN_PREFIX,
     allocate_gdb_port,
@@ -128,7 +128,7 @@ class RemoteLibvirtProvisioning:
         *,
         secret_registry: SecretRegistry,
         connections: RemoteLibvirtConnections[_ProvisionConn] | None = None,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         sleep: Sleep = time.sleep,
         monotonic: Monotonic = time.monotonic,
         agent_timeout_s: float = _AGENT_TIMEOUT_S,

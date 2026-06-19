@@ -32,7 +32,7 @@ from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     remote_config_for_resource,
-    remote_config_from_inventory,
+    unbound_remote_config,
 )
 from kdive.providers.remote_libvirt.guest.agent import AgentCommand, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
@@ -224,7 +224,7 @@ class EphemeralBuildVm:
         *,
         secret_registry: SecretRegistry,
         connections: RemoteLibvirtConnections[_BuildConn] | None = None,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         agent_command: AgentCommand = qemu_agent_command,
         timing: BuildVmTiming = _DEFAULT_BUILD_VM_TIMING,
     ) -> None:

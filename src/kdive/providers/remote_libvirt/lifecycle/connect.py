@@ -20,7 +20,7 @@ from kdive.providers.ports import (
     TransportHandle,
     TransportHandleData,
 )
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
 
@@ -41,7 +41,7 @@ class RemoteLibvirtConnect:
     def __init__(
         self,
         *,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         resolve_port: _ResolvePort | None = None,
         probe: _Probe | None = None,
     ) -> None:
@@ -53,7 +53,7 @@ class RemoteLibvirtConnect:
     def from_env(
         cls,
         *,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     ) -> RemoteLibvirtConnect:
         """Build with the real ``live_vm``-gated domain-XML reader + socket probe."""
         return cls(config_factory=config_factory)

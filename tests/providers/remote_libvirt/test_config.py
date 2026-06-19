@@ -23,10 +23,11 @@ from kdive.providers.remote_libvirt.config import (
     all_remote_configs,
     is_remote_libvirt_configured,
     remote_config_for_resource,
-    remote_config_from_inventory,
-    resolve_base_image_staged_volume,
+    resolve_base_image_staged_volume_for,
 )
 from kdive.providers.remote_libvirt.lifecycle.gdb import allocate_gdb_port
+
+_RESOURCE = "ub24-big"
 
 _INSTANCE = """
 name = "ub24-big"
@@ -77,9 +78,18 @@ def _no_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config.load()
 
 
-def test_single_instance_builds_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_singleton_resolver_is_gone() -> None:
+    # ADR-0187, #395: the no-arg singleton resolver and its guards are deleted; per-op callers
+    # resolve by resource name. Guard the deletion so a stray re-introduction is caught.
+    assert not hasattr(config_module, "remote_config_from_inventory")
+    assert not hasattr(config_module, "_require_single_instance")
+    assert not hasattr(config_module, "_resolve_instance")
+    assert not hasattr(config_module, "resolve_base_image_staged_volume")
+
+
+def test_by_name_builds_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_inventory(tmp_path, monkeypatch)
-    cfg = remote_config_from_inventory()
+    cfg = remote_config_for_resource(_RESOURCE)
     assert cfg.uri == "qemu+tls://host.example/system"
     assert cfg.cert_refs.client_cert_ref == "remote/clientcert.pem"
     assert cfg.cert_refs.client_key_ref == "remote/clientkey.pem"  # pragma: allowlist secret
@@ -111,22 +121,25 @@ def test_gate_degrades_on_malformed_inventory(
     assert is_remote_libvirt_configured() is False
 
 
-def test_no_instance_is_configuration_error(
+def test_unknown_resource_is_configuration_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _no_inventory(tmp_path, monkeypatch)
     with pytest.raises(CategorizedError) as excinfo:
-        remote_config_from_inventory()
+        remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_multiple_instances_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    second = _INSTANCE.replace('name = "ub24-big"', 'name = "ub24-small"')
+def test_multiple_instances_each_resolvable_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0187, #395: multiple instances are now supported; each resolves by its own name.
+    second = _INSTANCE.replace('name = "ub24-big"', 'name = "ub24-small"').replace(
+        "qemu+tls://host.example/system", "qemu+tls://host2.example/system"
+    )
     _write_inventory(tmp_path, monkeypatch, instances=f"{_INSTANCE}---{second}")
-    with pytest.raises(CategorizedError) as excinfo:
-        remote_config_from_inventory()
-    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "multiple" in str(excinfo.value)
+    assert remote_config_for_resource("ub24-big").uri == "qemu+tls://host.example/system"
+    assert remote_config_for_resource("ub24-small").uri == "qemu+tls://host2.example/system"
 
 
 def test_malformed_inventory_is_configuration_error(
@@ -137,7 +150,7 @@ def test_malformed_inventory_is_configuration_error(
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
     config.load()
     with pytest.raises(CategorizedError) as excinfo:
-        remote_config_from_inventory()
+        remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -203,19 +216,19 @@ def test_uri_with_no_verify_is_rejected(tmp_path: Path, monkeypatch: pytest.Monk
     )
     _write_inventory(tmp_path, monkeypatch, instances=instance)
     with pytest.raises(CategorizedError) as excinfo:
-        remote_config_from_inventory()
+        remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_explicit_cap_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     instance = f"{_INSTANCE}concurrent_allocation_cap = 4\n"
     _write_inventory(tmp_path, monkeypatch, instances=instance)
-    assert remote_config_from_inventory().concurrent_allocation_cap == 4
+    assert remote_config_for_resource(_RESOURCE).concurrent_allocation_cap == 4
 
 
 def test_provisioning_knob_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_inventory(tmp_path, monkeypatch)
-    cfg = remote_config_from_inventory()
+    cfg = remote_config_for_resource(_RESOURCE)
     assert cfg.storage_pool == "default"
     assert cfg.network == "default"
     assert cfg.machine == "pc"
@@ -226,7 +239,7 @@ def test_provisioning_knobs_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_NETWORK", "lab-net")
     monkeypatch.setenv("KDIVE_REMOTE_LIBVIRT_MACHINE", "q35")
     _write_inventory(tmp_path, monkeypatch)
-    cfg = remote_config_from_inventory()
+    cfg = remote_config_for_resource(_RESOURCE)
     assert cfg.storage_pool == "kdive-pool"
     assert cfg.network == "lab-net"
     assert cfg.machine == "q35"
@@ -236,27 +249,28 @@ def test_resolve_base_image_staged_volume_returns_volume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_inventory(tmp_path, monkeypatch)
-    assert resolve_base_image_staged_volume() == "fedora-kdive-remote-base-43.qcow2"
+    assert resolve_base_image_staged_volume_for(_RESOURCE) == "fedora-kdive-remote-base-43.qcow2"
 
 
-def test_resolve_base_image_staged_volume_no_instance_is_configuration_error(
+def test_resolve_base_image_staged_volume_unknown_resource_is_configuration_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _no_inventory(tmp_path, monkeypatch)
     with pytest.raises(CategorizedError) as excinfo:
-        resolve_base_image_staged_volume()
+        resolve_base_image_staged_volume_for(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_resolve_base_image_staged_volume_multiple_instances_fail_closed(
+def test_resolve_base_image_staged_volume_each_instance_resolves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    second = _INSTANCE.replace('name = "ub24-big"', 'name = "ub24-small"')
+    # ADR-0187, #395: with multiple instances, the by-name resolver returns each host's own
+    # staged volume.
+    second = _INSTANCE.replace('name = "ub24-big"', 'name = "ub24-small"').replace(
+        "qemu+tls://host.example/system", "qemu+tls://host2.example/system"
+    )
     _write_inventory(tmp_path, monkeypatch, instances=f"{_INSTANCE}---{second}")
-    with pytest.raises(CategorizedError) as excinfo:
-        resolve_base_image_staged_volume()
-    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "multiple" in str(excinfo.value)
+    assert resolve_base_image_staged_volume_for("ub24-small") == "fedora-kdive-remote-base-43.qcow2"
 
 
 def test_resolve_base_image_staged_volume_absent_image_is_configuration_error(
@@ -274,7 +288,7 @@ def test_resolve_base_image_staged_volume_absent_image_is_configuration_error(
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
     config.load()
     with pytest.raises(CategorizedError) as excinfo:
-        resolve_base_image_staged_volume()
+        resolve_base_image_staged_volume_for(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -295,7 +309,7 @@ object_key = "images/fedora.qcow2"
 """
     _write_inventory(tmp_path, monkeypatch, image=s3_image)
     with pytest.raises(CategorizedError) as excinfo:
-        resolve_base_image_staged_volume()
+        resolve_base_image_staged_volume_for(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "staged" in str(excinfo.value)
 
@@ -307,7 +321,7 @@ def test_bad_gdbstub_range_is_configuration_error(
     instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', f'gdbstub_range = "{bad}"')
     _write_inventory(tmp_path, monkeypatch, instances=instance)
     with pytest.raises(CategorizedError) as excinfo:
-        remote_config_from_inventory()
+        remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -319,7 +333,7 @@ def test_single_port_range_names_the_reserved_probe_port(
     instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', 'gdbstub_range = "47000:47000"')
     _write_inventory(tmp_path, monkeypatch, instances=instance)
     with pytest.raises(CategorizedError) as excinfo:
-        remote_config_from_inventory()
+        remote_config_for_resource(_RESOURCE)
     message = str(excinfo.value)
     assert "at least 2 ports" in message
     assert "reserved for the ACL probe" in message
@@ -329,7 +343,7 @@ def test_two_port_range_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     # Boundary: exactly one reserved probe port + one assignable System port.
     instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', 'gdbstub_range = "47000:47001"')
     _write_inventory(tmp_path, monkeypatch, instances=instance)
-    cfg = remote_config_from_inventory()
+    cfg = remote_config_for_resource(_RESOURCE)
     assert (cfg.gdb_port_min, cfg.gdb_port_max) == (47000, 47001)
 
 
@@ -339,7 +353,7 @@ def test_acl_probe_port_and_assignable_floor(
     # The lowest port is the reserved ACL probe port; System allocation starts one above it
     # (ADR-0184).
     _write_inventory(tmp_path, monkeypatch)
-    cfg = remote_config_from_inventory()
+    cfg = remote_config_for_resource(_RESOURCE)
     assert cfg.acl_probe_port == cfg.gdb_port_min == 47000
     assert cfg.assignable_gdb_port_min == cfg.gdb_port_min + 1 == 47001
     assert cfg.assignable_gdb_port_min <= cfg.gdb_port_max

@@ -75,7 +75,7 @@ def test_from_env_without_inventory_raises_configuration_error(
 ) -> None:
     monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
     with pytest.raises(CategorizedError) as excinfo:
-        RemoteLibvirtDiscovery.from_env(secret_registry=SecretRegistry())
+        RemoteLibvirtDiscovery.from_env(secret_registry=SecretRegistry(), resource_name="ub24-big")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 

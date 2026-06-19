@@ -21,7 +21,7 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import IntrospectOutput
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, unbound_remote_config
 from kdive.providers.remote_libvirt.guest.agent import (
     AgentCommand,
     AgentExecResult,
@@ -181,7 +181,7 @@ class RemoteLibvirtLiveIntrospect:
         self,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         open_connection: _OpenConnection | None = None,
         agent_command: AgentCommand = qemu_agent_command,
         secret_backend_factory: Callable[[], SecretBackend] | None = None,
@@ -199,7 +199,7 @@ class RemoteLibvirtLiveIntrospect:
         cls,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     ) -> RemoteLibvirtLiveIntrospect:
         """Build from env; opens no connection (config read per op)."""
         return cls(secret_registry=secret_registry, config_factory=config_factory)
