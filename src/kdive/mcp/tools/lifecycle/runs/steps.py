@@ -101,6 +101,9 @@ async def _enqueue_step(
             RunPayload(run_id=str(run.id)),
             job_authorizing(ctx, run.project),
             f"{run.id}:{step}",
+            # A terminally-failed step is recycled to a fresh attempt so a transient blip can be
+            # retried in place without a rebuild; the per-Run lock serializes retries (ADR-0185).
+            retry_terminal_failed=True,
         )
         await audit.record(
             conn,

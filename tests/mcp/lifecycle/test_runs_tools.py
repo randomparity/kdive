@@ -3162,6 +3162,49 @@ def test_install_is_idempotent_returns_same_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_install_retries_terminal_failed_step_without_rebuild(migrated_url: str) -> None:
+    # A transient install failure dead-letters the step job; re-calling runs.install must recycle
+    # it to a fresh queued attempt (no new build), not return the wedged failed job (#603).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            first = await _install(pool, _ctx(), run_id)
+            # Dead-letter the step job, as the worker would after exhausting attempts.
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state='failed', attempt=3, "
+                    "error_category='transport_failure', "
+                    'failure_context=\'{"failure_message": "blip"}\'::jsonb '
+                    "WHERE dedup_key=%s",
+                    (f"{run_id}:install",),
+                )
+
+            retry = await _install(pool, _ctx(), run_id)
+
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state, attempt, error_category FROM jobs WHERE dedup_key=%s",
+                    (f"{run_id}:install",),
+                )
+                job_row = await cur.fetchone()
+            njobs = await _count(pool, "SELECT count(*) AS n FROM jobs", ())
+            nbuild = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='build'", ())
+            nstate = await _count(
+                pool, "SELECT count(*) AS n FROM runs WHERE id=%s AND state='succeeded'", (run_id,)
+            )
+        assert retry.object_id == first.object_id  # same Run; same step job recycled in place
+        assert retry.status == "queued"
+        assert job_row is not None
+        assert job_row["state"] == "queued"
+        assert job_row["attempt"] == 0
+        assert job_row["error_category"] is None
+        assert njobs == 1  # recycled in place, no duplicate
+        assert nbuild == 0  # no rebuild
+        assert nstate == 1  # Run stays succeeded
+
+    asyncio.run(_run())
+
+
 def test_cmdline_default_is_kdump_reserving_for_kdump(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
