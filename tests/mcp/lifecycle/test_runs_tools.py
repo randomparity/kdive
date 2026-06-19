@@ -479,7 +479,10 @@ def test_envelope_for_run_failed_uses_run_failure_category() -> None:
 
     assert resp.status == "error"
     assert resp.error_category == "build_failure"
-    assert resp.data == {"current_status": "failed"}
+    assert resp.data["current_status"] == "failed"
+    assert "investigation_id" in resp.data
+    assert resp.data["build_source"] == "server"  # _profile() default
+    assert resp.data["build_source_provenance"] == "warm-tree"  # _profile() has string ref
 
 
 def test_envelope_for_run_failed_defaults_to_infrastructure_failure() -> None:
@@ -4588,3 +4591,53 @@ def test_finalize_build_after_cancel_does_not_resurrect_run(migrated_url: str) -
             assert await _run_state(pool, run_id) == "canceled"
 
     asyncio.run(_run())
+
+
+def test_run_envelope_surfaces_investigation_build_and_artifacts() -> None:
+    inv_id = uuid4()
+    run = Run(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        investigation_id=inv_id,
+        system_id=None,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
+        state=RunState.SUCCEEDED,
+        build_profile={
+            "source": "server",
+            "build_host": "build-1",
+            "kernel_source_ref": {"git": {"remote": "https://h/r", "ref": "main"}},
+        },
+        kernel_ref="s3://bucket/vmlinuz",
+        debuginfo_ref="s3://bucket/vmlinux",
+    )
+    resp = runs_common.envelope_for_run(run)
+    assert resp.data["investigation_id"] == str(inv_id)
+    assert resp.data["build_source"] == "server"
+    assert resp.data["build_host"] == "build-1"
+    assert resp.data["build_source_provenance"] == "git"
+    assert resp.refs == {"kernel": "s3://bucket/vmlinuz", "debuginfo": "s3://bucket/vmlinux"}
+    assert "h/r" not in str(resp.data)
+
+
+def test_failed_run_envelope_keeps_investigation_and_artifacts() -> None:
+    run = Run(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        investigation_id=uuid4(),
+        system_id=None,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
+        state=RunState.FAILED,
+        build_profile=_profile(),
+        failure_category=ErrorCategory.INSTALL_FAILURE,
+        kernel_ref="s3://bucket/vmlinuz",
+    )
+    resp = runs_common.envelope_for_run(run)
+    assert resp.status == "error"
+    assert "investigation_id" in resp.data
+    assert resp.refs == {"kernel": "s3://bucket/vmlinuz"}

@@ -455,3 +455,23 @@ def test_state_filter_rejects_invalid_values(migrated_url: str, bad_state: str) 
         assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
+
+
+def test_list_surfaces_placement_no_per_item_keys(migrated_url: str) -> None:
+    """systems.list rows carry resource_id + allocation_id, but no get-only N+1 keys."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, resource_id=res)
+            await _seed_system(pool, allocation_id=alloc)
+            resp = await _list_systems(pool, _ctx())
+        assert resp.status == "ok" and len(resp.items) == 1
+        item = resp.items[0]
+        assert item.data["resource_id"] == str(res)
+        assert item.data["allocation_id"] == str(alloc)
+        assert "active_run" not in item.data
+        assert "active_debug_session_ids" not in item.data
+
+    asyncio.run(_run())

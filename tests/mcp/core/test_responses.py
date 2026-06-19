@@ -458,3 +458,15 @@ def test_every_category_has_an_explicit_expected_bool() -> None:
         ErrorCategory.ALLOCATION_DENIED: False,
     }
     assert expected == _RETRYABLE_BY_CATEGORY
+
+
+def test_failure_carries_optional_refs() -> None:
+    resp = ToolResponse.failure("run-1", ErrorCategory.INSTALL_FAILURE, refs={"kernel": "s3://b/k"})
+    assert resp.refs == {"kernel": "s3://b/k"}
+    assert resp.error_category == ErrorCategory.INSTALL_FAILURE.value
+    assert resp.retryable is False  # category-iff-failure invariant still holds
+
+
+def test_failure_refs_default_empty() -> None:
+    resp = ToolResponse.failure("run-1", ErrorCategory.INSTALL_FAILURE)
+    assert resp.refs == {}

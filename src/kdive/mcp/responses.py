@@ -171,6 +171,7 @@ class ToolResponse(BaseModel):
         *,
         detail: str | None = None,
         suggested_next_actions: list[str] | None = None,
+        refs: dict[str, str] | None = None,
         data: ResponseDataInput | None = None,
     ) -> ToolResponse:
         return cls(
@@ -179,6 +180,7 @@ class ToolResponse(BaseModel):
             error_category=category.value,
             detail=suppressed_detail(category, detail),
             suggested_next_actions=suggested_next_actions or [],
+            refs=refs or {},
             data=dict(data or {}),
         )
 
