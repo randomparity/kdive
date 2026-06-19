@@ -318,25 +318,26 @@ git commit -m "feat(allocation): surface requested_pool; document pool field (#5
 
 ## Part B — Remote-libvirt de-singletoning (ADR-0187, #395)
 
-### Task B1: `remote_config_for_resource` + `all_remote_configs`; delete the singleton
+### Task B1: Add `remote_config_for_resource` + `all_remote_configs` (keep the singleton until B8)
 
 **Files:**
-- Modify: `src/kdive/providers/remote_libvirt/config.py` (`_resolve_instance` line 135-145, `_require_single_instance` line 148-165, `remote_config_from_inventory` line 243-275, `resolve_base_image_staged_volume` line 168-197)
+- Modify: `src/kdive/providers/remote_libvirt/config.py` (factor out `_build_config`; add the two new functions; **keep** `remote_config_from_inventory` / `_resolve_instance` / `_require_single_instance` untouched for now)
 - Test: `tests/providers/remote_libvirt/test_config.py`
 
 **Interfaces:**
 - Produces:
   - `remote_config_for_resource(resource_name: str) -> RemoteLibvirtConfig` — selects the instance whose `name == resource_name`; zero matches → `CONFIGURATION_ERROR` naming the missing instance.
   - `all_remote_configs() -> list[RemoteLibvirtConfig]` — validates and returns every declared instance.
-  - `remote_config_from_inventory` and `_require_single_instance`/`_resolve_instance` are **deleted**.
+  - `resolve_base_image_staged_volume_for(resource_name: str) -> str` — by-name variant (the old no-arg `resolve_base_image_staged_volume` stays until its callers migrate in B6).
+- **Green-at-every-commit:** B1 is purely additive. `remote_config_from_inventory` and the singleton guards are **not** deleted here — they are deleted in **B8** only after B2–B7 migrate every caller. This keeps `just type`/`just test` green at each commit (deleting the symbol now would break ~15 importers).
 
-- [ ] **Step 1: Write the failing test.** With two `[[remote_libvirt]]` instances (`a`, `b`) in a temp `systems.toml`: `remote_config_for_resource("b").uri` is b's URI; `remote_config_for_resource("c")` raises `CONFIGURATION_ERROR`; `all_remote_configs()` returns 2 configs; per-instance validation (`validate_remote_uri`, gdbstub range) still fires for the selected instance.
+- [ ] **Step 1: Write the failing test.** With two `[[remote_libvirt]]` instances (`a`, `b`) in a temp `systems.toml`: `remote_config_for_resource("b").uri` is b's URI; `remote_config_for_resource("c")` raises `CONFIGURATION_ERROR`; `all_remote_configs()` returns 2 configs; per-instance validation (`validate_remote_uri`, gdbstub range) still fires for the selected instance. (Note: today's parser still rejects 2 instances — Task B4 relaxes it. For this test, construct the instances list directly / monkeypatch `_load_remote_instances` to return two, rather than parsing a 2-instance file, so B1 does not depend on B4.)
 
 - [ ] **Step 2: Run to verify it fails.**
   Run: `uv run python -m pytest tests/providers/remote_libvirt/test_config.py -q`
   Expected: FAIL — new functions absent.
 
-- [ ] **Step 3: Implement.** Add a private `_build_config(instance) -> RemoteLibvirtConfig` factoring out the body of today's `remote_config_from_inventory` (validate URI, parse range, construct). Then:
+- [ ] **Step 3: Implement.** Add a private `_build_config(instance) -> RemoteLibvirtConfig` factoring out the body of today's `remote_config_from_inventory` (validate URI, parse range, construct), and have `remote_config_from_inventory` call it (so behavior is unchanged). Then add:
 
 ```python
 def remote_config_for_resource(resource_name: str) -> RemoteLibvirtConfig:
@@ -356,17 +357,17 @@ def all_remote_configs() -> list[RemoteLibvirtConfig]:
     return [_build_config(i) for i in _load_remote_instances()]
 ```
 
-  Delete `remote_config_from_inventory`, `_resolve_instance`, `_require_single_instance`. Update `resolve_base_image_staged_volume` to take `resource_name: str` and select that instance by name (no longer single).
+  Add a `resolve_base_image_staged_volume_for(resource_name)` by-name variant alongside the existing function (do not remove the old one yet).
 
 - [ ] **Step 4: Run to verify it passes.**
-  Run: `uv run python -m pytest tests/providers/remote_libvirt/test_config.py -q`
-  Expected: PASS. (Other modules will not compile yet — that's expected; B2–B6 fix them.)
+  Run: `just type && uv run python -m pytest tests/providers/remote_libvirt/test_config.py -q`
+  Expected: PASS — tree stays green (singleton still present, all callers compile).
 
 - [ ] **Step 5: Commit.**
 
 ```bash
 git add src/kdive/providers/remote_libvirt/config.py tests/
-git commit -m "feat(remote): resolve remote config by resource name (#395)"
+git commit -m "feat(remote): add by-name + fleet remote config resolvers (#395)"
 ```
 
 ### Task B2: `ProviderRuntime.for_resource` rebind hook + remote build_runtime parameterization
@@ -511,7 +512,7 @@ git commit -m "feat(remote): per-resource console + reconciler reset/reap (#395)
 - Test: `tests/providers/remote_libvirt/diagnostics/` (or wherever the doctor probe tests live — `rg -l "reachability\|base_image_staging" tests/`)
 
 **Interfaces:**
-- Consumes: `all_remote_configs` (B1), `resolve_base_image_staged_volume(resource_name)` (B1).
+- Consumes: `all_remote_configs` (B1), `resolve_base_image_staged_volume_for(resource_name)` (B1).
 - Produces: each remote diagnostic emits one result row per declared instance.
 
 - [ ] **Step 1: Write the failing test.** With two instances, the reachability/base-image/contribution probe returns two result rows (one per host), not one.
@@ -520,7 +521,7 @@ git commit -m "feat(remote): per-resource console + reconciler reset/reap (#395)
   Run: `uv run python -m pytest tests/providers/remote_libvirt/ -q -k "diagnostic or reachability or staging"`
   Expected: FAIL.
 
-- [ ] **Step 3: Implement.** Change each probe to iterate `all_remote_configs()` (and `resolve_base_image_staged_volume(name)` per instance), emitting per-host results. `contribution.py:50` `remote_config_from_inventory()` → loop over `all_remote_configs()`. Preserve each probe's existing per-host result shape.
+- [ ] **Step 3: Implement.** Change each probe to iterate `all_remote_configs()` (and `resolve_base_image_staged_volume_for(name)` per instance), emitting per-host results. `contribution.py:50` `remote_config_from_inventory()` → loop over `all_remote_configs()`. Preserve each probe's existing per-host result shape.
 
 - [ ] **Step 4: Run to verify it passes.**
   Run: `uv run python -m pytest tests/providers/remote_libvirt/ -q`
@@ -561,16 +562,19 @@ git add src/kdive/providers/remote_libvirt/ tests/
 git commit -m "feat(remote): resolve build-VM config by build-host name (#395)"
 ```
 
-### Task B8: Sweep for residual singleton references + full guardrails
+### Task B8: Delete the singleton; sweep for residual references + full guardrails
 
 **Files:**
+- Modify: `src/kdive/providers/remote_libvirt/config.py` (now-unused `remote_config_from_inventory`, `_resolve_instance`, `_require_single_instance`, the old no-arg `resolve_base_image_staged_volume`)
 - Verify across `src/kdive` and `tests`.
 
-- [ ] **Step 1: Grep proof.**
-  Run: `rg -n "remote_config_from_inventory|_require_single_instance|_resolve_instance|_check_remote_libvirt_singleton" src/kdive`
-  Expected: **no matches** (all deleted/replaced).
+- [ ] **Step 1: Confirm no production caller remains, then delete.**
+  Run: `rg -n "remote_config_from_inventory|_require_single_instance|_resolve_instance|resolve_base_image_staged_volume\b" src/kdive`
+  Expected: only the definitions in `config.py` remain (B2–B7 migrated every caller). If any other module still references them, that module's task (B2/B5/B6/B7) was incomplete — finish it first, do not delete. Then delete the four now-unused definitions from `config.py`.
 
-- [ ] **Step 2: Full local suite + guardrails.**
+- [ ] **Step 2: Grep proof + full local suite.**
+  Run: `rg -n "remote_config_from_inventory|_require_single_instance|_resolve_instance|_check_remote_libvirt_singleton" src/kdive`
+  Expected: **no matches**.
   Run: `just lint && just type && just test`
   Expected: PASS. Fix any remaining import of the deleted symbols.
 
@@ -592,6 +596,6 @@ git commit -m "test(remote): guard against singleton config resurrection (#395)"
 ## Self-review notes
 
 - **Spec coverage:** A1-A8 cover Part A (migration, persistence, placement, payload, admission, promotion, declaration, observability). B1-B8 cover Part B (per-resource config, runtime rebind, resolver chokepoint, singleton relax, console/reconciler/diagnostics/build callers, residual sweep). The tenant-isolation safeguard is in A5 (generic pool denial, no enumeration) + its test.
-- **Ordering:** A1→A2 (column before persistence); A3/A4 independent; A5 depends on A2/A3/A4; A6 on A2/A3; A7 independent; A8 on A2. B1 first (new API); B2 on B1; B3 on B2; B4 independent of B2/B3 but do after; B5/B6/B7 on B1/B2; B8 last. Part A and Part B are independent and may proceed in parallel only in separate worktrees (they touch disjoint files except none overlap) — but to keep one branch, run sequentially A then B.
+- **Ordering:** A1→A2 (column before persistence); A3/A4 independent; A5 depends on A2/A3/A4; A6 on A2/A3; A7 independent; A8 on A2. B1 first (additive new API, keeps the singleton); B2 on B1; B3 on B2; B4 independent of B2/B3 but do after; B5/B6/B7 on B1/B2; **B8 last (deletes the singleton only after every caller migrated — every prior commit stays green)**. Run **sequentially on one branch, A then B**: Part A and Part B are **not** file-disjoint — A7 and B4 both edit `inventory/model.py` (A7 the `_Instance` model, B4 the singleton guard + parse), and A7 also edits `reconcile_resources.py`. Do not run them in parallel worktrees; serialize A7 before B4.
 - **Risk — requested_pool XOR:** kept a service-layer invariant (A2/A5), no SQL XOR CHECK, matching 0016's `requested_kind` treatment (spec Open Risks).
 - **Verify after base moves:** if `main` advances, re-run `just docs-check`/`config-docs-check` and the migration version-list test (A1).
