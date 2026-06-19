@@ -47,7 +47,14 @@ class ResourceByKind(ToolPayload):
     kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT
 
 
-type ResourceSelector = ResourceById | ResourceByKind
+class ResourceByPool(ToolPayload):
+    """Select the first available resource carrying ``pool`` (ADR-0186, #561)."""
+
+    mode: Literal["pool"] = "pool"
+    pool: str = Field(min_length=1)
+
+
+type ResourceSelector = ResourceById | ResourceByKind | ResourceByPool
 
 
 class AllocationRequestPayload(SelectorPayload):

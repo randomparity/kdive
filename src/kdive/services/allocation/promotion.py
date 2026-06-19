@@ -299,6 +299,7 @@ async def _candidate_hosts(conn: AsyncConnection, alloc: Allocation) -> list[Res
             PlacementRequest(
                 resource_id=alloc.requested_resource_id,
                 kind=alloc.requested_kind,
+                pool=alloc.requested_pool,
                 project=alloc.project,
             ),
         )
@@ -317,6 +318,7 @@ async def _candidate_hosts(conn: AsyncConnection, alloc: Allocation) -> list[Res
         PlacementRequest(
             resource_id=alloc.requested_resource_id,
             kind=alloc.requested_kind,
+            pool=alloc.requested_pool,
             pcie_specs=tuple(alloc.requested_pcie_specs),
             project=alloc.project,
         ),
@@ -349,6 +351,7 @@ def _request_from_queued(alloc: Allocation, resource: Resource) -> AllocationReq
         pcie_specs=tuple(alloc.requested_pcie_specs),
         requested_kind=alloc.requested_kind,
         requested_resource_id=alloc.requested_resource_id,
+        requested_pool=alloc.requested_pool,
     )
 
 

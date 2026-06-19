@@ -8,8 +8,9 @@
 #                             and the `REMOTE_BASE_IMAGE_NAME` literal — all removed in Phase 1).
 #   * `[[remote_libvirt]]` / `[[local_libvirt]]` / `[[fault_inject]]` / `[[build_host]]`
 #                           -> reconciled into `resources` / `build_hosts` (Phases 2-3).
-#                             Remote-libvirt is currently singleton until provider ops carry
-#                             selected Resource identity into remote config resolution.
+#                             Multiple `[[remote_libvirt]]` instances are now supported (ADR-0187,
+#                             #395): per-op provider config selects the granted Resource's host by
+#                             name, so you can pool several remote-libvirt hosts in one fleet.
 #
 # Load it with `kdive reconcile-systems` (or the deploy `migrate` step, or the reconciler loop).
 # Path is `KDIVE_SYSTEMS_TOML` (default `./systems.toml`; in k8s a mounted ConfigMap).
@@ -92,9 +93,10 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # PROVIDER INSTANCES — reconciled into resources (Phase 2-3; shown here for reference).
 # ---------------------------------------------------------------------------------------------
 
-# Remote-libvirt currently accepts one instance. Per-op provider config still resolves a
-# singleton; declaring multiple [[remote_libvirt]] blocks is rejected until selected Resource
-# identity is threaded into remote provider operations.
+# Remote-libvirt supports multiple instances (ADR-0187, #395): declare as many [[remote_libvirt]]
+# blocks as you have hosts to pool. Per-op provider config selects the granted Resource's host by
+# its instance `name`, so allocations, builds, console hosting, reapers, and diagnostics each reach
+# the right host in a multi-host fleet.
 # [[remote_libvirt]]
 # name = "ub24-big"
 # uri = "qemu+tls://ub24-big.example/system"
@@ -106,6 +108,10 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # base_image = "fedora-kdive-remote-base-43"   # -> an [[image]] name
 # cost_class = "remote"
 # concurrent_allocation_cap = 1
+# pool groups interchangeable hosts for first-available `allocations.request(pool=...)`
+# selection (ADR-0186). Absent -> "default". Put identically-configured hosts in one pool so
+# an agent can request the pool instead of naming a specific host.
+# pool = "big-remote"
 # vcpus and memory_mb are the host's billable size ceiling. Admission's <=-resource-caps
 # check reads them off the Resource, so a remote host without them is un-grantable
 # (allocations.request -> configuration_error). Remote-libvirt is config-owned, so the file
@@ -135,6 +141,7 @@ volume = "fedora-kdive-remote-base-43.qcow2"
 # concurrent_allocation_cap = 1
 # vcpus = 8
 # memory_mb = 8192
+# pool = "default"   # optional; group interchangeable hosts for by-pool allocation (ADR-0186)
 # seed = 1337
 # [[fault_inject]]
 # name = "synthetic-2"

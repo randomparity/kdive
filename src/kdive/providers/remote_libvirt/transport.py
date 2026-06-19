@@ -196,10 +196,21 @@ class RemoteLibvirtConnections[C: ClosableConn]:
     open_connection: Callable[[str], C]
     secret_backend_factory: Callable[[], SecretBackend]
     pki_base_dir: Path | None = None
+    configs_factory: Callable[[], list[RemoteLibvirtConfig]] | None = None
 
     def config(self) -> RemoteLibvirtConfig:
-        """Return the current remote-libvirt operator configuration."""
+        """Return the current remote-libvirt operator configuration (the per-op single host)."""
         return self.config_factory()
+
+    def configs(self) -> list[RemoteLibvirtConfig]:
+        """Return every declared host's config for fleet-wide callers (reapers).
+
+        Defaults to the single :meth:`config` host when no fleet factory is bound, so per-op
+        single-host bundles need not declare one.
+        """
+        if self.configs_factory is not None:
+            return self.configs_factory()
+        return [self.config_factory()]
 
     def connection(self, config: RemoteLibvirtConfig) -> AbstractContextManager[C]:
         """Open one connection with the shared TLS materialization lifecycle."""
@@ -218,8 +229,14 @@ def remote_libvirt_connections[C: ClosableConn](
     open_connection: Callable[[str], C],
     secret_backend_factory: Callable[[], SecretBackend] | None = None,
     pki_base_dir: Path | None = None,
+    configs_factory: Callable[[], list[RemoteLibvirtConfig]] | None = None,
 ) -> RemoteLibvirtConnections[C]:
-    """Build the shared remote-libvirt connection dependency bundle."""
+    """Build the shared remote-libvirt connection dependency bundle.
+
+    ``configs_factory`` (optional) supplies the whole declared fleet for host-agnostic callers
+    (the reconciler reapers fan out over it); per-op single-host callers omit it and the bundle's
+    :meth:`RemoteLibvirtConnections.configs` falls back to the single :meth:`config` host.
+    """
     secret_backend_factory = secret_backend_factory or (
         lambda: secret_backend_from_env(registry=secret_registry)
     )
@@ -228,6 +245,7 @@ def remote_libvirt_connections[C: ClosableConn](
         open_connection=open_connection,
         secret_backend_factory=secret_backend_factory,
         pki_base_dir=pki_base_dir,
+        configs_factory=configs_factory,
     )
 
 

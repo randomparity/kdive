@@ -187,6 +187,38 @@ def test_delete_build_vm_skips_overlay_delete_for_malformed_build_name(tmp_path)
     assert conn.closed
 
 
+def test_list_build_vms_fans_out_over_the_fleet(tmp_path) -> None:
+    # Each declared host runs a leaked builder; the reaper lists across the whole fleet.
+    conn_a = _FakeConn(domains=[_FakeDomain(build_domain_name(_RID))])
+    conn_b = _FakeConn(domains=[_FakeDomain(build_domain_name(_OTHER_RID))])
+    reaper = _fleet_reaper(
+        {"qemu+tls://host-a.example/system": conn_a, "qemu+tls://host-b.example/system": conn_b},
+        tmp_path,
+    )
+
+    result = asyncio.run(reaper.list_build_vms())
+
+    assert {vm.run_id for vm in result} == {_RID, _OTHER_RID}
+    assert conn_a.closed and conn_b.closed
+
+
+def test_delete_build_vm_destroys_on_the_host_that_owns_the_domain(tmp_path) -> None:
+    # Host A has no such domain; host B owns it — the domain is destroyed on B.
+    conn_a = _FakeConn(domains=[])
+    domain_b = _FakeDomain(build_domain_name(_RID))
+    conn_b = _FakeConn(domains=[domain_b])
+    reaper = _fleet_reaper(
+        {"qemu+tls://host-a.example/system": conn_a, "qemu+tls://host-b.example/system": conn_b},
+        tmp_path,
+    )
+
+    asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
+
+    assert domain_b.destroyed == 1
+    assert domain_b.undefined == 1
+    assert conn_b.pool.lookups == [build_overlay_volume_name(_RID)]
+
+
 class _SecretBackend:
     def resolve(self, ref: str) -> str:
         return f"PEM::{ref}"
@@ -307,5 +339,32 @@ def _reaper(conn: _FakeConn, pki_base_dir: Path) -> RemoteLibvirtBuildVmReaper:
             open_connection=cast(OpenReaperConnection, open_connection),
             secret_backend_factory=_SecretBackend,
             pki_base_dir=pki_base_dir,
+        ),
+    )
+
+
+def _fleet_reaper(
+    conns_by_uri: dict[str, _FakeConn], pki_base_dir: Path
+) -> RemoteLibvirtBuildVmReaper:
+    configs = [
+        RemoteLibvirtConfig(uri=uri, cert_refs=_CERT_REFS, concurrent_allocation_cap=1)
+        for uri in conns_by_uri
+    ]
+
+    def open_connection(uri: str) -> _FakeConn:
+        for base, conn in conns_by_uri.items():
+            if uri.startswith(base):
+                return conn
+        raise AssertionError(f"unexpected uri {uri!r}")
+
+    return RemoteLibvirtBuildVmReaper(
+        secret_registry=SecretRegistry(),
+        connections=remote_libvirt_connections(
+            secret_registry=SecretRegistry(),
+            config_factory=lambda: configs[0],
+            open_connection=cast(OpenReaperConnection, open_connection),
+            secret_backend_factory=_SecretBackend,
+            pki_base_dir=pki_base_dir,
+            configs_factory=lambda: configs,
         ),
     )

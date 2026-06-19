@@ -75,6 +75,21 @@ vcpus = 16
 memory_mb = 65536
 """
 
+_SECOND_INSTANCE = """
+[[remote_libvirt]]
+name = "ub24-small"
+uri = "qemu+tls://host2.example/system"
+gdb_addr = "192.168.10.21"
+gdbstub_range = "47000:47099"
+client_cert_ref = "remote/clientcert.pem"
+client_key_ref = "remote/clientkey.pem"  # pragma: allowlist secret
+ca_cert_ref = "remote/cacert.pem"
+base_image = "fedora-kdive-remote-base-43"
+cost_class = "remote"
+vcpus = 8
+memory_mb = 32768
+"""
+
 _IMAGE = """
 [[image]]
 provider = "remote-libvirt"
@@ -176,6 +191,41 @@ def test_remote_worker_checks_build_runnable_tls_and_gdbstub_checks(
     assert by_id[GDBSTUB_ACL_ID].provider == "remote-libvirt"
 
 
+def test_checks_fan_out_one_row_per_declared_instance(monkeypatch, tmp_path: Path) -> None:
+    # ADR-0187: a doctor describes the fleet, so reachability + base-image-staging each emit one
+    # row per declared [[remote_libvirt]] instance (two here → two of each).
+    _with_remote_instance(monkeypatch, tmp_path, instances=_INSTANCE + _SECOND_INSTANCE)
+
+    checks = remote_contribution.diagnostic_contribution().checks()
+    ids = [check.id for check in checks]
+
+    assert ids.count(REACHABILITY_ID) == 2
+    assert ids.count(BASE_IMAGE_STAGING_ID) == 2
+
+
+def test_worker_checks_fan_out_one_row_per_declared_instance(monkeypatch, tmp_path: Path) -> None:
+    _with_remote_instance(monkeypatch, tmp_path, instances=_INSTANCE + _SECOND_INSTANCE)
+
+    async def tls_probe(ca_path: str) -> TlsProbeOutcome:
+        return TlsProbeOutcome.VALID
+
+    async def acl_probe(host: str, port_range: str) -> bool | None:
+        return True
+
+    monkeypatch.setattr(remote_contribution, "provider_tls_probe", lambda _config: tls_probe)
+    monkeypatch.setattr(remote_contribution, "gdbstub_acl_probe", lambda: acl_probe)
+
+    worker_checks = remote_contribution.diagnostic_contribution().worker_checks()
+    worker_ids = [check.id for check in worker_checks]
+    unavailable = remote_contribution.diagnostic_contribution().unavailable_worker_checks()
+    unavailable_ids = [descriptor.id for descriptor in unavailable]
+
+    assert worker_ids.count(PROVIDER_TLS_ID) == 2
+    assert worker_ids.count(GDBSTUB_ACL_ID) == 2
+    assert unavailable_ids.count(PROVIDER_TLS_ID) == 2
+    assert unavailable_ids.count(GDBSTUB_ACL_ID) == 2
+
+
 def test_secret_ref_passes_when_no_ref_is_required(monkeypatch, tmp_path: Path) -> None:
     # The default registry has no conditionally-required secret refs (the remote mTLS refs that
     # used to drive this moved to systems.toml, #395), so the assembled check resolves the empty
@@ -255,7 +305,7 @@ def test_run_reports_configuration_error_when_config_unresolvable_at_run_time(
     monkeypatch, tmp_path: Path
 ) -> None:
     # An instance that passes the inventory loader / gate (so the check is assembled) but fails
-    # remote_config_from_inventory at run time (inverted gdbstub range) → error +
+    # remote_config_for_resource at probe time (inverted gdbstub range) → error +
     # configuration_error, with no connection attempt (config resolved before any open).
     bad = _INSTANCE.replace('gdbstub_range = "47000:47099"', 'gdbstub_range = "47099:47000"')
     _with_remote_instance(monkeypatch, tmp_path, instances=bad)
@@ -299,15 +349,13 @@ def test_base_image_staging_absent_when_not_configured(monkeypatch, tmp_path: Pa
     assert BASE_IMAGE_STAGING_ID not in ids
 
 
-def test_multiple_instances_are_not_configured_so_no_reachability_check(
-    monkeypatch, tmp_path: Path
-) -> None:
-    # The inventory loader rejects >1 [[remote_libvirt]] instance, so is_remote_libvirt_configured()
-    # degrades to False and no remote check is assembled — one MCP call cannot fan out across hosts.
-    two = _INSTANCE + _INSTANCE.replace('"ub24-big"', '"second-host"')
-    _with_remote_instance(monkeypatch, tmp_path, instances=two)
-    ids = {c.id for c in _factory(None)._checks}  # noqa: SLF001
-    assert ids == {SECRET_REF_ID, LOCAL_KERNEL_SRC_ID}
+def test_multiple_instances_each_get_a_reachability_check(monkeypatch, tmp_path: Path) -> None:
+    # ADR-0187, #395: multiple [[remote_libvirt]] instances are now supported; the doctor assembles
+    # one runnable reachability + base-image-staging check per declared host (fan-out).
+    _with_remote_instance(monkeypatch, tmp_path, instances=_INSTANCE + _SECOND_INSTANCE)
+    ids = [c.id for c in _factory(None)._checks]  # noqa: SLF001
+    assert ids.count(REACHABILITY_ID) == 2
+    assert ids.count(BASE_IMAGE_STAGING_ID) == 2
 
 
 # ---- local build-host warm-tree source check (ADR-0163, #532) ------------------------

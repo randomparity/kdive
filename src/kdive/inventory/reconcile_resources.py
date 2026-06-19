@@ -65,12 +65,12 @@ _log = logging.getLogger(__name__)
 # and is distinguished by its (kind, name) identity (the Phase-3 multi-instance goal).
 _FAULT_INJECT_HOST_URI = "fault-inject://local"
 _RESOURCE_UPSERT_SELECT_BY_NAME = (
-    "SELECT id, name, host_uri, cost_class, capabilities, managed_by, "
+    "SELECT id, name, host_uri, cost_class, capabilities, pool, managed_by, "
     "lease_expires_at, owner_project, affinity_allowlist "
     "FROM resources WHERE kind = %s AND name = %s FOR UPDATE"
 )
 _RESOURCE_UPSERT_SELECT_UNNAMED_BY_HOST = (
-    "SELECT id, name, host_uri, cost_class, capabilities, managed_by, "
+    "SELECT id, name, host_uri, cost_class, capabilities, pool, managed_by, "
     "lease_expires_at, owner_project, affinity_allowlist "
     "FROM resources WHERE kind = %s AND host_uri = %s AND name IS NULL FOR UPDATE"
 )
@@ -87,6 +87,7 @@ class _UpsertResourceRow:
     host_uri: str
     cost_class: str
     capabilities: ResourceCaps
+    pool: str
     managed_by: str
     lease_expires_at: datetime | None
     owner_project: str | None
@@ -99,6 +100,7 @@ class _LocalResourceRow:
     name: str | None
     cost_class: str
     capabilities: ResourceCaps
+    pool: str
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,7 @@ class _DeclaredResource:
     host_uri: str
     cost_class: str
     caps: ResourceCaps
+    pool: str
 
 
 async def reconcile_resources(conn: AsyncConnection, doc: InventoryDoc) -> ReconcileDiff:
@@ -170,6 +173,7 @@ async def _create_config_resources(
                 host_uri=_FAULT_INJECT_HOST_URI,
                 cost_class=inst.cost_class,
                 caps=caps,
+                pool=inst.pool,
             )
             async with resource_identity_lock(conn, ResourceKind.FAULT_INJECT, inst.name):
                 await _upsert_config_resource(
@@ -190,6 +194,7 @@ async def _create_config_resources(
                 host_uri=inst.uri,
                 cost_class=inst.cost_class,
                 caps=caps,
+                pool=inst.pool,
             )
             async with resource_identity_lock(conn, ResourceKind.REMOTE_LIBVIRT, inst.name):
                 await _upsert_config_resource(
@@ -271,11 +276,12 @@ async def _insert_config_resource(
     await cur.execute(
         "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, "
         " host_uri, managed_by) "
-        "VALUES (%s, %s, %s, 'default', %s, 'available', %s, %s)",
+        "VALUES (%s, %s, %s, %s, %s, 'available', %s, %s)",
         (
             declared.kind.value,
             declared.name,
             Jsonb(declared.caps),
+            declared.pool,
             declared.cost_class,
             declared.host_uri,
             CONFIG_MANAGED_BY,
@@ -295,13 +301,14 @@ async def _adopt_config_resource(
     """Convert a non-config or scoped resource row into the declared config identity."""
     await cur.execute(
         "UPDATE resources SET name = %s, host_uri = %s, cost_class = %s, capabilities = %s, "
-        "managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
+        "pool = %s, managed_by = %s, lease_expires_at = NULL, owner_project = NULL, "
         "affinity_allowlist = '{}' WHERE id = %s",
         (
             declared.name,
             declared.host_uri,
             declared.cost_class,
             Jsonb(caps),
+            declared.pool,
             CONFIG_MANAGED_BY,
             row.id,
         ),
@@ -322,11 +329,13 @@ async def _update_config_resource(
         row.host_uri == declared.host_uri
         and row.cost_class == declared.cost_class
         and row.capabilities == caps
+        and row.pool == declared.pool
     ):
         return
     await cur.execute(
-        "UPDATE resources SET host_uri = %s, cost_class = %s, capabilities = %s WHERE id = %s",
-        (declared.host_uri, declared.cost_class, Jsonb(caps), row.id),
+        "UPDATE resources SET host_uri = %s, cost_class = %s, capabilities = %s, pool = %s "
+        "WHERE id = %s",
+        (declared.host_uri, declared.cost_class, Jsonb(caps), declared.pool, row.id),
     )
     diff.updated.append(_record(declared.kind, declared.name))
 
@@ -378,7 +387,7 @@ async def _overlay_local_libvirt(
 
 async def _overlay_one_local(cur: Any, inst: LocalLibvirtInstance, diff: ReconcileDiff) -> None:
     await cur.execute(
-        "SELECT id, name, cost_class, capabilities FROM resources "
+        "SELECT id, name, cost_class, capabilities, pool FROM resources "
         "WHERE kind = %s AND host_uri = %s FOR UPDATE",
         (ResourceKind.LOCAL_LIBVIRT.value, inst.host_uri),
     )
@@ -398,12 +407,16 @@ async def _overlay_one_local(cur: Any, inst: LocalLibvirtInstance, diff: Reconci
         CONCURRENT_ALLOCATION_CAP_KEY: inst.concurrent_allocation_cap,
     }
     changed = (
-        row.name != inst.name or row.cost_class != inst.cost_class or row.capabilities != merged
+        row.name != inst.name
+        or row.cost_class != inst.cost_class
+        or row.capabilities != merged
+        or row.pool != inst.pool
     )
     if changed:
         await cur.execute(
-            "UPDATE resources SET name = %s, cost_class = %s, capabilities = %s WHERE id = %s",
-            (inst.name, inst.cost_class, Jsonb(merged), row.id),
+            "UPDATE resources SET name = %s, cost_class = %s, capabilities = %s, pool = %s "
+            "WHERE id = %s",
+            (inst.name, inst.cost_class, Jsonb(merged), inst.pool, row.id),
         )
         diff.updated.append(_record(ResourceKind.LOCAL_LIBVIRT, inst.name))
 
@@ -493,6 +506,7 @@ def _upsert_row(row: Mapping[str, object]) -> _UpsertResourceRow:
         host_uri=host_uri,
         cost_class=cost_class,
         capabilities=_resource_caps(row["capabilities"]),
+        pool=_expect_str(row, "pool"),
         managed_by=managed_by,
         lease_expires_at=lease_expires_at,
         owner_project=owner_project,
@@ -506,6 +520,7 @@ def _local_row(row: Mapping[str, object]) -> _LocalResourceRow:
         name=_expect_optional_str(row, "name"),
         cost_class=_expect_str(row, "cost_class"),
         capabilities=_resource_caps(row["capabilities"]),
+        pool=_expect_str(row, "pool"),
     )
 
 

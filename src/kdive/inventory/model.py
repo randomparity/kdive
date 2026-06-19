@@ -86,6 +86,9 @@ class _Instance(BaseModel):
     name: str
     cost_class: str
     concurrent_allocation_cap: int = 1
+    # The pool label written to resources.pool; groups interchangeable hosts for first-available
+    # by-pool allocation (ADR-0186). Absent → 'default'.
+    pool: str = "default"
 
 
 class RemoteLibvirtInstance(_Instance):
@@ -226,17 +229,6 @@ class InventoryDoc(BaseModel):
             if dupes:
                 raise InventoryError(kind, "name", f"duplicate instance names {dupes}")
 
-    def _check_remote_libvirt_singleton(self) -> None:
-        if len(self.remote_libvirt) <= 1:
-            return
-        names = sorted(inst.name for inst in self.remote_libvirt)
-        raise InventoryError(
-            "remote_libvirt",
-            "instances",
-            "multiple instances are not supported until per-op remote resource selection is wired "
-            f"{names}",
-        )
-
     def _check_cost_class_uniqueness(self) -> None:
         names = [c.name for c in self.cost_class]
         dupes = sorted({n for n in names if names.count(n) > 1})
@@ -279,7 +271,6 @@ class InventoryDoc(BaseModel):
         doc._check_image_identities()
         doc._check_base_image_refs()
         doc._check_instance_name_uniqueness()
-        doc._check_remote_libvirt_singleton()
         doc._check_cost_class_uniqueness()
         doc._check_build_config_uniqueness()
         return doc

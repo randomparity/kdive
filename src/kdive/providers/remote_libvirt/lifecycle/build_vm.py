@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -29,7 +29,11 @@ import libvirt
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import GitSourceRef
 from kdive.providers.ports.build_transport import CommandResult
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import (
+    RemoteLibvirtConfig,
+    remote_config_for_resource,
+    unbound_remote_config,
+)
 from kdive.providers.remote_libvirt.guest.agent import AgentCommand, qemu_agent_command
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.providers.remote_libvirt.lifecycle.provisioning import (
@@ -220,13 +224,14 @@ class EphemeralBuildVm:
         *,
         secret_registry: SecretRegistry,
         connections: RemoteLibvirtConnections[_BuildConn] | None = None,
+        config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
         agent_command: AgentCommand = qemu_agent_command,
         timing: BuildVmTiming = _DEFAULT_BUILD_VM_TIMING,
     ) -> None:
         self._secret_registry = secret_registry
         self._connections = connections or remote_libvirt_connections(
             secret_registry=secret_registry,
-            config_factory=remote_config_from_inventory,
+            config_factory=config_factory,
             open_connection=open_libvirt_provision,
         )
         self._agent_command = agent_command
@@ -456,18 +461,24 @@ def ephemeral_build_session(
     secret_registry: SecretRegistry,
     *,
     run_id: UUID,
+    resource_name: str,
     source: GitSourceRef | None = None,
     wait_network: bool = True,
 ) -> Iterator[GuestExecBuildTransport]:
     """Module-level seam: build a default :class:`EphemeralBuildVm` and run its session.
 
     The BUILD handler imports this so a test can substitute a fake session without a libvirt
-    host; production delegates to a default-seam :class:`EphemeralBuildVm`. ``source`` is the
-    configured git build source for the pre-clone egress preflight (ADR-0155); ``None`` keeps the
-    route-only readiness behavior. ``wait_network=False`` is the agent-reachability diagnostic's
-    seam (ADR-0167): provision + wait-for-agent + yield, without the network gate.
+    host; production delegates to a default-seam :class:`EphemeralBuildVm`. ``resource_name`` is the
+    build host's name — its ``[[remote_libvirt]]`` instance name — so the build VM provisions on
+    *that* host's config in a multi-host fleet (ADR-0187, #395). ``source`` is the configured git
+    build source for the pre-clone egress preflight (ADR-0155); ``None`` keeps the route-only
+    readiness behavior. ``wait_network=False`` is the agent-reachability diagnostic's seam
+    (ADR-0167): provision + wait-for-agent + yield, without the network gate.
     """
-    vm = EphemeralBuildVm(secret_registry=secret_registry)
+    vm = EphemeralBuildVm(
+        secret_registry=secret_registry,
+        config_factory=lambda: remote_config_for_resource(resource_name),
+    )
     with vm.session(
         base_image_volume, run_id=run_id, source=source, wait_network=wait_network
     ) as transport:

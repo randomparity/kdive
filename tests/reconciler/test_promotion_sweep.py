@@ -61,6 +61,8 @@ async def _seed_resource(
     cordoned: bool = False,
     status: ResourceStatus = ResourceStatus.AVAILABLE,
     pcie: bool = False,
+    pool: str = "local-libvirt",
+    created_offset: timedelta = timedelta(0),
 ) -> Resource:
     caps: dict[str, object] = {CONCURRENT_ALLOCATION_CAP_KEY: cap, "vcpus": 64, "memory_mb": 65536}
     if pcie:
@@ -69,11 +71,11 @@ async def _seed_resource(
         conn,
         Resource(
             id=uuid4(),
-            created_at=_DT,
-            updated_at=_DT,
+            created_at=_DT + created_offset,
+            updated_at=_DT + created_offset,
             kind=ResourceKind.LOCAL_LIBVIRT,
             capabilities=caps,
-            pool="local-libvirt",
+            pool=pool,
             cost_class="local",
             status=status,
             host_uri="qemu:///system",
@@ -130,6 +132,7 @@ async def _enqueue(
     principal: str = "alice",
     agent_session: str | None = "sess-1",
     by_id: UUID | None = None,
+    requested_pool: str | None = None,
     pcie_specs: tuple[str, ...] = (),
     created_offset: timedelta = timedelta(0),
 ) -> UUID:
@@ -139,6 +142,7 @@ async def _enqueue(
     back/forward-dates `created_at` so FIFO + max-wait can be exercised deterministically.
     """
     ctx = RequestContext(principal=principal, agent_session=agent_session, projects=("proj",))
+    requested_kind = _KIND if (by_id is None and requested_pool is None) else None
     outcome = await admit(
         conn,
         AllocationRequest(
@@ -150,8 +154,9 @@ async def _enqueue(
             on_capacity="queue",
             disk_gb=10,
             pcie_specs=pcie_specs,
-            requested_kind=None if by_id is not None else _KIND,
+            requested_kind=requested_kind,
             requested_resource_id=by_id,
+            requested_pool=requested_pool,
         ),
     )
     assert outcome.granted and outcome.allocation is not None
@@ -281,6 +286,42 @@ def test_work_conserving_fills_free_host_behind_busy_global_oldest(migrated_url:
         async with await connect(migrated_url) as check:
             assert await _state(check, oldest) == "requested"  # still waits on busy A
             assert await _state(check, younger) == "granted"  # placed on free B
+
+    asyncio.run(_run())
+
+
+def test_by_pool_promotion_is_work_conserving_across_members(migrated_url: str) -> None:
+    # Two interchangeable members of pool 'big' are full with two queued by-pool requests.
+    # Freeing both lets the sweep grant both, each landing on a distinct freed member.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            member_a = await _seed_resource(seed, cap=1, pool="big")
+            member_b = await _seed_resource(
+                seed, cap=1, pool="big", created_offset=timedelta(minutes=1)
+            )
+            await _seed_quota(seed)
+            hold_a = await _seed_granted(seed, member_a.id)
+            hold_b = await _seed_granted(seed, member_b.id)
+            first = await _enqueue(
+                seed, member_a, requested_pool="big", created_offset=timedelta(hours=-2)
+            )
+            second = await _enqueue(
+                seed, member_b, requested_pool="big", created_offset=timedelta(hours=-1)
+            )
+            for hold in (hold_a, hold_b):
+                await ALLOCATIONS.update_state(seed, hold.id, AllocationState.RELEASING)
+                await ALLOCATIONS.update_state(seed, hold.id, AllocationState.RELEASED)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, promote_pending)
+        assert count == 2
+        async with await connect(migrated_url) as check:
+            assert await _state(check, first) == "granted"
+            assert await _state(check, second) == "granted"
+            placed = {
+                (await _row(check, first))["resource_id"],
+                (await _row(check, second))["resource_id"],
+            }
+        assert placed == {member_a.id, member_b.id}  # distinct members, no double-grant
 
     asyncio.run(_run())
 

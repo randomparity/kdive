@@ -12,7 +12,12 @@ import pytest
 from pydantic import ValidationError
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.tool_payloads import AllocationRequestPayload, EstimateRequestPayload, ResourceByKind
+from kdive.mcp.tool_payloads import (
+    AllocationRequestPayload,
+    EstimateRequestPayload,
+    ResourceByKind,
+    ResourceByPool,
+)
 
 
 def test_published_schema_shape_description_names_shapes_list_and_xor_rule() -> None:
@@ -51,6 +56,21 @@ def test_by_kind_selector_uses_resource_kind_enum() -> None:
     )
     assert isinstance(explicit.resource, ResourceByKind)
     assert explicit.resource.kind is ResourceKind.FAULT_INJECT
+
+
+def test_by_pool_selector_parses() -> None:
+    payload = AllocationRequestPayload.model_validate(
+        {"shape": "medium", "resource": {"mode": "pool", "pool": "big-remote"}}
+    )
+    assert isinstance(payload.resource, ResourceByPool)
+    assert payload.resource.pool == "big-remote"
+
+
+def test_by_pool_selector_rejects_empty_pool() -> None:
+    with pytest.raises(ValidationError):
+        AllocationRequestPayload.model_validate(
+            {"shape": "medium", "resource": {"mode": "pool", "pool": ""}}
+        )
 
 
 def _xor_error_entry(payload: dict[str, object]) -> tuple[str, object]:

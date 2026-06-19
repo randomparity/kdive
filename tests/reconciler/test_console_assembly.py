@@ -38,19 +38,14 @@ class _FakeRunningSystems:
         return set()
 
 
-def test_build_console_hosting_returns_none_when_remote_config_missing(
+def test_build_console_hosting_returns_none_when_not_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _run() -> None:
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
         monkeypatch.setattr(remote_composition, "object_store_from_env", lambda: object())
-
-        def _missing_config() -> object:
-            raise CategorizedError(
-                "remote config missing", category=ErrorCategory.CONFIGURATION_ERROR
-            )
-
-        monkeypatch.setattr(remote_composition, "remote_config_from_inventory", _missing_config)
+        # No declared remote instance → bootstrap degrades to None (no console hosting).
+        monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: False)
 
         hosting = await remote_composition.build_console_hosting(
             secret_registry=SecretRegistry(),
@@ -73,7 +68,7 @@ def test_build_console_hosting_preserves_object_store_config_error(
         def _raise_store() -> object:
             raise error
 
-        monkeypatch.setattr(remote_composition, "remote_config_from_inventory", lambda: object())
+        monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: True)
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
         monkeypatch.setattr(remote_composition, "object_store_from_env", _raise_store)
 
@@ -96,7 +91,7 @@ def test_build_console_hosting_opens_host_pool_and_returns_registry(
         host_pool = _FakePool()
         monkeypatch.setattr(remote_composition, "database_url", lambda: "postgresql://db/kdive")
         monkeypatch.setattr(remote_composition, "object_store_from_env", lambda: object())
-        monkeypatch.setattr(remote_composition, "remote_config_from_inventory", lambda: object())
+        monkeypatch.setattr(remote_composition, "is_remote_libvirt_configured", lambda: True)
         monkeypatch.setattr(remote_composition, "secret_backend_from_env", lambda **_: object())
         monkeypatch.setattr(remote_composition, "create_pool", lambda **_: host_pool)
 

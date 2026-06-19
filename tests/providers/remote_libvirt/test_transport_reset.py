@@ -16,15 +16,16 @@ from tests.providers.remote_libvirt.conftest import RecordingBackend
 from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain
 
 _GDB_ADDR = "10.0.0.5"
+_GDB_ADDR_B = "10.0.0.6"
 _DOMAIN = "kdive-sys"
 
 
-def _config() -> RemoteLibvirtConfig:
+def _config(gdb_addr: str = _GDB_ADDR, host: str = "host.example") -> RemoteLibvirtConfig:
     return RemoteLibvirtConfig(
-        uri="qemu+tls://host.example/system",
+        uri=f"qemu+tls://{host}/system",
         cert_refs=TlsCertRefs("c", "k", "a"),
         concurrent_allocation_cap=1,
-        gdb_addr=_GDB_ADDR,
+        gdb_addr=gdb_addr,
     )
 
 
@@ -32,7 +33,7 @@ def _resetter(domain: FakeDomain | None, tmp_path: Path) -> RemoteLibvirtTranspo
     conn = FakeControlConn({_DOMAIN: domain} if domain is not None else {})
     return RemoteLibvirtTransportResetter(
         secret_registry=SecretRegistry(),
-        config_factory=_config,
+        configs_factory=lambda: [_config()],
         open_connection=lambda uri: conn,
         secret_backend_factory=RecordingBackend,
         pki_base_dir=tmp_path,
@@ -83,12 +84,12 @@ def test_decoded_non_gdbstub_handle_does_not_load_remote_config(tmp_path: Path) 
     domain = FakeDomain(_DOMAIN)
     conn = FakeControlConn({_DOMAIN: domain})
 
-    def unavailable_config() -> RemoteLibvirtConfig:
+    def unavailable_configs() -> list[RemoteLibvirtConfig]:
         raise AssertionError("config should not load for non-gdbstub handle kinds")
 
     resetter = RemoteLibvirtTransportResetter(
         secret_registry=SecretRegistry(),
-        config_factory=unavailable_config,
+        configs_factory=unavailable_configs,
         open_connection=lambda uri: conn,
         secret_backend_factory=RecordingBackend,
         pki_base_dir=tmp_path,
@@ -123,6 +124,67 @@ def test_none_handle_is_a_noop(tmp_path: Path) -> None:
     async def scenario() -> None:
         await _resetter(domain, tmp_path).reset(
             transport="gdbstub", transport_handle=None, domain_name=_DOMAIN
+        )
+
+    asyncio.run(scenario())
+    assert domain.calls == []
+
+
+def test_fleet_handle_rearms_on_the_host_whose_gdb_addr_matches(tmp_path: Path) -> None:
+    # Two declared hosts (gdb_addr A and B); a handle that encodes host B must re-arm over
+    # host B's URI — the resetter self-selects the matching config from the fleet (ADR-0187).
+    domain = FakeDomain(_DOMAIN)
+    conn = FakeControlConn({_DOMAIN: domain})
+    opened: list[str] = []
+
+    def open_connection(uri: str) -> FakeControlConn:
+        opened.append(uri)
+        return conn
+
+    resetter = RemoteLibvirtTransportResetter(
+        secret_registry=SecretRegistry(),
+        configs_factory=lambda: [
+            _config(_GDB_ADDR, host="host-a.example"),
+            _config(_GDB_ADDR_B, host="host-b.example"),
+        ],
+        open_connection=open_connection,
+        secret_backend_factory=RecordingBackend,
+        pki_base_dir=tmp_path,
+    )
+
+    async def scenario() -> None:
+        await resetter.reset(
+            transport="gdbstub",
+            transport_handle=f"gdbstub://{_GDB_ADDR_B}:1234",
+            domain_name=_DOMAIN,
+        )
+
+    asyncio.run(scenario())
+    assert domain.calls == ["monitor:gdbserver none", "monitor:gdbserver tcp::1234"]
+    assert len(opened) == 1
+    assert opened[0].startswith("qemu+tls://host-b.example/system")
+
+
+def test_fleet_handle_matching_no_host_is_a_noop(tmp_path: Path) -> None:
+    domain = FakeDomain(_DOMAIN)
+    conn = FakeControlConn({_DOMAIN: domain})
+
+    resetter = RemoteLibvirtTransportResetter(
+        secret_registry=SecretRegistry(),
+        configs_factory=lambda: [
+            _config(_GDB_ADDR, host="host-a.example"),
+            _config(_GDB_ADDR_B, host="host-b.example"),
+        ],
+        open_connection=lambda uri: conn,
+        secret_backend_factory=RecordingBackend,
+        pki_base_dir=tmp_path,
+    )
+
+    async def scenario() -> None:
+        await resetter.reset(
+            transport="gdbstub",
+            transport_handle="gdbstub://10.9.9.9:1234",  # neither host's gdb_addr
+            domain_name=_DOMAIN,
         )
 
     asyncio.run(scenario())

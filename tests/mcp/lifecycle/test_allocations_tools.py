@@ -141,6 +141,25 @@ async def _request_by_id(
     )
 
 
+async def _request_by_pool(
+    pool: AsyncConnectionPool, ctx: RequestContext, target_pool: str, *, project: str = "proj"
+) -> ToolResponse:
+    return await request_allocation(
+        pool,
+        ctx,
+        project=project,
+        request=AllocationRequestPayload.model_validate(
+            {
+                "vcpus": 1,
+                "memory_gb": 0,
+                "disk_gb": 10,
+                "window": None,
+                "resource": {"mode": "pool", "pool": target_pool},
+            }
+        ),
+    )
+
+
 async def _set_resource_flags(
     pool: AsyncConnectionPool,
     resource_id: str,
@@ -300,6 +319,33 @@ def test_request_unknown_id_detail_names_id_not_kinds(migrated_url: str) -> None
         assert "resources.list" in resp.suggested_next_actions
 
     asyncio.run(_run())
+
+
+def test_request_by_pool_grants_from_pool_member(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)  # registers a host in pool 'local-libvirt'
+            return await _request_by_pool(pool, _ctx(), "local-libvirt")
+
+    resp = asyncio.run(_run())
+    assert resp.error_category is None
+    assert resp.status == "granted"
+
+
+def test_request_unknown_pool_denial_does_not_leak_pool_names(migrated_url: str) -> None:
+    # ADR-0186: a by-pool denial names the requested pool only — it must not enumerate other
+    # (possibly other-tenant) pool names like 'local-libvirt'.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)  # a host exists in pool 'local-libvirt'
+            return await _request_by_pool(pool, _ctx(), "customer-x-private")
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == "configuration_error"
+    assert resp.detail is not None
+    assert "customer-x-private" in resp.detail
+    assert "local-libvirt" not in resp.detail
+    assert "available kinds" not in resp.detail
 
 
 def test_denial_envelope_guides_agent_to_a_grant(migrated_url: str) -> None:
@@ -989,6 +1035,22 @@ def test_envelope_surfaces_recovery_context_on_granted() -> None:
     assert data["created_at"] == _DT.isoformat()
     assert data["requested_pcie_specs"] == []
     assert data["lease_expiry"] is None
+
+
+def test_envelope_surfaces_requested_pool() -> None:
+    alloc = Allocation(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="user-1",
+        project="proj",
+        resource_id=None,
+        state=AllocationState.REQUESTED,
+        requested_pool="big-remote",
+    )
+    data = _envelope_for_allocation(alloc).data
+    assert data["requested_pool"] == "big-remote"
+    assert data["requested_kind"] is None
 
 
 def test_envelope_surfaces_selector_on_failed() -> None:

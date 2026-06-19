@@ -176,6 +176,35 @@ def test_host_cap_denial_with_queue_enqueues_a_requested_row(migrated_url: str) 
     asyncio.run(_run())
 
 
+def test_by_pool_capacity_denial_with_queue_persists_requested_pool(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn, cap=1)
+            await _seed_quota(conn)
+            await _seed_granted(conn, res.id)  # fills the single host slot
+            outcome = await admit(
+                conn,
+                AllocationRequest(
+                    ctx=CTX,
+                    resource=res,
+                    project="proj",
+                    selector=SEL,
+                    window=1,
+                    on_capacity="queue",
+                    disk_gb=10,
+                    requested_pool="big",
+                ),
+            )
+            assert outcome.granted is True
+            alloc = outcome.allocation
+            assert alloc is not None
+            assert alloc.state is AllocationState.REQUESTED
+            assert alloc.requested_pool == "big"
+            assert alloc.requested_kind is None
+
+    asyncio.run(_run())
+
+
 def test_grant_quota_denial_with_queue_enqueues(migrated_url: str) -> None:
     async def _run() -> None:
         async with _conn(migrated_url) as conn:

@@ -49,6 +49,7 @@ async def _resource(
     pcie: bool = False,
     owner_project: str | None = None,
     affinity_allowlist: list[str] | None = None,
+    pool: str = "local-libvirt",
 ) -> Resource:
     capabilities: dict[str, object] = {
         CONCURRENT_ALLOCATION_CAP_KEY: 10,
@@ -65,7 +66,7 @@ async def _resource(
             updated_at=_DT + created_offset,
             kind=ResourceKind.LOCAL_LIBVIRT,
             capabilities=capabilities,
-            pool="local-libvirt",
+            pool=pool,
             cost_class="local",
             status=status,
             host_uri="qemu:///system",
@@ -144,6 +145,51 @@ def test_kind_candidates_are_schedulable_and_created_ordered(migrated_url: str) 
 
     ids, older_id, newer_id = asyncio.run(_run())
     assert ids == [older_id, newer_id]
+
+
+def test_pool_candidates_are_schedulable_and_created_ordered(migrated_url: str) -> None:
+    async def _run() -> tuple[list[UUID], UUID, UUID]:
+        async with _conn(migrated_url) as conn:
+            newer = await _resource(conn, created_offset=timedelta(minutes=2), pool="big")
+            await _resource(conn, created_offset=timedelta(minutes=1), cordoned=True, pool="big")
+            await _resource(
+                conn, created_offset=timedelta(minutes=3), status=ResourceStatus.OFFLINE, pool="big"
+            )
+            await _resource(conn, created_offset=timedelta(minutes=4), pool="small")  # other pool
+            older = await _resource(conn, pool="big")
+            candidates = await resolve_placement_candidates(
+                conn, PlacementRequest(resource_id=None, pool="big")
+            )
+        return [resource.id for resource in candidates.resources], older.id, newer.id
+
+    ids, older_id, newer_id = asyncio.run(_run())
+    assert ids == [older_id, newer_id]
+
+
+def test_pool_unknown_returns_no_candidates(migrated_url: str) -> None:
+    async def _run() -> list[UUID]:
+        async with _conn(migrated_url) as conn:
+            await _resource(conn, pool="big")
+            candidates = await resolve_placement_candidates(
+                conn, PlacementRequest(resource_id=None, pool="nope")
+            )
+        return [r.id for r in candidates.resources]
+
+    assert asyncio.run(_run()) == []
+
+
+def test_pool_excludes_affinity_disallowed_scoped_member(migrated_url: str) -> None:
+    async def _run() -> tuple[list[UUID], UUID]:
+        async with _conn(migrated_url) as conn:
+            await _resource(conn, pool="big", owner_project="other", affinity_allowlist=["other"])
+            allowed = await _resource(conn, pool="big")
+            candidates = await resolve_placement_candidates(
+                conn, PlacementRequest(resource_id=None, pool="big", project="mine")
+            )
+        return [r.id for r in candidates.resources], allowed.id
+
+    ids, allowed_id = asyncio.run(_run())
+    assert ids == [allowed_id]
 
 
 def test_pcie_resolution_reports_busy_capacity_candidate(migrated_url: str) -> None:

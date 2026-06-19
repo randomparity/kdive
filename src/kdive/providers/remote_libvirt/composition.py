@@ -39,8 +39,13 @@ from kdive.providers.infra.console_hosting import (
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
-from kdive.providers.remote_libvirt.config import remote_config_from_inventory
-from kdive.providers.remote_libvirt.console.collector import ConsoleCollector
+from kdive.providers.remote_libvirt.config import (
+    RemoteLibvirtConfig,
+    is_remote_libvirt_configured,
+    remote_config_for_resource,
+    unbound_remote_config,
+)
+from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
 from kdive.providers.remote_libvirt.console.wiring import (
     RemoteConsolePartStore,
     open_remote_console,
@@ -50,7 +55,6 @@ from kdive.providers.remote_libvirt.debug.introspect import (
     RemoteLibvirtLiveIntrospect,
     RemoteLibvirtVmcoreIntrospect,
 )
-from kdive.providers.remote_libvirt.discovery import RemoteLibvirtDiscovery
 from kdive.providers.remote_libvirt.lifecycle.build_vm import ephemeral_build_session
 from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnect
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
@@ -68,7 +72,7 @@ from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import secret_backend_from_env
+from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.objectstore import object_store_from_env
 
 _POOL = "remote-libvirt"
@@ -121,10 +125,52 @@ def build_ephemeral_build_transport_factory(
                 details={"run_id": str(run_id), "build_host": host.name},
             )
         return ephemeral_build_session(
-            host.base_image_volume, secret_registry, run_id=run_id, source=source
+            host.base_image_volume,
+            secret_registry,
+            run_id=run_id,
+            resource_name=host.name,
+            source=source,
         )
 
     return _factory
+
+
+def resource_name_for_system(conninfo: str, system_id: UUID) -> str:
+    """Resolve a remote System's bound resource (host) name: System→Allocation→Resource.
+
+    The remote-libvirt resource ``name`` is its ``[[remote_libvirt]]`` instance name (ADR-0112),
+    so this is the key the per-console open passes to :func:`remote_config_for_resource` to reach
+    the System's *own* host in a multi-host fleet (ADR-0187, #395).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the System has no bound remote resource
+            (no allocation row, or the join finds none) — the console cannot be opened without
+            knowing which host owns the System.
+    """
+    with psycopg.connect(conninfo) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT r.name FROM systems s "
+            "JOIN allocations a ON a.id = s.allocation_id "
+            "JOIN resources r ON r.id = a.resource_id "
+            "WHERE s.id = %s",
+            (system_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise CategorizedError(
+            f"system {system_id} has no bound remote-libvirt resource; cannot open its console",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return str(row[0])
+
+
+def _open_console_for_system(
+    system_id: UUID, *, conninfo: str, secret_backend: SecretBackend
+) -> ConsoleStream:
+    """Open ``system_id``'s console against the host config of the resource it is allocated to."""
+    name = resource_name_for_system(conninfo, system_id)
+    config = remote_config_for_resource(name)
+    return open_remote_console(config, secret_backend, system_id)
 
 
 async def build_console_hosting(
@@ -132,10 +178,13 @@ async def build_console_hosting(
     secret_registry: SecretRegistry,
     running_systems_factory: RunningSystemsFactory,
 ) -> ConsoleHosting | None:
-    """Build the single-leader remote console hosting loop, or ``None`` when unconfigured."""
-    try:
-        remote_config = remote_config_from_inventory()
-    except CategorizedError:
+    """Build the single-leader remote console hosting loop, or ``None`` when unconfigured.
+
+    The process-wide singletons (leader lock, pump runner, host pool) are bootstrapped once; the
+    per-System console open resolves the System's *own* host config by its bound resource name, so
+    one leader hosts consoles across a multi-host fleet (ADR-0187, #395).
+    """
+    if not is_remote_libvirt_configured():
         return None
 
     conninfo = database_url()
@@ -155,7 +204,9 @@ async def build_console_hosting(
             raise TypeError("console collector factory expected a UUID system_id")
         return ConsoleCollector(
             system_id,
-            open_console=lambda sid: open_remote_console(remote_config, secret_backend, sid),
+            open_console=lambda sid: _open_console_for_system(
+                sid, conninfo=conninfo, secret_backend=secret_backend
+            ),
             store=part_store,
             secret_registry=secret_registry,
         )
@@ -171,8 +222,13 @@ async def build_console_hosting(
 
 
 def discovery_registration(*, secret_registry: SecretRegistry) -> ProviderDiscoveryRegistration:
+    # Remote-libvirt resource rows are created by reconcile_resources from the systems.toml overlay
+    # (ADR-0112), never by discovery — the registration is creates=False, so the registrar is a
+    # bind-only no-op and never resolves the target. The fleet is multi-host (ADR-0187), so there
+    # is no single host to enumerate here; the target factory fails loudly if it is ever reached.
+    del secret_registry
     return ProviderDiscoveryRegistration(
-        target_factory=lambda: _discovery_target(secret_registry),
+        target_factory=_no_discovery_target,
         kind=ResourceKind.REMOTE_LIBVIRT,
         pool_name=_POOL,
         cost_class=_COST_CLASS,
@@ -180,27 +236,52 @@ def discovery_registration(*, secret_registry: SecretRegistry) -> ProviderDiscov
     )
 
 
-def _discovery_target(secret_registry: SecretRegistry) -> DiscoveryRegistrationTarget:
-    discovery = RemoteLibvirtDiscovery.from_env(secret_registry=secret_registry)
-    return DiscoveryRegistrationTarget(discovery=discovery, resource_id=discovery.host_uri)
+def _no_discovery_target() -> DiscoveryRegistrationTarget:
+    raise CategorizedError(
+        "remote-libvirt discovery does not create resource rows (creates=False); the fleet is "
+        "registered by reconcile_resources from systems.toml",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+    )
 
 
-def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
-    """Build remote-libvirt ports; buildable without operator config (ADR-0076)."""
+def build_runtime(
+    *,
+    secret_registry: SecretRegistry,
+    config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
+) -> ProviderRuntime:
+    """Build remote-libvirt ports; buildable without operator config (ADR-0076).
+
+    ``config_factory`` resolves the remote host's connection config. By default it is the
+    unbound resolver, which raises if a per-op port is reached without binding: the resolver
+    rebinds the runtime per granted Resource via ``rebind_for_resource`` so a per-op call reaches
+    the *allocated* host (ADR-0187, #395). The ``builder`` and ``vmcore_introspector`` ports take
+    no remote config — they build on a build-host transport / operate on a fetched vmcore, not the
+    remote libvirt host.
+    """
     builder = RemoteLibvirtBuild.from_env(secret_registry=secret_registry)
-    installer = RemoteLibvirtInstall.from_env(secret_registry=secret_registry)
-    retriever = RemoteLibvirtRetrieve.from_env(secret_registry=secret_registry)
+    installer = RemoteLibvirtInstall.from_env(
+        secret_registry=secret_registry, config_factory=config_factory
+    )
+    retriever = RemoteLibvirtRetrieve.from_env(
+        secret_registry=secret_registry, config_factory=config_factory
+    )
     vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
-    live_introspector = RemoteLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
+    live_introspector = RemoteLibvirtLiveIntrospect.from_env(
+        secret_registry=secret_registry, config_factory=config_factory
+    )
 
     return ProviderRuntime(
         profile_policy=RemoteLibvirtProfilePolicy(),
-        provisioner=RemoteLibvirtProvisioning(secret_registry=secret_registry),
+        provisioner=RemoteLibvirtProvisioning(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
         builder=builder,
         installer=installer,
         booter=installer,
-        connector=RemoteLibvirtConnect.from_env(),
-        controller=RemoteLibvirtControl.from_env(secret_registry=secret_registry),
+        connector=RemoteLibvirtConnect.from_env(config_factory=config_factory),
+        controller=RemoteLibvirtControl.from_env(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
         retriever=retriever,
         crash_postmortem=retriever,
         vmcore_introspector=vmcore_introspector,
@@ -224,9 +305,15 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         build_config_validator=builder.validate_config_ref,
         rootfs_validator=lambda _rootfs: None,
         rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
-        staged_volume_probe=probe_staged_volumes,
+        staged_volume_probe=lambda volumes: probe_staged_volumes(
+            volumes, config_factory=config_factory
+        ),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
         platform_root_cmdline=None,
+        rebind_for_resource=lambda resource_name: build_runtime(
+            secret_registry=secret_registry,
+            config_factory=lambda: remote_config_for_resource(resource_name),
+        ),
     )

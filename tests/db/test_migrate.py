@@ -144,6 +144,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0042",
         "0043",
         "0044",
+        "0045",
     ]
     assert second == []
 
@@ -471,7 +472,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
 
     monkeypatch.setattr(migrate, "discover_migrations", lambda: full)
     applied = migrate.apply_migrations(pg_conn)
-    assert applied == ["0042", "0043", "0044"]
+    assert applied == ["0042", "0043", "0044", "0045"]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
 
@@ -690,6 +691,13 @@ def test_allocations_gain_m1_size_and_billing_columns(pg_conn: psycopg.Connectio
     assert cols.get("active_ended_at") == "timestamp with time zone"
 
 
+def test_migration_0045_adds_requested_pool_nullable(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    cols = _columns(pg_conn, "allocations")
+    assert cols.get("requested_pool") == "text"
+    assert _nullable(pg_conn, "allocations").get("requested_pool") == "YES"
+
+
 def test_migration_0014_adds_pcie_claim_jsonb_default_empty(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     cols = _columns(pg_conn, "allocations")
@@ -787,6 +795,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0042",
         "0043",
         "0044",
+        "0045",
     ]
 
 

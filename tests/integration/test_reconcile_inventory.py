@@ -841,7 +841,9 @@ def _fault_inject_toml(
     vcpus: int = 8,
     memory_mb: int = 16384,
     cap: int = 1,
+    pool: str | None = None,
 ) -> str:
+    pool_line = f'pool = "{pool}"\n' if pool is not None else ""
     return (
         "schema_version = 2\n"
         "[[fault_inject]]\n"
@@ -850,6 +852,7 @@ def _fault_inject_toml(
         f"vcpus = {vcpus}\n"
         f"memory_mb = {memory_mb}\n"
         f"concurrent_allocation_cap = {cap}\n"
+        f"{pool_line}"
     )
 
 
@@ -860,7 +863,9 @@ def _remote_libvirt_toml(
     vcpus: int = 8,
     memory_mb: int = 16384,
     cost_class: str = "remote",
+    pool: str | None = None,
 ) -> str:
+    pool_line = f'pool = "{pool}"\n' if pool is not None else ""
     return (
         "schema_version = 2\n"
         "[[image]]\n"
@@ -886,6 +891,7 @@ def _remote_libvirt_toml(
         f"vcpus = {vcpus}\n"
         f"memory_mb = {memory_mb}\n"
         "concurrent_allocation_cap = 1\n"
+        f"{pool_line}"
     )
 
 
@@ -1002,6 +1008,7 @@ def test_fault_inject_resource_is_admitted_not_configuration_error(
                     spec=AdmissionRequestSpec(
                         resource_id=None,
                         kind=ResourceKind.FAULT_INJECT,
+                        pool=None,
                         shape="small",
                         vcpus=None,
                         memory_gb=None,
@@ -1042,6 +1049,36 @@ def test_remote_libvirt_overlay_lands_vcpus_memory_in_caps(
     asyncio.run(_run())
 
 
+def test_declared_pool_lands_in_pool_column_else_default(migrated_url: str, tmp_path: Path) -> None:
+    # ADR-0186: a declared `pool` is written to the resources.pool column; absent → 'default'.
+    # One doc declares a pooled remote host and a pool-less fault-inject host (single remote
+    # instance keeps the still-present singleton guard happy until #395 relaxes it).
+    combined = (
+        _remote_libvirt_toml(name="rl-pool", pool="big-remote") + "[[fault_inject]]\n"
+        'name = "fi-default"\n'
+        'cost_class = "local"\n'
+        "vcpus = 8\n"
+        "memory_mb = 16384\n"
+        "concurrent_allocation_cap = 1\n"
+    )
+
+    async def _run() -> tuple[str, str]:
+        doc = load_inventory(_write_toml(tmp_path, combined))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            pooled = await _resource_by_name(check, "rl-pool")
+            defaulted = await _resource_by_name(check, "fi-default")
+        return str(pooled["pool"]), str(defaulted["pool"])
+
+    pooled_pool, default_pool = asyncio.run(_run())
+    assert pooled_pool == "big-remote"
+    assert default_pool == "default"
+
+
 def test_remote_libvirt_resource_is_admitted_not_configuration_error(
     migrated_url: str, tmp_path: Path
 ) -> None:
@@ -1076,6 +1113,7 @@ def test_remote_libvirt_resource_is_admitted_not_configuration_error(
                     spec=AdmissionRequestSpec(
                         resource_id=None,
                         kind=ResourceKind.REMOTE_LIBVIRT,
+                        pool=None,
                         shape="small",
                         vcpus=None,
                         memory_gb=None,
@@ -1420,6 +1458,7 @@ def test_two_fault_inject_instances_are_each_independently_allocatable(
                             spec=AdmissionRequestSpec(
                                 resource_id=cast(UUID, resource_id),
                                 kind=ResourceKind.FAULT_INJECT,
+                                pool=None,
                                 shape="small",
                                 vcpus=None,
                                 memory_gb=None,

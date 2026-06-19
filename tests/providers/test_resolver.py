@@ -9,6 +9,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.catalog.resources import ResourceKind
@@ -20,9 +21,14 @@ class _Runtime:
     def __init__(self, label: str) -> None:
         self.label = label
         self.registered: list[object] = []
+        self.bound_to: str | None = None
 
     async def register_discovery(self, pool: object) -> None:
         self.registered.append(pool)
+
+    def for_resource(self, resource_name: str) -> _Runtime:
+        self.bound_to = resource_name
+        return self
 
 
 def _resolver(*kinds: ResourceKind) -> tuple[ProviderResolver, dict[ResourceKind, _Runtime]]:
@@ -154,3 +160,13 @@ def test_runtime_lookup_absent_object_fails_with_not_found(
         "object_kind": object_kind,
         "object_id": str(_ABSENT_OBJECT_ID),
     }
+
+
+def test_runtime_for_system_binds_to_resource_name() -> None:
+    # ADR-0187: runtime_for_system resolves (kind, name) and returns the runtime bound to the
+    # System's Resource name, so a per-op call reaches the allocated host.
+    resolver, runtimes = _resolver(ResourceKind.REMOTE_LIBVIRT)
+    conn = cast(AsyncConnection, _Conn({"kind": "remote-libvirt", "name": "host-b"}))
+    bound = asyncio.run(resolver.runtime_for_system(conn, _ABSENT_OBJECT_ID))
+    assert bound is runtimes[ResourceKind.REMOTE_LIBVIRT]
+    assert runtimes[ResourceKind.REMOTE_LIBVIRT].bound_to == "host-b"

@@ -45,6 +45,7 @@ def _spec(**overrides: Any) -> AdmissionRequestSpec:
     fields: dict[str, Any] = {
         "resource_id": None,
         "kind": ResourceKind.LOCAL_LIBVIRT,
+        "pool": None,
         "shape": None,
         "vcpus": 2,
         "memory_gb": 4,
@@ -154,6 +155,68 @@ def test_request_admission_returns_configuration_error_when_no_target(
         assert by_kind.resource is None
         assert by_kind.category is ErrorCategory.CONFIGURATION_ERROR
         assert by_kind.available_kinds == ("remote-libvirt",)
+
+    asyncio.run(_run())
+
+
+def test_request_admission_by_pool_no_target_does_not_enumerate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A by-pool no-target denial leaves available_kinds None and must NOT enumerate pools
+    # (operator labels on affinity-scoped resources — a fleet list leaks across tenants, ADR-0186).
+    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+        return _sizing()
+
+    async def placement(*_: object, **__: object) -> PlacementCandidates:
+        return PlacementCandidates(resources=[])
+
+    async def registered_kinds(*_: object, **__: object) -> tuple[str, ...]:
+        raise AssertionError("a by-pool denial must not enumerate kinds or pools")
+
+    monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
+    monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "_registered_kinds", registered_kinds)
+
+    async def _run() -> None:
+        result = await request_admission(
+            _CONN, _ctx(), project="proj", spec=_spec(kind=None, pool="big-remote")
+        )
+        assert result.resource is None
+        assert result.category is ErrorCategory.CONFIGURATION_ERROR
+        assert result.available_kinds is None
+        assert result.selector == "pool"
+        assert result.object_id == "big-remote"
+
+    asyncio.run(_run())
+
+
+def test_request_admission_by_pool_grant_threads_requested_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = _resource()
+    captured: list[AllocationRequest] = []
+
+    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+        return _sizing()
+
+    async def placement(*_: object, **__: object) -> PlacementCandidates:
+        return PlacementCandidates(resources=[resource])
+
+    async def admit(_conn: object, request: AllocationRequest) -> AdmissionOutcome:
+        captured.append(request)
+        return AdmissionOutcome(granted=True, allocation=_allocation())
+
+    monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
+    monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "admit", admit)
+
+    async def _run() -> None:
+        await request_admission(
+            _CONN, _ctx(), project="proj", spec=_spec(kind=None, pool="big-remote")
+        )
+        assert captured[0].requested_pool == "big-remote"
+        assert captured[0].requested_kind is None
+        assert captured[0].requested_resource_id is None
 
     asyncio.run(_run())
 

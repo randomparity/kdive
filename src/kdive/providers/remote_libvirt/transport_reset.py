@@ -23,7 +23,7 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import TransportHandleData
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, all_remote_configs
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
@@ -65,13 +65,13 @@ class RemoteLibvirtTransportResetter:
         self,
         *,
         secret_registry: SecretRegistry,
-        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+        configs_factory: Callable[[], list[RemoteLibvirtConfig]] = all_remote_configs,
         open_connection: OpenResetConnection = open_libvirt_reset,
         secret_backend_factory: Callable[[], SecretBackend] | None = None,
         rearm: Callable[[_Domain, int], None] = _real_rearm,
         pki_base_dir: Path | None = None,
     ) -> None:
-        self._config_factory = config_factory
+        self._configs_factory = configs_factory
         self._open_connection = open_connection
         self._secret_backend_factory = secret_backend_factory or (
             lambda: secret_backend_from_env(registry=secret_registry)
@@ -92,15 +92,24 @@ class RemoteLibvirtTransportResetter:
         Raises:
             CategorizedError: ``TRANSPORT_FAILURE`` if the monitor re-arm errors.
         """
-        port = self._port_if_ours(transport, transport_handle, domain_name)
-        if port is None or domain_name is None:
+        match = self._match_if_ours(transport, transport_handle, domain_name)
+        if match is None or domain_name is None:
             return
-        await asyncio.to_thread(self._rearm_blocking, domain_name, port)
+        config, port = match
+        await asyncio.to_thread(self._rearm_blocking, config, domain_name, port)
         _log.info("reconciler: re-armed remote gdbstub for domain %s (port %d)", domain_name, port)
 
-    def _port_if_ours(
+    def _match_if_ours(
         self, transport: str, transport_handle: str | None, domain_name: str | None
-    ) -> int | None:
+    ) -> tuple[RemoteLibvirtConfig, int] | None:
+        """Resolve the fleet host whose ``gdb_addr`` matches the handle, with the freed port.
+
+        The transport handle self-identifies its host (it encodes ``gdb_addr`` + port), so the
+        matching host is selected from the declared fleet by ``gdb_addr`` — no DB lookup. Returns
+        ``None`` (a no-op) for a non-gdbstub transport, a missing/undecodable handle, a handle host
+        that matches no declared host (a local loopback gdbstub, or another fleet's host), or a
+        missing domain name.
+        """
         if transport != _GDBSTUB:
             return None
         if transport_handle is None:
@@ -113,16 +122,16 @@ class RemoteLibvirtTransportResetter:
             return None
         if data.kind != _GDBSTUB:
             return None
-        config = self._config_factory()
-        if data.host != config.gdb_addr:
-            return None  # a local loopback gdbstub, or not our gdb_addr — not ours to reset
+        config = next((c for c in self._configs_factory() if c.gdb_addr == data.host), None)
+        if config is None:
+            return None  # a local loopback gdbstub, or no declared host owns this gdb_addr
         if domain_name is None:
             _log.info("reconciler: remote gdbstub session has no domain_name; cannot reset")
             return None
-        return data.port
+        return config, data.port
 
-    def _rearm_blocking(self, domain_name: str, port: int) -> None:
-        with self._connection() as conn:
+    def _rearm_blocking(self, config: RemoteLibvirtConfig, domain_name: str, port: int) -> None:
+        with self._connection(config) as conn:
             try:
                 domain = conn.lookupByName(domain_name)
             except libvirt.libvirtError as exc:
@@ -139,9 +148,9 @@ class RemoteLibvirtTransportResetter:
                     details={"port": port},
                 ) from exc
 
-    def _connection(self) -> AbstractContextManager[_ResetConn]:
+    def _connection(self, config: RemoteLibvirtConfig) -> AbstractContextManager[_ResetConn]:
         return remote_connection(
-            self._config_factory(),
+            config,
             self._secret_backend_factory(),
             open_connection=self._open_connection,
             pki_base_dir=self._pki_base_dir,

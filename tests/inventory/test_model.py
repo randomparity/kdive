@@ -239,15 +239,14 @@ def test_duplicate_remote_instance_name_rejected() -> None:
         InventoryDoc.parse(d)
 
 
-def test_multiple_remote_instances_rejected_until_per_op_selection_is_wired() -> None:
+def test_multiple_distinct_remote_instances_parse() -> None:
+    # ADR-0187 (#395): per-op resource selection is wired, so N remote-libvirt hosts are allowed.
     d = _doc()
     second = {**d["remote_libvirt"][0], "name": "h2", "uri": "qemu+tls://h2/system"}
+    first_name = d["remote_libvirt"][0]["name"]
     d["remote_libvirt"] = [d["remote_libvirt"][0], second]
-    with pytest.raises(InventoryError) as excinfo:
-        InventoryDoc.parse(d)
-    assert excinfo.value.entry == "remote_libvirt"
-    assert excinfo.value.field == "instances"
-    assert "multiple instances are not supported" in str(excinfo.value)
+    doc = InventoryDoc.parse(d)
+    assert sorted(inst.name for inst in doc.remote_libvirt) == sorted([first_name, "h2"])
 
 
 def test_duplicate_fault_inject_name_rejected() -> None:

@@ -21,7 +21,7 @@ from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.discovery import ResourceRecord
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_for_resource
 from kdive.providers.remote_libvirt.transport import (
     OpenConnection,
     open_libvirt,
@@ -50,15 +50,21 @@ class RemoteLibvirtDiscovery:
         self.host_uri = config.uri
 
     @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtDiscovery:
-        """Build from the declared ``[[remote_libvirt]]`` inventory instance (ADR-0112).
+    def from_env(
+        cls, *, secret_registry: SecretRegistry, resource_name: str
+    ) -> RemoteLibvirtDiscovery:
+        """Build for the named ``[[remote_libvirt]]`` instance (ADR-0112, ADR-0187).
+
+        A remote-libvirt resource row's ``name`` is its instance name, so discovery enumerates a
+        single named host (#395); the fleet is registered by ``reconcile_resources`` from the
+        config overlay, not by discovery (the registration is ``creates=False``).
 
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` when the inventory config is
-                absent or invalid (see :func:`remote_config_from_inventory`).
+            CategorizedError: ``CONFIGURATION_ERROR`` when no instance named ``resource_name`` is
+                declared or the inventory is invalid (see :func:`remote_config_for_resource`).
         """
         return cls(
-            config=remote_config_from_inventory(),
+            config=remote_config_for_resource(resource_name),
             secret_backend=secret_backend_from_env(registry=secret_registry),
             open_connection=open_libvirt,
         )

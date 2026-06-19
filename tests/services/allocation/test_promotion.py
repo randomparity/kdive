@@ -46,7 +46,7 @@ async def _conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
         await conn.close()
 
 
-async def _resource(conn: psycopg.AsyncConnection) -> Resource:
+async def _resource(conn: psycopg.AsyncConnection, *, pool: str = "local-libvirt") -> Resource:
     return await RESOURCES.insert(
         conn,
         Resource(
@@ -59,7 +59,7 @@ async def _resource(conn: psycopg.AsyncConnection) -> Resource:
                 "vcpus": 64,
                 "memory_mb": 65536,
             },
-            pool="local-libvirt",
+            pool=pool,
             cost_class="local",
             status=ResourceStatus.AVAILABLE,
             host_uri="qemu:///system",
@@ -104,7 +104,9 @@ async def _queued(
     resource: Resource,
     *,
     created_offset: timedelta = timedelta(0),
+    requested_pool: str | None = None,
 ) -> UUID:
+    by_id = resource.id if requested_pool is None else None
     outcome = await admit(
         conn,
         AllocationRequest(
@@ -116,7 +118,8 @@ async def _queued(
             on_capacity="queue",
             disk_gb=10,
             requested_kind=None,
-            requested_resource_id=resource.id,
+            requested_resource_id=by_id,
+            requested_pool=requested_pool,
         ),
     )
     assert outcome.allocation is not None
@@ -164,6 +167,29 @@ def test_promote_pending_grants_after_capacity_frees(migrated_url: str) -> None:
         return promoted, state, audit_row
 
     assert asyncio.run(_run()) == (1, "granted", ("bob", "bob-sess"))
+
+
+def test_promote_pending_grants_by_pool_to_freed_member(migrated_url: str) -> None:
+    async def _run() -> tuple[int, str, str | None]:
+        async with _conn(migrated_url) as conn:
+            resource = await _resource(conn, pool="big")
+            await _quota(conn)
+            holder = await _granted(conn, resource.id)  # fills the single host slot
+            queued = await _queued(conn, resource, requested_pool="big")
+            await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASING)
+            await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASED)
+
+            promoted = await promote_pending(conn)
+            state = await _state(conn, queued)
+            cur = await conn.execute("SELECT resource_id FROM allocations WHERE id = %s", (queued,))
+            row = await cur.fetchone()
+            resource_id = str(row[0]) if row and row[0] is not None else None
+        return promoted, state, resource_id
+
+    promoted, state, resource_id = asyncio.run(_run())
+    assert promoted == 1
+    assert state == "granted"
+    assert resource_id is not None  # stamped onto the freed pool member
 
 
 def test_promote_pending_budget_denial_fails_without_retry(migrated_url: str) -> None:

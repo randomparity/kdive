@@ -37,6 +37,13 @@ async def queue_position(conn: AsyncConnection, alloc: Allocation) -> int:
             "AND (created_at, id) < (%(created_at)s, %(id)s)"
         )
         target = alloc.requested_kind.value
+    elif alloc.requested_pool is not None:
+        query = (
+            "SELECT count(*) FROM allocations WHERE state = 'requested' "
+            "AND requested_pool = %(target)s "
+            "AND (created_at, id) < (%(created_at)s, %(id)s)"
+        )
+        target = alloc.requested_pool
     else:
         return 1
     async with conn.cursor() as cur:
@@ -50,6 +57,7 @@ def _allocation_recovery(alloc: Allocation) -> dict[str, JsonValue]:
     """Selector, sizing, placement, and timing already on the Allocation row (#568)."""
     return {
         "requested_kind": alloc.requested_kind.value if alloc.requested_kind else None,
+        "requested_pool": alloc.requested_pool,
         "requested_resource_id": (
             str(alloc.requested_resource_id) if alloc.requested_resource_id else None
         ),

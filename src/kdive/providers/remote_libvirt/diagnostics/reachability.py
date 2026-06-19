@@ -36,7 +36,7 @@ from kdive.diagnostics.checks import ReachabilityOutcome, ReachabilityProbe
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
-    remote_config_from_inventory,
+    unbound_remote_config,
 )
 from kdive.providers.remote_libvirt.transport import open_libvirt, remote_connection
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -53,7 +53,7 @@ def _default_secret_backend() -> SecretBackend:
 
 def remote_libvirt_reachability_probe(
     *,
-    config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+    config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
     open_connection: Callable[[str], object] = open_libvirt,
     secret_backend_factory: Callable[[], SecretBackend] = _default_secret_backend,
     pki_base_dir: Path | None = None,
