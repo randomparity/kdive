@@ -1,4 +1,11 @@
 ---
+- name: Install the virtualization stack (switch-to-modular)
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - libvirt_stack
+
 - name: Emit remote-libvirt facts (controller-side)
   hosts: remote_libvirt_hosts
   gather_facts: true

@@ -1,0 +1,61 @@
+---
+- name: Install virtualization packages (Debian)
+  ansible.builtin.apt:
+    name: >-
+      {{ libvirt_stack_packages_debian
+         + [libvirt_stack_qemu_package_map['Debian'][ansible_architecture]] }}
+    state: present
+    update_cache: true
+  when: ansible_os_family == 'Debian'
+
+- name: Install virtualization packages (RedHat)
+  ansible.builtin.dnf:
+    name: >-
+      {{ libvirt_stack_packages_redhat
+         + [libvirt_stack_qemu_package_map['RedHat'][ansible_architecture]] }}
+    state: present
+  when: ansible_os_family == 'RedHat'
+
+# switch-to-modular: required even on Ubuntu (boots monolithic by default
+# but ships the modular daemons in libvirt-daemon-system).
+- name: Stop the monolithic libvirt units (best effort; may be absent)
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+  loop: "{{ libvirt_stack_monolithic_units }}"
+  failed_when: false
+
+- name: Disable and mask the monolithic libvirt units
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: false
+    masked: true
+  loop: "{{ libvirt_stack_monolithic_units }}"
+
+- name: Enable and start the modular libvirt sockets
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    masked: false
+  loop: "{{ libvirt_stack_modular_sockets }}"
+
+- name: Add the login user to the kvm and libvirt groups
+  ansible.builtin.user:
+    name: "{{ ansible_user_id }}"
+    groups: [kvm, libvirt]
+    append: true
+
+- name: Run virt-host-validate (read-only)
+  ansible.builtin.command: virt-host-validate qemu
+  register: libvirt_stack_virt_host_validate
+  changed_when: false
+  failed_when: false
+
+- name: Assert hardware virtualization and /dev/kvm pass
+  ansible.builtin.assert:
+    that:
+      - libvirt_stack_virt_host_validate.stdout is search('hardware virtualization\s*:\s*PASS')
+      - libvirt_stack_virt_host_validate.stdout is search('/dev/kvm exists\s*:\s*PASS')
+    fail_msg: "KVM not usable on {{ inventory_hostname }}:\n{{ libvirt_stack_virt_host_validate.stdout }}"
+    success_msg: "KVM acceleration and /dev/kvm present."

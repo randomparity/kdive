@@ -1,0 +1,41 @@
+---
+libvirt_stack_packages_debian:
+  - libvirt-daemon-system
+  - libvirt-clients
+  - qemu-utils
+  - libguestfs-tools
+  - virtinst
+  - gnutls-bin
+libvirt_stack_packages_redhat:
+  - libvirt
+  - libvirt-client
+  - qemu-img
+  - libguestfs-tools-c
+  - virt-install
+  - gnutls-utils
+
+# qemu emulator package by os_family + arch.
+libvirt_stack_qemu_package_map:
+  Debian:
+    x86_64: qemu-system-x86
+    ppc64le: qemu-system-ppc
+  RedHat:
+    x86_64: qemu-kvm
+    ppc64le: qemu-kvm
+
+libvirt_stack_monolithic_units:
+  - libvirtd.service
+  - libvirtd.socket
+  - libvirtd-ro.socket
+  - libvirtd-admin.socket
+  - libvirtd-tls.socket
+  - libvirtd-tcp.socket
+
+# NOTE: virtproxyd-tls.socket is enabled by the libvirt_tls role, not here.
+libvirt_stack_modular_sockets:
+  - virtqemud.socket
+  - virtnetworkd.socket
+  - virtstoraged.socket
+  - virtnodedevd.socket
+  - virtsecretd.socket
+  - virtproxyd.socket
