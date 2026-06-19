@@ -8,7 +8,7 @@
   [ADR-0069](0069-reservation-pending-queue-scheduler.md) (the work-conserving FIFO promotion
   sweep and the persisted request-input columns a queued row re-admits from),
   [ADR-0068](0068-custom-config-pcie-modeling.md) (the PCIe narrowing layered on a candidate
-  set), [ADR-0112](0112-resource-merge-reconcile.md) (the `systems.toml` → `resources` reconcile
+  set), [ADR-0112](0112-systems-inventory-config.md) (the `systems.toml` → `resources` reconcile
   that writes `resource.pool`), [ADR-0180](0180-lifecycle-recovery-context.md) (the recovery
   context that echoes the requested selector).
 - **Spec:** [`../superpowers/specs/2026-06-19-system-pools-design.md`](../superpowers/specs/2026-06-19-system-pools-design.md)
@@ -41,9 +41,16 @@ pool-level metadata or quota — nothing in #561 needs them, and a label keeps o
 (the resource row) and zero new lifecycle.
 
 **Exactly one selector.** The request target becomes **exactly one of `{resource_id, pool,
-kind}`**; zero or more than one is a `configuration_error` raised before admission. A pool is its
-own axis and is assumed to group interchangeable (same-kind) hosts, so `pool`+`kind` would be
-redundant; rejecting it keeps the validation and the test matrix small.
+kind}`**, enforced structurally by the existing payload discriminated union (`ResourceById |
+ResourceByKind`) extended with a `ResourceByPool` variant. A pool is its own axis and is assumed
+to group interchangeable (same-kind) hosts, so `pool`+`kind` would be redundant; rejecting it
+keeps the validation and the test matrix small. Internally `AdmissionRequestSpec.kind` (today a
+non-optional `ResourceKind` with a by-id default) becomes optional and gains `pool`; the three
+sites that assume `kind` is always set become selector-aware — the `object_id` derivation, the
+`requested_kind`-vs-`requested_pool` persistence (a queued pool row must not carry a bogus
+`requested_kind`), and the no-resource denial detail. A **pool** no-resource denial enumerates
+**available pools** (`SELECT DISTINCT pool`, deployment topology like the by-kind `available_kinds`
+of ADR-0132), not kinds.
 
 **Candidate resolution mirrors by-kind.** `placement.PlacementRequest` gains `pool: str | None`;
 `_schedulable_candidates` gains a pool branch — `SELECT * FROM resources WHERE pool=%s AND

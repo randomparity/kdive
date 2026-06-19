@@ -70,9 +70,16 @@ system's bound resource name and calls `remote_config_for_resource(name)` to ope
 console on its own host. This is the one caller that moves from resolve-once-at-bootstrap to
 resolve-per-system.
 
-`remote_config_from_inventory()` (no identity) is retained only for the genuinely host-agnostic
-callers — discovery enumeration and the console-hosting bootstrap of process-wide singletons
-(event loop, leader lock) — never for a per-op dispatch.
+**No caller resolves "an arbitrary single instance."** Several remote callers have no System yet
+today depend on the singleton: the reconciler sweeps (`transport_reset.py` dead-worker gdbstub
+re-arm, `reaping/connections.py` port reaping) and the doctor diagnostics
+(`reachability`/`base_image_staging`/`contribution`/`gdbstub_acl`). The sweeps resolve **per
+domain → System → Resource** (a domain-less reap enumerates all hosts); the diagnostics **fan out
+per declared instance**. To serve the genuinely fleet-wide callers, add `all_remote_configs()`
+(validates and returns every instance). `remote_config_from_inventory()` is **deleted** — every
+site moves to `remote_config_for_resource(name)` or `all_remote_configs()`, so a dispatch with N
+hosts can never silently hit the wrong host. Discovery and the console-hosting bootstrap keep a
+no-identity entry point, but via `all_remote_configs()` / per-instance resolution.
 
 ## Consequences
 
@@ -101,6 +108,11 @@ callers — discovery enumeration and the console-hosting bootstrap of process-w
   resolve-once cache that goes stale when the reconcile re-assigns instances; rejected in favor of
   resolving per op from the current inventory keyed by the resource name (the config read is
   already deferred per ADR-0076).
+- **Retain `remote_config_from_inventory()` for the no-System callers (reaper/diagnostics).**
+  With N instances it would resolve an arbitrary single host, silently resetting the wrong
+  gdbstub / reaping the wrong host / reporting one host's health as the fleet's. Rejected —
+  delete it and force every no-System caller onto `all_remote_configs()` (fan-out) or a
+  per-domain→resource resolution.
 - **Thread a full `RemoteLibvirtConfig` object through the job payload.** Serializes connection
   identity (including secret refs) into the queue row; rejected — pass the resource *name* and
   resolve at the worker boundary where secrets already resolve.
