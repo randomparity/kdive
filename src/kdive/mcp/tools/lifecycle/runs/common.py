@@ -11,6 +11,7 @@ from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import Job
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import job_envelope
+from kdive.mcp.tools.lifecycle._recovery import build_profile_summary
 from kdive.services.runs import states as run_states
 from kdive.services.runs.steps import StepProgress
 
@@ -55,6 +56,24 @@ def no_job_failure_detail(category: ErrorCategory) -> str:
         failed Run is never surfaced as a bare category.
     """
     return _NO_JOB_DETAIL.get(category, _NO_JOB_FALLBACK)
+
+
+def _run_recovery(run: Run) -> dict[str, JsonValue]:
+    """Investigation link + redaction-safe build summary, on the Run row (#568)."""
+    return {
+        "investigation_id": str(run.investigation_id),
+        **build_profile_summary(run.build_profile),
+    }
+
+
+def _run_artifact_refs(run: Run) -> dict[str, str]:
+    """The Run's object-store artifact keys, for the envelope ``refs`` slot."""
+    refs: dict[str, str] = {}
+    if run.kernel_ref:
+        refs["kernel"] = run.kernel_ref
+    if run.debuginfo_ref:
+        refs["debuginfo"] = run.debuginfo_ref
+    return refs
 
 
 def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
@@ -128,8 +147,13 @@ def envelope_for_run(
         if isinstance(kind, str):
             data["expected_boot_failure"] = kind
         data["expected_boot_failure_detail"] = cast(JsonValue, run.expected_boot_failure)
+    data.update(_run_recovery(run))
     return ToolResponse.success(
-        str(run.id), run.state.value, suggested_next_actions=actions, data=data
+        str(run.id),
+        run.state.value,
+        suggested_next_actions=actions,
+        refs=_run_artifact_refs(run),
+        data=data,
     )
 
 
@@ -147,7 +171,7 @@ def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None)
     derived `detail` is still routed through `ToolResponse.failure`, so a no-leak category
     surfaces the seam constant, never the derived reason.
     """
-    data: dict[str, JsonValue] = {"current_status": run.state.value}
+    data: dict[str, JsonValue] = {"current_status": run.state.value, **_run_recovery(run)}
     detail: str | None = None
     no_leak = suppressed_detail(category, None) is not None
     if failing_job is not None and not no_leak:
@@ -159,7 +183,9 @@ def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None)
                 data[key] = value
     elif failing_job is None:
         detail = no_job_failure_detail(category)
-    return ToolResponse.failure(str(run.id), category, detail=detail, data=data)
+    return ToolResponse.failure(
+        str(run.id), category, detail=detail, refs=_run_artifact_refs(run), data=data
+    )
 
 
 def run_job_envelope(job: Job, run_id: UUID) -> ToolResponse:
