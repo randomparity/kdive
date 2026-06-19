@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import LiteralString
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 
 import kdive.services.allocation.admission.pcie_claim as pcie_claim
@@ -20,6 +21,7 @@ from kdive.services.allocation.admission.affinity import project_may_place
 class PlacementRequest:
     resource_id: UUID | None
     kind: ResourceKind | None = None
+    pool: str | None = None
     pcie_specs: tuple[str, ...] = ()
     project: str | None = None
 
@@ -41,7 +43,7 @@ async def resolve_placement_candidates(
     applied. The PCIe-spec filtering then narrows the affinity-allowed set.
     """
     candidates = await _schedulable_candidates(
-        conn, request.resource_id, request.kind, request.project
+        conn, request.resource_id, request.kind, request.pool, request.project
     )
     if not request.pcie_specs:
         return PlacementCandidates(resources=candidates)
@@ -64,26 +66,40 @@ async def _schedulable_candidates(
     conn: AsyncConnection,
     resource_id: UUID | None,
     kind: ResourceKind | None,
+    pool: str | None,
     project: str | None,
 ) -> list[Resource]:
-    """Return schedulable candidates for either an explicit host or a resource kind.
+    """Return schedulable candidates for an explicit host, a pool, or a resource kind.
 
     Candidates are filtered by the per-project affinity predicate when ``project`` is set;
     a disallowed scoped resource is excluded so it is never selected (Task 4.2). An explicit
-    ``resource_id`` targeting a disallowed scoped host yields no candidate.
+    ``resource_id`` targeting a disallowed scoped host yields no candidate. A by-pool request
+    (ADR-0186) selects every schedulable resource carrying the pool label, oldest-first, exactly
+    like by-kind — selection routes around a busy/cordoned member.
     """
     if resource_id is not None:
         resource = await RESOURCES.get(conn, resource_id)
         if resource is None or resource.cordoned or resource.status is not ResourceStatus.AVAILABLE:
             return []
         return [resource] if _affinity_ok(resource, project) else []
-    if kind is None:
-        return []
+    if pool is not None:
+        return await _label_candidates(conn, "pool", pool, project)
+    if kind is not None:
+        return await _label_candidates(conn, "kind", kind.value, project)
+    return []
+
+
+async def _label_candidates(
+    conn: AsyncConnection, column: LiteralString, value: str, project: str | None
+) -> list[Resource]:
+    """Schedulable resources matching ``column = value``, oldest-first, affinity-filtered."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT * FROM resources WHERE kind = %s AND status = 'available' AND NOT cordoned "
-            "ORDER BY created_at, id",
-            (kind.value,),
+            sql.SQL(
+                "SELECT * FROM resources WHERE {col} = %s AND status = 'available' "
+                "AND NOT cordoned ORDER BY created_at, id"
+            ).format(col=sql.Identifier(column)),
+            (value,),
         )
         rows = await cur.fetchall()
     candidates = [Resource.model_validate(row) for row in rows]
