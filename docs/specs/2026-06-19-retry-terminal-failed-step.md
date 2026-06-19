@@ -39,6 +39,13 @@ returns the old failed job. The suggestion is a dead end; `transport_failure` is
 5. `runs.get` next-action stays consistent: it already reports the abandoned step as `pending` and
    suggests `runs.install` / `runs.boot`; after this change that suggestion actually re-runs the
    step. No change to `runs.get`.
+6. The recycled re-run claims its step cleanly even if the prior failed step's `run_steps` row was
+   **not** removed. `abandon_run_step` is best-effort (`runs_common.py:15-20` logs and swallows), so
+   a stale `running` row can linger. `claim_run_step` (`db/idempotency.py:114-144`) already tolerates
+   this: it reaps a `running` row older than `_STALE_RUNNING_INTERVAL` and otherwise waits-then-
+   reclaims, so a recycled job whose owner is gone self-heals (worst case a bounded wait), never a
+   hard `UNIQUE(run_id, step)` conflict. The fix relies on this existing behavior — it adds no new
+   `run_steps` handling.
 
 Falsifiable check: a queue test that fails a step-keyed job to `failed` at `attempt == max_attempts`,
 then `enqueue(..., retry_terminal_failed=True)`, asserts the returned job is `queued` with
