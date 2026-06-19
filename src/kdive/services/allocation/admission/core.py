@@ -129,6 +129,7 @@ class AllocationRequest:
     on_capacity: Literal["deny", "queue"] = "deny"
     requested_kind: ResourceKind | None = None
     requested_resource_id: UUID | None = None
+    requested_pool: str | None = None
 
 
 @dataclass(frozen=True)
@@ -598,6 +599,7 @@ async def _enqueue(conn: AsyncConnection, request: AllocationRequest) -> Admissi
             requested_pcie_specs=list(request.pcie_specs),
             requested_kind=request.requested_kind,
             requested_resource_id=request.requested_resource_id,
+            requested_pool=request.requested_pool,
         ),
     )
     if request.idempotency_key is not None:
