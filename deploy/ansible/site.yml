@@ -20,6 +20,13 @@
   roles:
     - libvirt_pool_net
 
+- name: Apply the gdbstub-port ACL
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - gdbstub_acl
+
 - name: Emit remote-libvirt facts (controller-side)
   hosts: remote_libvirt_hosts
   gather_facts: true

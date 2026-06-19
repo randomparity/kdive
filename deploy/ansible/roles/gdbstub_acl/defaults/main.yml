@@ -1,0 +1,7 @@
+---
+gdbstub_acl_acl_tls_port: 16514
+# Port-range separators DIFFER by firewall: firewalld rich rules want a DASH
+# ("47000-47099"); ufw and iptables want the COLON form ("47000:47099", which is
+# exactly gdbstub_range). Use gdbstub_acl_gdbstub_port_range_dash for firewalld
+# ONLY; use the raw gdbstub_range for ufw.
+gdbstub_acl_gdbstub_port_range_dash: "{{ gdbstub_range | replace(':', '-') }}"
