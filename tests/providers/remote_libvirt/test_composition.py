@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 
@@ -58,3 +59,45 @@ def test_for_resource_is_identity_without_rebind_hook() -> None:
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
     plain = replace(runtime, rebind_for_resource=None)
     assert plain.for_resource("anything") is plain
+
+
+def test_console_open_resolves_the_systems_own_host_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0187: per-System console open must resolve the host config of the resource the System is
+    # allocated to (System→Allocation→Resource.name), so one leader hosts a multi-host fleet.
+    system_id = uuid4()
+    secret_backend = object()
+    resolved: list[str] = []
+    opened: list[tuple[RemoteLibvirtConfig, object]] = []
+
+    def fake_name_lookup(conninfo: str, sid: object) -> str:
+        assert sid == system_id
+        return "host-b"
+
+    def fake_for_resource(name: str) -> RemoteLibvirtConfig:
+        resolved.append(name)
+        return RemoteLibvirtConfig(
+            uri=f"qemu+tls://{name}.example/system",
+            cert_refs=TlsCertRefs("c", "k", "ca"),  # pragma: allowlist secret
+            concurrent_allocation_cap=1,
+            gdb_addr="10.0.0.2",
+        )
+
+    def fake_open_remote_console(config: RemoteLibvirtConfig, backend: object, sid: object):  # noqa: ANN202
+        opened.append((config, sid))
+        return object()
+
+    monkeypatch.setattr(composition, "resource_name_for_system", fake_name_lookup)
+    monkeypatch.setattr(composition, "remote_config_for_resource", fake_for_resource)
+    monkeypatch.setattr(composition, "open_remote_console", fake_open_remote_console)
+
+    composition._open_console_for_system(
+        system_id,
+        conninfo="postgresql://ignored",
+        secret_backend=secret_backend,  # ty: ignore[invalid-argument-type]
+    )
+
+    assert resolved == ["host-b"]
+    assert opened[0][0].uri == "qemu+tls://host-b.example/system"
+    assert opened[0][1] == system_id

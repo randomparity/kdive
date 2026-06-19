@@ -41,10 +41,11 @@ from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
+    is_remote_libvirt_configured,
     remote_config_for_resource,
     remote_config_from_inventory,
 )
-from kdive.providers.remote_libvirt.console.collector import ConsoleCollector
+from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
 from kdive.providers.remote_libvirt.console.wiring import (
     RemoteConsolePartStore,
     open_remote_console,
@@ -72,7 +73,7 @@ from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.security.secrets.secrets import secret_backend_from_env
+from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
 from kdive.store.objectstore import object_store_from_env
 
 _POOL = "remote-libvirt"
@@ -131,15 +132,56 @@ def build_ephemeral_build_transport_factory(
     return _factory
 
 
+def resource_name_for_system(conninfo: str, system_id: UUID) -> str:
+    """Resolve a remote System's bound resource (host) name: System→Allocation→Resource.
+
+    The remote-libvirt resource ``name`` is its ``[[remote_libvirt]]`` instance name (ADR-0112),
+    so this is the key the per-console open passes to :func:`remote_config_for_resource` to reach
+    the System's *own* host in a multi-host fleet (ADR-0187, #395).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the System has no bound remote resource
+            (no allocation row, or the join finds none) — the console cannot be opened without
+            knowing which host owns the System.
+    """
+    with psycopg.connect(conninfo) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT r.name FROM systems s "
+            "JOIN allocations a ON a.id = s.allocation_id "
+            "JOIN resources r ON r.id = a.resource_id "
+            "WHERE s.id = %s",
+            (system_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise CategorizedError(
+            f"system {system_id} has no bound remote-libvirt resource; cannot open its console",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return str(row[0])
+
+
+def _open_console_for_system(
+    system_id: UUID, *, conninfo: str, secret_backend: SecretBackend
+) -> ConsoleStream:
+    """Open ``system_id``'s console against the host config of the resource it is allocated to."""
+    name = resource_name_for_system(conninfo, system_id)
+    config = remote_config_for_resource(name)
+    return open_remote_console(config, secret_backend, system_id)
+
+
 async def build_console_hosting(
     *,
     secret_registry: SecretRegistry,
     running_systems_factory: RunningSystemsFactory,
 ) -> ConsoleHosting | None:
-    """Build the single-leader remote console hosting loop, or ``None`` when unconfigured."""
-    try:
-        remote_config = remote_config_from_inventory()
-    except CategorizedError:
+    """Build the single-leader remote console hosting loop, or ``None`` when unconfigured.
+
+    The process-wide singletons (leader lock, pump runner, host pool) are bootstrapped once; the
+    per-System console open resolves the System's *own* host config by its bound resource name, so
+    one leader hosts consoles across a multi-host fleet (ADR-0187, #395).
+    """
+    if not is_remote_libvirt_configured():
         return None
 
     conninfo = database_url()
@@ -159,7 +201,9 @@ async def build_console_hosting(
             raise TypeError("console collector factory expected a UUID system_id")
         return ConsoleCollector(
             system_id,
-            open_console=lambda sid: open_remote_console(remote_config, secret_backend, sid),
+            open_console=lambda sid: _open_console_for_system(
+                sid, conninfo=conninfo, secret_backend=secret_backend
+            ),
             store=part_store,
             secret_registry=secret_registry,
         )
