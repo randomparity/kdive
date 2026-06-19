@@ -421,6 +421,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Produces: `system_envelope(system, *, resource_kind=None, resource_id=None, active_debug_session_ids=None, active_run=None)`. `data` carries `project` (existing), `allocation_id`, `resource_id`, `resource_kind`, the provisioning summary (`arch`/`boot_method`/`vcpu`/`memory_mb`/`disk_gb`), `shape`, `created_at`, `updated_at`, and (get-only) `active_run` + `active_debug_session_ids`.
 - Produces helpers `_placement_for_system(conn, allocation_id) -> tuple[str | None, str | None]` and `_active_run_for_system(conn, system_id) -> dict[str, JsonValue] | None`.
 
+**Scope note:** `rg -n 'system_envelope\b' src` confirms the only callers are `get_system`
+and `_systems_collection` (provision uses the separate `defined_system_envelope`), so the
+unconditional new `data` keys reach only the get/list paths. Run the full
+`test_systems_*.py` modules (Step 8); update any assertion the new keys surface without
+deleting coverage.
+
 - [ ] **Step 1: Write the failing envelope test**
 
 Append to `tests/mcp/lifecycle/test_systems_tools.py` (import `System`, `SystemState`, `system_envelope`, `uuid4`, a datetime; follow the module's existing imports):
@@ -701,6 +707,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `build_profile_summary` from `_recovery` (Task 1); `ToolResponse.failure(refs=...)` (Task 1).
 - Produces: `envelope_for_run` `data` gains `investigation_id`, `build_source`, `build_host` (when present), `build_source_provenance`; the envelope `refs` gains `kernel`/`debuginfo` when set — on both the success and the failed path.
+
+**Scope note:** `rg -n 'envelope_for_run\b' src` confirms the only src caller is `get_run`;
+the rest are the `test_runs_tools.py` envelope tests (~lines 476-612) this task extends. Run
+the full module (Step 4); update any existing assertion the new keys surface without deleting
+coverage.
 
 - [ ] **Step 1: Write the failing envelope tests**
 
