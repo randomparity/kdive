@@ -50,7 +50,9 @@ async def get_run(
                 await _step_progress(conn, run.id) if run.state is RunState.SUCCEEDED else None
             )
         required = (
-            system_required_cmdline(_install_method_for(system, runtime.profile_policy))
+            system_required_cmdline(
+                _install_method_for(system, runtime.profile_policy), runtime.platform_root_cmdline
+            )
             if system is not None and runtime is not None
             else None
         )

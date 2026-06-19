@@ -137,7 +137,10 @@ def test_required_cmdline_root_matches_the_rendered_disk_target() -> None:
 
     target = _safe_fromstring(_render()).find("devices/disk/target")
     assert target is not None
-    assert f"root=/dev/{target.get('dev')}" in system_required_cmdline(CaptureMethod.CONSOLE)
+    # local-libvirt's runtime injects this root device (platform_root_cmdline default).
+    assert f"root=/dev/{target.get('dev')}" in system_required_cmdline(
+        CaptureMethod.CONSOLE, "root=/dev/vda"
+    )
 
 
 def test_render_uses_disk_path_override_when_given() -> None:

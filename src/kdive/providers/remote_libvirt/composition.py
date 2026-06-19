@@ -225,4 +225,8 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         rootfs_validator=lambda _rootfs: None,
         rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
         staged_volume_probe=probe_staged_volumes,
+        # The remote base image is partitioned and boots via in-guest GRUB, which already carries
+        # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
+        # platform must not inject a root device or it overrides that (ADR-0183, #587).
+        platform_root_cmdline=None,
     )
