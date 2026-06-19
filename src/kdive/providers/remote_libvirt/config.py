@@ -337,6 +337,33 @@ def all_remote_configs() -> list[RemoteLibvirtConfig]:
     return [_build_config(inst) for inst in _load_remote_instances()]
 
 
+def remote_instance_names() -> list[str]:
+    """The declared ``[[remote_libvirt]]`` instance names, parsed but not connection-validated.
+
+    For fan-out callers (the doctor) that enumerate the fleet at assembly time and resolve each
+    host's config lazily at op/probe time via :func:`remote_config_for_resource` — so a single
+    malformed instance surfaces as that host's per-check error, not an assembly crash (ADR-0187).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the inventory file is present but
+            unparseable (the same fail-closed contract as the other resolvers).
+    """
+    return [inst.name for inst in _load_remote_instances()]
+
+
+def all_remote_configs_by_name() -> list[tuple[str, RemoteLibvirtConfig]]:
+    """Resolve every declared instance's ``(name, config)`` for name-keyed fan-out callers.
+
+    The fan-out doctor pairs each host's config with its instance name so a per-host probe can
+    resolve the by-name staged base-image volume (ADR-0187, #395).
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the inventory is malformed or any declared
+            instance fails validation.
+    """
+    return [(inst.name, _build_config(inst)) for inst in _load_remote_instances()]
+
+
 def remote_config_from_inventory() -> RemoteLibvirtConfig:
     """Resolve the remote-libvirt connection config from the single ``systems.toml`` instance.
 
