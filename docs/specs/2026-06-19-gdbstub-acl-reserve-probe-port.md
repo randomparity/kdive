@@ -36,10 +36,11 @@ System is running on it.
 3. The firewall ACL the probe exercises is the operator-configured range; the operator-facing
    `pass`/`fail` messages still name the full range to open.
 
-Falsifiable check: a test asserting that on a fresh host the provisioner allocates
-`gdb_port_min + 1` (not `gdb_port_min`), and that `gdb_port_min` — the probe's target — is below
-the provisioner's allocation floor. It fails on the current code (which allocates `gdb_port_min`)
-and passes after the fix.
+Falsifiable check: tests asserting (a) on a fresh host the provisioner allocates `gdb_port_min + 1`
+(not `gdb_port_min`); and (b) even when a stale/foreign domain already records `gdb_port_min`, the
+provisioner still never assigns it — the reserved port is excluded by the allocation floor, not by
+the "already taken" set. Both fail on the current code (which allocates from `gdb_port_min`) and
+pass after the fix, pinning the invariant across the fresh-host and reuse-own-recorded-port paths.
 
 ## Approach
 
@@ -59,7 +60,16 @@ listener-free) — only the System-allocation floor moves up.
   the call site via the config property.
 - `_parse_gdbstub_range` validation tightens: the range must span **at least two** ports
   (`gdb_port_max > gdb_port_min`) — one reserved probe port plus at least one assignable System
-  port. A single-port range now fails fast with a `CONFIGURATION_ERROR` that names the reservation.
+  port. A single-port range now fails fast with a `CONFIGURATION_ERROR` whose message names the
+  reservation and the minimum, e.g. "gdbstub_range must span at least 2 ports (the lowest is
+  reserved for the ACL probe)".
+
+  **Compatibility:** this is a behavior change for a deployment that today declares a one-port range
+  (e.g. `gdbstub_range = "47000:47000"`). `_parse_gdbstub_range` runs in
+  `remote_config_from_inventory` (per-op, fail-closed), not in the `is_remote_libvirt_configured`
+  opt-in gate, so such a deployment keeps starting but begins failing every remote op with the
+  `CONFIGURATION_ERROR` above until the operator widens the range. No in-repo `systems.toml` example
+  or fixture uses a single-port range (verified during implementation); the default is 47000–47099.
 - The probe (`diagnostics/gdbstub_acl.py`), the check (`diagnostics/checks.py::GdbstubAclCheck`),
   and the contribution (`providers/remote_libvirt/diagnostics/contribution.py`) keep their current
   signatures and the `port_range` string for the operator message. Only their docstrings change to
