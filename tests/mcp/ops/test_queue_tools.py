@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -242,9 +243,12 @@ def test_jobs_list_renders_failed_job_with_category(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_jobs_list_degrades_failed_job_missing_category(migrated_url: str) -> None:
+def test_jobs_list_degrades_failed_job_missing_category(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
     # The schema permits a failed job with a null error_category; rendering must degrade
-    # to a categorized failure rather than crash the whole list (#582).
+    # to a categorized failure rather than crash the whole list, and log the malformed
+    # row so the silent normalization is observable (#582).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
@@ -260,8 +264,11 @@ def test_jobs_list_degrades_failed_job_missing_category(migrated_url: str) -> No
         item = {i.object_id: i for i in resp.items}[str(failed.id)]
         assert item.status == "failed"
         assert item.error_category == "infrastructure_failure"
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any(str(failed.id) in r.getMessage() for r in warnings)
 
-    asyncio.run(_run())
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.tools.ops.queue"):
+        asyncio.run(_run())
 
 
 def test_jobs_list_rejects_unknown_state(migrated_url: str) -> None:

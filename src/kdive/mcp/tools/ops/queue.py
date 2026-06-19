@@ -12,6 +12,7 @@ directly without MCP transport.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastmcp import FastMCP
@@ -32,6 +33,8 @@ from kdive.mcp.tools._platform_auth import actor_for, audit_platform_denial, hel
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
+
+_log = logging.getLogger(__name__)
 
 _QUEUE_OBJECT_ID = "queue"
 _JOBS_OBJECT_ID = "jobs"
@@ -195,7 +198,12 @@ def _job_item(job: Job) -> ToolResponse:
     """
     if job.state is not JobState.FAILED:
         return ToolResponse.success(str(job.id), job.state.value, data=_job_row(job))
-    category = job.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE
+    category = job.error_category
+    if category is None:
+        _log.warning(
+            "failed job %s has no error_category; degraded to infrastructure_failure", job.id
+        )
+        category = ErrorCategory.INFRASTRUCTURE_FAILURE
     return ToolResponse(
         object_id=str(job.id),
         status=JobState.FAILED.value,
