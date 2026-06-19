@@ -13,7 +13,7 @@
         immediate: true
         state: enabled
       loop:
-        - "{{ gdbstub_acl_acl_tls_port }}"
+        - "{{ gdbstub_acl_tls_port }}"
         - "{{ gdbstub_acl_gdbstub_port_range_dash }}"
 
     - name: Drop TLS + gdbstub from any other source (lower priority)
@@ -25,7 +25,7 @@
         immediate: true
         state: enabled
       loop:
-        - "{{ gdbstub_acl_acl_tls_port }}"
+        - "{{ gdbstub_acl_tls_port }}"
         - "{{ gdbstub_acl_gdbstub_port_range_dash }}"
 
     - name: Read back the rich rules (read-only)
@@ -33,12 +33,13 @@
       register: gdbstub_acl_firewalld_rules
       changed_when: false
 
-    - name: Assert the default-drop rule is present (off-CIDR refused)
+    - name: Assert the default-drop rules are present (off-CIDR refused)
       ansible.builtin.assert:
         that:
-          - gdbstub_acl_firewalld_rules.stdout is search('port="' ~ gdbstub_acl_acl_tls_port ~ '".*drop')
+          - gdbstub_acl_firewalld_rules.stdout is search('port="' ~ gdbstub_acl_tls_port ~ '"\s+protocol="tcp"\s+drop')
+          - gdbstub_acl_firewalld_rules.stdout is search('port="' ~ gdbstub_acl_gdbstub_port_range_dash ~ '"\s+protocol="tcp"\s+drop')
         fail_msg: >-
-          No default-drop rich rule for :{{ gdbstub_acl_acl_tls_port }} — port is world-open.
+          No default-drop rich rule for :{{ gdbstub_acl_tls_port }} or gdbstub range — port is world-open.
 
 # --- Ubuntu: ufw default-deny inbound is the drop; ordered allow-from rules open
 # --- only the worker CIDR. ---
@@ -51,7 +52,7 @@
         direction: in
         proto: tcp
         from_ip: "{{ worker_cidr }}"
-        to_port: "{{ gdbstub_acl_acl_tls_port }}"
+        to_port: "{{ gdbstub_acl_tls_port }}"
 
     - name: Allow gdbstub range from the worker CIDR
       community.general.ufw:
