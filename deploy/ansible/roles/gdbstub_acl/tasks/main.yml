@@ -90,10 +90,32 @@
         proto: tcp
         to_port: "{{ gdbstub_range }}"
 
+    # ufw enabling sets DEFAULT_FORWARD_POLICY=DROP, which would block libvirt's guest
+    # NAT forwarding — and the remote-libvirt install/kdump-capture planes need the guest
+    # to egress to the object store. FORWARD is routed-through traffic, independent of the
+    # INPUT-chain gdbstub/TLS ACL, so allowing it does NOT weaken this role's protection;
+    # it just preserves the forwarding behavior that existed before ufw was enabled.
+    - name: Allow forwarded traffic so enabling ufw does not break libvirt guest egress
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: DEFAULT_FORWARD_POLICY="ACCEPT"
+      register: gdbstub_acl_ufw_forward_policy
+      when: gdbstub_acl_ufw_enable | bool
+
     - name: Enable ufw so the ACL is enforced (SSH already allowed above)
       community.general.ufw:
         state: enabled
       when: gdbstub_acl_ufw_enable | bool
+
+    - name: Reload ufw if the forward policy changed under an active ufw  # noqa: command-instead-of-module
+      # state:enabled does not reload an already-active ufw, so a forward-policy edit on a
+      # re-run needs an explicit reload; on the first run `enable` already read the new file.
+      ansible.builtin.command: ufw reload
+      when:
+        - gdbstub_acl_ufw_enable | bool
+        - gdbstub_acl_ufw_forward_policy.changed
+      changed_when: true
 
     - name: Read ufw status  # noqa: command-instead-of-module
       # Reading enforcement state; the ufw module sets rules, it has no is-active read.
