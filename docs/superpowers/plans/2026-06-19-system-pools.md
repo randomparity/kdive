@@ -374,8 +374,8 @@ git commit -m "feat(remote): add by-name + fleet remote config resolvers (#395)"
 
 **Files:**
 - Modify: `src/kdive/providers/core/runtime.py` (`ProviderRuntime` dataclass — add `for_resource`)
-- Modify: `src/kdive/providers/remote_libvirt/composition.py` (`build_runtime` line 188-232; thread a `config_factory` into every port; set `for_resource`)
-- Modify: every remote port constructor / `from_env` that defaulted `config_factory=remote_config_from_inventory` (the ~16 modules from the spec B.5 list) — change the default to a required/injected `config_factory` supplied by `build_runtime`.
+- Modify: `src/kdive/providers/remote_libvirt/composition.py` (`build_runtime` line 188-232; thread `config_factory` into the class-(a) lifecycle ports; set `rebind_for_resource`)
+- Modify: the class-(a) lifecycle port constructors / `from_env` so `build_runtime` can pass a bound `config_factory` (do NOT remove their `= remote_config_from_inventory` default): `lifecycle/{provisioning,connect,install,control,build_vm}.py`, `debug/introspect.py`, `retrieve/facade.py`, `staged_volumes.py`. The class-(b)/(c) modules are migrated in B5/B6, not here.
 - Test: `tests/providers/core/test_runtime.py`, `tests/providers/remote_libvirt/test_composition.py`
 
 **Interfaces:**
@@ -401,8 +401,8 @@ git commit -m "feat(remote): add by-name + fleet remote config resolvers (#395)"
         return self.rebind_for_resource(resource_name)
 ```
 
-  - `remote_composition.build_runtime`: accept `config_factory: Callable[[], RemoteLibvirtConfig]` (default a function that raises "remote runtime used unbound — call for_resource"). Thread it into every port constructor. Set `rebind_for_resource=lambda name: build_runtime(secret_registry=secret_registry, config_factory=lambda: remote_config_for_resource(name))`.
-  - Each remote port module: change `config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory` to `config_factory: Callable[[], RemoteLibvirtConfig]` (no default) and have `build_runtime` pass it. Their `from_env` classmethods take `config_factory` too. (Modules: `lifecycle/{provisioning,connect,install,control,build_vm}.py`, `debug/introspect.py`, `retrieve/facade.py`, `staged_volumes.py`, `transport_reset.py`, `reaping/connections.py`, `diagnostics/{reachability,base_image_staging,contribution}.py`.)
+  - `remote_composition.build_runtime`: accept `config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory` (keep the singleton as the unbound default so an unbound runtime still works exactly as today — it is deleted only in B8). Thread `config_factory` into every **class-(a) lifecycle port** `build_runtime` constructs. Set `rebind_for_resource=lambda name: build_runtime(secret_registry=secret_registry, config_factory=lambda: remote_config_for_resource(name))`.
+  - **Green-at-every-commit (do NOT remove any default):** keep `config_factory: ... = remote_config_from_inventory` on **every** module's constructor/`from_env`. B2 only *adds* the ability for `build_runtime` to pass an override; it removes no default. The class-(a) lifecycle ports (`lifecycle/{provisioning,connect,install,control,build_vm}.py`, `debug/introspect.py`, `retrieve/facade.py`, `staged_volumes.py`) now receive the bound factory from `build_runtime`. The class-(b)/(c) modules (`transport_reset.py`, `reaping/connections.py`, `diagnostics/{reachability,base_image_staging,contribution}.py`) are **not touched in B2** — they keep the singleton default and are migrated together with their callers in B5/B6 (so no caller ever loses a required arg mid-flight). B8 removes the now-unused singleton and any default still referencing it.
 
 - [ ] **Step 4: Run to verify it passes.**
   Run: `uv run python -m pytest tests/providers/core/ tests/providers/remote_libvirt/ -q`
