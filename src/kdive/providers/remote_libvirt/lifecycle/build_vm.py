@@ -105,6 +105,23 @@ _NETWORK_POLL_S = 2.0
 _EGRESS_PROBE_CALL_TIMEOUT_S = 30
 
 
+def _is_transient_agent_drop(exc: CategorizedError) -> bool:
+    """Whether an agent error during the network gate is a transient channel drop to retry (#584).
+
+    A bare/transport-level drop is transient by classification. A ``CONFIGURATION_ERROR`` is
+    treated as transient *only* when its libvirt code is ``VIR_ERR_AGENT_UNRESPONSIVE`` (the build
+    transport marks that deterministic for the build phase, ADR-0168, but during network bring-up
+    NetworkManager momentarily churns the agent's virtio-serial channel). Any other deterministic
+    config code (agent not installed / command denied) is a genuine failure and is not retried.
+    """
+    if exc.category is ErrorCategory.TRANSPORT_FAILURE:
+        return True
+    return (
+        exc.category is ErrorCategory.CONFIGURATION_ERROR
+        and exc.details.get("libvirt_error_code") == libvirt.VIR_ERR_AGENT_UNRESPONSIVE
+    )
+
+
 @dataclass(frozen=True)
 class BuildVmTiming:
     """Clock and timeout seams for build-VM guest-agent + network readiness."""
@@ -324,26 +341,39 @@ class EphemeralBuildVm:
     def _wait_for_network(self, transport: GuestExecBuildTransport, domain_name: str) -> None:
         """Block until the build guest has a default route, so the clone sees working network.
 
-        A non-zero probe rc means "no route yet, keep polling"; a raised CategorizedError (the
-        agent dropped) propagates. On the deadline, the last probe output is surfaced so a broken
-        probe (missing cut/grep) is diagnosable rather than a bare timeout (ADR-0144).
+        A non-zero probe rc means "no route yet, keep polling". A transient agent drop is also
+        "not ready, keep polling": NetworkManager briefly drops the guest's virtio-serial agent
+        channel while it brings the interface up, so a ``VIR_ERR_AGENT_UNRESPONSIVE`` *during this
+        gate* is expected and must not fail the build (#584) — unlike a drop during the build
+        itself, which stays fatal (ADR-0168). A genuinely deterministic agent config error (not
+        installed / denied) still propagates. On the deadline, the last probe output (or the last
+        agent drop) is surfaced so a broken probe or a wedged agent is diagnosable (ADR-0144).
         """
         last: list[CommandResult] = []
+        last_drop: list[CategorizedError] = []
 
         def probe() -> bool:
-            result = transport.run(
-                _NETWORK_PROBE_ARGV, cwd="/", timeout_s=_NETWORK_PROBE_CALL_TIMEOUT_S
-            )
+            try:
+                result = transport.run(
+                    _NETWORK_PROBE_ARGV, cwd="/", timeout_s=_NETWORK_PROBE_CALL_TIMEOUT_S
+                )
+            except CategorizedError as exc:
+                if not _is_transient_agent_drop(exc):
+                    raise
+                last_drop.append(exc)
+                return False
             last.append(result)
             return result.returncode == 0
 
         def timeout_detail() -> dict[str, object]:
-            if not last:
-                return {}
-            return {
-                "probe_stderr": redacted_tail(last[-1].stderr, self._secret_registry),
-                "probe_stdout": last[-1].stdout[-200:],
-            }
+            if last:
+                return {
+                    "probe_stderr": redacted_tail(last[-1].stderr, self._secret_registry),
+                    "probe_stdout": last[-1].stdout[-200:],
+                }
+            if last_drop:
+                return {"agent_drop": str(last_drop[-1])}
+            return {}
 
         wait_for_network(
             probe,
