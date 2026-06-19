@@ -37,9 +37,12 @@ manager on the event loop:
    failure retains it for the reconciler) are unchanged.
 4. The worker-local build lane is unchanged (it already offloads its whole build).
 
-Falsifiable check: a test driving `run_build_on_host` with a factory whose `__enter__` records the
-running thread asserts that thread is **not** the event-loop thread; it fails on the current code
-and passes after the fix.
+Falsifiable check: a test driving `run_build_on_host` with a factory that records the running
+thread at `__enter__`, inside `builder.build`, **and** at `__exit__` (teardown — itself blocking
+synchronous libvirt) asserts none of those threads is the event-loop thread. It fails on the
+current code (which enters/exits the session on the loop) and passes after the fix. Pinning all
+three points keeps the guard as wide as criterion 1's claim, so a later regression that moved any
+phase — including teardown — back onto the loop is caught.
 
 ## Non-goals
 
@@ -49,6 +52,10 @@ and passes after the fix.
   alternatives).
 - No change to the residual-VM re-claim path: it is already idempotent and is exercised less often
   once SIGKILL-mid-build stops.
+- No change to build cancellation: `asyncio.to_thread` is not cancellable, so a worker stop /
+  shutdown does not interrupt an in-flight session. This is unchanged from today's `build()`
+  offload — the session simply spans a wider sync region now — and the lease fence + reconciler
+  reaper remain the backstop for a worker that dies mid-build.
 
 ## Approach
 
