@@ -77,6 +77,7 @@ class _SessionFactory(Protocol):
         secret_registry: SecretRegistry,
         *,
         run_id: UUID,
+        resource_name: str,
         source: GitSourceRef | None = ...,
         wait_network: bool = ...,
     ) -> AbstractContextManager[_BuildTransport]: ...
@@ -178,7 +179,12 @@ def _blocking_probe(
         return BuildHostAgentOutcome.HOST_UNREACHABLE, False
     try:
         with session_factory(
-            base_image_volume, secret_registry, run_id=run_id, source=None, wait_network=False
+            base_image_volume,
+            secret_registry,
+            run_id=run_id,
+            resource_name=host.name,
+            source=None,
+            wait_network=False,
         ) as transport:
             try:
                 result = transport.run(

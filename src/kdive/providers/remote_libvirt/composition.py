@@ -126,7 +126,11 @@ def build_ephemeral_build_transport_factory(
                 details={"run_id": str(run_id), "build_host": host.name},
             )
         return ephemeral_build_session(
-            host.base_image_volume, secret_registry, run_id=run_id, source=source
+            host.base_image_volume,
+            secret_registry,
+            run_id=run_id,
+            resource_name=host.name,
+            source=source,
         )
 
     return _factory

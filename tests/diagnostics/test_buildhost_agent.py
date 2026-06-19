@@ -67,6 +67,7 @@ def _session_factory(
         secret_registry: SecretRegistry,
         *,
         run_id: UUID,
+        resource_name: str = "",
         source: object | None = None,
         wait_network: bool = True,
     ) -> Iterator[_FakeTransport]:
@@ -124,6 +125,7 @@ def _gate_driven_unresponsive_factory():
         secret_registry: SecretRegistry,
         *,
         run_id: UUID,
+        resource_name: str = "",
         source: object | None = None,
         wait_network: bool = True,
     ) -> Iterator[_FakeTransport]:

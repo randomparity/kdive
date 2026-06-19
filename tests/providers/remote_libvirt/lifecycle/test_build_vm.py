@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+from contextlib import contextmanager
 from typing import Any
 from uuid import UUID
 
@@ -469,3 +470,43 @@ def test_session_egress_probe_guards_leading_dash_remote(tmp_path: Any) -> None:
         assert isinstance(transport, GuestExecBuildTransport)
     [probe] = agent.ls_remote_commands
     assert "-- --upload-pack=evil HEAD" in probe
+
+
+def test_ephemeral_session_resolves_config_by_build_host_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0187, #395: the ephemeral build session must provision on the *build host's* config,
+    # resolved by the host's [[remote_libvirt]] instance name — not a lone singleton.
+    from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
+    from kdive.providers.remote_libvirt.lifecycle import build_vm
+
+    captured: dict[str, object] = {}
+
+    def fake_for_resource(name: str) -> RemoteLibvirtConfig:
+        captured["name"] = name
+        return RemoteLibvirtConfig(
+            uri=f"qemu+tls://{name}.example/system",
+            cert_refs=TlsCertRefs("c", "k", "ca"),  # pragma: allowlist secret
+            concurrent_allocation_cap=1,
+        )
+
+    class _RecordingVm:
+        def __init__(self, *, secret_registry, config_factory) -> None:  # noqa: ANN001
+            captured["config"] = config_factory()
+
+        @contextmanager
+        def session(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            yield object()
+
+    monkeypatch.setattr(build_vm, "remote_config_for_resource", fake_for_resource)
+    monkeypatch.setattr(build_vm, "EphemeralBuildVm", _RecordingVm)
+
+    with build_vm.ephemeral_build_session(
+        _BASE_VOLUME, SecretRegistry(), run_id=RUN_ID, resource_name="host-b"
+    ):
+        pass
+
+    assert captured["name"] == "host-b"
+    config = captured["config"]
+    assert isinstance(config, RemoteLibvirtConfig)
+    assert config.uri == "qemu+tls://host-b.example/system"
