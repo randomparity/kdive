@@ -276,6 +276,14 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Consumes: `iso` from `kdive.mcp.tools.lifecycle._recovery` (Task 1).
 - Produces: `envelope_for_allocation` `data` now carries `requested_kind`, `requested_resource_id`, `requested_pcie_specs`, `shape`, `requested_vcpus`, `requested_memory_gb`, `requested_disk_gb`, `resource_id`, `lease_expiry`, `active_started_at`, `active_ended_at`, `created_at`, `updated_at` — on both the success and the failed envelope. Existing keys (`project`, queue counters) unchanged.
 
+**Scope guard:** Only `envelope_for_allocation` (used by `allocations.get`/`wait`/`list`)
+changes. The `allocations.request` grant/enqueue response is built by a **separate** helper,
+`_grant_or_enqueue_response` in `request.py` (which omits `resource_id` on a `requested`
+allocation) — do **not** change it; its tests (e.g. `test_allocations_pcie.py:169` asserting
+`"resource_id" not in second.data`) exercise that untouched path and must stay green. If
+running the full module surfaces a pre-existing assertion that now sees a new key on a
+get/wait/list envelope, update that assertion to check the new value — do not delete coverage.
+
 - [ ] **Step 1: Write the failing envelope test**
 
 Append to `tests/mcp/lifecycle/test_allocations_tools.py` (reuse `Allocation`, `AllocationState`, `ResourceKind`, `_DT`, `_envelope_for_allocation`, `uuid4` already imported there):
@@ -596,8 +604,11 @@ Then update `get_system` to call them:
 
 - [ ] **Step 6: Add `resource_id` to the list join**
 
-In `list_systems`, add `a.resource_id AS resource_id` to the SELECT and update `_split_kind`
-to pop it. Replace the query line:
+`_split_kind` / `_systems_collection` are referenced only inside `view.py` (confirm with
+`rg -n '_split_kind|_systems_collection' src tests` — no external callers), so renaming
+`_split_kind` to `_split_placement` is self-contained. In `list_systems`, add
+`a.resource_id AS resource_id` to the SELECT and update the splitter to pop it. Replace the
+query line:
 
 ```python
         query = sql.SQL(
@@ -638,28 +649,31 @@ Update the two `list_systems` return sites to use `_split_placement`:
 
 - [ ] **Step 7: Write/extend a list handler test asserting `resource_id` on list rows**
 
-Add to `tests/mcp/lifecycle/test_systems_list.py` (follow that module's seed helpers/fixtures):
-a test that seeds a ready System, calls `list_systems`, and asserts the first item's
-`data["resource_id"]` equals the seeded resource id and `data["allocation_id"]` is present,
-and that no `active_run`/`active_debug_session_ids` key appears on a list item.
+Add to `tests/mcp/lifecycle/test_systems_list.py`, mirroring the existing
+`test_list_exposes_resource_kind` exactly (same `_seed_budget_quota` / `_seed_resource` /
+`_seed_allocation` / `_seed_system` / `_list_systems` / `_ctx` / `_pool` helpers already in
+that module — `_seed_resource` returns the resource `UUID`):
 
 ```python
-def test_list_systems_surfaces_placement(migrated_url: str) -> None:
+def test_list_surfaces_placement_no_per_item_keys(migrated_url: str) -> None:
+    """systems.list rows carry resource_id + allocation_id, but no get-only N+1 keys."""
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            # Seed an allocation+system using the module's existing helpers, capturing
-            # the resource id and system's project, then:
-            resp = await list_systems(pool, _ctx())
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, resource_id=res)
+            await _seed_system(pool, allocation_id=alloc)
+            resp = await _list_systems(pool, _ctx())
+        assert resp.status == "ok" and len(resp.items) == 1
         item = resp.items[0]
-        assert item.data["resource_id"] is not None
-        assert "allocation_id" in item.data
+        assert item.data["resource_id"] == str(res)
+        assert item.data["allocation_id"] == str(alloc)
         assert "active_run" not in item.data
+        assert "active_debug_session_ids" not in item.data
+
     asyncio.run(_run())
 ```
-
-(Wire the seeding to the helpers already used by `test_systems_list.py` — do not invent a
-new fixture. If that module lacks a list seed helper, reuse the one in
-`test_systems_tools.py`.)
 
 - [ ] **Step 8: Run the system tests — expect pass**
 
@@ -885,20 +899,25 @@ not weaken the test.
 
 - [ ] **Step 3: Write the resume integration test**
 
-Find the existing lifecycle integration exercise (search `tests/integration/` for a module
-that drives allocation→system→run over the handlers with the `migrated_url`/stack fixtures).
-Add a test that: requests+grants an allocation, provisions a System, creates+binds a Run,
-then calls `get_allocation`, `get_system`, `get_run` and asserts that the ids needed for the
-next tool are all present in the envelopes without touching the DB directly:
+**This test crosses three object modules, so its DB seeding is not fully pre-written here —
+read the seed helpers first.** Create `tests/mcp/lifecycle/test_recovery_resume.py`. Reuse
+the concrete seed helpers proven in `test_systems_list.py` for the allocation+system spine
+(`_seed_budget_quota`, `_seed_resource` → resource `UUID`, `_seed_allocation(resource_id=...)`
+→ allocation `UUID`, `_seed_system(allocation_id=..., state=SystemState.READY)` → system
+`UUID`), and seed a bound Run the same way `test_runs_tools.py` seeds runs (insert a `Run`
+via `RUNS.insert` with `system_id=<system>`, `investigation_id=<seeded investigation>`,
+`state=RunState.SUCCEEDED`). Read both modules' top-of-file imports/helpers before writing —
+do not invent new fixtures. Then assert the recovery ids are all present:
 
 ```python
 def test_resume_from_read_tools(migrated_url: str) -> None:
     async def _run() -> None:
-        # ... seed via the module's existing helpers: alloc(granted) -> system(ready)
-        #     -> run(created, bound to system) ...
-        alloc_resp = await get_allocation(pool, ctx, alloc_id)
-        sys_resp = await get_system(pool, ctx, system_id)
-        run_resp = await get_run(pool, ctx, run_id, resolver=resolver)
+        async with _pool(migrated_url) as pool:
+            # spine: resource -> granted allocation -> ready system -> bound run
+            # (seed via the helpers named above; capture alloc_id/system_id/run_id as str)
+            alloc_resp = await get_allocation(pool, ctx, alloc_id)
+            sys_resp = await get_system(pool, ctx, system_id)
+            run_resp = await get_run(pool, ctx, run_id, resolver=resolver)
         # systems.provision needs the granted resource id:
         assert alloc_resp.data["resource_id"] is not None
         # runs.bind / install need the system + its allocation + run's investigation:
@@ -909,8 +928,9 @@ def test_resume_from_read_tools(migrated_url: str) -> None:
     asyncio.run(_run())
 ```
 
-(Wire seeding to the module's existing helpers/fixtures; do not invent new infrastructure.
-If no suitable integration module exists, place this in `tests/mcp/lifecycle/` using the
+(`get_system` takes no resolver; `get_run` takes `resolver=` — build a test resolver the
+same way `test_runs_tools.py` does. Do not invent new infrastructure. Place the test in
+`tests/mcp/lifecycle/` using the
 same `migrated_url` handler-seeding pattern the unit handler tests use.)
 
 - [ ] **Step 4: Run the resume test — expect pass**
