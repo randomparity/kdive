@@ -124,40 +124,57 @@ class RemoteLibvirtDumpVolumeReaper:
         await asyncio.to_thread(self._delete_blocking, name)
 
     def _list_blocking(self) -> list[DumpVolume]:  # pragma: no cover - live_vm
-        config = self._connections.config()
-        with self._connections.connection(config) as conn:
-            pool = conn.storagePoolLookupByName(config.storage_pool)
-            pool.refresh(0)
-            volumes: list[DumpVolume] = []
-            for volume in pool.listAllVolumes(0):
-                name = volume.name()
-                system_id = system_id_from_dump_volume_name(name)
-                if system_id is None and not name.startswith("kdive-host-dump-"):
-                    continue
-                volumes.append(
-                    DumpVolume(
-                        name=name,
-                        system_id=system_id,
-                        mtime_epoch_s=volume_mtime_epoch_s(volume.XMLDesc(0)),
-                    )
+        volumes: list[DumpVolume] = []
+        for config in self._connections.configs():
+            with self._connections.connection(config) as conn:
+                volumes.extend(self._list_host(conn, config.storage_pool))
+        return volumes
+
+    @staticmethod
+    def _list_host(conn: _ReaperConn, storage_pool: str) -> list[DumpVolume]:  # pragma: no cover
+        pool = conn.storagePoolLookupByName(storage_pool)
+        pool.refresh(0)
+        volumes: list[DumpVolume] = []
+        for volume in pool.listAllVolumes(0):
+            name = volume.name()
+            system_id = system_id_from_dump_volume_name(name)
+            if system_id is None and not name.startswith("kdive-host-dump-"):
+                continue
+            volumes.append(
+                DumpVolume(
+                    name=name,
+                    system_id=system_id,
+                    mtime_epoch_s=volume_mtime_epoch_s(volume.XMLDesc(0)),
                 )
-            return volumes
+            )
+        return volumes
 
     def _delete_blocking(self, name: str) -> None:  # pragma: no cover - live_vm
-        config = self._connections.config()
-        with self._connections.connection(config) as conn:
-            pool = conn.storagePoolLookupByName(config.storage_pool)
-            try:
-                volume = pool.storageVolLookupByName(name)
-            except libvirt.libvirtError as exc:
-                if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
-                    return  # already gone (a live capture's finally beat the reap)
-                raise _infra("looking up host_dump volume", volume=name) from exc
-            try:
-                volume.delete(0)
-            except libvirt.libvirtError as exc:
-                raise _infra("deleting host_dump volume", volume=name) from exc
-            _log.info("reconciler: deleted orphaned host_dump volume %s", name)
+        # A dump-volume name encodes the owning System but not its host, so the reconciler calls
+        # delete-by-name with no host. Try each declared host: the volume lives on exactly one,
+        # and an already-gone (or not-on-this-host) volume is benign — never an error.
+        for config in self._connections.configs():
+            with self._connections.connection(config) as conn:
+                if self._delete_on_host(conn, config.storage_pool, name):
+                    return
+
+    @staticmethod
+    def _delete_on_host(  # pragma: no cover - live_vm
+        conn: _ReaperConn, storage_pool: str, name: str
+    ) -> bool:
+        pool = conn.storagePoolLookupByName(storage_pool)
+        try:
+            volume = pool.storageVolLookupByName(name)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return False  # not on this host (or already gone) — try the next
+            raise _infra("looking up host_dump volume", volume=name) from exc
+        try:
+            volume.delete(0)
+        except libvirt.libvirtError as exc:
+            raise _infra("deleting host_dump volume", volume=name) from exc
+        _log.info("reconciler: deleted orphaned host_dump volume %s", name)
+        return True
 
 
 def _infra(verb: str, **details: str) -> CategorizedError:

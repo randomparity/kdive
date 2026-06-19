@@ -75,6 +75,36 @@ def test_mtime_is_zero_when_absent_or_malformed() -> None:
     )
 
 
+def test_list_dump_volumes_fans_out_over_the_fleet(tmp_path: Path) -> None:
+    # Two declared hosts, each carrying one orphaned dump volume; the reaper lists across both.
+    conn_a = _FakeConn()
+    conn_b = _FakeConn()
+    reaper = _fleet_reaper(
+        {"qemu+tls://host-a.example/system": conn_a, "qemu+tls://host-b.example/system": conn_b},
+        tmp_path,
+    )
+
+    volumes = asyncio.run(reaper.list_dump_volumes())
+
+    assert len(volumes) == 2
+    assert conn_a.closed and conn_b.closed
+
+
+def test_delete_dump_volume_skips_hosts_without_the_volume(tmp_path: Path) -> None:
+    # Host A does not have the volume (NO_STORAGE_VOL); host B does — the reaper deletes on B.
+    conn_a = _FakeConn(volume_error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL))
+    conn_b = _FakeConn()
+    reaper = _fleet_reaper(
+        {"qemu+tls://host-a.example/system": conn_a, "qemu+tls://host-b.example/system": conn_b},
+        tmp_path,
+    )
+
+    asyncio.run(reaper.delete_dump_volume(host_dump_volume_name(_SID)))
+
+    assert conn_a.pool.volume.deleted == 0
+    assert conn_b.pool.volume.deleted == 1
+
+
 def test_delete_dump_volume_treats_missing_volume_as_done(tmp_path: Path) -> None:
     conn = _FakeConn(volume_error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL))
     reaper = _reaper(conn, tmp_path)
@@ -154,6 +184,33 @@ class _FakeConn:
 
     def close(self) -> None:
         self.closed = True
+
+
+def _fleet_reaper(
+    conns_by_uri: dict[str, _FakeConn], pki_base_dir: Path
+) -> RemoteLibvirtDumpVolumeReaper:
+    configs = [
+        RemoteLibvirtConfig(uri=uri, cert_refs=_CERT_REFS, concurrent_allocation_cap=1)
+        for uri in conns_by_uri
+    ]
+
+    def open_connection(uri: str) -> _FakeConn:
+        for base, conn in conns_by_uri.items():
+            if uri.startswith(base):
+                return conn
+        raise AssertionError(f"unexpected uri {uri!r}")
+
+    return RemoteLibvirtDumpVolumeReaper(
+        secret_registry=SecretRegistry(),
+        connections=remote_libvirt_connections(
+            secret_registry=SecretRegistry(),
+            config_factory=lambda: configs[0],
+            open_connection=cast(OpenDumpReaperConnection, open_connection),
+            secret_backend_factory=_SecretBackend,
+            pki_base_dir=pki_base_dir,
+            configs_factory=lambda: configs,
+        ),
+    )
 
 
 def _reaper(conn: _FakeConn, pki_base_dir: Path) -> RemoteLibvirtDumpVolumeReaper:

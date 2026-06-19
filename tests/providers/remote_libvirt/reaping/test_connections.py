@@ -42,9 +42,7 @@ def test_open_libvirt_reaper_uses_protocol_opener(monkeypatch: pytest.MonkeyPatc
     assert opened == ["qemu+tls://builder.example/system"]
 
 
-def test_reaper_connections_bind_remote_config_and_opener(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_reaper_connections_bind_fleet_configs_and_opener() -> None:
     config = _config()
     opened: list[str] = []
     conn = _Conn()
@@ -53,13 +51,24 @@ def test_reaper_connections_bind_remote_config_and_opener(
         opened.append(uri)
         return conn
 
-    monkeypatch.setattr(connections, "remote_config_from_inventory", lambda: config)
-
     bundle = connections.remote_libvirt_reaper_connections(
         secret_registry=SecretRegistry(),
         open_connection=cast(Any, open_connection),
+        configs_factory=lambda: [config],
     )
 
-    assert bundle.config() is config
+    assert bundle.configs() == [config]
     assert bundle.open_connection("qemu+tls://builder.example/system") is conn
     assert opened == ["qemu+tls://builder.example/system"]
+
+
+def test_reaper_bundle_has_no_single_host() -> None:
+    # A reaper bundle is fleet-wide; calling the single-host config() must fail loudly so a
+    # reaper can never silently sweep just one host (ADR-0187, #395).
+    bundle = connections.remote_libvirt_reaper_connections(
+        secret_registry=SecretRegistry(),
+        open_connection=cast(Any, lambda _uri: _Conn()),
+        configs_factory=lambda: [_config()],
+    )
+    with pytest.raises(AssertionError):
+        bundle.config()

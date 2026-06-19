@@ -101,32 +101,44 @@ class RemoteLibvirtBuildVmReaper:
         await asyncio.to_thread(self._delete_blocking, domain_name)
 
     def _list_blocking(self) -> list[BuildVm]:  # pragma: no cover - live_vm
-        config = self._connections.config()
-        with self._connections.connection(config) as conn:
-            vms: list[BuildVm] = []
-            for domain in conn.listAllDomains(0):
-                name = domain.name()
-                if not name.startswith(BUILD_DOMAIN_PREFIX):
-                    continue
-                vms.append(BuildVm(domain_name=name, run_id=run_id_from_build_vm_name(name)))
-            return vms
+        vms: list[BuildVm] = []
+        for config in self._connections.configs():
+            with self._connections.connection(config) as conn:
+                for domain in conn.listAllDomains(0):
+                    name = domain.name()
+                    if not name.startswith(BUILD_DOMAIN_PREFIX):
+                        continue
+                    vms.append(BuildVm(domain_name=name, run_id=run_id_from_build_vm_name(name)))
+        return vms
 
     def _delete_blocking(self, domain_name: str) -> None:  # pragma: no cover - live_vm
-        config = self._connections.config()
+        # A build-domain name encodes the owning Run but not its host, so the reconciler calls
+        # delete-by-name with no host. Visit each declared host: destroy the domain where it lives
+        # and delete the overlay (absent-tolerant) — a leaked overlay can outlive its domain, so the
+        # overlay is swept on every host. Stop once the host that owned the domain is reached.
         run_id = run_id_from_build_vm_name(domain_name)
-        with self._connections.connection(config) as conn:
-            try:
-                domain = conn.lookupByName(domain_name)
-            except libvirt.libvirtError as exc:
-                if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
-                    domain = None
-                else:
-                    raise _infra("looking up build VM domain", domain=domain_name) from exc
-            if domain is not None:
-                self._destroy_undefine(domain, domain_name)
-            if run_id is not None:
-                delete_volume(conn, config.storage_pool, build_overlay_volume_name(run_id))
-            _log.info("reconciler: reaped leaked build VM %s", domain_name)
+        for config in self._connections.configs():
+            with self._connections.connection(config) as conn:
+                found = self._delete_on_host(conn, config.storage_pool, domain_name, run_id)
+            if found:
+                _log.info("reconciler: reaped leaked build VM %s", domain_name)
+                return
+
+    def _delete_on_host(  # pragma: no cover - live_vm
+        self, conn: _ReaperConn, storage_pool: str, domain_name: str, run_id: UUID | None
+    ) -> bool:
+        try:
+            domain = conn.lookupByName(domain_name)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                domain = None
+            else:
+                raise _infra("looking up build VM domain", domain=domain_name) from exc
+        if domain is not None:
+            self._destroy_undefine(domain, domain_name)
+        if run_id is not None:
+            delete_volume(conn, storage_pool, build_overlay_volume_name(run_id))
+        return domain is not None
 
     @staticmethod
     def _destroy_undefine(domain: _Domain, domain_name: str) -> None:  # pragma: no cover - live_vm
