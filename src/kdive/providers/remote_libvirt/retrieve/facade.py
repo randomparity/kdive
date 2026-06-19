@@ -106,9 +106,14 @@ class RemoteLibvirtRetrieve:
         )
 
     @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtRetrieve:
+    def from_env(
+        cls,
+        *,
+        secret_registry: SecretRegistry,
+        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+    ) -> RemoteLibvirtRetrieve:
         """Build from the shared worker env; opens no connection and mints no URL here."""
-        return cls(secret_registry=secret_registry)
+        return cls(secret_registry=secret_registry, config_factory=config_factory)
 
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
         """Capture a vmcore by dispatching to the selected remote-libvirt workflow."""

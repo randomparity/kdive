@@ -74,9 +74,14 @@ class RemoteLibvirtControl:
         self._pki_base_dir = pki_base_dir
 
     @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtControl:
+    def from_env(
+        cls,
+        *,
+        secret_registry: SecretRegistry,
+        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+    ) -> RemoteLibvirtControl:
         """Build from the shared worker env; opens no connection here."""
-        return cls(secret_registry=secret_registry)
+        return cls(secret_registry=secret_registry, config_factory=config_factory)
 
     def power(self, domain_name: str, action: PowerAction) -> None:
         """Drive the domain's power state; idempotent ``on``/``off`` swallow the post-state.

@@ -105,7 +105,23 @@ class ProviderRuntime:
     rootfs_validator: RootfsValidator | None = None
     rootfs_build_plane: RootfsBuildPlane | None = None
     staged_volume_probe: StagedVolumeProbe | None = None
+    # Per-resource rebind hook (ADR-0187). A provider whose connection identity varies per
+    # granted Resource (remote-libvirt: one inventory instance per host) sets this so the
+    # resolver can bind the runtime's ports to the op's Resource by name. ``None`` → identity
+    # (local-libvirt / fault-inject share one host, so no per-resource config).
+    rebind_for_resource: Callable[[str], ProviderRuntime] | None = None
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:
             await self.discovery_registrar(pool)
+
+    def for_resource(self, resource_name: str) -> ProviderRuntime:
+        """Return a runtime bound to ``resource_name``; identity when no rebind hook is set.
+
+        The resolver calls this at the per-op chokepoint so a provider serving many hosts
+        (remote-libvirt) resolves the *allocated* host's connection config, while single-host
+        providers return themselves unchanged (ADR-0187).
+        """
+        if self.rebind_for_resource is None:
+            return self
+        return self.rebind_for_resource(resource_name)

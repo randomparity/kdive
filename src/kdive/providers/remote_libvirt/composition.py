@@ -39,7 +39,11 @@ from kdive.providers.infra.console_hosting import (
 from kdive.providers.infra.reaping import BuildVmReaper, DumpVolumeReaper
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
-from kdive.providers.remote_libvirt.config import remote_config_from_inventory
+from kdive.providers.remote_libvirt.config import (
+    RemoteLibvirtConfig,
+    remote_config_for_resource,
+    remote_config_from_inventory,
+)
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector
 from kdive.providers.remote_libvirt.console.wiring import (
     RemoteConsolePartStore,
@@ -185,22 +189,43 @@ def _discovery_target(secret_registry: SecretRegistry) -> DiscoveryRegistrationT
     return DiscoveryRegistrationTarget(discovery=discovery, resource_id=discovery.host_uri)
 
 
-def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
-    """Build remote-libvirt ports; buildable without operator config (ADR-0076)."""
+def build_runtime(
+    *,
+    secret_registry: SecretRegistry,
+    config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+) -> ProviderRuntime:
+    """Build remote-libvirt ports; buildable without operator config (ADR-0076).
+
+    ``config_factory`` resolves the remote host's connection config. By default it is the
+    singleton resolver (one declared host); the resolver rebinds the runtime per granted Resource
+    via ``rebind_for_resource`` so a per-op call reaches the *allocated* host (ADR-0187, #395).
+    The ``builder`` and ``vmcore_introspector`` ports take no remote config — they build on a
+    build-host transport / operate on a fetched vmcore, not the remote libvirt host.
+    """
     builder = RemoteLibvirtBuild.from_env(secret_registry=secret_registry)
-    installer = RemoteLibvirtInstall.from_env(secret_registry=secret_registry)
-    retriever = RemoteLibvirtRetrieve.from_env(secret_registry=secret_registry)
+    installer = RemoteLibvirtInstall.from_env(
+        secret_registry=secret_registry, config_factory=config_factory
+    )
+    retriever = RemoteLibvirtRetrieve.from_env(
+        secret_registry=secret_registry, config_factory=config_factory
+    )
     vmcore_introspector = RemoteLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
-    live_introspector = RemoteLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
+    live_introspector = RemoteLibvirtLiveIntrospect.from_env(
+        secret_registry=secret_registry, config_factory=config_factory
+    )
 
     return ProviderRuntime(
         profile_policy=RemoteLibvirtProfilePolicy(),
-        provisioner=RemoteLibvirtProvisioning(secret_registry=secret_registry),
+        provisioner=RemoteLibvirtProvisioning(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
         builder=builder,
         installer=installer,
         booter=installer,
-        connector=RemoteLibvirtConnect.from_env(),
-        controller=RemoteLibvirtControl.from_env(secret_registry=secret_registry),
+        connector=RemoteLibvirtConnect.from_env(config_factory=config_factory),
+        controller=RemoteLibvirtControl.from_env(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
         retriever=retriever,
         crash_postmortem=retriever,
         vmcore_introspector=vmcore_introspector,
@@ -224,9 +249,15 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         build_config_validator=builder.validate_config_ref,
         rootfs_validator=lambda _rootfs: None,
         rootfs_build_plane=RemoteLibvirtRootfsBuildPlane.from_env(),
-        staged_volume_probe=probe_staged_volumes,
+        staged_volume_probe=lambda volumes: probe_staged_volumes(
+            volumes, config_factory=config_factory
+        ),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
         platform_root_cmdline=None,
+        rebind_for_resource=lambda resource_name: build_runtime(
+            secret_registry=secret_registry,
+            config_factory=lambda: remote_config_for_resource(resource_name),
+        ),
     )

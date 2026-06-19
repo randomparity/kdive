@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -220,13 +220,14 @@ class EphemeralBuildVm:
         *,
         secret_registry: SecretRegistry,
         connections: RemoteLibvirtConnections[_BuildConn] | None = None,
+        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
         agent_command: AgentCommand = qemu_agent_command,
         timing: BuildVmTiming = _DEFAULT_BUILD_VM_TIMING,
     ) -> None:
         self._secret_registry = secret_registry
         self._connections = connections or remote_libvirt_connections(
             secret_registry=secret_registry,
-            config_factory=remote_config_from_inventory,
+            config_factory=config_factory,
             open_connection=open_libvirt_provision,
         )
         self._agent_command = agent_command

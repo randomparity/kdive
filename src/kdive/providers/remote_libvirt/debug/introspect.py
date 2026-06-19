@@ -195,9 +195,14 @@ class RemoteLibvirtLiveIntrospect:
         )
 
     @classmethod
-    def from_env(cls, *, secret_registry: SecretRegistry) -> RemoteLibvirtLiveIntrospect:
+    def from_env(
+        cls,
+        *,
+        secret_registry: SecretRegistry,
+        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+    ) -> RemoteLibvirtLiveIntrospect:
         """Build from env; opens no connection (config read per op)."""
-        return cls(secret_registry=secret_registry)
+        return cls(secret_registry=secret_registry, config_factory=config_factory)
 
     def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
         """Run one allowlisted in-guest drgn helper; return a redacted, byte-bounded report.

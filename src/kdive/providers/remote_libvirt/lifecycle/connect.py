@@ -50,9 +50,13 @@ class RemoteLibvirtConnect:
         self._probe = probe if probe is not None else _real_probe
 
     @classmethod
-    def from_env(cls) -> RemoteLibvirtConnect:
+    def from_env(
+        cls,
+        *,
+        config_factory: Callable[[], RemoteLibvirtConfig] = remote_config_from_inventory,
+    ) -> RemoteLibvirtConnect:
         """Build with the real ``live_vm``-gated domain-XML reader + socket probe."""
-        return cls()
+        return cls(config_factory=config_factory)
 
     def open_transport(self, system: SystemHandle, kind: DebugTransportKind) -> TransportHandle:
         """Open the gdbstub or drgn-live transport for ``system``; raise for any other kind.
