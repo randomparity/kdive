@@ -91,28 +91,35 @@ For a `SUCCEEDED` Run, `runs.get` adds a fixed-key `data.steps` map:
   `CANCELED` is terminal, `FAILED` is a failure envelope.
 
 One extra read on the `get` path: a single
-`SELECT step, state FROM run_steps WHERE run_id = %s AND step IN ('build','install','boot')`.
-`runs.list` is unchanged (no N+1).
+`SELECT step, state, result FROM run_steps WHERE run_id = %s AND step IN ('build','install','boot')`.
+The `result` is read so the `boot` row's recorded `boot_outcome` can drive the booted-run
+next-action (below); the `steps` map itself only uses `state`. `runs.list` is unchanged (no
+N+1).
 
 ### `suggested_next_actions` progression
 
 For a `SUCCEEDED` Run, the second action walks the real progression (the first stays
 `runs.get`):
 
-| Condition | Second action |
+| Condition | Second action(s) |
 |---|---|
 | unbound (`system_id is None`) | `runs.bind` |
 | bound, `install` not `succeeded` | `runs.install` |
 | bound, `install` succeeded, `boot` not `succeeded` | `runs.boot` |
-| bound, `install` + `boot` succeeded, `expected_boot_failure` set | `vmcore.fetch` |
-| bound, `install` + `boot` succeeded, no expected failure | `debug.start_session` |
+| bound, `install` + `boot` succeeded, boot `boot_outcome == "expected_crash_observed"` | `postmortem.triage`, `vmcore.fetch` |
+| bound, `install` + `boot` succeeded, boot booted normally | `debug.start_session` |
 
-The `expected_boot_failure` branch uses the Run field already carried in the envelope (no
-extra query): a Run created to crash on boot is driven to vmcore capture, not a live debug
-attach (which `sessions_lifecycle.py` rejects for an `expected_crash_observed` boot). The
-`data.steps` map remains the ground truth regardless of the recommended action; a `running`
-install/boot still recommends the same forward tool (the step jobs are idempotent), and the
-caller can read `steps` to see an in-flight claim.
+The booted-run branch keys on the **observed** `boot_outcome` recorded in the `boot` step
+result, not on the Run's create-time `expected_boot_failure` field. The two diverge: a Run
+that set `expected_boot_failure` but then booted normally records `boot_outcome: "ready"`
+(`runs_boot.py`) and **is** live-debuggable, so it is routed to `debug.start_session`; only
+a boot that actually crashed as expected (`boot_outcome == "expected_crash_observed"`) is
+routed to crash triage. The `postmortem.triage` / `vmcore.fetch` pair matches the failure
+envelope `sessions_lifecycle.py` itself returns when a live attach is attempted on an
+`expected_crash_observed` boot, so the two agent-facing surfaces agree. The `data.steps`
+map remains the ground truth regardless of the recommended action; a `running` install/boot
+still recommends the same forward tool (the step jobs are idempotent), and the caller can
+read `steps` to see an in-flight claim.
 
 ### Documentation
 
@@ -127,10 +134,11 @@ caller can read `steps` to see an in-flight claim.
   reflecting `succeeded` / `running` / `pending`.
 - A non-`SUCCEEDED` Run carries no `data.steps`.
 - `suggested_next_actions` walks unbound→bind, built→install, installed→boot,
-  booted→debug.start_session (or vmcore.fetch for an expected-boot-failure Run).
+  booted-normally→debug.start_session, and crashed-as-expected→postmortem.triage/vmcore.fetch.
 - The `RunState` docstring and `runs.get` docs state that `succeeded` is build-succeeded.
 - Tests pin each `steps`/next-action case (built-only, install-running, installed,
-  booted, booted-expecting-crash, unbound).
+  booted-normally, booted-with-`expected_crash_observed`, and an
+  `expected_boot_failure` Run that booted normally → debug.start_session, unbound).
 
 ## Considered & rejected
 

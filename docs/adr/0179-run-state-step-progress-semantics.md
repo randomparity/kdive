@@ -38,9 +38,12 @@ build-vs-install-vs-boot relationship explicit and discoverable on `runs.get`.
 
 3. **Progression in `suggested_next_actions`.** For a `SUCCEEDED` Run the second action
    follows the real progression: unbound→`runs.bind`; built→`runs.install`;
-   installed→`runs.boot`; booted→`debug.start_session`, or `vmcore.fetch` when the Run
-   carries an `expected_boot_failure` (already in the envelope — an expected-crash Run is
-   driven to vmcore capture, not a live attach the debug plane would reject).
+   installed→`runs.boot`; booted normally→`debug.start_session`. A boot whose recorded
+   `boot_outcome == "expected_crash_observed"` (read from the `boot` step result) is routed
+   to `postmortem.triage` / `vmcore.fetch`, matching the failure the debug plane returns for
+   a live attach on such a boot. The branch keys on the **observed** outcome, not the Run's
+   create-time `expected_boot_failure`: a Run that expected a crash but booted normally
+   records `boot_outcome: "ready"` and is live-debuggable.
 
 A `running` install/boot is read as persisted (no liveness reinterpretation, matching
 ADR-0176) and still recommends the same forward tool (the step jobs are idempotent); the
