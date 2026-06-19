@@ -366,7 +366,10 @@ class GdbstubAclCheck(Check):
     A **policy** check, not a live-port check: the gdbstub port is assigned per-domain
     (ADR-0083), so a cold preflight with zero running guests has no concrete port —
     validating that the ACL admits the configured range needs no live domain and catches
-    the M2 fault (a closed ACL) directly. An indeterminate probe (``None``) is ``error``.
+    the M2 fault (a closed ACL) directly. The probe connects to the reserved ACL-probe port
+    (the lowest port of the range, never assigned to a System; ADR-0184), so it never pauses a
+    live guest; ``port_range`` is the full configured firewall range named in the operator
+    message. An indeterminate probe (``None``) is ``error``.
     """
 
     def __init__(
