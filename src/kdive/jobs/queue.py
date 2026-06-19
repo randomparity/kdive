@@ -41,6 +41,7 @@ async def enqueue(
     dedup_key: str,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    retry_terminal_failed: bool = False,
 ) -> Job:
     """Admit a job, returning the existing one on a ``dedup_key`` conflict.
 
@@ -48,6 +49,14 @@ async def enqueue(
     ``SELECT … WHERE dedup_key = …`` in one transaction, so a re-issue returns the
     **same** job (in whatever state it has since reached) and never enqueues a
     duplicate. ``DO NOTHING RETURNING`` is avoided — it returns no row on conflict.
+
+    When ``retry_terminal_failed`` is set, a dead-lettered (``failed``) job for ``dedup_key``
+    is reset in place to a fresh ``queued`` attempt (``attempt = 0``, lease/worker/failure
+    cleared) before the fetch — so a transient install/boot step failure can be retried without
+    a rebuild (ADR-0185). The ``state = 'failed'`` fence leaves a freshly-inserted ``queued`` row,
+    an in-flight ``queued``/``running`` job, and a ``succeeded``/``canceled`` job untouched, so
+    in-flight dedup and no-resurrection hold. It is opt-in: the default off keeps a failed
+    ``provision`` job ``failed`` so admission can surface its original reason (ADR-0149).
 
     Raises:
         ValueError: ``max_attempts < 1`` (a job that ``dequeue`` could never claim).
@@ -70,6 +79,14 @@ async def enqueue(
                 dedup_key,
             ),
         )
+        if retry_terminal_failed:
+            await cur.execute(
+                "UPDATE jobs SET state = %s, attempt = 0, worker_id = NULL, "
+                "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
+                "    failure_context = '{}'::jsonb, result_ref = NULL "
+                "WHERE dedup_key = %s AND state = %s",
+                (JobState.QUEUED.value, dedup_key, JobState.FAILED.value),
+            )
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
     if row is None:  # Invariant: we just inserted the row, or it already existed.
