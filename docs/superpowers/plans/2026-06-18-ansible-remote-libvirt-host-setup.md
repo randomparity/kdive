@@ -18,7 +18,7 @@
 - Read-only / assert / command tasks set `changed_when:` honestly so the "second run = 0 changed" idempotence bar measures real drift.
 - The lint gate has **three** wiring points that ship together (CI runs `just lint`/`type`/`test` separately and never `just ci`): the `lint-ansible` recipe in `justfile`, a `.pre-commit-config.yaml` hook, and an explicit step in `.github/workflows/ci.yml`.
 - The emitted `systems.toml` block matches `systems.toml.example` field-for-field. `[[remote_libvirt]]` requires `vcpus` and `memory_mb` (billable ceiling).
-- Secrets: CA private key + worker client key are written to the controller artifacts dir, **ansible-vault-encrypted**, never committed; the artifacts dir is gitignored.
+- Secrets: CA private key + worker client key are written to the controller artifacts dir as `0600` PEMs and the dir is **gitignored** (never committed). They are **plaintext at rest** as written by `pki.yml`; encryption-at-rest is an explicit, owned obligation — either run the optional `ansible-vault encrypt` step in Task 8 (gated on `vault_keys_at_rest`) or the operator encrypts the artifacts dir out of band. Do **not** claim the keys are vaulted unless that step ran. With `auth_tls="none"` the CA key is the entire fleet authz boundary, so this is a real trust-boundary obligation, not a nicety.
 - ppc64le paths are implemented but flagged **unvalidated** (no ppc64le test host).
 - All shell the roles drop onto hosts must respect the repo's bash policy where applicable, but Ansible task YAML is the primary artifact; prefer modules over `command`/`shell`, and where a `command` is unavoidable set `changed_when`/`failed_when` explicitly.
 
@@ -866,7 +866,10 @@ Create `deploy/ansible/roles/gdbstub_acl/defaults/main.yml`:
 ```yaml
 ---
 acl_tls_port: 16514
-# gdbstub_range is "47000:47099"; firewalld/ufw want a dash form for ranges.
+# Port-range separators DIFFER by firewall: firewalld rich rules want a DASH
+# ("47000-47099"); ufw and iptables want the COLON form ("47000:47099", which is
+# exactly gdbstub_range). Use gdbstub_port_range_dash for firewalld ONLY; use the
+# raw gdbstub_range for ufw.
 gdbstub_port_range_dash: "{{ gdbstub_range | replace(':', '-') }}"
 ```
 
@@ -935,7 +938,8 @@ Create `deploy/ansible/roles/gdbstub_acl/tasks/main.yml`:
         direction: in
         proto: tcp
         from_ip: "{{ worker_cidr }}"
-        to_port: "{{ gdbstub_port_range_dash }}"
+        # ufw wants the COLON form — use gdbstub_range, NOT the dash var.
+        to_port: "{{ gdbstub_range }}"
 
     - name: Set the default inbound policy to deny (the drop)
       community.general.ufw:
@@ -1026,9 +1030,13 @@ Create `deploy/ansible/roles/guest_image_prereqs/tasks/main.yml` (all gated on D
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
+      # image.yml runs become:true, so virt-builder/virt-customize execute as ROOT
+      # — the cache to invalidate is root's (uid 0 + /root), NOT the login user's.
+      # Clearing the login user's cache would leave root's dhclient-less cache live
+      # and the appliance would still fail to get an IP (the exact step-4 symptom).
       loop:
-        - "/var/tmp/.guestfs-{{ ansible_user_uid }}"
-        - "{{ ansible_env.HOME }}/.cache/libguestfs"
+        - "/var/tmp/.guestfs-0"
+        - "/root/.cache/libguestfs"
       when: dhcp_client.changed
 ```
 
@@ -1269,7 +1277,8 @@ git commit -m "feat(ansible): guest_base_image role (native build + cloud-image 
 - Create: `deploy/ansible/playbooks/pki.yml`
 
 **Interfaces:**
-- Produces: `{{ pki_artifacts_dir }}/cacert.pem` (+ vaulted `cakey.pem`), per-host `{{ pki_artifacts_dir }}/<host>/{servercert.pem,serverkey.pem}` (consumed by `libvirt_tls`), and the worker client bundle `{{ pki_artifacts_dir }}/client/{clientcert.pem,clientkey.pem}` — all written controller-side, never fetched from a host.
+- Produces: `{{ pki_artifacts_dir }}/cacert.pem` + `cakey.pem` (`0600`, plaintext unless `vault_keys_at_rest`), per-host `{{ pki_artifacts_dir }}/<host>/{servercert.pem,serverkey.pem}` (consumed by `libvirt_tls`), and the worker client bundle `{{ pki_artifacts_dir }}/client/{clientcert.pem,clientkey.pem}` — all written controller-side, never fetched from a host.
+- Caveat: enabling `vault_keys_at_rest` encrypts `cakey.pem`, so a later **re-run** of the signing tasks (or adding a host) needs `--ask-vault-pass`/`--vault-password-file`, since `ownca_privatekey_path` must read the CA key. Encrypt only once host issuance is complete, or keep the keys plaintext-gitignored and encrypt the dir out of band.
 
 - [ ] **Step 1: Create the PKI playbook**
 
@@ -1283,6 +1292,9 @@ Create `deploy/ansible/playbooks/pki.yml`:
   gather_facts: false
   vars:
     pki_artifacts_dir: "{{ playbook_dir }}/../artifacts"
+    # Declared here (not relied on from group_vars/all) so it resolves on the
+    # implicit localhost; `-e pki_mode=byo` still overrides (extra-vars win).
+    pki_mode: generate
   tasks:
     - name: Ensure the artifacts directory exists
       ansible.builtin.file:
@@ -1394,6 +1406,26 @@ Create `deploy/ansible/playbooks/pki.yml`:
         dest: "{{ pki_artifacts_dir }}/client/cacert.pem"
         mode: "0644"
       when: pki_mode == 'generate'
+
+    # --- Optional encryption-at-rest for the private keys. Off by default so the
+    # --- bring-up flow can read them; flip vault_keys_at_rest=true (and supply a
+    # --- vault password) to satisfy the "vaulted" posture. Without this, the keys
+    # --- are plaintext-but-gitignored and at-rest encryption is the operator's job.
+    - name: Encrypt the private keys at rest (opt-in)
+      ansible.builtin.command:
+        argv:
+          - ansible-vault
+          - encrypt
+          - "{{ pki_artifacts_dir }}/cakey.pem"
+          - "{{ pki_artifacts_dir }}/client/clientkey.pem"
+      register: vault_encrypt
+      changed_when: "'Encryption successful' in vault_encrypt.stdout"
+      failed_when:
+        - vault_encrypt.rc != 0
+        - "'is already encrypted' not in vault_encrypt.stderr"
+      when:
+        - pki_mode == 'generate'
+        - vault_keys_at_rest | default(false) | bool
 ```
 
 > The per-host server key/CSR tasks write to `{{ pki_artifacts_dir }}/<host>/...`; `community.crypto` does not create parent dirs, so add a directory task before them:
@@ -1568,7 +1600,41 @@ Run the full suite (boundary/arch tests live outside `tests/deploy/`):
 `just test`
 Expected: PASS (no regressions from the new test module).
 
-- [ ] **Step 4: Commit**
+> **None of the gates above exercise runtime behavior.** `lint-ansible`, `--syntax-check`,
+> and the text-grep pytest validate structure and style only — they cannot catch a wrong ufw
+> port separator, a firewalld rich-rule precedence mistake, a cache-uid mismatch, or a
+> security-driver regression. Treating "all gates green" as "the automation works" is a
+> mistake. The two checks below are the real behavioral gates and are **required acceptance,
+> owned by the executor before this plan is considered done**, not optional follow-ups.
+
+- [ ] **Step 4: Dry-run gate (no host mutation)**
+
+Run (from `deploy/ansible/`, against a reachable test host or with `--check`):
+```bash
+uv run --with 'ansible-core>=2.17' --with community.libvirt --with ansible.posix \
+  --with community.general ansible-playbook site.yml --check -i inventory/hosts.yml
+```
+Expected: the play parses, resolves all vars/templates, and reports per-task would-change
+state. Resolve any undefined-var/template errors here (the first gate that evaluates the
+Jinja the runtime will execute). `--check` cannot fully model the `command`/firewalld tasks,
+so it is necessary-not-sufficient.
+
+- [ ] **Step 5: Real-host acceptance gate (REQUIRED — the behavioral bar)**
+
+On a real KVM host (`ub26-big` and/or `fed44-big`):
+1. `ansible-playbook playbooks/pki.yml` then `ansible-playbook site.yml`.
+2. Re-run `ansible-playbook site.yml` — assert the second run reports **0 changed**
+   (the idempotence bar; command/assert tasks set `changed_when` so this is honest).
+3. From a host **outside** `worker_cidr`, attempt `nc -vz <host> 16514` and a gdbstub-range
+   port — both must be **refused/timed out**; the worker's CIDR connects. (The in-play
+   firewalld assertion only proves the drop *rule exists*; this proves it *bites*.)
+4. `just check-remote-libvirt <host>` and the runbook step-8 worker→host TLS connect pass.
+
+Record the result (host, distro, arch, 0-changed confirmation, off-CIDR refusal) in the PR.
+ppc64le stays unvalidated until a ppc64le host exists — state that explicitly rather than
+implying coverage.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add deploy/ansible/README.md deploy/ansible/site.yml
