@@ -13,10 +13,11 @@ x86_64 or ppc64le). Design: `docs/superpowers/specs/2026-06-18-ansible-remote-li
 - A `dir` storage pool + the `default` network.
 - A firewalld/ufw ACL restricting `:16514` and the gdbstub range to `worker_cidr`,
   **enforced** on both distros (the gdbstub tier is raw TCP — the ACL is its only auth).
-  Fedora/RHEL use firewalld; on Ubuntu the role allows SSH then enables ufw
-  (`gdbstub_acl_ufw_enable`, default true) and asserts it is active — failing closed
-  rather than leaving the debug ports open. Set the var false only if you enforce by
-  other means.
+  Fedora/RHEL use firewalld; on Ubuntu the role allows SSH, sets
+  `DEFAULT_FORWARD_POLICY=ACCEPT` (so enabling ufw doesn't break libvirt guest NAT
+  egress), enables ufw (`gdbstub_acl_ufw_enable`, default true), and asserts it is
+  active — failing closed rather than leaving the debug ports open. Set the var false
+  only if you enforce by other means.
 - An operator-staged base image carrying the in-guest helpers (optional; `image.yml`).
 - A controller-side `systems.toml` `[[remote_libvirt]]`/`[[image]]` block per host.
 

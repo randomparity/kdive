@@ -218,10 +218,14 @@ host's pool/network names aligned with those values and document them in the emi
   RHEL: firewalld rich-rules (active by default). Ubuntu: the role allows the SSH/management
   port first, adds the allow-from-CIDR + deny rules, then **enables ufw** (`gdbstub_acl_ufw_enable`,
   default true — enabling ufw applies a global deny, acceptable on a dedicated host, and SSH is
-  allowed first so it cannot lock out). The role then **asserts ufw is active** and fails closed
-  rather than reporting success with open debug ports. (Verified both: off-CIDR refused, in-CIDR
-  allowed, IPv4 + IPv6.) Set the var false only when enforcing by other means — the assert still
-  guards against a silently-open host.
+  allowed first so it cannot lock out). Because enabling ufw otherwise sets
+  `DEFAULT_FORWARD_POLICY=DROP` — which would break libvirt guest NAT egress that the install/
+  capture planes need — the role sets `DEFAULT_FORWARD_POLICY=ACCEPT` first (FORWARD is
+  routed-through traffic, independent of the INPUT-chain ACL, so this does not weaken it). The
+  role then **asserts ufw is active** and fails closed rather than reporting success with open
+  debug ports. (Verified both: off-CIDR refused, in-CIDR allowed, IPv4 + IPv6; FORWARD=ACCEPT
+  preserves guest egress.) Set the var false only when enforcing by other means — the assert
+  still guards against a silently-open host.
 - `virt-builder` guarded by volume-exists + checksum; pool/net via `community.libvirt`.
 - Secrets: CA + client private keys vaulted; artifacts dir gitignored; hosts only ever
   receive the public CA cert + their own server cert (no host→controller `fetch`).
