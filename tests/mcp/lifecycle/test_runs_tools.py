@@ -3169,7 +3169,9 @@ def test_cmdline_default_is_kdump_reserving_for_kdump(migrated_url: str) -> None
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
-                cmdline = await run_steps.cmdline_for(conn, run, CaptureMethod.KDUMP)
+                cmdline = await run_steps.cmdline_for(
+                    conn, run, CaptureMethod.KDUMP, root_cmdline="root=/dev/vda"
+                )
             assert "crashkernel=" in cmdline
             assert "root=/dev/vda" in cmdline  # the platform injects the root device
 
@@ -3183,7 +3185,9 @@ def test_cmdline_default_omits_crashkernel_for_non_kdump(migrated_url: str) -> N
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
-                cmdline = await run_steps.cmdline_for(conn, run, CaptureMethod.CONSOLE)
+                cmdline = await run_steps.cmdline_for(
+                    conn, run, CaptureMethod.CONSOLE, root_cmdline="root=/dev/vda"
+                )
             assert "crashkernel=" not in cmdline
             assert "root=/dev/vda" in cmdline
 
@@ -3200,7 +3204,9 @@ def test_cmdline_appends_ledger_debug_args_after_the_required_base(migrated_url:
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, UUID(run_id))
                 assert run is not None
-                cmdline = await run_steps.cmdline_for(conn, run, CaptureMethod.KDUMP)
+                cmdline = await run_steps.cmdline_for(
+                    conn, run, CaptureMethod.KDUMP, root_cmdline="root=/dev/vda"
+                )
             # The platform-required args lead; the agent's debug args are appended after them.
             assert cmdline == "console=ttyS0 root=/dev/vda crashkernel=256M dhash_entries=1"
 
@@ -3249,6 +3255,22 @@ def test_runs_get_advertises_the_system_required_cmdline(migrated_url: str) -> N
             )
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.data["required_cmdline"] == "console=ttyS0 root=/dev/vda crashkernel=256M"
+
+    asyncio.run(_run())
+
+
+def test_runs_get_omits_root_for_provider_without_platform_root(migrated_url: str) -> None:
+    # A provider whose in-guest bootloader owns the root device (remote-libvirt) advertises no
+    # root= — injecting one would override the base image's root=UUID (ADR-0183).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(
+                pool, provisioning_profile=_profile_dump(crashkernel="256M")
+            )
+            resp = await _get_run(
+                pool, _ctx(), run_id, resolver=provider_resolver(platform_root_cmdline=None)
+            )
+        assert resp.data["required_cmdline"] == "console=ttyS0 crashkernel=256M"  # no root=
 
     asyncio.run(_run())
 

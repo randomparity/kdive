@@ -92,6 +92,10 @@ class ProviderRuntime:
     supported_capture_methods: frozenset[CaptureMethod] = field(
         default_factory=lambda: frozenset(CaptureMethod)
     )
+    # The platform-owned root device cmdline (ADR-0183). ``"root=/dev/vda"`` for direct-kernel
+    # boot (local-libvirt's whole-disk-ext4 overlay); ``None`` when the in-guest bootloader owns
+    # the root device (remote-libvirt inherits ``root=UUID=…`` via ``grubby --copy-default``).
+    platform_root_cmdline: str | None = "root=/dev/vda"
     discovery_registrar: DiscoveryRegistrar | None = None
     debug: DebugCapabilities | None = None
     component_sources: ComponentSourceCapabilities = field(

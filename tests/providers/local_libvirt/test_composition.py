@@ -68,6 +68,8 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     )
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, GdbMiEngine)
+    # Direct-kernel boot: the platform owns the whole-disk root device (ADR-0183).
+    assert runtime.platform_root_cmdline == "root=/dev/vda"
     assert runtime.component_sources.provider == ResourceKind.LOCAL_LIBVIRT.value
     assert runtime.component_sources.accepted_component_sources == {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),

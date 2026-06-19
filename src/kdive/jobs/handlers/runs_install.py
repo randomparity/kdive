@@ -55,7 +55,7 @@ async def install_handler(
     installer = runtime.installer
     method = install_method_for(system, runtime.profile_policy)
     kernel_ref = run.kernel_ref
-    cmdline = await cmdline_for(conn, run, method)
+    cmdline = await cmdline_for(conn, run, method, root_cmdline=runtime.platform_root_cmdline)
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = await installed_initrd_ref(conn, run_id)
     job_ctx = job_context_from_job(job, run.project)

@@ -201,6 +201,11 @@ coeff = "1.0"
 # CONFIG_KEXEC=y
 # CONFIG_CRASH_DUMP=y
 # CONFIG_DEBUG_INFO=y
+# # remote-libvirt's base image root is XFS; keep these or the built kernel cannot mount it
+# # and boots to emergency mode (ADR-0183). Declaring this fragment overrides the packaged
+# # seed, so a remote deployment must carry them here too.
+# CONFIG_XFS_FS=y
+# CONFIG_XFS_POSIX_ACL=y
 # """
 
 # ---------------------------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from kdive.profiles.provider_policy import capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.runtime import ProfilePolicy
 
-_REQUIRED_BASE_CMDLINE = "console=ttyS0 root=/dev/vda"
+_REQUIRED_CONSOLE = "console=ttyS0"
 _KDUMP_CRASHKERNEL = "crashkernel=256M"
 _PLATFORM_OWNED_CMDLINE_TOKENS = ("root=", "console=", "crashkernel=")
 
@@ -131,10 +131,20 @@ async def installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | Non
     return result.initrd_ref
 
 
-def system_required_cmdline(method: CaptureMethod) -> str:
+def system_required_cmdline(method: CaptureMethod, root_cmdline: str | None) -> str:
+    """Compose the platform-owned kernel cmdline (ADR-0183).
+
+    ``console=ttyS0`` (serial console capture parity) leads; ``root_cmdline`` follows when the
+    provider owns the root device (``"root=/dev/vda"`` for local-libvirt's direct-kernel boot,
+    ``None`` for remote-libvirt where the in-guest bootloader supplies ``root=UUID=…``); the kdump
+    crashkernel reservation is last. Tokens are emitted in this fixed order, dropping ``None``.
+    """
+    tokens = [_REQUIRED_CONSOLE]
+    if root_cmdline:
+        tokens.append(root_cmdline)
     if method is CaptureMethod.KDUMP:
-        return f"{_REQUIRED_BASE_CMDLINE} {_KDUMP_CRASHKERNEL}"
-    return _REQUIRED_BASE_CMDLINE
+        tokens.append(_KDUMP_CRASHKERNEL)
+    return " ".join(tokens)
 
 
 def platform_owned_cmdline_token(cmdline: str | None) -> str | None:
@@ -143,8 +153,10 @@ def platform_owned_cmdline_token(cmdline: str | None) -> str | None:
     return next((tok for tok in _PLATFORM_OWNED_CMDLINE_TOKENS if tok in cmdline), None)
 
 
-async def cmdline_for(conn: AsyncConnection, run: Run, method: CaptureMethod) -> str:
-    required = system_required_cmdline(method)
+async def cmdline_for(
+    conn: AsyncConnection, run: Run, method: CaptureMethod, *, root_cmdline: str | None
+) -> str:
+    required = system_required_cmdline(method, root_cmdline)
     result = await existing_build_result(conn, run.id)
     if result is not None and result.cmdline is not None and result.cmdline.strip():
         return f"{required} {result.cmdline.strip()}"

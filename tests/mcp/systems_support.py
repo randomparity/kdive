@@ -104,8 +104,13 @@ def provider_resolver(
     crash_postmortem: object | None = None,
     supported_capture_methods: frozenset[CaptureMethod] | None = None,
     profile_policy: object | None = None,
+    platform_root_cmdline: str | None = "root=/dev/vda",
 ) -> ProviderResolver:
-    """Return a local-libvirt resolver with optional fake runtime ports."""
+    """Return a local-libvirt resolver with optional fake runtime ports.
+
+    ``platform_root_cmdline`` defaults to the local-libvirt root device; pass ``None`` to model a
+    provider (e.g. remote-libvirt) whose in-guest bootloader owns the root device (ADR-0183).
+    """
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
         profile_policy=cast(
@@ -130,6 +135,7 @@ def provider_resolver(
         ),
         component_sources=TEST_COMPONENT_SOURCES,
         rootfs_validator=lambda _: None,
+        platform_root_cmdline=platform_root_cmdline,
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 
