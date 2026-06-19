@@ -216,6 +216,54 @@ def test_jobs_list_filters_by_state(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_jobs_list_renders_failed_job_with_category(migrated_url: str) -> None:
+    # A failed job carries an error_category; the per-job item must thread it so the
+    # category-iff-failure envelope invariant (ADR-0019) renders instead of raising (#582).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                failed = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-f"
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', error_category = 'build_failure' "
+                    "WHERE id = %s",
+                    (failed.id,),
+                )
+            resp = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR))
+        assert resp.status == "ok"
+        items = {item.object_id: item for item in resp.items}
+        item = items[str(failed.id)]
+        assert item.status == "failed"
+        assert item.error_category == "build_failure"
+        assert item.retryable is False  # derived from the category (ADR-0118)
+        assert item.data["state"] == "failed"
+
+    asyncio.run(_run())
+
+
+def test_jobs_list_degrades_failed_job_missing_category(migrated_url: str) -> None:
+    # The schema permits a failed job with a null error_category; rendering must degrade
+    # to a categorized failure rather than crash the whole list (#582).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                failed = await queue.enqueue(
+                    conn, JobKind.BUILD, _build_payload(), _authorizing("proj-a"), "dk-n"
+                )
+                await conn.execute(
+                    "UPDATE jobs SET state = 'failed', error_category = NULL WHERE id = %s",
+                    (failed.id,),
+                )
+            resp = await ops_queue.jobs_list(pool, _ctx(platform_roles=_OPERATOR))
+        assert resp.status == "ok"  # the list renders despite the malformed row
+        item = {i.object_id: i for i in resp.items}[str(failed.id)]
+        assert item.status == "failed"
+        assert item.error_category == "infrastructure_failure"
+
+    asyncio.run(_run())
+
+
 def test_jobs_list_rejects_unknown_state(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

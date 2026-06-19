@@ -174,13 +174,33 @@ def _parse_states(states: list[str] | None) -> list[JobState] | None:
 
 
 def _jobs_response(depth: dict[str, int], jobs: list[Job]) -> ToolResponse:
-    items = [ToolResponse.success(str(job.id), job.state.value, data=_job_row(job)) for job in jobs]
+    items = [_job_item(job) for job in jobs]
     return ToolResponse.collection(
         _JOBS_OBJECT_ID,
         "ok",
         items,
         suggested_next_actions=[_PAUSE_TOOL, _RESUME_TOOL],
         data={f"depth_{state}": str(count) for state, count in sorted(depth.items())},
+    )
+
+
+def _job_item(job: Job) -> ToolResponse:
+    """One per-job platform item, pairing a ``failed`` status with its category (#582).
+
+    A ``failed`` job must carry an ``error_category`` or the envelope invariant
+    (ADR-0019) rejects the whole list at construction. The category is threaded from the
+    job row; the schema permits a ``failed`` job with a null category, so a missing one
+    degrades to ``infrastructure_failure`` rather than crashing the operator's list (the
+    same fail-open guard the per-project ``jobs.list`` applies).
+    """
+    if job.state is not JobState.FAILED:
+        return ToolResponse.success(str(job.id), job.state.value, data=_job_row(job))
+    category = job.error_category or ErrorCategory.INFRASTRUCTURE_FAILURE
+    return ToolResponse(
+        object_id=str(job.id),
+        status=JobState.FAILED.value,
+        error_category=category.value,
+        data=dict(_job_row(job)),
     )
 
 
