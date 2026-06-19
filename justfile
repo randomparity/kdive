@@ -150,6 +150,9 @@ lint-ansible:
     ANSIBLE_CONFIG=deploy/ansible/ansible.cfg \
         uv run --with 'ansible-lint==26.4.0' --with 'ansible-core==2.21.1' \
         ansible-lint -c deploy/ansible/.ansible-lint deploy/ansible
+    cd deploy/ansible && for p in site.yml playbooks/pki.yml playbooks/image.yml; do \
+        uv run --with 'ansible-core==2.21.1' \
+        ansible-playbook "$p" --syntax-check -i inventory/hosts.yml; done
 
 # Lint and security-scan the GitHub Actions workflows.
 lint-workflows:

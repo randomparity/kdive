@@ -5,3 +5,8 @@ gdbstub_acl_tls_port: 16514
 # exactly gdbstub_range). Use gdbstub_acl_gdbstub_port_range_dash for firewalld
 # ONLY; use the raw gdbstub_range for ufw.
 gdbstub_acl_gdbstub_port_range_dash: "{{ gdbstub_range | replace(':', '-') }}"
+
+# Ubuntu only: ufw enforces the ACL only when ACTIVE, so the role enables it (after
+# allowing SSH). Set false only if you enforce these ports by other means — the role
+# then FAILS when ufw is inactive rather than leaving the debug ports world-open.
+gdbstub_acl_ufw_enable: true

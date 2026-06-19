@@ -41,19 +41,24 @@
         fail_msg: >-
           No default-drop rich rule for :{{ gdbstub_acl_tls_port }} or gdbstub range — port is world-open.
 
-# --- Ubuntu: PORT-SPECIFIC allow-from-CIDR + deny rules (matching the iptables
-# --- runbook). ufw is first-match, so the allow-from rules are added before the
-# --- broad deny rules for the same ports. We do NOT set a global `default deny
-# --- incoming` — that would also block SSH (no SSH allow rule exists) and violate
-# --- the "leave SSH untouched" constraint. Only :16514 and the gdbstub range are
-# --- governed; every other port (incl. SSH/22) is left exactly as it was.
-# --- NOTE: ufw enforces these only when active; this role does not enable ufw
-# --- (enabling it changes the host's whole firewall posture and needs an explicit
-# --- SSH allow first). On a host where ufw is inactive the rules are staged but
-# --- inert — enable ufw deliberately, with an SSH allow, as a separate operator step.
+# --- Ubuntu/Debian: ufw. The gdbstub tier is raw-TCP with NO TLS, so this ACL is the
+# --- ONLY auth for those ports — leaving it unenforced means unauthenticated full-VM
+# --- memory access. ufw enforces only when ACTIVE, and activating ufw applies a global
+# --- "deny incoming", so we MUST allow the SSH/management port first (or enabling ufw
+# --- locks the host out), then add the port-specific allow-from-CIDR + deny rules, then
+# --- enable ufw. The role asserts ufw ends up active — it fails closed rather than
+# --- reporting success with the debug ports world-open. Set gdbstub_acl_ufw_enable=false
+# --- only if you enforce these ports by other means (the assert still guards you).
 - name: Configure ufw ACL (Debian)
   when: ansible_os_family == 'Debian'
   block:
+    - name: Allow the SSH/management port (so enabling ufw cannot lock the host out)
+      community.general.ufw:
+        rule: allow
+        direction: in
+        proto: tcp
+        to_port: "{{ ansible_port | default(22) }}"
+
     - name: Allow TLS from the worker CIDR
       community.general.ufw:
         rule: allow
@@ -71,16 +76,37 @@
         # ufw wants the COLON form — use gdbstub_range, NOT the dash var.
         to_port: "{{ gdbstub_range }}"
 
-    - name: Deny TLS from any other source (port-specific; SSH untouched)
+    - name: Deny TLS from any other source
       community.general.ufw:
         rule: deny
         direction: in
         proto: tcp
         to_port: "{{ gdbstub_acl_tls_port }}"
 
-    - name: Deny gdbstub range from any other source (port-specific; SSH untouched)
+    - name: Deny gdbstub range from any other source
       community.general.ufw:
         rule: deny
         direction: in
         proto: tcp
         to_port: "{{ gdbstub_range }}"
+
+    - name: Enable ufw so the ACL is enforced (SSH already allowed above)
+      community.general.ufw:
+        state: enabled
+      when: gdbstub_acl_ufw_enable | bool
+
+    - name: Read ufw status  # noqa: command-instead-of-module
+      # Reading enforcement state; the ufw module sets rules, it has no is-active read.
+      ansible.builtin.command: ufw status
+      register: gdbstub_acl_ufw_status
+      changed_when: false
+
+    - name: Assert ufw is active so the gdbstub/TLS ACL is actually enforced
+      ansible.builtin.assert:
+        that:
+          - "'Status: active' in gdbstub_acl_ufw_status.stdout"
+        fail_msg: >-
+          ufw is INACTIVE — the gdbstub/TLS ACL is not enforced and the raw-TCP debug
+          ports are world-open. Set gdbstub_acl_ufw_enable=true (default) or enable ufw
+          (with an SSH allow) by other means before registering this host.
+        success_msg: "ufw active; gdbstub/TLS ACL enforced."
