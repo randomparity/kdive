@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from kdive.providers.remote_libvirt.console.collector import ConsoleCollector
+from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -32,10 +32,26 @@ class FakeStream:
         self.closed = True
 
 
+class FakeNonBlockingStream:
+    """recv returns None for would-block, bytes for data, b"" for EOF (real non-blocking shape)."""
+
+    def __init__(self, script: list[bytes | None]) -> None:
+        self._script = list(script)
+        self.closed = False
+        self.recvs = 0
+
+    def recv(self, nbytes: int) -> bytes | None:
+        self.recvs += 1
+        return self._script.pop(0) if self._script else b""
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeOpenConsole:
     """An opener that hands out a scripted stream per (re)connect, recording opens."""
 
-    def __init__(self, streams: list[FakeStream]) -> None:
+    def __init__(self, streams: list[ConsoleStream]) -> None:
         self._streams = list(streams)
         self.opens = 0
 
@@ -89,6 +105,25 @@ def test_pump_buffers_decoded_output() -> None:
     assert store.parts == {}
     collector.finalize()
     assert store.artifact == b"hello world\n"
+
+
+def test_would_block_keeps_stream_open_and_captures_later_data() -> None:
+    # None = would-block (no data yet). The pump must NOT drop/reopen; later data on the SAME
+    # stream is captured. Before the fix, the None read is treated as EOF and drops the stream.
+    stream = FakeNonBlockingStream([None, b"booting\n", None, b"emergency\n"])
+    opener = FakeOpenConsole([stream])
+    store = FakePartStore()
+    collector = _collector(opener, store, rotation_threshold=1024)
+    assert collector.pump_once() is False  # would-block: no data, stream kept
+    assert stream.closed is False
+    assert opener.opens == 1
+    assert collector.pump_once() is True  # "booting\n" on the same stream
+    assert collector.pump_once() is False  # would-block again, still no drop
+    assert stream.closed is False
+    assert collector.pump_once() is True  # "emergency\n"
+    assert opener.opens == 1  # never reopened
+    collector.finalize()
+    assert store.artifact == b"booting\nemergency\n"
 
 
 def test_rotation_on_threshold_uploads_numbered_parts() -> None:
