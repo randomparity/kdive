@@ -55,11 +55,12 @@ _CRASH_MARKER = re.compile(
 class ConsoleStream(Protocol):
     """The slice of a ``virDomainOpenConsole`` stream the collector reads.
 
-    ``recv`` returns up to ``nbytes`` of console output, ``b""`` on a clean end, and raises
-    on a dropped stream (the collector reconnects). ``close`` releases the stream.
+    ``recv`` returns up to ``nbytes`` of console output, ``None`` when a non-blocking read would
+    block (no data this instant — keep the stream), ``b""`` on a clean end-of-stream (the
+    collector reconnects), and raises on a dropped stream. ``close`` releases the stream.
     """
 
-    def recv(self, nbytes: int) -> bytes: ...
+    def recv(self, nbytes: int) -> bytes | None: ...
     def close(self) -> None: ...
 
 
@@ -163,9 +164,13 @@ class ConsoleCollector:
         """Read one chunk into the buffer, rotating as needed; return whether bytes arrived.
 
         Reconnects on a stream drop (AC1) and rotates on the size threshold or a crash marker
-        (AC2). A clean end-of-stream (``b""``) drops the stream so the next pump reconnects —
-        a powered-off guest reconnects when it boots again. A no-op once finalized, so a pump
-        that was already in the thread pool when finalize ran never re-opens a closed stream.
+        (AC2). A would-block read (``None``) on the non-blocking stream means "no data this
+        instant" — the stream is healthy, so it is kept open and the hosting loop backs off and
+        pumps again; without this distinction the non-blocking stream's idle would-blocks would
+        be read as end-of-stream and thrash open/drop/reopen, capturing nothing (ADR-0182). A
+        clean end-of-stream (``b""``) drops the stream so the next pump reconnects — a powered-off
+        guest reconnects when it boots again. A no-op once finalized, so a pump that was already
+        in the thread pool when finalize ran never re-opens a closed stream.
         """
         with self._lock:
             if self._finalized:
@@ -176,6 +181,9 @@ class ConsoleCollector:
             except Exception:  # noqa: BLE001 - any stream error is a drop; reconnect next pump
                 _log.info("console stream for %s dropped; will reconnect", self._system_id)
                 self._drop_stream()
+                return False
+            if chunk is None:
+                # Would-block: no data this read. Keep the stream open; the loop backs off.
                 return False
             if not chunk:
                 self._drop_stream()
