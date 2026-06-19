@@ -6,6 +6,13 @@
   roles:
     - libvirt_stack
 
+- name: Configure mutual-TLS listener
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - libvirt_tls
+
 - name: Emit remote-libvirt facts (controller-side)
   hosts: remote_libvirt_hosts
   gather_facts: true

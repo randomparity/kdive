@@ -1,0 +1,77 @@
+---
+- name: Create the PKI directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ libvirt_tls_pki_ca_dir }}"
+      mode: "0755"
+    - path: "{{ libvirt_tls_pki_libvirt_dir }}/private"
+      mode: "0700"
+
+- name: Install the CA certificate
+  ansible.builtin.copy:
+    src: "{{ pki_artifacts_dir }}/cacert.pem"
+    dest: "{{ libvirt_tls_pki_ca_dir }}/cacert.pem"
+    mode: "0644"
+  notify: Restart virtproxyd
+
+- name: Install the server certificate
+  ansible.builtin.copy:
+    src: "{{ pki_artifacts_dir }}/{{ inventory_hostname }}/servercert.pem"
+    dest: "{{ libvirt_tls_pki_libvirt_dir }}/servercert.pem"
+    mode: "0644"
+  notify: Restart virtproxyd
+
+- name: Install the server private key
+  ansible.builtin.copy:
+    src: "{{ pki_artifacts_dir }}/{{ inventory_hostname }}/serverkey.pem"
+    dest: "{{ libvirt_tls_pki_libvirt_dir }}/private/serverkey.pem"
+    mode: "0600"
+  notify: Restart virtproxyd
+
+- name: Render /etc/libvirt/virtproxyd.conf
+  ansible.builtin.template:
+    src: virtproxyd.conf.j2
+    dest: /etc/libvirt/virtproxyd.conf
+    mode: "0600"
+  notify: Restart virtproxyd
+
+- name: Disable the libvirt security driver (opt-in only)
+  ansible.builtin.lineinfile:
+    path: /etc/libvirt/qemu.conf
+    # Default keeps SELinux/AppArmor on; flip only when disable_security_driver is set,
+    # and only after the narrow label fix (pool labeling / virt_use_* booleans) is tried.
+    regexp: '^#*\s*security_driver\s*='
+    line: 'security_driver = "none"'
+  when: disable_security_driver | bool
+  notify: Restart virtproxyd
+
+- name: Enable and start virtproxyd-tls.socket
+  ansible.builtin.systemd_service:
+    name: virtproxyd-tls.socket
+    enabled: true
+    state: started
+    masked: false
+  notify: Restart virtproxyd
+
+- name: Apply pending restarts before the verification gate
+  ansible.builtin.meta: flush_handlers
+
+# --- verification gate: :16514 LISTEN owned by virtproxyd-tls.socket ---
+- name: Read the listener on the TLS port
+  ansible.builtin.command: "ss -ltnp sport = :{{ libvirt_tls_tls_port }}"
+  register: libvirt_tls_tls_listener
+  changed_when: false
+
+- name: Assert :16514 is LISTEN and owned by virtproxyd
+  ansible.builtin.assert:
+    that:
+      - "'LISTEN' in libvirt_tls_tls_listener.stdout"
+      - "'virtproxyd' in libvirt_tls_tls_listener.stdout"
+      - "'libvirtd' not in libvirt_tls_tls_listener.stdout"
+    fail_msg: >-
+      :{{ libvirt_tls_tls_port }} is not owned by virtproxyd-tls.socket:
+      {{ libvirt_tls_tls_listener.stdout }}
+    success_msg: ":{{ libvirt_tls_tls_port }} LISTEN owned by virtproxyd-tls.socket."
