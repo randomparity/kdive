@@ -176,7 +176,7 @@ _external lane (ingest a prebuilt artifact):_
 
 `implemented` · `read-only`
 
-Return one run.
+Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

@@ -84,7 +84,13 @@ class InvestigationState(StrEnum):
 
 
 class RunState(StrEnum):
-    """One build per Run; a failed step is terminal for the Run."""
+    """Build-phase lifecycle of a Run; one build per Run, a failed step is terminal.
+
+    ``succeeded`` means the **build** step succeeded — not that the kernel is installed or
+    booted. Install and boot progress live in the ``run_steps`` ledger and are surfaced by
+    ``runs.get`` as ``data.steps`` (ADR-0179). A failed install/boot step fails the Run to
+    ``failed``.
+    """
 
     CREATED = "created"
     RUNNING = "running"

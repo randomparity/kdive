@@ -61,6 +61,7 @@ from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs import steps as run_steps
+from kdive.services.runs.steps import StepProgress, step_progress
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
 
@@ -661,6 +662,135 @@ def test_get_created_run(migrated_url: str) -> None:
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.status == "created"
         assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+
+    asyncio.run(_run())
+
+
+async def _insert_step(
+    pool: AsyncConnectionPool, run_id: str, step: str, state: str, result: dict[str, Any]
+) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO run_steps (run_id, step, state, result) VALUES (%s, %s, %s, %s)",
+            (UUID(run_id), step, state, Jsonb(result)),
+        )
+
+
+def test_step_progress_reads_install_boot_and_outcome(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO run_steps (run_id, step, state, result) "
+                    "VALUES (%s, 'install', 'succeeded', %s)",
+                    (UUID(run_id), Jsonb({})),
+                )
+                await conn.execute(
+                    "INSERT INTO run_steps (run_id, step, state, result) "
+                    "VALUES (%s, 'boot', 'succeeded', %s)",
+                    (UUID(run_id), Jsonb({"boot_outcome": "expected_crash_observed"})),
+                )
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress == StepProgress(
+            install="succeeded", boot="succeeded", boot_outcome="expected_crash_observed"
+        )
+        assert progress.steps_map() == {
+            "build": "succeeded",
+            "install": "succeeded",
+            "boot": "succeeded",
+        }
+
+    asyncio.run(_run())
+
+
+def test_step_progress_missing_rows_are_pending(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            async with pool.connection() as conn:
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress == StepProgress(install="pending", boot="pending", boot_outcome=None)
+
+    asyncio.run(_run())
+
+
+def test_get_built_only_run_steps_and_install_action(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"] == {
+            "build": "succeeded",
+            "install": "pending",
+            "boot": "pending",
+        }
+        assert resp.suggested_next_actions == ["runs.get", "runs.install"]
+
+    asyncio.run(_run())
+
+
+def test_get_install_running_run_recommends_install(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "running", {})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"]["install"] == "running"
+        assert resp.suggested_next_actions == ["runs.get", "runs.install"]
+
+    asyncio.run(_run())
+
+
+def test_get_installed_run_recommends_boot(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"] == {
+            "build": "succeeded",
+            "install": "succeeded",
+            "boot": "pending",
+        }
+        assert resp.suggested_next_actions == ["runs.get", "runs.boot"]
+
+    asyncio.run(_run())
+
+
+def test_get_booted_run_recommends_debug_start_session(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(pool, run_id, "boot", "succeeded", {"boot_outcome": "ready"})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"]["boot"] == "succeeded"
+        assert resp.suggested_next_actions == ["runs.get", "debug.start_session"]
+
+    asyncio.run(_run())
+
+
+def test_get_expected_crash_boot_recommends_triage(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool, run_id, "boot", "succeeded", {"boot_outcome": "expected_crash_observed"}
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.suggested_next_actions == ["runs.get", "postmortem.triage", "vmcore.fetch"]
+
+    asyncio.run(_run())
+
+
+def test_get_non_succeeded_run_has_no_steps(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.CREATED)
+            resp = await get_run(pool, _ctx(), run_id)
+        assert "steps" not in resp.data
 
     asyncio.run(_run())
 

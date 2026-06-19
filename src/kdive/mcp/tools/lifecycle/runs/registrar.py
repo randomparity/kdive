@@ -82,7 +82,7 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
     async def runs_get(
         run_id: Annotated[str, Field(description="The Run to render.")],
     ) -> ToolResponse:
-        """Return one run."""
+        """Return one run; `succeeded` means build done. `data.steps` has install/boot status."""
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 
 
