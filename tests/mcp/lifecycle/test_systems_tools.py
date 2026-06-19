@@ -2550,3 +2550,51 @@ def test_define_then_catalog_change_then_provision_defined_keeps_size(migrated_u
         assert stored["disk_gb"] == 20
 
     asyncio.run(_run())
+
+
+def test_system_envelope_surfaces_placement_and_profile_summary() -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from kdive.domain.capacity.state import SystemState
+    from kdive.domain.lifecycle import System
+    from kdive.mcp.tools.lifecycle.systems.view import system_envelope
+
+    dt = datetime(2026, 6, 18, tzinfo=UTC)
+    alloc_id, res_id, run_id = uuid4(), uuid4(), uuid4()
+    system = System(
+        id=uuid4(),
+        created_at=dt,
+        updated_at=dt,
+        principal="user-1",
+        project="proj",
+        allocation_id=alloc_id,
+        state=SystemState.READY,
+        provisioning_profile={
+            "schema_version": 1,
+            "arch": "x86_64",
+            "boot_method": "direct-kernel",
+            "vcpu": 4,
+            "memory_mb": 8192,
+            "disk_gb": 40,
+            "kernel_source_ref": "secret-tree",
+        },
+        shape="small",
+    )
+    resp = system_envelope(
+        system,
+        resource_kind="local-libvirt",
+        resource_id=str(res_id),
+        active_run={"id": str(run_id), "state": "running"},
+    )
+    data = resp.data
+    assert data["allocation_id"] == str(alloc_id)
+    assert data["resource_id"] == str(res_id)
+    assert data["resource_kind"] == "local-libvirt"
+    assert data["arch"] == "x86_64"
+    assert data["boot_method"] == "direct-kernel"
+    assert data["memory_mb"] == 8192
+    assert data["shape"] == "small"
+    assert data["created_at"] == dt.isoformat()
+    assert data["active_run"] == {"id": str(run_id), "state": "running"}
+    assert "secret-tree" not in str(data)
