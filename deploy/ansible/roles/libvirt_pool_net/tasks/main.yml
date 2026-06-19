@@ -1,0 +1,22 @@
+---
+- name: Define the storage pool
+  community.libvirt.virt_pool:
+    name: default
+    command: define
+    xml: |
+      <pool type='dir'>
+        <name>default</name>
+        <target><path>{{ storage_pool_target }}</path></target>
+      </pool>
+
+- name: Build the storage pool
+  community.libvirt.virt_pool:
+    name: default
+    state: active
+    autostart: true
+
+- name: Ensure the default network is active and autostarted
+  community.libvirt.virt_net:
+    name: "{{ libvirt_network }}"
+    state: active
+    autostart: true

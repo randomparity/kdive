@@ -13,6 +13,13 @@
   roles:
     - libvirt_tls
 
+- name: Define the storage pool and network
+  hosts: remote_libvirt_hosts
+  become: true
+  gather_facts: true
+  roles:
+    - libvirt_pool_net
+
 - name: Emit remote-libvirt facts (controller-side)
   hosts: remote_libvirt_hosts
   gather_facts: true
