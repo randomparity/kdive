@@ -241,9 +241,11 @@ jobs:
         # The ty hook shells out to `uv run ty check`, which would sync the whole
         # project (and need libvirt-dev) just to type-check; the lint-type-test job
         # covers ty whole-tree (`ty check`, not `ty check src`), so skip it here and
-        # keep this job venv-free.
+        # keep this job venv-free. lint-ansible is the same shape (it shells out to
+        # `just lint-ansible`, and `just` is not installed in this job) and is covered
+        # by the lint-type-test job's "Lint Ansible" step, so skip it here too.
         env:
-          SKIP: ty
+          SKIP: ty,lint-ansible
         run: uvx prek@0.4.3 run --all-files --show-diff-on-failure
 
   workflow-hygiene:
