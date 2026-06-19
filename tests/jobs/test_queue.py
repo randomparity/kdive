@@ -122,6 +122,128 @@ def test_enqueue_rejects_max_attempts_below_one(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _terminal_failed_job(conn: psycopg.AsyncConnection, dedup_key: str) -> Job:
+    """Build a job dead-lettered to ``failed`` at ``attempt == max_attempts`` (ADR-0185)."""
+    claimed = await _insert_running_job(
+        conn, dedup_key, worker_id="w1", lease_seconds=300, attempt=3, max_attempts=3
+    )
+    failed = await queue.fail(
+        conn, claimed, ErrorCategory.TRANSPORT_FAILURE, failure_context={"failure_message": "blip"}
+    )
+    assert failed.state is JobState.FAILED
+    return failed
+
+
+def test_enqueue_retry_terminal_failed_resets_failed_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            failed = await _terminal_failed_job(conn, "dk-retry")
+
+            recycled = await queue.enqueue(
+                conn,
+                JobKind.BUILD,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-retry",
+                retry_terminal_failed=True,
+            )
+
+            assert recycled.id == failed.id  # reset in place, not replaced
+            assert recycled.state is JobState.QUEUED
+            assert recycled.attempt == 0
+            assert recycled.worker_id is None
+            assert recycled.lease_expires_at is None
+            assert recycled.error_category is None
+            assert recycled.failure_context == {}
+            assert recycled.result_ref is None
+            assert await _count_jobs(conn) == 1
+            # No longer wedged: a worker can claim the recycled job.
+            claimed = await queue.dequeue(conn, "w2")
+            assert claimed is not None
+            assert claimed.id == failed.id
+            assert claimed.attempt == 1
+
+    asyncio.run(_run())
+
+
+def test_enqueue_retry_terminal_failed_preserves_in_flight(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            # A queued in-flight job is deduped, not reset.
+            queued = await queue.enqueue(
+                conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-q"
+            )
+            again = await queue.enqueue(
+                conn,
+                JobKind.BUILD,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-q",
+                retry_terminal_failed=True,
+            )
+            assert again.id == queued.id
+            assert again.state is JobState.QUEUED
+            assert again.attempt == 0
+
+            # A running job keeps its worker and lease (the fence excludes 'running').
+            running = await _insert_running_job(conn, "dk-run", worker_id="w1", lease_seconds=300)
+            held = await queue.enqueue(
+                conn,
+                JobKind.BUILD,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-run",
+                retry_terminal_failed=True,
+            )
+            assert held.id == running.id
+            assert held.state is JobState.RUNNING
+            assert held.worker_id == "w1"
+            assert held.lease_expires_at is not None
+
+    asyncio.run(_run())
+
+
+def test_enqueue_retry_terminal_failed_does_not_resurrect_succeeded(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await queue.enqueue(conn, JobKind.BUILD, _build_payload(), _AUTHORIZING, "dk-ok")
+            claimed = await queue.dequeue(conn, "w1")
+            assert claimed is not None
+            done = await queue.complete(conn, claimed.id, "w1", "result-ref")
+            assert done is not None and done.state is JobState.SUCCEEDED
+
+            again = await queue.enqueue(
+                conn,
+                JobKind.BUILD,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-ok",
+                retry_terminal_failed=True,
+            )
+            assert again.id == claimed.id
+            assert again.state is JobState.SUCCEEDED  # not resurrected
+            assert again.result_ref == "result-ref"
+
+    asyncio.run(_run())
+
+
+def test_enqueue_default_leaves_failed_job_untouched(migrated_url: str) -> None:
+    # The default (no flag) preserves today's behavior for provision/build dedup keys (ADR-0149).
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            failed = await _terminal_failed_job(conn, "dk-prov")
+
+            same = await queue.enqueue(
+                conn, JobKind.PROVISION, _system_payload(), _AUTHORIZING, "dk-prov"
+            )
+
+            assert same.id == failed.id
+            assert same.state is JobState.FAILED  # untouched: still dead-lettered
+            assert same.error_category is ErrorCategory.TRANSPORT_FAILURE
+
+    asyncio.run(_run())
+
+
 async def _insert_running_job(
     conn: psycopg.AsyncConnection,
     dedup_key: str,

@@ -18,13 +18,14 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload
+from kdive.jobs.payloads import Authorizing, BuildPayload, RunPayload
 from tests.adversarial.conftest import count_rows, open_conn, open_conns
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
@@ -32,6 +33,10 @@ _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
 def _build_payload() -> BuildPayload:
     return BuildPayload(run_id=str(uuid4()), build_host_id=str(WORKER_LOCAL_ID))
+
+
+def _run_payload() -> RunPayload:
+    return RunPayload(run_id=str(uuid4()))
 
 
 async def _expire_lease(conn: psycopg.AsyncConnection, job_id: object) -> None:
@@ -138,5 +143,44 @@ def test_concurrent_enqueue_same_dedup_key_makes_one_row(migrated_url: str, race
         assert len(ids) == 1, f"dedup_key race created {len(ids)} distinct jobs"
         async with open_conn(migrated_url) as check:
             assert await count_rows(check, "jobs") == 1
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("racers", [4, 12])
+def test_concurrent_retry_terminal_failed_resets_once(migrated_url: str, racers: int) -> None:
+    # Concurrent step retries (ADR-0185) recycle a dead-lettered job exactly once: the
+    # UPDATE … WHERE state='failed' fence re-checks under the row lock, so the row ends up
+    # in a single queued/attempt-0 state with no duplicate.
+    async def _run() -> None:
+        async with open_conn(migrated_url) as seed:
+            await seed.execute(
+                "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, "
+                "    error_category, authorizing, dedup_key) "
+                "VALUES ('install', '{}', 'failed', 3, 3, 'transport_failure', %s, 'dk-failed')",
+                (Jsonb(_AUTHORIZING.model_dump(mode="json")),),
+            )
+        async with open_conns(migrated_url, racers) as conns:
+            jobs = await asyncio.gather(
+                *(
+                    queue.enqueue(
+                        c,
+                        JobKind.INSTALL,
+                        _run_payload(),
+                        _AUTHORIZING,
+                        "dk-failed",
+                        retry_terminal_failed=True,
+                    )
+                    for c in conns
+                )
+            )
+        ids = {j.id for j in jobs}
+        assert len(ids) == 1, f"recycle race created {len(ids)} distinct jobs"
+        async with open_conn(migrated_url) as check:
+            assert await count_rows(check, "jobs") == 1
+            row = await (
+                await check.execute("SELECT state, attempt FROM jobs WHERE dedup_key = 'dk-failed'")
+            ).fetchone()
+            assert row == ("queued", 0)
 
     asyncio.run(_run())
