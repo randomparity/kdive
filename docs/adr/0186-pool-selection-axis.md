@@ -48,9 +48,12 @@ keeps the validation and the test matrix small. Internally `AdmissionRequestSpec
 non-optional `ResourceKind` with a by-id default) becomes optional and gains `pool`; the three
 sites that assume `kind` is always set become selector-aware — the `object_id` derivation, the
 `requested_kind`-vs-`requested_pool` persistence (a queued pool row must not carry a bogus
-`requested_kind`), and the no-resource denial detail. A **pool** no-resource denial enumerates
-**available pools** (`SELECT DISTINCT pool`, deployment topology like the by-kind `available_kinds`
-of ADR-0132), not kinds.
+`requested_kind`), and the no-resource denial detail. A **pool** no-resource denial returns a
+**generic** detail and does **not** enumerate available pools: unlike the fixed global
+`ResourceKind` enum (the by-kind `available_kinds`, ADR-0132), pool names are operator-chosen
+free-form strings on resources that may be affinity-scoped (`affinity_allowlist` /
+`owner_project`), so a `SELECT DISTINCT pool` would leak another project's private pool names
+across the tenant boundary.
 
 **Candidate resolution mirrors by-kind.** `placement.PlacementRequest` gains `pool: str | None`;
 `_schedulable_candidates` gains a pool branch — `SELECT * FROM resources WHERE pool=%s AND

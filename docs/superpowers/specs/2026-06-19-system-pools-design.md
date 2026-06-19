@@ -98,11 +98,15 @@ become selector-aware**:
   so a queued pool row does not carry a bogus `requested_kind` that corrupts promotion
   re-resolution.
 - `available_kinds` / `_no_resource_response` (request.py:88 and the handler's
-  `_no_resource_response`) — the "available kinds: …" denial detail is kind-specific. A **pool**
-  no-resource denial enumerates **available pools** (`SELECT DISTINCT pool FROM resources`,
-  deployment-topology data like `_registered_kinds`, ADR-0132 — safe to name, no per-project
-  leak), not kinds. Add an `available_pools` sibling to `RequestAdmissionResult`; the by-id and
-  by-kind details are unchanged.
+  `_no_resource_response`) — the "available kinds: …" denial detail is kind-specific and is set
+  **only** on a by-kind denial. A **pool** no-resource denial leaves `available_kinds` `None` and
+  returns a **generic** detail (e.g. `no schedulable resource in pool {pool!r} is registered`)
+  with **no pool enumeration**. We deliberately do **not** enumerate available pools: unlike the
+  fixed global `ResourceKind` enum (`_registered_kinds`, ADR-0132), pool names are operator-chosen
+  free-form strings on resources that may be **affinity-scoped** (`affinity_allowlist` /
+  `owner_project`), so a `SELECT DISTINCT pool` would leak another project's private pool names
+  across the tenant boundary. A pool name is operator config the agent already holds; the denial
+  does not need to echo the catalog. (By-id and by-kind details are unchanged.)
 
 ### A.2 Candidate resolution
 
@@ -278,6 +282,8 @@ worker op on the granted System → resource.name → remote_config_for_resource
   references.
 - **Boundary/error paths:** empty pool string; pool + kind both set; pool naming a kind value;
   resource whose allocation has NULL resource_id (queued) never reaches a remote op.
+- **Tenant isolation:** project A requesting an unknown pool gets a generic denial that does
+  **not** echo project B's affinity-scoped pool names (no `SELECT DISTINCT pool` leak).
 
 ## Open risks / decisions
 
