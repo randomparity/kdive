@@ -16,3 +16,11 @@ def test_kdump_fragment_is_packaged_and_nonempty() -> None:
     data = KDUMP_FRAGMENT_PATH.read_bytes()
     assert data.strip()
     assert b"CONFIG_CRASH_DUMP=y" in data
+
+
+def test_kdump_fragment_carries_xfs_root_support() -> None:
+    # The remote base image root is XFS V5; x86_64_defconfig has EXT4 but not XFS, so without these
+    # the built kernel cannot mount root and boots to emergency mode (ADR-0183, #587).
+    data = KDUMP_FRAGMENT_PATH.read_bytes()
+    assert b"CONFIG_XFS_FS=y" in data
+    assert b"CONFIG_XFS_POSIX_ACL=y" in data

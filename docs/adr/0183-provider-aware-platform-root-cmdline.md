@@ -73,9 +73,12 @@ admission set (`root=`/`console=`/`crashkernel=`, which rejects a user build cmd
 **unchanged** — a user must never set `root=` on any provider; only what the *platform* injects becomes
 provider-aware.
 
-**2. Add `CONFIG_XFS_FS=y` and `CONFIG_XFS_POSIX_ACL=y` to the `kdump` build-config fragment** in both
-the file-authoritative `systems.toml` (`source='config'`, ADR-0122) and the packaged seed
-`src/kdive/build_configs/data/kdump.config`. `=y` (not `=m`): the in-guest helper already regenerates the
+**2. Add `CONFIG_XFS_FS=y` and `CONFIG_XFS_POSIX_ACL=y` to the `kdump` build-config fragment.** The repo
+tracks the packaged seed `src/kdive/build_configs/data/kdump.config` (the default a deployment inherits
+when it declares no fragment) and the `systems.toml.example` template. An operator's deployed
+`systems.toml` is gitignored and file-authoritative (`source='config'`, ADR-0122) — declaring its own
+`kdump` fragment overrides the seed, so a remote deployment must carry the XFS lines there too (the
+example documents this and the D2 cluster's `systems.toml` is updated at deploy). `=y` (not `=m`): the in-guest helper already regenerates the
 initramfs (`dracut --force`) on every install, but a built-in driver is guaranteed present regardless of
 dracut's host-config module-selection heuristics, so `=y` is the safer guarantee the XFS root mounts. This
 is the fragment the #587 remote arc applies; it is where the remote root-fs driver requirement is
@@ -91,9 +94,9 @@ satisfied today.
 - `runs.get`'s advertised required cmdline now omits `root=` for remote Systems, matching the installed
   cmdline. A new field on `ProviderRuntime` with a backward-compatible default; no schema, migration, or
   tool-surface change.
-- The `kdump` fragment now also pulls in XFS. The fragment's bytes (and sha256) change; the packaged
-  seed and the GitOps `systems.toml` copy stay intentionally distinct (the toml copy keeps its
-  `CONFIG_GDB_SCRIPTS=y` marker) but both gain the two XFS lines.
+- The packaged `kdump` seed now pulls in XFS (its bytes and sha256 change). An operator who declares a
+  `kdump` fragment in their `systems.toml` (e.g. D2, which keeps its `CONFIG_GDB_SCRIPTS=y` marker)
+  overrides the seed and must add the XFS lines there; the `systems.toml.example` template now shows them.
 - The remote arc must be re-verified live on D2 after merge (build → install → boot → multi-user) — the
   console capture from #594 is the verification instrument.
 

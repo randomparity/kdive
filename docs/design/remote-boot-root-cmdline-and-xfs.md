@@ -57,11 +57,14 @@ CONFIG_XFS_FS=y
 CONFIG_XFS_POSIX_ACL=y
 ```
 
-- `systems.toml` `[[build_config]]` `name = "kdump"` `content` (file-authoritative, `source='config'`,
-  ADR-0122) — keeps its existing `CONFIG_GDB_SCRIPTS=y` marker.
-- `src/kdive/build_configs/data/kdump.config` (packaged seed).
+- `src/kdive/build_configs/data/kdump.config` (the tracked packaged seed — the default a deployment
+  inherits when it declares no `kdump` fragment).
+- `systems.toml.example` (tracked template) — documents that a remote deployment declaring its own
+  `kdump` fragment must carry the XFS lines, since a declared fragment (`source='config'`, ADR-0122)
+  overrides the seed. The operator's deployed `systems.toml` is gitignored; D2's is updated at deploy.
 
-`=y` (built-in), not `=m`, so the driver does not depend on a regenerated initramfs.
+`=y` (built-in), not `=m`: the install helper already regenerates the initramfs (`dracut --force`), but a
+built-in driver is guaranteed present regardless of dracut's host-config module-selection heuristics.
 
 ## Acceptance criteria
 
@@ -76,8 +79,8 @@ CONFIG_XFS_POSIX_ACL=y
    install cmdline containing exactly `root=/dev/vda`.
 7. `runs.get` advertises a required cmdline with no `root=` for a remote System and with `root=/dev/vda`
    for a local System.
-8. The packaged `kdump.config` and the `systems.toml` kdump fragment both contain `CONFIG_XFS_FS=y` and
-   `CONFIG_XFS_POSIX_ACL=y`.
+8. The packaged seed `kdump.config` contains `CONFIG_XFS_FS=y` and `CONFIG_XFS_POSIX_ACL=y`; the
+   `systems.toml.example` kdump block documents them.
 9. `_PLATFORM_OWNED_CMDLINE_TOKENS` still rejects a user cmdline containing `root=` (unchanged) on any
    provider.
 
