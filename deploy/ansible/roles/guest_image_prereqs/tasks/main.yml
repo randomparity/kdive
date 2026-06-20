@@ -51,3 +51,19 @@
       when: guest_image_prereqs_dhcp_client is changed  # noqa: no-handler
       # Sequential cache invalidation — must follow the apt task immediately, not
       # deferred to a handler that runs after all tasks complete.
+
+# --- Scratch (bare) build tools: the scratch source kind builds from the host OS
+# --- family (debootstrap on Debian, dnf --installroot on RedHat). ---
+- name: Ensure debootstrap is present (Debian-family scratch builds)
+  ansible.builtin.apt:
+    name: debootstrap
+    state: present
+  when: ansible_os_family == 'Debian'
+
+- name: Ensure dnf + guestfs tools are present (RedHat-family scratch builds)
+  ansible.builtin.dnf:
+    name:
+      - dnf
+      - libguestfs-tools
+    state: present
+  when: ansible_os_family == 'RedHat'

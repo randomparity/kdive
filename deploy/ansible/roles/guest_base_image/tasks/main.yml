@@ -1,137 +1,48 @@
 ---
+- name: Assert this host selects at least one image
+  ansible.builtin.assert:
+    that: (kdive_requested_images | length) > 0
+    fail_msg: >-
+      host_images is empty for '{{ inventory_hostname }}'. Set host_images in
+      host_vars/{{ inventory_hostname }}.yml (or leave it unset to default to
+      host_images_default).
+
+- name: Assert every selected image name exists in the catalog
+  ansible.builtin.assert:
+    that: item in (kdive_image_catalog | map(attribute='name') | list)
+    fail_msg: >-
+      host_images entry '{{ item }}' is not defined in kdive_image_catalog
+      (group_vars/all.yml).
+  loop: "{{ kdive_requested_images }}"
+
+- name: Assert host_default_image is one of this host's selected images
+  ansible.builtin.assert:
+    that: kdive_default_image in kdive_requested_images
+    fail_msg: >-
+      host_default_image '{{ kdive_default_image }}' is not in host_images
+      {{ kdive_requested_images }} for '{{ inventory_hostname }}'. The emitted
+      [[remote_libvirt]].base_image must name a staged [[image]] or the app
+      rejects systems.toml at load.
+
+- name: Assert each selected image supports this host architecture
+  ansible.builtin.assert:
+    that: ansible_architecture in (item.arches | default(kdive_image_defaults.arches))
+    fail_msg: >-
+      image '{{ item.name }}' does not support arch {{ ansible_architecture }}
+      (arches={{ item.arches | default(kdive_image_defaults.arches) }}).
+  loop: "{{ kdive_selected_images }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Ensure the build working directory exists
   ansible.builtin.file:
     path: "{{ guest_base_image_build_workdir }}"
     state: directory
     mode: "0755"
 
-- name: Compute the package set (add kernel-debuginfo when requested)
-  ansible.builtin.set_fact:
-    guest_base_image_image_packages: >-
-      {{ build_packages + (['kernel-debuginfo'] if include_kernel_debuginfo | bool else []) }}
-
-- name: Check whether the staged volume already exists
-  ansible.builtin.stat:
-    path: "{{ storage_pool_target }}/{{ base_image_name }}.qcow2"
-  register: guest_base_image_staged_volume
-
-# --- Build path A: virt-builder (default), native on the host. ---
-- name: Build the base image with virt-builder (native)
-  ansible.builtin.command:  # noqa: command-instead-of-module
-    # No Ansible module wraps virt-builder; the command module is the only option.
-    argv:
-      - virt-builder
-      - "{{ base_image_distro }}-{{ base_image_version }}"
-      - --arch
-      - "{{ ansible_architecture }}"
-      - --format
-      - qcow2
-      - --size
-      - 10G
-      - --output
-      - "{{ guest_base_image_build_workdir }}/{{ base_image_name }}.qcow2"
-      - --install
-      - "{{ guest_base_image_image_packages | join(',') }}"
-      - --run-command
-      - systemctl enable qemu-guest-agent.service
-      - --run-command
-      - systemctl enable kdump.service
-      - --run-command
-      - sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
-  when:
-    - base_image_source == 'virt-builder'
-    - (not guest_base_image_staged_volume.stat.exists) or (force_image_rebuild | bool)
-  changed_when: true
-
-# --- Build path B: cloud-image fallback (ppc64le when no virt-builder template). ---
-- name: Download the Fedora cloud image (fallback)
-  ansible.builtin.get_url:
-    url: "{{ guest_base_image_cloud_image_url }}"
-    dest: "{{ guest_base_image_build_workdir }}/{{ base_image_name }}.qcow2"
-    mode: "0644"
-  when:
-    - base_image_source == 'cloud-image'
-    - (not guest_base_image_staged_volume.stat.exists) or (force_image_rebuild | bool)
-
-- name: Customize the cloud image (same package/SELinux steps as virt-builder)
-  ansible.builtin.command:  # noqa: command-instead-of-module
-    # No Ansible module wraps virt-customize; the command module is the only option.
-    argv:
-      - virt-customize
-      - -a
-      - "{{ guest_base_image_build_workdir }}/{{ base_image_name }}.qcow2"
-      - --install
-      - "{{ guest_base_image_image_packages | join(',') }}"
-      - --run-command
-      - systemctl enable qemu-guest-agent.service
-      - --run-command
-      - systemctl enable kdump.service
-      - --run-command
-      - sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
-  when:
-    - base_image_source == 'cloud-image'
-    - (not guest_base_image_staged_volume.stat.exists) or (force_image_rebuild | bool)
-  changed_when: true
-
-# --- Set the crashkernel reservation when debuginfo/kdump image is requested. ---
-- name: Set the crashkernel reservation
-  ansible.builtin.command:  # noqa: command-instead-of-module
-    # No Ansible module wraps virt-customize; the command module is the only option.
-    argv:
-      - virt-customize
-      - -a
-      - "{{ guest_base_image_build_workdir }}/{{ base_image_name }}.qcow2"
-      - --run-command
-      - "grubby --update-kernel=ALL --args=crashkernel={{ crashkernel_value }}"
-  when:
-    - include_kernel_debuginfo | bool
-    - (not guest_base_image_staged_volume.stat.exists) or (force_image_rebuild | bool)
-  changed_when: true
-
-# --- Install the three in-guest helpers: chown root:root + restorecon per helper
-# --- (ENOENT-not-EACCES gotcha -- chmod alone does not fix it). Build the argv list
-# --- with a fact loop, then run virt-customize once. ---
-- name: Build the virt-customize helper arguments
-  ansible.builtin.set_fact:
-    guest_base_image_helper_args: >-
-      {{ guest_base_image_helper_args | default([])
-         + ['--copy-in', helper_src ~ '/' ~ item ~ ':/usr/local/sbin/',
-            '--run-command', 'chown root:root /usr/local/sbin/' ~ item,
-            '--run-command', 'chmod 0755 /usr/local/sbin/' ~ item,
-            '--run-command', 'restorecon -v /usr/local/sbin/' ~ item] }}
-  loop: "{{ guest_base_image_helpers }}"
-
-- name: Install the in-guest helpers into the image
-  ansible.builtin.command:  # noqa: command-instead-of-module
-    # No Ansible module wraps virt-customize; the command module is the only option.
-    argv: >-
-      {{ ['virt-customize', '-a',
-          guest_base_image_build_workdir ~ '/' ~ base_image_name ~ '.qcow2']
-         + guest_base_image_helper_args }}
-  when: (not guest_base_image_staged_volume.stat.exists) or (force_image_rebuild | bool)
-  changed_when: true
-
-- name: Stage the finished image into the (root-owned) pool
-  ansible.builtin.copy:
-    src: "{{ guest_base_image_build_workdir }}/{{ base_image_name }}.qcow2"
-    dest: "{{ storage_pool_target }}/{{ base_image_name }}.qcow2"
-    remote_src: true
-    owner: root
-    group: root
-    mode: "0644"
-  when: (not guest_base_image_staged_volume.stat.exists) or (force_image_rebuild | bool)
-
-- name: Refresh the storage pool so libvirt sees the new volume
-  community.libvirt.virt_pool:
-    name: default
-    command: refresh
-
-- name: Record the staged image sha256
-  ansible.builtin.stat:
-    path: "{{ storage_pool_target }}/{{ base_image_name }}.qcow2"
-    checksum_algorithm: sha256
-  register: guest_base_image_staged_final
-
-- name: Report the staged image identity
-  ansible.builtin.debug:
-    msg: "Staged {{ base_image_name }}.qcow2 sha256={{ guest_base_image_staged_final.stat.checksum }}"
+- name: Build and stage each selected image
+  ansible.builtin.include_tasks: build_one.yml
+  loop: "{{ kdive_selected_images }}"
+  loop_control:
+    loop_var: image
+    label: "{{ image.name }}"

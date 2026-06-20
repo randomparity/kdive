@@ -44,6 +44,7 @@ dev = [
   "pytest==9.0.3",
   "testcontainers==4.14.2",
   "hypothesis==6.155.2",
+  "jinja2==3.1.6",
 ]
 live = [
   "drgn==0.2.0",

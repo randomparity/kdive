@@ -7,6 +7,23 @@
       Host '{{ inventory_hostname }}' is missing gdb_addr.
       Set it in inventory/host_vars/{{ inventory_hostname }}.yml.
 
+- name: Assert this host selects at least one image
+  ansible.builtin.assert:
+    that: (kdive_requested_images | length) > 0
+    fail_msg: >-
+      host_images is empty for '{{ inventory_hostname }}'; the emitted systems.toml
+      would carry no [[image]] block. Set host_images in
+      host_vars/{{ inventory_hostname }}.yml.
+
+- name: Assert host_default_image is one of this host's selected images
+  ansible.builtin.assert:
+    that: kdive_default_image in kdive_requested_images
+    fail_msg: >-
+      host_default_image '{{ kdive_default_image }}' is not in host_images
+      {{ kdive_requested_images }} for '{{ inventory_hostname }}'. The emitted
+      [[remote_libvirt]].base_image must name a staged [[image]] or the app
+      rejects systems.toml at load.
+
 - name: Ensure the controller artifacts dir exists
   ansible.builtin.file:
     path: "{{ pki_artifacts_dir }}"
