@@ -59,6 +59,13 @@
         proto: tcp
         to_port: "{{ ansible_port | default(22) }}"
 
+    # ufw is strict first-match with no rule priorities (unlike the firewalld path's
+    # priority="100" drop). `insert: 1` pins the worker-CIDR allows at the TOP of the
+    # chain, ahead of the deny rules below — so they win regardless of insertion history.
+    # Without this, appended rules map to chain order only on the first run: a later
+    # `worker_cidr` change appends the new allow *after* the existing deny-anywhere and is
+    # silently shadowed (it lands behind the deny and never matches). The allows are
+    # already CIDR-scoped, so inserting them first cannot widen access.
     - name: Allow TLS from the worker CIDR
       community.general.ufw:
         rule: allow
@@ -66,6 +73,7 @@
         proto: tcp
         from_ip: "{{ worker_cidr }}"
         to_port: "{{ gdbstub_acl_tls_port }}"
+        insert: 1
 
     - name: Allow gdbstub range from the worker CIDR
       community.general.ufw:
@@ -75,6 +83,7 @@
         from_ip: "{{ worker_cidr }}"
         # ufw wants the COLON form — use gdbstub_range, NOT the dash var.
         to_port: "{{ gdbstub_range }}"
+        insert: 1
 
     - name: Deny TLS from any other source
       community.general.ufw:
@@ -116,6 +125,44 @@
         - gdbstub_acl_ufw_enable | bool
         - gdbstub_acl_ufw_forward_policy.changed
       changed_when: true
+
+    # A previous worker_cidr leaves an `allow` to these ports for a now-irrelevant source.
+    # The CIDR-scoped allow above re-grants the current source, but the stale one lingers —
+    # and since this ACL is the ONLY auth for the raw-TCP gdbstub tier, an allow for a
+    # decommissioned/reassigned CIDR is a real over-permission. Prune every ALLOW to the
+    # protected ports whose source is not the current worker_cidr. Bounded by construction:
+    # only `ALLOW IN` lines for exactly the TLS port or gdbstub range, current-CIDR excluded;
+    # SSH (different port) and the deny rules (not `ALLOW IN`) can never match. Delete
+    # highest-numbered first so renumbering does not invalidate the remaining targets.
+    - name: Prune stale worker-CIDR allows for the protected ports  # noqa: command-instead-of-module
+      ansible.builtin.shell: |
+        set -euo pipefail
+        # `grep` exits 1 on no match; wrap each filter in `|| true` so "nothing stale to
+        # prune" (the steady state) is success, not a pipefail-induced task failure.
+        mapfile -t nums < <(
+          ufw status numbered \
+            | { grep -E "\] +({{ gdbstub_acl_tls_port }}|{{ gdbstub_range }})/tcp +ALLOW IN " || true; } \
+            | { grep -vF "{{ worker_cidr }}" || true; } \
+            | sed -E 's/^\[ *([0-9]+)\].*/\1/' \
+            | sort -rn
+        )
+        pruned=0
+        for n in "${nums[@]}"; do
+          [ -n "$n" ] || continue
+          ufw --force delete "$n" >/dev/null
+          pruned=1
+        done
+        echo "pruned=$pruned"
+      args:
+        executable: /bin/bash
+      register: gdbstub_acl_ufw_prune
+      changed_when: "'pruned=1' in gdbstub_acl_ufw_prune.stdout"
+      # NOT gated on gdbstub_acl_ufw_enable: the allow/deny rule tasks above run
+      # unconditionally, so a worker_cidr change leaves a stale allow even when this run
+      # does not flip ufw active (enable=false, ufw enforced by other means). Pruning
+      # must track those tasks, not the enable flag, or the over-permission persists in
+      # that path. Safe when ufw is inactive: `ufw status numbered` lists no rules, the
+      # grep matches nothing, and the task is a no-op.
 
     - name: Read ufw status  # noqa: command-instead-of-module
       # Reading enforcement state; the ufw module sets rules, it has no is-active read.
