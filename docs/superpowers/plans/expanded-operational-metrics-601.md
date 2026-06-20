@@ -56,10 +56,13 @@ test) + a test that `_repair_plan` with all optional ports enabled == `ALL_REPAI
 3. Impl: add the `kdive.reconciler.repairs` counter + `kdive.errors` counter to
    `ReconcilerTelemetry`; `record_repairs(counts, failures)` adds each count (incl. 0) under
    `repair_kind`, and one `kdive.errors{infrastructure_failure}` per failure name. Declare
-   `ALL_REPAIR_KINDS` near `_repair_plan`; wire `record_repairs` in `_pass_loop` after
-   `run_once()` using the report's counts. (Map the `ReconcileReport` fields back to spec
-   names, or — cleaner — thread the raw `counts` dict out of `reconcile_once`; pick whichever
-   keeps the keys = `_RepairSpec.name`.)
+   `ALL_REPAIR_KINDS` near `_repair_plan`. **Thread the raw `counts` dict (keys =
+   `_RepairSpec.name`) out of `reconcile_once`** — extend `ReconcileReport` with a
+   `repair_counts: Mapping[str, int]` field (or return the dict alongside) so `_pass_loop`
+   passes spec-named counts straight to `record_repairs`. Do **not** reconstruct counts from
+   the existing `ReconcileReport` scalar fields: their names diverge from the spec names
+   (e.g. the field `reconciled_inventory` vs the spec name `reconcile_inventory`), which would
+   make `repair_kind` labels mismatch `ALL_REPAIR_KINDS` and fail step 2's test.
 **Acceptance:** both tests green; `kdive.errors` counter exists on the reconciler meter;
 `ALL_REPAIR_KINDS` pinned to the plan. `just test` for `tests/reconciler/` + `just type`.
 **Rollback:** revert loop_telemetry + loop.py hunks; counter is additive.
@@ -81,9 +84,23 @@ per pass); `src/kdive/__main__.py` (construct `FleetTelemetry`, pass via `Reconc
    has gauge callbacks emitting `kdive_allocations{state=...}` etc. and
    `kdive_host_capacity_used/total{provider=...}`; before any refresh emits nothing (or all
    zeros); a second `refresh` failure path keeps the last snapshot.
-3. Impl: `read_fleet_snapshot` runs the grouped counts + capacity join; `FleetTelemetry`
-   registers observable gauges reading the cached snapshot; `_pass_loop` reads a snapshot on
-   its own connection each pass and calls `refresh`, logging+keeping-last on failure.
+3. Impl: `read_fleet_snapshot` runs the grouped count-by-state queries and the
+   occupying-count grouped query, then sums the typed caps in Python (see below);
+   `FleetTelemetry` registers observable gauges reading the cached snapshot; `_pass_loop`
+   reads a snapshot on its own connection each pass and calls `refresh`, logging+keeping-last
+   on failure.
+
+**Host-capacity detail:** `concurrent_allocation_cap` is **not** a column — it lives in the
+`resources.capabilities` JSONB, read via the typed `require_allocation_cap` view
+(`resource_capabilities.py`), which fails closed on an absent/invalid cap. Load resources and
+sum the typed caps **in Python** per provider; skip (and log once) a resource whose cap is
+absent/invalid rather than counting it as 0 in a way that hides a misconfig. A plain SQL `SUM`
+over a non-existent column is wrong.
+
+**Cross-thread cache:** `FleetSnapshot` is a **frozen** dataclass; `refresh(snapshot)` rebinds
+the cache to that one new reference and never mutates fields in place, so a scrape-thread
+gauge callback reading the reference under the GIL can never see a half-updated snapshot — the
+same single-assignment cross-thread pattern as `WorkerTelemetry.observe_queue_depth`.
 **Acceptance:** tests green; gauges render through `render_prometheus`. `just test` for
 `tests/reconciler/` + `just type`. Note the db-marked test skips without Docker.
 **Rollback:** delete fleet.py + FleetTelemetry; remove the `_pass_loop` refresh + `__main__`
@@ -95,7 +112,9 @@ wiring (all additive).
 **Files:** new `src/kdive/services/allocation/admission/metrics.py` (`_AdmissionReason`,
 `classify`, `AdmissionMetrics`); `src/kdive/services/allocation/promotion.py` +
 `src/kdive/reconciler/repairs/allocations.py` (optional `metrics` param threaded through);
-the allocations tool handler (record after `admit()`); `src/kdive/reconciler/loop.py` +
+the allocations request handler `src/kdive/mcp/tools/lifecycle/allocations/request.py` (record
+after `admit()`, with `AdmissionMetrics` injected via
+`src/kdive/mcp/tools/lifecycle/allocations/registrar.py`); `src/kdive/reconciler/loop.py` +
 `ReconcileConfig` + `__main__.py` (wire the reconciler's `AdmissionMetrics`);
 `tests/services/allocation/test_admission_metrics.py`,
 `tests/mcp/test_allocations_tools.py` (counter at the tool boundary), promotion test.
