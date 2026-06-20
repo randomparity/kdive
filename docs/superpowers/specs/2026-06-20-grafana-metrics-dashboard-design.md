@@ -78,7 +78,7 @@ Instruments emitted today, by defining module:
 | Instrument (OTel name) | Type | Key labels | Module |
 |------------------------|------|------------|--------|
 | `kdive.mcp.requests` | counter | `tool`, `outcome` | `mcp/middleware/telemetry.py` |
-| `kdive.mcp.request.errors` | counter | `tool` | `mcp/middleware/telemetry.py` |
+| `kdive.mcp.request.errors` | counter | `tool`, `outcome` (always `error`) | `mcp/middleware/telemetry.py` |
 | `kdive.mcp.request.duration` | histogram | `tool` | `mcp/middleware/telemetry.py` |
 | `kdive.debug.session.duration` | histogram | — | `mcp/tools/debug/debug_session_telemetry.py` |
 | `kdive.allocation.admission` | counter | `outcome`, `reason` | `services/allocation/admission/metrics.py` |
@@ -91,13 +91,13 @@ Instruments emitted today, by defining module:
 | `kdive.host.capacity.total` | gauge | `provider` | `reconciler/fleet.py` |
 | `kdive.reconcile.duration` | histogram | — | `reconciler/loop_telemetry.py` |
 | `kdive.reconcile.lag` | histogram | — | `reconciler/loop_telemetry.py` |
-| `kdive.reconciler.repairs` | counter | `repair_kind`, `outcome` | `reconciler/loop_telemetry.py` |
+| `kdive.reconciler.repairs` | counter | `repair_kind` | `reconciler/loop_telemetry.py` |
 | `kdive.errors` | counter | `error_category` | `reconciler/loop_telemetry.py`, `jobs/worker_telemetry.py` |
 | `kdive.job.duration` | histogram | `job_kind`, `outcome` | `jobs/worker_telemetry.py` |
 | `kdive.job.queue.depth` | gauge | — | `jobs/worker_telemetry.py` |
 | `kdive.job.retries` | counter | `job_kind` | `jobs/worker_telemetry.py` |
 | `kdive.job.time_to_claim` | histogram | `job_kind` | `jobs/worker_telemetry.py` |
-| `kdive.provider.op.duration` | histogram | `provider`, `job_kind` | `jobs/worker_telemetry.py` |
+| `kdive.provider.op.duration` | histogram | `provider`, `job_kind`, `outcome` | `jobs/worker_telemetry.py` |
 | `kdive.provider.op.errors` | counter | `provider`, `job_kind` | `jobs/worker_telemetry.py` |
 | `kdive.build.phase.duration` | histogram | `build_phase`, `provider`, `outcome` | `jobs/build_telemetry.py` |
 | `kdive.build_host.capacity` | gauge | `build_host` | `reconciler/build_host_fleet.py` |
