@@ -10,6 +10,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.domain.capacity.state import DebugSessionState
+from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import TransportResetter
 
 _log = logging.getLogger(__name__)
@@ -17,22 +18,36 @@ _log = logging.getLogger(__name__)
 _DETACHED_DEBUG_SESSION_STATE_VALUE = DebugSessionState.DETACHED.value
 _LIVE_DEBUG_SESSION_STATE_VALUE = DebugSessionState.LIVE.value
 
+# Module-level no-op singleton so DebugSessionTelemetry.disabled() is not constructed on
+# every default-argument evaluation (ruff B008).
+_NULL_TELEMETRY: DebugSessionTelemetry = DebugSessionTelemetry.disabled()
+
 
 async def repair_dead_sessions(
-    conn: AsyncConnection, stale_after: timedelta, resetter: TransportResetter
+    conn: AsyncConnection,
+    stale_after: timedelta,
+    resetter: TransportResetter,
+    telemetry: DebugSessionTelemetry = _NULL_TELEMETRY,
 ) -> int:
-    """Detach stale ``live`` debug sessions, then reset each dead transport best-effort."""
+    """Detach stale ``live`` debug sessions, then reset each dead transport best-effort.
+
+    For each reaped row the session age is computed in SQL (``EXTRACT(EPOCH FROM
+    (now() - created_at))``) to avoid worker-vs-DB clock skew, and recorded on
+    ``telemetry`` as outcome ``reaped``.
+    """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "UPDATE debug_sessions SET state = %s "
             "WHERE state = %s AND worker_heartbeat_at IS NOT NULL "
             "  AND worker_heartbeat_at < now() - %s "
-            "RETURNING id, run_id, transport, transport_handle",
+            "RETURNING id, run_id, transport, transport_handle, "
+            "  EXTRACT(EPOCH FROM (now() - created_at)) AS age_seconds",
             (_DETACHED_DEBUG_SESSION_STATE_VALUE, _LIVE_DEBUG_SESSION_STATE_VALUE, stale_after),
         )
         rows = await cur.fetchall()
     for row in rows:
         _log.info("reconciler: dead debug_session %s -> detached", row["id"])
+        telemetry.record(row["transport"], "reaped", float(row["age_seconds"]))
         await _reset_dead_transport(conn, resetter, row)
     return len(rows)
 

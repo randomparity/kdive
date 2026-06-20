@@ -28,6 +28,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
+from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import (
@@ -139,6 +140,10 @@ _NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
 # stateless default field without a per-call construction (ruff B008).
 _NULL_ADMISSION_METRICS: AdmissionMetrics = AdmissionMetrics.disabled()
 
+# The default (no-op) debug-session telemetry (ADR-0191 H3): a module-level singleton so it
+# is a stateless default field without a per-call construction (ruff B008).
+_NULL_DEBUG_SESSION_TELEMETRY: DebugSessionTelemetry = DebugSessionTelemetry.disabled()
+
 # The process-singleton inventory reconcile pass (ADR-0112): held here so its last-good
 # parse cache (keyed by the systems.toml hash) survives across reconcile passes — the parse
 # step is skipped when the file is unchanged, but the reconcile-against-DB step still runs
@@ -218,6 +223,7 @@ class ReconcileConfig:
     fleet_telemetry: FleetTelemetry | None = None
     build_host_telemetry: BuildHostTelemetry | None = None
     admission_metrics: AdmissionMetrics = field(default=_NULL_ADMISSION_METRICS)
+    debug_session_telemetry: DebugSessionTelemetry = field(default=_NULL_DEBUG_SESSION_TELEMETRY)
 
 
 _DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
@@ -261,7 +267,10 @@ def _repair_plan(
         _RepairSpec(
             "dead_sessions",
             lambda conn: _repair_dead_sessions(
-                conn, config.debug_session_stale_after, config.resetter
+                conn,
+                config.debug_session_stale_after,
+                config.resetter,
+                config.debug_session_telemetry,
             ),
         ),
         _RepairSpec("leaked_domains", lambda conn: _repair_leaked_domains(conn, reaper)),
