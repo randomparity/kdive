@@ -684,3 +684,77 @@ def test_lint_is_clean() -> None:
     )
     assert res.returncode == 0, res.stdout + res.stderr
     assert "0 chart(s) failed" in res.stdout
+
+
+# --- Bundled observability (opt-in Prometheus, ADR-0189) ----------------------------------
+
+
+def _obs_docs(*set_args: str) -> list[dict[str, Any]]:
+    """Render with bundledObservability on and return every YAML doc."""
+    res = _template(
+        "config.KDIVE_DATABASE_URL=postgresql://x/y", "bundledObservability=true", *set_args
+    )
+    assert res.returncode == 0, res.stderr
+    return [d for d in yaml.safe_load_all(res.stdout) if isinstance(d, dict)]
+
+
+def _obs_kind(docs: list[dict[str, Any]], kind: str) -> dict[str, Any]:
+    return next(d for d in docs if d.get("kind") == kind and "prometheus" in d["metadata"]["name"])
+
+
+def _scrape_config(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    cm = next(
+        d
+        for d in docs
+        if d.get("kind") == "ConfigMap" and d["metadata"]["name"].endswith("-prometheus-config")
+    )
+    return yaml.safe_load(cm["data"]["prometheus.yml"])
+
+
+def test_observability_off_by_default_renders_no_prometheus() -> None:
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert res.returncode == 0, res.stderr
+    assert "-prometheus" not in res.stdout
+
+
+def test_observability_renders_rbac_deployment_and_clusterip_service() -> None:
+    docs = _obs_docs()
+    assert _obs_kind(docs, "ServiceAccount")
+    role = _obs_kind(docs, "Role")
+    rules = role["rules"][0]
+    assert rules["resources"] == ["pods"]
+    assert sorted(rules["verbs"]) == ["get", "list", "watch"]
+    assert _obs_kind(docs, "RoleBinding")
+    svc = _obs_kind(docs, "Service")
+    assert svc["spec"]["type"] == "ClusterIP"
+    assert {p["port"] for p in svc["spec"]["ports"]} == {9090}
+    dep = _obs_kind(docs, "Deployment")
+    assert dep["spec"]["template"]["spec"]["serviceAccountName"].endswith("-prometheus")
+
+
+def test_observability_scrape_config_uses_annotation_relabeling() -> None:
+    # helm template / yaml.safe_load_all validate only the wrapping ConfigMap; the relabel DSL
+    # inside data["prometheus.yml"] is the load-bearing logic, so parse and assert on it directly
+    # (a valid-but-wrong relabel rule would render fine and scrape nothing).
+    cfg = _scrape_config(_obs_docs())
+    job = cfg["scrape_configs"][0]
+    sd = job["kubernetes_sd_configs"][0]
+    assert sd["role"] == "pod"
+    assert sd["namespaces"]["names"] == ["default"]  # helm template's default release namespace
+    rels = job["relabel_configs"]
+    keep = next(r for r in rels if r.get("action") == "keep")
+    assert keep["source_labels"] == ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+    assert keep["regex"] == "true"
+    path = next(r for r in rels if r.get("target_label") == "__metrics_path__")
+    assert path["source_labels"] == ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
+    addr = next(r for r in rels if r.get("target_label") == "__address__")
+    assert "__meta_kubernetes_pod_annotation_prometheus_io_port" in addr["source_labels"]
+    assert "__meta_kubernetes_pod_ip" in addr["source_labels"]
+
+
+def test_observability_independent_of_bundled_backends() -> None:
+    # Renders on the external path (no bundledBackends) — the targets are the app pods, which
+    # exist on both paths, so observability must not pull in the demo backends.
+    docs = _obs_docs()
+    assert _obs_kind(docs, "Deployment")
+    assert "mock-oauth2-server" not in yaml.safe_dump_all(docs)
