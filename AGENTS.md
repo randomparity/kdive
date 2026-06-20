@@ -111,7 +111,7 @@ transport.
   object id, status, `suggested_next_actions` (literal next tool names), artifact `refs`,
   and an `error_category` **iff** the status is a failure (enforced at construction).
   References, never log dumps.
-- **State transitions are guarded data** — `domain/state.py` is a nested adjacency table;
+- **State transitions are guarded data** — `domain/capacity/state.py` is a nested adjacency table;
   the repository layer (`db/repositories.py`) calls `can_transition` before persisting any
   state change. An illegal edge raises `IllegalTransition` (a programming error, distinct
   from operational `ErrorCategory` failures).
@@ -121,7 +121,7 @@ transport.
   and register into the redaction registry for the op's lifetime; only `(present,
   source-ref)` persists. All guest/console/gdb output passes the redactor before
   persistence or any response snippet (`security/`).
-- **Destructive-op gate** — `security/gate.py`: power/force_crash/teardown/reprovision
+- **Destructive-op gate** — `security/authz/gate.py`: power/force_crash/teardown/reprovision
   require all three of capability scope + RBAC role + explicit profile opt-in (deny by
   default).
 - **Concurrency** — serialize per-Allocation and per-System via advisory locks; admission
