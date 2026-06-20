@@ -171,6 +171,10 @@ def _build_over_transport_session(
         )
         result = bound.build(run_id, parsed, recorder=recorder, provider=provider)
     except BaseException as exc:
+        # Return value intentionally ignored: a build-transport exception must always propagate.
+        # Suppression (returning True from __exit__) would silently swallow a build failure, which
+        # is a worse outcome than any cleanup side effect the context manager might want to attempt.
+        # This diverges from `with`-block semantics deliberately.
         transport_ctx.__exit__(type(exc), exc, exc.__traceback__)
         raise
     else:
