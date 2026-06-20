@@ -42,6 +42,7 @@ from kdive.providers.remote_libvirt import composition as remote_composition
 from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
+from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 if TYPE_CHECKING:
@@ -294,7 +295,10 @@ class ProviderComposition:
         )
 
     def _console_hosting_factories(
-        self, *, enable_remote_libvirt: bool | None
+        self,
+        *,
+        enable_remote_libvirt: bool | None,
+        console_telemetry: ConsoleTelemetry | None = None,
     ) -> tuple[_ConsoleHostingFactory, ...]:
         if not _remote_libvirt_enabled(enable_remote_libvirt):
             return ()
@@ -302,6 +306,7 @@ class ProviderComposition:
             lambda: remote_composition.build_console_hosting(
                 secret_registry=self._secret_registry,
                 running_systems_factory=DbRunningRemoteSystems,
+                console_telemetry=console_telemetry,
             ),
         )
 
@@ -409,10 +414,16 @@ class ProviderComposition:
         return SshBuildHostProber(secret_registry=self._secret_registry)
 
     async def build_reconciler_console_hosting(
-        self, *, enable_remote_libvirt: bool | None = None
+        self,
+        *,
+        enable_remote_libvirt: bool | None = None,
+        console_telemetry: ConsoleTelemetry | None = None,
     ) -> ConsoleHosting | None:
         """Assemble provider-owned console hosting for the reconciler."""
-        for factory in self._console_hosting_factories(enable_remote_libvirt=enable_remote_libvirt):
+        for factory in self._console_hosting_factories(
+            enable_remote_libvirt=enable_remote_libvirt,
+            console_telemetry=console_telemetry,
+        ):
             return await factory()
         return None
 

@@ -299,3 +299,66 @@ def test_empty_console_bytes_finalize_to_empty_artifact() -> None:
     assert collector.pump_once() is False
     collector.finalize()
     assert store.artifact == b""
+
+
+class FakeTelemetry:
+    """Records ``record`` calls for assertion."""
+
+    def __init__(self) -> None:
+        self.recorded: list[int] = []
+
+    def record(self, byte_len: int) -> None:
+        self.recorded.append(byte_len)
+
+
+def test_finalize_reports_assembled_byte_length_to_telemetry() -> None:
+    store = FakePartStore()
+    stream = FakeStream([b"hello world\n"])
+    telem = FakeTelemetry()
+    collector = ConsoleCollector(
+        _SYSTEM,
+        open_console=FakeOpenConsole([stream]),
+        store=store,
+        secret_registry=SecretRegistry(),
+        telemetry=telem,
+        rotation_threshold=1024,
+    )
+    collector.pump_once()
+    collector.finalize()
+    assert store.artifact == b"hello world\n"
+    assert telem.recorded == [len(b"hello world\n")]
+
+
+def test_finalize_reports_zero_bytes_to_telemetry_when_empty() -> None:
+    store = FakePartStore()
+    stream = FakeStream([])  # immediate EOF
+    telem = FakeTelemetry()
+    collector = ConsoleCollector(
+        _SYSTEM,
+        open_console=FakeOpenConsole([stream]),
+        store=store,
+        secret_registry=SecretRegistry(),
+        telemetry=telem,
+    )
+    collector.pump_once()
+    collector.finalize()
+    assert store.artifact == b""
+    assert telem.recorded == [0]
+
+
+def test_finalize_idempotent_does_not_double_report_telemetry() -> None:
+    store = FakePartStore()
+    stream = FakeStream([b"data\n"])
+    telem = FakeTelemetry()
+    collector = ConsoleCollector(
+        _SYSTEM,
+        open_console=FakeOpenConsole([stream]),
+        store=store,
+        secret_registry=SecretRegistry(),
+        telemetry=telem,
+        rotation_threshold=1024,
+    )
+    collector.pump_once()
+    collector.finalize()
+    collector.finalize()  # second call is a no-op
+    assert len(telem.recorded) == 1

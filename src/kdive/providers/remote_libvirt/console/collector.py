@@ -84,6 +84,12 @@ class ConsolePartStore(Protocol):
     def delete_part(self, system_id: UUID, index: int) -> None: ...
 
 
+class ConsoleRecorder(Protocol):
+    """The narrow telemetry port the collector calls at finalize (ADR-0191 H2)."""
+
+    def record(self, byte_len: int) -> None: ...
+
+
 class ConsoleCollector:
     """Streams one System's console, rotating redacted parts and assembling on finalize.
 
@@ -103,6 +109,7 @@ class ConsoleCollector:
         rotation_threshold: int = DEFAULT_ROTATION_THRESHOLD,
         seam_overlap: int = DEFAULT_SEAM_OVERLAP,
         read_chunk: int = DEFAULT_READ_CHUNK,
+        telemetry: ConsoleRecorder | None = None,
     ) -> None:
         self._system_id = system_id
         self._open_console = open_console
@@ -111,6 +118,7 @@ class ConsoleCollector:
         self._rotation_threshold = rotation_threshold
         self._seam_overlap = seam_overlap
         self._read_chunk = read_chunk
+        self._telemetry = telemetry
         self._stream: ConsoleStream | None = None
         self._buffer = bytearray()
         # Raw trailing bytes held back from the previous rotation and prepended to the next
@@ -260,6 +268,8 @@ class ConsoleCollector:
             for index in sorted(self._store.list_part_indices(self._system_id)):
                 assembled.extend(self._store.read_part(self._system_id, index))
             self._store.write_console_artifact(self._system_id, bytes(assembled))
+            if self._telemetry is not None:
+                self._telemetry.record(len(assembled))
             self._finalized = True
         _log.info("console collector for %s finalized into one artifact", self._system_id)
 
