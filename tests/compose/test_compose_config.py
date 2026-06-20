@@ -207,3 +207,17 @@ def test_prometheus_static_config_targets_every_aux_port() -> None:
         for static in job["static_configs"]:
             targets.update(static["targets"])
     assert targets == {f"{svc}:{port}" for svc, port in _AUX_PORTS.items()}
+
+
+def test_prometheus_static_config_passes_promtool() -> None:
+    # Bonus semantic check over the content assertions above: promtool is the only thing that
+    # validates the Prometheus DSL itself. Skips cleanly when absent (it is not on every runner).
+    if shutil.which("promtool") is None:
+        pytest.skip("promtool not installed")
+    res = subprocess.run(
+        ["promtool", "check", "config", str(_PROM_CONFIG)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr

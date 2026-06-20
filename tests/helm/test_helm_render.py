@@ -758,3 +758,23 @@ def test_observability_independent_of_bundled_backends() -> None:
     docs = _obs_docs()
     assert _obs_kind(docs, "Deployment")
     assert "mock-oauth2-server" not in yaml.safe_dump_all(docs)
+
+
+def test_observability_scrape_config_passes_promtool() -> None:
+    # Bonus semantic check: promtool is the only thing that validates the Prometheus relabel DSL
+    # the chart renders. Skips cleanly when absent (it is not on every runner), like the helm gate.
+    if shutil.which("promtool") is None:
+        pytest.skip("promtool not installed")
+    import tempfile
+
+    cfg = _scrape_config(_obs_docs())
+    with tempfile.NamedTemporaryFile("w", suffix=".yml") as fh:
+        yaml.safe_dump(cfg, fh)
+        fh.flush()
+        res = subprocess.run(
+            ["promtool", "check", "config", fh.name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert res.returncode == 0, res.stdout + res.stderr
