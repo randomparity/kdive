@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 
 def _docker_compose_available() -> bool:
@@ -151,3 +152,58 @@ def test_app_service_has_healthcheck_against_its_aux_readyz(service: str) -> Non
     test_cmd = healthcheck["test"]
     joined = " ".join(test_cmd) if isinstance(test_cmd, list) else str(test_cmd)
     assert f"127.0.0.1:{_AUX_PORTS[service]}/readyz" in joined
+
+
+# --- Opt-in Prometheus on the `obs` profile (ADR-0189) ------------------------------------
+
+_PROM_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "compose" / "prometheus.yml"
+
+
+def _services_with_obs_profile() -> dict[str, Any]:
+    # `docker compose config` drops profile-gated services unless the profile is active, so
+    # render with `--profile obs` to make the prometheus service appear in the model.
+    res = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(_COMPOSE_FILE),
+            "--profile",
+            "obs",
+            "config",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 0, f"compose config invalid: {res.stderr}"
+    return json.loads(res.stdout)["services"]
+
+
+def test_prometheus_service_is_obs_profile_only() -> None:
+    # Present when the profile is active...
+    assert "prometheus" in _services_with_obs_profile()
+    # ...and absent from the default (no-profile) model, so the turnkey graph is unchanged.
+    assert "prometheus" not in _services()
+    assert _services_with_obs_profile()["prometheus"]["profiles"] == ["obs"]
+
+
+def test_prometheus_publishes_ui_but_not_the_scraped_ports() -> None:
+    prom = _services_with_obs_profile()["prometheus"]
+    published = {str(p.get("published")) for p in prom.get("ports", [])}
+    assert "9090" in published
+    for aux in _AUX_PORTS.values():
+        assert str(aux) not in published
+
+
+def test_prometheus_static_config_targets_every_aux_port() -> None:
+    # docker compose config validates the compose file, never the mounted prometheus.yml, so
+    # parse the committed scrape config and assert its static targets match the aux-port contract.
+    cfg = yaml.safe_load(_PROM_CONFIG.read_text())
+    targets: set[str] = set()
+    for job in cfg["scrape_configs"]:
+        for static in job["static_configs"]:
+            targets.update(static["targets"])
+    assert targets == {f"{svc}:{port}" for svc, port in _AUX_PORTS.items()}

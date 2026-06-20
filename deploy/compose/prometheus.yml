@@ -1,0 +1,13 @@
+# Static-target scrape config for the reference compose's opt-in Prometheus (ADR-0189).
+# Targets each process's aux /metrics (ADR-0090 §5) by compose service name on the compose
+# network; those ports are never published to the host. Brought up with the `obs` profile:
+#   docker compose --profile obs up -d prometheus
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: kdive
+    static_configs:
+      - targets:
+          - server:9464
+          - worker:9465
+          - reconciler:9466
