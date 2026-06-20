@@ -170,3 +170,45 @@ def test_runtime_for_system_binds_to_resource_name() -> None:
     bound = asyncio.run(resolver.runtime_for_system(conn, _ABSENT_OBJECT_ID))
     assert bound is runtimes[ResourceKind.REMOTE_LIBVIRT]
     assert runtimes[ResourceKind.REMOTE_LIBVIRT].bound_to == "host-b"
+
+
+def test_binding_for_system_returns_binding_with_kind_and_bound_runtime() -> None:
+    resolver, runtimes = _resolver(ResourceKind.REMOTE_LIBVIRT)
+    conn = cast(AsyncConnection, _Conn({"kind": "remote-libvirt", "name": "host-c"}))
+    binding = asyncio.run(resolver.binding_for_system(conn, _ABSENT_OBJECT_ID))
+    assert binding.kind is ResourceKind.REMOTE_LIBVIRT
+    assert binding.runtime is runtimes[ResourceKind.REMOTE_LIBVIRT]
+    assert runtimes[ResourceKind.REMOTE_LIBVIRT].bound_to == "host-c"
+
+
+def test_binding_for_run_returns_binding_with_kind_and_bound_runtime() -> None:
+    resolver, runtimes = _resolver(ResourceKind.LOCAL_LIBVIRT)
+    conn = cast(AsyncConnection, _Conn({"kind": "local-libvirt", "name": "host-d"}))
+    binding = asyncio.run(resolver.binding_for_run(conn, _ABSENT_OBJECT_ID))
+    assert binding.kind is ResourceKind.LOCAL_LIBVIRT
+    assert binding.runtime is runtimes[ResourceKind.LOCAL_LIBVIRT]
+    assert runtimes[ResourceKind.LOCAL_LIBVIRT].bound_to == "host-d"
+
+
+@pytest.mark.parametrize(
+    ("object_kind", "resolve"),
+    (
+        ("system", ProviderResolver.binding_for_system),
+        ("run", ProviderResolver.binding_for_run),
+    ),
+)
+def test_binding_lookup_absent_object_fails_with_not_found(
+    object_kind: str,
+    resolve: _RuntimeLookup,
+) -> None:
+    resolver, _ = _resolver(ResourceKind.LOCAL_LIBVIRT)
+    conn = _Conn(None)
+
+    with pytest.raises(CategorizedError) as exc:
+        asyncio.run(resolve(resolver, conn, _ABSENT_OBJECT_ID))
+
+    assert exc.value.category is ErrorCategory.NOT_FOUND
+    assert exc.value.details == {
+        "object_kind": object_kind,
+        "object_id": str(_ABSENT_OBJECT_ID),
+    }
