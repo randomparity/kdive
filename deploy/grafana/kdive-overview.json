@@ -1,6 +1,6 @@
 {
   "title": "kdive \u2014 Metrics Overview",
-  "uid": "${datasource}",
+  "uid": "kdive-overview",
   "tags": [
     "kdive"
   ],

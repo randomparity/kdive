@@ -84,7 +84,7 @@ def build_dashboard() -> dict:
     panels = _build_panels()
     return {
         "title": "kdive — Metrics Overview",
-        "uid": "${datasource}",
+        "uid": "kdive-overview",
         "tags": ["kdive"],
         "schemaVersion": 39,
         "version": 1,
