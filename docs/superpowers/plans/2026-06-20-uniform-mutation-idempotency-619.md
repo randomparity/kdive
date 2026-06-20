@@ -67,26 +67,23 @@ Spec: [`../../design/uniform-mutation-idempotency.md`](../../design/uniform-muta
 - `async record_envelope(conn, *, principal, key, project, kind, envelope) -> None` —
   `INSERT … VALUES (%s,%s,%s,%s,%s)` with `Jsonb({"envelope": envelope.model_dump(mode="json")})`.
   Let `psycopg.errors.UniqueViolation` propagate (do NOT catch/map here).
-- `async record_or_resolve(conn, *, principal, key, project, kind, envelope) -> ToolResponse`
-  — call `record_envelope`; on `UniqueViolation`, re-run `resolve_envelope_replay` (on the
-  same conn; the caller is responsible for having rolled back — see Task 2/3 note), return
-  the prior envelope if found, else raise `CategorizedError(CONFLICT, details={"reason":
-  "idempotency_key_in_use"})`. **Note:** because a UniqueViolation aborts the surrounding
-  transaction, `record_or_resolve` is only safe to call as the final statement of a
-  transaction the caller then exits; the catch/re-resolve happens after rollback. See the
-  helper docstring + Task 2 for the exact call shape (the simplest correct form: the helper
-  takes a freshly-resolvable conn, and topology callers structure the try/except around the
-  `conn.transaction()` block — implement whichever keeps the helper a pure leaf; if the
-  in-transaction-then-reresolve cannot be expressed as one leaf call, split into
-  `record_envelope` + a caller-side except that calls `resolve_envelope_replay`, and drop
-  `record_or_resolve`). Prefer the split if simpler — the spec's invariants, not the helper
-  shape, are the contract.
+- `async resolve_conflict(conn, *, principal, key, kind) -> ToolResponse` — the
+  read-after-conflict helper, called by a caller's `except UniqueViolation` block **after**
+  the aborted `conn.transaction()` has exited (so the connection is usable again). It re-runs
+  `resolve_envelope_replay`; returns the prior envelope if found, else raises
+  `CategorizedError(CONFLICT, details={"reason": "idempotency_key_in_use"})` (the cross-tool
+  misuse case). Do **not** build a combined "record-and-on-conflict-resolve" leaf — a
+  `UniqueViolation` aborts the whole transaction, so the re-resolve cannot run on the same
+  open transaction; the caller must own the `try: async with conn.transaction(): … record …`
+  / `except UniqueViolation:` structure and call `resolve_conflict` in the except. This split
+  is the prescribed shape; both topologies use it identically.
 
 **Tests (behavior, against testcontainer Postgres — mirror `tests/services/allocation`):**
 - record then resolve returns an identical envelope (`model_dump` equality).
 - resolve miss → `None`; resolve under a different `kind`/`principal` → `None`.
-- duplicate `(principal, key)` insert raises `UniqueViolation` (record_envelope) and, via the
-  caller pattern, re-resolves to the first envelope.
+- duplicate `(principal, key)` insert raises `UniqueViolation` (record_envelope); a following
+  `resolve_conflict` returns the first envelope; `resolve_conflict` under a *different* kind
+  (no row) raises `CONFLICT`.
 - `validate_idempotency_key`: empty and 201-char → `CONFIGURATION_ERROR`; 200-char ok.
 
 **Acceptance:** `just lint`, `just type`, the new test file green. **Rollback:** delete the
@@ -147,35 +144,33 @@ investigations service + `mcp/tools/catalog/investigations.py`. Tests mirror eac
 1. Registrar: add the `idempotency_key` field; forward through the MCP adapter to the
    service. The MCP adapter (`create.py`, `provision.py`) passes it down — it does NOT open
    its own connection.
-2. Service: add `idempotency_key: str | None = None` parameter. At the top of the service
-   (after it opens its connection, before any lock/insert): if not None,
-   `validate_idempotency_key` + `resolve_envelope_replay(conn, principal=ctx.principal, …)`;
-   on hit, return a result the adapter maps to the stored envelope. **Design choice:** the
-   service returns its normal typed result on the work path; for replay, the cleanest is for
-   the service to return the *stored `ToolResponse`* directly — but services return domain
-   result types, not envelopes. Resolve this by doing the replay check + record in the **MCP
-   adapter is impossible (no conn)**, so instead: have the service accept the
-   `idempotency_key` and, inside its insert `conn.transaction()`, after it has the created
-   object, build nothing extra — instead the service calls a small callback or returns the
-   created id, and the adapter builds the envelope. To keep the envelope identical on replay,
-   **record the envelope from inside the service**: pass the envelope-builder is awkward.
-   **Concrete decision:** move envelope construction for these three tools to a point the
-   service can reach: the service builds the success envelope itself (these envelopes are
-   simple — `runs.create`'s `_created_response`, systems' `job_envelope`/
-   `defined_system_envelope`, investigations' open envelope) by importing the existing
-   response builders, records it inside the insert transaction, and returns the envelope (or
-   a result carrying it). The MCP adapter returns the service's envelope unchanged on both
-   fresh and replay paths. Keep the existing typed-error returns for the failure paths
-   (failures are not recorded).
-   - If relocating envelope construction into the service is too invasive for `create_run`
-     (it has rich error mapping in `create.py`), an acceptable alternative: the service does
-     the replay-resolve and, on a miss, performs the insert and records the envelope using a
-     builder passed in by the adapter as a callable `envelope_of(result) -> ToolResponse`.
-     Choose the lower-churn option; document which in the PR.
-3. Record only on success, inside the insert `conn.transaction()`. Failure paths record
-   nothing.
-4. Concurrent duplicate: structure the try/except so a `UniqueViolation` on record rolls the
-   insert back and re-resolves to the winner's envelope.
+2. Service: add `idempotency_key: str | None = None` parameter (uses `ctx.principal`). At the
+   top of the service, after it opens its connection and before any lock/insert: if the key
+   is not None, `validate_idempotency_key(key)` then
+   `resolve_envelope_replay(conn, principal=ctx.principal, key=key, kind=_KIND)`; on a hit
+   return the stored envelope (see step 3 for how the service yields an envelope).
+3. **Prescribed approach — pass an envelope-builder callback into the service.** Do NOT
+   relocate the adapter's error-mapping. The MCP adapter keeps building both success and
+   error envelopes; it passes the service a `build_envelope: Callable[[<service result>],
+   ToolResponse]` that wraps the *existing* success builder (`_created_response` for
+   `runs.create`, `job_envelope`/`defined_system_envelope` for systems, the open-envelope
+   builder for investigations). The service:
+   - on a replay hit, returns the stored `ToolResponse` (it is already an envelope);
+   - on the work path, after the insert inside its `conn.transaction()`, builds the success
+     envelope via `build_envelope(result)`, calls `record_envelope(conn, …, envelope=…)` in
+     that same transaction, and returns the envelope.
+   The service's return type therefore becomes `ToolResponse` for the success/replay paths
+   while failures still raise/return the existing typed errors the adapter maps. (If a
+   service currently returns a domain result that the adapter turns into an error envelope on
+   *failure*, keep that path unchanged — only the *success* envelope construction moves
+   behind the callback. The adapter calls the service, and on a returned `ToolResponse`
+   passes it through unchanged.)
+4. Record only on success, inside the insert `conn.transaction()`. Failure paths record
+   nothing (the key stays unused so a corrected retry can reuse it).
+5. Concurrent duplicate: wrap the insert `conn.transaction()` in `try`; on
+   `except UniqueViolation` (after the aborted transaction exits) call
+   `resolve_conflict(conn, principal=ctx.principal, key=key, kind=_KIND)` and return its
+   envelope (winner's) — or it raises `CONFLICT` for a cross-tool collision.
 
 **Tests:**
 - `test_runs_create_replays_on_keyed_retry` — keyed create, discard envelope, keyed retry ⇒
