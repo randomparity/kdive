@@ -11,7 +11,9 @@ from uuid import UUID
 from kdive.build_configs.defaults import DEFAULT_CONFIG_REF, CatalogConfigFetch
 from kdive.components.references import ComponentRef
 from kdive.components.requirements import validate_config_requirements
+from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.shared.build_host.common import _dropped_fragment_symbols
 from kdive.providers.shared.build_host.configuration.config import (
@@ -85,7 +87,14 @@ class BuildHostOrchestrator:
         """Remove a per-run workspace via the injected best-effort cleanup seam."""
         self.cleanup(workspace)
 
-    def build_workspace(self, run_id: UUID, profile: ServerBuildProfile) -> Path:
+    def build_workspace(
+        self,
+        run_id: UUID,
+        profile: ServerBuildProfile,
+        *,
+        recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+        provider: str = "",
+    ) -> Path:
         """Resolve config, checkout, preflight, run ``make``, and return the workspace path."""
         workspace = self.workspace_path(run_id)
         config_ref = profile.config or DEFAULT_CONFIG_REF
@@ -95,13 +104,16 @@ class BuildHostOrchestrator:
             catalog_fetch=self.catalog_fetch,
         )
         fragment_text = fragment_bytes.decode()
-        self.checkout(run_id, profile, workspace, fragment_bytes)
-        if self.run_olddefconfig(workspace) != 0:
-            raise build_failure("make olddefconfig exited non-zero", run_id)
-        config_text = self.read_config(workspace)
-        _validate_final_config(run_id, profile, fragment_text, config_text)
-        if self.run_make(workspace) != 0:
-            raise build_failure("make exited non-zero", run_id)
+        with recorder.phase(BuildPhase.SOURCE_SYNC, provider):
+            self.checkout(run_id, profile, workspace, fragment_bytes)
+        with recorder.phase(BuildPhase.CONFIGURE, provider):
+            if self.run_olddefconfig(workspace) != 0:
+                raise build_failure("make olddefconfig exited non-zero", run_id)
+            config_text = self.read_config(workspace)
+            _validate_final_config(run_id, profile, fragment_text, config_text)
+        with recorder.phase(BuildPhase.COMPILE, provider):
+            if self.run_make(workspace) != 0:
+                raise build_failure("make exited non-zero", run_id)
         return workspace
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
