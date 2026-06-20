@@ -72,6 +72,34 @@ per-tool shape of these two fields is intentionally open. Read them like this:
 A black-box agent therefore needs only this one envelope contract plus the per-tool
 input schema; it never has to special-case each tool's result shape.
 
+## Idempotent retries
+
+The transport-reset retry contract blesses re-invoking idempotent *reads* after a
+transient drop. For *mutations*, a blind retry of the initial create/enqueue could
+double-act. To make a mutation retry safe, every object-creating / job-enqueuing tool
+accepts an optional `idempotency_key` ([ADR-0193](../adr/0193-uniform-mutation-idempotency.md)):
+
+- **What it covers.** The create/enqueue mutations — `runs.create` / `runs.build` /
+  `runs.install` / `runs.boot`, `systems.provision` / `systems.define` /
+  `systems.provision_defined` / `systems.reprovision` / `systems.teardown`,
+  `vmcore.fetch`, `control.power` / `control.force_crash`, `investigations.open`, and
+  `allocations.request` / `allocations.renew`. Pure state-transition mutations that act on
+  an existing object by id (e.g. `runs.cancel`, `allocations.release`,
+  `investigations.close`) are naturally idempotent and take no key.
+- **Replay, not re-action.** A repeated `idempotency_key` returns the **identical prior
+  envelope** — the same object/job, byte-for-byte the same fields — instead of creating a
+  second object or enqueuing a second job. A keyed retry after a transport drop is safe.
+- **Principal-scoped.** Keys are scoped to your principal; one tenant's key can never
+  resolve another's envelope.
+- **Success-only.** A key is recorded only when the mutation succeeds. A failed call (a
+  denial or a validation error) records nothing, so you may correct the input and retry the
+  same key.
+- **One key per logical operation.** Reusing one key across two different tools fails closed
+  with a `conflict` error — mint a fresh key per operation. A key is at most 200 characters.
+- **Window.** A key replays only within the retention window (see
+  [async jobs](async-jobs.md)); after it is garbage-collected, a repeat is treated as a fresh
+  request.
+
 ## List responses
 
 `*.list` tools return a sequence of `ToolResponse` objects, one envelope per item.

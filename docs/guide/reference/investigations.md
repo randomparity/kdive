@@ -60,6 +60,7 @@ Open an investigation.
 |---|---|---|---|
 | `description` | string (nullable) | no | Optional free-form description for reporting (<=4096 chars). |
 | `external_refs` | array<object> (nullable) | no | Optional external tracker refs (each with tracker, id, url). |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `project` | string | yes | Project to create the Investigation under. |
 | `title` | string | yes | Human-readable title (1..=200 chars). |
 
