@@ -22,6 +22,7 @@ from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from kdive.domain.capacity.state import JobState
+from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import Counter, Histogram, Meter
@@ -69,6 +70,18 @@ class WorkerTelemetry:
             unit="1",
             description="Categorized failures at their backend origin, by error category.",
         )
+        # ADR-0191 F: provider-op RED — recorded only when the handler tags a provider kind.
+        self._provider_op_duration: Histogram = meter.create_histogram(
+            "kdive.provider.op.duration",
+            unit="s",
+            description="Provider-operation wall-clock duration, by provider and job kind.",
+            explicit_bucket_boundaries_advisory=list(_DURATION_BUCKETS),
+        )
+        self._provider_op_errors: Counter = meter.create_counter(
+            "kdive.provider.op.errors",
+            unit="1",
+            description="Failed provider operations, by provider and job kind.",
+        )
 
     def _observe_depth(self, _options: CallbackOptions) -> Iterable[Observation]:
         return [Observation(self._last_depth)]
@@ -88,8 +101,10 @@ class WorkerTelemetry:
         outcome label; the duration histogram is recorded with that outcome on close.
         """
         if not self._enabled:
+            clear_provider_kind()
             yield JobSpan(None, job_kind)
             return
+        clear_provider_kind()
         started = time.perf_counter()
         with self._tracer.start_as_current_span(
             f"job/{job_kind}", kind=SpanKind.CONSUMER, attributes={"job_kind": job_kind}
@@ -107,6 +122,12 @@ class WorkerTelemetry:
             if handle.outcome == "error":
                 handle.span.set_status(Status(StatusCode.ERROR))
         self._duration.record(elapsed, labels)
+        provider = take_provider_kind()
+        if provider is not None:
+            op_labels = {"provider": provider, "job_kind": handle.job_kind}
+            self._provider_op_duration.record(elapsed, {**op_labels, "outcome": handle.outcome})
+            if handle.outcome == "error":
+                self._provider_op_errors.add(1, op_labels)
 
     @property
     def enabled(self) -> bool:
