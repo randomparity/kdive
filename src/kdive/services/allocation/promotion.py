@@ -52,6 +52,7 @@ from kdive.services.allocation.admission.core import (
     admission_gate,
     price_window_and_estimate,
 )
+from kdive.services.allocation.admission.metrics import AdmissionMetrics
 from kdive.services.allocation.admission.placement import (
     PlacementRequest,
     resolve_placement_candidates,
@@ -67,7 +68,7 @@ _REQUESTED_VALUE = AllocationState.REQUESTED.value
 _SECONDS_PER_HOUR = 3600
 
 
-async def promote_pending(conn: AsyncConnection) -> int:
+async def promote_pending(conn: AsyncConnection, metrics: AdmissionMetrics | None = None) -> int:
     """Promote the oldest *placeable* queued request per resource (one pass).
 
     Candidate-selects every ``requested`` allocation oldest-first (the partial index), then
@@ -75,7 +76,11 @@ async def promote_pending(conn: AsyncConnection) -> int:
     ``granted`` this pass. A budget recheck failure terminates a request to ``failed``
     (counted as not promoted); a per-candidate error rolls that candidate back and leaves it
     ``requested`` for the next pass without starving its siblings.
+
+    ``metrics`` (default the no-op) records a grant decision + the request→grant wait
+    (``now - created_at``) per promoted allocation (ADR-0190 D).
     """
+    metrics = metrics or AdmissionMetrics.disabled()
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id FROM allocations WHERE state = %s ORDER BY created_at, id",
@@ -85,36 +90,43 @@ async def promote_pending(conn: AsyncConnection) -> int:
     promoted = 0
     for alloc_id in candidate_ids:
         try:
-            if await _promote_one(conn, alloc_id):
-                promoted += 1
+            promoted_alloc = await _promote_one(conn, alloc_id)
         except Exception:  # noqa: BLE001 - one candidate's failure must not starve the rest
             _log.warning(
                 "reconciler: promoting allocation %s failed; retry next pass",
                 alloc_id,
                 exc_info=True,
             )
+            continue
+        if promoted_alloc is not None:
+            promoted += 1
+            metrics.record_promotion(
+                (datetime.now(UTC) - promoted_alloc.created_at).total_seconds()
+            )
     return promoted
 
 
-async def _promote_one(conn: AsyncConnection, alloc_id: UUID) -> bool:
+async def _promote_one(conn: AsyncConnection, alloc_id: UUID) -> Allocation | None:
     """Attempt to promote one queued allocation under PROJECT → RESOURCE → ALLOCATION.
 
-    Returns ``True`` only when the candidate was transitioned ``requested → granted`` this
-    call. A budget recheck failure terminates it to ``failed`` and returns ``False`` (it is
-    not re-queued); any other denial leaves it ``requested`` (a wait) and returns ``False``.
-    A locked re-read fences a release that won the race (the row is no longer ``requested``).
+    Returns the (pre-promotion) ``Allocation`` only when the candidate was transitioned
+    ``requested → granted`` this call (the caller reads its ``created_at`` for the wait
+    metric); otherwise ``None``. A budget recheck failure terminates it to ``failed`` (it is
+    not re-queued); any other denial leaves it ``requested`` (a wait). A locked re-read fences
+    a release that won the race (the row is no longer ``requested``).
     """
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT project FROM allocations WHERE id = %s", (alloc_id,))
         proj_row = await cur.fetchone()
     if proj_row is None:
-        return False
+        return None
     project: str = proj_row["project"]
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
         alloc = await ALLOCATIONS.get(conn, alloc_id)
         if alloc is None or alloc.state is not AllocationState.REQUESTED:
-            return False  # a release/another pass won the race
-        return await _place_or_terminate(conn, alloc)
+            return None  # a release/another pass won the race
+        granted = await _place_or_terminate(conn, alloc)
+        return alloc if granted else None
 
 
 async def _place_or_terminate(conn: AsyncConnection, alloc: Allocation) -> bool:
@@ -376,7 +388,9 @@ def _selector_from_snapshot(alloc: Allocation, resource: Resource) -> Selector:
     )
 
 
-async def reap_queue_timeouts(conn: AsyncConnection, max_wait: timedelta) -> int:
+async def reap_queue_timeouts(
+    conn: AsyncConnection, max_wait: timedelta, metrics: AdmissionMetrics | None = None
+) -> int:
     """Reap queued requests never placeable past ``max_wait`` → ``failed(queue_timeout)``.
 
     Runs **after** the promotion step in a pass, so every aged row already had its placement
@@ -405,6 +419,7 @@ async def reap_queue_timeouts(conn: AsyncConnection, max_wait: timedelta) -> int
                 candidate["id"],
                 exc_info=True,
             )
+    (metrics or AdmissionMetrics.disabled()).record_queue_timeout(reaped)
     return reaped
 
 

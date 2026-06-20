@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from opentelemetry import metrics as otel_metrics
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import AllocationState
@@ -24,6 +25,7 @@ from kdive.services.allocation.admission.core import (
     BUDGET_DENIAL_REASON,
     AdmissionOutcome,
 )
+from kdive.services.allocation.admission.metrics import AdmissionMetrics
 from kdive.services.allocation.admission.request import (
     AdmissionRequestSpec,
     RequestAdmissionResult,
@@ -33,6 +35,39 @@ from kdive.services.allocation.admission.request import (
 
 _log = logging.getLogger(__name__)
 _DISCOVERY_NEXT_ACTIONS = ["resources.list", "shapes.list"]
+
+_admission_metrics: AdmissionMetrics | None = None
+
+
+def _default_admission_metrics() -> AdmissionMetrics:
+    """The process admission metrics, resolved lazily from the global meter (ADR-0190 D).
+
+    The facade installs the global ``MeterProvider`` before the app serves, so the meter
+    here exports through the aux ``/metrics`` scrape reader. Cached after first use.
+    """
+    global _admission_metrics
+    if _admission_metrics is None:
+        _admission_metrics = AdmissionMetrics(meter=otel_metrics.get_meter("kdive.mcp"))
+    return _admission_metrics
+
+
+def _outcome_for_metrics(result: RequestAdmissionResult) -> AdmissionOutcome | None:
+    """Translate a request result into the admission outcome to count (ADR-0190 D).
+
+    A grant/enqueue is a success outcome carrying the allocation (classify reads its state);
+    a typed denial is recorded as-is; a pre-admission error or a no-schedulable-resource
+    rejection is recorded under its category. An infrastructure failure (no signal) → ``None``.
+    """
+    if result.error is not None:
+        return AdmissionOutcome(granted=False, allocation=None, category=result.error.category)
+    if result.allocation is not None:
+        return AdmissionOutcome(granted=True, allocation=result.allocation)
+    if result.denial is not None:
+        return result.denial
+    if result.resource is None:
+        category = result.category or ErrorCategory.CONFIGURATION_ERROR
+        return AdmissionOutcome(granted=False, allocation=None, category=category)
+    return None
 
 
 def _spec_from_payload(payload: AllocationRequestPayload) -> AdmissionRequestSpec | ToolResponse:
@@ -69,6 +104,7 @@ async def request_allocation(
     project: str,
     request: AllocationRequestPayload,
     idempotency_key: str | None = None,
+    admission_metrics: AdmissionMetrics | None = None,
 ) -> ToolResponse:
     """Admit an allocation against budget, quota, and selected host capacity."""
     require_project(ctx, project)
@@ -85,6 +121,9 @@ async def request_allocation(
                 spec=spec,
                 idempotency_key=idempotency_key,
             )
+        outcome = _outcome_for_metrics(result)
+        if outcome is not None:
+            (admission_metrics or _default_admission_metrics()).record_decision(outcome)
         return _request_response(result)
 
 

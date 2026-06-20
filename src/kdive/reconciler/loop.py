@@ -69,6 +69,7 @@ from kdive.reconciler.repairs import build_hosts as build_host_repairs
 from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
 from kdive.reconciler.repairs import jobs as job_repairs
 from kdive.reconciler.repairs import systems as system_repairs
+from kdive.services.allocation.admission.metrics import AdmissionMetrics
 from kdive.services.images.retention import (
     ImageSweepStore,
 )
@@ -132,6 +133,10 @@ _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
 
 # The default build-VM reaper (ADR-0100): a module-level stateless singleton (see above).
 _NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
+
+# The default (no-op) admission metrics (ADR-0190 D): a module-level singleton so it is a
+# stateless default field without a per-call construction (ruff B008).
+_NULL_ADMISSION_METRICS: AdmissionMetrics = AdmissionMetrics.disabled()
 
 # The process-singleton inventory reconcile pass (ADR-0112): held here so its last-good
 # parse cache (keyed by the systems.toml hash) survives across reconcile passes — the parse
@@ -210,6 +215,7 @@ class ReconcileConfig:
     heartbeat_tick: timedelta = timedelta(seconds=1)
     telemetry: ReconcilerTelemetry | None = None
     fleet_telemetry: FleetTelemetry | None = None
+    admission_metrics: AdmissionMetrics = field(default=_NULL_ADMISSION_METRICS)
 
 
 _DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
@@ -226,8 +232,14 @@ def _repair_plan(
         # Release leaked `active` allocations whose System is terminal/absent (ADR-0109) BEFORE
         # the promotion sweep, so a host-cap slot this reaper frees is filled in the same pass.
         _RepairSpec("reaped_active_allocations", _reap_orphaned_active_allocations),
-        _RepairSpec("promoted_allocations", _promote_pending),
-        _RepairSpec("queue_timeouts", _reap_queue_timeouts_for(config.queue_max_wait)),
+        _RepairSpec(
+            "promoted_allocations",
+            lambda conn: _promote_pending(conn, config.admission_metrics),
+        ),
+        _RepairSpec(
+            "queue_timeouts",
+            _reap_queue_timeouts_for(config.queue_max_wait, config.admission_metrics),
+        ),
         _RepairSpec("orphaned_systems", _repair_orphaned_systems),
         _RepairSpec("abandoned_jobs", _repair_abandoned_jobs),
         # Reap (or cordon, if still live) runtime resources whose lease lapsed — the leak

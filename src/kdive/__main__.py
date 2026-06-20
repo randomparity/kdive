@@ -483,6 +483,7 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
     from kdive.reconciler.fleet import FleetTelemetry
     from kdive.reconciler.loop import ReconcileConfig, Reconciler
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
+    from kdive.services.allocation.admission.metrics import AdmissionMetrics
     from kdive.store.objectstore import object_store_from_env
 
     # Before any libvirt connection opens: libvirt services stream events only on connections
@@ -523,6 +524,9 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
                         meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
                     ),
                     fleet_telemetry=FleetTelemetry(
+                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
+                    ),
+                    admission_metrics=AdmissionMetrics(
                         meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
                     ),
                 ),

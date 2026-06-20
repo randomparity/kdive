@@ -585,6 +585,80 @@ def test_never_placeable_past_max_wait_failed_queue_timeout(migrated_url: str) -
     asyncio.run(_run())
 
 
+def _admission_points(reader: Any, name: str) -> dict[tuple[tuple[str, str], ...], float]:
+    data = reader.get_metrics_data()
+    assert data is not None
+    points: dict[tuple[tuple[str, str], ...], float] = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name != name:
+                    continue
+                for point in metric.data.data_points:
+                    value = getattr(point, "value", None)
+                    if value is None:
+                        continue
+                    attrs = point.attributes or {}
+                    key = tuple(sorted((str(k), str(v)) for k, v in attrs.items()))
+                    points[key] = value
+    return points
+
+
+def _wait_sample_count(reader: Any) -> int:
+    data = reader.get_metrics_data()
+    assert data is not None
+    total = 0
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name != "kdive.allocation.wait":
+                    continue
+                for point in metric.data.data_points:
+                    total += getattr(point, "count", 0)
+    return total
+
+
+def test_promotion_sweep_emits_admission_metrics(migrated_url: str) -> None:
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from kdive.reconciler.repairs.allocations import reap_queue_timeouts_for
+    from kdive.services.allocation.admission.metrics import AdmissionMetrics
+
+    reader = InMemoryMetricReader()
+    metrics = AdmissionMetrics(meter=MeterProvider(metric_readers=[reader]).get_meter("test"))
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            res = await _seed_resource(seed, cap=1)
+            await _seed_quota(seed)
+            holder = await _seed_granted(seed, res.id)
+            promotable = await _enqueue(seed, res)
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASING)
+            await ALLOCATIONS.update_state(seed, holder.id, AllocationState.RELEASED)
+            # A second host that stays full forever, with a long-aged queued row pinned to it
+            # (by_id, so the promotion sweep can't place it on the freed slot) to reap.
+            full = await _seed_resource(seed, cap=1)
+            await _seed_granted(seed, full.id)
+            await _enqueue(seed, full, by_id=full.id, created_offset=timedelta(hours=-48))
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            promoted = await run_repair(pool, lambda conn: promote_pending(conn, metrics))
+            reaped = await run_repair(pool, reap_queue_timeouts_for(timedelta(hours=24), metrics))
+        assert promoted == 1
+        assert reaped == 1
+
+        points = _admission_points(reader, "kdive.allocation.admission")
+        assert points[(("outcome", "granted"), ("reason", "none"))] == 1
+        assert points[(("outcome", "rejected"), ("reason", "queue_timeout"))] == 1
+        # The promoted allocation contributed exactly one request→grant wait sample.
+        assert _wait_sample_count(reader) == 1
+        async with await connect(migrated_url) as check:
+            assert await _state(check, promotable) == "granted"
+
+    asyncio.run(_run())
+
+
 def test_fresh_queued_row_not_reaped(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
