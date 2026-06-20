@@ -106,20 +106,35 @@ Instruments emitted today, by defining module:
 | `kdive.vmcore.capture.duration` | histogram | — | `jobs/handlers/capture_telemetry.py` |
 | `kdive.vmcore.capture.bytes` | histogram | — | `jobs/handlers/capture_telemetry.py` |
 | `kdive.console.bytes` | counter | — | `reconciler/console_telemetry.py` |
-| `kdive.config.core_settings` | info gauge | (settings labels) | config telemetry |
-| `kdive.config.cli_settings` | info gauge | (settings labels) | config telemetry |
-| `kdive.providers.local_libvirt.settings` | info gauge | (settings labels) | provider telemetry |
-| `kdive.providers.remote_libvirt.settings` | info gauge | (settings labels) | provider telemetry |
-| `kdive.providers.fault_inject.settings` | info gauge | (settings labels) | provider telemetry |
+
+That is **29 instruments** — the complete set the dashboard must cover.
 
 The exact label sets are confirmed during implementation against the emitting
 modules; the table above is the planning reference, not a frozen contract.
 
-## Dashboard layout — single dashboard, 10 collapsible rows
+### Not metrics — explicitly excluded
 
-Exhaustive coverage: every operational instrument gets a real panel; the static
-info/settings gauges are collected into one collapsed Info row so they do not
-dilute the storytelling.
+These strings look like instrument names but are **not** OpenTelemetry instruments
+and must never appear in a panel query or the coverage catalog:
+
+- `kdive.config.core_settings`, `kdive.config.cli_settings`,
+  `kdive.providers.local_libvirt.settings`,
+  `kdive.providers.remote_libvirt.settings`,
+  `kdive.providers.fault_inject.settings` — these are **Python module import
+  paths** in `src/kdive/config/manifest.py` (`SETTING_MODULES`, ADR-0087). They are
+  force-imported by `config/__init__.py` to aggregate each module's `SETTINGS`
+  (`KDIVE_*` env-var registry); nothing feeds them to a meter, so they render no
+  Prometheus series. There is no config/settings dashboard row.
+- `kdive.mcp`, `kdive.worker`, `kdive.reconciler` — these are OTel **meter
+  scope names** (`get_meter("kdive.worker")` etc. in `__main__.py`, `mcp/app.py`,
+  `registrar.py`), not instruments; they have no series of their own.
+
+## Dashboard layout — single dashboard, 9 collapsible rows
+
+Exhaustive coverage of the **29 real instruments**: every emitted instrument gets
+a panel. (There is no Info/settings row — the `kdive.config.*` /
+`kdive.providers.*.settings` strings are config module paths, not metrics; see
+"Not metrics — explicitly excluded" above.)
 
 1. **MCP request plane** — request rate by `tool`; error rate; request-duration
    p50/p95/p99 via `histogram_quantile` over `_bucket`; debug-session duration.
@@ -139,7 +154,6 @@ dilute the storytelling.
    `provider` / `job_kind`.
 9. **Capture** — vmcore capture duration; vmcore capture-size distribution;
    console-bytes rate.
-10. **ℹ️ Info (collapsed)** — config/provider settings gauges as label tables.
 
 ## PromQL patterns
 
@@ -160,22 +174,35 @@ dilute the storytelling.
    no hardcoded datasource UID leaks in.
 3. **Coverage guard** — extract every `kdive_*` base series referenced in panel
    `expr` strings (stripping the `_bucket`/`_sum`/`_count` histogram suffixes back
-   to the base name); assert the set covers the full instrument catalog. The
-   catalog is enumerated by **static scan**, not introspection — instruments are
-   created inside methods via `meter.create_*("kdive…")` string literals, not as
-   importable module constants, and the lifecycle gauges use an f-string
-   (`f"kdive.{table}"` in `reconciler/fleet.py:_INVENTORY`). The guard therefore:
-   (a) greps the telemetry modules for `"kdive\.[a-z0-9_.]+"` literals, (b) expands
-   the `fleet.py:_INVENTORY` f-string names from the hard-listed table set
-   (`allocations`, `systems`, `runs`, `debug_sessions`), and (c) normalizes each
-   OTel name to its rendered series name using the **same rule as
-   `metrics_text._sanitize`** (dots→`_`, **no `_total`**, no unit suffix).
-   To keep the guard from going vacuous (green while the dashboard is broken on a
-   live scrape), it also instantiates one real meter, renders via
-   `render_prometheus`, and asserts a concrete series is present under its true
-   name and absent under the wrong one — e.g. `kdive_mcp_requests` present,
-   `kdive_mcp_requests_total` absent. Adding a new instrument later fails the
-   coverage assertion until the dashboard gets a panel.
+   to the base name); assert the set equals the instrument catalog. The catalog is
+   enumerated by **static scan**, but precisely — a bare `"kdive\.…"` string match
+   is wrong because it also captures meter *scope* names (`get_meter("kdive.mcp")`)
+   and the `config/manifest.py` module paths, neither of which is an instrument.
+   The guard therefore:
+   - (a) scans an **explicit, named allowlist of telemetry source files** — exactly
+     the modules in the catalog's Module column — and collects only the **first
+     positional argument of `meter.create_counter/up_down_counter/histogram/`
+     `observable_gauge(...)` calls** (an `ast-grep`/AST match on the call, not a
+     regex over arbitrary strings). This structurally excludes scope names and
+     config paths, which are never `create_*` arguments.
+   - (b) expands the `reconciler/fleet.py:_INVENTORY` f-string (`f"kdive.{table}"`)
+     from the hard-listed table set (`allocations`, `systems`, `runs`,
+     `debug_sessions`) — the one instrument family whose name is not a literal.
+   - (c) normalizes each OTel name to its rendered series with the **same rule as
+     `metrics_text._sanitize`** (dots→`_`, **no `_total`**, no unit suffix).
+   - (d) asserts a hard-coded exclusion set (`kdive.mcp`, `kdive.worker`,
+     `kdive.reconciler` scope names; the five `SETTING_MODULES` paths) never leaks
+     into the catalog, so a future maintainer who broadens the scan is caught.
+
+   Anti-vacuity: the guard instantiates one real meter, renders via
+   `render_prometheus`, and asserts (i) a concrete series is present under its true
+   name and absent under the wrong one — `kdive_mcp_requests` present,
+   `kdive_mcp_requests_total` absent — **and** (ii) the **count** of catalog base
+   series equals 29 (25 literal `create_*` names + the 4 `_INVENTORY` gauges; note
+   `kdive.errors` is emitted from two modules but is one series), so an over- or
+   under-collection (e.g. a leaked scope name or a dropped instrument) fails
+   immediately. Adding a real instrument later fails the set-equality assertion
+   until the dashboard gets a panel.
 
 A live smoke test (bring up the compose `obs` profile, import, eyeball) is
 documented in the README as a manual step, not automated.
@@ -186,8 +213,10 @@ documented in the README as a manual step, not automated.
   (`metrics_text.py`) emits counters with **no `_total`** and no unit suffix; the
   naming contract above is authoritative and the coverage-guard's live-render
   assertion locks it against drift.
-- **Info-gauge label cardinality**: the settings gauges carry many labels; the
-  Info row uses table panels rather than time series to keep them readable.
+- **Catalog ≠ string-match**: two classes of `kdive.*` string (meter scope names,
+  config `SETTING_MODULES` paths) are not instruments and are explicitly excluded
+  from the catalog and every query; the coverage guard collects only `meter.create_*`
+  arguments and a count assertion guards against re-contamination.
 - **Empty panels without traffic**: on a freshly started stack some counters read
   zero; the README notes this and points at the compose `obs` profile plus a bit
   of exercised traffic for a populated view.
