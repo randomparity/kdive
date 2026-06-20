@@ -529,6 +529,48 @@ def test_register_ephemeral_without_base_image_volume_config_error(migrated_url:
     asyncio.run(_run())
 
 
+def test_register_ephemeral_guest_rootfs_volume_rejected(migrated_url: str) -> None:
+    """A guest/boot rootfs volume (no build toolchain) is rejected, not silently accepted."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_ephemeral_libvirt_build_host(
+                pool,
+                _admin_ctx(),
+                _ephemeral_request(
+                    name="guest-as-build", base_image_volume="fedora-kdive-remote-base-43.qcow2"
+                ),
+            )
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        reason = str(resp.data["reason"])
+        assert "toolchain" in reason
+        # The failure points the operator at the build-host agent diagnostic.
+        assert "ops.diagnostics --with-buildhost-agent" in str(resp.data["detail"])
+        assert await _host_exists(migrated_url, "guest-as-build") is False
+
+    asyncio.run(_run())
+
+
+def test_register_ephemeral_guest_rootfs_volume_rejected_case_insensitive(
+    migrated_url: str,
+) -> None:
+    """The guest-rootfs name match is case-insensitive (an upper-cased volume is still rejected)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_ephemeral_libvirt_build_host(
+                pool,
+                _admin_ctx(),
+                _ephemeral_request(
+                    name="guest-as-build-2", base_image_volume="FEDORA-KDIVE-REMOTE-BASE-43.QCOW2"
+                ),
+            )
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert await _host_exists(migrated_url, "guest-as-build-2") is False
+
+    asyncio.run(_run())
+
+
 # --- disable: protected / not_found / audit ---
 
 
