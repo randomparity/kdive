@@ -1055,3 +1055,62 @@ def test_drain_unknown_mode_rejected(migrated_url: str) -> None:
         assert audited == []
 
     asyncio.run(_run())
+
+
+def test_list_paginates_with_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(5):
+                await _register(pool, host_uri=f"qemu:///h{i}")
+            seen: list[str] = []
+            cursor: str | None = None
+            for _ in range(10):
+                page = await catalog_resources_tools.list_resources(
+                    pool, CTX, kind=None, limit=2, cursor=cursor
+                )
+                seen.extend(item.object_id for item in page.items)
+                if not page.data["truncated"]:
+                    break
+                cursor = cast(str, page.data["next_cursor"])
+        assert len(seen) == 5
+        assert len(set(seen)) == 5
+
+    asyncio.run(_run())
+
+
+def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(2):
+                await _register(pool, host_uri=f"qemu:///e{i}")
+            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=2)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
+    # A hidden row between visible rows must not consume a page slot: truncation is over
+    # the VISIBLE rows, not the raw fetch (ADR-0192).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(3):
+                await _register(pool, host_uri=f"qemu:///v{i}")
+            hidden = await _register(pool, host_uri="qemu:///hidden")
+            await _set_affinity(pool, hidden, owner_project="other")
+            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=3)
+        assert len(resp.items) == 3
+        assert resp.data["truncated"] is False
+
+    asyncio.run(_run())
+
+
+def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, cursor="!!!")
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())
