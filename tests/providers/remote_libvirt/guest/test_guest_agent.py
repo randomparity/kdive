@@ -25,6 +25,16 @@ from kdive.providers.remote_libvirt.guest.agent import (
 )
 from tests.providers.remote_libvirt.conftest import libvirt_error
 
+
+class _StubDomain:
+    """A minimal libvirt-domain stand-in: the guest-exec seam only reads ``name()``."""
+
+    def name(self) -> str:
+        return "build-vm"
+
+
+_DOMAIN = _StubDomain()
+
 _ALLOWED = frozenset({"/usr/bin/curl", "/usr/bin/kdive-install"})
 
 # libvirt error codes that name a deterministic, non-retryable guest-agent condition
@@ -101,7 +111,7 @@ def _exec(agent: _FakeAgent) -> GuestAgentExec:
 
 def test_run_returns_captured_stdout_and_exit_status() -> None:
     agent = _FakeAgent(exitcode=0, out=b"published-object-bytes")
-    result = _exec(agent).run(object(), ["/usr/bin/curl", "-fsS", "https://store/obj"])
+    result = _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "-fsS", "https://store/obj"])
     assert result.exit_status == 0
     assert result.stdout == b"published-object-bytes"
     assert result.stderr == b""
@@ -115,7 +125,7 @@ def test_run_returns_captured_stdout_and_exit_status() -> None:
 
 def test_run_polls_until_the_command_exits() -> None:
     agent = _FakeAgent(out=b"done", status_sequence=[False, False, True])
-    result = _exec(agent).run(object(), ["/usr/bin/curl", "https://store/obj"])
+    result = _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert result.stdout == b"done"
     assert [c["execute"] for c in agent.commands].count("guest-exec-status") == 3
 
@@ -123,7 +133,7 @@ def test_run_polls_until_the_command_exits() -> None:
 def test_run_rejects_a_non_allowlisted_program() -> None:
     agent = _FakeAgent()
     with pytest.raises(CategorizedError) as excinfo:
-        _exec(agent).run(object(), ["/bin/sh", "-c", "curl https://store/obj"])
+        _exec(agent).run(_DOMAIN, ["/bin/sh", "-c", "curl https://store/obj"])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert agent.commands == []  # rejected before any agent round-trip
 
@@ -131,7 +141,7 @@ def test_run_rejects_a_non_allowlisted_program() -> None:
 def test_run_rejects_an_empty_argv() -> None:
     agent = _FakeAgent()
     with pytest.raises(CategorizedError) as excinfo:
-        _exec(agent).run(object(), [])
+        _exec(agent).run(_DOMAIN, [])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert agent.commands == []
 
@@ -154,7 +164,7 @@ def test_agent_unreachable_maps_to_transport_failure() -> None:
     raised = libvirt.libvirtError("guest agent is not connected")
 
     with pytest.raises(CategorizedError) as excinfo:
-        _exec_raising(raised).run(object(), ["/usr/bin/curl", "https://store/obj"])
+        _exec_raising(raised).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
     assert excinfo.value.details["libvirt_error"] == "guest agent is not connected"
     assert excinfo.value.details["libvirt_error_code"] is None
@@ -167,7 +177,7 @@ def test_deterministic_libvirt_error_maps_to_configuration_error(code: int) -> N
     # build-host condition; classify it CONFIGURATION_ERROR (retryable=false) so an agent does
     # not burn retry cycles on a failure that can never clear (#531, ADR-0159).
     with pytest.raises(CategorizedError) as excinfo:
-        _exec_raising(libvirt_error(code)).run(object(), ["/usr/bin/curl", "https://store/obj"])
+        _exec_raising(libvirt_error(code)).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["libvirt_error_code"] == code
     assert excinfo.value.details["libvirt_error"]  # the libvirt error string, non-empty
@@ -186,7 +196,7 @@ def test_transient_libvirt_error_stays_transport_failure(code: int) -> None:
     # died, sync timeout) or an unrelated transient libvirt error keeps the retryable transport
     # classification — only the deterministic-config codes flip to CONFIGURATION_ERROR (#531).
     with pytest.raises(CategorizedError) as excinfo:
-        _exec_raising(libvirt_error(code)).run(object(), ["/usr/bin/curl", "https://store/obj"])
+        _exec_raising(libvirt_error(code)).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
     assert excinfo.value.details["libvirt_error_code"] == code
 
@@ -212,7 +222,7 @@ def test_build_deterministic_set_classifies_code_86_as_configuration_error() -> 
         libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE), BUILD_DETERMINISTIC_CONFIG_CODES
     )
     with pytest.raises(CategorizedError) as excinfo:
-        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+        exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["libvirt_error_code"] == libvirt.VIR_ERR_AGENT_UNRESPONSIVE
 
@@ -223,7 +233,7 @@ def test_build_deterministic_set_still_maps_base_codes_to_configuration_error() 
         libvirt_error(libvirt.VIR_ERR_ACCESS_DENIED), BUILD_DETERMINISTIC_CONFIG_CODES
     )
     with pytest.raises(CategorizedError) as excinfo:
-        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+        exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
@@ -232,7 +242,7 @@ def test_default_set_keeps_code_86_transport_failure() -> None:
     # retryable transport_failure, preserving ADR-0159 for callers with no readiness gate.
     exc = _exec_raising(libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE))
     with pytest.raises(CategorizedError) as excinfo:
-        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+        exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
 
 
@@ -255,7 +265,7 @@ def test_qemu_agent_command_maps_missing_libvirt_qemu(
     monkeypatch.setattr(builtins, "__import__", _import)
 
     with pytest.raises(CategorizedError) as excinfo:
-        qemu_agent_command(object(), "{}", 1, 0)
+        qemu_agent_command(_DOMAIN, "{}", 1, 0)
 
     assert excinfo.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert excinfo.value.details == {"dependency": "libvirt_qemu"}
@@ -280,7 +290,7 @@ def test_qemu_agent_command_propagates_unrelated_import_failure(
     monkeypatch.setattr(builtins, "__import__", _import)
 
     with pytest.raises(ModuleNotFoundError) as excinfo:
-        qemu_agent_command(object(), "{}", 1, 0)
+        qemu_agent_command(_DOMAIN, "{}", 1, 0)
 
     assert excinfo.value.name == "other_dependency"
 
@@ -296,7 +306,7 @@ def test_malformed_agent_response_maps_to_infrastructure_failure() -> None:
         monotonic=_float_clock(),
     )
     with pytest.raises(CategorizedError) as excinfo:
-        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+        exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -304,7 +314,7 @@ def test_agent_calls_use_a_bounded_positive_timeout() -> None:
     # A blocking (-2) timeout would let a disconnected agent wedge the worker; each
     # call must carry a positive bound so the seam's deadline governs total time.
     agent = _FakeAgent(out=b"ok")
-    _exec(agent).run(object(), ["/usr/bin/curl", "https://store/obj"])
+    _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert agent.timeouts  # at least one round-trip happened
     assert all(timeout > 0 for timeout in agent.timeouts)
 
@@ -314,7 +324,7 @@ def test_signal_killed_command_is_not_reported_as_success() -> None:
     # (OOM, timeout-kill, SIGSEGV); defaulting a missing exitcode to 0 would read
     # a killed install as success.
     agent = _FakeAgent(exitcode=None, signal=9, out=b"partial")
-    result = _exec(agent).run(object(), ["/usr/bin/curl", "https://store/obj"])
+    result = _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert result.exit_status != 0
     assert result.exit_status == 128 + 9
 
@@ -326,7 +336,7 @@ def test_exited_with_neither_exitcode_nor_signal_is_not_success() -> None:
     # (issue #517), so it must raise INFRASTRUCTURE_FAILURE rather than return success.
     agent = _FakeAgent(exitcode=None, signal=None, out=b"partial")
     with pytest.raises(CategorizedError) as excinfo:
-        _exec(agent).run(object(), ["/usr/bin/curl", "https://store/obj"])
+        _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
@@ -340,5 +350,5 @@ def test_run_times_out_when_the_command_never_exits() -> None:
         monotonic=iter([0.0, 2.0, 4.0, 6.0, 8.0]).__next__,
     )
     with pytest.raises(CategorizedError) as excinfo:
-        exc.run(object(), ["/usr/bin/curl", "https://store/obj"])
+        exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE

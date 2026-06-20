@@ -13,8 +13,9 @@ All time predicates evaluate `now()` in Postgres, never a Python clock (the `pro
 convention), so the reconciler and the probe agree on staleness regardless of clock skew. The TTL
 and staleness defaults mirror the sibling `diagnostics.egress_probe` mutating-probe tuning
 (ADR-0091) but are owned here: ``db`` is a lower layer than ``diagnostics``, so this module must not
-import it; the small constant/exception duplication between two independent probe subsystems is the
-cost of a clean layering direction (consumers in ``diagnostics`` import these downward).
+import it; the small constant duplication between two independent probe subsystems is the cost of a
+clean layering direction (consumers in ``diagnostics`` import these downward). The single-flight
+fence error is shared, not duplicated, via :mod:`kdive.db.probe_fence` (same ``db`` layer).
 """
 
 from __future__ import annotations
@@ -27,19 +28,13 @@ from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.probe_fence import ProbeInFlightError as ProbeInFlightError
+
 # The hard TTL backstop and the heartbeat staleness window mirror diagnostics.egress_probe's tuning
 # (ADR-0091): the TTL is sized well above a probe's max runtime so the reaper never destroys a live
 # builder mid-check; staleness is below the TTL so a stalled run is reaped promptly.
 DEFAULT_PROBE_TTL = timedelta(minutes=10)
 DEFAULT_PROBE_HEARTBEAT_STALE_AFTER = timedelta(minutes=2)
-
-
-class ProbeInFlightError(Exception):
-    """A live probe row already exists for this build host — the DB single-flight fence fired.
-
-    Distinct from a backend-down error so the check can report "a probe is already in flight" rather
-    than a generic registration failure (the cross-process second-caller signal).
-    """
 
 
 __all__ = [

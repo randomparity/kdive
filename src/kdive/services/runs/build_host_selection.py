@@ -18,6 +18,9 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.db.build_host_policy import (
+    check_warm_tree_source_admission as check_warm_tree_source_admission,
+)
 from kdive.db.build_hosts import (
     BuildHost,
     BuildHostKind,
@@ -27,9 +30,6 @@ from kdive.db.build_hosts import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile, is_git_source
-from kdive.services.runs.build_host_policy import (
-    check_warm_tree_source_admission as check_warm_tree_source_admission,
-)
 
 
 class SourceKind(StrEnum):

@@ -51,7 +51,7 @@ CORE_PREFIXES = (
 ALLOWED_FILES = frozenset(
     {
         # ResourceKind.REMOTE_LIBVIRT (ADR-0076 named touch-point).
-        "src/kdive/domain/models.py",
+        "src/kdive/domain/catalog/resources.py",
         # The one M2 migration: the resources.kind CHECK widen.
         "src/kdive/db/schema/0020_resources_kind_remote_libvirt.sql",
         # The additive presign_get primitive (ADR-0076, ADR-0078).

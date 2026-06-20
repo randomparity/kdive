@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.components.references import ComponentKind
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting import Budget, Quota
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.capture import CaptureMethod
@@ -32,7 +33,6 @@ from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.security.authz.rbac import Role
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)

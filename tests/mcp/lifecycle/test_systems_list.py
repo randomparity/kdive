@@ -20,16 +20,11 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES, SYSTEMS
+from kdive.domain.accounting import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
-from kdive.domain.models import (
-    Allocation,
-    Budget,
-    PCIeClaim,
-    Quota,
-    Resource,
-    ResourceKind,
-    System,
-)
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation, System
+from kdive.domain.pcie import PCIeClaim
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.systems.view import (

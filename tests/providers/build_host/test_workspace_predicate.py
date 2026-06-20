@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kdive.services.runs.build_host_policy import (
+from kdive.db.build_host_policy import (
     KERNEL_SRC_INVALID_DETAIL,
     KERNEL_SRC_UNSET_DETAIL,
     warm_tree_source_error,

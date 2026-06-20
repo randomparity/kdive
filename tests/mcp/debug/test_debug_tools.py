@@ -23,6 +23,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, DEBUG_SESSIONS, INVESTIGATIONS, RUNS, SYSTEMS
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -32,13 +33,7 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import (
-    Allocation,
-    DebugSession,
-    Investigation,
-    Run,
-    System,
-)
+from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
 from kdive.providers.core.resolver import ProviderResolver
@@ -56,7 +51,6 @@ from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePo
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 

@@ -81,7 +81,7 @@ class _FakeStore:
 
     def put_artifact(self, request: object) -> object:
         import kdive.artifacts.storage as _art
-        from kdive.domain.models import Sensitivity
+        from kdive.domain.catalog.artifacts import Sensitivity
 
         req = cast(_art.ArtifactWriteRequest, request)
         key = req.key()

@@ -176,7 +176,7 @@ async def _seed_investigation(pool: AsyncConnectionPool, state: InvestigationSta
     from uuid import uuid4
 
     from kdive.db.repositories import INVESTIGATIONS
-    from kdive.domain.models import Investigation
+    from kdive.domain.lifecycle import Investigation
 
     dt = datetime(2026, 1, 1, tzinfo=UTC)
     async with pool.connection() as conn:
@@ -685,7 +685,7 @@ async def _attach_run(
     from kdive.db.repositories import RUNS
     from kdive.domain.capacity.state import RunState
     from kdive.domain.catalog.resources import ResourceKind
-    from kdive.domain.models import Run
+    from kdive.domain.lifecycle import Run
     from tests.mcp._seed import seed_crashed_system
 
     n = next(_ATTACH_SEQ)

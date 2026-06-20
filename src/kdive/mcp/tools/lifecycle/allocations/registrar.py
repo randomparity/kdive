@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastmcp import FastMCP
+from opentelemetry import metrics as otel_metrics
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
@@ -23,6 +24,7 @@ from kdive.mcp.tools.lifecycle.allocations.request import (
 from kdive.mcp.tools.lifecycle.allocations.view import get_allocation as _get_allocation
 from kdive.mcp.tools.lifecycle.allocations.view import list_allocations as _list_allocations
 from kdive.mcp.tools.lifecycle.allocations.view import wait_allocation as _wait_allocation
+from kdive.services.allocation.admission.metrics import AdmissionMetrics
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -36,6 +38,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
 
 def _register_allocations_request(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    # Constructed at build time off the proxy meter (ADR-0190 D), like TelemetryMiddleware: the
+    # proxy binds to the real MeterProvider once init_telemetry installs it, so this needs no
+    # process-global lazy singleton and no boot-order dependency from the handler.
+    admission_metrics = AdmissionMetrics(meter=otel_metrics.get_meter("kdive.mcp"))
+
     @app.tool(
         name="allocations.request",
         annotations=_docmeta.mutating(),
@@ -59,6 +66,7 @@ def _register_allocations_request(app: FastMCP, pool: AsyncConnectionPool) -> No
             project=project,
             request=request,
             idempotency_key=idempotency_key,
+            admission_metrics=admission_metrics,
         )
 
 

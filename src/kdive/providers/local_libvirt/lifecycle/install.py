@@ -284,22 +284,23 @@ class LocalLibvirtInstall:
             if result.answered:
                 if result.ok:
                     return
-                details: dict[str, object] = {"system_id": str(system_id)}
-                if first_probe_error is not None:
-                    details["probe_error"] = first_probe_error
                 raise CategorizedError(
                     "System booted but a run-readiness check failed",
                     category=ErrorCategory.READINESS_FAILURE,
-                    details=details,
+                    details=self._boot_failure_details(system_id, first_probe_error),
                 )
-        details: dict[str, object] = {"system_id": str(system_id)}
-        if first_probe_error is not None:
-            details["probe_error"] = first_probe_error
         raise CategorizedError(
             "System did not become ready within the boot window",
             category=ErrorCategory.BOOT_TIMEOUT,
-            details=details,
+            details=self._boot_failure_details(system_id, first_probe_error),
         )
+
+    @staticmethod
+    def _boot_failure_details(system_id: UUID, first_probe_error: str | None) -> dict[str, object]:
+        details: dict[str, object] = {"system_id": str(system_id)}
+        if first_probe_error is not None:
+            details["probe_error"] = first_probe_error
+        return details
 
     def _open(self, purpose: str) -> _LibvirtConn:
         try:

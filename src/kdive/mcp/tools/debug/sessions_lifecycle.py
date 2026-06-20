@@ -569,7 +569,15 @@ async def _detach_locked(
             row = await cur.fetchone()
         if row is None:
             return _config_error(str(session_id))
-        if row["state"] == DebugSessionState.DETACHED.value:
+        try:
+            state = DebugSessionState(row["state"])
+        except ValueError as exc:
+            raise CategorizedError(
+                f"debug session has an unrecognized state {row['state']!r}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"session_id": str(session_id)},
+            ) from exc
+        if state is DebugSessionState.DETACHED:
             return _detached_envelope(session_id, row["project"])
         await _close(connector, row["transport_handle"])
         await DEBUG_SESSIONS.update_state(conn, session_id, DebugSessionState.DETACHED)

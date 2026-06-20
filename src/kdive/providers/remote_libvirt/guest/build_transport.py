@@ -19,7 +19,6 @@ from __future__ import annotations
 import base64
 import shlex
 import time
-from typing import Any
 
 from kdive.artifacts.storage import PresignedUpload
 from kdive.diagnostics.egress_probe import redact_presigned
@@ -29,6 +28,7 @@ from kdive.providers.remote_libvirt.guest.agent import (
     BUILD_DETERMINISTIC_CONFIG_CODES,
     AgentCommand,
     GuestAgentExec,
+    GuestDomain,
     Monotonic,
     Sleep,
 )
@@ -61,7 +61,7 @@ class GuestExecBuildTransport(ShellBuildTransport):
     def __init__(
         self,
         *,
-        domain: Any,
+        domain: GuestDomain,
         agent_command: AgentCommand,
         secret_registry: SecretRegistry,
         poll_s: float = 1.0,

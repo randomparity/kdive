@@ -56,7 +56,7 @@ class UsageTrackingMiddleware(Middleware):
         category = result_error_category(result)
         if category is None:
             return ToolOutcome.OK
-        if category == ErrorCategory.AUTHORIZATION_DENIED.value:
+        if category == ErrorCategory.AUTHORIZATION_DENIED:
             return ToolOutcome.DENIED
         return ToolOutcome.ERROR
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from opentelemetry import metrics as otel_metrics
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import AllocationState
@@ -35,20 +34,6 @@ from kdive.services.allocation.admission.request import (
 
 _log = logging.getLogger(__name__)
 _DISCOVERY_NEXT_ACTIONS = ["resources.list", "shapes.list"]
-
-_admission_metrics: AdmissionMetrics | None = None
-
-
-def _default_admission_metrics() -> AdmissionMetrics:
-    """The process admission metrics, resolved lazily from the global meter (ADR-0190 D).
-
-    The facade installs the global ``MeterProvider`` before the app serves, so the meter
-    here exports through the aux ``/metrics`` scrape reader. Cached after first use.
-    """
-    global _admission_metrics
-    if _admission_metrics is None:
-        _admission_metrics = AdmissionMetrics(meter=otel_metrics.get_meter("kdive.mcp"))
-    return _admission_metrics
 
 
 def _outcome_for_metrics(result: RequestAdmissionResult) -> AdmissionOutcome | None:
@@ -106,7 +91,12 @@ async def request_allocation(
     idempotency_key: str | None = None,
     admission_metrics: AdmissionMetrics | None = None,
 ) -> ToolResponse:
-    """Admit an allocation against budget, quota, and selected host capacity."""
+    """Admit an allocation against budget, quota, and selected host capacity.
+
+    ``admission_metrics`` is injected by the registrar (constructed at app build time off the
+    proxy meter, ADR-0190 D); when absent (un-instrumented callers and tests) decisions are
+    recorded into a no-op emitter rather than reaching for a process-global.
+    """
     require_project(ctx, project)
     require_role(ctx, project, Role.OPERATOR)
     with bind_context(principal=ctx.principal):
@@ -123,7 +113,7 @@ async def request_allocation(
             )
         outcome = _outcome_for_metrics(result)
         if outcome is not None:
-            (admission_metrics or _default_admission_metrics()).record_decision(outcome)
+            (admission_metrics or AdmissionMetrics.disabled()).record_decision(outcome)
         return _request_response(result)
 
 

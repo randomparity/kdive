@@ -47,6 +47,7 @@ from kdive.domain.catalog.resource_capabilities import (
     VCPUS_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
 from kdive.inventory.reconcile import (
@@ -485,6 +486,9 @@ def _deterministic_name(host_uri: str) -> str:
     return f"discovered-{cleaned}" if cleaned else "discovered-host"
 
 
+_ROWS = RowTyper("resources")
+
+
 def _resource_caps(value: object) -> ResourceCaps:
     if not isinstance(value, dict):
         raise InventoryError("resources", "capabilities", "database row is not a JSON object")
@@ -492,21 +496,21 @@ def _resource_caps(value: object) -> ResourceCaps:
 
 
 def _upsert_row(row: Mapping[str, object]) -> _UpsertResourceRow:
-    row_id = _expect_uuid(row, "id")
-    name = _expect_optional_str(row, "name")
-    host_uri = _expect_str(row, "host_uri")
-    cost_class = _expect_str(row, "cost_class")
-    managed_by = _expect_str(row, "managed_by")
-    lease_expires_at = _expect_optional_datetime(row, "lease_expires_at")
-    owner_project = _expect_optional_str(row, "owner_project")
-    affinity_allowlist = _expect_str_list(row, "affinity_allowlist")
+    row_id = _ROWS.uuid(row, "id")
+    name = _ROWS.optional_string(row, "name")
+    host_uri = _ROWS.string(row, "host_uri")
+    cost_class = _ROWS.string(row, "cost_class")
+    managed_by = _ROWS.string(row, "managed_by")
+    lease_expires_at = _ROWS.optional_datetime(row, "lease_expires_at")
+    owner_project = _ROWS.optional_string(row, "owner_project")
+    affinity_allowlist = _ROWS.string_list(row, "affinity_allowlist")
     return _UpsertResourceRow(
         id=row_id,
         name=name,
         host_uri=host_uri,
         cost_class=cost_class,
         capabilities=_resource_caps(row["capabilities"]),
-        pool=_expect_str(row, "pool"),
+        pool=_ROWS.string(row, "pool"),
         managed_by=managed_by,
         lease_expires_at=lease_expires_at,
         owner_project=owner_project,
@@ -516,66 +520,27 @@ def _upsert_row(row: Mapping[str, object]) -> _UpsertResourceRow:
 
 def _local_row(row: Mapping[str, object]) -> _LocalResourceRow:
     return _LocalResourceRow(
-        id=_expect_uuid(row, "id"),
-        name=_expect_optional_str(row, "name"),
-        cost_class=_expect_str(row, "cost_class"),
+        id=_ROWS.uuid(row, "id"),
+        name=_ROWS.optional_string(row, "name"),
+        cost_class=_ROWS.string(row, "cost_class"),
         capabilities=_resource_caps(row["capabilities"]),
-        pool=_expect_str(row, "pool"),
+        pool=_ROWS.string(row, "pool"),
     )
 
 
 def _discovered_row(row: Mapping[str, object]) -> _DiscoveredResourceRow:
     return _DiscoveredResourceRow(
-        id=_expect_uuid(row, "id"),
-        host_uri=_expect_str(row, "host_uri"),
+        id=_ROWS.uuid(row, "id"),
+        host_uri=_ROWS.string(row, "host_uri"),
     )
 
 
 def _prune_row(row: Mapping[str, object]) -> _PruneResourceRow:
     return _PruneResourceRow(
-        id=_expect_uuid(row, "id"),
-        kind=_expect_str(row, "kind"),
-        name=_expect_str(row, "name"),
+        id=_ROWS.uuid(row, "id"),
+        kind=_ROWS.string(row, "kind"),
+        name=_ROWS.string(row, "name"),
     )
-
-
-def _expect_uuid(row: Mapping[str, object], field: str) -> UUID:
-    value = row[field]
-    if not isinstance(value, UUID):
-        raise _row_error(field, "uuid")
-    return value
-
-
-def _expect_str(row: Mapping[str, object], field: str) -> str:
-    value = row[field]
-    if not isinstance(value, str):
-        raise _row_error(field, "str")
-    return value
-
-
-def _expect_optional_str(row: Mapping[str, object], field: str) -> str | None:
-    value = row[field]
-    if value is not None and not isinstance(value, str):
-        raise _row_error(field, "str or null")
-    return value
-
-
-def _expect_optional_datetime(row: Mapping[str, object], field: str) -> datetime | None:
-    value = row[field]
-    if value is not None and not isinstance(value, datetime):
-        raise _row_error(field, "datetime or null")
-    return value
-
-
-def _expect_str_list(row: Mapping[str, object], field: str) -> list[str]:
-    value = row[field]
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise _row_error(field, "list[str]")
-    return cast("list[str]", value)
-
-
-def _row_error(field: str, expected: str) -> InventoryError:
-    return InventoryError("resources", field, f"database row expected {expected}")
 
 
 def _record(kind: ResourceKind, name: str, detail: str = "") -> ReconcileRecord:

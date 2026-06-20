@@ -64,7 +64,7 @@ def test_fixtures_carry_staged_volume(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             async with pool.connection() as conn:
                 await _insert_staged(conn, name="fedora-remote", volume="fedora-remote.qcow2")
-            resp = await fixtures.list_fixtures_tool(pool)
+            resp = await fixtures.list_fixtures(pool)
         rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
         match = next(row for row in rows if row["name"] == "fedora-remote")
         assert match["volume"] == "fedora-remote.qcow2"
@@ -82,7 +82,7 @@ def test_lists_public_catalog_entries(migrated_url: str) -> None:
                 await _insert_image(
                     conn, provider="local-libvirt", name="cloud", visibility="public", owner=None
                 )
-            resp = await fixtures.list_fixtures_tool(pool)
+            resp = await fixtures.list_fixtures(pool)
         assert resp.status == "ok"
         rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
         names = {row["name"] for row in rows}
@@ -95,7 +95,7 @@ def test_lists_public_catalog_entries(migrated_url: str) -> None:
 def test_empty_catalog_yields_empty_list(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await fixtures.list_fixtures_tool(pool)
+            resp = await fixtures.list_fixtures(pool)
         assert resp.status == "ok"
         assert data_sequence(resp, "fixtures") == []
 
@@ -112,7 +112,7 @@ def test_private_image_is_not_surfaced(migrated_url: str) -> None:
                 await _insert_image(
                     conn, provider="local-libvirt", name="priv", visibility="private", owner="p1"
                 )
-            resp = await fixtures.list_fixtures_tool(pool)
+            resp = await fixtures.list_fixtures(pool)
         rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
         names = {row["name"] for row in rows}
         assert "pub" in names

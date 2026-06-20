@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any, NamedTuple, Protocol
+from typing import NamedTuple, Protocol
 from uuid import UUID
 
 import libvirt
@@ -22,7 +22,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
+from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, GuestDomain
 from kdive.providers.remote_libvirt.transport import open_libvirt_protocol, remote_connection
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -63,7 +63,7 @@ class RetrieveConn(Protocol):
 
 
 class AgentExec(Protocol):
-    def run(self, domain: Any, argv: list[str]) -> AgentExecResult: ...
+    def run(self, domain: GuestDomain, argv: list[str]) -> AgentExecResult: ...
 
 
 type OpenRetrieveConnection = Callable[[str], RetrieveConn]

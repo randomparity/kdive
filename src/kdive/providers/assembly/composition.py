@@ -17,6 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.config.core_settings import FAULT_INJECT, LOCAL_LIBVIRT_ENABLED
 from kdive.db.build_hosts import BuildHostKind
+from kdive.db.resource_discovery import ensure_discovered_resource_registered
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
@@ -42,7 +43,6 @@ from kdive.providers.remote_libvirt.config import is_remote_libvirt_configured
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.build_host.reachability import BuildHostProber, SshBuildHostProber
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.resources.discovery import ensure_discovered_resource_registered
 
 if TYPE_CHECKING:
     from kdive.providers.infra.console_hosting import ConsoleHosting

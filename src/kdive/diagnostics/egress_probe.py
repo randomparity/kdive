@@ -42,6 +42,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.probe_fence import ProbeInFlightError
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
 
 EGRESS_ID = "guest_egress"
@@ -113,14 +114,6 @@ class ProbeGuest(Protocol):
     async def provision(self, domain_name: str) -> None: ...
     async def exec_egress(self, domain_name: str, presigned_url: str) -> EgressOutcome: ...
     async def teardown(self, domain_name: str) -> None: ...
-
-
-class ProbeInFlightError(Exception):
-    """A live probe row already exists for this provider — the DB single-flight fence fired.
-
-    Distinct from a backend-down error so the check can report "a probe is already in flight"
-    rather than a generic registration failure (the cross-process second-caller signal).
-    """
 
 
 class EgressProbeRegistry:

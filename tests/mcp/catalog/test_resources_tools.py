@@ -15,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
@@ -28,7 +29,6 @@ from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.mcp.json_data import data_sequence, json_mapping
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -103,7 +103,7 @@ def test_list_returns_host_with_flat_capability_projection(migrated_url: str) ->
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
-            responses = await catalog_resources_tools.list_resources_tool(pool, CTX, kind=None)
+            responses = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
         assert responses.object_id == "resources"
         assert responses.status == "ok"
         items = responses.items
@@ -127,7 +127,7 @@ def test_list_hides_resources_outside_project_affinity(migrated_url: str) -> Non
             visible = await _register(pool, host_uri="qemu:///visible")
             hidden = await _register(pool, host_uri="qemu:///hidden")
             await _set_affinity(pool, hidden, owner_project="other")
-            responses = await catalog_resources_tools.list_resources_tool(pool, CTX, kind=None)
+            responses = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
         return visible, [item.object_id for item in responses.items]
 
     visible, item_ids = asyncio.run(_run())
@@ -139,10 +139,8 @@ def test_list_hides_scoped_resources_without_viewer_role(migrated_url: str) -> N
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
             await _set_affinity(pool, res_id, owner_project="proj")
-            member_resp = await catalog_resources_tools.list_resources_tool(pool, CTX, kind=None)
-            viewer_resp = await catalog_resources_tools.list_resources_tool(
-                pool, VIEWER_CTX, kind=None
-            )
+            member_resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None)
+            viewer_resp = await catalog_resources_tools.list_resources(pool, VIEWER_CTX, kind=None)
         return (
             res_id,
             [item.object_id for item in member_resp.items],
@@ -158,7 +156,7 @@ def test_list_kind_filter_miss_is_configuration_error(migrated_url: str) -> None
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool)
-            responses = await catalog_resources_tools.list_resources_tool(pool, CTX, kind="nope")
+            responses = await catalog_resources_tools.list_resources(pool, CTX, kind="nope")
         assert responses.status == "error"
         assert responses.error_category == "configuration_error"
 
@@ -175,7 +173,7 @@ def test_list_malformed_resource_row_degrades_to_infrastructure_failure(
             async with pool.connection() as conn:
                 await conn.execute("UPDATE resources SET capabilities = '[]'::jsonb")
             caplog.set_level(logging.WARNING, logger=catalog_resources_tools.__name__)
-            responses = await catalog_resources_tools.list_resources_tool(
+            responses = await catalog_resources_tools.list_resources(
                 pool, CTX, kind="local-libvirt"
             )
         items = responses.items

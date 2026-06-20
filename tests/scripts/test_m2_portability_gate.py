@@ -19,7 +19,7 @@ from scripts.m2_portability_gate import (
 
 
 def test_render_report_records_remote_at_four_of_four_capture_methods() -> None:
-    md = render_report({"src/kdive/domain/models.py": 4})
+    md = render_report({"src/kdive/domain/catalog/resources.py": 4})
     assert "## Capture-method coverage" in md
     # The capstone exit record (M2.5): remote reaches 4/4, local stays 3/4 (no KDUMP),
     # and the two advertised sets are disjoint on KDUMP.
@@ -48,20 +48,20 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
 def test_render_report_lists_allowlisted_and_flags_violations() -> None:
     md = render_report(
         {
-            "src/kdive/domain/models.py": 4,
-            "src/kdive/services/resources/discovery.py": 7,
+            "src/kdive/domain/catalog/resources.py": 4,
+            "src/kdive/db/resource_discovery.py": 7,
         }
     )
     assert "# M2 portability report" in md
-    assert "src/kdive/domain/models.py" in md
+    assert "src/kdive/domain/catalog/resources.py" in md
     assert "allowlist" in md.lower()
     # a non-allowlisted core file renders under the Violations section + a fail verdict
-    assert "## Violations" in md and "src/kdive/services/resources/discovery.py" in md
+    assert "## Violations" in md and "src/kdive/db/resource_discovery.py" in md
     assert "gate FAILED" in md
 
 
 def test_render_report_passes_when_only_allowlisted() -> None:
-    md = render_report({"src/kdive/domain/models.py": 4})
+    md = render_report({"src/kdive/domain/catalog/resources.py": 4})
     assert "gate passed" in md
     assert "## Violations" not in md
 
@@ -88,9 +88,9 @@ def test_parse_numstat_counts_binary_files_as_touched() -> None:
 def test_violations_excludes_allowlisted_files() -> None:
     touched = {
         "src/kdive/store/objectstore.py": 12,
-        "src/kdive/services/resources/discovery.py": 4,
+        "src/kdive/db/resource_discovery.py": 4,
     }
-    assert violations(touched) == {"src/kdive/services/resources/discovery.py": 4}
+    assert violations(touched) == {"src/kdive/db/resource_discovery.py": 4}
 
 
 def test_allowlist_is_exactly_the_named_touch_points() -> None:
@@ -110,7 +110,7 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
     assert (
         frozenset(
             {
-                "src/kdive/domain/models.py",
+                "src/kdive/domain/catalog/resources.py",
                 "src/kdive/db/schema/0020_resources_kind_remote_libvirt.sql",
                 "src/kdive/store/objectstore.py",
                 "src/kdive/mcp/tools/debug/sessions.py",
@@ -271,12 +271,12 @@ def test_measure_bounds_every_git_call(monkeypatch: pytest.MonkeyPatch) -> None:
         timeouts.append(timeout)
         stdout = ""
         if "log" in argv:
-            stdout = "2\t0\tsrc/kdive/domain/models.py\n"
+            stdout = "2\t0\tsrc/kdive/domain/catalog/resources.py\n"
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(gate.subprocess, "run", run)
 
-    assert gate._measure() == {"src/kdive/domain/models.py": 2}
+    assert gate._measure() == {"src/kdive/domain/catalog/resources.py": 2}
     assert timeouts == [gate.GIT_COMMAND_TIMEOUT_S] * 3
 
 

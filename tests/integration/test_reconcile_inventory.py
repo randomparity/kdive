@@ -982,7 +982,7 @@ def test_fault_inject_resource_is_admitted_not_configuration_error(
 ) -> None:
     # #385 regression headline: after reconcile, allocations.request(kind=fault-inject) is
     # ADMITTED, not configuration_error (the vcpus=None denial the issue reports).
-    from kdive.domain.models import ResourceKind
+    from kdive.domain.catalog.resources import ResourceKind
     from kdive.security.authz.context import RequestContext
     from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
 
@@ -1085,7 +1085,7 @@ def test_remote_libvirt_resource_is_admitted_not_configuration_error(
     # Tool-feedback regression headline: allocations.request(kind=remote-libvirt) is ADMITTED,
     # not configuration_error{vcpus=None} — the universal wall the agent run hit. The seeded
     # remote-libvirt host now declares a vcpus/memory_mb ceiling, so shape "small" (1 vcpu) fits.
-    from kdive.domain.models import ResourceKind
+    from kdive.domain.catalog.resources import ResourceKind
     from kdive.security.authz.context import RequestContext
     from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
 
@@ -1342,10 +1342,10 @@ def test_reconcile_resources_is_idempotent(migrated_url: str, tmp_path: Path) ->
 def test_discovery_insert_path_writes_managed_by_discovery(migrated_url: str) -> None:
     # Invariant 5 (load-bearing): a host discovered AFTER the migration must insert at
     # 'discovery', not the column default 'runtime'. Exercises the real registrar insert path.
+    from kdive.db.resource_discovery import register_discovered_resource
     from kdive.domain.capacity.state import ResourceStatus
     from kdive.domain.catalog.discovery import ResourceRecord
-    from kdive.domain.models import ResourceKind
-    from kdive.services.resources.discovery import register_discovered_resource
+    from kdive.domain.catalog.resources import ResourceKind
 
     async def _run() -> None:
         record = ResourceRecord(
@@ -1423,7 +1423,7 @@ def test_two_fault_inject_instances_are_each_independently_allocatable(
 ) -> None:
     # Task 3.1: both instances are independently allocatable. Targeting each by resource_id
     # admits an allocation on it — no allocation-API change, selection by resource_id.
-    from kdive.domain.models import ResourceKind
+    from kdive.domain.catalog.resources import ResourceKind
     from kdive.security.authz.context import RequestContext
     from kdive.services.allocation.admission.request import AdmissionRequestSpec, request_admission
 
@@ -1951,7 +1951,7 @@ def test_reconcile_serializes_with_register_on_the_resource_name(
     # RESOURCE advisory lock keyed by the resource name, a concurrent reconcile of that name
     # BLOCKS (cannot race the adopt/prune), then proceeds once the holder releases.
     from kdive.db.locks import LockScope, advisory_xact_lock
-    from kdive.domain.models import ResourceKind
+    from kdive.domain.catalog.resources import ResourceKind
     from tests.db_waits import wait_until_any_backend_waiting
 
     async def _run() -> None:

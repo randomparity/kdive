@@ -108,7 +108,7 @@ def _resource_row_error(object_id: object | None) -> ToolResponse:
     )
 
 
-async def list_resources_tool(
+async def list_resources(
     pool: AsyncConnectionPool, ctx: RequestContext, *, kind: str | None
 ) -> ToolResponse:
     """Return every resource (optionally filtered by ``kind``) in one collection envelope."""
@@ -218,7 +218,7 @@ def register(
         ] = None,
     ) -> ToolResponse:
         """List runtime resources visible to the caller."""
-        return await list_resources_tool(pool, current_context(), kind=kind)
+        return await list_resources(pool, current_context(), kind=kind)
 
     @app.tool(
         name="resources.describe",
