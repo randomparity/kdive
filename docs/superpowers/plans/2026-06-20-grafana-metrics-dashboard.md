@@ -177,7 +177,11 @@ def _otel_instrument_names() -> set[str]:
             if not node.args:
                 continue
             first = node.args[0]
-            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            if (
+                isinstance(first, ast.Constant)
+                and isinstance(first.value, str)
+                and first.value.startswith("kdive.")
+            ):
                 names.add(first.value)
     names.update(f"kdive.{table}" for table in _INVENTORY_TABLES)
     if names & EXCLUDED_OTEL_NAMES:
@@ -988,12 +992,44 @@ def _referenced_base_series() -> set[str]:
 
 def test_dashboard_covers_full_catalog() -> None:
     assert _referenced_base_series() == catalog_series()
+
+
+_KNOWN_PANEL_TYPES = {"row", "timeseries", "bargauge", "stat", "table"}
+
+
+def _content_panels() -> list[dict]:
+    return [p for p in build_dashboard()["panels"] if p["type"] != "row"]
+
+
+def test_every_panel_type_is_known() -> None:
+    types = {p["type"] for p in build_dashboard()["panels"]}
+    assert types <= _KNOWN_PANEL_TYPES, f"unknown panel type(s): {types - _KNOWN_PANEL_TYPES}"
+
+
+def test_every_content_panel_has_renderable_targets() -> None:
+    for panel in _content_panels():
+        targets = panel.get("targets", [])
+        assert targets, f"panel {panel['title']!r} has no targets"
+        for target in targets:
+            assert target.get("datasource"), f"target in {panel['title']!r} missing datasource"
+            assert target.get("expr", "").strip(), f"target in {panel['title']!r} has empty expr"
+
+
+def test_panel_gridpos_rectangles_do_not_overlap() -> None:
+    rects = [
+        (p["gridPos"]["x"], p["gridPos"]["y"], p["gridPos"]["w"], p["gridPos"]["h"])
+        for p in build_dashboard()["panels"]
+    ]
+    for i, (ax, ay, aw, ah) in enumerate(rects):
+        for bx, by, bw, bh in rects[i + 1 :]:
+            overlap = ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+            assert not overlap, f"panels overlap at ({ax},{ay}) and ({bx},{by})"
 ```
 
-- [ ] **Step 2: Run test to verify coverage**
+- [ ] **Step 2: Run tests to verify coverage and structure**
 
-Run: `uv run pytest tests/deploy/test_grafana_dashboard.py::test_dashboard_covers_full_catalog -q`
-Expected: PASS. If it fails, the assertion error prints the symmetric difference — series in the catalog but not the dashboard (missing panel) or vice versa (typo / stray suffix like a `_total` mistakenly queried). Fix the offending row in `build_dashboard.py`, regenerate, re-run.
+Run: `uv run pytest tests/deploy/test_grafana_dashboard.py -q`
+Expected: PASS. `test_dashboard_covers_full_catalog` prints the symmetric difference on failure — series in the catalog but not the dashboard (missing panel) or a stray series (e.g. an accidental `_total`). The three structural tests catch a typo'd panel `type`, a target with no `datasource`/`expr`, and overlapping `gridPos` — the "imports but renders broken" failures that JSON-validity alone misses.
 
 - [ ] **Step 3: Write the README**
 
@@ -1050,7 +1086,7 @@ Expected: PASS (all tests).
 uv run ruff format tests/deploy/test_grafana_dashboard.py
 uv run ruff check tests/deploy/test_grafana_dashboard.py
 git add tests/deploy/test_grafana_dashboard.py deploy/grafana/README.md
-git commit -m "feat(grafana): full-catalog coverage guard + dashboard README"
+git commit -m "feat(grafana): coverage guard + structural-validity tests + README"
 ```
 
 ---
@@ -1082,5 +1118,6 @@ Bring up the compose `obs` profile, import `kdive-overview.json`, select the Pro
 
 - **Spec coverage:** Naming contract → Task 1 render test + Global Constraints. 29-instrument catalog → Task 1. Generator + drift guard → Task 2. All 9 rows / 29 series → Tasks 3–5 + Task 6 coverage guard. Datasource portability → Task 2. Excluded non-metrics → Task 1 enumerator exclusion + assertion. README/manual smoke → Task 6 + Task 7.
 - **Coverage-guard completeness:** Task 6's `test_dashboard_covers_full_catalog` asserts set equality, so a missing panel OR a stray series (e.g. an accidental `_total`) fails. Task 1's `test_catalog_has_29_series` is the anti-vacuity count.
+- **Render validity (not just JSON validity):** Task 6's structural tests (`test_every_panel_type_is_known`, `test_every_content_panel_has_renderable_targets`, `test_panel_gridpos_rectangles_do_not_overlap`) catch the "imports but renders broken/blank" failures — typo'd panel types, targets missing `datasource`/`expr`, overlapping `gridPos` — that JSON-validity and coverage alone miss. The manual Grafana smoke (Task 7) is an additional, not the only, gate.
 - **Series-name consistency:** every `expr` uses bare counter names (`kdive_mcp_requests`, not `_total`) and `_bucket` for histogram quantiles; `kdive_host_capacity_total` is a real gauge name and is intentionally not suffix-stripped (only `_bucket`/`_sum`/`_count` are stripped).
 - **Label fidelity:** group-by labels match the verified catalog — repairs by `repair_kind` only (no `outcome`), provider-op by `provider`/`job_kind`, admission rejections by `reason`.
