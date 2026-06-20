@@ -1,0 +1,79 @@
+---
+# Build a minimal "bare but conformant" (ADR-0188 Option A) image from the host OS
+# family: busybox userland but still systemd + qemu-guest-agent + curl/tar, so the
+# in-target artifact channel and boot-readiness path work unchanged. Included from
+# build_one.yml only when image.source == 'scratch'. The Fedora/RHEL helpers are
+# installed by build_one.yml after this returns.
+#
+# UNVALIDATED: there is no scratch-capable test host in CI or available hardware
+# (like the ppc64le path). The bootloader install and boot must be confirmed on a
+# real host — see deploy/ansible/README.md caveats.
+- name: Create the scratch rootfs directory for {{ image.name }}
+  ansible.builtin.file:
+    path: "{{ guest_base_image_build_workdir }}/{{ image.name }}.root"
+    state: directory
+    mode: "0755"
+
+- name: Bootstrap a minimal RedHat-family rootfs for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    # No Ansible module installs into an arbitrary --installroot; command is the only option.
+    argv:
+      - dnf
+      - "--installroot={{ guest_base_image_build_workdir }}/{{ image.name }}.root"
+      - "--releasever={{ ansible_distribution_major_version }}"
+      - --setopt=install_weak_deps=False
+      - -y
+      - install
+      - systemd
+      - busybox
+      - qemu-guest-agent
+      - kexec-tools
+      - makedumpfile
+      - curl
+      - tar
+      - kernel
+      - grub2-tools
+      - grub2-efi-x64
+      - shim-x64
+  when: ansible_os_family == 'RedHat'
+  changed_when: true
+
+- name: Bootstrap a minimal Debian-family rootfs for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    # No Ansible module wraps debootstrap; the command module is the only option.
+    argv:
+      - debootstrap
+      - --variant=minbase
+      - >-
+        --include=systemd-sysv,busybox,qemu-guest-agent,kexec-tools,makedumpfile,curl,tar,linux-image-generic,grub-efi-amd64
+      - "{{ ansible_distribution_release }}"
+      - "{{ guest_base_image_build_workdir }}/{{ image.name }}.root"
+  when: ansible_os_family == 'Debian'
+  changed_when: true
+
+- name: Assemble a partitioned qcow2 from the rootfs for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    # virt-make-fs builds a partitioned filesystem image from the rootfs. The
+    # bootloader install (grub to the ESP) is NOT done here and is UNVALIDATED — the
+    # scratch/bare path has no test host, so its bootability must be confirmed on
+    # hardware (see README caveat).
+    argv:
+      - virt-make-fs
+      - --partition=gpt
+      - --type=ext4
+      - --format=qcow2
+      - --size=+2G
+      - "{{ guest_base_image_build_workdir }}/{{ image.name }}.root"
+      - "{{ guest_base_image_qcow2 }}"
+  changed_when: true
+
+- name: Enable qemu-guest-agent in the scratch image for {{ image.name }}
+  ansible.builtin.command:  # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - systemctl enable qemu-guest-agent.service
+  changed_when: true
