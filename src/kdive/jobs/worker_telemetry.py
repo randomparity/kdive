@@ -21,9 +21,14 @@ from typing import TYPE_CHECKING
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from kdive.domain.capacity.state import JobState
+
 if TYPE_CHECKING:
-    from opentelemetry.metrics import Histogram, Meter
+    from opentelemetry.metrics import Counter, Histogram, Meter
     from opentelemetry.trace import Span, Tracer
+
+    from kdive.domain.errors import ErrorCategory
+    from kdive.domain.operations.jobs import Job
 
 #: Histogram bucket bounds (seconds) for per-job duration — kdive jobs run from
 #: sub-second (teardown) to many minutes (kernel build), so the upper buckets are coarse.
@@ -55,6 +60,14 @@ class WorkerTelemetry:
             callbacks=[self._observe_depth],
             unit="1",
             description="Claimable jobs in the queue at the last poll.",
+        )
+        # ADR-0190 E: the backend-origin failure counter — one increment per job→FAILED
+        # transition, labeled by error_category (no per-poll inflation; the request surface's
+        # by-category rate lives on kdive.mcp.request.errors).
+        self._errors: Counter = meter.create_counter(
+            "kdive.errors",
+            unit="1",
+            description="Categorized failures at their backend origin, by error category.",
         )
 
     def _observe_depth(self, _options: CallbackOptions) -> Iterable[Observation]:
@@ -104,6 +117,16 @@ class WorkerTelemetry:
         """Cache the queue depth observed at a poll for the gauge to report on scrape."""
         if self._enabled:
             self._last_depth = claimable
+
+    def record_job_failure(self, job: Job, category: ErrorCategory) -> None:
+        """Count one job→``FAILED`` transition by ``error_category`` (ADR-0190 E).
+
+        A no-op when disabled. Only a terminal ``FAILED`` job is counted — a requeued
+        (non-terminal) job is a retry,
+        not a failure origin, so it is skipped to avoid counting transient blips.
+        """
+        if self._enabled and job.state is JobState.FAILED:
+            self._errors.add(1, {"error_category": category.value})
 
 
 class JobSpan:

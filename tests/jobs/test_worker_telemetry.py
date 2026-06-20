@@ -6,13 +6,36 @@ emitted instruments carry only allowlisted labels (``job_kind``/``outcome``).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from uuid import uuid4
+
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from kdive.domain.capacity.state import JobState
+from kdive.domain.errors import ErrorCategory
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
+
+_NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _job(state: JobState, category: ErrorCategory | None = None) -> Job:
+    return Job(
+        id=uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+        kind=JobKind.BUILD,
+        payload={},
+        state=state,
+        max_attempts=3,
+        error_category=category,
+        authorizing={"principal": "alice", "agent_session": None, "project": "proj"},
+        dedup_key=str(uuid4()),
+    )
 
 
 def _telemetry() -> tuple[WorkerTelemetry, InMemoryMetricReader, InMemorySpanExporter]:
@@ -90,3 +113,40 @@ def test_queue_depth_gauge_reports_last_observed_not_a_running_sum() -> None:
 
 def test_queue_depth_disabled_is_noop() -> None:
     WorkerTelemetry.disabled().observe_queue_depth(5)  # must not raise
+
+
+def _error_points(reader: InMemoryMetricReader) -> dict[tuple[tuple[str, str], ...], float]:
+    data = reader.get_metrics_data()
+    assert data is not None
+    points: dict[tuple[tuple[str, str], ...], float] = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name != "kdive.errors":
+                    continue
+                for point in metric.data.data_points:
+                    attrs = point.attributes or {}
+                    key = tuple(sorted((str(k), str(v)) for k, v in attrs.items()))
+                    points[key] = getattr(point, "value", 0)
+    return points
+
+
+def test_record_job_failure_increments_errors_by_category() -> None:
+    telemetry, reader, _ = _telemetry()
+    job = _job(JobState.FAILED, ErrorCategory.BUILD_FAILURE)
+    telemetry.record_job_failure(job, ErrorCategory.BUILD_FAILURE)
+    points = _error_points(reader)
+    assert points[(("error_category", "build_failure"),)] == 1
+
+
+def test_record_job_failure_skips_a_requeued_job() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_job_failure(_job(JobState.QUEUED), ErrorCategory.TRANSPORT_FAILURE)
+    # A non-terminal (requeued) job is a retry, not a failure origin → not counted.
+    assert _error_points(reader) == {}
+
+
+def test_record_job_failure_disabled_is_noop() -> None:
+    WorkerTelemetry.disabled().record_job_failure(
+        _job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
+    )

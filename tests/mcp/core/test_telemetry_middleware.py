@@ -124,6 +124,58 @@ def test_failure_envelope_records_error_metrics() -> None:
     asyncio.run(_run())
 
 
+def _error_points(reader: InMemoryMetricReader) -> list[Any]:
+    points = _metric_points(reader)
+    return [p for name, pts in points.items() if "error" in name for p in pts]
+
+
+def test_failure_envelope_error_counter_carries_category() -> None:
+    async def _run() -> None:
+        mw, _spans, reader = _harness()
+
+        async def _call_next(_ctx: Any) -> ToolResult:
+            envelope = ToolResponse.failure("allocations.request", ErrorCategory.QUOTA_EXCEEDED)
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+        await mw.on_call_tool(_FakeContext("allocations.request"), _call_next)
+        categories = {dict(p.attributes or {}).get("error_category") for p in _error_points(reader)}
+        assert "quota_exceeded" in categories
+
+    asyncio.run(_run())
+
+
+def test_raised_categorized_error_labels_its_category() -> None:
+    from kdive.domain.errors import CategorizedError
+
+    async def _run() -> None:
+        mw, _spans, reader = _harness()
+
+        async def _call_next(_ctx: Any) -> None:
+            raise CategorizedError("nope", category=ErrorCategory.AUTHORIZATION_DENIED)
+
+        with contextlib.suppress(CategorizedError):
+            await mw.on_call_tool(_FakeContext("runs.create"), _call_next)
+        categories = {dict(p.attributes or {}).get("error_category") for p in _error_points(reader)}
+        assert "authorization_denied" in categories
+
+    asyncio.run(_run())
+
+
+def test_raised_generic_exception_labels_infrastructure_failure() -> None:
+    async def _run() -> None:
+        mw, _spans, reader = _harness()
+
+        async def _call_next(_ctx: Any) -> None:
+            raise RuntimeError("boom")
+
+        with contextlib.suppress(RuntimeError):
+            await mw.on_call_tool(_FakeContext("runs.create"), _call_next)
+        categories = {dict(p.attributes or {}).get("error_category") for p in _error_points(reader)}
+        assert "infrastructure_failure" in categories
+
+    asyncio.run(_run())
+
+
 def test_secret_in_exception_does_not_leak_through_span() -> None:
     async def _run() -> None:
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
