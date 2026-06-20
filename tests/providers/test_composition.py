@@ -592,10 +592,14 @@ def test_console_hosting_delegates_to_remote_when_enabled(
     seen: dict[str, object] = {}
 
     async def _build_console_hosting(
-        *, secret_registry: SecretRegistry, running_systems_factory: object
+        *,
+        secret_registry: SecretRegistry,
+        running_systems_factory: object,
+        console_telemetry: object | None = None,
     ) -> object:
         seen["secret_registry"] = secret_registry
         seen["running_systems_factory"] = running_systems_factory
+        seen["console_telemetry"] = console_telemetry
         return expected_hosting
 
     monkeypatch.setattr(
