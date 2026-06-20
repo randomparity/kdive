@@ -24,9 +24,16 @@ is legible at a glance and demoable end to end.
 
 | Path | Purpose |
 |------|---------|
-| `deploy/grafana/kdive-overview.json` | The dashboard model (Grafana 10+, schema v39). |
-| `deploy/grafana/README.md` | Import instructions, datasource expectations, scrape note. |
-| `tests/deploy/test_grafana_dashboard.py` | JSON validity + coverage-guard against the live metric catalog. |
+| `deploy/grafana/build_dashboard.py` | Generator: defines rows/panels in compact Python and emits the JSON (source of truth). |
+| `deploy/grafana/kdive-overview.json` | The committed, importable dashboard model (Grafana 10+, schema v39) — **generated** by `build_dashboard.py`. |
+| `deploy/grafana/README.md` | Import instructions, datasource expectations, scrape note, regenerate command. |
+| `tests/deploy/test_grafana_dashboard.py` | Drift-guard (committed JSON == fresh generate) + JSON validity + datasource portability + coverage-guard. |
+| `tests/deploy/grafana_catalog.py` | Test helper: statically enumerates the 29-instrument catalog from the telemetry modules. |
+
+The shipped artifact is still the portable `kdive-overview.json`; the generator
+is how it is maintained, following the repo's existing generated-doc pattern
+(`gen_tool_reference.py` + a drift-guard test). Hand-editing the JSON is a test
+failure — edit `build_dashboard.py` and regenerate.
 
 ## Portability mechanics
 
@@ -168,6 +175,9 @@ a panel. (There is no Info/settings row — the `kdive.config.*` /
 
 `tests/deploy/test_grafana_dashboard.py`:
 
+0. **Drift guard** — running `build_dashboard.py`'s builder in-process produces
+   JSON byte-identical to the committed `kdive-overview.json`; a hand-edit or a
+   stale commit fails the test (same pattern as `gen_tool_reference.py`).
 1. **JSON validity** — the file parses and has the expected top-level dashboard
    keys (`panels`, `templating`, `schemaVersion`, `title`).
 2. **Datasource portability** — every panel/target references `${datasource}`;
