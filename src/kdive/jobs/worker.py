@@ -139,6 +139,7 @@ class Worker:
                     conn, job, ErrorCategory.NOT_IMPLEMENTED, terminal=True
                 )
                 await _compensate_run_failure(conn, failed_job, ErrorCategory.NOT_IMPLEMENTED)
+            self._telemetry.record_job_failure(failed_job, ErrorCategory.NOT_IMPLEMENTED)
             _log.warning("no handler for job %s kind %s; dead-lettered", job.id, job.kind)
             return job
         await self._dispatch(job, handler)
@@ -224,6 +225,7 @@ class Worker:
                     failure_context=_failure_context(exc, self._secret_registry),
                 )
                 await _compensate_run_failure(conn, failed_job, category)
+            self._telemetry.record_job_failure(failed_job, category)
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
             return
         async with self._pool.connection() as conn:

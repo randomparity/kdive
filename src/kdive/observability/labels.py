@@ -27,6 +27,14 @@ ALLOWED_LABEL_KEYS: frozenset[str] = frozenset(
         "outcome",
         "status_code",
         "transition_kind",
+        # ADR-0190 (#601 first cut): bounded-enum labels for the expanded instruments —
+        # reconciler repairs (repair_kind), lifecycle inventory (state), the error-taxonomy
+        # counter (error_category), and admission decisions (reason). Each is bounded by an
+        # enum; never a per-object/per-tenant identifier.
+        "repair_kind",
+        "state",
+        "error_category",
+        "reason",
     }
 )
 

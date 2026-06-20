@@ -38,3 +38,9 @@ def test_mixed_attrs_keep_only_allowlisted() -> None:
 def test_allowlist_excludes_known_identifier_keys() -> None:
     for ident in ("principal", "tenant", "project", "object_id", "secret_ref"):
         assert ident not in labels.ALLOWED_LABEL_KEYS
+
+
+def test_allowlist_includes_expanded_metric_label_keys() -> None:
+    # ADR-0190: the #601 first-cut instruments add four bounded-enum label keys.
+    for key in ("repair_kind", "state", "error_category", "reason"):
+        assert key in labels.ALLOWED_LABEL_KEYS

@@ -987,3 +987,22 @@ def test_reaps_a_stray_named_volume_with_no_system(migrated_url: str) -> None:
         assert count == 1  # no System => no live capture possible => age-reap
 
     asyncio.run(_run())
+
+
+def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
+    """ALL_REPAIR_KINDS must equal the names a plan with every optional port emits.
+
+    The repairs counter labels ``repair_kind`` with the ``_RepairSpec.name`` strings, so the
+    declared bound must stay in lock-step with the plan or the cardinality guard drifts.
+    """
+    config = ReconcileConfig(
+        build_host_prober=cast(loop.BuildHostProber, object()),
+        upload_store=cast(loop.UploadStore, object()),
+        image_store=cast(loop.ImageSweepStore, object()),
+        console_registry=cast(loop.CollectorRegistry, object()),
+        resource_probe=cast(loop.ResourceProbe, object()),
+    )
+    plan = loop._repair_plan(
+        reaper=NullReaper(), config=config, image_publish_grace=timedelta(seconds=1)
+    )
+    assert {spec.name for spec in plan} == set(loop.ALL_REPAIR_KINDS)

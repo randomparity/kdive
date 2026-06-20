@@ -18,8 +18,8 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -61,6 +61,7 @@ from kdive.reconciler.cleanup.uploads import (
 from kdive.reconciler.cleanup.uploads import (
     repair_abandoned_uploads as _repair_abandoned_uploads,
 )
+from kdive.reconciler.fleet import FleetTelemetry, read_fleet_snapshot
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
 from kdive.reconciler.repairs import allocations as allocation_repairs
@@ -68,6 +69,7 @@ from kdive.reconciler.repairs import build_hosts as build_host_repairs
 from kdive.reconciler.repairs import debug_sessions as debug_session_repairs
 from kdive.reconciler.repairs import jobs as job_repairs
 from kdive.reconciler.repairs import systems as system_repairs
+from kdive.services.allocation.admission.metrics import AdmissionMetrics
 from kdive.services.images.retention import (
     ImageSweepStore,
 )
@@ -132,6 +134,10 @@ _NULL_DUMP_VOLUME_REAPER: DumpVolumeReaper = NullDumpVolumeReaper()
 # The default build-VM reaper (ADR-0100): a module-level stateless singleton (see above).
 _NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
 
+# The default (no-op) admission metrics (ADR-0190 D): a module-level singleton so it is a
+# stateless default field without a per-call construction (ruff B008).
+_NULL_ADMISSION_METRICS: AdmissionMetrics = AdmissionMetrics.disabled()
+
 # The process-singleton inventory reconcile pass (ADR-0112): held here so its last-good
 # parse cache (keyed by the systems.toml hash) survives across reconcile passes — the parse
 # step is skipped when the file is unchanged, but the reconcile-against-DB step still runs
@@ -180,6 +186,12 @@ class ReconcileReport:
     reclaimed_build_host_leases: int = 0
     build_host_states_changed: int = 0
     reaped_runtime_resources: int = 0
+    #: The raw per-kind repair counts, keyed by ``_RepairSpec.name`` (ADR-0190 A). The scalar
+    #: fields above feed callers that read named categories; this dict feeds the repairs
+    #: counter with the exact spec names so ``repair_kind`` == ``ALL_REPAIR_KINDS``. Excluded
+    #: from equality (``compare=False``): it is a derived mirror of the scalar counts, so
+    #: existing report-equality assertions stay meaningful without enumerating it.
+    repair_counts: Mapping[str, int] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +214,8 @@ class ReconcileConfig:
     heartbeat: Heartbeat | None = None
     heartbeat_tick: timedelta = timedelta(seconds=1)
     telemetry: ReconcilerTelemetry | None = None
+    fleet_telemetry: FleetTelemetry | None = None
+    admission_metrics: AdmissionMetrics = field(default=_NULL_ADMISSION_METRICS)
 
 
 _DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
@@ -218,8 +232,14 @@ def _repair_plan(
         # Release leaked `active` allocations whose System is terminal/absent (ADR-0109) BEFORE
         # the promotion sweep, so a host-cap slot this reaper frees is filled in the same pass.
         _RepairSpec("reaped_active_allocations", _reap_orphaned_active_allocations),
-        _RepairSpec("promoted_allocations", _promote_pending),
-        _RepairSpec("queue_timeouts", _reap_queue_timeouts_for(config.queue_max_wait)),
+        _RepairSpec(
+            "promoted_allocations",
+            lambda conn: _promote_pending(conn, config.admission_metrics),
+        ),
+        _RepairSpec(
+            "queue_timeouts",
+            _reap_queue_timeouts_for(config.queue_max_wait, config.admission_metrics),
+        ),
         _RepairSpec("orphaned_systems", _repair_orphaned_systems),
         _RepairSpec("abandoned_jobs", _repair_abandoned_jobs),
         # Reap (or cordon, if still live) runtime resources whose lease lapsed — the leak
@@ -301,6 +321,35 @@ def _repair_plan(
     return tuple(repairs)
 
 
+#: Every ``repair_kind`` the repairs counter can emit — the union of the base repairs and the
+#: optional-port repairs (ADR-0190 A). Pinned to :func:`_repair_plan` by
+#: ``test_all_repair_kinds_matches_a_fully_populated_plan`` so the cardinality bound and the
+#: plan never drift. Bounded and low-cardinality; never a per-object identifier.
+ALL_REPAIR_KINDS: tuple[str, ...] = (
+    "expired_allocations",
+    "reaped_active_allocations",
+    "promoted_allocations",
+    "queue_timeouts",
+    "orphaned_systems",
+    "abandoned_jobs",
+    "reaped_runtime_resources",
+    "reaped_build_vms",
+    "reclaimed_build_host_leases",
+    "dead_sessions",
+    "leaked_domains",
+    "leaked_probe_guests",
+    "idempotency_keys_gc_count",
+    "reaped_dump_volumes",
+    "build_host_states_changed",
+    "abandoned_uploads",
+    "console_collectors_reaped",
+    "reconcile_inventory",
+    "leaked_images",
+    "dangling_images",
+    "expired_private_images",
+)
+
+
 async def reconcile_once(
     pool: AsyncConnectionPool,
     reaper: InfraReaper,
@@ -357,6 +406,7 @@ async def reconcile_once(
         reclaimed_build_host_leases=counts["reclaimed_build_host_leases"],
         build_host_states_changed=counts.get("build_host_states_changed", 0),
         reaped_runtime_resources=counts["reaped_runtime_resources"],
+        repair_counts=dict(counts),
     )
 
 
@@ -399,6 +449,7 @@ class Reconciler:
         self._config = config
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
         self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
+        self._fleet_telemetry = config.fleet_telemetry or FleetTelemetry.disabled()
 
     async def run_once(self) -> ReconcileReport:
         """Run one reconciliation pass."""
@@ -432,6 +483,20 @@ class Reconciler:
                 with contextlib.suppress(asyncio.CancelledError):
                     await ticker
 
+    async def _refresh_fleet_snapshot(self) -> None:
+        """Read the fleet inventory + capacity into the gauge cache (ADR-0190 B; best-effort).
+
+        A read failure is logged and leaves the previous cached snapshot in place — the
+        inventory gauges are observability, never load-bearing for the repair pass.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                snapshot = await read_fleet_snapshot(conn)
+        except Exception:  # noqa: BLE001 - a snapshot read must never starve the repair loop
+            _log.warning("reconciler: fleet snapshot read failed this pass", exc_info=True)
+            return
+        self._fleet_telemetry.refresh(snapshot)
+
     def _start_heartbeat_ticker(self, stop: asyncio.Event) -> asyncio.Task[None] | None:
         if self._config.heartbeat is None:
             return None
@@ -446,10 +511,12 @@ class Reconciler:
             self._telemetry.observe_lag(time.monotonic() - next_due)
             with self._telemetry.pass_span() as span:
                 try:
-                    await self.run_once()
+                    report = await self.run_once()
+                    self._telemetry.record_repairs(report.repair_counts, report.failures)
                 except Exception:  # noqa: BLE001 - a durable reconciler survives a transient per-pass error
                     span.set_outcome("error")
                     _log.exception("reconcile pass failed; continuing after %ss", interval)
+            await self._refresh_fleet_snapshot()
             next_due = time.monotonic() + interval
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval)

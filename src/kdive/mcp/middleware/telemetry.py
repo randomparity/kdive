@@ -9,9 +9,17 @@ from typing import Any
 from fastmcp.server.middleware import Middleware
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.middleware.shared import ToolOutcome, result_error_category
 
 _DURATION_BUCKETS = (0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
+
+
+def _exception_category(exc: BaseException) -> str:
+    """The error_category for a raised exception: the typed category, else infrastructure."""
+    if isinstance(exc, CategorizedError):
+        return exc.category.value
+    return ErrorCategory.INFRASTRUCTURE_FAILURE.value
 
 
 class TelemetryMiddleware(Middleware):
@@ -47,18 +55,25 @@ class TelemetryMiddleware(Middleware):
                 result = await call_next(context)
             except Exception as exc:
                 self._finish(span, tool, ToolOutcome.ERROR, started)
-                self._errors.add(1, {"tool": tool, "outcome": ToolOutcome.ERROR.value})
+                self._record_error(tool, _exception_category(exc))
                 span.record_exception(exc)
                 span.set_status(Status(StatusCode.ERROR))
                 raise
-            outcome = (
-                ToolOutcome.ERROR if result_error_category(result) is not None else ToolOutcome.OK
-            )
+            category = result_error_category(result)
+            outcome = ToolOutcome.ERROR if category is not None else ToolOutcome.OK
             self._finish(span, tool, outcome, started)
             if outcome is ToolOutcome.ERROR:
-                self._errors.add(1, {"tool": tool, "outcome": outcome.value})
+                self._record_error(tool, category)
                 span.set_status(Status(StatusCode.ERROR))
             return result
+
+    def _record_error(self, tool: str, category: str | None) -> None:
+        # ADR-0190 E: break the per-call error rate down by error_category (the request
+        # surface's by-category counter; backend-origin failures live on kdive.errors).
+        labels = {"tool": tool, "outcome": ToolOutcome.ERROR.value}
+        if category is not None:
+            labels["error_category"] = category
+        self._errors.add(1, labels)
 
     def _finish(self, span: Any, tool: str, outcome: ToolOutcome, started: float) -> None:
         labels = {"tool": tool, "outcome": outcome.value}

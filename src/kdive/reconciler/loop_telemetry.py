@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING
 
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from kdive.domain.errors import ErrorCategory
+
 if TYPE_CHECKING:
-    from opentelemetry.metrics import Histogram, Meter
+    from opentelemetry.metrics import Counter, Histogram, Meter
     from opentelemetry.trace import Span, Tracer
 
 #: Histogram bucket bounds (seconds) for one reconcile pass (DB sweeps, usually fast).
@@ -51,6 +53,19 @@ class ReconcilerTelemetry:
             description="Gap between the scheduled and actual reconcile-pass start.",
             explicit_bucket_boundaries_advisory=list(_DURATION_BUCKETS),
         )
+        # ADR-0190 group A: per-repair-kind work counter (label `repair_kind` = the
+        # `_RepairSpec.name`), and the backend-origin error counter (group E) the reconciler
+        # bumps under `infrastructure_failure` for a repair that raised this pass.
+        self._repairs: Counter = meter.create_counter(
+            "kdive.reconciler.repairs",
+            unit="1",
+            description="Reconciler repairs performed, by repair kind.",
+        )
+        self._errors: Counter = meter.create_counter(
+            "kdive.errors",
+            unit="1",
+            description="Categorized failures at their backend origin, by error category.",
+        )
 
     @classmethod
     def disabled(cls) -> ReconcilerTelemetry:
@@ -63,6 +78,23 @@ class ReconcilerTelemetry:
         """Record the gap between the scheduled and actual pass start (no-op when disabled)."""
         if self._enabled and lag_seconds >= 0.0:
             self._lag.record(lag_seconds)
+
+    def record_repairs(self, counts: Mapping[str, int], failures: Iterable[str]) -> None:
+        """Emit the per-kind repair counts + one error per failed repair (ADR-0190 A/E).
+
+        Args:
+            counts: ``{repair_kind: count}`` keyed by the ``_RepairSpec.name`` strings — each
+                count (including 0) is added so the series is present from the first pass.
+            failures: The names of repairs that raised this pass; each increments the
+                error counter under ``infrastructure_failure`` so a wedged sweep is visible
+                even though its repair count is 0.
+        """
+        if not self._enabled:
+            return
+        for repair_kind, count in counts.items():
+            self._repairs.add(count, {"repair_kind": repair_kind})
+        for _ in failures:
+            self._errors.add(1, {"error_category": ErrorCategory.INFRASTRUCTURE_FAILURE.value})
 
     @contextlib.contextmanager
     def pass_span(self) -> Iterator[_PassSpan]:

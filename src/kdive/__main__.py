@@ -480,8 +480,10 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
     from kdive.process_health.worker import build_worker_probe
     from kdive.providers.assembly.composition import ProviderComposition
     from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
+    from kdive.reconciler.fleet import FleetTelemetry
     from kdive.reconciler.loop import ReconcileConfig, Reconciler
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
+    from kdive.services.allocation.admission.metrics import AdmissionMetrics
     from kdive.store.objectstore import object_store_from_env
 
     # Before any libvirt connection opens: libvirt services stream events only on connections
@@ -519,6 +521,12 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
                     heartbeat=heartbeat,
                     telemetry=ReconcilerTelemetry(
                         tracer=telemetry.tracer_provider.get_tracer("kdive.reconciler"),
+                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
+                    ),
+                    fleet_telemetry=FleetTelemetry(
+                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
+                    ),
+                    admission_metrics=AdmissionMetrics(
                         meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
                     ),
                 ),
