@@ -512,3 +512,71 @@ def test_list_jobs_excludes_jobs_with_no_project(migrated_url: str) -> None:
         assert resp.items == []
 
     asyncio.run(_run())
+
+
+def test_list_jobs_first_page_sets_truncated_and_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(3):
+                await _enqueue(pool, f"p{i}")
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+        assert resp.data["truncated"] is True
+        assert isinstance(resp.data["next_cursor"], str)
+        assert len(resp.items) == 2
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(2):
+                await _enqueue(pool, f"e{i}")
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_empty_pagination_fields(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+        assert resp.data["count"] == 0
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_drains_every_row_following_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(5):
+                await _enqueue(pool, f"d{i}")
+            seen: list[str] = []
+            cursor: str | None = None
+            for _ in range(10):  # bound the loop defensively
+                resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2, cursor=cursor)
+                seen.extend(item.object_id for item in resp.items)
+                if not resp.data["truncated"]:
+                    break
+                next_cursor = resp.data["next_cursor"]
+                assert isinstance(next_cursor, str)
+                cursor = next_cursor
+        assert len(seen) == 5
+        assert len(set(seen)) == 5  # no duplicate across pages
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=2, cursor="!!!")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())

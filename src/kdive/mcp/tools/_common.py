@@ -6,6 +6,7 @@ import base64
 import binascii
 import json
 from collections.abc import Sequence
+from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
@@ -136,6 +137,30 @@ def invalid_cursor_error(object_id: str) -> ToolResponse:
     return config_error_reason(object_id, ConfigErrorReason.INVALID_CURSOR)
 
 
+def encode_ts_uuid_cursor(tool_tag: str, created_at: datetime, row_id: UUID) -> str:
+    """Encode a ``(created_at, id)`` keyset cursor for a timestamp-ordered list (ADR-0192).
+
+    The timestamp is serialized at full (tz-aware, microsecond) precision so it round-trips
+    to the exact stored value and the ``created_at = boundary`` arm of the seek matches the
+    boundary row.
+    """
+    return encode_cursor(tool_tag, (created_at.isoformat(), str(row_id)))
+
+
+def decode_ts_uuid_cursor(tool_tag: str, cursor: str) -> tuple[datetime, UUID]:
+    """Decode a ``(created_at, id)`` keyset cursor into typed seek values (ADR-0192).
+
+    Returns the typed boundary so the handler binds a ``timestamptz`` / ``uuid`` (not a raw
+    string) into the row-value seek predicate. Raises :class:`InvalidCursor` on a malformed
+    or wrong-tool token, or when a well-formed token carries a non-timestamp / non-uuid part.
+    """
+    ts_part, id_part = decode_cursor(tool_tag, cursor, arity=2)
+    try:
+        return datetime.fromisoformat(ts_part), UUID(id_part)
+    except ValueError as exc:
+        raise InvalidCursor("cursor key parts are not a (timestamp, uuid)") from exc
+
+
 def config_error(
     object_id: str, *, detail: str | None = None, data: ResponseDataInput | None = None
 ) -> ToolResponse:
@@ -216,7 +241,9 @@ __all__ = [
     "config_error_reason",
     "context_from_job",
     "decode_cursor",
+    "decode_ts_uuid_cursor",
     "encode_cursor",
+    "encode_ts_uuid_cursor",
     "invalid_cursor_error",
     "invalid_uuid_error",
     "job_envelope",
