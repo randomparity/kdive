@@ -15,7 +15,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 # registered remote build host — so the caller can self-correct from the error alone.
 _BUILD_LANE_GUIDANCE = (
     "Either stage a kernel source tree on the build worker and set KDIVE_KERNEL_SRC to "
-    "its absolute path (see docs/operating/build-source-staging.md), or submit a git "
+    "its absolute path (see resource://kdive/docs/operating/build-source-staging.md), or "
+    "submit a git "
     'build profile instead — a structured kernel_source_ref {"git": {"remote": ..., '
     '"ref": ...}} either on the local host once the operator allowlists its remote via '
     "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST, or on a registered remote build host "
