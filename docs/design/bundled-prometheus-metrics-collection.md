@@ -29,8 +29,11 @@ must not re-expose raw `/metrics` off it.
 ### Helm (`bundledObservability`, default `false`)
 
 A new top-level value `bundledObservability` (independent of `bundledBackends` — the scrape
-targets are the app pods, present on both paths). When true, `templates/demo/prometheus.yaml`
-renders five objects, all guarded by `{{- if .Values.bundledObservability }}`:
+targets are the app pods, present on both paths). When true, two templates —
+`templates/demo/prometheus.yaml` (SA/Role/RoleBinding/Deployment/Service) and
+`templates/demo/prometheus-config.yaml` (the scrape-config ConfigMap, in its own file so the
+Deployment can hash it into a `checksum/config` annotation without a self-referential
+`include`) — render six objects, all guarded by `{{- if .Values.bundledObservability }}`:
 
 1. **ServiceAccount** `<fullname>-prometheus`.
 2. **Role** (namespaced) granting `get`/`list`/`watch` on `pods` — all a pod-role
@@ -108,9 +111,11 @@ in-process, no live cluster), which closes the render-vs-scrape gap; the live "t
   unknown CRD kind. (Rejected templating it; see ADR.)
 - **RBAC minimization:** namespaced Role, `pods` `get/list/watch` only; SD scoped to the release
   namespace so it cannot read pods elsewhere.
-- **`docker compose config` includes profile services:** the structural test sees the
-  `prometheus` service even though it is profile-gated, so it can assert on it directly; the
-  turnkey-ordering tests are unaffected because the app services do not `depends_on` it.
+- **`docker compose config` omits profile-gated services:** verified on Compose v5.x — without
+  `--profile obs` the `prometheus` service is absent from the rendered model. The structural
+  test therefore renders with `--profile obs` enabled to assert on the service, and separately
+  asserts it is absent from the default (no-profile) model so the turnkey graph stays unchanged.
+  The turnkey-ordering tests are unaffected because the app services do not `depends_on` it.
 - **emptyDir restart drops history:** documented; acceptable for the demo posture; BYO/PVC for
   durability.
 - **Aux port never re-exposed:** k8s Prometheus Service is `9090`-only; compose publishes only

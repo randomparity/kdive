@@ -55,12 +55,15 @@ observability:
 ### Task 2: Helm Prometheus manifests + render/content tests
 
 **Files:**
-- Create: `deploy/helm/kdive/templates/demo/prometheus.yaml`
+- Create: `deploy/helm/kdive/templates/demo/prometheus-config.yaml` (the scrape-config ConfigMap, in its own file)
+- Create: `deploy/helm/kdive/templates/demo/prometheus.yaml` (SA/Role/RoleBinding/Deployment/Service)
 - Test: `tests/helm/test_helm_render.py` (append)
 
 **Interfaces:**
 - Consumes: `.Values.bundledObservability`, `.Values.observability.*` (Task 1); `kdive.fullname`, `kdive.labels` helpers.
-- Produces: ServiceAccount/Role/RoleBinding/ConfigMap/Deployment/Service named `<fullname>-prometheus` (+`-prometheus-config` ConfigMap).
+- Produces: ServiceAccount/Role/RoleBinding/Deployment/Service named `<fullname>-prometheus` (`prometheus.yaml`) and a `<fullname>-prometheus-config` ConfigMap (`prometheus-config.yaml`).
+
+**Why two files:** the Deployment hashes the ConfigMap into a `checksum/config` pod annotation so a scrape-config edit rolls the pod (mirrors `kdive.configChecksum`, which hashes `configmap.yaml` from the deployment files). The hash uses `include (print $.Template.BasePath "/demo/prometheus-config.yaml") .` — it MUST point at a *different* file than the one it lives in, or the include recurses into itself and `helm template` aborts. So the ConfigMap lives in its own `prometheus-config.yaml`.
 
 - [ ] **Step 1: Write the failing tests.** Append to `tests/helm/test_helm_render.py` — helpers that re-template with `bundledObservability=true` and parse the ConfigMap's `prometheus.yml` as YAML:
 
@@ -129,48 +132,14 @@ def test_observability_independent_of_bundled_backends() -> None:
 ```
 
 - [ ] **Step 2: Run to verify they fail.** Run: `uv run python -m pytest tests/helm/test_helm_render.py -k observability -q` — Expected: FAIL (no `-prometheus` docs; `next()` StopIteration).
-- [ ] **Step 3: Write the template.** Create `deploy/helm/kdive/templates/demo/prometheus.yaml` (full content):
+- [ ] **Step 3a: Write the scrape-config ConfigMap** in its own file `deploy/helm/kdive/templates/demo/prometheus-config.yaml` (full content):
 
 ```yaml
 {{- if .Values.bundledObservability }}
-# Opt-in in-cluster Prometheus (ADR-0189): scrapes the per-process aux /metrics (ADR-0090 §5)
-# via the prometheus.io/scrape annotations the chart stamps on every component pod. emptyDir +
-# short retention (demo posture); ClusterIP only — reach the UI with `kubectl port-forward`.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "kdive.fullname" . }}-prometheus
-  labels:
-    {{- include "kdive.labels" . | nindent 4 }}
----
-# Namespaced pod-read for kubernetes_sd_configs (role: pod). A Role (not ClusterRole) keeps the
-# blast radius to the release namespace, which is also where the SD job is scoped.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ include "kdive.fullname" . }}-prometheus
-  labels:
-    {{- include "kdive.labels" . | nindent 4 }}
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ include "kdive.fullname" . }}-prometheus
-  labels:
-    {{- include "kdive.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "kdive.fullname" . }}-prometheus
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "kdive.fullname" . }}-prometheus
-    namespace: {{ .Release.Namespace }}
----
+# Scrape config for the opt-in Prometheus (ADR-0189), in its own file so the Deployment in
+# prometheus.yaml can hash it into a checksum/config annotation without a self-referential
+# include. Annotation discovery: keep pods with prometheus.io/scrape=true, take the metrics path
+# and port from the prometheus.io/path & prometheus.io/port annotations the chart already stamps.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -206,6 +175,52 @@ data:
             target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+{{- end }}
+```
+
+- [ ] **Step 3b: Write the RBAC + Deployment + Service** in `deploy/helm/kdive/templates/demo/prometheus.yaml` (full content):
+
+```yaml
+{{- if .Values.bundledObservability }}
+# Opt-in in-cluster Prometheus (ADR-0189): scrapes the per-process aux /metrics (ADR-0090 §5)
+# via the prometheus.io/scrape annotations the chart stamps on every component pod. emptyDir +
+# short retention (demo posture); ClusterIP only — reach the UI with `kubectl port-forward`.
+# The scrape-config ConfigMap is in demo/prometheus-config.yaml (separate file: the checksum
+# annotation below hashes it, which would recurse if it lived here).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+---
+# Namespaced pod-read for kubernetes_sd_configs (role: pod). A Role (not ClusterRole) keeps the
+# blast radius to the release namespace, which is also where the SD job is scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kdive.fullname" . }}-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kdive.fullname" . }}-prometheus
+    namespace: {{ .Release.Namespace }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -224,7 +239,7 @@ spec:
         app: {{ include "kdive.fullname" . }}-prometheus
         {{- include "kdive.labels" . | nindent 8 }}
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/demo/prometheus.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/demo/prometheus-config.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "kdive.fullname" . }}-prometheus
       containers:
@@ -283,7 +298,7 @@ spec:
 - Consumes: the `server`/`worker`/`reconciler` services and their aux ports.
 - Produces: a `prometheus` service (profile `obs`) and the committed scrape config.
 
-- [ ] **Step 1: Write the failing tests.** Append to `tests/compose/test_compose_config.py`:
+- [ ] **Step 1: Write the failing tests.** Append to `tests/compose/test_compose_config.py`. NOTE: `docker compose config` OMITS profile-gated services unless the profile is active (verified on Compose v5.x), so the existing `_services()` (no `--profile`) would never see `prometheus` — these tests render with the `obs` profile enabled via a dedicated helper:
 
 ```python
 import yaml  # add to imports at top of file
@@ -291,13 +306,28 @@ import yaml  # add to imports at top of file
 _PROM_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "compose" / "prometheus.yml"
 
 
+def _services_with_obs_profile() -> dict[str, Any]:
+    # `docker compose config` drops profile-gated services unless the profile is active, so
+    # render with `--profile obs` to make the prometheus service appear in the model.
+    res = subprocess.run(
+        ["docker", "compose", "-f", str(_COMPOSE_FILE), "--profile", "obs",
+         "config", "--format", "json"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert res.returncode == 0, f"compose config invalid: {res.stderr}"
+    return json.loads(res.stdout)["services"]
+
+
 def test_prometheus_service_is_obs_profile_only() -> None:
-    prom = _services()["prometheus"]
-    assert prom["profiles"] == ["obs"]
+    # Present when the profile is active...
+    assert "prometheus" in _services_with_obs_profile()
+    # ...and absent from the default (no-profile) model, so the turnkey graph is unchanged.
+    assert "prometheus" not in _services()
+    assert _services_with_obs_profile()["prometheus"]["profiles"] == ["obs"]
 
 
 def test_prometheus_publishes_ui_but_not_the_scraped_ports() -> None:
-    prom = _services()["prometheus"]
+    prom = _services_with_obs_profile()["prometheus"]
     published = {str(p.get("published")) for p in prom.get("ports", [])}
     assert "9090" in published
     for aux in _AUX_PORTS.values():
@@ -313,7 +343,7 @@ def test_prometheus_static_config_targets_every_aux_port() -> None:
     assert targets == {f"{svc}:{port}" for svc, port in _AUX_PORTS.items()}
 ```
 
-- [ ] **Step 2: Run to verify they fail.** Run: `uv run python -m pytest tests/compose/test_compose_config.py -k prometheus -q` — Expected: FAIL (`KeyError: 'prometheus'` / missing file).
+- [ ] **Step 2: Run to verify they fail.** Run: `uv run python -m pytest tests/compose/test_compose_config.py -k prometheus -q` — Expected: FAIL (`KeyError: 'prometheus'` from `_services_with_obs_profile` / missing `prometheus.yml` for the static-config test).
 - [ ] **Step 3: Create the scrape config** `deploy/compose/prometheus.yml`:
 
 ```yaml
