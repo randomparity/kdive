@@ -230,6 +230,23 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   http://<mcp-host>/mcp | head
 ```
 
+### Collect metrics (opt-in — ADR-0189)
+
+The per-process `/metrics` (ADR-0090 §5) are emitted but not collected by default. Install with
+`--set bundledObservability=true` to deploy an in-cluster Prometheus that scrapes all three
+components via the `prometheus.io/scrape` annotations. This is the live check the render tests
+cannot do — confirm every component is an `UP` target and the `kdive_*` series are present:
+
+```bash
+kubectl port-forward svc/<release>-kdive-prometheus 9090:9090
+# http://localhost:9090/targets — server/worker/reconciler all UP
+# http://localhost:9090/graph — query kdive_job_queue_depth (worker) / kdive_mcp_requests (server)
+```
+
+It is off by default (production is BYO — the chart README documents a `PodMonitor` for
+Operator clusters and the existing-Prometheus annotation path), runs on `emptyDir` with short
+retention, and its Service is `9090`-only (the aux `/metrics` is never re-exposed off-cluster).
+
 ## 7. Architecture: one object store, three consumers
 
 There is exactly **one** object store (S3/MinIO) in a deployment, and **three different parties

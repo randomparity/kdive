@@ -60,6 +60,23 @@ docker compose exec server python -c \
   'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:9464/readyz").read())'
 ```
 
+### Metrics collection (opt-in — ADR-0189)
+
+Those `/metrics` are produced and discarded unless something scrapes them. An opt-in Prometheus
+behind the `obs` compose profile (so the turnkey `up` graph is unchanged) collects all three on
+the compose network:
+
+```bash
+docker compose --profile obs up -d prometheus
+# open http://localhost:9090/targets — server/worker/reconciler should be UP
+# then query e.g. kdive_job_queue_depth to confirm kdive_* series are present
+```
+
+It scrapes `server:9464` / `worker:9465` / `reconciler:9466` over the compose network (those
+aux ports stay unpublished — only the `9090` UI is published to the host) using the static
+config in [`prometheus.yml`](prometheus.yml). TSDB is ephemeral container-local (no named
+volume): a `docker compose down` drops the history, matching the demo posture.
+
 ## Driving an authenticated request
 
 The mock OIDC issuer derives a token's `iss` claim from the URL it is minted through. The
