@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 
 from deploy.grafana.build_dashboard import JSON_PATH, build_dashboard, render_json
-from tests.deploy.grafana_catalog import catalog_series  # noqa: F401 — used in Task 6 coverage test
+from tests.deploy.grafana_catalog import catalog_series
 
 
 def test_committed_json_matches_generator() -> None:
@@ -77,3 +78,55 @@ def test_rows_7_to_9_present() -> None:
     titles = [p["title"] for p in build_dashboard()["panels"] if p["type"] == "row"]
     for row in ("Build plane", "Provider operations", "Capture"):
         assert row in titles
+
+
+_HISTOGRAM_SUFFIXES = ("_bucket", "_sum", "_count")
+
+
+def _referenced_base_series() -> set[str]:
+    found: set[str] = set()
+    for expr in _all_exprs():
+        for match in re.findall(r"kdive_[a-z0-9_]+", expr):
+            base = match
+            for suffix in _HISTOGRAM_SUFFIXES:
+                if base.endswith(suffix):
+                    base = base[: -len(suffix)]
+                    break
+            found.add(base)
+    return found
+
+
+def test_dashboard_covers_full_catalog() -> None:
+    assert _referenced_base_series() == catalog_series()
+
+
+_KNOWN_PANEL_TYPES = {"row", "timeseries", "bargauge", "stat", "table"}
+
+
+def _content_panels() -> list[dict]:
+    return [p for p in build_dashboard()["panels"] if p["type"] != "row"]
+
+
+def test_every_panel_type_is_known() -> None:
+    types = {p["type"] for p in build_dashboard()["panels"]}
+    assert types <= _KNOWN_PANEL_TYPES, f"unknown panel type(s): {types - _KNOWN_PANEL_TYPES}"
+
+
+def test_every_content_panel_has_renderable_targets() -> None:
+    for panel in _content_panels():
+        targets = panel.get("targets", [])
+        assert targets, f"panel {panel['title']!r} has no targets"
+        for target in targets:
+            assert target.get("datasource"), f"target in {panel['title']!r} missing datasource"
+            assert target.get("expr", "").strip(), f"target in {panel['title']!r} has empty expr"
+
+
+def test_panel_gridpos_rectangles_do_not_overlap() -> None:
+    rects = [
+        (p["gridPos"]["x"], p["gridPos"]["y"], p["gridPos"]["w"], p["gridPos"]["h"])
+        for p in build_dashboard()["panels"]
+    ]
+    for i, (ax, ay, aw, ah) in enumerate(rects):
+        for bx, by, bw, bh in rects[i + 1 :]:
+            overlap = ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+            assert not overlap, f"panels overlap at ({ax},{ay}) and ({bx},{by})"
