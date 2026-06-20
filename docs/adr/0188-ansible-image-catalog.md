@@ -49,14 +49,29 @@ satisfy that path.
    the bare image uses a new `scratch` path.
 
 4. **Bare image is "bare but conformant" (Option A).** The bare image still runs
-   `qemu-guest-agent`, the three helpers, and `curl`/`tar` under a systemd init, so the full
-   build→install→boot→debug arc is unchanged and no provider work is needed. It is built
-   **from the host OS family** (`dnf --installroot` on RedHat, `debootstrap` on Debian) into
-   a minimal rootfs assembled into a partitioned bootable qcow2 via guestfish.
+   `qemu-guest-agent`, the family-appropriate helpers, and `curl`/`tar` under a systemd init,
+   so the build→install→boot→debug arc is unchanged on a Fedora/RHEL host and no provider work
+   is needed. It is built **from the host OS family** (`dnf --installroot` on RedHat,
+   `debootstrap` on Debian) into a minimal rootfs assembled into a partitioned bootable qcow2
+   via guestfish.
 
-5. **Per-image `root_device`.** Each entry declares its real root device; the facts template
-   emits it verbatim. Per ADR-0183 the platform no longer injects `root=` for remote, so each
-   image owns its partition layout (the cloud bases are partitioned, not whole-disk `/dev/vda`).
+5. **The helper/package contract is Fedora/RHEL-family; Ubuntu's install arc is scoped out.**
+   The three in-guest helpers are a Fedora/RHEL reference implementation (`grubby` / `dracut`
+   / `grub2-reboot` / `kdump-utils`), and `kdive_image_defaults.packages` is a Fedora/RHEL
+   set. So the full kdive arc is delivered for **fedora** and **rocky** (both RHEL-family);
+   the **ubuntu** image stages, boots, and connects its guest agent (provision / `host_dump`
+   path) but `runs.install` (the `kdive-install-kernel` `grubby` path) does **not** work until
+   a Debian helper variant lands — tracked separately. The ubuntu entry carries its own Debian
+   package set (`kdump-tools`, no `drgn`) because `virt-customize --install` runs the image's
+   own package manager. This is an honest scoping of the prior Fedora pin, not a claim that the
+   Fedora helpers run on Debian.
+
+6. **`root_device` is catalog metadata for remote.** Each entry declares a `root_device`
+   (default `/dev/vda`); the facts template emits it verbatim. The remote provider sets
+   `platform_root_cmdline=None` and never consumes `root_device` on the boot/install path —
+   the in-guest GRUB owns the real root (ADR-0183, #587). So the value is the `[[image]]`
+   schema's required metadata, best-effort and confirmed on hardware, never a fabricated
+   partition number that could mislead.
 
 ## Consequences
 
