@@ -24,6 +24,7 @@ from kdive.diagnostics.service import DiagnosticsService, default_service_factor
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
+from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.middleware import (
@@ -294,8 +295,6 @@ def _register_vmcore_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
-    from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
-
     vmcore.register_handlers(
         registry,
         resolver=assembly.resolver,

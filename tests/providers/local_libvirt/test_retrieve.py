@@ -76,12 +76,14 @@ def _retriever(store: _FakeStore, *, core: bytes | None) -> LocalLibvirtRetrieve
 
 
 def test_capture_stores_two_artifacts_and_returns_build_id() -> None:
+    raw_core = b"RAWCORE"
     store = _FakeStore()
-    out = _retriever(store, core=b"RAWCORE").capture(_SYS, CaptureMethod.KDUMP)
+    out = _retriever(store, core=raw_core).capture(_SYS, CaptureMethod.KDUMP)
     assert isinstance(out, CaptureOutput)
     assert out.raw.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump"
     assert out.redacted.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump-redacted"
     assert out.vmcore_build_id == "deadbeef"
+    assert out.raw_size_bytes == len(raw_core)
     names = {(name, sens) for _, name, sens, _ in store.puts}
     assert ("vmcore-kdump", Sensitivity.SENSITIVE) in names
     assert ("vmcore-kdump-redacted", Sensitivity.REDACTED) in names

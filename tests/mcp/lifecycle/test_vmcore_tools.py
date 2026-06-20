@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -18,6 +21,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import vmcore as vmcore_plane
+from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
@@ -590,6 +594,82 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
         assert refs  # something was returned
         # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
         assert all(not ("/vmcore-" in key and not key.endswith("-redacted")) for key in refs)
+
+    asyncio.run(_run())
+
+
+# --- capture handler telemetry integration -------------------------------------------------
+
+
+def _metric_points(reader: InMemoryMetricReader, name: str) -> list[Any]:
+    data = reader.get_metrics_data()
+    if data is None:
+        return []
+    out: list[Any] = []
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                if m.name == name:
+                    out.extend(m.data.data_points)
+    return out
+
+
+def test_capture_handler_emits_telemetry_on_success(migrated_url: str) -> None:
+    """capture_handler must call telemetry.record with duration and bytes on success."""
+
+    async def _run() -> None:
+        reader = InMemoryMetricReader()
+        meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+        telemetry = CaptureTelemetry(meter=meter)
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            job = await _enqueue_capture(pool, sys_id)
+            retriever = _FakeRetriever(sys_id)
+            async with pool.connection() as conn:
+                await vmcore_plane.capture_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=retriever),
+                    telemetry=telemetry,
+                )
+        dur_pts = _metric_points(reader, "kdive.vmcore.capture.duration")
+        byte_pts = _metric_points(reader, "kdive.vmcore.capture.bytes")
+        assert dur_pts, "duration not emitted on success"
+        assert dur_pts[0].attributes["capture_method"] == CaptureMethod.HOST_DUMP.value
+        assert dur_pts[0].attributes["outcome"] == "ok"
+        assert byte_pts, "bytes not emitted on success"
+        assert byte_pts[0].attributes["capture_method"] == CaptureMethod.HOST_DUMP.value
+        expected_output = _capture_output(sys_id)
+        assert byte_pts[0].sum == expected_output.raw_size_bytes
+
+    asyncio.run(_run())
+
+
+def test_capture_handler_emits_error_telemetry_no_bytes(migrated_url: str) -> None:
+    """capture_handler must emit duration with outcome='error' and no bytes on failure."""
+
+    async def _run() -> None:
+        reader = InMemoryMetricReader()
+        meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+        telemetry = CaptureTelemetry(meter=meter)
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            job = await _enqueue_capture(pool, sys_id)
+            err = CategorizedError("no core", category=ErrorCategory.READINESS_FAILURE)
+            retriever = _FakeRetriever(sys_id, raises=err)
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError):
+                    await vmcore_plane.capture_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(retriever=retriever),
+                        telemetry=telemetry,
+                    )
+        dur_pts = _metric_points(reader, "kdive.vmcore.capture.duration")
+        byte_pts = _metric_points(reader, "kdive.vmcore.capture.bytes")
+        assert dur_pts, "duration not emitted on error"
+        assert dur_pts[0].attributes["outcome"] == "error"
+        assert not byte_pts, "bytes must not be emitted on error"
 
     asyncio.run(_run())
 
