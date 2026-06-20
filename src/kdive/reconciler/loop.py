@@ -61,6 +61,7 @@ from kdive.reconciler.cleanup.uploads import (
 from kdive.reconciler.cleanup.uploads import (
     repair_abandoned_uploads as _repair_abandoned_uploads,
 )
+from kdive.reconciler.fleet import FleetTelemetry, read_fleet_snapshot
 from kdive.reconciler.inventory import InventoryReconcilePass
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
 from kdive.reconciler.repairs import allocations as allocation_repairs
@@ -208,6 +209,7 @@ class ReconcileConfig:
     heartbeat: Heartbeat | None = None
     heartbeat_tick: timedelta = timedelta(seconds=1)
     telemetry: ReconcilerTelemetry | None = None
+    fleet_telemetry: FleetTelemetry | None = None
 
 
 _DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
@@ -435,6 +437,7 @@ class Reconciler:
         self._config = config
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
         self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
+        self._fleet_telemetry = config.fleet_telemetry or FleetTelemetry.disabled()
 
     async def run_once(self) -> ReconcileReport:
         """Run one reconciliation pass."""
@@ -468,6 +471,20 @@ class Reconciler:
                 with contextlib.suppress(asyncio.CancelledError):
                     await ticker
 
+    async def _refresh_fleet_snapshot(self) -> None:
+        """Read the fleet inventory + capacity into the gauge cache (ADR-0190 B; best-effort).
+
+        A read failure is logged and leaves the previous cached snapshot in place — the
+        inventory gauges are observability, never load-bearing for the repair pass.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                snapshot = await read_fleet_snapshot(conn)
+        except Exception:  # noqa: BLE001 - a snapshot read must never starve the repair loop
+            _log.warning("reconciler: fleet snapshot read failed this pass", exc_info=True)
+            return
+        self._fleet_telemetry.refresh(snapshot)
+
     def _start_heartbeat_ticker(self, stop: asyncio.Event) -> asyncio.Task[None] | None:
         if self._config.heartbeat is None:
             return None
@@ -487,6 +504,7 @@ class Reconciler:
                 except Exception:  # noqa: BLE001 - a durable reconciler survives a transient per-pass error
                     span.set_outcome("error")
                     _log.exception("reconcile pass failed; continuing after %ss", interval)
+            await self._refresh_fleet_snapshot()
             next_due = time.monotonic() + interval
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval)
