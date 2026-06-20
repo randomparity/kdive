@@ -71,3 +71,9 @@ def test_saturation_panel_divides_used_by_total() -> None:
     exprs = " ".join(_all_exprs())
     assert "kdive_host_capacity_used" in exprs
     assert "kdive_host_capacity_total" in exprs
+
+
+def test_rows_7_to_9_present() -> None:
+    titles = [p["title"] for p in build_dashboard()["panels"] if p["type"] == "row"]
+    for row in ("Build plane", "Provider operations", "Capture"):
+        assert row in titles

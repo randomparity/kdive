@@ -158,6 +158,9 @@ def _build_panels() -> list[dict]:
     _row_capacity(grid)
     _row_reconciler(grid)
     _row_jobs(grid)
+    _row_build(grid)
+    _row_provider(grid)
+    _row_capture(grid)
     return grid.panels
 
 
@@ -355,6 +358,100 @@ def _row_jobs(grid: _Grid) -> None:
             unit="s",
         ),
         width=12,
+    )
+
+
+def _row_build(grid: _Grid) -> None:
+    grid.row("Build plane")
+    grid.add(
+        _timeseries(
+            "Build-phase duration p95",
+            [
+                _target(
+                    _quantile("kdive_build_phase_duration", 0.95, ("build_phase",)),
+                    "{{build_phase}}",
+                )
+            ],
+            unit="s",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Build-host capacity by host",
+            [_target("sum by (build_host) (kdive_build_host_capacity)", "{{build_host}}")],
+            unit="short",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Build-host leases by host",
+            [_target("sum by (build_host) (kdive_build_host_leases)", "{{build_host}}")],
+            unit="short",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Build-host reachability by host",
+            [_target("sum by (build_host) (kdive_build_host_reachable)", "{{build_host}}")],
+            unit="short",
+        ),
+        width=12,
+    )
+
+
+def _row_provider(grid: _Grid) -> None:
+    grid.row("Provider operations")
+    grid.add(
+        _timeseries(
+            "Provider-op duration p95",
+            [
+                _target(
+                    _quantile("kdive_provider_op_duration", 0.95, ("provider", "job_kind")),
+                    "{{provider}}/{{job_kind}}",
+                )
+            ],
+            unit="s",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Provider-op errors",
+            [_target(_rate("kdive_provider_op_errors", "provider"), "{{provider}}")],
+            unit="ops",
+        ),
+        width=12,
+    )
+
+
+def _row_capture(grid: _Grid) -> None:
+    grid.row("Capture")
+    grid.add(
+        _timeseries(
+            "vmcore capture duration p95",
+            [_target(_quantile("kdive_vmcore_capture_duration", 0.95), "p95")],
+            unit="s",
+        ),
+        width=8,
+    )
+    grid.add(
+        _timeseries(
+            "vmcore capture size p95",
+            [_target(_quantile("kdive_vmcore_capture_bytes", 0.95), "p95")],
+            unit="bytes",
+        ),
+        width=8,
+    )
+    grid.add(
+        _timeseries(
+            "Console bytes rate",
+            [_target("sum (rate(kdive_console_bytes[$__rate_interval]))", "bytes/s")],
+            unit="Bps",
+        ),
+        width=8,
     )
 
 
