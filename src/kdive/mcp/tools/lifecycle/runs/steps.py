@@ -25,9 +25,16 @@ from kdive.mcp.tools.lifecycle.runs.common import run_job_envelope
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.idempotency.envelope import keyed_mutation
 
 
-async def install_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> ToolResponse:
+async def install_run(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    run_id: str,
+    *,
+    idempotency_key: str | None = None,
+) -> ToolResponse:
     """Admit an idempotent install for a built, SUCCEEDED Run."""
     uid = _as_uuid(run_id)
     if uid is None:
@@ -42,10 +49,25 @@ async def install_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: st
                 return _config_error(run_id, data={"current_status": run.state.value})
             if run.system_id is None:
                 return _not_bound(run_id)
-            return await _enqueue_step(conn, ctx, run, JobKind.INSTALL, "install", "runs.install")
+            return await keyed_mutation(
+                conn,
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=run.project,
+                kind="runs.install",
+                do_work=lambda: _enqueue_step(
+                    conn, ctx, run, JobKind.INSTALL, "install", "runs.install"
+                ),
+            )
 
 
-async def boot_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) -> ToolResponse:
+async def boot_run(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    run_id: str,
+    *,
+    idempotency_key: str | None = None,
+) -> ToolResponse:
     """Admit an idempotent boot for a built, installed Run."""
     uid = _as_uuid(run_id)
     if uid is None:
@@ -62,7 +84,14 @@ async def boot_run(pool: AsyncConnectionPool, ctx: RequestContext, run_id: str) 
                 return _not_bound(run_id)
             if not await _has_succeeded_step(conn, uid, "install"):
                 return _config_error(run_id, data={"reason": "install_first"})
-            return await _enqueue_step(conn, ctx, run, JobKind.BOOT, "boot", "runs.boot")
+            return await keyed_mutation(
+                conn,
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=run.project,
+                kind="runs.boot",
+                do_work=lambda: _enqueue_step(conn, ctx, run, JobKind.BOOT, "boot", "runs.boot"),
+            )
 
 
 def _not_bound(run_id: str) -> ToolResponse:

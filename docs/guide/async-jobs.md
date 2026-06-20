@@ -68,6 +68,24 @@ while the returned envelope is non-terminal. Requesting a long explicit `timeout
 holds the stream near the reset window and risks an intermediary cut; that drop is retryable, but
 short waits avoid it.
 
+## Retrying the initial enqueue (idempotency)
+
+The read-retry contract above covers `jobs.wait`/`jobs.get`. But a transport reset can also
+drop the **response to the enqueuing call itself** — `runs.build`, `vmcore.fetch`,
+`control.power`, `systems.provision`, and the rest of the create/enqueue surface. A blind
+retry of that call could enqueue a second job. To retry it safely, pass an `idempotency_key`
+([ADR-0193](../adr/0193-uniform-mutation-idempotency.md), and see
+[the envelope guide](response-envelope.md#idempotent-retries)): a repeated key returns the
+**same job envelope** instead of enqueuing again.
+
+**Replay / GC window.** A recorded key replays only within the reconciler's retention window
+(default **7 days**, configurable). The reconciler garbage-collects keys past the window on
+its periodic pass. After a key is collected, repeating it is treated as a *fresh* enqueue —
+still safe at the job layer, because the job-enqueue tools derive their job `dedup_key` from
+the target object (e.g. `{run_id}:build`, `{system_id}:capture_vmcore:{method}`), so a
+same-target re-enqueue returns the existing job rather than a duplicate. The `idempotency_key`
+adds, on top of that, an identical-*envelope* replay for the bounded window.
+
 ## Durability and retries
 
 Jobs carry a worker heartbeat/lease. If a worker dies mid-run, the job is

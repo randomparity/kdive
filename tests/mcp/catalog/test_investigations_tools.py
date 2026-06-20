@@ -64,6 +64,27 @@ def test_open_mints_investigation_and_audits(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_open_keyed_retry_replays_one_investigation(migrated_url: str) -> None:
+    """A keyed retry replays the identical envelope and mints exactly one Investigation."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            first = await _open(pool, _ctx(), project="proj", title="oops", idempotency_key="k1")
+            second = await _open(pool, _ctx(), project="proj", title="oops", idempotency_key="k1")
+            assert first.model_dump() == second.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM investigations")
+                inv_n = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'investigations.open'"
+                )
+                key_n = await cur.fetchone()
+        assert inv_n is not None and inv_n["n"] == 1
+        assert key_n is not None and key_n["n"] == 1
+
+    asyncio.run(_run())
+
+
 def test_open_persists_and_dedups_external_refs(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
