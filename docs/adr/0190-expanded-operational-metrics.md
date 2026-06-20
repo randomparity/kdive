@@ -90,7 +90,7 @@ The FIFO **pending** depth is `kdive_allocations{state="requested"}`; no separat
 
 `kdive_allocation_admission_total` counter, labels `outcome` ∈ {granted, rejected, queued}
 and `reason` ∈ `_AdmissionReason` {none, quota, budget, capacity, affinity, pcie,
-configuration, queue_timeout}. An `AdmissionMetrics` emitter classifies an `AdmissionOutcome`
+configuration, queue_timeout, unknown}. An `AdmissionMetrics` emitter classifies an `AdmissionOutcome`
 into the `(outcome, reason)` pair via a pure mapping that keys on the **full outcome shape**,
 not the category alone, because both the success flag and the categories are overloaded:
 
@@ -98,10 +98,13 @@ not the category alone, because both the success flag and the categories are ove
   allocation (`_enqueue`), so `queued` vs `granted` is read from `allocation.state`, never
   from `granted` alone;
 - input-validation and PCIe-grammar denials both raise `CONFIGURATION_ERROR` with no
-  distinguishing reason, so they fold into one `configuration` reason — never `pcie` (which
-  is reserved for the PCIe-busy `ALLOCATION_DENIED`);
-- an unmatched `(category, reason)` maps to `(rejected, none)` with a `warning` log so a new
-  denial shape surfaces rather than silently mislabeling.
+  distinguishing reason, so they fold into one `configuration` reason — never `pcie`;
+- the PCIe-busy denial is the only `ALLOCATION_DENIED` that sets no `reason` string
+  (`reason=None`), so `pcie` is matched by elimination after the three reason-bearing
+  `ALLOCATION_DENIED` shapes (budget/affinity/capacity);
+- an unmatched `(category, reason)` maps to `(rejected, unknown)` — a distinct sentinel,
+  never sharing `none` with a successful outcome — with a `warning` log so a new denial shape
+  surfaces rather than silently mislabeling.
 
 It is recorded at the synchronous `admit()` boundary in the allocations tool handler
 (`kdive.mcp`) and at the promotion / queue-timeout sweeps in the reconciler
@@ -128,8 +131,10 @@ counted once, not once per poll. A worker job failure is echoed back through
 - **server** — no new server counter. The existing `kdive_mcp_request_errors` counter (a
   per-call RED rate, already incremented once per failed tool call) gains an `error_category`
   label, giving the request surface a by-category breakdown with no new double-counting.
-- **worker** — `kdive_errors_total{error_category}` increments once when a job transitions to
-  `FAILED` (the origin of a job failure).
+- **worker** — `kdive_errors_total{error_category}` increments once per job→`FAILED`
+  transition at the shared `queue.fail` seam (the worker fails a job at more than one site —
+  pre-dispatch and handler-exception — so the counter hooks the common transition, not one
+  branch).
 - **reconciler** — `kdive_errors_total` increments under `infrastructure_failure` per repair
   named in a pass's `failures` (§2).
 

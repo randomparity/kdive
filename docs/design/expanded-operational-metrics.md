@@ -41,7 +41,7 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
 - `state` → `AllocationState` ∪ `SystemState` ∪ `RunState` ∪ `DebugSessionState`.
 - `error_category` → `ErrorCategory` (22).
 - `reason` → `_AdmissionReason` = {none, quota, budget, capacity, affinity, pcie,
-  configuration, queue_timeout} (8).
+  configuration, queue_timeout, unknown} (9).
 - `outcome` (already allowlisted) gains values {granted, rejected, queued}.
 
 ## Design details
@@ -101,14 +101,22 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
     `affinity`).
   - `granted=False`, `ALLOCATION_DENIED` + `reason == at_capacity` → (`rejected`,
     `capacity`).
-  - `granted=False`, `ALLOCATION_DENIED` + PCIe-busy `reason` → (`rejected`, `pcie`).
+  - `granted=False`, `ALLOCATION_DENIED` + `reason is None` → (`rejected`, `pcie`). The
+    PCIe-busy denial (`_resolve_pcie_claim`, `MatchOutcome.CAPACITY`) is the **only**
+    `ALLOCATION_DENIED` that sets **no `reason` string** (`reason=None`, queueable), so it is
+    identified by elimination — there is no `pcie` reason literal. The three reason-bearing
+    `ALLOCATION_DENIED` shapes (`budget_exceeded`/`affinity_denied`/`at_capacity`) are matched
+    above, so a `None` reason here is unambiguously PCIe-busy.
   - `granted=False`, `CONFIGURATION_ERROR` → (`rejected`, `configuration`). Both the
     input-validation denial (`price_window_and_estimate`: bad window/size/over-caps) and the
-    PCIe-grammar denial raise `CONFIGURATION_ERROR` with no distinguishing reason, so they
-    fold into one operator-fixable `configuration` reason — they are **not** labeled `pcie`.
+    PCIe-grammar denial (`MatchOutcome.CONFIG`) raise `CONFIGURATION_ERROR` with no
+    distinguishing reason, so they fold into one operator-fixable `configuration` reason —
+    they are **not** labeled `pcie`.
   - queue-timeout reaper → (`rejected`, `queue_timeout`).
-  - Any unmatched `(category, reason)` → (`rejected`, `none`) with a one-line `warning` log,
-    so a new denial shape is visible rather than silently dropped.
+  - Any unmatched `(category, reason)` → (`rejected`, `unknown`) with a one-line `warning`
+    log, so a new denial shape is visibly anomalous (a distinct sentinel, never sharing
+    `none` with a successful outcome) rather than silently dropped. `unknown` is the 9th
+    `_AdmissionReason` value.
 - Server: the allocations tool handler records the decision after `admit()` returns (reads
   enqueue-vs-grant from the returned outcome's allocation state).
 - Reconciler: `allocation_promotion.promote_pending` and `reap_queue_timeouts` gain an
@@ -133,8 +141,11 @@ inflate the count by the poll rate. The split:
   rate without any new double-counting. This counter already means "tool calls that returned
   an error" (a RED rate signal), and an echoed `jobs.get` failure is a legitimate failed call
   on that surface.
-- **Worker** — `kdive.errors` increments once when a job transitions to `FAILED` (the origin
-  of a job failure), labeled with the job's `error_category`.
+- **Worker** — `kdive.errors` increments once at the job→`FAILED` transition, labeled with
+  the resolved `error_category`. The worker fails a job at more than one site (the
+  pre-dispatch unmapped-handler path and the `_dispatch` handler-exception path, both calling
+  `queue.fail`); the counter hooks the shared fail seam (keyed on the category passed to
+  `queue.fail`), not a single branch, so neither path is missed or double-counted.
 - **Reconciler** — `kdive.errors` increments under `infrastructure_failure` per repair named
   in a pass's `failures` (§A).
 
@@ -154,13 +165,14 @@ increment means.
 - **B + D-gauges**: `read_fleet_snapshot` against a seeded DB returns correct counts; the
   gauge callbacks emit from the cache; a stale cache keeps the last snapshot.
 - **D**: `classify` maps each `AdmissionOutcome` shape to the right `(outcome, reason)` —
-  including the enqueue case (`granted=True` + `REQUESTED` → `queued`), a validation
-  `CONFIGURATION_ERROR` → `configuration` (not `pcie`), and an unmatched shape →
-  `(rejected, none)`; the wait histogram records at promotion; the counter records at the
-  tool boundary.
-- **E**: the worker increments `kdive.errors` once on a job→`FAILED` transition (not per
-  poll); the reconciler increments under `infrastructure_failure` for a failed pass; the
-  server's `kdive.mcp.request.errors` carries the `error_category` label on a failing result.
+  the enqueue case (`granted=True` + `REQUESTED` → `queued`), PCIe-busy (`ALLOCATION_DENIED`
+  + `reason is None` → `pcie`), a validation `CONFIGURATION_ERROR` → `configuration` (not
+  `pcie`), and an unmatched shape → `(rejected, unknown)`; the wait histogram records at
+  promotion; the counter records at the tool boundary.
+- **E**: the worker increments `kdive.errors` once per job→`FAILED` transition at the shared
+  `queue.fail` seam (covering both fail sites, not per poll); the reconciler increments under
+  `infrastructure_failure` for a failed pass; the server's `kdive.mcp.request.errors` carries
+  the `error_category` label on a failing result.
 - Instruments render through `render_prometheus` end to end (collect the scrape reader,
   assert the new metric families appear).
 
