@@ -35,28 +35,41 @@ is legible at a glance and demoable end to end.
   editing datasource UIDs.
 - Rate windows use **`$__rate_interval`** so they auto-scale with the zoom level.
 - No hardcoded `job=`/`instance=` selectors in queries. kdive metrics are
-  self-identifying by name, and the same instrument (`kdive_errors_total`)
-  legitimately appears on more than one process (worker and reconciler), so
-  over-filtering would hide data.
+  self-identifying by name, and the same instrument (`kdive_errors`) legitimately
+  appears on more than one process (worker and reconciler), so over-filtering
+  would hide data.
 
-## Exporter naming conventions (the contract every query depends on)
+## Exposition naming conventions (the contract every query depends on)
 
-The OpenTelemetry Prometheus exporter transforms the OTel dotted instrument names
-into Prometheus series:
+kdive does **not** use the OpenTelemetry Prometheus exporter, and carries no
+`opentelemetry-exporter-prometheus` / `prometheus_client` dependency. The
+`/metrics` surface on every process is served by a hand-rolled renderer,
+`src/kdive/health/metrics_text.py` (`render_prometheus`, wired in at
+`src/kdive/health/aux_listener.py`). Its naming contract — read directly from the
+renderer, not assumed from exporter defaults — is:
 
-- Dots become underscores: `kdive.reconcile.duration` → `kdive_reconcile_duration`.
-- Monotonic counters gain a `_total` suffix: `kdive.mcp.requests` →
-  `kdive_mcp_requests_total`.
-- Histograms split into `_bucket` / `_sum` / `_count` series (confirmed against
-  `tests/health/test_metrics_text.py`). No unit suffix (`_seconds`) is appended
-  in this codebase's exporter configuration.
-- Observable gauges keep the base name: `kdive.job.queue.depth` →
-  `kdive_job_queue_depth`.
+- **Name sanitization (`_sanitize`)**: every character that is not alphanumeric,
+  `_`, or `:` becomes `_`. So dots become underscores:
+  `kdive.reconcile.duration` → `kdive_reconcile_duration`.
+- **Counters carry NO `_total` suffix.** `_render_sum` emits the bare sanitized
+  name. `kdive.mcp.requests` → `kdive_mcp_requests` (not `..._total`). This is the
+  single most important deviation from stock Prometheus conventions and the reason
+  off-the-shelf OTel dashboard PromQL will not work here.
+- **No unit suffix** (no `_seconds`, no `_bytes` appended by the renderer). A
+  histogram declared with `unit="s"` still renders as `kdive_..._bucket`, etc.
+- **Gauges** (observable lifecycle / capacity / queue-depth) keep the base name:
+  `kdive.job.queue.depth` → `kdive_job_queue_depth`.
+- **Histograms** split into `_bucket` (cumulative, with an `le="+Inf"` bucket),
+  `_sum`, and `_count` series, each carrying an `le` label on the buckets.
+  Confirmed by `tests/health/test_metrics_text.py` (which renders
+  `kdive_request_duration_bucket` and, notably, `kdive_allocations` /
+  `kdive_request_duration` with **no** `_total`).
 
-The exact `_total` suffixes and the absence of unit suffixes are **verified during
-implementation** by rendering the real exposition (instantiating the meters and
-reading the Prometheus output, or scraping a live `/metrics`). The coverage-guard
-test (below) pins the names so they cannot silently drift.
+A Prometheus scrape adds its own target labels (in the reference compose all three
+processes share `job="kdive"`, distinguished by `instance`). Histogram bucket
+boundaries come from the SDK's aggregation (instruments set
+`explicit_bucket_boundaries_advisory`); `histogram_quantile` works regardless of
+the exact boundaries, so the dashboard does not hardcode bucket values.
 
 ## Metric catalog (source of truth)
 
@@ -130,7 +143,9 @@ dilute the storytelling.
 
 ## PromQL patterns
 
-- Counter rate: `sum by (<dim>) (rate(<name>_total[$__rate_interval]))`
+- Counter rate (**no `_total` suffix** — see naming contract above):
+  `sum by (<dim>) (rate(<name>[$__rate_interval]))`, e.g.
+  `sum by (outcome) (rate(kdive_mcp_requests[$__rate_interval]))`.
 - Histogram quantile: `histogram_quantile(0.95, sum by (le, <dim>) (rate(<name>_bucket[$__rate_interval])))`
 - Gauge breakdown: `sum by (state) (<name>)`
 - Saturation: `sum by (provider) (kdive_host_capacity_used) / sum by (provider) (kdive_host_capacity_total)`
@@ -144,19 +159,33 @@ dilute the storytelling.
 2. **Datasource portability** — every panel/target references `${datasource}`;
    no hardcoded datasource UID leaks in.
 3. **Coverage guard** — extract every `kdive_*` base series referenced in panel
-   `expr` strings; assert the set covers the full instrument catalog enumerated
-   from the meter modules (same drift-guard pattern the repo already uses for
-   generated docs and tool schemas). Adding a new instrument later fails this
-   test until the dashboard gets a panel.
+   `expr` strings (stripping the `_bucket`/`_sum`/`_count` histogram suffixes back
+   to the base name); assert the set covers the full instrument catalog. The
+   catalog is enumerated by **static scan**, not introspection — instruments are
+   created inside methods via `meter.create_*("kdive…")` string literals, not as
+   importable module constants, and the lifecycle gauges use an f-string
+   (`f"kdive.{table}"` in `reconciler/fleet.py:_INVENTORY`). The guard therefore:
+   (a) greps the telemetry modules for `"kdive\.[a-z0-9_.]+"` literals, (b) expands
+   the `fleet.py:_INVENTORY` f-string names from the hard-listed table set
+   (`allocations`, `systems`, `runs`, `debug_sessions`), and (c) normalizes each
+   OTel name to its rendered series name using the **same rule as
+   `metrics_text._sanitize`** (dots→`_`, **no `_total`**, no unit suffix).
+   To keep the guard from going vacuous (green while the dashboard is broken on a
+   live scrape), it also instantiates one real meter, renders via
+   `render_prometheus`, and asserts a concrete series is present under its true
+   name and absent under the wrong one — e.g. `kdive_mcp_requests` present,
+   `kdive_mcp_requests_total` absent. Adding a new instrument later fails the
+   coverage assertion until the dashboard gets a panel.
 
 A live smoke test (bring up the compose `obs` profile, import, eyeball) is
 documented in the README as a manual step, not automated.
 
 ## Risks / open questions
 
-- **Exact series names**: the `_total` suffix and unit-suffix behavior are
-  exporter-dependent; pinned by rendering the real exposition during
-  implementation and locking via the coverage-guard test.
+- **Exact series names**: resolved, not open. The custom renderer
+  (`metrics_text.py`) emits counters with **no `_total`** and no unit suffix; the
+  naming contract above is authoritative and the coverage-guard's live-render
+  assertion locks it against drift.
 - **Info-gauge label cardinality**: the settings gauges carry many labels; the
   Info row uses table panels rather than time series to keep them readable.
 - **Empty panels without traffic**: on a freshly started stack some counters read
