@@ -50,7 +50,7 @@ Add four low-cardinality keys to `ALLOWED_LABEL_KEYS`, each bounded by an enum:
 | `repair_kind` | the static reconciler repair plan (`ALL_REPAIR_KINDS`) | ~21 |
 | `state` | the per-object state enums (`AllocationState`/`SystemState`/`RunState`/`DebugSessionState`) | ≤7 per object |
 | `error_category` | `ErrorCategory` (ADR-0019) | 22 |
-| `reason` | `_AdmissionReason` | 7 |
+| `reason` | `_AdmissionReason` | 8 |
 
 `outcome` (already allowlisted) gains the admission values `{granted, rejected, queued}`
 alongside the existing `{ok, error}`. A cardinality-guard test asserts every emitted value
@@ -89,14 +89,29 @@ The FIFO **pending** depth is `kdive_allocations{state="requested"}`; no separat
 ### 4. D — admission & capacity
 
 `kdive_allocation_admission_total` counter, labels `outcome` ∈ {granted, rejected, queued}
-and `reason` ∈ `_AdmissionReason` {none, quota, budget, capacity, pcie, affinity,
-queue_timeout}. An `AdmissionMetrics` emitter classifies an `AdmissionOutcome` into the
-`(outcome, reason)` pair via a pure mapping and is recorded at the two decision sites: the
-synchronous `admit()` boundary in the allocations tool handler (`kdive.mcp`) and the
-promotion / queue-timeout sweeps in the reconciler (`kdive.reconciler`).
+and `reason` ∈ `_AdmissionReason` {none, quota, budget, capacity, affinity, pcie,
+configuration, queue_timeout}. An `AdmissionMetrics` emitter classifies an `AdmissionOutcome`
+into the `(outcome, reason)` pair via a pure mapping that keys on the **full outcome shape**,
+not the category alone, because both the success flag and the categories are overloaded:
+
+- an enqueued request is a *success* outcome (`granted=True`) carrying a `REQUESTED`
+  allocation (`_enqueue`), so `queued` vs `granted` is read from `allocation.state`, never
+  from `granted` alone;
+- input-validation and PCIe-grammar denials both raise `CONFIGURATION_ERROR` with no
+  distinguishing reason, so they fold into one `configuration` reason — never `pcie` (which
+  is reserved for the PCIe-busy `ALLOCATION_DENIED`);
+- an unmatched `(category, reason)` maps to `(rejected, none)` with a `warning` log so a new
+  denial shape surfaces rather than silently mislabeling.
+
+It is recorded at the synchronous `admit()` boundary in the allocations tool handler
+(`kdive.mcp`) and at the promotion / queue-timeout sweeps in the reconciler
+(`kdive.reconciler`).
 
 `kdive_allocation_wait_seconds` histogram (request→grant latency) is recorded at promotion
 only (`now - allocation.created_at`); a synchronous grant waits ~0 and is not recorded.
+`promote_pending` / `reap_queue_timeouts` take an optional `AdmissionMetrics` (default the
+no-op) and record inside the per-candidate loop where the `Allocation` row (with
+`created_at`) is in hand; the int count return is unchanged.
 
 `kdive_host_capacity_used` / `kdive_host_capacity_total` gauges, labeled `provider`
 (reserved key, now used), come from the same per-pass `FleetSnapshot`: used = occupying
@@ -105,18 +120,23 @@ allocations (`GRANTED`/`ACTIVE`/`RELEASING`) per provider; total = sum of advert
 
 ### 5. E — error taxonomy
 
-`kdive_errors_total` counter, label `error_category`, incremented wherever a categorized
-failure surfaces:
+`kdive_errors_total` counts categorized failures **at their origin**, so one root cause is
+counted once, not once per poll. A worker job failure is echoed back through
+`ToolResponse.from_job` on every `jobs.get`/`jobs.list` poll; incrementing a server-side
+`kdive_errors` on each echo would inflate the count by the poll rate. The split:
 
-- **server** — `TelemetryMiddleware.on_call_tool` already computes the result's
-  `error_category`; it increments the counter there (covers every MCP tool failure,
-  synchronous or job-backed).
-- **worker** — the per-job dispatch path increments it when a job ends with a non-null
-  `error_category`.
-- **reconciler** — a failed repair pass increments it under `infrastructure_failure`
-  (§2).
+- **server** — no new server counter. The existing `kdive_mcp_request_errors` counter (a
+  per-call RED rate, already incremented once per failed tool call) gains an `error_category`
+  label, giving the request surface a by-category breakdown with no new double-counting.
+- **worker** — `kdive_errors_total{error_category}` increments once when a job transitions to
+  `FAILED` (the origin of a job failure).
+- **reconciler** — `kdive_errors_total` increments under `infrastructure_failure` per repair
+  named in a pass's `failures` (§2).
 
-`error_category` values are bounded by `ErrorCategory`.
+`kdive_errors_total` is thus the backend-origin failure counter (worker + reconciler) with no
+poll inflation; the request-surface error rate by category lives on
+`kdive_mcp_request_errors{tool,error_category}`. `error_category` values are bounded by
+`ErrorCategory`.
 
 ### 6. No schema / migration change
 

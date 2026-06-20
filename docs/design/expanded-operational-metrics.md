@@ -30,7 +30,8 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
 | D | `kdive.allocation.admission` | counter | server, reconciler | `outcome`, `reason` |
 | D | `kdive.allocation.wait` (s) | histogram | reconciler | — |
 | D | `kdive.host.capacity.used` / `kdive.host.capacity.total` | observable gauge | reconciler | `provider` |
-| E | `kdive.errors` | counter | server, worker, reconciler | `error_category` |
+| E | `kdive.errors` | counter | worker, reconciler | `error_category` |
+| E | `kdive.mcp.request.errors` (extend existing) | counter | server | `tool`, `outcome`, `error_category` |
 
 ## Labels (allowlist additions)
 
@@ -39,8 +40,8 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
 - `repair_kind` → `ALL_REPAIR_KINDS` (the full set of `_RepairSpec.name`, ~21).
 - `state` → `AllocationState` ∪ `SystemState` ∪ `RunState` ∪ `DebugSessionState`.
 - `error_category` → `ErrorCategory` (22).
-- `reason` → `_AdmissionReason` = {none, quota, budget, capacity, pcie, affinity,
-  queue_timeout}.
+- `reason` → `_AdmissionReason` = {none, quota, budget, capacity, affinity, pcie,
+  configuration, queue_timeout} (8).
 - `outcome` (already allowlisted) gains values {granted, rejected, queued}.
 
 ## Design details
@@ -62,7 +63,10 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
 
 - New `reconciler/fleet.py`: a `FleetSnapshot` dataclass and an async
   `read_fleet_snapshot(conn) -> FleetSnapshot` that runs grouped `COUNT(*)` queries:
-  - count-by-state for `allocations`, `systems`, `runs`, `debug_sessions`.
+  - count-by-state for `allocations`, `systems`, `runs`, `debug_sessions`. The snapshot
+    **seeds every state of each object's enum to 0** before applying the grouped counts, so a
+    state that drops to zero still emits a `0` series rather than vanishing (a grouped
+    `COUNT(*)` only returns states that currently have rows).
   - host capacity: occupying-allocation count per provider, and advertised
     `concurrent_allocation_cap` sum per provider (joined via the resource catalog).
 - `FleetTelemetry` (new, in `loop_telemetry.py` or a sibling) holds the cached snapshot and
@@ -80,30 +84,64 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
   `classify(outcome: AdmissionOutcome) -> tuple[str, str]` returning `(outcome, reason)`,
   and an `AdmissionMetrics` emitter (`record_decision(outcome)`, `record_wait(seconds)`,
   `disabled()`).
-- `classify` mapping:
-  - granted → (`granted`, `none`).
-  - `QUOTA_EXCEEDED` → (`rejected|queued`, `quota`) — `queued` when `queueable` and the
-    request enqueued, else `rejected`.
-  - `ALLOCATION_DENIED` + `reason=budget_exceeded` → (`rejected`, `budget`).
-  - `ALLOCATION_DENIED` + `reason=affinity_denied` → (`rejected`, `affinity`).
-  - `ALLOCATION_DENIED` host-cap (`reason=at_capacity`) → (`rejected|queued`, `capacity`).
-  - `CONFIGURATION_ERROR` PCIe → (`rejected`, `pcie`).
+- `_AdmissionReason` = {none, quota, budget, capacity, affinity, pcie, configuration,
+  queue_timeout} (8). `outcome` ∈ {granted, rejected, queued}.
+- `classify` keys on the **full outcome shape**, not the category alone, because the success
+  flag and the error categories are both overloaded:
+  - **`granted=True` and `allocation.state == GRANTED`** → (`granted`, `none`).
+  - **`granted=True` and `allocation.state == REQUESTED`** → (`queued`, `none`). A queueable
+    denial that `on_capacity=queue` enqueues returns a *success* outcome carrying a
+    `REQUESTED` allocation (`_enqueue` in `admission/core.py`), so `granted` alone cannot
+    distinguish a real grant from an enqueue — the allocation's state is the discriminator.
+  - `granted=False`, `QUOTA_EXCEEDED` → (`rejected`, `quota`) — covers both the grant-quota
+    and the pending-cap denial (both raise `QUOTA_EXCEEDED`).
+  - `granted=False`, `ALLOCATION_DENIED` + `reason == budget_exceeded` → (`rejected`,
+    `budget`).
+  - `granted=False`, `ALLOCATION_DENIED` + `reason == affinity_denied` → (`rejected`,
+    `affinity`).
+  - `granted=False`, `ALLOCATION_DENIED` + `reason == at_capacity` → (`rejected`,
+    `capacity`).
+  - `granted=False`, `ALLOCATION_DENIED` + PCIe-busy `reason` → (`rejected`, `pcie`).
+  - `granted=False`, `CONFIGURATION_ERROR` → (`rejected`, `configuration`). Both the
+    input-validation denial (`price_window_and_estimate`: bad window/size/over-caps) and the
+    PCIe-grammar denial raise `CONFIGURATION_ERROR` with no distinguishing reason, so they
+    fold into one operator-fixable `configuration` reason — they are **not** labeled `pcie`.
   - queue-timeout reaper → (`rejected`, `queue_timeout`).
-- Server: the allocations tool handler records the decision after `admit()` returns. Whether
-  the request was enqueued vs hard-denied is read from the returned outcome.
-- Reconciler: the promotion sweep records a `granted` decision + `record_wait(now -
-  created_at)` per promoted allocation; the queue-timeout sweep records a `queue_timeout`
-  rejection. These flow through `ReconcileConfig` like the other configured ports.
+  - Any unmatched `(category, reason)` → (`rejected`, `none`) with a one-line `warning` log,
+    so a new denial shape is visible rather than silently dropped.
+- Server: the allocations tool handler records the decision after `admit()` returns (reads
+  enqueue-vs-grant from the returned outcome's allocation state).
+- Reconciler: `allocation_promotion.promote_pending` and `reap_queue_timeouts` gain an
+  optional `metrics: AdmissionMetrics = AdmissionMetrics.disabled()` parameter. At the point
+  each candidate is promoted (it holds the `Allocation` row with `created_at`), the sweep
+  calls `record_decision` (granted) + `record_wait((now - created_at).total_seconds())`; the
+  timeout reaper calls `record_decision` (queue_timeout) per reaped row. The int count return
+  is unchanged. The reconciler wires the real `AdmissionMetrics` through `ReconcileConfig`
+  into the `promote_pending` / `reap_queue_timeouts` repair closures.
 
 ### E — error counter
 
-- `kdive.errors` counter created once per process meter.
-- Server: `TelemetryMiddleware.on_call_tool` already computes the result's `error_category`;
-  it increments the counter with that value (and on the raised-exception path under the most
-  specific category available, else `infrastructure_failure`).
-- Worker: the per-job dispatch records the counter when the job ends with a non-null
-  `error_category`.
-- Reconciler: §A failed-pass path.
+`kdive_errors_total{error_category}` counts categorized failures **at their origin**, so a
+single root cause is counted once — not once per poll. A worker job failure surfaces to the
+agent via `jobs.get`/`jobs.list`, which echo the job's `error_category` through
+`ToolResponse.from_job` on *every* poll; counting those echoes at the server middleware would
+inflate the count by the poll rate. The split:
+
+- **Server** — do **not** add a second server-side counter. Instead extend the existing
+  `kdive.mcp.request.errors` counter with an `error_category` label (added when the result
+  carries one), so the request surface gets a by-category breakdown of its per-call error
+  rate without any new double-counting. This counter already means "tool calls that returned
+  an error" (a RED rate signal), and an echoed `jobs.get` failure is a legitimate failed call
+  on that surface.
+- **Worker** — `kdive.errors` increments once when a job transitions to `FAILED` (the origin
+  of a job failure), labeled with the job's `error_category`.
+- **Reconciler** — `kdive.errors` increments under `infrastructure_failure` per repair named
+  in a pass's `failures` (§A).
+
+So `kdive_errors_total` is the **backend-origin** failure counter (worker + reconciler) with
+no poll inflation; the request-surface by-category error rate lives on
+`kdive_mcp_request_errors{tool,error_category}`. Both are honestly named for what one
+increment means.
 
 ## Testing
 
@@ -115,10 +153,14 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
   names; a failed repair increments `kdive.errors{infrastructure_failure}`.
 - **B + D-gauges**: `read_fleet_snapshot` against a seeded DB returns correct counts; the
   gauge callbacks emit from the cache; a stale cache keeps the last snapshot.
-- **D**: `classify` maps each `AdmissionOutcome` shape to the right `(outcome, reason)`;
-  the wait histogram records at promotion; the counter records at the tool boundary.
-- **E**: the middleware increments per category on a failing result and on a raised
-  exception; the worker increments on a failed job.
+- **D**: `classify` maps each `AdmissionOutcome` shape to the right `(outcome, reason)` —
+  including the enqueue case (`granted=True` + `REQUESTED` → `queued`), a validation
+  `CONFIGURATION_ERROR` → `configuration` (not `pcie`), and an unmatched shape →
+  `(rejected, none)`; the wait histogram records at promotion; the counter records at the
+  tool boundary.
+- **E**: the worker increments `kdive.errors` once on a job→`FAILED` transition (not per
+  poll); the reconciler increments under `infrastructure_failure` for a failed pass; the
+  server's `kdive.mcp.request.errors` carries the `error_category` label on a failing result.
 - Instruments render through `render_prometheus` end to end (collect the scrape reader,
   assert the new metric families appear).
 
