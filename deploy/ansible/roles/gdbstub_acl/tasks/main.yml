@@ -157,7 +157,12 @@
         executable: /bin/bash
       register: gdbstub_acl_ufw_prune
       changed_when: "'pruned=1' in gdbstub_acl_ufw_prune.stdout"
-      when: gdbstub_acl_ufw_enable | bool
+      # NOT gated on gdbstub_acl_ufw_enable: the allow/deny rule tasks above run
+      # unconditionally, so a worker_cidr change leaves a stale allow even when this run
+      # does not flip ufw active (enable=false, ufw enforced by other means). Pruning
+      # must track those tasks, not the enable flag, or the over-permission persists in
+      # that path. Safe when ufw is inactive: `ufw status numbered` lists no rules, the
+      # grep matches nothing, and the task is a no-op.
 
     - name: Read ufw status  # noqa: command-instead-of-module
       # Reading enforcement state; the ufw module sets rules, it has no is-active read.
