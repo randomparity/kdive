@@ -1,4 +1,4 @@
-"""Tests for the M0 domain records (`kdive.domain.models`)."""
+"""Tests for the M0 domain records owned by the bounded ``kdive.domain`` modules."""
 
 from __future__ import annotations
 
@@ -10,6 +10,13 @@ from typing import Any, TypedDict
 import pytest
 from pydantic import ValidationError
 
+from kdive.domain.accounting import (
+    Budget,
+    CostClassCoefficient,
+    LedgerEntry,
+    LedgerEventType,
+    Quota,
+)
 from kdive.domain.capacity.state import (
     AllocationState,
     DebugSessionState,
@@ -19,28 +26,20 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.artifacts import Artifact, Sensitivity
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import (
+from kdive.domain.lifecycle import (
     Allocation,
-    Artifact,
-    Budget,
-    CostClassCoefficient,
     DebugSession,
     ExpectedBootFailure,
     ExternalRef,
     Investigation,
-    Job,
-    JobKind,
-    LedgerEntry,
-    LedgerEventType,
-    Quota,
-    Resource,
-    ResourceKind,
     Run,
-    Sensitivity,
     System,
     SystemShape,
 )
+from kdive.domain.operations.jobs import Job, JobKind
 
 _NOW = dt.datetime(2026, 6, 3, 12, 0, tzinfo=dt.UTC)
 _ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
@@ -477,7 +476,7 @@ def test_allocation_failure_category_coerces_and_defaults() -> None:
 
     from kdive.domain.capacity.state import AllocationState
     from kdive.domain.errors import ErrorCategory
-    from kdive.domain.models import Allocation
+    from kdive.domain.lifecycle import Allocation
 
     base = {
         "id": uuid4(),

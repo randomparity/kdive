@@ -47,7 +47,7 @@ from tests.adversarial.conftest import (
 )
 
 if TYPE_CHECKING:
-    from kdive.domain.models import Resource
+    from kdive.domain.catalog.resources import Resource
 
 # The estimate one SMALL_SELECTOR (1 vcpu, 0 GB) prices to over a 1-hour window at the
 # seeded local coeff (1.0): rate 1.0 kcu/hr × 1 hr = 1 kcu. The budget tests size

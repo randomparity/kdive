@@ -31,6 +31,7 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
+from kdive.domain.accounting import Budget, Quota
 from kdive.domain.capacity.state import (
     AllocationState,
     InvestigationState,
@@ -38,16 +39,8 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
-from kdive.domain.models import (
-    Allocation,
-    Budget,
-    Investigation,
-    Quota,
-    Resource,
-    ResourceKind,
-    Run,
-    System,
-)
+from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.lifecycle import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.allocations.view import get_allocation
 from kdive.mcp.tools.lifecycle.runs.view import get_run

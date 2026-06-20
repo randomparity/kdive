@@ -26,17 +26,11 @@ from kdive.components.references import (
 from kdive.db import upload_manifest
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import (
-    Allocation,
-    Investigation,
-    Job,
-    JobKind,
-    Run,
-    Sensitivity,
-    System,
-)
+from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.models import HandlerRegistry

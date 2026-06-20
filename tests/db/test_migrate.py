@@ -13,8 +13,10 @@ import pytest
 
 from kdive.db import idempotency, migrate
 from kdive.db.provider_component_records import ComponentUploadState
-from kdive.domain import errors, models
+from kdive.domain import errors
 from kdive.domain.capacity import state
+from kdive.domain.catalog import images, resources
+from kdive.domain.operations import jobs
 
 # Each lifecycle/category CHECK constraint and the enum it must mirror (ADR-0015).
 CHECK_ENUMS = [
@@ -25,15 +27,15 @@ CHECK_ENUMS = [
     ("runs_state_check", state.RunState),
     ("debug_sessions_state_check", state.DebugSessionState),
     ("jobs_state_check", state.JobState),
-    ("jobs_kind_check", models.JobKind),
+    ("jobs_kind_check", jobs.JobKind),
     ("runs_failure_category_check", errors.ErrorCategory),
     ("jobs_error_category_check", errors.ErrorCategory),
     ("allocations_failure_category_check", errors.ErrorCategory),
-    ("image_visibility_check", models.ImageVisibility),
-    ("image_state_check", models.ImageState),
-    ("image_catalog_managed_by_check", models.ManagedBy),
-    ("resources_managed_by_check", models.ManagedBy),
-    ("build_hosts_managed_by_check", models.ManagedBy),
+    ("image_visibility_check", images.ImageVisibility),
+    ("image_state_check", images.ImageState),
+    ("image_catalog_managed_by_check", resources.ManagedBy),
+    ("resources_managed_by_check", resources.ManagedBy),
+    ("build_hosts_managed_by_check", resources.ManagedBy),
     ("run_steps_state_check", idempotency._RunStepState),
     ("component_uploads_state_check", ComponentUploadState),
 ]

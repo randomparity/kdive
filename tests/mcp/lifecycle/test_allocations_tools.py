@@ -845,7 +845,7 @@ def test_failed_envelope_reports_failure_category_else_infrastructure() -> None:
 
     from kdive.domain.capacity.state import AllocationState
     from kdive.domain.errors import ErrorCategory
-    from kdive.domain.models import Allocation
+    from kdive.domain.lifecycle import Allocation
 
     _id = uuid4()
     _now = datetime.now(UTC)

@@ -386,7 +386,7 @@ from collections.abc import Sequence  # noqa: E402
 from datetime import timedelta  # noqa: E402
 
 from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
-from kdive.domain.models import Sensitivity  # noqa: E402
+from kdive.domain.catalog.artifacts import Sensitivity  # noqa: E402
 
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))

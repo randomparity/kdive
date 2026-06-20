@@ -81,8 +81,8 @@ from psycopg.types.json import Jsonb  # noqa: E402
 
 from kdive.artifacts.storage import HeadResult  # noqa: E402
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry  # noqa: E402
+from kdive.domain.catalog.artifacts import Sensitivity  # noqa: E402
 from kdive.domain.errors import CategorizedError, ErrorCategory  # noqa: E402
-from kdive.domain.models import Sensitivity  # noqa: E402
 from kdive.services.runs.steps import BuildStepResult  # noqa: E402
 
 _CHUNKED = ManifestEntry("kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3)))

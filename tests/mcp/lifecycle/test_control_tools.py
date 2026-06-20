@@ -30,16 +30,8 @@ from kdive.domain.capacity.state import (
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import (
-    Allocation,
-    DebugSession,
-    Investigation,
-    Job,
-    JobKind,
-    PowerAction,
-    Run,
-    System,
-)
+from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
+from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.handlers import control as control_plane
 from kdive.jobs.models import HandlerRegistry

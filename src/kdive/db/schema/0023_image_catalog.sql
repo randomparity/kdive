@@ -1,7 +1,7 @@
 -- 0023_image_catalog.sql — M2.4 image & rootfs lifecycle (ADR-0092, ADR-0093).
 -- The single M2.4 migration: the full public + private image_catalog schema. The DB-backed
 -- catalog replaces the read-only YAML rootfs catalog as the single source of truth. Mirrors
--- ImageCatalogEntry + ImageVisibility/ImageState in domain/models.py; named CHECKs encode the
+-- ImageCatalogEntry + ImageVisibility/ImageState in domain/catalog/images.py; named CHECKs encode the
 -- closed value sets (tied to the enums by tests/db/test_migrate.py). Columns the later M2.4
 -- issues (#285/#286/#287) consume — owner, expires_at, pending_since, state — are authored here
 -- so no later issue adds a second migration (the single-migration-owner rule).

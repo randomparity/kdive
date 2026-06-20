@@ -310,7 +310,7 @@ def test_default_resolver_registers_only_local_libvirt(
 def test_enabling_fault_inject_registers_both_kinds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kdive.domain.models import ResourceKind
+    from kdive.domain.catalog.resources import ResourceKind
 
     _declare_no_remote(tmp_path, monkeypatch)
     resolver = composition.ProviderComposition().build_provider_resolver(enable_fault_inject=True)
@@ -390,7 +390,7 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
     import asyncio
     from uuid import UUID
 
-    from kdive.domain.models import ResourceKind
+    from kdive.domain.catalog.resources import ResourceKind
 
     owner = composition.ProviderComposition()
     resolver = owner.build_provider_resolver(enable_fault_inject=True)
@@ -611,7 +611,7 @@ def test_console_hosting_delegates_to_remote_when_enabled(
 
 
 def test_fault_inject_opt_in_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kdive.domain.models import ResourceKind
+    from kdive.domain.catalog.resources import ResourceKind
 
     monkeypatch.setenv("KDIVE_FAULT_INJECT", "1")
 

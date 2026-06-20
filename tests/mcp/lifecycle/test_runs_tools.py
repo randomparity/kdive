@@ -29,17 +29,10 @@ from kdive.domain.capacity.state import (
     RunState,
     SystemState,
 )
+from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.models import (
-    Allocation,
-    Investigation,
-    Job,
-    JobKind,
-    Resource,
-    ResourceKind,
-    Run,
-    System,
-)
+from kdive.domain.lifecycle import Allocation, Investigation, Run, System
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.domain.pcie import PCIeClaim
 from kdive.jobs.handlers import runs as runs_handlers
 from kdive.jobs.handlers import runs_boot, runs_shared

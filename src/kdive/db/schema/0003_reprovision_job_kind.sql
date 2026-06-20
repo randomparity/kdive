@@ -1,6 +1,6 @@
 -- 0003_reprovision_job_kind.sql — M1 reprovision-in-place job kind (ADR-0038).
 -- Additive to 0002 (forward-only, ADR-0015). Widens the jobs.kind CHECK to admit the
--- `reprovision` op (systems.reprovision enqueues it); mirrors JobKind in domain/models.py.
+-- `reprovision` op (systems.reprovision enqueues it); mirrors JobKind in domain/operations/jobs.py.
 -- No behavior — issue ⑦ wires systems.reprovision and the handler. Drop-and-recreate
 -- keeps the constraint name stable for the SQL↔enum tie (tested in test_migrate.py).
 ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check;
