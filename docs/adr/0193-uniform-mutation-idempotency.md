@@ -115,16 +115,21 @@ Replay therefore always returns a prior *success*.
 
 - **Principal-scoped.** Resolution and recording filter on `ctx.principal`; the PK
   `(principal, key)` means one tenant's key can never resolve another's envelope.
-- **Concurrent duplicates** are serialized by the PK: two same-key calls that both miss the
-  up-front read both attempt the work; the first to commit wins, the loser's
-  `record_envelope` INSERT raises `UniqueViolation` → `CONFLICT`, and its transaction rolls
-  back (no second object). This is the ADR-0040 §3 contract; the loser retries and now
-  hits the recorded replay.
-- **Cross-tool key reuse is rejected within a tool only by construction**, not across tools:
-  because `kind` is part of the lookup but not the PK, the *same* `(principal, key)` used on
-  two different tools collides on the PK and the second tool's record raises `CONFLICT`. This
-  is acceptable and safe (fail-closed): a client should use a fresh key per logical
-  operation. Documented in the envelope guide.
+- **Concurrent duplicates** are serialized by the PK (read-after-conflict): two same-key
+  calls that both miss the up-front read both attempt the work; the first to commit wins. The
+  loser's `record_envelope` INSERT raises `UniqueViolation`; the loser rolls back (no second
+  object), **re-resolves** the replay on a fresh read, and returns the *winner's* envelope —
+  not a bare `CONFLICT`. This is strictly better UX than ADR-0040 §3's loser-gets-an-error
+  (and is not in tension with it — ADR-0040 governs the allocation path, untouched here):
+  a client that legitimately retried the same operation under a race still gets its replay.
+- **Cross-tool key reuse** is the genuine misuse path: the *same* `(principal, key)` on two
+  different tools collides on the PK; the loser's re-resolve under the second tool's `kind`
+  finds nothing, so it surfaces `CONFLICT` (fail-closed). A client should use a fresh key per
+  logical operation. Documented in the envelope guide.
+- **Key bounds.** A supplied key is validated `≤ 200` chars and non-empty before any DB work
+  (`configuration_error` otherwise); the key is a client-controlled `text` PK component, so an
+  unbounded value is a storage/PK-bloat vector. The shared helper is the single enforcement
+  point for the generalized surface (the allocation path is not retro-bounded by this ADR).
 
 ### 5. Retention / GC
 

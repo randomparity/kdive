@@ -66,9 +66,33 @@ async def record_envelope(
 ) -> None:
     """Persist `envelope` for (principal, key) in the caller's transaction.
 
-    Raises CategorizedError(CONFLICT) on the (principal, key) PK UniqueViolation.
+    Lets psycopg's UniqueViolation propagate on the (principal, key) PK so the caller
+    can roll back and re-resolve (read-after-conflict); it does NOT itself map to a
+    category (mapping happens at the handler's catch boundary, outside the aborted txn).
     """
+
+def validate_idempotency_key(key: str) -> None:
+    """Raise CategorizedError(CONFIGURATION_ERROR) if `key` is empty or > 200 chars."""
 ```
+
+The catch/rollback/re-resolve dance (invariant 5) is the handler's responsibility, but is
+identical everywhere, so it lives in the helper too:
+
+```python
+async def record_or_resolve(
+    conn: AsyncConnection, *, principal: str, key: str, project: str,
+    kind: str, envelope: ToolResponse
+) -> ToolResponse:
+    """Record `envelope` under (principal, key); on a PK collision re-resolve and
+    return the prior envelope. Returns the stored/own envelope, or raises
+    CategorizedError(CONFLICT) only when the colliding row is a different `kind`."""
+```
+
+Topology-1 handlers run their enqueue + `record_envelope` inside one `conn.transaction()`,
+catch `UniqueViolation` *outside* that block, then re-resolve. Topology-2 services do the
+same around their insert transaction. `record_or_resolve` is the shared sequence; a handler
+that must enqueue-then-record in one transaction wraps the transaction in the try and calls
+`resolve_envelope_replay` in the except.
 
 - `result` jsonb shape: `{"envelope": envelope.model_dump(mode="json")}`. Replay rebuilds
   via `ToolResponse.model_validate(row["result"]["envelope"])`.
@@ -80,50 +104,89 @@ async def record_envelope(
   mutation `CONFLICT` is the more specific "key already in use under a different in-flight or
   completed operation").
 
-### Handler integration pattern
+### Handler integration: two distinct connection topologies
 
-Every in-scope handler follows the same shape:
+The in-scope handlers do **not** share one connection structure, so the integration is
+described per topology rather than as a single snippet. In both, the success envelope is
+built from the inserted row / enqueued job *before* the committing transaction closes (the
+handlers already do this), and the record is committed in the **same transaction** as the
+durable effect.
+
+**Topology 1 — handler owns the connection (job-enqueue tools).**
+`runs.build`, `runs.install`, `runs.boot`, `vmcore.fetch`, `control.*`,
+`systems.provision_defined`, `systems.reprovision`, `systems.teardown` already open
+`async with pool.connection() as conn` in the handler and do the work inside a
+`conn.transaction()` (e.g. `_build_locked`). Both integration points use that same `conn`:
 
 ```python
-async def handler(pool, ctx, ..., idempotency_key: str | None = None) -> ToolResponse:
-    # ... validate inputs (cheap, no DB) ...
-    async with pool.connection() as conn:
-        if idempotency_key is not None:
-            replay = await resolve_envelope_replay(
-                conn, principal=ctx.principal, key=idempotency_key, kind=_KIND)
-            if replay is not None:
-                return replay
-        # ... existing authz + work, opening conn.transaction() to commit the object/job ...
-        # inside that SAME transaction, after building `envelope`:
+async with pool.connection() as conn:
+    obj = await load_and_authorize(conn, ...)   # run/system + RBAC (existing)
+    if idempotency_key is not None:
+        replay = await resolve_envelope_replay(
+            conn, principal=ctx.principal, key=idempotency_key, kind=_KIND)
+        if replay is not None:
+            return replay
+    async with conn.transaction():              # existing commit/enqueue block
+        job = await enqueue(...)                 # existing
+        envelope = job_envelope(job, ...)        # existing
         if idempotency_key is not None:
             await record_envelope(
                 conn, principal=ctx.principal, key=idempotency_key,
-                project=project, kind=_KIND, envelope=envelope)
-        return envelope
+                project=obj.project, kind=_KIND, envelope=envelope)
+    return envelope
 ```
 
-Two integration points per handler:
-1. **Up-front replay** — a read on the pooled connection before any lock/work. On a hit,
-   short-circuit; nothing is locked, no job enqueued, no row inserted.
-2. **In-transaction record** — `record_envelope` is called inside the existing
-   `conn.transaction()` that commits the durable object / enqueues the job, so the key and
-   the effect are atomic. The success envelope must be *constructed before* the transaction
-   commits (it already is — the handlers build the envelope from the inserted row / enqueued
-   job before returning).
+`project` is sourced from the already-loaded object (`run.project` / `system.project`).
 
-For the **object-creating** services (`create_run`, `SystemAdmission.create_for_allocation`,
-`open_investigation`), `idempotency_key` and `ctx.principal` thread from the registrar →
-handler → the function owning the insert transaction. The replay check stays at the handler
-boundary (one connection, opened once).
+**Topology 2 — the service owns the connection (object-creating tools).**
+`runs.create` (`create_run(pool, …)`), `systems.{provision,define}`
+(`SystemAdmission.create_for_allocation(pool, …)`), and `investigations.open` open their
+connection *inside the service*, not in the MCP adapter. For these the record **cannot** be
+done from the adapter — it must run inside the service's own insert transaction. Therefore:
 
-For the **job-enqueuing** handlers, the enqueue already happens inside a `conn.transaction()`
-(e.g. `_build_locked`); `record_envelope` is added in that block after the job is enqueued
-and the envelope built.
+- the service function gains `idempotency_key: str | None` and `principal: str` parameters,
+  threaded from the registrar → MCP adapter → service;
+- the **up-front replay** is done by the service at the top, on the connection it opens,
+  before it takes any lock or inserts (a hit returns the stored envelope and the service
+  never enters its insert path);
+- the **record** is the last statement inside the service's existing insert
+  `conn.transaction()`, using the `project` the service has already resolved (from the
+  Allocation for systems/`runs.create`, from the `project` argument for investigations) and
+  the success envelope the service builds.
 
-`control.power`: when `idempotency_key` is supplied, the job dedup key becomes
+This keeps the read+write on the one connection the service already owns; the MCP adapter
+does **not** open a second connection. The replay-read being un-transactioned (autocommit)
+is fine — it is a point read; correctness rests on the in-transaction record + the PK, not
+on the read's isolation (see Concurrent-duplicate below).
+
+**`control.power`**: when `idempotency_key` is supplied, the job dedup key becomes
 `f"{system_id}:power:{action}:{idempotency_key}"` (replacing the `uuid4()`); the envelope is
 recorded under `kind="control.power"`. Absent, the `uuid4()` path is unchanged and nothing
 is recorded.
+
+### Key validation
+
+`idempotency_key`, when supplied, is bounded to **≤ 200 characters** and non-empty;
+a longer or empty key is a `configuration_error` returned *before* any DB work (the key is a
+client-controlled `text` PK component, so an unbounded value is a storage/PK-bloat vector).
+The bound is checked in the shared helper's caller path (a small
+`validate_idempotency_key(key) -> None` in the helper module) so every tool enforces it
+identically. (The existing allocation path is not retro-bounded by this spec; the new helper
+is the single enforcement point for the generalized surface.)
+
+### Concurrent-duplicate resolution (read-after-conflict)
+
+Two same-key calls can both miss the up-front read and both attempt the work. The first to
+commit wins. The loser's `record_envelope` INSERT hits the `(principal, key)` PK and raises
+`UniqueViolation`. Rather than surfacing a bare `CONFLICT` to a client that legitimately
+retried the *same* operation, the loser **catches the `UniqueViolation`, rolls back its own
+transaction (so no second object/job), re-runs `resolve_envelope_replay` on a fresh
+read, and returns the winner's stored envelope** — the same envelope a later retry would
+get. A `CONFLICT` error is returned only if, after the rollback, the re-resolve finds no
+envelope (i.e. the colliding row is a *different* tool's key — invariant 6), which is the
+genuine cross-operation-reuse misuse, not a self-race. The helper exposes this as a single
+`record_or_replay(conn, …, run_work_envelope)`-style path so each handler does not
+re-implement the catch/rollback/re-resolve dance.
 
 ### Registrar changes
 
@@ -153,16 +216,25 @@ added input field.
    subsequent corrected call with the same key proceeds and succeeds.
 4. **Principal scope.** Principal A's key never resolves principal B's envelope (same key
    string, different principal ⇒ miss, then a fresh record).
-5. **Concurrent duplicate.** Two same-key calls that both miss the up-front read ⇒ one
-   commits, the other's `record_envelope` raises `CONFLICT` and rolls back (no second
-   object); a third call with that key now replays the winner's envelope.
-6. **Cross-tool key reuse** ⇒ the second tool's record raises `CONFLICT` (PK is
-   `(principal, key)`, not `(principal, key, kind)`).
+5. **Concurrent duplicate (read-after-conflict).** Two same-key calls that both miss the
+   up-front read ⇒ one commits; the loser's `record_envelope` raises `UniqueViolation`, the
+   loser's transaction rolls back (no second object/job), the loser **re-resolves** the
+   replay and returns the *winner's* envelope — not a `CONFLICT` error. The catch+re-resolve
+   is outside the aborted transaction (a fresh read), since a Postgres transaction cannot
+   issue further queries after an error until rollback. The test asserts both callers return
+   the identical envelope and exactly one object/job exists.
+6. **Cross-tool key reuse.** The same `(principal, key)` on two *different* tools: the second
+   tool's record raises `UniqueViolation`; the re-resolve under the second tool's `kind`
+   finds nothing (the row's `kind` differs), so it surfaces `CONFLICT` (PK is
+   `(principal, key)`, not `(principal, key, kind)`). This is the genuine misuse path,
+   distinct from invariant 5's self-race.
 7. **Unkeyed unchanged.** `idempotency_key=None` ⇒ today's behavior exactly (no read, no
    record); two unkeyed calls create two objects.
 8. **GC window.** A key older than the retention window is GC'd; a repeat after GC is a fresh
    request (covered by the existing `gc_idempotency_keys` test extended for a non-allocation
    `kind`).
+9. **Key bounds.** An empty key or a key > 200 chars ⇒ `configuration_error` before any DB
+   work; no row inserted, no object created.
 
 ## Acceptance-test outline
 
