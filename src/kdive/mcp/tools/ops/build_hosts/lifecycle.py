@@ -2,7 +2,8 @@
 
 ``list`` is ``platform_auditor``-gated: returns id, name, kind, address,
 ssh_credential_ref (the reference string only — never key bytes), workspace_root,
-max_concurrent, enabled, and state for every row in ``build_hosts``.
+max_concurrent, enabled, state, and ``resolves`` (whether the host backs a declared
+``[[remote_libvirt]]`` instance, ADR-0195) for every row in ``build_hosts``.
 
 ``disable`` and ``remove`` are ``platform_admin``-gated mutating ops. Both reject the
 protected ``worker-local`` seed (CONFLICT). ``remove`` also rejects a host that still
@@ -30,7 +31,11 @@ from kdive.mcp.tools.ops import _reads
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, require_platform_role
-from kdive.services.runs.build_host_selection import accepted_source_kinds
+from kdive.services.runs.build_host_selection import (
+    accepted_source_kinds,
+    build_host_resolves,
+    declared_remote_instance_names,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -81,6 +86,10 @@ async def list_build_hosts(
             rows = await cur.fetchall()
         await _reads.record_read(conn, ctx, tool=LIST_TOOL, args=args)
 
+    # Resolved once per call (not per row): an ephemeral_libvirt host resolves only when a
+    # [[remote_libvirt]] instance of the same name is declared (ADR-0195, #626); a missing or
+    # malformed systems.toml degrades to an empty set, so such a host reports resolves=false.
+    declared = declared_remote_instance_names()
     items = [
         ToolResponse.success(
             str(row["id"]),
@@ -95,6 +104,9 @@ async def list_build_hosts(
                 "max_concurrent": str(row["max_concurrent"]),
                 "enabled": str(row["enabled"]).lower(),
                 "state": row["state"],
+                "resolves": str(
+                    build_host_resolves(BuildHostKind(row["kind"]), row["name"], declared)
+                ).lower(),
                 "supported_source_kinds": [
                     kind.value for kind in accepted_source_kinds(BuildHostKind(row["kind"]))
                 ],

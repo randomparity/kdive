@@ -77,7 +77,7 @@ def _profile_of(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_one_item_per_host_with_name_object_id() -> None:
-    resp = build_host_profile_examples(_ALL_KINDS)
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     assert resp.status == "ok"
     items = _items(resp)
     assert set(items) == {"worker-local", "ssh-host", "eph-host"}
@@ -87,7 +87,7 @@ def test_one_item_per_host_with_name_object_id() -> None:
 
 
 def test_every_example_parses_as_server_build_profile() -> None:
-    resp = build_host_profile_examples(_ALL_KINDS)
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     for data in _items(resp).values():
         parsed = BuildProfile.parse(_profile_of(data))
         assert isinstance(parsed, ServerBuildProfile)
@@ -95,7 +95,7 @@ def test_every_example_parses_as_server_build_profile() -> None:
 
 
 def test_source_form_matches_advertised_kind() -> None:
-    resp = build_host_profile_examples(_ALL_KINDS)
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     for data in _items(resp).values():
         parsed = BuildProfile.parse(_profile_of(data))
         assert isinstance(parsed, ServerBuildProfile)
@@ -106,7 +106,7 @@ def test_source_form_matches_advertised_kind() -> None:
 
 
 def test_advertised_kinds_match_shared_helper() -> None:
-    resp = build_host_profile_examples(_ALL_KINDS)
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     items = _items(resp)
     for host in _ALL_KINDS:
         expected = [k.value for k in accepted_source_kinds(host.kind)]
@@ -114,7 +114,7 @@ def test_advertised_kinds_match_shared_helper() -> None:
 
 
 def test_examples_are_compatible_with_their_host() -> None:
-    resp = build_host_profile_examples(_ALL_KINDS)
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     for host in _ALL_KINDS:
         data = _items(resp)[host.name]
         parsed = BuildProfile.parse(_profile_of(data))
@@ -126,7 +126,7 @@ def test_examples_are_compatible_with_their_host() -> None:
 
 
 def test_local_uses_string_remote_uses_git_object() -> None:
-    resp = build_host_profile_examples(_ALL_KINDS)
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     items = _items(resp)
     assert isinstance(_profile_of(items["worker-local"])["kernel_source_ref"], str)
     for remote in ("ssh-host", "eph-host"):
@@ -137,15 +137,29 @@ def test_local_uses_string_remote_uses_git_object() -> None:
 
 
 def test_collection_chains_into_runs_create_and_build() -> None:
-    resp = build_host_profile_examples(_ALL_KINDS)
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
     assert resp.suggested_next_actions == ["runs.create", "runs.build"]
 
 
 def test_empty_host_list_is_valid_empty_collection() -> None:
-    resp = build_host_profile_examples([])
+    resp = build_host_profile_examples([], declared_instances=[])
     assert resp.status == "ok"
     assert resp.items == []
     assert resp.data["count"] == 0
+
+
+def test_unresolvable_ephemeral_host_is_omitted() -> None:
+    # eph-host names no declared [[remote_libvirt]] instance: it cannot build, so no example.
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=[])
+    names = {item.object_id for item in resp.items}
+    assert "eph-host" not in names
+    assert {"worker-local", "ssh-host"} <= names
+
+
+def test_resolvable_ephemeral_host_is_emitted() -> None:
+    resp = build_host_profile_examples(_ALL_KINDS, declared_instances=["eph-host"])
+    names = {item.object_id for item in resp.items}
+    assert "eph-host" in names
 
 
 # --- registrar boundary + pool-backed behavior ---

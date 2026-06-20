@@ -19,10 +19,16 @@ schema-valid as emitted (it parses via ``BuildProfile.parse`` and survives
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from kdive.db.build_hosts import BuildHost
 from kdive.mcp.responses import ToolResponse
 from kdive.serialization import JsonValue
-from kdive.services.runs.build_host_selection import SourceKind, accepted_source_kinds
+from kdive.services.runs.build_host_selection import (
+    SourceKind,
+    accepted_source_kinds,
+    build_host_resolves,
+)
 
 _OBJECT_ID = "profile-examples"
 
@@ -42,21 +48,34 @@ _NOTE = (
 )
 
 
-def build_host_profile_examples(hosts: list[BuildHost]) -> ToolResponse:
+def build_host_profile_examples(
+    hosts: list[BuildHost], declared_instances: Collection[str]
+) -> ToolResponse:
     """Build the example-build-profiles collection from a list of build hosts.
+
+    Omits any host that does not resolve to a declared ``[[remote_libvirt]]`` instance — an
+    ``ephemeral_libvirt`` host whose name names no instance (ADR-0195, #626) — so every emitted
+    example is buildable for its host. ``local`` and ``ssh`` hosts always resolve.
 
     Args:
         hosts: The registered build-host rows (e.g. from
             :func:`~kdive.db.build_hosts.list_all_hosts`). A migrated database always has
             at least the seeded ``worker-local`` row, so the collection is normally
             non-empty; an empty list yields a valid empty collection.
+        declared_instances: The declared ``[[remote_libvirt]]`` instance names (from
+            :func:`~kdive.services.runs.build_host_selection.declared_remote_instance_names`),
+            used to drop ``ephemeral_libvirt`` hosts with no backing instance.
 
     Returns:
-        A :class:`ToolResponse` collection with one item per host; each item's ``data``
-        carries ``build_host``, ``host_kind``, ``supported_source_kinds``, the ready-to-edit
-        ``profile`` dict, and a ``note``.
+        A :class:`ToolResponse` collection with one item per *resolving* host; each item's
+        ``data`` carries ``build_host``, ``host_kind``, ``supported_source_kinds``, the
+        ready-to-edit ``profile`` dict, and a ``note``.
     """
-    items = [_example_item(host) for host in hosts]
+    items = [
+        _example_item(host)
+        for host in hosts
+        if build_host_resolves(host.kind, host.name, declared_instances)
+    ]
     return ToolResponse.collection(
         _OBJECT_ID,
         "ok",
