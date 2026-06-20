@@ -113,6 +113,21 @@ def test_check_id_and_vantage() -> None:
     assert check.vantage is Vantage.SERVER
 
 
+def test_resource_id_defaults_to_none() -> None:
+    check = RemoteLibvirtReachabilityCheck(
+        provider=_PROVIDER, probe=_probe(ReachabilityOutcome.REACHABLE)
+    )
+    assert asyncio.run(check.run()).resource_id is None
+
+
+def test_resource_id_is_stamped_on_every_outcome() -> None:
+    for outcome in ReachabilityOutcome:
+        check = RemoteLibvirtReachabilityCheck(
+            provider=_PROVIDER, resource_id="ub26", probe=_probe(outcome)
+        )
+        assert asyncio.run(check.run()).resource_id == "ub26"
+
+
 # ---- production probe adapter (libvirt boundary mocked) ------------------------------
 
 

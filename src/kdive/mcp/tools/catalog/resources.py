@@ -154,9 +154,11 @@ async def describe_resource(
     """Return one resource's envelope with pool/cost_class/host_uri, or an error.
 
     For a remote-libvirt resource, also report ``staged_base_images``: each caller-visible staged
-    base-image volume and whether it is staged on the host's pool (ADR-0156). The live probe runs
-    only after the DB connection is released, and degrades to a per-volume status — it never fails
-    the describe.
+    base-image volume and whether it is staged on the host's pool (ADR-0156). The live probe is
+    bound to the described host (``for_resource``, ADR-0187/0194) so a reachable host reports a real
+    ``staged``/``absent``/``pool_absent`` status; ``"unknown"`` means the probe could not run. The
+    probe runs only after the DB connection is released, and degrades to a per-volume status — it
+    never fails the describe.
     """
     try:
         uid = UUID(resource_id)
@@ -176,7 +178,7 @@ async def describe_resource(
         envelope.data["cost_class"] = resource.cost_class
         envelope.data["host_uri"] = resource.host_uri
         if resource.kind is ResourceKind.REMOTE_LIBVIRT:
-            probe = staged_probe or _runtime_staged_probe(resolver, resource.kind)
+            probe = staged_probe or _runtime_staged_probe(resolver, resource.kind, resource.name)
             statuses = (
                 await probe([volume for _, volume in staged_images])
                 if probe is not None and staged_images
@@ -191,12 +193,22 @@ async def describe_resource(
 
 
 def _runtime_staged_probe(
-    resolver: ProviderResolver | None, kind: ResourceKind
+    resolver: ProviderResolver | None, kind: ResourceKind, name: str | None
 ) -> StagedVolumeProbe | None:
+    """Resolve the staged-volume probe bound to the described host (ADR-0187, ADR-0194).
+
+    A present ``name`` binds the runtime to that host via ``for_resource`` so the probe connects to
+    the described resource — without it the unbound remote-libvirt runtime's ``config_factory`` is
+    ``unbound_remote_config`` and degrades every volume to ``"unknown"``. A ``None`` name (a
+    non-reconciled resource row) keeps the prior unbound behavior.
+    """
     if resolver is None:
         return None
     try:
-        return resolver.resolve(kind).staged_volume_probe
+        runtime = resolver.resolve(kind)
+        if name is not None:
+            runtime = runtime.for_resource(name)
+        return runtime.staged_volume_probe
     except CategorizedError:
         return None
 
