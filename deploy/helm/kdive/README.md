@@ -144,6 +144,65 @@ The MCP `8000` Service defaults to `ClusterIP` (`kubectl port-forward` to reach 
 `service.type=NodePort` — optionally pinning `service.nodePort` — or front it with an
 Ingress/LoadBalancer to expose it outside the cluster.
 
+### Bundled Prometheus (opt-in — ADR-0189)
+
+Nothing scrapes the `/metrics` above by default. Set `bundledObservability=true` to deploy an
+in-cluster Prometheus that discovers all three components via the `prometheus.io/scrape`
+annotations and collects them:
+
+```sh
+helm upgrade --install kdive deploy/helm/kdive ... --set bundledObservability=true
+```
+
+It is independent of `bundledBackends` (the scrape targets are the app pods, present on both the
+demo and external-backend paths) and **off by default** — production installs are BYO (below).
+It renders a `ServiceAccount`, a **namespaced** `Role`/`RoleBinding` (only `get`/`list`/`watch`
+on `pods`, scoped to the release namespace), the scrape-config `ConfigMap`, the Prometheus
+`Deployment`, and a `ClusterIP` Service on `9090`. Reach the UI and confirm targets:
+
+```sh
+kubectl port-forward svc/<release>-kdive-prometheus 9090:9090
+# open http://localhost:9090/targets — all three components (server/worker/reconciler) should be UP
+# then query e.g. kdive_job_queue_depth to confirm kdive_* series are present
+```
+
+Defaults match the bundled demo posture: `emptyDir` storage (a Prometheus pod restart drops
+history) and short retention. Override `observability.retention`, `observability.scrapeInterval`,
+and `observability.image` as needed; for durable storage swap the `emptyDir` for a PVC (edit
+`templates/demo/prometheus.yaml`). The Prometheus Service is `9090`-only — the unauthenticated
+aux `/metrics` is never re-exposed off the cluster (keep it that way; do not NodePort/Ingress it).
+
+**BYO Prometheus (production / operator clusters).** Two paths, both relying on the
+`prometheus.io/*` annotations the chart already emits — leave `bundledObservability=false`:
+
+- An existing **annotation-discovery** Prometheus (the common `kubernetes_sd_configs` pod-role
+  setup) already picks up the kdive pods; no chart change needed.
+- A cluster running the **Prometheus Operator** — add a `PodMonitor` (not templated here, to
+  avoid a CRD dependency on stock clusters). Each process exposes a different aux port and the
+  port is not a named container port, so target each by number with one endpoint per port:
+
+  ```yaml
+  apiVersion: monitoring.coreos.com/v1
+  kind: PodMonitor
+  metadata:
+    name: kdive
+  spec:
+    selector:
+      matchLabels:
+        app.kubernetes.io/name: kdive
+    podMetricsEndpoints:
+      - targetPort: 9464   # server
+        path: /metrics
+      - targetPort: 9465   # worker
+        path: /metrics
+      - targetPort: 9466   # reconciler
+        path: /metrics
+  ```
+
+  (Each endpoint targets every selected pod, so the two ports a given pod does not listen on
+  show as down — harmless. To avoid that, reuse the bundled chart's annotation-relabeling job
+  from `templates/demo/prometheus-config.yaml` as an Operator `additionalScrapeConfigs` instead.)
+
 ## Secrets
 
 `config.*` renders into a plain ConfigMap, so it is for **non-secret** configuration

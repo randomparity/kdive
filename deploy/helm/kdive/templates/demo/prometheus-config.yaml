@@ -1,0 +1,41 @@
+{{- if .Values.bundledObservability }}
+# Scrape config for the opt-in Prometheus (ADR-0189), in its own file so the Deployment in
+# prometheus.yaml can hash it into a checksum/config annotation without a self-referential
+# include. Annotation discovery: keep pods with prometheus.io/scrape=true, take the metrics path
+# and port from the prometheus.io/path & prometheus.io/port annotations the chart already stamps.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus-config
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.observability.scrapeInterval }}
+    scrape_configs:
+      - job_name: kdive-pods
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [{{ .Release.Namespace }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            target_label: __address__
+            regex: (.+);(.+)
+            replacement: $1:$2
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            target_label: app
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+{{- end }}

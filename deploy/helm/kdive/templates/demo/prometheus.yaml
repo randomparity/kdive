@@ -1,0 +1,99 @@
+{{- if .Values.bundledObservability }}
+# Opt-in in-cluster Prometheus (ADR-0189): scrapes the per-process aux /metrics (ADR-0090 §5)
+# via the prometheus.io/scrape annotations the chart stamps on every component pod. emptyDir +
+# short retention (demo posture); ClusterIP only — reach the UI with `kubectl port-forward`.
+# The scrape-config ConfigMap is in demo/prometheus-config.yaml (separate file: the checksum
+# annotation below hashes it, which would recurse if it lived here).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+---
+# Namespaced pod-read for kubernetes_sd_configs (role: pod). A Role (not ClusterRole) keeps the
+# blast radius to the release namespace, which is also where the SD job is scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kdive.fullname" . }}-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kdive.fullname" . }}-prometheus
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ include "kdive.fullname" . }}-prometheus
+  template:
+    metadata:
+      labels:
+        app: {{ include "kdive.fullname" . }}-prometheus
+        {{- include "kdive.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/demo/prometheus-config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "kdive.fullname" . }}-prometheus
+      containers:
+        - name: prometheus
+          image: {{ .Values.observability.image }}
+          args:
+            # No --web.enable-lifecycle: the checksum/config annotation below rolls the pod on a
+            # scrape-config change, so a runtime reload endpoint (and its /-/quit) is unused surface.
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ .Values.observability.retention }}
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kdive.fullname" . }}-prometheus-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kdive.fullname" . }}-prometheus
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "kdive.fullname" . }}-prometheus
+  ports:
+    - port: {{ .Values.observability.uiPort }}
+      targetPort: 9090
+{{- end }}
