@@ -21,7 +21,7 @@ reliable: both fetch exactly `_MAX_ROWS` (500) and set `truncated` when
 
 Each list already orders by a stable, total sort key: `(created_at, id)` for the
 allocation/system/job/investigation/resource families (`id` a UUID tiebreaker),
-`(ts, id)` for `audit.query` (`id` a bigint), and a natural key
+`(ts, id)` for `audit.query` (`id` a UUID), and a natural key
 (`provider, name, arch`) for `images.list`. `artifacts.list` returns the artifacts of a
 single System (a naturally small, system-bounded set). `inventory.list` returns **two**
 independent streams (allocations + systems) in one envelope.

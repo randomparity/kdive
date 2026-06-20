@@ -29,8 +29,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
-from kdive.mcp.responses import ToolResponse
+from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.tools.ops import _reads
 from kdive.security.authz.context import RequestContext
@@ -45,7 +51,7 @@ from kdive.security.authz.rbac import (
 
 _TOOL = "audit.query"
 _OBJECT_ID = "audit.query"
-_MAX_ROWS = 500
+_LIST_TAG = "audit.query"
 
 
 class _AuditQueryFilters(BaseModel):
@@ -85,6 +91,8 @@ async def query_project(
     ctx: RequestContext,
     *,
     request: ProjectAuditQuery,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> ToolResponse:
     """Read one project's audit log; requires project admin."""
     with bind_context(principal=ctx.principal):
@@ -97,7 +105,7 @@ async def query_project(
             )
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
-        return await _query_project(pool, ctx, request.project, filters)
+        return await _query_project(pool, ctx, request.project, filters, limit, cursor)
 
 
 async def query_all_projects(
@@ -105,6 +113,8 @@ async def query_all_projects(
     ctx: RequestContext,
     *,
     request: AllProjectsAuditQuery,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> ToolResponse:
     """Read every project's audit log; requires platform auditor."""
     with bind_context(principal=ctx.principal):
@@ -117,7 +127,7 @@ async def query_all_projects(
             )
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(_OBJECT_ID, exc, suggested_next_actions=[_TOOL])
-        return await _query_cross_project(pool, ctx, filters)
+        return await _query_cross_project(pool, ctx, filters, limit, cursor)
 
 
 async def query(
@@ -125,11 +135,13 @@ async def query(
     ctx: RequestContext,
     *,
     request: AuditQueryRequest,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> ToolResponse:
     """Dispatch the typed ``audit.query`` request model to its explicit handler."""
     if isinstance(request, ProjectAuditQuery):
-        return await query_project(pool, ctx, request=request)
-    return await query_all_projects(pool, ctx, request=request)
+        return await query_project(pool, ctx, request=request, limit=limit, cursor=cursor)
+    return await query_all_projects(pool, ctx, request=request, limit=limit, cursor=cursor)
 
 
 class _Filters:
@@ -174,7 +186,12 @@ def _parse_object_id(object_id: str | None) -> UUID | None:
 
 
 async def _query_project(
-    pool: AsyncConnectionPool, ctx: RequestContext, project: str, filters: _Filters
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    project: str,
+    filters: _Filters,
+    limit: int,
+    cursor: str | None,
 ) -> ToolResponse:
     """Project-scoped form: require admin on ``project``, read only its rows, no platform audit."""
     try:
@@ -189,13 +206,25 @@ async def _query_project(
         return ToolResponse.failure(
             _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
         )
+    # Decode the cursor only after authz so a bad cursor cannot change the denial path.
+    after: tuple[datetime, UUID] | None = None
+    if cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_LIST_TAG, cursor)
+        except InvalidCursor:
+            return _invalid_cursor_error(_OBJECT_ID)
+    capped = _clamp_list_limit(limit)
     async with pool.connection() as conn:
-        rows = await _fetch_rows(conn, project=project, filters=filters)
-    return _response(rows)
+        rows = await _fetch_rows(conn, project=project, filters=filters, limit=capped, after=after)
+    return _response(rows, capped)
 
 
 async def _query_cross_project(
-    pool: AsyncConnectionPool, ctx: RequestContext, filters: _Filters
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    filters: _Filters,
+    limit: int,
+    cursor: str | None,
 ) -> ToolResponse:
     """Cross-project form: require ``platform_auditor``, read all projects, read-audit."""
     args = _audit_args(filters)
@@ -206,16 +235,31 @@ async def _query_cross_project(
         return ToolResponse.failure(
             _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
         )
+    # Decode the cursor only after authz + read-audit so a bad cursor cannot change either.
+    after: tuple[datetime, UUID] | None = None
+    if cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_LIST_TAG, cursor)
+        except InvalidCursor:
+            async with pool.connection() as conn:
+                await _reads.record_read(conn, ctx, tool=_TOOL, args=args)
+            return _invalid_cursor_error(_OBJECT_ID)
+    capped = _clamp_list_limit(limit)
     async with pool.connection() as conn:
-        rows = await _fetch_rows(conn, project=None, filters=filters)
+        rows = await _fetch_rows(conn, project=None, filters=filters, limit=capped, after=after)
         await _reads.record_read(conn, ctx, tool=_TOOL, args=args)
-    return _response(rows)
+    return _response(rows, capped)
 
 
 async def _fetch_rows(
-    conn: AsyncConnection, *, project: str | None, filters: _Filters
+    conn: AsyncConnection,
+    *,
+    project: str | None,
+    filters: _Filters,
+    limit: int,
+    after: tuple[datetime, UUID] | None,
 ) -> list[dict[str, object]]:
-    """Read filtered ``audit_log`` rows.
+    """Read filtered ``audit_log`` rows, ``limit + 1`` for truncation (ADR-0192).
 
     The WHERE clause is assembled from a fixed set of **literal** fragments (so the query
     stays a ``LiteralString`` — no runtime-string interpolation reaches the SQL); every
@@ -243,11 +287,18 @@ async def _fetch_rows(
         if end is not None:
             where += " AND ts < %s"
             params.append(end)
+    seek: LiteralString = ""
+    if after is not None:
+        seek = " AND (ts, id) < (%s, %s)"
+        params.extend(after)
     query: LiteralString = (
-        "SELECT ts, principal, agent_session, project, tool, object_kind, object_id, "
-        "transition FROM audit_log WHERE true" + where + " ORDER BY ts DESC, id DESC LIMIT %s"
+        "SELECT id, ts, principal, agent_session, project, tool, object_kind, object_id, "
+        "transition FROM audit_log WHERE true"
+        + where
+        + seek
+        + " ORDER BY ts DESC, id DESC LIMIT %s"
     )
-    params.append(_MAX_ROWS)
+    params.append(limit + 1)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
         return list(await cur.fetchall())
@@ -284,19 +335,24 @@ def _as_str(value: object) -> str:
     return "" if value is None else str(value)
 
 
-def _response(rows: list[dict[str, object]]) -> ToolResponse:
+def _response(rows: list[dict[str, object]], limit: int) -> ToolResponse:
+    kept, truncated = _paginate(rows, limit)
     items: list[ToolResponse] = []
-    for row in rows:
+    for row in kept:
         data = _row_data(row)
         items.append(ToolResponse.success(data["object_id"] or _OBJECT_ID, "ok", data=data))
+    next_cursor: JsonValue = None
+    if truncated and kept:
+        last = kept[-1]
+        ts, row_id = last["ts"], last["id"]
+        if isinstance(ts, datetime) and isinstance(row_id, UUID):
+            next_cursor = _encode_ts_uuid_cursor(_LIST_TAG, ts, row_id)
     return ToolResponse.collection(
         _OBJECT_ID,
         "ok",
         items,
         suggested_next_actions=["inventory.list"],
-        data={
-            "truncated": "true" if len(rows) >= _MAX_ROWS else "false",
-        },
+        data={"truncated": truncated, "next_cursor": next_cursor},
     )
 
 
@@ -316,10 +372,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 description="Project or all-projects audit query request.",
             ),
         ],
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
     ) -> ToolResponse:
         """Read audit_log: project form (admin) or cross-project (platform_auditor).
 
-        Returns the most recent matching rows (capped at 500, newest first);
-        ``data.truncated`` is "true" when the cap is hit — narrow with filters.
+        Returns the most recent matching rows, newest first, keyset-paginated:
+        ``data.truncated`` is ``true`` when more rows match than were returned — pass
+        ``data.next_cursor`` back as ``cursor`` for the next page, or narrow with filters.
         """
-        return await query(pool, current_context(), request=request)
+        return await query(pool, current_context(), request=request, limit=limit, cursor=cursor)

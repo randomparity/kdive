@@ -61,7 +61,7 @@ Each single-stream handler:
    predicate is a row-value comparison `(col_a, col_b) < (%s, %s)` (for `DESC, DESC`) or
    `(col_a, col_b) > (%s, %s)` (for `ASC, ASC`). The decoded string parts bind as
    parameters (a timestamp part parses back to `timestamptz`; the tiebreaker binds as
-   text/uuid/bigint per column type — psycopg casts against the typed column).
+   text/uuid per column type — psycopg casts against the typed column).
 3. If more than `limit` rows came back, drop the extra, set `truncated=true`, and
    `next_cursor = encode_cursor(tag, last_kept_row_key)`. Else `truncated=false`,
    `next_cursor=null`.
