@@ -77,8 +77,11 @@ author's correction).
 - **A separate task file per distro.** Rejected — one `build_one.yml` dispatching on
   `image.source` keeps the per-image flow in one place; only the genuinely different
   scratch assembly is split into `build_scratch.yml`.
-- **Per-entry full package lists.** Rejected — `kdive_image_defaults` holds the shared set;
-  entries override only deltas.
+- **One shared package list across all distros.** Rejected — `virt-customize --install` runs
+  the *image's* package manager, so a Fedora package name (`kdump-utils`, `drgn`) errors on an
+  Ubuntu image. `kdive_image_defaults.packages` is the Fedora/RHEL set; the ubuntu entry carries
+  its own Debian set per-entry. Genuinely-shared fields (helpers, toggles, arch alias) stay in
+  the defaults map.
 
 ## Catalog data model (`group_vars/all.yml`)
 
