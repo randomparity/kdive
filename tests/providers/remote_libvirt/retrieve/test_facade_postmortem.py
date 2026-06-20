@@ -29,7 +29,9 @@ class _Capturer:
         artifact = StoredArtifact(
             f"{self.label}/{system_id}", "etag", Sensitivity.SENSITIVE, "vmcore"
         )
-        return CaptureOutput(raw=artifact, redacted=artifact, vmcore_build_id=self.label)
+        return CaptureOutput(
+            raw=artifact, redacted=artifact, vmcore_build_id=self.label, raw_size_bytes=0
+        )
 
 
 def test_facade_dispatches_supported_capture_methods() -> None:

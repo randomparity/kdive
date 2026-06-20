@@ -120,7 +120,12 @@ class KdumpCapturer:
         redacted = persist_redacted(
             self._store_factory, self._secret_registry, system_id, method, info.dmesg
         )
-        return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=info.build_id)
+        return CaptureOutput(
+            raw=raw,
+            redacted=redacted,
+            vmcore_build_id=info.build_id,
+            raw_size_bytes=info.size_bytes,
+        )
 
     def _await_inspect(self, domain: Domain, system_id: UUID) -> CoreInfo:
         agent_exec = self._agent_exec_factory(DEFAULT_INSPECT_TIMEOUT_S)

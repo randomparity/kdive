@@ -75,7 +75,7 @@ def _capture_output(sys_id: str, method: CaptureMethod = CaptureMethod.HOST_DUMP
         Sensitivity.REDACTED,
         "vmcore",
     )
-    return CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef")
+    return CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512)
 
 
 class _FakeRetriever:

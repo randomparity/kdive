@@ -294,7 +294,13 @@ def _register_vmcore_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
-    vmcore.register_handlers(registry, resolver=assembly.resolver)
+    from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
+
+    vmcore.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        telemetry=CaptureTelemetry(meter=metrics.get_meter("kdive.worker")),
+    )
 
 
 def _register_diagnostics_handlers(

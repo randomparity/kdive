@@ -123,7 +123,9 @@ def test_retrieve_port_outputs_are_stable_namedtuples() -> None:
     raw = StoredArtifact("raw-key", "raw-etag", Sensitivity.SENSITIVE, "vmcore")
     redacted = StoredArtifact("redacted-key", "redacted-etag", Sensitivity.REDACTED, "vmcore")
 
-    capture = CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id="deadbeef")
+    capture = CaptureOutput(
+        raw=raw, redacted=redacted, vmcore_build_id="deadbeef", raw_size_bytes=42
+    )
     crash_result = CrashResult(exit_status=0, stdout=b"ok", stderr=b"")
     crash = CrashOutput(results={"log": crash_result._asdict()}, transcript="ok", truncated=False)
     introspect = IntrospectOutput(
@@ -136,6 +138,7 @@ def test_retrieve_port_outputs_are_stable_namedtuples() -> None:
     assert capture.raw.key == "raw-key"
     assert capture.redacted.sensitivity is Sensitivity.REDACTED
     assert capture.vmcore_build_id == "deadbeef"
+    assert capture.raw_size_bytes == 42
     log_result = cast("dict[str, object]", crash.results["log"])
     assert log_result["exit_status"] == 0
     assert crash.transcript == "ok"

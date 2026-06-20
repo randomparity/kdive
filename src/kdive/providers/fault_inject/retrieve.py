@@ -23,10 +23,17 @@ class FaultInjectRetrieve:
         self._store_factory = store_factory
         self._store: StorePort | None = None
 
+    _SYNTHETIC_DATA = b"fault-inject-vmcore"
+
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
         raw = self._put(system_id, f"vmcore-{method.value}", Sensitivity.SENSITIVE)
         redacted = self._put(system_id, f"vmcore-{method.value}-redacted", Sensitivity.REDACTED)
-        return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=SYNTHETIC_BUILD_ID)
+        return CaptureOutput(
+            raw=raw,
+            redacted=redacted,
+            vmcore_build_id=SYNTHETIC_BUILD_ID,
+            raw_size_bytes=len(self._SYNTHETIC_DATA),
+        )
 
     def run_crash_postmortem(
         self,

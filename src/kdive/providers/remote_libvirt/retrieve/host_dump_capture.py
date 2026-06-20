@@ -330,6 +330,7 @@ class HostDumpCapturer:
                     "error": type(exc).__name__,
                 },
             ) from exc
+        raw_size_bytes = spool.stat().st_size
         raw = self._stream_put(system_id, spool, sha256_b64)
         self._verify_stored(raw.key, sha256_b64, system_id)
         redacted = persist_redacted(
@@ -339,7 +340,9 @@ class HostDumpCapturer:
             CaptureMethod.HOST_DUMP,
             dmesg,
         )
-        return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=build_id)
+        return CaptureOutput(
+            raw=raw, redacted=redacted, vmcore_build_id=build_id, raw_size_bytes=raw_size_bytes
+        )
 
     def _dmesg_best_effort(self, spool: Path, system_id: UUID) -> bytes:
         try:

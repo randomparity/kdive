@@ -168,7 +168,9 @@ class _ControllerProvider:
 class _RetrieveProvider:
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
         artifact = StoredArtifact("key", "etag", Sensitivity.SENSITIVE, "vmcore")
-        return CaptureOutput(raw=artifact, redacted=artifact, vmcore_build_id="deadbeef")
+        return CaptureOutput(
+            raw=artifact, redacted=artifact, vmcore_build_id="deadbeef", raw_size_bytes=0
+        )
 
     def run_crash_postmortem(
         self,
