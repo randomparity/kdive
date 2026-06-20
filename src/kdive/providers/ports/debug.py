@@ -56,8 +56,9 @@ class GdbController(Protocol):
     def read(self, *, timeout_sec: float) -> list[dict[str, object]]:
         """Read pending gdb/MI records without sending a command.
 
-        A read timeout is non-fatal and returns an empty list; this lets polling callers
-        distinguish "no records yet" from a command timeout.
+        Unlike :meth:`write` and :meth:`get_gdb_response`, this is the non-raising sibling:
+        a read timeout is non-fatal and returns an empty list, so polling callers can
+        distinguish "no records yet" from a command timeout without catching an error.
         """
         ...
 

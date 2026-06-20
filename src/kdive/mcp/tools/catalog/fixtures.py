@@ -56,7 +56,7 @@ async def _public_rows(pool: AsyncConnectionPool) -> list[JsonValue]:
     ]
 
 
-async def list_fixtures_tool(pool: AsyncConnectionPool) -> ToolResponse:
+async def list_fixtures(pool: AsyncConnectionPool) -> ToolResponse:
     """Return the public baseline catalog entries (provider, name, arch) from the DB."""
     return ToolResponse.success(_OBJECT_ID, "ok", data={"fixtures": await _public_rows(pool)})
 
@@ -114,7 +114,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def fixtures_list() -> ToolResponse:
         """List rootfs fixture catalog entries (provider, name, arch). Requires a valid token."""
         current_context()
-        return await list_fixtures_tool(pool)
+        return await list_fixtures(pool)
 
     @app.tool(
         name=_VALIDATE_TOOL,
