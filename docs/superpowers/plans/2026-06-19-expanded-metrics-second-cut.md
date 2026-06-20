@@ -305,7 +305,7 @@ Import `clear_provider_kind`, `take_provider_kind` from `kdive.jobs.provider_con
   - `jobs/handlers/runs_build.py`: the kind is `run.target_kind` already in hand — `set_provider_kind(run.target_kind.value)` (no binding needed).
   Import `set_provider_kind` from `kdive.jobs.provider_context` in each.
 
-- [ ] **Step 14: Run the touched handler tests** `uv run python -m pytest tests/jobs tests/mcp/lifecycle -q` → PASS (no behavior change; the tag is a side effect).
+- [ ] **Step 14: Add a handler-to-metric integration assertion (the load-bearing link).** The contextvar tag is what connects a handler to the provider-op series; a handler that forgets `set_provider_kind` silently emits nothing with green unit tests. Add a test that drives one representative provider-backed handler through a fake resolver (whose `binding_for_system` returns a `ProviderBinding(kind=ResourceKind.LOCAL_LIBVIRT, runtime=<fake>)`) inside a `WorkerTelemetry.job_span` backed by an `InMemoryMetricReader`, then asserts `kdive.provider.op.duration` emitted with `provider="local-libvirt"`. Use `capture_handler` (it is also touched in T5) or a provision handler with its provider call stubbed. This proves the handler actually tags; the manual-contextvar tests (steps 9-12) only prove the telemetry unit. Then run `uv run python -m pytest tests/jobs tests/mcp/lifecycle -q` → PASS.
 
 - [ ] **Step 15: Verify __main__ needs no change** — `WorkerTelemetry` is already constructed at `__main__.py:459`; the new instruments ride on the same object. No wiring change for F.
 
@@ -449,18 +449,33 @@ class BuildPhaseRecorder:
 
 - [ ] **Step 4: Run** → PASS.
 
-- [ ] **Step 5: Thread the recorder + provider kind into the orchestrator.** Read `providers/shared/build_host/orchestration.py` `BuildHostOrchestrator.build_workspace` and `dispatch.py`. Add a `recorder: BuildPhaseRecorder = BuildPhaseRecorder.disabled()` and `provider: str` parameter to the orchestration entry the builders call (defaulting to disabled so non-build callers are unaffected). Wrap:
-  - the `factory()`/transport bring-up in `dispatch.py` → `recorder.phase(BuildPhase.PROVISION, provider)`
-  - `checkout()` → `BuildPhase.SOURCE_SYNC`
-  - `run_olddefconfig` + `read_config` + `_validate_final_config` → `BuildPhase.CONFIGURE`
-  - `run_make` → `BuildPhase.COMPILE`
-  - `run_modules_install` + bundle (remote) → `BuildPhase.MODULES`
-  - build-id / vmlinux extraction → `BuildPhase.ARTIFACT`
-  The builder passes its `ResourceKind.value` as `provider` (local-libvirt has no provision phase — simply do not wrap a stage it does not run).
+- [ ] **Step 5: Thread the recorder + provider kind into the orchestrator.** The central seam is `BuildHostOrchestrator.build_workspace(self, run_id, profile)` (`orchestration.py:88-105`), which delineates source-sync (`self.checkout`, line 98), configure (`run_olddefconfig`+`read_config`+`_validate_final_config`, lines 99-102), and compile (`run_make`, line 103). Change its signature to:
 
-- [ ] **Step 6: Construct + inject in `__main__.py`.** Where the build handlers are registered (`build_handler_registry`), build `BuildPhaseRecorder(meter=telemetry.meter_provider.get_meter("kdive.worker"))` and thread it to the builder/orchestrator. Mirror how `resolver` reaches the handlers. (If the registration site has no meter in scope, use `from opentelemetry import metrics; metrics.get_meter("kdive.worker")` as the allocations registrar does at `registrar.py:44`.)
+```python
+    def build_workspace(
+        self,
+        run_id: UUID,
+        profile: ServerBuildProfile,
+        *,
+        recorder: BuildPhaseRecorder = BuildPhaseRecorder.disabled(),
+        provider: str = "",
+    ) -> Path:
+```
 
-- [ ] **Step 7: Run** `uv run python -m pytest tests/jobs/test_build_telemetry.py tests/providers -q` → PASS. `just lint && just type` → clean.
+Wrap inside `build_workspace` (default-disabled recorder → non-build callers unaffected, `provider=""` only reached when recorder is disabled):
+  - `self.checkout(...)` → `with recorder.phase(BuildPhase.SOURCE_SYNC, provider):`
+  - `run_olddefconfig` + `read_config` + `_validate_final_config` → `with recorder.phase(BuildPhase.CONFIGURE, provider):`
+  - `self.run_make(...)` → `with recorder.phase(BuildPhase.COMPILE, provider):`
+
+  The `provision`, `modules`, and `artifact` phases live outside `build_workspace`:
+  - **provision** — the transport/ephemeral-VM `factory()` bring-up in `dispatch.py` (the `with factory()` session entry; ADR-0181 offloads the whole session). Wrap that entry with `recorder.phase(BuildPhase.PROVISION, provider)`. Only the transport-backed providers (remote-libvirt / ephemeral-libvirt) enter `factory()`; local-libvirt builds in-process and has no provision phase, so it never wraps it.
+  - **modules + artifact** — in the **remote** builder (`providers/remote_libvirt/build.py`), wrap `run_modules_install`+bundle as `MODULES` and the build-id/vmlinux extraction as `ARTIFACT`. The **local** builder (`providers/local_libvirt/build.py`) wraps only its build-id/objcopy extraction as `ARTIFACT` (it has no separate modules step).
+
+  Per-provider phase map (what each provider emits): **local-libvirt** → {source_sync, configure, compile, artifact}; **remote-libvirt / ephemeral** → {provision, source_sync, configure, compile, modules, artifact}. Each builder threads `recorder=recorder, provider=ResourceKind.<X>.value` into its `build_workspace` call and into the `dispatch.py` provision wrap; the recorder is obtained from `RunHandlerPorts` (Step 6) and passed by value down to the offloaded thread (histogram `record` is thread-safe).
+
+- [ ] **Step 6: Construct + inject via the run-handler registrar.** Build handlers are registered through `runs.register_handlers(registry, ports=runs.RunHandlerPorts(...))` (`mcp/app.py` `_register_run_handlers`). Add a `build_phase_recorder: BuildPhaseRecorder` field to `RunHandlerPorts`, built in `_register_run_handlers` as `BuildPhaseRecorder(meter=metrics.get_meter("kdive.worker"))` (the registrar pattern the allocations registrar uses at `registrar.py:44`; `from opentelemetry import metrics`). The build handler passes it (and `run.target_kind.value`) into the builder, which forwards to `build_workspace` and the `dispatch.py` provision wrap. No `__main__.py` change — the meter is process-global and no-ops until `init_telemetry`.
+
+- [ ] **Step 7: Add an end-to-end emit assertion + run.** Add a test that drives a build through `BuildHostOrchestrator.build_workspace(run_id, profile, recorder=<reader-backed recorder>, provider="local-libvirt")` with stubbed `checkout`/`run_olddefconfig`/`read_config`/`run_make` seams (the orchestrator already takes these as injected callables, see `from_defaults` at `orchestration.py:55-78`) and asserts `source_sync`, `configure`, `compile` points are emitted with `provider="local-libvirt"`. Run `uv run python -m pytest tests/jobs/test_build_telemetry.py tests/providers -q` → PASS. `just lint && just type` → clean.
 
 - [ ] **Step 8: Commit** `feat(observability): time build sub-phases (ADR-0191 G1)`
 
