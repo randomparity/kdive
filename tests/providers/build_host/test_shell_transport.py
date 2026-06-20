@@ -125,6 +125,25 @@ def test_clone_init_non_zero_is_infrastructure_failure() -> None:
     assert "permission denied" in str(exc.value.details["stderr"])
 
 
+def test_clone_init_command_not_found_is_missing_dependency_with_diagnostic() -> None:
+    # rc 127 is the canonical "git: not found" shape — the base image lacks the build toolchain.
+    t = _RecordingTransport([_ok(returncode=127, stderr="sh: git: not found")])
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("https://git.example/linux.git", "v6.9", "/src")
+    assert exc.value.category == ErrorCategory.MISSING_DEPENDENCY
+    assert exc.value.details["diagnostic"] == "ops.diagnostics --with-buildhost-agent"
+    assert "git" in str(exc.value.details["stderr"])
+
+
+def test_clone_init_not_found_stderr_without_127_is_missing_dependency() -> None:
+    # Backstop: a transport that does not surface rc 127 but whose stderr names a missing git.
+    t = _RecordingTransport([_ok(returncode=1, stderr="sh: 1: git: not found")])
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("https://git.example/linux.git", "v6.9", "/src")
+    assert exc.value.category == ErrorCategory.MISSING_DEPENDENCY
+    assert exc.value.details["diagnostic"] == "ops.diagnostics --with-buildhost-agent"
+
+
 def test_clone_fetch_non_zero_is_configuration_error_with_fetch_stderr() -> None:
     # init ok, fetch fails — the regression for the masked-cause bug (checkout never runs).
     t = _RecordingTransport([_ok(), _ok(returncode=128, stderr="Could not resolve host")])
