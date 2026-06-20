@@ -26,10 +26,14 @@ Return one durable job visible to the caller.
 
 `implemented` · `read-only`
 
-List jobs visible to the caller.
+List jobs visible to the caller, newest first.
+
+Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+``cursor`` to read the next page.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
 | `limit` | integer | no | Maximum rows returned (capped at 200). |
 
 ## `jobs.wait`

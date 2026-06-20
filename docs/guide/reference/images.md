@@ -51,6 +51,14 @@ Extend an image catalog entry lease.
 
 List published image catalog entries.
 
+Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+``cursor`` for the next page.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
+
 ## `images.prune_expired`
 
 `implemented` · `destructive`

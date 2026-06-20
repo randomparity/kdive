@@ -74,9 +74,13 @@ Return a System the caller can view.
 
 List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires viewer.
 
+Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+``cursor`` for the next page.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `allocation_id` | string (nullable) | no | Only Systems under this Allocation id. |
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
 | `limit` | integer | no | Maximum rows returned (capped at 200). |
 | `pcie` | string (nullable) | no | Only Systems whose Allocation claims a device matching this '<vendor>:<device>' spec. |
 | `shape` | string (nullable) | no | Only Systems with this named shape, or '__custom__' for full-custom (no shape). |
