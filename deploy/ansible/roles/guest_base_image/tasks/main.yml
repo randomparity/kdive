@@ -1,4 +1,12 @@
 ---
+- name: Assert this host selects at least one image
+  ansible.builtin.assert:
+    that: (kdive_requested_images | length) > 0
+    fail_msg: >-
+      host_images is empty for '{{ inventory_hostname }}'. Set host_images in
+      host_vars/{{ inventory_hostname }}.yml (or leave it unset to default to
+      host_images_default).
+
 - name: Assert every selected image name exists in the catalog
   ansible.builtin.assert:
     that: item in (kdive_image_catalog | map(attribute='name') | list)
@@ -6,6 +14,15 @@
       host_images entry '{{ item }}' is not defined in kdive_image_catalog
       (group_vars/all.yml).
   loop: "{{ kdive_requested_images }}"
+
+- name: Assert host_default_image is one of this host's selected images
+  ansible.builtin.assert:
+    that: kdive_default_image in kdive_requested_images
+    fail_msg: >-
+      host_default_image '{{ kdive_default_image }}' is not in host_images
+      {{ kdive_requested_images }} for '{{ inventory_hostname }}'. The emitted
+      [[remote_libvirt]].base_image must name a staged [[image]] or the app
+      rejects systems.toml at load.
 
 - name: Assert each selected image supports this host architecture
   ansible.builtin.assert:

@@ -33,6 +33,7 @@ kdive_image_defaults:
   include_kernel_debuginfo: false
   crashkernel: "256M"  # applied only when include_kernel_debuginfo | bool
   arches: [x86_64]
+  kdump_service: kdump.service  # Fedora/RHEL unit; the ubuntu entry overrides it
   root_device: /dev/vda  # remote metadata only; the in-guest GRUB owns root (ADR-0183)
   arch_alias:  # ansible_architecture -> distro download vocabulary
     x86_64: amd64
@@ -57,6 +58,7 @@ kdive_image_catalog:
     cloud_image_url: >-
       https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-{{
       image_arch_alias }}.img
+    kdump_service: kdump-tools.service  # Debian unit name (the kdump-tools package)
     packages:  # Debian names; drgn is not in the default Ubuntu repos
       - qemu-guest-agent
       - kexec-tools

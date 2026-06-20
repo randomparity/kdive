@@ -12,6 +12,8 @@
                 | default(kdive_image_defaults.include_kernel_debuginfo)) | bool
             else []) }}
     guest_base_image_helpers: "{{ image.helpers | default(kdive_image_defaults.helpers) }}"
+    guest_base_image_kdump_service: >-
+      {{ image.kdump_service | default(kdive_image_defaults.kdump_service) }}
     guest_base_image_crashkernel: >-
       {{ image.crashkernel | default(kdive_image_defaults.crashkernel) }}
     guest_base_image_debuginfo: >-
@@ -47,7 +49,7 @@
       - --run-command
       - systemctl enable qemu-guest-agent.service
       - --run-command
-      - systemctl enable kdump.service
+      - systemctl enable {{ guest_base_image_kdump_service }}
       - --run-command
       - sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
   when:
@@ -79,7 +81,7 @@
       - --run-command
       - systemctl enable qemu-guest-agent.service
       - --run-command
-      - systemctl enable kdump.service
+      - systemctl enable {{ guest_base_image_kdump_service }}
   when:
     - image.source == 'cloud-image'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
