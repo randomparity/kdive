@@ -59,3 +59,15 @@ def test_admission_reason_breakdown_panel_exists() -> None:
     exprs = " ".join(_all_exprs())
     assert "kdive_allocation_admission" in exprs
     assert "reason" in exprs
+
+
+def test_rows_4_to_6_present() -> None:
+    titles = [p["title"] for p in build_dashboard()["panels"] if p["type"] == "row"]
+    for row in ("Capacity / saturation", "Reconciler loop", "Jobs / workers"):
+        assert row in titles
+
+
+def test_saturation_panel_divides_used_by_total() -> None:
+    exprs = " ".join(_all_exprs())
+    assert "kdive_host_capacity_used" in exprs
+    assert "kdive_host_capacity_total" in exprs

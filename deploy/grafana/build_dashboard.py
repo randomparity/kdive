@@ -155,6 +155,9 @@ def _build_panels() -> list[dict]:
     _row_mcp(grid)
     _row_allocation(grid)
     _row_lifecycle(grid)
+    _row_capacity(grid)
+    _row_reconciler(grid)
+    _row_jobs(grid)
     return grid.panels
 
 
@@ -250,6 +253,109 @@ def _row_lifecycle(grid: _Grid) -> None:
             ),
             width=12,
         )
+
+
+def _row_capacity(grid: _Grid) -> None:
+    grid.row("Capacity / saturation")
+    grid.add(
+        _bargauge(
+            "Host-cap saturation by provider",
+            [
+                _target(
+                    "sum by (provider) (kdive_host_capacity_used) "
+                    "/ sum by (provider) (kdive_host_capacity_total)",
+                    "{{provider}}",
+                )
+            ],
+            unit="percentunit",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Host-cap slots (used vs total)",
+            [
+                _target("sum by (provider) (kdive_host_capacity_used)", "used {{provider}}"),
+                _target("sum by (provider) (kdive_host_capacity_total)", "total {{provider}}"),
+            ],
+            unit="short",
+        ),
+        width=12,
+    )
+
+
+def _row_reconciler(grid: _Grid) -> None:
+    grid.row("Reconciler loop")
+    grid.add(
+        _timeseries(
+            "Reconcile duration (p95)",
+            [_target(_quantile("kdive_reconcile_duration", 0.95), "p95")],
+            unit="s",
+        ),
+        width=8,
+    )
+    grid.add(
+        _timeseries(
+            "Reconcile lag (p95)",
+            [_target(_quantile("kdive_reconcile_lag", 0.95), "p95")],
+            unit="s",
+        ),
+        width=8,
+    )
+    grid.add(
+        _timeseries(
+            "Repairs by kind",
+            [_target(_rate("kdive_reconciler_repairs", "repair_kind"), "{{repair_kind}}")],
+            unit="ops",
+            stacked=True,
+        ),
+        width=8,
+    )
+    grid.add(
+        _timeseries(
+            "Errors by category",
+            [_target(_rate("kdive_errors", "error_category"), "{{error_category}}")],
+            unit="ops",
+            stacked=True,
+        ),
+        width=12,
+    )
+
+
+def _row_jobs(grid: _Grid) -> None:
+    grid.row("Jobs / workers")
+    grid.add(
+        _timeseries(
+            "Job duration p95 by kind",
+            [_target(_quantile("kdive_job_duration", 0.95, ("job_kind",)), "{{job_kind}}")],
+            unit="s",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Job queue depth",
+            [_target("kdive_job_queue_depth", "depth")],
+            unit="short",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Retries by kind",
+            [_target(_rate("kdive_job_retries", "job_kind"), "{{job_kind}}")],
+            unit="ops",
+        ),
+        width=12,
+    )
+    grid.add(
+        _timeseries(
+            "Time-to-claim p95 by kind",
+            [_target(_quantile("kdive_job_time_to_claim", 0.95, ("job_kind",)), "{{job_kind}}")],
+            unit="s",
+        ),
+        width=12,
+    )
 
 
 def render_json() -> str:
