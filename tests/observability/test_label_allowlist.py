@@ -44,3 +44,9 @@ def test_allowlist_includes_expanded_metric_label_keys() -> None:
     # ADR-0190: the #601 first-cut instruments add four bounded-enum label keys.
     for key in ("repair_kind", "state", "error_category", "reason"):
         assert key in labels.ALLOWED_LABEL_KEYS
+
+
+def test_allowlist_includes_second_cut_metric_label_keys() -> None:
+    # ADR-0191: the #610 second-cut instruments add four more label keys.
+    for key in ("build_phase", "capture_method", "transport", "build_host"):
+        assert key in labels.ALLOWED_LABEL_KEYS

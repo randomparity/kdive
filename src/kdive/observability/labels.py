@@ -35,6 +35,14 @@ ALLOWED_LABEL_KEYS: frozenset[str] = frozenset(
         "state",
         "error_category",
         "reason",
+        # ADR-0191 (#610 second cut): build sub-phase timings (build_phase), vmcore capture
+        # method (capture_method), debug-session transport (transport), and the
+        # deployment-bounded build-host fleet label (build_host) — bounded by the operator's
+        # build_hosts table, the one non-enum allowlist key (ADR-0191 §1).
+        "build_phase",
+        "capture_method",
+        "transport",
+        "build_host",
     }
 )
 
