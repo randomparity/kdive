@@ -39,6 +39,7 @@ def serialize_results(results: list[CheckResult]) -> str:
                     "fix": r.fix,
                     "provider": r.provider,
                     "failure_category": r.failure_category,
+                    "resource_id": r.resource_id,
                 }
                 for r in results
             ]
@@ -75,6 +76,7 @@ def _reconstruct(item: Any) -> CheckResult:
             fix=item.get("fix"),
             provider=item.get("provider"),
             failure_category=item.get("failure_category"),
+            resource_id=item.get("resource_id"),
         )
     except (KeyError, ValueError) as exc:  # missing field, bad enum, or invariant violation
         raise ResultCodecError(f"invalid diagnostics result item: {exc}") from exc
