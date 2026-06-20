@@ -79,8 +79,13 @@ check `tests/mcp/` first).
 4. Fetch `clamped + 1` rows. When `cursor` is supplied, `decode_cursor(tag, cursor,
    arity=2)`; on `InvalidCursor` return `invalid_cursor_error(object_id)`. Add the seek
    predicate to the WHERE: `(created_at, id) < (%s, %s)` for DESC lists,
-   `(created_at, id) > (%s, %s)` for resources. Bind the two decoded strings (psycopg casts
-   the ISO timestamp to `timestamptz` and the id to uuid against the typed columns).
+   `(created_at, id) > (%s, %s)` for resources. **Bind a real typed value, not the raw
+   cursor string**: parse the timestamp part with `datetime.fromisoformat(...)` and the id
+   with `UUID(...)` before binding, so psycopg sends a `timestamptz` / `uuid` (a raw text
+   bind inside a row-value comparison forces Postgres to infer the cast, which is fragile;
+   a typed bind is unambiguous). A parse failure here is also an `invalid_cursor` config
+   error (a well-formed envelope can still carry a non-timestamp/non-uuid `k` part), so wrap
+   the parse and map `ValueError` to `invalid_cursor_error`.
 5. `kept, truncated = paginate(rows, clamped)`. Build `next_cursor`: if `truncated`,
    `encode_cursor(tag, (kept[-1].created_at.isoformat(), str(kept[-1].id)))`, else `None`.
 6. Pass `data={"truncated": truncated, "next_cursor": next_cursor}` to
@@ -141,7 +146,17 @@ no keyset query, no `limit`. This keeps the documented response keys uniform.
 - Replace the hardcoded `_MAX_ROWS = 500` fetch with `clamp_list_limit(limit)` where `limit`
   defaults to `DEFAULT_LIST_LIMIT`; add a `limit` tool parameter. Fetch `clamped + 1`.
 - Sort key `(ts, id)` DESC (already `ORDER BY ts DESC, id DESC`); arity-2 cursor; seek
-  `(ts, id) < (%s, %s)`; the id is a bigint — bind the decoded string (psycopg casts).
+  `(ts, id) < (%s, %s)`; bind `datetime.fromisoformat(ts_part)` and `int(id_part)` (id is a
+  bigint) — typed binds, not raw strings; a parse failure → `invalid_cursor_error`.
+- **Decode the cursor after the authz check (and, for the all-projects scope, after the
+  read-audit record), before `_fetch_rows`.** The authz denial path (and its
+  `platform_audit_log` record) must be reached identically whether or not a cursor is
+  present, so an unauthorized caller cannot use a malformed cursor to change the denial-audit
+  behavior. Concretely: in `_query_project` / `_query_cross_project`, after
+  `require_role`/`require_platform_role` (and `record_read` for cross-project), decode the
+  cursor; on `InvalidCursor`/parse `ValueError` return `invalid_cursor_error`, then call
+  `_fetch_rows` with the typed seek key. A bad cursor is the caller's own input error,
+  surfaced only after they pass authz.
 - `_response` takes `(kept, truncated, next_cursor)` and sets `data={"truncated": <bool>,
   "next_cursor": <str|None>}` — drop the `"true"/"false"` string.
 - Update the docstring (drives the generated reference doc). Run `just docs`.
