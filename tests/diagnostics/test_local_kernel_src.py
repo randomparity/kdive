@@ -100,6 +100,13 @@ def test_fix_names_both_build_lanes() -> None:
     assert "build_hosts.register" in LOCAL_KERNEL_SRC_FIX
 
 
+def test_fix_cites_the_staging_doc_as_an_mcp_resource_uri() -> None:
+    # The remediation reaches an MCP client, which cannot open a bare filesystem path; it must
+    # cite the doc as the fetchable resource URI (ADR-0151), not "docs/operating/...".
+    assert "resource://kdive/docs/operating/build-source-staging.md" in LOCAL_KERNEL_SRC_FIX
+    assert "(docs/operating/" not in LOCAL_KERNEL_SRC_FIX
+
+
 # ---- enabled-gate (ADR-0167) --------------------------------------------------------
 
 

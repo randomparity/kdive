@@ -37,7 +37,8 @@ BUILDHOST_AGENT_ID = "ephemeral_libvirt_buildhost_agent"
 BUILDHOST_AGENT_FIX = (
     "an ephemeral_libvirt build host's throwaway builder boots but its qemu-guest-agent never "
     "becomes usable; rebuild or repair the operator-staged base build image so its guest agent "
-    "starts (docs/operating/build-source-staging.md), then re-run doctor --with-buildhost-agent"
+    "starts (resource://kdive/docs/operating/build-source-staging.md), then re-run doctor "
+    "--with-buildhost-agent"
 )
 
 # The build-lane remediation the local-kernel-src check surfaces as its ``fix`` (ADR-0163). It is
@@ -48,8 +49,8 @@ BUILDHOST_AGENT_FIX = (
 # stays free of a provider import.
 LOCAL_KERNEL_SRC_FIX = (
     "stage a kernel source tree on the build worker and set KDIVE_KERNEL_SRC to its absolute "
-    "path (docs/operating/build-source-staging.md), or route builds to a registered git build "
-    "host (build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)"
+    "path (resource://kdive/docs/operating/build-source-staging.md), or route builds to a "
+    "registered git build host (build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)"
 )
 
 # The operator remediation the base-image-staging check surfaces as its ``fix`` (ADR-0080,

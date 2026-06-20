@@ -1262,7 +1262,7 @@ def test_sync_tree_filesystem_root_is_configuration_error(tmp_path: Path) -> Non
 
 # --- #481: the warm-tree error names both reachable lanes + the operator doc -------------
 
-_STAGING_DOC = "docs/operating/build-source-staging.md"
+_STAGING_DOC = "resource://kdive/docs/operating/build-source-staging.md"
 
 
 def _names_both_lanes_and_doc(message: str) -> bool:
@@ -1316,7 +1316,7 @@ def _assert_names_both_build_lanes(message: str) -> None:
     # the operator warm-tree staging step (and its doc), and the git build lane
     # (structured ref + a registered remote build host).
     assert "KDIVE_KERNEL_SRC" in message
-    assert "docs/operating/build-source-staging.md" in message
+    assert "resource://kdive/docs/operating/build-source-staging.md" in message
     assert '{"git"' in message
     assert "build_hosts.register" in message
 

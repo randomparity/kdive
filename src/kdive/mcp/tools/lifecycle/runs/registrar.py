@@ -107,7 +107,8 @@ def _register_runs_create(
                     "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get "
                     "the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) "
                     "for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named "
-                    "fragment. See docs/operating/build-source-staging.md for staging the source."
+                    "fragment. See resource://kdive/docs/operating/build-source-staging.md for "
+                    "staging the source."
                 )
             ),
         ],
