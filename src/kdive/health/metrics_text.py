@@ -14,6 +14,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from opentelemetry.sdk.metrics.export import (
+    Gauge,
     Histogram,
     HistogramDataPoint,
     MetricsData,
@@ -27,10 +28,11 @@ CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 def render_prometheus(metrics_data: MetricsData | None) -> str:
     """Return the Prometheus text exposition for ``metrics_data``.
 
-    Sums render as a single sample per data point; histograms render the standard
-    ``_bucket`` (cumulative, with a ``+Inf`` bucket), ``_sum``, and ``_count`` series.
-    Unknown metric kinds are skipped (the server emits only sums and histograms). A
-    ``None`` reader result (no metrics collected yet) renders to an empty body.
+    Sums render as a single sample per data point; gauges render one sample per data point
+    (the observable lifecycle-inventory / host-capacity / queue-depth gauges); histograms
+    render the standard ``_bucket`` (cumulative, with a ``+Inf`` bucket), ``_sum``, and
+    ``_count`` series. Unknown metric kinds are skipped. A ``None`` reader result (no metrics
+    collected yet) renders to an empty body.
     """
     if metrics_data is None:
         return ""
@@ -41,6 +43,9 @@ def render_prometheus(metrics_data: MetricsData | None) -> str:
         name = _sanitize(metric.name)
         if isinstance(data, Sum):
             _emit_help(lines, seen, name, "counter", metric)
+            _render_sum(lines, name, data.data_points)
+        elif isinstance(data, Gauge):
+            _emit_help(lines, seen, name, "gauge", metric)
             _render_sum(lines, name, data.data_points)
         elif isinstance(data, Histogram):
             _emit_help(lines, seen, name, "histogram", metric)

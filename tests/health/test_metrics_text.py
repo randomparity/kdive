@@ -80,3 +80,42 @@ def test_histogram_renders_prometheus_bucket_sum_and_count_lines() -> None:
     assert (
         'kdive_request_duration_count{a_label="line\\nbreak",z_label="needs\\"escape"} 6\n'
     ) in body
+
+
+def test_gauge_renders_a_sample_per_data_point() -> None:
+    from opentelemetry.sdk.metrics.export import Gauge, NumberDataPoint
+
+    metrics = MetricsData(
+        resource_metrics=[
+            ResourceMetrics(
+                resource=Resource.create({}),
+                scope_metrics=[
+                    ScopeMetrics(
+                        scope=InstrumentationScope("test"),
+                        metrics=[
+                            Metric(
+                                name="kdive.allocations",
+                                description="Allocations by state",
+                                unit="1",
+                                data=Gauge(
+                                    data_points=[
+                                        NumberDataPoint(
+                                            attributes={"state": "granted"},
+                                            start_time_unix_nano=1,
+                                            time_unix_nano=2,
+                                            value=3,
+                                        )
+                                    ]
+                                ),
+                            )
+                        ],
+                        schema_url="",
+                    )
+                ],
+                schema_url="",
+            )
+        ]
+    )
+    body = render_prometheus(metrics)
+    assert "# TYPE kdive_allocations gauge\n" in body
+    assert 'kdive_allocations{state="granted"} 3\n' in body
