@@ -411,6 +411,60 @@ def test_list_advertises_supported_source_kinds_per_kind(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_list_marks_unresolvable_ephemeral_host_false(migrated_url: str) -> None:
+    """An ephemeral_libvirt host with no backing [[remote_libvirt]] instance is resolves=false.
+
+    The test env has no systems.toml, so declared_remote_instance_names() is empty: the
+    ephemeral host names no instance and is reported not-ready, while local/ssh resolve.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_host(pool, name="ssh-host")
+            await register_ephemeral_libvirt_build_host(
+                pool,
+                _admin_ctx(),
+                _ephemeral_request(name="eph-noinstance"),
+            )
+            list_resp = await list_build_hosts(pool, _auditor_ctx())
+
+        assert list_resp.status == "ok"
+        by_name = {item.data.get("name"): item.data for item in list_resp.items}
+        assert by_name["eph-noinstance"]["resolves"] == "false"
+        assert by_name["ssh-host"]["resolves"] == "true"
+        assert by_name["worker-local"]["resolves"] == "true"
+        # redaction intact: the credential ref string only, never key bytes
+        assert by_name["ssh-host"]["ssh_credential_ref"] == _CRED_REF
+        assert _SECRET_VALUE not in str(list_resp.model_dump())
+
+    asyncio.run(_run())
+
+
+def test_list_marks_resolvable_ephemeral_host_true(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ephemeral_libvirt host whose name matches a declared instance is resolves=true."""
+
+    monkeypatch.setattr(
+        "kdive.mcp.tools.ops.build_hosts.lifecycle.declared_remote_instance_names",
+        lambda: ["eph-ok"],
+    )
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await register_ephemeral_libvirt_build_host(
+                pool,
+                _admin_ctx(),
+                _ephemeral_request(name="eph-ok"),
+            )
+            list_resp = await list_build_hosts(pool, _auditor_ctx())
+
+        by_name = {item.data.get("name"): item.data for item in list_resp.items}
+        assert by_name["eph-ok"]["resolves"] == "true"
+
+    asyncio.run(_run())
+
+
 def test_register_audit_row_written_no_secret_bytes(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
