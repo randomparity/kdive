@@ -45,8 +45,13 @@ Link a run to an investigation.
 
 List the Investigations you can view, newest-first, for reporting.
 
+Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+``cursor`` for the next page.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
 | `project` | string (nullable) | no | Restrict to one project you can view; omit for all. |
 | `state` | string (nullable) | no | Filter by state (open/active/closed/abandoned). |
 

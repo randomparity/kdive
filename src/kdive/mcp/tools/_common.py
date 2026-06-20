@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+from collections.abc import Sequence
+from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
@@ -31,6 +36,7 @@ class ConfigErrorReason(StrEnum):
     INVALID_TIMEOUT = "invalid_timeout"
     INVALID_TEXT = "invalid_text"
     INVALID_PCIE_MATCH = "invalid_pcie_match"
+    INVALID_CURSOR = "invalid_cursor"
 
 
 _MAX_ECHOED_ID = 64
@@ -71,6 +77,88 @@ def invalid_uuid_error(field: str, raw_id: str) -> ToolResponse:
 
 def clamp_list_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIST_LIMIT))
+
+
+class InvalidCursor(Exception):
+    """A list `cursor` is malformed, minted by a different tool, or the wrong shape (ADR-0192).
+
+    Raised by :func:`decode_cursor`; a list handler maps it to an ``invalid_cursor``
+    ``configuration_error`` (:func:`invalid_cursor_error`). Never a silent first-page
+    fallback — a silent fallback would trap an agent re-reading page one forever.
+    """
+
+
+def encode_cursor(tool_tag: str, key_parts: Sequence[str]) -> str:
+    """Encode a list page's continuation cursor as an opaque base64url token (ADR-0192).
+
+    The token wraps the producing tool's tag plus the last returned row's sort key (each
+    part stringified) so a cursor minted by one list is rejected by another. It is not a
+    security token: every page re-applies the same project/role ``WHERE`` clause, so the
+    cursor only expresses a sort-key boundary.
+    """
+    payload = json.dumps({"t": tool_tag, "k": list(key_parts)}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+
+
+def decode_cursor(tool_tag: str, cursor: str, *, arity: int) -> list[str]:
+    """Decode an opaque list cursor, validating its tag and shape (ADR-0192).
+
+    Returns the ``arity`` sort-key parts. Raises :class:`InvalidCursor` when the token is
+    not valid base64url, not the expected JSON object, carries a different tool's tag, or
+    whose ``k`` is not a list of exactly ``arity`` strings.
+    """
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
+        obj = json.loads(raw)
+    except (binascii.Error, ValueError, UnicodeError) as exc:
+        raise InvalidCursor("cursor is not a valid token") from exc
+    if not isinstance(obj, dict) or obj.get("t") != tool_tag:
+        raise InvalidCursor("cursor was not minted by this tool")
+    key = obj.get("k")
+    if not isinstance(key, list) or len(key) != arity:
+        raise InvalidCursor("cursor has the wrong shape")
+    if not all(isinstance(part, str) for part in key):
+        raise InvalidCursor("cursor key parts must be strings")
+    return [part for part in key if isinstance(part, str)]
+
+
+def paginate[T](rows: list[T], limit: int) -> tuple[list[T], bool]:
+    """Split a ``limit + 1`` fetch into the kept page and a truncation flag (ADR-0192).
+
+    A handler fetches one row past ``limit``; this drops the extra and reports
+    ``truncated=True`` iff that extra row was present. Exact at the boundary: exactly
+    ``limit`` matching rows reports ``truncated=False``.
+    """
+    return rows[:limit], len(rows) > limit
+
+
+def invalid_cursor_error(object_id: str) -> ToolResponse:
+    """Build the ``invalid_cursor`` ``configuration_error`` for a bad list cursor (ADR-0192)."""
+    return config_error_reason(object_id, ConfigErrorReason.INVALID_CURSOR)
+
+
+def encode_ts_uuid_cursor(tool_tag: str, created_at: datetime, row_id: UUID) -> str:
+    """Encode a ``(created_at, id)`` keyset cursor for a timestamp-ordered list (ADR-0192).
+
+    The timestamp is serialized at full (tz-aware, microsecond) precision so it round-trips
+    to the exact stored value and the ``created_at = boundary`` arm of the seek matches the
+    boundary row.
+    """
+    return encode_cursor(tool_tag, (created_at.isoformat(), str(row_id)))
+
+
+def decode_ts_uuid_cursor(tool_tag: str, cursor: str) -> tuple[datetime, UUID]:
+    """Decode a ``(created_at, id)`` keyset cursor into typed seek values (ADR-0192).
+
+    Returns the typed boundary so the handler binds a ``timestamptz`` / ``uuid`` (not a raw
+    string) into the row-value seek predicate. Raises :class:`InvalidCursor` on a malformed
+    or wrong-tool token, or when a well-formed token carries a non-timestamp / non-uuid part.
+    """
+    ts_part, id_part = decode_cursor(tool_tag, cursor, arity=2)
+    try:
+        return datetime.fromisoformat(ts_part), UUID(id_part)
+    except ValueError as exc:
+        raise InvalidCursor("cursor key parts are not a (timestamp, uuid)") from exc
 
 
 def config_error(
@@ -144,6 +232,7 @@ __all__ = [
     "DEFAULT_LIST_LIMIT",
     "MAX_LIST_LIMIT",
     "ConfigErrorReason",
+    "InvalidCursor",
     "as_uuid",
     "authorizing",
     "authz_denied",
@@ -151,8 +240,14 @@ __all__ = [
     "config_error",
     "config_error_reason",
     "context_from_job",
+    "decode_cursor",
+    "decode_ts_uuid_cursor",
+    "encode_cursor",
+    "encode_ts_uuid_cursor",
+    "invalid_cursor_error",
     "invalid_uuid_error",
     "job_envelope",
     "not_found",
+    "paginate",
     "stale_handle",
 ]

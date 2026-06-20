@@ -266,7 +266,8 @@ def test_cross_project_auditor_reads_all_and_audits(migrated_url: str) -> None:
         assert {r["project"] for r in _rows(resp)} == {"proj-a", "proj-b"}
         assert len(_rows(resp)) == 3
         assert resp.data["count"] == 3
-        assert resp.data["truncated"] == "false"
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
         # Exactly one platform_audit_log row (role recorded), zero audit_log writes.
         rows = await _platform_audit_rows(migrated_url)
         assert rows == [("user-1", "platform_auditor", "audit.query", "all-projects")]
@@ -469,5 +470,72 @@ def test_inverted_window_is_config_error(migrated_url: str) -> None:
             )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+async def _seed_n_rows(pool: AsyncConnectionPool, n: int) -> None:
+    async with pool.connection() as conn, conn.transaction():
+        for i in range(n):
+            await _audit_row(
+                conn,
+                project="proj-a",
+                principal="alice",
+                tool="allocations.request",
+                transition="requested",
+                object_kind="allocation",
+                object_id=uuid4(),
+                ts=_DT + timedelta(minutes=i),
+            )
+
+
+def test_cross_project_paginates_with_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_n_rows(pool, 5)
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            seen: list[str] = []
+            cursor: str | None = None
+            for _ in range(10):
+                page = await audit_tools.query_all_projects(
+                    pool, ctx, request=_all_projects_query(), limit=2, cursor=cursor
+                )
+                seen.extend(str(r["object_id"]) for r in _rows(page))
+                if not page.data["truncated"]:
+                    break
+                cursor = cast(str, page.data["next_cursor"])
+        assert len(seen) == 5
+        assert len(set(seen)) == 5
+
+    asyncio.run(_run())
+
+
+def test_cross_project_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_n_rows(pool, 2)
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            resp = await audit_tools.query_all_projects(
+                pool, ctx, request=_all_projects_query(), limit=2
+            )
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_cross_project_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_n_rows(pool, 1)
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            resp = await audit_tools.query_all_projects(
+                pool, ctx, request=_all_projects_query(), cursor="!!!"
+            )
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
+        # The read is still audited even though the cursor was bad (decode is post-authz).
+        rows = await _platform_audit_rows(migrated_url)
+        assert rows == [("user-1", "platform_auditor", "audit.query", "all-projects")]
 
     asyncio.run(_run())

@@ -470,3 +470,80 @@ def test_list_surfaces_placement_no_per_item_keys(migrated_url: str) -> None:
         assert "active_debug_session_ids" not in item.data
 
     asyncio.run(_run())
+
+
+def test_pagination_drains_distinct_timestamps(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, resource_id=res)
+            for i in range(5):
+                await _seed_system(
+                    pool, allocation_id=alloc, created_at=datetime(2026, 6, i + 1, tzinfo=UTC)
+                )
+            seen: list[str] = []
+            cursor: str | None = None
+            for _ in range(10):
+                page = await _list_systems(pool, _ctx(), limit=2, cursor=cursor)
+                seen.extend(item.object_id for item in page.items)
+                if not page.data["truncated"]:
+                    break
+                cursor = cast(str, page.data["next_cursor"])
+        assert len(seen) == 5
+        assert len(set(seen)) == 5
+
+    asyncio.run(_run())
+
+
+def test_pagination_drains_tied_timestamps(migrated_url: str) -> None:
+    # Every System shares one created_at microsecond; the id DESC tiebreaker must keep the
+    # page boundary total so the cursor never skips or repeats across the tie (ADR-0192).
+    async def _run() -> None:
+        tie = datetime(2026, 6, 1, tzinfo=UTC)
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, resource_id=res)
+            for _ in range(5):
+                await _seed_system(pool, allocation_id=alloc, created_at=tie)
+            seen: list[str] = []
+            cursor: str | None = None
+            for _ in range(10):
+                page = await _list_systems(pool, _ctx(), limit=2, cursor=cursor)
+                seen.extend(item.object_id for item in page.items)
+                if not page.data["truncated"]:
+                    break
+                cursor = cast(str, page.data["next_cursor"])
+        assert len(seen) == 5
+        assert len(set(seen)) == 5
+
+    asyncio.run(_run())
+
+
+def test_pagination_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            res = await _seed_resource(pool)
+            alloc = await _seed_allocation(pool, resource_id=res)
+            for i in range(2):
+                await _seed_system(
+                    pool, allocation_id=alloc, created_at=datetime(2026, 6, i + 1, tzinfo=UTC)
+                )
+            resp = await _list_systems(pool, _ctx(), limit=2)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_pagination_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_budget_quota(pool, "proj")
+            resp = await _list_systems(pool, _ctx(), limit=2, cursor="!!!")
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())

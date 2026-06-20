@@ -182,6 +182,18 @@ def test_artifacts_list_returns_redacted_only(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_artifacts_list_carries_total_and_truncated(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, _, _ = await _seed_system_with_artifacts(pool)
+            resp = await artifacts_list(pool, _ctx(), system_id=sys_id)
+        assert resp.data["total"] == len(resp.items)
+        assert resp.data["truncated"] is False
+        assert "next_cursor" not in resp.data  # bounded set; no cursor
+
+    asyncio.run(_run())
+
+
 def test_artifacts_search_text_returns_bounded_matches(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

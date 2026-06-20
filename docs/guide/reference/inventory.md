@@ -8,10 +8,12 @@
 
 Cross-project systems/allocations summary. Requires platform auditor.
 
-Each list is capped at 500 rows (newest first); ``data.truncated`` is "true"
-when either cap is hit — narrow with the project/resource filters.
+Each stream (allocations, systems) is capped at ``limit`` (newest first);
+``data.truncated`` is ``true`` when either cap is hit. This dual-stream summary is
+not cursor-continuable — narrow with the project/resource filters instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `limit` | integer | no | Maximum rows per stream returned (capped at 200). |
 | `project` | string (nullable) | no | Filter the summary to one project; omit for all. |
 | `resource_id` | string (nullable) | no | Filter to allocations/systems on one host UUID. |

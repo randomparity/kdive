@@ -33,12 +33,17 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import ConfigErrorReason
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, projects_with_role, require_role
@@ -564,18 +569,27 @@ async def set_investigation(
 
 
 async def _fetch_investigation_rows(
-    conn: AsyncConnection, projects: tuple[str, ...], state: InvestigationState | None
-) -> list[InvestigationListItem]:
+    conn: AsyncConnection,
+    projects: tuple[str, ...],
+    state: InvestigationState | None,
+    *,
+    limit: int,
+    after: tuple[datetime, UUID] | None,
+) -> list[dict[str, Any]]:
+    """Fetch a keyset page of raw investigation rows (``limit + 1`` for truncation, ADR-0192)."""
     query = "SELECT * FROM investigations WHERE project = ANY(%s)"
     params: list[object] = [list(projects)]
     if state is not None:
         query += " AND state = %s"
         params.append(state.value)
-    query += " ORDER BY created_at DESC, id DESC"
+    if after is not None:
+        query += " AND (created_at, id) < (%s, %s)"
+        params.extend(after)
+    query += " ORDER BY created_at DESC, id DESC LIMIT %s"
+    params.append(limit)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
-        rows = await cur.fetchall()
-    return [_investigation_list_item(row) for row in rows]
+        return list(await cur.fetchall())
 
 
 def _investigation_list_item(row: dict[str, Any]) -> InvestigationListItem:
@@ -598,14 +612,23 @@ def _investigation_row_error(object_id: object | None) -> ToolResponse:
     )
 
 
+_INVESTIGATIONS_LIST_TAG = "investigations.list"
+
+
 async def list_investigations(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     project: str | None = None,
     state: str | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> ToolResponse:
-    """List the caller's viewer-project Investigations, newest-first (ADR-0135)."""
+    """List the caller's viewer-project Investigations, newest-first (ADR-0135, ADR-0192).
+
+    Keyset-paginated: fetches one row past ``limit`` to set ``data.truncated`` /
+    ``data.next_cursor`` from the last kept row's ``(created_at, id)``.
+    """
     resolved_state: InvestigationState | None = None
     if state is not None:
         try:
@@ -617,17 +640,31 @@ async def list_investigations(
                 accepted_values=[s.value for s in InvestigationState],
                 detail=f"state {state!r} is not a valid Investigation state",
             )
+    capped = _clamp_list_limit(limit)
+    after = None
+    if cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_INVESTIGATIONS_LIST_TAG, cursor)
+        except InvalidCursor:
+            return _invalid_cursor_error("investigations.list")
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         if project is not None:
             viewer_projects = tuple(p for p in viewer_projects if p == project)
         async with pool.connection() as conn:
-            render_queue = await _fetch_investigation_rows(conn, viewer_projects, resolved_state)
-            investigations: list[Investigation] = []
-            for item in render_queue:
-                if isinstance(item, ToolResponse):
-                    continue
-                investigations.append(item)
+            rows = await _fetch_investigation_rows(
+                conn, viewer_projects, resolved_state, limit=capped + 1, after=after
+            )
+            kept, truncated = _paginate(rows, capped)
+            next_cursor = (
+                _encode_ts_uuid_cursor(
+                    _INVESTIGATIONS_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"]
+                )
+                if truncated and kept
+                else None
+            )
+            render_queue = [_investigation_list_item(row) for row in kept]
+            investigations = [item for item in render_queue if not isinstance(item, ToolResponse)]
             attachments = await _attachments_for_investigations(
                 conn, [inv.id for inv in investigations]
             )
@@ -642,6 +679,7 @@ async def list_investigations(
             "ok",
             items,
             suggested_next_actions=["investigations.get", "investigations.open"],
+            data={"truncated": truncated, "next_cursor": next_cursor},
         )
 
 
@@ -787,6 +825,19 @@ def _register_investigations_list(app: FastMCP, pool: AsyncConnectionPool) -> No
             str | None,
             Field(description="Filter by state (open/active/closed/abandoned)."),
         ] = None,
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
     ) -> ToolResponse:
-        """List the Investigations you can view, newest-first, for reporting."""
-        return await list_investigations(pool, current_context(), project=project, state=state)
+        """List the Investigations you can view, newest-first, for reporting.
+
+        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+        ``cursor`` for the next page.
+        """
+        return await list_investigations(
+            pool, current_context(), project=project, state=state, limit=limit, cursor=cursor
+        )

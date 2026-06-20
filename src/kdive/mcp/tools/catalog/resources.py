@@ -30,7 +30,13 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -75,7 +81,13 @@ async def _staged_remote_images(
 
 async def _fetch_resource_rows(
     conn: AsyncConnection, kind: ResourceKind | None
-) -> list[ResourceListItem]:
+) -> list[dict[str, Any]]:
+    """Fetch all resource rows ascending; visibility + paging happen in the handler.
+
+    Visibility (``resource_visible_to_projects``) is computed in Python, so paging must
+    run over the *visible* list to keep ``truncated`` exact (ADR-0192). The resources table
+    is the bounded operator fleet, so reading it whole per call is cheap.
+    """
     if kind is None:
         query = "SELECT * FROM resources ORDER BY created_at, id"
         params: tuple[object, ...] = ()
@@ -84,8 +96,7 @@ async def _fetch_resource_rows(
         params = (kind.value,)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
-        rows = await cur.fetchall()
-    return [_resource_list_item(row) for row in rows]
+        return list(await cur.fetchall())
 
 
 def _resource_list_item(row: dict[str, Any]) -> ResourceListItem:
@@ -108,10 +119,32 @@ def _resource_row_error(object_id: object | None) -> ToolResponse:
     )
 
 
+_RESOURCES_LIST_TAG = "resources.list"
+
+
+def _row_visible(row: dict[str, Any], viewer_projects: tuple[str, ...]) -> bool:
+    """Visibility for one raw row; a row that fails to validate is kept (degraded, not hidden)."""
+    try:
+        resource = Resource.model_validate(row)
+    except ValueError:
+        return True
+    return resource_visible_to_projects(resource, viewer_projects)
+
+
 async def list_resources(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, kind: str | None
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    kind: str | None,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
 ) -> ToolResponse:
-    """Return every resource (optionally filtered by ``kind``) in one collection envelope."""
+    """Return a page of visible resources (optionally filtered by ``kind``), ascending.
+
+    Keyset-paginated over the *visible* rows so ``data.truncated`` is exact even though
+    visibility is applied in Python (ADR-0192). The fleet table is small, so it is read
+    whole per call and paged in memory.
+    """
     if kind is None:
         resource_kind = None
     else:
@@ -119,28 +152,41 @@ async def list_resources(
             resource_kind = ResourceKind(kind)
         except ValueError:
             return resource_config_error("resources.list")
+    capped = _clamp_list_limit(limit)
+    after = None
+    if cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_RESOURCES_LIST_TAG, cursor)
+        except InvalidCursor:
+            return _invalid_cursor_error("resources.list")
     with bind_context(principal=ctx.principal):
         viewer_projects = tuple(projects_with_role(ctx, Role.VIEWER))
         async with pool.connection() as conn:
-            resources = await _fetch_resource_rows(conn, resource_kind)
-        responses: list[ToolResponse] = []
-        for resource in resources:
-            if isinstance(resource, ToolResponse):
-                responses.append(resource)
-                continue
-            if not resource_visible_to_projects(resource, viewer_projects):
-                continue
-            responses.append(
-                resource_envelope(
-                    resource, next_actions=["resources.describe", "allocations.request"]
-                )
-            )
+            rows = await _fetch_resource_rows(conn, resource_kind)
+        visible = [row for row in rows if _row_visible(row, viewer_projects)]
+        if after is not None:
+            visible = [row for row in visible if (row["created_at"], row["id"]) > after]
+        kept, truncated = _paginate(visible, capped)
+        next_cursor = (
+            _encode_ts_uuid_cursor(_RESOURCES_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"])
+            if truncated and kept
+            else None
+        )
+        responses = [_resource_envelope_or_degraded(row) for row in kept]
         return ToolResponse.collection(
             "resources",
             "ok",
             responses,
             suggested_next_actions=["resources.describe", "allocations.request"],
+            data={"truncated": truncated, "next_cursor": next_cursor},
         )
+
+
+def _resource_envelope_or_degraded(row: dict[str, Any]) -> ToolResponse:
+    item = _resource_list_item(row)
+    if isinstance(item, ToolResponse):
+        return item
+    return resource_envelope(item, next_actions=["resources.describe", "allocations.request"])
 
 
 async def describe_resource(
@@ -228,9 +274,20 @@ def register(
             str | None,
             Field(description="Filter by resource kind (e.g. 'local-libvirt'); omit for all."),
         ] = None,
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
     ) -> ToolResponse:
-        """List runtime resources visible to the caller."""
-        return await list_resources(pool, current_context(), kind=kind)
+        """List runtime resources visible to the caller.
+
+        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+        ``cursor`` for the next page.
+        """
+        return await list_resources(pool, current_context(), kind=kind, limit=limit, cursor=cursor)
 
     @app.tool(
         name="resources.describe",

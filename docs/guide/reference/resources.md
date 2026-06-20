@@ -64,9 +64,14 @@ Cordon a host, then report or force-release its allocations.
 
 List runtime resources visible to the caller.
 
+Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+``cursor`` for the next page.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
 | `kind` | string (nullable) | no | Filter by resource kind (e.g. 'local-libvirt'); omit for all. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
 
 ## `resources.register_fault_inject`
 

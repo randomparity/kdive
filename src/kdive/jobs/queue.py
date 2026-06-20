@@ -12,7 +12,7 @@ connection, and all assume READ COMMITTED (psycopg's default).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -327,7 +327,13 @@ async def queue_depth(conn: AsyncConnection) -> dict[str, int]:
     return {str(state): int(count) for state, count in rows}
 
 
-async def recent_jobs(conn: AsyncConnection, limit: int, projects: Sequence[str]) -> list[Job]:
+async def recent_jobs(
+    conn: AsyncConnection,
+    limit: int,
+    projects: Sequence[str],
+    *,
+    after: tuple[datetime, UUID] | None = None,
+) -> list[Job]:
     """Return the caller's most recent jobs, newest first, capped at ``limit``.
 
     Scoped to ``projects``: only jobs whose ``authorizing->>'project'`` is one of the
@@ -336,12 +342,24 @@ async def recent_jobs(conn: AsyncConnection, limit: int, projects: Sequence[str]
     closed). The cap applies after the project filter, so the caller gets up to ``limit``
     of *their* jobs. The ``id`` tiebreaker makes the order total when two jobs share a
     ``created_at`` microsecond, so the cap never drops an arbitrary one of a tied pair.
+
+    ``after`` is the ``(created_at, id)`` keyset boundary from a prior page's cursor
+    (ADR-0192); when set, only rows strictly older than it (in ``created_at DESC, id DESC``
+    order) are returned. The caller fetches ``limit`` already incremented by one so it can
+    detect truncation.
     """
+    seek = ""
+    params: list[object] = [list(projects)]
+    if after is not None:
+        seek = " AND (created_at, id) < (%s, %s)"
+        params.extend(after)
+    params.append(limit)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT * FROM jobs WHERE authorizing->>'project' = ANY(%s::text[]) "
-            "ORDER BY created_at DESC, id DESC LIMIT %s",
-            (list(projects), limit),
+            "SELECT * FROM jobs WHERE authorizing->>'project' = ANY(%s::text[])"
+            + seek
+            + " ORDER BY created_at DESC, id DESC LIMIT %s",
+            params,
         )
         rows = await cur.fetchall()
     return [Job.model_validate(row) for row in rows]

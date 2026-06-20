@@ -25,6 +25,9 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.tools.ops import _reads
 from kdive.security.authz.context import RequestContext
@@ -36,7 +39,6 @@ from kdive.security.authz.rbac import (
 
 _TOOL = "inventory.list"
 _OBJECT_ID = "inventory.list"
-_MAX_ROWS = 500
 
 
 async def list_inventory(
@@ -45,8 +47,14 @@ async def list_inventory(
     *,
     project: str | None = None,
     resource_id: str | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
 ) -> ToolResponse:
-    """Cross-project systems/allocations summary; requires ``platform_auditor``."""
+    """Cross-project systems/allocations summary; requires ``platform_auditor``.
+
+    A dual-stream summary (allocations + systems), so it is **not** cursor-continuable
+    (ADR-0192): each stream is capped at ``limit`` and ``data.truncated`` is true iff either
+    stream was capped. An operator narrows with the ``project`` / ``resource_id`` filters.
+    """
     with bind_context(principal=ctx.principal):
         try:
             resource_uuid = _parse_resource_id(resource_id)
@@ -60,11 +68,12 @@ async def list_inventory(
             return ToolResponse.failure(
                 _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
             )
+        capped = _clamp_list_limit(limit)
         async with pool.connection() as conn:
-            allocations = await _fetch_allocations(conn, project, resource_uuid)
-            systems = await _fetch_systems(conn, project, resource_uuid)
+            allocations = await _fetch_allocations(conn, project, resource_uuid, capped + 1)
+            systems = await _fetch_systems(conn, project, resource_uuid, capped + 1)
             await _reads.record_read(conn, ctx, tool=_TOOL, args=args)
-        return _response(allocations, systems)
+        return _response(allocations, systems, capped)
 
 
 def _parse_resource_id(resource_id: str | None) -> UUID | None:
@@ -80,9 +89,9 @@ def _parse_resource_id(resource_id: str | None) -> UUID | None:
 
 
 async def _fetch_allocations(
-    conn: AsyncConnection, project: str | None, resource_id: UUID | None
+    conn: AsyncConnection, project: str | None, resource_id: UUID | None, limit: int
 ) -> list[dict[str, object]]:
-    """Read filtered ``allocations`` rows.
+    """Read filtered ``allocations`` rows (``limit`` rows; the caller passes ``cap + 1``).
 
     The WHERE clause is built from **literal** fragments (so the query stays a
     ``LiteralString`` — no runtime interpolation); filters bind as ``%s`` parameters.
@@ -99,14 +108,14 @@ async def _fetch_allocations(
         "SELECT id, resource_id, project, principal, state, lease_expiry "
         "FROM allocations WHERE true" + where + " ORDER BY created_at DESC, id DESC LIMIT %s"
     )
-    params.append(_MAX_ROWS)
+    params.append(limit)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
         return list(await cur.fetchall())
 
 
 async def _fetch_systems(
-    conn: AsyncConnection, project: str | None, resource_id: UUID | None
+    conn: AsyncConnection, project: str | None, resource_id: UUID | None, limit: int
 ) -> list[dict[str, object]]:
     params: list[object] = []
     where: LiteralString = ""
@@ -123,7 +132,7 @@ async def _fetch_systems(
         "JOIN resources r ON r.id = a.resource_id "
         "WHERE true" + where + " ORDER BY s.created_at DESC, s.id DESC LIMIT %s"
     )
-    params.append(_MAX_ROWS)
+    params.append(limit)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(query, params)
         return list(await cur.fetchall())
@@ -167,15 +176,17 @@ def _as_str(value: object) -> str | None:
 
 
 def _response(
-    allocations: list[dict[str, object]], systems: list[dict[str, object]]
+    allocations: list[dict[str, object]], systems: list[dict[str, object]], limit: int
 ) -> ToolResponse:
+    kept_allocs, alloc_truncated = _paginate(allocations, limit)
+    kept_systems, sys_truncated = _paginate(systems, limit)
     items = [
         ToolResponse.success(str(row["id"]), "ok", data={"kind": "allocation", **_alloc_data(row)})
-        for row in allocations
+        for row in kept_allocs
     ]
     items.extend(
         ToolResponse.success(str(row["id"]), "ok", data={"kind": "system", **_system_data(row)})
-        for row in systems
+        for row in kept_systems
     )
     return ToolResponse.collection(
         _OBJECT_ID,
@@ -183,11 +194,9 @@ def _response(
         items,
         suggested_next_actions=["audit.query"],
         data={
-            "allocation_count": str(len(allocations)),
-            "system_count": str(len(systems)),
-            "truncated": "true"
-            if len(allocations) >= _MAX_ROWS or len(systems) >= _MAX_ROWS
-            else "false",
+            "allocation_count": len(kept_allocs),
+            "system_count": len(kept_systems),
+            "truncated": alloc_truncated or sys_truncated,
         },
     )
 
@@ -207,12 +216,16 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         resource_id: Annotated[
             str | None, Field(description="Filter to allocations/systems on one host UUID.")
         ] = None,
+        limit: Annotated[
+            int, Field(description="Maximum rows per stream returned (capped at 200).")
+        ] = DEFAULT_LIST_LIMIT,
     ) -> ToolResponse:
         """Cross-project systems/allocations summary. Requires platform auditor.
 
-        Each list is capped at 500 rows (newest first); ``data.truncated`` is "true"
-        when either cap is hit — narrow with the project/resource filters.
+        Each stream (allocations, systems) is capped at ``limit`` (newest first);
+        ``data.truncated`` is ``true`` when either cap is hit. This dual-stream summary is
+        not cursor-continuable — narrow with the project/resource filters instead.
         """
         return await list_inventory(
-            pool, current_context(), project=project, resource_id=resource_id
+            pool, current_context(), project=project, resource_id=resource_id, limit=limit
         )
