@@ -202,6 +202,23 @@ Install a built run onto its system.
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `run_id` | string | yes | The Run whose built kernel to install. |
 
+## `runs.list`
+
+`implemented` · `read-only`
+
+List the caller's Runs, filterable by system/investigation/state. Requires viewer.
+
+Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+``cursor`` for the next page.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
+| `investigation_id` | string (nullable) | no | Only Runs under this Investigation id. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
+| `state` | `created`, `running`, `succeeded`, `failed`, `canceled` (nullable) | no | Only Runs in this build-phase state. |
+| `system_id` | string (nullable) | no | Only Runs bound to this System id. |
+
 ## `runs.profile_examples`
 
 `implemented` · `read-only`

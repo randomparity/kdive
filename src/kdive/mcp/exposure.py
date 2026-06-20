@@ -166,6 +166,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "resources.drain": frozenset({ExposureScope.PLATFORM_OPERATOR, ExposureScope.PLATFORM_ADMIN}),
     # runs
     "runs.get": _VIEWER,
+    "runs.list": _VIEWER,
     "runs.create": _OPERATOR,
     "runs.bind": _OPERATOR,
     "runs.cancel": _OPERATOR,
