@@ -63,10 +63,11 @@ spec:
         - name: prometheus
           image: {{ .Values.observability.image }}
           args:
+            # No --web.enable-lifecycle: the checksum/config annotation below rolls the pod on a
+            # scrape-config change, so a runtime reload endpoint (and its /-/quit) is unused surface.
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
             - --storage.tsdb.retention.time={{ .Values.observability.retention }}
-            - --web.enable-lifecycle
           ports:
             - containerPort: 9090
           volumeMounts:
