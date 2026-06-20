@@ -112,3 +112,10 @@ def test_fail_dominates_a_concurrent_host_unreachable() -> None:
 
 def test_fix_names_the_base_image_remediation() -> None:
     assert "base" in BUILDHOST_AGENT_FIX and "guest agent" in BUILDHOST_AGENT_FIX
+
+
+def test_fix_cites_the_staging_doc_as_an_mcp_resource_uri() -> None:
+    # The remediation reaches an MCP client, which cannot open a bare filesystem path; it must
+    # cite the doc as the fetchable resource URI (ADR-0151), not "docs/operating/...".
+    assert "resource://kdive/docs/operating/build-source-staging.md" in BUILDHOST_AGENT_FIX
+    assert "(docs/operating/" not in BUILDHOST_AGENT_FIX

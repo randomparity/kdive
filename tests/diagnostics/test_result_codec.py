@@ -36,6 +36,21 @@ def test_roundtrip_preserves_three_state_and_fields() -> None:
     ]
 
 
+def test_roundtrip_preserves_resource_id() -> None:
+    src = [
+        CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", resource_id="ub26"),
+        CheckResult(GDBSTUB_ACL_ID, CheckStatus.PASS, "ok"),
+    ]
+    out = deserialize_results(serialize_results(src))
+    assert [r.resource_id for r in out] == ["ub26", None]
+
+
+def test_payload_without_resource_id_reconstructs_none() -> None:
+    payload = '{"results": [{"check_id": "provider_tls", "status": "pass", "detail": "ok"}]}'
+    [result] = deserialize_results(payload)
+    assert result.resource_id is None
+
+
 @pytest.mark.parametrize("raw", [None, "", "not json", "{}", '{"results": 3}', "[]"])
 def test_malformed_raises(raw: str | None) -> None:
     with pytest.raises(ResultCodecError):

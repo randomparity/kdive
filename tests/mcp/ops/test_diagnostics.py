@@ -272,6 +272,29 @@ def test_verdict_carries_each_check_status_detail_fix_provider(migrated_url: str
     asyncio.run(_run())
 
 
+def test_verdict_projects_resource_id(migrated_url: str) -> None:
+    # A fanned-out per-host check names which host it probed; a resource-independent check is None.
+    results = [
+        CheckResult(
+            check_id="remote_libvirt_base_image_staging",
+            status=CheckStatus.PASS,
+            detail="staged",
+            provider="remote-libvirt",
+            resource_id="ub26",
+        ),
+        CheckResult(check_id="secret_ref", status=CheckStatus.PASS, detail="all resolve"),
+    ]
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await diagnostics.run_diagnostics(pool, _factory(results), _OPERATOR)
+        by_check = {item.data["check"]: item for item in resp.items}
+        assert by_check["remote_libvirt_base_image_staging"].data["resource_id"] == "ub26"
+        assert by_check["secret_ref"].data["resource_id"] is None
+
+    asyncio.run(_run())
+
+
 def test_verdict_projects_failure_category(migrated_url: str) -> None:
     results = [
         CheckResult(

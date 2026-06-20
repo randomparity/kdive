@@ -203,6 +203,26 @@ def test_checks_fan_out_one_row_per_declared_instance(monkeypatch, tmp_path: Pat
     assert ids.count(BASE_IMAGE_STAGING_ID) == 2
 
 
+def test_fanned_out_checks_carry_each_instance_name_as_resource_id(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # ADR-0194: each per-host reachability + base-image-staging result names which host it probed,
+    # so an operator can tell which of N declared hosts is staged. Force the probes so the checks
+    # run to a verdict without a live libvirt connection.
+    _with_remote_instance(monkeypatch, tmp_path, instances=_INSTANCE + _SECOND_INSTANCE)
+    _force_probe(monkeypatch, ReachabilityOutcome.REACHABLE)
+    _force_staging_probe(monkeypatch, BaseImageStagingOutcome.STAGED)
+
+    checks = remote_contribution.diagnostic_contribution().checks()
+    results = [asyncio.run(check.run()) for check in checks]
+
+    by_id: dict[str, set[str | None]] = {}
+    for result in results:
+        by_id.setdefault(result.check_id, set()).add(result.resource_id)
+    assert by_id[REACHABILITY_ID] == {"ub24-big", "ub24-small"}
+    assert by_id[BASE_IMAGE_STAGING_ID] == {"ub24-big", "ub24-small"}
+
+
 def test_worker_checks_fan_out_one_row_per_declared_instance(monkeypatch, tmp_path: Path) -> None:
     _with_remote_instance(monkeypatch, tmp_path, instances=_INSTANCE + _SECOND_INSTANCE)
 

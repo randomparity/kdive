@@ -13,6 +13,7 @@ the global lock order).
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from enum import StrEnum
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from kdive.db.build_hosts import (
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import ServerBuildProfile, is_git_source
+from kdive.providers.remote_libvirt.config import remote_instance_names
 
 
 class SourceKind(StrEnum):
@@ -64,6 +66,48 @@ def accepted_source_kinds(host_kind: BuildHostKind) -> tuple[SourceKind, ...]:
     if host_kind is BuildHostKind.LOCAL:
         return (SourceKind.WARM_TREE, SourceKind.GIT)
     return (SourceKind.GIT,)
+
+
+def build_host_resolves(
+    host_kind: BuildHostKind, host_name: str, declared_instances: Collection[str]
+) -> bool:
+    """Whether a build host of this kind/name can be built on, given the declared instances.
+
+    ``local`` and ``ssh`` hosts have no ``[[remote_libvirt]]`` dependency: a ``local`` host
+    builds on the worker, an ``ssh`` host connects to its own ``address``/credential. An
+    ``ephemeral_libvirt`` host provisions its build VM on the ``[[remote_libvirt]]`` instance
+    whose name equals the build host's name (the worker resolves it by name, ADR-0187), so it
+    resolves only when that instance is declared (ADR-0195, #626).
+
+    Args:
+        host_kind: The build host's transport kind.
+        host_name: The build host's name (the ``[[remote_libvirt]]`` instance name for an
+            ``ephemeral_libvirt`` host).
+        declared_instances: The declared ``[[remote_libvirt]]`` instance names.
+
+    Returns:
+        ``True`` if the host can be built on; ``False`` for an ``ephemeral_libvirt`` host whose
+        name is not a declared instance.
+    """
+    if host_kind is BuildHostKind.EPHEMERAL_LIBVIRT:
+        return host_name in declared_instances
+    return True
+
+
+def declared_remote_instance_names() -> list[str]:
+    """The declared ``[[remote_libvirt]]`` instance names, degrading to empty on a config error.
+
+    Wraps :func:`~kdive.providers.remote_libvirt.config.remote_instance_names` (ADR-0187) for
+    the read-only discovery surfaces (``runs.profile_examples``, ``build_hosts.list``). A missing
+    ``systems.toml`` already returns an empty list there; a present-but-malformed file raises
+    ``CONFIGURATION_ERROR``, which this swallows to an empty list so a bad operator edit cannot
+    crash a read tool (ADR-0112 fault isolation). The precise parse error still surfaces
+    fail-closed at build time via ``remote_config_for_resource``.
+    """
+    try:
+        return remote_instance_names()
+    except CategorizedError:
+        return []
 
 
 def check_source_kind_compatibility(

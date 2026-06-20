@@ -42,6 +42,7 @@ from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.rbac import Role
+from kdive.services.runs.build_host_selection import declared_remote_instance_names
 
 
 def register(
@@ -106,7 +107,8 @@ def _register_runs_create(
                     "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get "
                     "the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) "
                     "for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named "
-                    "fragment. See docs/operating/build-source-staging.md for staging the source."
+                    "fragment. See resource://kdive/docs/operating/build-source-staging.md for "
+                    "staging the source."
                 )
             ),
         ],
@@ -354,6 +356,7 @@ def _register_runs_profile_examples(app: FastMCP, pool: AsyncConnectionPool) -> 
         # presence as defence-in-depth. No platform/project gate, no audit — the projection
         # is the public host-kind/source-kind rule only (ADR-0160).
         current_context()
+        declared = declared_remote_instance_names()
         async with pool.connection() as conn:
             hosts = await list_all_hosts(conn)
-        return _build_host_profile_examples(hosts)
+        return _build_host_profile_examples(hosts, declared)
