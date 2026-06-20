@@ -43,3 +43,19 @@ def test_every_target_uses_templated_datasource() -> None:
     uids = set(_datasource_uids(dash))
     leaked = uids - {"${datasource}"}
     assert not leaked, f"hardcoded datasource uid(s): {leaked}"
+
+
+def _all_exprs() -> list[str]:
+    return [t["expr"] for p in build_dashboard()["panels"] for t in p.get("targets", [])]
+
+
+def test_rows_1_to_3_present() -> None:
+    titles = [p["title"] for p in build_dashboard()["panels"] if p["type"] == "row"]
+    for row in ("MCP request plane", "Allocation / admission", "Lifecycle inventory"):
+        assert row in titles
+
+
+def test_admission_reason_breakdown_panel_exists() -> None:
+    exprs = " ".join(_all_exprs())
+    assert "kdive_allocation_admission" in exprs
+    assert "reason" in exprs
