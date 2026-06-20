@@ -63,6 +63,53 @@ def _metric_names(reader: InMemoryMetricReader) -> set[str]:
     return names
 
 
+def _counter_points(
+    reader: InMemoryMetricReader, name: str
+) -> dict[tuple[tuple[str, str], ...], float]:
+    """Return {sorted-attr-tuple: value} for the number-data points of metric ``name``."""
+    data = reader.get_metrics_data()
+    assert data is not None
+    points: dict[tuple[tuple[str, str], ...], float] = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name != name:
+                    continue
+                for point in metric.data.data_points:
+                    value = getattr(point, "value", None)  # NumberDataPoint only
+                    if value is None:
+                        continue
+                    attrs = point.attributes or {}
+                    key = tuple(sorted((str(k), str(v)) for k, v in attrs.items()))
+                    points[key] = value
+    return points
+
+
+def test_record_repairs_emits_per_kind_counts() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_repairs(
+        {"orphaned_systems": 2, "promoted_allocations": 0, "leaked_domains": 1}, failures=[]
+    )
+    points = _counter_points(reader, "kdive.reconciler.repairs")
+    assert points[(("repair_kind", "orphaned_systems"),)] == 2
+    assert points[(("repair_kind", "leaked_domains"),)] == 1
+    # A zero-count kind still emits its series so the metric is present from the start.
+    assert points[(("repair_kind", "promoted_allocations"),)] == 0
+
+
+def test_record_repairs_failure_increments_errors() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_repairs({"leaked_domains": 0}, failures=["leaked_domains", "orphaned_systems"])
+    points = _counter_points(reader, "kdive.errors")
+    assert points[(("error_category", "infrastructure_failure"),)] == 2
+
+
+def test_record_repairs_disabled_is_noop() -> None:
+    telemetry = ReconcilerTelemetry.disabled()
+    # No meter wired; must be a silent no-op rather than raising.
+    telemetry.record_repairs({"orphaned_systems": 1}, failures=["orphaned_systems"])
+
+
 def test_disabled_pass_span_is_noop() -> None:
     telemetry = ReconcilerTelemetry.disabled()
     with telemetry.pass_span() as span:

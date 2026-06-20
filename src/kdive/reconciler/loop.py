@@ -18,8 +18,8 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -180,6 +180,12 @@ class ReconcileReport:
     reclaimed_build_host_leases: int = 0
     build_host_states_changed: int = 0
     reaped_runtime_resources: int = 0
+    #: The raw per-kind repair counts, keyed by ``_RepairSpec.name`` (ADR-0190 A). The scalar
+    #: fields above feed callers that read named categories; this dict feeds the repairs
+    #: counter with the exact spec names so ``repair_kind`` == ``ALL_REPAIR_KINDS``. Excluded
+    #: from equality (``compare=False``): it is a derived mirror of the scalar counts, so
+    #: existing report-equality assertions stay meaningful without enumerating it.
+    repair_counts: Mapping[str, int] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +307,35 @@ def _repair_plan(
     return tuple(repairs)
 
 
+#: Every ``repair_kind`` the repairs counter can emit — the union of the base repairs and the
+#: optional-port repairs (ADR-0190 A). Pinned to :func:`_repair_plan` by
+#: ``test_all_repair_kinds_matches_a_fully_populated_plan`` so the cardinality bound and the
+#: plan never drift. Bounded and low-cardinality; never a per-object identifier.
+ALL_REPAIR_KINDS: tuple[str, ...] = (
+    "expired_allocations",
+    "reaped_active_allocations",
+    "promoted_allocations",
+    "queue_timeouts",
+    "orphaned_systems",
+    "abandoned_jobs",
+    "reaped_runtime_resources",
+    "reaped_build_vms",
+    "reclaimed_build_host_leases",
+    "dead_sessions",
+    "leaked_domains",
+    "leaked_probe_guests",
+    "idempotency_keys_gc_count",
+    "reaped_dump_volumes",
+    "build_host_states_changed",
+    "abandoned_uploads",
+    "console_collectors_reaped",
+    "reconcile_inventory",
+    "leaked_images",
+    "dangling_images",
+    "expired_private_images",
+)
+
+
 async def reconcile_once(
     pool: AsyncConnectionPool,
     reaper: InfraReaper,
@@ -357,6 +392,7 @@ async def reconcile_once(
         reclaimed_build_host_leases=counts["reclaimed_build_host_leases"],
         build_host_states_changed=counts.get("build_host_states_changed", 0),
         reaped_runtime_resources=counts["reaped_runtime_resources"],
+        repair_counts=dict(counts),
     )
 
 
@@ -446,7 +482,8 @@ class Reconciler:
             self._telemetry.observe_lag(time.monotonic() - next_due)
             with self._telemetry.pass_span() as span:
                 try:
-                    await self.run_once()
+                    report = await self.run_once()
+                    self._telemetry.record_repairs(report.repair_counts, report.failures)
                 except Exception:  # noqa: BLE001 - a durable reconciler survives a transient per-pass error
                     span.set_outcome("error")
                     _log.exception("reconcile pass failed; continuing after %ss", interval)
