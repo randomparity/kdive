@@ -99,10 +99,12 @@ that must enqueue-then-record in one transaction wraps the transaction in the tr
 - `kind` is the **tool name** string (e.g. `"runs.create"`). One named constant per tool,
   colocated with the handler (mirroring `_RENEW_KIND` in `services/allocation/renew.py`).
 - `record_envelope` uses the same `INSERT … VALUES (key, principal, project, kind, result)`
-  as `services/allocation/idempotency.record_key`, differing only in the jsonb payload and
-  the `CONFLICT` category (the allocation helper uses `CONFIGURATION_ERROR`; for a generic
-  mutation `CONFLICT` is the more specific "key already in use under a different in-flight or
-  completed operation").
+  as `services/allocation/idempotency.record_key`, differing only in the jsonb payload
+  (`{"envelope": …}`) and in letting `UniqueViolation` propagate instead of mapping it. The
+  category mapping lives one level up in `record_or_resolve`: a genuine cross-tool collision
+  surfaces `CONFLICT` (more specific than the allocation helper's `CONFIGURATION_ERROR` —
+  "key already in use under a different operation"), while a self-race is absorbed into a
+  replay and surfaces no error at all.
 
 ### Handler integration: two distinct connection topologies
 
@@ -144,8 +146,9 @@ async with pool.connection() as conn:
 connection *inside the service*, not in the MCP adapter. For these the record **cannot** be
 done from the adapter — it must run inside the service's own insert transaction. Therefore:
 
-- the service function gains `idempotency_key: str | None` and `principal: str` parameters,
-  threaded from the registrar → MCP adapter → service;
+- the service function gains an `idempotency_key: str | None` parameter, threaded from the
+  registrar → MCP adapter → service (the principal is already available as `ctx.principal`;
+  no separate principal parameter is added);
 - the **up-front replay** is done by the service at the top, on the connection it opens,
   before it takes any lock or inserts (a hit returns the stored envelope and the service
   never enters its insert path);
