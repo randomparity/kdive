@@ -22,7 +22,10 @@ Contract (see ADR-0193 / the design spec):
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from psycopg import AsyncConnection
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -108,3 +111,68 @@ async def resolve_conflict(
         category=ErrorCategory.CONFLICT,
         details={"reason": "idempotency_key_in_use"},
     )
+
+
+async def keyed_mutation(
+    conn: AsyncConnection,
+    *,
+    idempotency_key: str | None,
+    principal: str,
+    project: str,
+    kind: str,
+    do_work: Callable[[], Awaitable[ToolResponse]],
+) -> ToolResponse:
+    """Run a job-enqueuing mutation under optional replay-idempotency on one connection.
+
+    The handler-owned-connection (topology 1) orchestration: when ``idempotency_key`` is
+    ``None`` this just calls ``do_work`` (today's behavior, unchanged). When supplied it:
+    validates the key; resolves a replay up-front (a hit short-circuits with no work); else
+    runs ``do_work`` and records its success envelope **in the same transaction**; on a PK
+    collision it rolls back and re-resolves (the winner's envelope, or ``CONFLICT`` for a
+    cross-tool reuse).
+
+    ``do_work`` must perform the durable effect (e.g. ``queue.enqueue``) and return the
+    success envelope; it is invoked inside a fresh ``conn.transaction()`` so the effect and
+    the key record commit atomically. A failure envelope is **not** recorded (a denial is not
+    cached); ``do_work`` should raise or short-circuit *before* returning rather than
+    returning a failure it wants recorded.
+
+    Always returns a :class:`ToolResponse` (never raises for key handling): an invalid key or
+    a genuine cross-tool collision is mapped to a failure envelope so the tool boundary stays
+    "errors are envelopes".
+    """
+    if idempotency_key is None:
+        return await do_work()
+    try:
+        validate_idempotency_key(idempotency_key)
+    except CategorizedError as exc:
+        # Do not echo the (rejected, unbounded) key as object_id.
+        return ToolResponse.failure_from_error("idempotency_key", exc)
+    replay = await resolve_envelope_replay(
+        conn, principal=principal, key=idempotency_key, kind=kind
+    )
+    if replay is not None:
+        return replay
+    try:
+        async with conn.transaction():
+            envelope = await do_work()
+            if envelope.error_category is not None:
+                # A denial/validation failure is not cached (ADR-0193): leave the key unused
+                # so the caller can correct the input and retry it. Returning here lets the
+                # transaction commit any side effects do_work intended for the failure path
+                # (today none of the wired tools mutate on the failure branch).
+                return envelope
+            await record_envelope(
+                conn,
+                principal=principal,
+                key=idempotency_key,
+                project=project,
+                kind=kind,
+                envelope=envelope,
+            )
+    except UniqueViolation:
+        try:
+            return await resolve_conflict(conn, principal=principal, key=idempotency_key, kind=kind)
+        except CategorizedError as exc:
+            return ToolResponse.failure_from_error(idempotency_key, exc)
+    return envelope

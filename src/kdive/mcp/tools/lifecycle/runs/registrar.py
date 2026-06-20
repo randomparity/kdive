@@ -234,6 +234,10 @@ def _register_runs_build(
                 "build of a Run."
             ),
         ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Enqueue a kernel build for a run."""
         ctx = current_context()
@@ -247,6 +251,7 @@ def _register_runs_build(
                 ctx,
                 run_id,
                 cmdline=cmdline,
+                idempotency_key=idempotency_key,
             ),
             required_role=Role.OPERATOR,
         )
@@ -312,9 +317,13 @@ def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def runs_install(
         run_id: Annotated[str, Field(description="The Run whose built kernel to install.")],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Install a built run onto its system."""
-        return await _install_run(pool, current_context(), run_id)
+        return await _install_run(pool, current_context(), run_id, idempotency_key=idempotency_key)
 
 
 def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -337,9 +346,13 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def runs_boot(
         run_id: Annotated[str, Field(description="The Run whose installed kernel to boot.")],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Boot an installed run."""
-        return await _boot_run(pool, current_context(), run_id)
+        return await _boot_run(pool, current_context(), run_id, idempotency_key=idempotency_key)
 
 
 def _register_runs_profile_examples(app: FastMCP, pool: AsyncConnectionPool) -> None:

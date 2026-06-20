@@ -206,10 +206,20 @@ class _FakeControl:
 
 
 async def _power(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str, action: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    action: str,
+    idempotency_key: str | None = None,
 ) -> Any:
     return await control_tools.power_system(
-        pool, ctx, system_id=system_id, action=action, resolver=provider_resolver()
+        pool,
+        ctx,
+        system_id=system_id,
+        action=action,
+        resolver=provider_resolver(),
+        idempotency_key=idempotency_key,
     )
 
 
@@ -234,6 +244,47 @@ def test_power_off_with_gate_checks_enqueues_job(migrated_url: str) -> None:
                 )
                 row = await cur.fetchone()
         assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_power_keyed_retry_replays_one_job(migrated_url: str) -> None:
+    """A repeated key folds into the dedup key: identical envelope, exactly one power job."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            first = await _power(pool, _ctx(), system_id=sys_id, action="on", idempotency_key="k1")
+            second = await _power(pool, _ctx(), system_id=sys_id, action="on", idempotency_key="k1")
+            assert first.model_dump() == second.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'power' AND dedup_key = %s",
+                    (f"{sys_id}:power:on:k1",),
+                )
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_power_unkeyed_calls_are_distinct_jobs(migrated_url: str) -> None:
+    """Without a key, each power call is a distinct job (the default, ADR-0193)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            await _power(pool, _ctx(), system_id=sys_id, action="on")
+            await _power(pool, _ctx(), system_id=sys_id, action="on")
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'power' AND dedup_key LIKE %s",
+                    (f"{sys_id}:power:on:%",),
+                )
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 2
 
     asyncio.run(_run())
 

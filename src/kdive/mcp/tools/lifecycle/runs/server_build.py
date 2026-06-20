@@ -33,6 +33,7 @@ from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.idempotency.envelope import keyed_mutation
 from kdive.services.runs.build_host_selection import resolve_and_admit
 from kdive.services.runs.steps import platform_owned_cmdline_token
 
@@ -53,6 +54,7 @@ class BuildRunHandlers:
         run_id: str,
         *,
         cmdline: str | None = None,
+        idempotency_key: str | None = None,
     ) -> ToolResponse:
         """Admit an idempotent server build for a Run and enqueue the build job."""
         uid = _as_uuid(run_id)
@@ -93,7 +95,14 @@ class BuildRunHandlers:
                         self.config_validator(config_ref)
                     except CategorizedError as exc:
                         return ToolResponse.failure_from_error(run_id, exc)
-                return await _build_locked(conn, ctx, run, cmdline, parsed)
+                return await keyed_mutation(
+                    conn,
+                    idempotency_key=idempotency_key,
+                    principal=ctx.principal,
+                    project=run.project,
+                    kind="runs.build",
+                    do_work=lambda: _build_locked(conn, ctx, run, cmdline, parsed),
+                )
 
 
 async def _build_locked(
