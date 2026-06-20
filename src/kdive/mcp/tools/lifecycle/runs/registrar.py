@@ -145,6 +145,10 @@ def _register_runs_create(
                 )
             ),
         ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Create a run, bound to a system or unbound against a target_kind."""
         request = _RunCreateRequest(
@@ -155,7 +159,13 @@ def _register_runs_create(
             expected_boot_failure=expected_boot_failure,
             reuse_requirement=reuse_requirement,
         )
-        return await _create_run(pool, current_context(), request, resolver=resolver)
+        return await _create_run(
+            pool,
+            current_context(),
+            request,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
+        )
 
 
 def _register_runs_bind(app: FastMCP, pool: AsyncConnectionPool) -> None:

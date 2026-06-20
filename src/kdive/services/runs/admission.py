@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import NoReturn, cast
@@ -136,12 +137,16 @@ class RunCreateResult:
     expected_boot_failure_kind: str | None = None
 
 
+type RunCreateRecorder = Callable[[AsyncConnection, RunCreateResult], Awaitable[None]]
+
+
 async def create_run(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     request: RunCreateRequest,
     *,
     resolver: ProviderResolver,
+    recorder: RunCreateRecorder | None = None,
 ) -> RunCreateResult:
     """Create a Run, bound to a `ready` System or unbound against a ``target_kind`` (ADR-0169).
 
@@ -151,6 +156,10 @@ async def create_run(
     registered ``target_kind`` is required, no target capacity is held, and the Run is bound
     later via ``runs.bind``. ``request.reuse_requirement`` (bound path only) re-asserts the
     System sizing/PCIe under the lock, closing the list→create TOCTOU.
+
+    ``recorder`` (idempotency, ADR-0193), when given, is awaited inside the Run-insert
+    transaction with the freshly-built result, so the idempotency key and the Run commit
+    atomically. It may raise (e.g. a key collision); the caller handles that.
     """
     object_id = request.object_id()
     investigation_id = _parse_uuid(request.investigation_id)
@@ -175,6 +184,7 @@ async def create_run(
                     parsed_expected,
                     requirement=requirement,
                     resolver=resolver,
+                    recorder=recorder,
                 )
             system_id = _parse_uuid(request.system_id)
             targets, project = await _resolve_targets(conn, ctx, investigation_id, system_id)
@@ -187,6 +197,7 @@ async def create_run(
                 project=project,
                 requirement=requirement,
                 explicit_target_kind=request.target_kind,
+                recorder=recorder,
             )
 
 
@@ -458,6 +469,7 @@ async def _create_locked(
     project: str,
     requirement: ReuseRequirement,
     explicit_target_kind: str | None,
+    recorder: RunCreateRecorder | None = None,
 ) -> RunCreateResult:
     # Global total lock order PROJECT < RESOURCE < ALLOCATION < SYSTEM, then INVESTIGATION →
     # RUN (locks.py, ADR-0040 §1): ALLOCATION must precede SYSTEM. The reconciler →expired
@@ -505,7 +517,10 @@ async def _create_locked(
             target_kind=target_kind,
         )
         await _flip_investigation_if_open(conn, ctx, inv, targets.investigation_id, project)
-    return _created_result(run, expected_boot_failure, project)
+        result = _created_result(run, expected_boot_failure, project)
+        if recorder is not None:
+            await recorder(conn, result)
+    return result
 
 
 async def _insert_run(
@@ -627,6 +642,7 @@ async def _create_unbound(
     *,
     requirement: ReuseRequirement,
     resolver: ProviderResolver,
+    recorder: RunCreateRecorder | None = None,
 ) -> RunCreateResult:
     """Create a Run with no System (ADR-0169): commit a ``target_kind``, hold no capacity.
 
@@ -660,7 +676,10 @@ async def _create_unbound(
             conn, ctx, investigation_id, build_profile, expected_boot_failure, project, target_kind
         )
         await _flip_investigation_if_open(conn, ctx, locked_inv, investigation_id, project)
-    return _created_result(run, expected_boot_failure, project)
+        result = _created_result(run, expected_boot_failure, project)
+        if recorder is not None:
+            await recorder(conn, result)
+    return result
 
 
 async def _insert_unbound_run(
