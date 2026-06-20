@@ -133,7 +133,8 @@ async def _reprovision_locked(
                 conn, ctx, system_id, profile, profile_policy, rootfs_validator, idempotency_key
             )
     except UniqueViolation:
-        assert idempotency_key is not None
+        if idempotency_key is None:
+            raise  # only the keyed path records, so an unkeyed collision is not ours
         async with pool.connection() as conn:
             try:
                 return await resolve_conflict(
@@ -307,8 +308,8 @@ async def teardown_system(
             try:
                 return await _teardown_locked(conn, ctx, uid, system_id, idempotency_key)
             except UniqueViolation:
-                # Only the keyed path records, so a collision implies a non-None key.
-                assert idempotency_key is not None
+                if idempotency_key is None:
+                    raise  # only the keyed path records, so an unkeyed collision is not ours
                 try:
                     return await resolve_conflict(
                         conn, principal=ctx.principal, key=idempotency_key, kind=_TEARDOWN_KIND
