@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 
+from jsonschema import Draft202012Validator
+
 from deploy.grafana.build_dashboard import JSON_PATH, build_dashboard, render_json
 from tests.deploy.grafana_catalog import catalog_series
 
@@ -105,25 +107,93 @@ def test_dashboard_covers_full_catalog() -> None:
     assert _referenced_base_series() == catalog_series()
 
 
-_KNOWN_PANEL_TYPES = {"row", "timeseries", "bargauge", "stat", "table"}
+_DATASOURCE_SCHEMA = {
+    "type": "object",
+    "required": ["type", "uid"],
+    "properties": {"type": {"const": "prometheus"}, "uid": {"type": "string", "minLength": 1}},
+}
+
+_GRIDPOS_SCHEMA = {
+    "type": "object",
+    "required": ["h", "w", "x", "y"],
+    "properties": {key: {"type": "integer", "minimum": 0} for key in ("h", "w", "x", "y")},
+}
+
+_TARGET_SCHEMA = {
+    "type": "object",
+    "required": ["datasource", "expr", "refId"],
+    "properties": {
+        "datasource": _DATASOURCE_SCHEMA,
+        "expr": {"type": "string", "minLength": 1},
+        "refId": {"type": "string", "minLength": 1},
+    },
+}
+
+# Fields a non-row (content) panel must carry to render in Grafana.
+_CONTENT_PANEL_REQUIRES = {
+    "required": ["datasource", "fieldConfig", "options", "targets"],
+    "properties": {
+        "datasource": _DATASOURCE_SCHEMA,
+        "fieldConfig": {"type": "object"},
+        "options": {"type": "object"},
+        "targets": {"type": "array", "minItems": 1, "items": _TARGET_SCHEMA},
+    },
+}
+
+# Structural contract every panel the generator emits must satisfy. Encodes what
+# Grafana needs to render — not the full (CUE-based, permissive) Grafana schema, so
+# it stays deterministic and non-flaky while still catching malformed panels.
+_PANEL_SCHEMA = {
+    "type": "object",
+    "required": ["type", "id", "title", "gridPos"],
+    "properties": {
+        "type": {"enum": ["row", "timeseries", "bargauge", "stat", "table"]},
+        "id": {"type": "integer"},
+        "title": {"type": "string"},
+        "gridPos": _GRIDPOS_SCHEMA,
+    },
+    "allOf": [
+        # Non-row panels must carry the render-bearing fields.
+        {
+            "if": {"required": ["type"], "properties": {"type": {"const": "row"}}},
+            "else": _CONTENT_PANEL_REQUIRES,
+        },
+        # Single-value panels must declare how they reduce a series to a value.
+        {
+            "if": {"required": ["type"], "properties": {"type": {"enum": ["bargauge", "stat"]}}},
+            "then": {"properties": {"options": {"required": ["reduceOptions"]}}},
+        },
+    ],
+}
+
+_DASHBOARD_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["title", "uid", "schemaVersion", "templating", "panels"],
+    "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "uid": {"type": "string", "minLength": 1},
+        "schemaVersion": {"type": "integer"},
+        "templating": {
+            "type": "object",
+            "required": ["list"],
+            "properties": {
+                "list": {"type": "array", "items": {"type": "object", "required": ["name", "type"]}}
+            },
+        },
+        "panels": {"type": "array", "minItems": 1, "items": _PANEL_SCHEMA},
+    },
+}
 
 
-def _content_panels() -> list[dict]:
-    return [p for p in build_dashboard()["panels"] if p["type"] != "row"]
-
-
-def test_every_panel_type_is_known() -> None:
-    types = {p["type"] for p in build_dashboard()["panels"]}
-    assert types <= _KNOWN_PANEL_TYPES, f"unknown panel type(s): {types - _KNOWN_PANEL_TYPES}"
-
-
-def test_every_content_panel_has_renderable_targets() -> None:
-    for panel in _content_panels():
-        targets = panel.get("targets", [])
-        assert targets, f"panel {panel['title']!r} has no targets"
-        for target in targets:
-            assert target.get("datasource"), f"target in {panel['title']!r} missing datasource"
-            assert target.get("expr", "").strip(), f"target in {panel['title']!r} has empty expr"
+def test_committed_json_matches_grafana_dashboard_schema() -> None:
+    dash = json.loads(JSON_PATH.read_text(encoding="utf-8"))
+    errors = sorted(
+        Draft202012Validator(_DASHBOARD_SCHEMA).iter_errors(dash),
+        key=lambda error: list(error.absolute_path),
+    )
+    messages = [f"{list(error.absolute_path)}: {error.message}" for error in errors]
+    assert not messages, "dashboard fails Grafana structural schema:\n" + "\n".join(messages)
 
 
 def test_panel_gridpos_rectangles_do_not_overlap() -> None:
