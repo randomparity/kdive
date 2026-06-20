@@ -23,6 +23,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs_shared import finalize_build
 from kdive.jobs.payloads import BuildPayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.build_host.dispatch import (
@@ -196,6 +197,7 @@ async def _build_handler_autocommit(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"run_id": str(run_id)},
         )
+    set_provider_kind(run.target_kind.value)
     result = await existing_build_result(conn, run_id)
     if result is None:
         result = await _build_and_record(

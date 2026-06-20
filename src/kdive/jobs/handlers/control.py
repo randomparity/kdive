@@ -18,6 +18,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
@@ -45,8 +46,10 @@ async def _control_target(conn: AsyncConnection, system_id: UUID, *, op: str) ->
 
 
 async def _controller(conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver):
-    """Resolve the System's controller port."""
-    return (await resolver.runtime_for_system(conn, system_id)).controller
+    """Resolve the System's controller port and tag the provider kind for metrics."""
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    return binding.runtime.controller
 
 
 async def power_handler(

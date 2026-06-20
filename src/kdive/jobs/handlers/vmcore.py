@@ -18,6 +18,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.store.objectstore import register_artifact_row
@@ -112,7 +113,9 @@ async def capture_handler(
     precheck = await precheck_system(conn, system_id, method)
     if isinstance(precheck, str):
         return precheck
-    retriever = (await resolver.runtime_for_system(conn, system_id)).retriever
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    retriever = binding.runtime.retriever
     output = await asyncio.to_thread(retriever.capture, system_id, method)
     return await finalize_capture(conn, job, precheck, method, output)
 
