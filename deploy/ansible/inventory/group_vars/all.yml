@@ -8,25 +8,86 @@ worker_cidr: "192.168.16.0/24"
 gdbstub_range: "47000:47099"
 gdb_addr: ""  # REQUIRED per host; provisioning fails closed without it (set in host_vars)
 
-# --- base image ---
-base_image_distro: fedora
-base_image_version: "43"
-base_image_name: "fedora-kdive-remote-base-{{ base_image_version }}"
-base_image_source: virt-builder  # virt-builder | cloud-image
+# --- image catalog (replaces the single base_image_* globals; ADR-0188) ---
 helper_src: "{{ playbook_dir }}/../remote-libvirt-guest-helpers"
-build_packages:
-  - qemu-guest-agent
-  - drgn
-  - kexec-tools
-  - makedumpfile
-  - kdump-utils
-  - curl
-  - tar
-  - openssl
-  - python3
-include_kernel_debuginfo: false
-crashkernel_value: "256M"  # applied only when include_kernel_debuginfo | bool
 force_image_rebuild: false
+
+# Fields genuinely shared across catalog entries. The package set defaults to the
+# Fedora/RHEL family; the ubuntu entry overrides it (virt-customize runs the image's
+# own package manager, so Fedora package names fail on a Debian image).
+kdive_image_defaults:
+  packages:
+    - qemu-guest-agent
+    - drgn
+    - kexec-tools
+    - makedumpfile
+    - kdump-utils
+    - curl
+    - tar
+    - openssl
+    - python3
+  helpers:
+    - kdive-install-kernel
+    - kdive-capture-vmcore
+    - kdive-drgn
+  include_kernel_debuginfo: false
+  crashkernel: "256M"  # applied only when include_kernel_debuginfo | bool
+  arches: [x86_64]
+  root_device: /dev/vda  # remote metadata only; the in-guest GRUB owns root (ADR-0183)
+  arch_alias:  # ansible_architecture -> distro download vocabulary
+    x86_64: amd64
+    aarch64: arm64
+    ppc64le: ppc64el
+
+# The catalog. Each entry: logical name, distro/version, source kind, optional
+# per-entry overrides (packages/helpers/arches/root_device/cloud_image_url/force).
+# The in-guest helpers are Fedora/RHEL-family (grubby/dracut): the full kdive
+# build->install->boot->debug arc ships for fedora + rocky; the ubuntu image stages,
+# boots, and connects its guest agent (provision/host_dump) but runs.install needs a
+# Debian helper variant (tracked separately).
+kdive_image_catalog:
+  - name: fedora-kdive-remote-base-43
+    distro: fedora
+    version: "43"
+    source: virt-builder
+  - name: ubuntu-2404-kdive-remote-base
+    distro: ubuntu
+    version: "24.04"
+    source: cloud-image
+    cloud_image_url: >-
+      https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-{{
+      image_arch_alias }}.img
+    packages:  # Debian names; drgn is not in the default Ubuntu repos
+      - qemu-guest-agent
+      - kexec-tools
+      - makedumpfile
+      - kdump-tools
+      - curl
+      - tar
+      - openssl
+      - python3
+  - name: rocky-10-kdive-remote-base
+    distro: rocky
+    version: "10"
+    source: cloud-image  # RHEL-family: Fedora helpers/packages apply
+    cloud_image_url: >-
+      https://dl.rockylinux.org/pub/rocky/10/images/{{ ansible_architecture
+      }}/Rocky-10-GenericCloud-Base.latest.{{ ansible_architecture }}.qcow2
+  - name: bare-kdive-remote-base
+    distro: bare
+    version: "1"
+    source: scratch  # built from the host OS family
+
+host_images_default: [fedora-kdive-remote-base-43]
+
+# Derived selection (lazily evaluated; read by guest_base_image + remote_libvirt_facts).
+kdive_requested_images: "{{ host_images | default(host_images_default) }}"
+kdive_selected_images: >-
+  {{ kdive_image_catalog | selectattr('name', 'in', kdive_requested_images) | list }}
+kdive_default_image: "{{ host_default_image | default(kdive_requested_images[0]) }}"
+image_arch_alias: >-
+  {{ kdive_image_defaults.arch_alias.get(ansible_architecture | default('x86_64'),
+     ansible_architecture | default('x86_64')) }}
 
 # --- billable ceiling (required by the [[remote_libvirt]] schema) ---
 vcpus: 16

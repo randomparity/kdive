@@ -1,3 +1,6 @@
 ---
 remote_host_fqdn: rock10-big.dev.pdx.drc.nz
 gdb_addr: 192.168.12.4
+# Rocky host: RHEL-family, full kdive arc (Fedora-family helpers apply).
+host_images: [rocky-10-kdive-remote-base, bare-kdive-remote-base]
+host_default_image: rocky-10-kdive-remote-base

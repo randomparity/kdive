@@ -1,21 +1,23 @@
 # Rendered by the remote_libvirt_facts role for {{ inventory_hostname }}.
 # Paste ONE host's [[remote_libvirt]] block into the deployment's systems.toml
 # (the reconciler rejects multiple [[remote_libvirt]] blocks — singleton until
-# multi-instance remote selection lands). The matching [[image]] block is safe to
+# multi-instance remote selection lands). The [[image]] blocks below are safe to
 # include alongside it. Machine type is an env knob, not a systems.toml field:
 #   KDIVE_REMOTE_LIBVIRT_MACHINE={{ machine_type[ansible_architecture] }}
 
+{% for img in kdive_selected_images %}
 [[image]]
 provider = "remote-libvirt"
-name = "{{ base_image_name }}"
+name = "{{ img.name }}"
 arch = "{{ ansible_architecture }}"
 format = "qcow2"
-root_device = "/dev/vda"
+root_device = "{{ img.root_device | default(kdive_image_defaults.root_device) }}"
 visibility = "public"
 [image.source]
 kind = "staged"
-volume = "{{ base_image_name }}.qcow2"
+volume = "{{ img.name }}.qcow2"
 
+{% endfor %}
 [[remote_libvirt]]
 name = "{{ inventory_hostname }}"
 uri = "qemu+tls://{{ remote_host_fqdn }}/system"
@@ -24,7 +26,7 @@ gdbstub_range = "{{ gdbstub_range }}"
 client_cert_ref = "{{ remote_libvirt_facts_client_cert_ref }}"
 client_key_ref = "{{ remote_libvirt_facts_client_key_ref }}"   # pragma: allowlist secret - filename ref
 ca_cert_ref = "{{ remote_libvirt_facts_ca_cert_ref }}"
-base_image = "{{ base_image_name }}"
+base_image = "{{ kdive_default_image }}"
 cost_class = "{{ cost_class }}"
 concurrent_allocation_cap = {{ concurrent_allocation_cap }}
 vcpus = {{ vcpus }}

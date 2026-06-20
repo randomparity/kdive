@@ -1,3 +1,7 @@
 ---
 remote_host_fqdn: ub26-big.dev.pdx.drc.nz
 gdb_addr: 192.168.12.2
+# Ubuntu host: stage the ubuntu base + the bare image. The ubuntu image's runs.install
+# arc needs a Debian helper variant (ADR-0188) — provision/boot/agent works today.
+host_images: [ubuntu-2404-kdive-remote-base, bare-kdive-remote-base]
+host_default_image: ubuntu-2404-kdive-remote-base
