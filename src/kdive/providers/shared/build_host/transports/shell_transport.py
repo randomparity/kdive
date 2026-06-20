@@ -36,6 +36,26 @@ _MAX_REMOTE_READ_B64_BYTES = 8 * 1024 * 1024
 _CLONE_TIMEOUT_S = 10 * 60
 _UPLOAD_TIMEOUT_S = 5 * 60
 
+# The build-host agent diagnostic surfaced on a toolchain-missing build failure (ADR-0196). It is a
+# literal here, not imported from `diagnostics/checks.py` (the legal import direction is
+# diagnostics → providers), and matches the same pointer the registration rejection emits.
+_BUILDHOST_AGENT_DIAGNOSTIC = "ops.diagnostics --with-buildhost-agent"
+
+
+def _is_command_not_found(result: CommandResult, stderr_tail: str) -> bool:
+    """Return True when *result* is a ``git: not found``-class failure (ADR-0196).
+
+    The reliable primary signal is exit code 127 (the guest-exec / SSH shell reports it for a
+    missing program). The stderr backstop covers a transport that does not surface 127: it
+    requires *git* named together with a not-found token, read from the already-redacted tail so
+    no unredacted bytes are inspected. A non-127 exit with any other stderr (a permission/disk
+    fault) is not a command-not-found shape.
+    """
+    if result.returncode == 127:
+        return True
+    lowered = stderr_tail.lower()
+    return "git" in lowered and ("not found" in lowered or "no such file" in lowered)
+
 
 def _validate_url(url: str) -> None:
     """Reject a URL containing a control character before it reaches a remote command."""
@@ -165,17 +185,28 @@ class ShellBuildTransport:
                 ``git fetch``, or a failed ``git checkout FETCH_HEAD``; ``TRANSPORT_FAILURE``
                 when the fetch reported success but produced no ``FETCH_HEAD`` (the fetch's own
                 stderr is surfaced, not masked behind a later FETCH_HEAD pathspec error);
-                ``INFRASTRUCTURE_FAILURE`` for a failed ``git init`` (an environment fault).
+                ``MISSING_DEPENDENCY`` when ``git init`` is a ``git: not found``-class failure
+                (the base image lacks the build toolchain; ADR-0196), carrying a
+                ``details["diagnostic"]`` pointer to the build-host agent check;
+                ``INFRASTRUCTURE_FAILURE`` for any other failed ``git init`` (an environment
+                fault).
         """
         validate_git_arg(remote, "remote")
         validate_git_arg(ref, "ref")
 
         init = self._run_remote(["git", "init", dest], cwd="/", timeout_s=_CLONE_TIMEOUT_S)
         if init.returncode != 0:
+            init_stderr = redacted_tail(init.stderr, self._secret_registry)
+            if _is_command_not_found(init, init_stderr):
+                raise CategorizedError(
+                    "the build host's base image is missing the kernel build toolchain (git)",
+                    category=ErrorCategory.MISSING_DEPENDENCY,
+                    details={"diagnostic": _BUILDHOST_AGENT_DIAGNOSTIC, "stderr": init_stderr},
+                )
             raise CategorizedError(
                 "git init failed on remote",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"stderr": redacted_tail(init.stderr, self._secret_registry)},
+                details={"stderr": init_stderr},
             )
         fetch = self._run_remote(
             ["git", "-C", dest, "fetch", "--depth", "1", remote, ref],
