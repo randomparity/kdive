@@ -55,6 +55,16 @@
   - `image_arch_alias = kdive_image_defaults.arch_alias.get(ansible_architecture, ansible_architecture)`
 - Template consumes: `kdive_selected_images`, `kdive_default_image`, `kdive_image_defaults`, `ansible_architecture`, plus the existing `[[remote_libvirt]]` vars.
 
+- [ ] **Step 0: Add `jinja2` to the dev dependency group**
+
+The contract test renders the real ansible template, which needs Jinja2 — absent from the
+test venv (`uv run python -c 'import jinja2'` → ModuleNotFoundError; it is only pulled
+transiently by `just lint-ansible`'s ephemeral env). Add it (pin the exact resolved version):
+
+Run: `uv add --group dev jinja2`
+Then verify: `uv run python -c "import jinja2; print(jinja2.__version__)"` and confirm
+`pyproject.toml` `[dependency-groups] dev` lists `jinja2==<version>` and `uv.lock` updated.
+
 - [ ] **Step 1: Write the failing contract test**
 
 Create `tests/inventory/test_image_catalog_contract.py`:
