@@ -69,9 +69,14 @@ def test_rows_4_to_6_present() -> None:
 
 
 def test_saturation_panel_divides_used_by_total() -> None:
-    exprs = " ".join(_all_exprs())
-    assert "kdive_host_capacity_used" in exprs
-    assert "kdive_host_capacity_total" in exprs
+    division_exprs = [
+        expr
+        for expr in _all_exprs()
+        if "kdive_host_capacity_used" in expr
+        and "kdive_host_capacity_total" in expr
+        and "/" in expr
+    ]
+    assert division_exprs, "no panel divides kdive_host_capacity_used by kdive_host_capacity_total"
 
 
 def test_rows_7_to_9_present() -> None:

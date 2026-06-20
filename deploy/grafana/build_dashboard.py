@@ -448,7 +448,7 @@ def _row_capture(grid: _Grid) -> None:
     grid.add(
         _timeseries(
             "Console bytes rate",
-            [_target("sum (rate(kdive_console_bytes[$__rate_interval]))", "bytes/s")],
+            [_target(f"sum (rate(kdive_console_bytes[{_RATE_WINDOW}]))", "bytes/s")],
             unit="Bps",
         ),
         width=8,
