@@ -72,8 +72,23 @@ def _denied(object_id: str, tool: str) -> ToolResponse:
     )
 
 
-def _config_error(name: str, reason: str) -> ToolResponse:
-    return ToolResponse.failure(name, ErrorCategory.CONFIGURATION_ERROR, data={"reason": reason})
+# A `base_image_volume` whose name carries this marker is a guest/boot rootfs from the ADR-0188
+# remote-libvirt catalog (`<distro>-kdive-remote-base-<ver>.qcow2`). That image boots and crash-
+# captures but carries no kernel build toolchain, so registering it as an ephemeral build host
+# would only fail minutes into the first build with `git: not found` (ADR-0196).
+_GUEST_ROOTFS_VOLUME_MARKER = "kdive-remote-base"
+
+# Surfaced in the registration rejection and on a toolchain-missing build failure so the operator
+# can verify a registered host's builder. Referenced as a literal here (not imported from
+# `diagnostics/checks.py`: the legal import direction is diagnostics → providers/mcp).
+_BUILDHOST_AGENT_DIAGNOSTIC = "ops.diagnostics --with-buildhost-agent"
+
+
+def _config_error(name: str, reason: str, *, detail: str | None = None) -> ToolResponse:
+    data: dict[str, str] = {"reason": reason}
+    if detail is not None:
+        data["detail"] = detail
+    return ToolResponse.failure(name, ErrorCategory.CONFIGURATION_ERROR, data=data)
 
 
 def _validate_credential_ref(ref: str | None) -> bool:
@@ -135,6 +150,17 @@ def _ephemeral_plan(
     if not request.base_image_volume.strip():
         return _config_error(
             request.name, "an ephemeral_libvirt build host requires a base_image_volume"
+        )
+    if _GUEST_ROOTFS_VOLUME_MARKER in request.base_image_volume.lower():
+        return _config_error(
+            request.name,
+            "base_image_volume looks like a guest/boot rootfs (the kdive-remote-base catalog), "
+            "which carries no kernel build toolchain — a build on it fails with 'git: not found'",
+            detail=(
+                "stage a build base image that carries the kernel toolchain (git, flex, bison, "
+                "bc, make, objcopy, tar) per docs/operating/runbooks/remote-libvirt-host-setup.md, "
+                f"and verify a registered host's builder with `{_BUILDHOST_AGENT_DIAGNOSTIC}`"
+            ),
         )
     return _InsertPlan(
         sql=_EPHEMERAL_INSERT,
