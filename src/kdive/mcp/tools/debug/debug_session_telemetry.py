@@ -44,6 +44,6 @@ class DebugSessionTelemetry:
             outcome: The close reason — ``ok``, ``error``, or ``reaped``.
             seconds: Session lifetime in seconds.
         """
-        if not self._enabled:
+        if not self._enabled or seconds < 0.0:
             return
         self._duration.record(seconds, {"transport": transport, "outcome": outcome})

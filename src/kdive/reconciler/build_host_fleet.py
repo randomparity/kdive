@@ -12,7 +12,6 @@ pass (its own connection) and the scrape reads from the frozen cache.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -21,8 +20,6 @@ from psycopg import AsyncConnection
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
-
-_log = logging.getLogger(__name__)
 
 _LEASES_QUERY = (
     "SELECT h.name, count(l.run_id) "

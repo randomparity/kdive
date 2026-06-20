@@ -48,3 +48,11 @@ def test_disabled_is_noop() -> None:
     tel = DebugSessionTelemetry.disabled()
     tel.record("gdbstub", "ok", 12.0)
     assert not _points(reader, "kdive.debug.session.duration"), "disabled() must not emit"
+
+
+def test_negative_seconds_are_not_recorded() -> None:
+    """A negative duration (app/DB clock skew) must not pollute the histogram."""
+    reader = InMemoryMetricReader()
+    tel = DebugSessionTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    tel.record("gdbstub", "ok", -0.001)
+    assert not _points(reader, "kdive.debug.session.duration"), "negative duration must not emit"

@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg_pool import AsyncConnectionPool
@@ -31,6 +32,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.mcp.tools.debug import sessions_lifecycle as _sessions_lifecycle_mod
 from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
@@ -276,5 +278,50 @@ def test_end_session_idempotent_detach_also_records_ok(migrated_url: str) -> Non
         pts = _points(reader, "kdive.debug.session.duration")
         assert pts, "idempotent detach must still record duration"
         assert pts[0].attributes["outcome"] == "ok"
+
+    asyncio.run(_run())
+
+
+def test_end_session_records_error_outcome_on_detach_failure(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """end_session emits outcome='error' when _detach_locked returns a config_error envelope.
+
+    Approach: patch _detach_locked in the sessions_lifecycle module to return a
+    configuration_error (status='error') so the outcome mapping at the call boundary is
+    exercised without requiring a genuine concurrent session deletion race in the DB.
+    This is the right boundary to test: end_session's telemetry call is unconditional once
+    _detach_resources resolves successfully, so the outcome label depends entirely on
+    envelope.status from _detach_locked.
+    """
+    from kdive.mcp.tools._common import config_error
+
+    async def _fake_detach_locked(
+        conn: Any, ctx: Any, session_id: UUID, system_id: UUID, connector: Any
+    ) -> Any:
+        return config_error(str(session_id))
+
+    monkeypatch.setattr(_sessions_lifecycle_mod, "_detach_locked", _fake_detach_locked)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id)
+            run_id = await _seed_run(pool, sys_id)
+            session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
+            reader, tel = _make_telemetry()
+            registry = SecretRegistry()
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
+                provider_resolver(connector=_FakeConnector(), profile_policy=_PROFILE_POLICY),
+                runtime_resolver=None,
+                secret_registry=registry,
+                telemetry=tel,
+            )
+            resp = await handlers.end_session(pool, _ctx(), session_id)
+        assert resp.status == "error"
+        pts = _points(reader, "kdive.debug.session.duration")
+        assert pts, "error detach must still emit a duration point"
+        assert pts[0].attributes["outcome"] == "error"
+        assert pts[0].attributes["transport"] == "gdbstub"
 
     asyncio.run(_run())
