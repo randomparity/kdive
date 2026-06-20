@@ -11,6 +11,19 @@ image:
 bundledBackends: false
 demoAcknowledged: false
 
+# bundledObservability deploys an in-cluster Prometheus that scrapes all three components'
+# aux /metrics (ADR-0090 §5) via the prometheus.io/scrape annotations the chart already emits.
+# Independent of bundledBackends (the scrape targets are the app pods, present on both paths)
+# and off by default (production installs are BYO — see the chart README). It runs on emptyDir
+# with short retention (demo posture); a Prometheus pod restart drops history. Reach the UI with
+# `kubectl port-forward svc/<release>-kdive-prometheus 9090:9090`. ADR-0189.
+bundledObservability: false
+observability:
+  image: prom/prometheus:v3.12.0
+  retention: 6h
+  scrapeInterval: 15s
+  uiPort: 9090
+
 config:
   KDIVE_DATABASE_URL: ""
   KDIVE_OIDC_ISSUER: ""
