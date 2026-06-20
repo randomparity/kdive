@@ -309,9 +309,15 @@ def _register_systems_teardown(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def systems_teardown(
         system_id: Annotated[str, Field(description="The System to tear down.")],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Enqueue teardown for a System. Requires admin on the System's project."""
-        return await _teardown_system(pool, current_context(), system_id)
+        return await _teardown_system(
+            pool, current_context(), system_id, idempotency_key=idempotency_key
+        )
 
 
 def _register_systems_reprovision(
@@ -341,6 +347,10 @@ def _register_systems_reprovision(
             ProvisioningProfile,
             Field(description="New provisioning profile; must opt in to reprovision."),
         ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Enqueue in-place reprovision for a ready System; not for creating a new System —
         use `systems.provision` instead. Requires operator and opt-in.
@@ -356,6 +366,7 @@ def _register_systems_reprovision(
                 ctx,
                 system_id=system_id,
                 profile=dump_profile(profile),
+                idempotency_key=idempotency_key,
             ),
             required_role=Role.OPERATOR,
         )
