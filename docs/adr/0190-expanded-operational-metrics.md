@@ -160,6 +160,13 @@ ADR-0189 Prometheus.
   pool work (#561), and show an instant fleet inventory.
 - The cardinality-guard test fails loudly if a new label key escapes the allowlist or a
   label value escapes its bounded enum.
+- **Known limitation:** the synchronous admission counter records on every
+  `allocations.request` call, so an idempotency-key *replay* (a client retrying the same key)
+  re-counts the cached grant as another `outcome=granted` event. The counter measures
+  admission *request events*, not unique grant decisions; replays are rare and the effect is
+  bounded metric noise on retries. Surfacing a replay flag through `admit` →
+  `RequestAdmissionResult` → the handler was judged disproportionate plumbing for the effect;
+  if a unique-grant signal is later needed, that is the seam to add.
 
 ## Considered & rejected
 

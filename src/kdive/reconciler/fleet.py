@@ -121,14 +121,19 @@ async def _capacity_total(conn: AsyncConnection) -> dict[str, int]:
     async with conn.cursor() as cur:
         await cur.execute("SELECT id, kind, capabilities FROM resources")
         rows = await cur.fetchall()
-    for resource_id, provider, capabilities in rows:
+    skipped = 0
+    for _resource_id, provider, capabilities in rows:
         cap = ResourceCapabilities.from_mapping(capabilities or {}).allocation_cap()
         if cap is None:
-            _log.warning(
-                "fleet snapshot: resource %s has no valid allocation cap; skipping", resource_id
-            )
+            skipped += 1  # a cap-less resource can't be allocated; excluded from the total
             continue
         total[str(provider)] = total.get(str(provider), 0) + cap
+    if skipped:
+        # One aggregate line per pass, not per resource — a steady-state misconfig must not
+        # flood the log every reconcile interval.
+        _log.warning(
+            "fleet snapshot: %d resource(s) have no valid allocation cap; excluded", skipped
+        )
     return total
 
 
