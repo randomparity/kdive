@@ -14,9 +14,10 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.build_hosts import WORKER_LOCAL_ID
+from kdive.domain.capacity.state import JobState
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload
+from kdive.jobs.payloads import Authorizing, BuildPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware import DenialAuditMiddleware
 from kdive.mcp.tools.catalog import jobs as jobs_tools
@@ -578,5 +579,117 @@ def test_list_jobs_malformed_cursor_is_config_error(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())
+
+
+async def _set_state(pool: AsyncConnectionPool, job_id: str, state: JobState) -> None:
+    async with pool.connection() as conn:
+        await conn.execute("UPDATE jobs SET state = %s WHERE id = %s", (state.value, job_id))
+
+
+async def _enqueue_provision(pool: AsyncConnectionPool, dedup: str) -> str:
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            JobKind.PROVISION,
+            SystemPayload(system_id=str(uuid4())),
+            Authorizing(principal="p", project="proj"),
+            dedup,
+        )
+    return str(job.id)
+
+
+async def _enqueue_build_for_investigation(pool: AsyncConnectionPool, dedup: str) -> str:
+    """Seed an Investigation + Run and a build job whose payload run_id points at it.
+
+    Returns the Investigation id (the filter key). ``runs.system_id`` is nullable since
+    ADR-0169, so the Run needs only its Investigation FK + a committed ``target_kind``.
+    """
+    async with pool.connection() as conn:
+        inv = await conn.execute(
+            "INSERT INTO investigations (title, state, principal, project) "
+            "VALUES ('inv', 'active', 'p', 'proj') RETURNING id"
+        )
+        inv_row = await inv.fetchone()
+        assert inv_row is not None
+        run = await conn.execute(
+            "INSERT INTO runs (investigation_id, state, build_profile, principal, project, "
+            "target_kind) VALUES (%s, 'running', '{}'::jsonb, 'p', 'proj', 'local_libvirt') "
+            "RETURNING id",
+            (inv_row[0],),
+        )
+        run_row = await run.fetchone()
+        assert run_row is not None
+        await queue.enqueue(
+            conn,
+            JobKind.BUILD,
+            BuildPayload(run_id=str(run_row[0]), build_host_id=str(WORKER_LOCAL_ID)),
+            Authorizing(principal="p", project="proj"),
+            dedup,
+        )
+    return str(inv_row[0])
+
+
+def test_list_jobs_filters_by_status(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            failed = await _enqueue(pool, "f")
+            await _set_state(pool, failed, JobState.FAILED)
+            await _enqueue(pool, "q")  # stays queued
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, status=JobState.FAILED)
+        assert [r.object_id for r in resp.items] == [failed]
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            build_id = await _enqueue(pool, "b")
+            await _enqueue_provision(pool, "p")
+            resp = await jobs_tools.list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.BUILD)
+        assert [r.object_id for r in resp.items] == [build_id]
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_filters_by_investigation_id(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            investigation_id = await _enqueue_build_for_investigation(pool, "in-inv")
+            await _enqueue(pool, "other")  # build for an unrelated run
+            await _enqueue_provision(pool, "no-run")  # run-less, never matches
+            resp = await jobs_tools.list_jobs(
+                pool, VIEWER_CTX, limit=50, investigation_id=investigation_id
+            )
+        assert [r.data["kind"] for r in resp.items] == ["build"]
+        assert len(resp.items) == 1
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_malformed_investigation_id_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await jobs_tools.list_jobs(
+                pool, VIEWER_CTX, limit=50, investigation_id="not-a-uuid"
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_investigation_filter_no_match_is_empty(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _enqueue(pool, "b")
+            resp = await jobs_tools.list_jobs(
+                pool, VIEWER_CTX, limit=50, investigation_id=str(uuid4())
+            )
+        assert resp.status == "ok"
+        assert resp.items == []
 
     asyncio.run(_run())

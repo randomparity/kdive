@@ -515,6 +515,180 @@ def test_recent_jobs_empty_projects_returns_nothing(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _enqueue_with_state(
+    conn: psycopg.AsyncConnection,
+    kind: JobKind,
+    state: JobState,
+    dedup: str,
+    *,
+    project: str = "proj",
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Insert a job in an explicit ``kind``/``state`` for ``project`` (filter-test seeding)."""
+    await conn.execute(
+        "INSERT INTO jobs (kind, payload, state, max_attempts, authorizing, dedup_key) "
+        "VALUES (%s, %s, %s, 3, %s, %s)",
+        (
+            kind.value,
+            Jsonb(payload if payload is not None else _build_payload().model_dump(mode="json")),
+            state.value,
+            Jsonb({"principal": "p", "agent_session": None, "project": project}),
+            dedup,
+        ),
+    )
+
+
+async def _seed_run_in_investigation(conn: psycopg.AsyncConnection, project: str = "proj") -> str:
+    """Insert a minimal Investigation + Run; return the Run id for a job payload's ``run_id``.
+
+    ``system_id`` is nullable since ADR-0169, so the Run needs only its Investigation FK,
+    a committed ``target_kind``, state, profile, and ownership — enough for the
+    ``jobs.payload->>'run_id' -> runs.investigation_id`` filter join under test.
+    """
+    cur = await conn.execute(
+        "INSERT INTO investigations (title, state, principal, project) "
+        "VALUES ('inv', 'active', 'p', %s) RETURNING id",
+        (project,),
+    )
+    inv_row = await cur.fetchone()
+    assert inv_row is not None
+    cur = await conn.execute(
+        "INSERT INTO runs (investigation_id, state, build_profile, principal, project, "
+        "target_kind) VALUES (%s, 'running', '{}'::jsonb, 'p', %s, 'local_libvirt') "
+        "RETURNING id",
+        (inv_row[0], project),
+    )
+    run_row = await cur.fetchone()
+    assert run_row is not None
+    return str(run_row[0])
+
+
+def test_recent_jobs_filters_by_status(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await _enqueue_with_state(conn, JobKind.BUILD, JobState.FAILED, "f1")
+            await _enqueue_with_state(conn, JobKind.BUILD, JobState.QUEUED, "q1")
+            recent = await queue.recent_jobs(
+                conn, limit=10, projects=["proj"], status=JobState.FAILED
+            )
+        assert [j.dedup_key for j in recent] == ["f1"]
+
+    asyncio.run(_run())
+
+
+def test_recent_jobs_filters_by_kind(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await _enqueue_with_state(conn, JobKind.BUILD, JobState.QUEUED, "b1")
+            await _enqueue_with_state(
+                conn,
+                JobKind.PROVISION,
+                JobState.QUEUED,
+                "p1",
+                payload=_system_payload().model_dump(mode="json"),
+            )
+            recent = await queue.recent_jobs(conn, limit=10, projects=["proj"], kind=JobKind.BUILD)
+        assert [j.dedup_key for j in recent] == ["b1"]
+
+    asyncio.run(_run())
+
+
+def test_recent_jobs_filters_by_status_and_kind_conjunction(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await _enqueue_with_state(conn, JobKind.BUILD, JobState.FAILED, "fb")
+            await _enqueue_with_state(conn, JobKind.BUILD, JobState.QUEUED, "qb")
+            await _enqueue_with_state(
+                conn,
+                JobKind.PROVISION,
+                JobState.FAILED,
+                "fp",
+                payload=_system_payload().model_dump(mode="json"),
+            )
+            recent = await queue.recent_jobs(
+                conn, limit=10, projects=["proj"], status=JobState.FAILED, kind=JobKind.BUILD
+            )
+        assert [j.dedup_key for j in recent] == ["fb"]
+
+    asyncio.run(_run())
+
+
+def test_recent_jobs_filters_by_investigation_id(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            run_id = await _seed_run_in_investigation(conn)
+            inv_row = await (
+                await conn.execute("SELECT investigation_id FROM runs WHERE id = %s", (run_id,))
+            ).fetchone()
+            assert inv_row is not None
+            investigation_id = inv_row[0]
+            # A build job whose payload points at the investigation's run.
+            await _enqueue_with_state(
+                conn,
+                JobKind.BUILD,
+                JobState.QUEUED,
+                "in-inv",
+                payload=BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID)).model_dump(
+                    mode="json", exclude_none=True
+                ),
+            )
+            # A build job for an unrelated run, and a run-less provision job: both excluded.
+            await _enqueue_with_state(conn, JobKind.BUILD, JobState.QUEUED, "other-run")
+            await _enqueue_with_state(
+                conn,
+                JobKind.PROVISION,
+                JobState.QUEUED,
+                "no-run",
+                payload=_system_payload().model_dump(mode="json"),
+            )
+            recent = await queue.recent_jobs(
+                conn, limit=10, projects=["proj"], investigation_id=investigation_id
+            )
+        assert [j.dedup_key for j in recent] == ["in-inv"]
+
+    asyncio.run(_run())
+
+
+def test_recent_jobs_investigation_filter_no_match_is_empty(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await _enqueue_with_state(conn, JobKind.BUILD, JobState.QUEUED, "b1")
+            recent = await queue.recent_jobs(
+                conn, limit=10, projects=["proj"], investigation_id=uuid4()
+            )
+        assert recent == []
+
+    asyncio.run(_run())
+
+
+def test_recent_jobs_investigation_filter_excludes_other_project(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            run_id = await _seed_run_in_investigation(conn, project="other")
+            inv_row = await (
+                await conn.execute("SELECT investigation_id FROM runs WHERE id = %s", (run_id,))
+            ).fetchone()
+            assert inv_row is not None
+            # The job is owned by 'other' but the caller can only read 'proj': the project
+            # predicate excludes it even though the investigation id matches (no leak).
+            await _enqueue_with_state(
+                conn,
+                JobKind.BUILD,
+                JobState.QUEUED,
+                "other-proj",
+                project="other",
+                payload=BuildPayload(run_id=run_id, build_host_id=str(WORKER_LOCAL_ID)).model_dump(
+                    mode="json", exclude_none=True
+                ),
+            )
+            recent = await queue.recent_jobs(
+                conn, limit=10, projects=["proj"], investigation_id=inv_row[0]
+            )
+        assert recent == []
+
+    asyncio.run(_run())
+
+
 def test_queue_paused_defaults_false_and_toggles(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:

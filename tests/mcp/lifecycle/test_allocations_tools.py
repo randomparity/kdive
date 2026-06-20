@@ -717,6 +717,64 @@ def test_list_allocations_malformed_cursor_is_config_error(migrated_url: str) ->
     asyncio.run(_run())
 
 
+def test_list_allocations_filters_by_state(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool, cap=2)
+            granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
+            await _seed_alloc(pool, res, AllocationState.RELEASED)
+            resp = await list_allocations(
+                pool, _ctx(), project="proj", limit=50, state=AllocationState.GRANTED
+            )
+        assert [r.object_id for r in resp.items] == [granted]
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_state_filter_no_match_is_empty(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool, cap=1)
+            await _seed_alloc(pool, res, AllocationState.GRANTED)
+            resp = await list_allocations(
+                pool, _ctx(), project="proj", limit=50, state=AllocationState.FAILED
+            )
+        assert resp.status == "ok"
+        assert resp.items == []
+        assert resp.data["truncated"] is False
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_state_filter_drains_across_pages(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res = await _register(pool, cap=5)
+            granted = {await _seed_alloc(pool, res, AllocationState.GRANTED) for _ in range(3)}
+            await _seed_alloc(pool, res, AllocationState.RELEASED)
+            seen: list[str] = []
+            cursor: str | None = None
+            for _ in range(10):
+                page = await list_allocations(
+                    pool,
+                    _ctx(),
+                    project="proj",
+                    limit=2,
+                    cursor=cursor,
+                    state=AllocationState.GRANTED,
+                )
+                seen.extend(item.object_id for item in page.items)
+                if not page.data["truncated"]:
+                    break
+                next_cursor = page.data["next_cursor"]
+                assert isinstance(next_cursor, str)
+                cursor = next_cursor
+        assert set(seen) == granted  # only granted, every one, no duplicate
+        assert len(seen) == len(granted)
+
+    asyncio.run(_run())
+
+
 def test_pick_by_kind_skips_cordoned_host(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

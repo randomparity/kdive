@@ -16,16 +16,17 @@ Return one allocation visible to the caller.
 
 `implemented` · `read-only`
 
-List allocations visible in a project, newest first.
+List allocations visible in a project, newest first, filterable by state.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` for the next page.
+``cursor`` for the next page. The ``state`` filter composes with the cursor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
 | `limit` | integer | no | Maximum rows returned (capped at 200). |
 | `project` | string | yes | Project whose allocations to list. |
+| `state` | `requested`, `granted`, `active`, `releasing`, `released`, `expired`, `failed` (nullable) | no | Only allocations in this lifecycle state. |
 
 ## `allocations.release`
 

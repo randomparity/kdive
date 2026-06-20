@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -333,6 +333,9 @@ async def recent_jobs(
     projects: Sequence[str],
     *,
     after: tuple[datetime, UUID] | None = None,
+    status: JobState | None = None,
+    kind: JobKind | None = None,
+    investigation_id: UUID | None = None,
 ) -> list[Job]:
     """Return the caller's most recent jobs, newest first, capped at ``limit``.
 
@@ -347,19 +350,42 @@ async def recent_jobs(
     (ADR-0192); when set, only rows strictly older than it (in ``created_at DESC, id DESC``
     order) are returned. The caller fetches ``limit`` already incremented by one so it can
     detect truncation.
+
+    Optional filters (ADR-0197), applied before the keyset seek so the cursor stays a pure
+    boundary across pages:
+
+    - ``status`` / ``kind`` are equality predicates on the ``state`` / ``kind`` columns.
+    - ``investigation_id`` filters to jobs whose Run belongs to that Investigation. The
+      ``jobs`` table has no Run/Investigation column, so the query joins ``runs`` on
+      ``jobs.payload->>'run_id'``; only run-bearing kinds (``build``/``install``/``boot``)
+      carry a ``run_id``, so non-run-bearing jobs never match. The project predicate still
+      gates every row, so an Investigation in an unreadable project yields no rows.
     """
-    seek = ""
+    # Qualify every job column so the optional `runs` join cannot make `created_at`/`id`
+    # ambiguous, and so `j.*` returns only `jobs` columns (a bare `*` would pull `runs`
+    # columns into the row and break `Job.model_validate`). Composed via psycopg.sql so the
+    # statically-built fragments stay type-safe and the values bind as parameters.
+    join = sql.SQL("")
+    clauses = [sql.SQL("j.authorizing->>'project' = ANY(%s::text[])")]
     params: list[object] = [list(projects)]
+    if investigation_id is not None:
+        join = sql.SQL(" JOIN runs r ON r.id::text = j.payload->>'run_id'")
+        clauses.append(sql.SQL("r.investigation_id = %s"))
+        params.append(investigation_id)
+    if status is not None:
+        clauses.append(sql.SQL("j.state = %s"))
+        params.append(status.value)
+    if kind is not None:
+        clauses.append(sql.SQL("j.kind = %s"))
+        params.append(kind.value)
     if after is not None:
-        seek = " AND (created_at, id) < (%s, %s)"
+        clauses.append(sql.SQL("(j.created_at, j.id) < (%s, %s)"))
         params.extend(after)
     params.append(limit)
+    query = sql.SQL(
+        "SELECT j.* FROM jobs j{join} WHERE {where} ORDER BY j.created_at DESC, j.id DESC LIMIT %s"
+    ).format(join=join, where=sql.SQL(" AND ").join(clauses))
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            "SELECT * FROM jobs WHERE authorizing->>'project' = ANY(%s::text[])"
-            + seek
-            + " ORDER BY created_at DESC, id DESC LIMIT %s",
-            params,
-        )
+        await cur.execute(query, params)
         rows = await cur.fetchall()
     return [Job.model_validate(row) for row in rows]
