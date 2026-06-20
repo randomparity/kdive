@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from uuid import UUID
 
@@ -16,11 +17,15 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
+from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureVmcorePayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.store.objectstore import register_artifact_row
+
+_DISABLED_TELEMETRY = CaptureTelemetry.disabled()
 
 
 def captured_method(object_key: str) -> str:
@@ -104,6 +109,7 @@ async def capture_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    telemetry: CaptureTelemetry = _DISABLED_TELEMETRY,
 ) -> str | None:
     """Capture the System's vmcore and store the raw + redacted rows."""
     payload = load_payload(job, CaptureVmcorePayload)
@@ -112,18 +118,32 @@ async def capture_handler(
     precheck = await precheck_system(conn, system_id, method)
     if isinstance(precheck, str):
         return precheck
-    retriever = (await resolver.runtime_for_system(conn, system_id)).retriever
-    output = await asyncio.to_thread(retriever.capture, system_id, method)
-    return await finalize_capture(conn, job, precheck, method, output)
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    retriever = binding.runtime.retriever
+    started = time.perf_counter()
+    try:
+        output = await asyncio.to_thread(retriever.capture, system_id, method)
+        result = await finalize_capture(conn, job, precheck, method, output)
+    except Exception:
+        elapsed = time.perf_counter() - started
+        telemetry.record(method.value, binding.kind.value, "error", seconds=elapsed)
+        raise
+    elapsed = time.perf_counter() - started
+    telemetry.record(
+        method.value, binding.kind.value, "ok", seconds=elapsed, size_bytes=output.raw_size_bytes
+    )
+    return result
 
 
 def register_handlers(
     registry: HandlerRegistry,
     *,
     resolver: ProviderResolver,
+    telemetry: CaptureTelemetry = _DISABLED_TELEMETRY,
 ) -> None:
     """Bind the `capture_vmcore` job handler."""
     registry.register(
         JobKind.CAPTURE_VMCORE,
-        lambda conn, job: capture_handler(conn, job, resolver=resolver),
+        lambda conn, job: capture_handler(conn, job, resolver=resolver, telemetry=telemetry),
     )

@@ -6,6 +6,7 @@ from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from kdive.build_artifacts.results import BuildOutput
+from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -14,7 +15,14 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 class Builder(Protocol):
     """Build port returning stored kernel and debuginfo refs."""
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(
+        self,
+        run_id: UUID,
+        profile: ServerBuildProfile,
+        *,
+        recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+        provider: str = "",
+    ) -> BuildOutput:
         """Build a kernel and store its boot artifact plus debuginfo.
 
         Raises:

@@ -124,7 +124,7 @@ class _BuildProvider:
     def __init__(self) -> None:
         self.calls: list[tuple[UUID, str]] = []
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(self, run_id: UUID, profile: ServerBuildProfile, **_: object) -> BuildOutput:
         assert isinstance(profile.config, LocalComponentRef)
         self.calls.append((run_id, profile.config.path))
         return BuildOutput(kernel_ref="k", debuginfo_ref="v", build_id="deadbeef")
@@ -168,7 +168,9 @@ class _ControllerProvider:
 class _RetrieveProvider:
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
         artifact = StoredArtifact("key", "etag", Sensitivity.SENSITIVE, "vmcore")
-        return CaptureOutput(raw=artifact, redacted=artifact, vmcore_build_id="deadbeef")
+        return CaptureOutput(
+            raw=artifact, redacted=artifact, vmcore_build_id="deadbeef", raw_size_bytes=0
+        )
 
     def run_crash_postmortem(
         self,
@@ -590,10 +592,14 @@ def test_console_hosting_delegates_to_remote_when_enabled(
     seen: dict[str, object] = {}
 
     async def _build_console_hosting(
-        *, secret_registry: SecretRegistry, running_systems_factory: object
+        *,
+        secret_registry: SecretRegistry,
+        running_systems_factory: object,
+        console_telemetry: object | None = None,
     ) -> object:
         seen["secret_registry"] = secret_registry
         seen["running_systems_factory"] = running_systems_factory
+        seen["console_telemetry"] = console_telemetry
         return expected_hosting
 
     monkeypatch.setattr(

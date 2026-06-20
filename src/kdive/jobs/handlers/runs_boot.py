@@ -21,6 +21,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs_common import abandon_run_step_best_effort
 from kdive.jobs.payloads import RunPayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import Booter
 from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
@@ -247,7 +248,9 @@ async def boot_handler(
     claim = await claim_run_step(conn, run_id, "boot")
     if not claim.claimed:
         return str(run_id)
-    booter = (await resolver.runtime_for_run(conn, run_id)).booter
+    binding = await resolver.binding_for_run(conn, run_id)
+    set_provider_kind(binding.kind.value)
+    booter = binding.runtime.booter
     system_id = run.require_system_id()
 
     try:

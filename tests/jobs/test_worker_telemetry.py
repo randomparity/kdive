@@ -7,6 +7,7 @@ emitted instruments carry only allowlisted labels (``job_kind``/``outcome``).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from opentelemetry.sdk.metrics import MeterProvider
@@ -150,3 +151,83 @@ def test_record_job_failure_disabled_is_noop() -> None:
     WorkerTelemetry.disabled().record_job_failure(
         _job(JobState.FAILED, ErrorCategory.BUILD_FAILURE), ErrorCategory.BUILD_FAILURE
     )
+
+
+def _points_for(reader: InMemoryMetricReader, family_name: str) -> list[Any]:
+    """Return all data points whose metric name matches ``family_name``."""
+    data = reader.get_metrics_data()
+    assert data is not None
+    out: list[Any] = []
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == family_name:
+                    out.extend(metric.data.data_points)
+    return out
+
+
+def test_provider_op_duration_recorded_when_kind_tagged() -> None:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    tracer = TracerProvider().get_tracer("test")
+    telem = WorkerTelemetry(tracer=tracer, meter=meter)
+    from kdive.jobs.provider_context import set_provider_kind
+
+    with telem.job_span("build") as span:
+        set_provider_kind("local-libvirt")
+        span.set_outcome("ok")
+    points = _points_for(reader, "kdive.provider.op.duration")
+    assert points, "provider-op duration not emitted for a tagged job"
+    assert points[0].attributes["provider"] == "local-libvirt"
+    assert points[0].attributes["job_kind"] == "build"
+
+
+def test_provider_op_not_recorded_for_untagged_job_and_no_leak() -> None:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    tracer = TracerProvider().get_tracer("test")
+    telem = WorkerTelemetry(tracer=tracer, meter=meter)
+    from kdive.jobs.provider_context import set_provider_kind
+
+    with telem.job_span("build") as span:  # tagged
+        set_provider_kind("remote-libvirt")
+        span.set_outcome("ok")
+    with telem.job_span("teardown"):  # untagged — must NOT inherit remote-libvirt
+        pass
+    points = _points_for(reader, "kdive.provider.op.duration")
+    kinds = {p.attributes["job_kind"] for p in points}
+    assert "teardown" not in kinds
+
+
+# --- Group I: time-to-claim + retries (ADR-0191 I) ---
+
+
+def test_record_time_to_claim_emits_one_point_with_job_kind() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_time_to_claim("build", 3.0)
+    points = _points_for(reader, "kdive.job.time_to_claim")
+    assert len(points) == 1
+    assert points[0].attributes["job_kind"] == "build"
+
+
+def test_record_time_to_claim_negative_seconds_is_noop() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_time_to_claim("build", -1.0)
+    assert _points_for(reader, "kdive.job.time_to_claim") == []
+
+
+def test_record_time_to_claim_disabled_is_noop() -> None:
+    WorkerTelemetry.disabled().record_time_to_claim("build", 3.0)  # must not raise
+
+
+def test_record_job_retry_increments_counter_with_job_kind() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_job_retry("build")
+    points = _points_for(reader, "kdive.job.retries")
+    assert len(points) == 1
+    assert points[0].attributes["job_kind"] == "build"
+    assert points[0].value == 1
+
+
+def test_record_job_retry_disabled_is_noop() -> None:
+    WorkerTelemetry.disabled().record_job_retry("build")  # must not raise

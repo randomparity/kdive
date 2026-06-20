@@ -22,6 +22,7 @@ from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from kdive.domain.capacity.state import JobState
+from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
 
 if TYPE_CHECKING:
     from opentelemetry.metrics import Counter, Histogram, Meter
@@ -69,6 +70,31 @@ class WorkerTelemetry:
             unit="1",
             description="Categorized failures at their backend origin, by error category.",
         )
+        # ADR-0191 F: provider-op RED — recorded only when the handler tags a provider kind.
+        self._provider_op_duration: Histogram = meter.create_histogram(
+            "kdive.provider.op.duration",
+            unit="s",
+            description="Provider-operation wall-clock duration, by provider and job kind.",
+            explicit_bucket_boundaries_advisory=list(_DURATION_BUCKETS),
+        )
+        self._provider_op_errors: Counter = meter.create_counter(
+            "kdive.provider.op.errors",
+            unit="1",
+            description="Failed provider operations, by provider and job kind.",
+        )
+        # ADR-0191 I: queue latency — time from enqueue to first claim, by job kind.
+        self._time_to_claim: Histogram = meter.create_histogram(
+            "kdive.job.time_to_claim",
+            unit="s",
+            description="Queue latency from enqueue to claim, by job kind.",
+            explicit_bucket_boundaries_advisory=list(_DURATION_BUCKETS),
+        )
+        # ADR-0191 I: non-terminal requeues (retries), by job kind.
+        self._retries: Counter = meter.create_counter(
+            "kdive.job.retries",
+            unit="1",
+            description="Job requeues (non-terminal failures), by job kind.",
+        )
 
     def _observe_depth(self, _options: CallbackOptions) -> Iterable[Observation]:
         return [Observation(self._last_depth)]
@@ -88,8 +114,10 @@ class WorkerTelemetry:
         outcome label; the duration histogram is recorded with that outcome on close.
         """
         if not self._enabled:
+            clear_provider_kind()
             yield JobSpan(None, job_kind)
             return
+        clear_provider_kind()
         started = time.perf_counter()
         with self._tracer.start_as_current_span(
             f"job/{job_kind}", kind=SpanKind.CONSUMER, attributes={"job_kind": job_kind}
@@ -107,6 +135,12 @@ class WorkerTelemetry:
             if handle.outcome == "error":
                 handle.span.set_status(Status(StatusCode.ERROR))
         self._duration.record(elapsed, labels)
+        provider = take_provider_kind()
+        if provider is not None:
+            op_labels = {"provider": provider, "job_kind": handle.job_kind}
+            self._provider_op_duration.record(elapsed, {**op_labels, "outcome": handle.outcome})
+            if handle.outcome == "error":
+                self._provider_op_errors.add(1, op_labels)
 
     @property
     def enabled(self) -> bool:
@@ -127,6 +161,16 @@ class WorkerTelemetry:
         """
         if self._enabled and job.state is JobState.FAILED:
             self._errors.add(1, {"error_category": category.value})
+
+    def record_time_to_claim(self, job_kind: str, seconds: float) -> None:
+        """Record enqueue→claim latency (no-op when disabled or seconds < 0)."""
+        if self._enabled and seconds >= 0.0:
+            self._time_to_claim.record(seconds, {"job_kind": job_kind})
+
+    def record_job_retry(self, job_kind: str) -> None:
+        """Count one non-terminal requeue (no-op when disabled)."""
+        if self._enabled:
+            self._retries.add(1, {"job_kind": job_kind})
 
 
 class JobSpan:

@@ -8,6 +8,7 @@ from uuid import UUID
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.build_artifacts.results import BuildOutput
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT, StorePort
 
@@ -19,8 +20,15 @@ class FaultInjectBuild:
         self._store_factory = store_factory
         self._store: StorePort | None = None
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
-        del profile
+    def build(
+        self,
+        run_id: UUID,
+        profile: ServerBuildProfile,
+        *,
+        recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+        provider: str = "",
+    ) -> BuildOutput:
+        del profile, recorder, provider
         kernel = self._put(run_id, "kernel", b"fault-inject-kernel", Sensitivity.REDACTED)
         debuginfo = self._put(run_id, "vmlinux", b"fault-inject-vmlinux", Sensitivity.REDACTED)
         return BuildOutput(

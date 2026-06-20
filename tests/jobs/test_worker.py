@@ -10,6 +10,9 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.trace import TracerProvider
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
@@ -24,6 +27,7 @@ from kdive.jobs import worker as worker_module
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, BuildPayload, RunPayload, load_payload
 from kdive.jobs.worker import Worker, WorkerConfig
+from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (
     seed_granted_allocation,
@@ -832,5 +836,101 @@ def test_no_heartbeat_means_no_ticker_task(monkeypatch: pytest.MonkeyPatch) -> N
         monkeypatch.setattr(worker, "run_once", fake_run_once)
         await asyncio.wait_for(worker.run(stop), timeout=1)
         assert ran.is_set()
+
+    asyncio.run(_run())
+
+
+# --- Group I: time-to-claim + retries (ADR-0191 I) ---
+
+
+def _telemetry_worker(
+    pool: AsyncConnectionPool,
+    registry: HandlerRegistry,
+) -> tuple[Worker, InMemoryMetricReader]:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    tracer = TracerProvider().get_tracer("test")
+    telemetry = WorkerTelemetry(tracer=tracer, meter=meter)
+    w = _worker(pool, registry, worker_id="w1", config=WorkerConfig(telemetry=telemetry))
+    return w, reader
+
+
+def _retry_points(reader: InMemoryMetricReader) -> list[Any]:
+    data = reader.get_metrics_data()
+    assert data is not None
+    out: list[Any] = []
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == "kdive.job.retries":
+                    out.extend(metric.data.data_points)
+    return out
+
+
+def test_non_terminal_handler_error_records_retry(migrated_url: str) -> None:
+    """A non-terminal CategorizedError requeues the job and increments the retry counter."""
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+            attempts = 0
+
+            async def flaky(conn: psycopg.AsyncConnection, job: Job) -> str:
+                nonlocal attempts
+                attempts += 1
+                # Non-terminal: the job is requeued (state → QUEUED).
+                raise CategorizedError("transient", category=ErrorCategory.TRANSPORT_FAILURE)
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.BUILD, flaky)
+            worker, reader = _telemetry_worker(pool, reg)
+            async with pool.connection() as conn:
+                await queue.enqueue(
+                    conn,
+                    JobKind.BUILD,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-retry-yes",
+                    max_attempts=3,
+                )
+
+            await worker.run_once()  # first attempt: non-terminal → requeued
+            assert attempts == 1
+
+            points = _retry_points(reader)
+            assert points, "retry counter not incremented for a non-terminal failure"
+            assert points[0].value == 1
+            assert points[0].attributes["job_kind"] == "build"
+
+    asyncio.run(_run())
+
+
+def test_terminal_handler_error_does_not_record_retry(migrated_url: str) -> None:
+    """A terminal CategorizedError dead-letters the job; the retry counter stays at zero."""
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+
+            async def fatal(conn: psycopg.AsyncConnection, job: Job) -> str:
+                raise CategorizedError(
+                    "unrecoverable",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    terminal=True,
+                )
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.BUILD, fatal)
+            worker, reader = _telemetry_worker(pool, reg)
+            async with pool.connection() as conn:
+                await queue.enqueue(
+                    conn,
+                    JobKind.BUILD,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-retry-no",
+                    max_attempts=3,
+                )
+
+            await worker.run_once()  # terminal: dead-lettered, no retry counted
+            assert _retry_points(reader) == []
 
     asyncio.run(_run())

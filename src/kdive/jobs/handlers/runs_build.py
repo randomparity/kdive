@@ -20,9 +20,11 @@ from kdive.domain.capacity.state import IllegalTransition, RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import Job
+from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs_shared import finalize_build
 from kdive.jobs.payloads import BuildPayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.build_host.dispatch import (
@@ -96,6 +98,8 @@ async def _run_build(
     secret_registry: SecretRegistry,
     kernel_src: str,
     transport_factories: BuildHostTransportFactories | None = None,
+    recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+    provider: str = "",
 ) -> BuildOutput:
     """Resolve the runtime builder and run it on ``host`` through the build-host seam.
 
@@ -112,6 +116,8 @@ async def _run_build(
         secret_registry=secret_registry,
         kernel_src=kernel_src,
         transport_factories=transport_factories,
+        recorder=recorder,
+        provider=provider,
     )
 
 
@@ -142,6 +148,7 @@ async def build_handler(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     transport_factories: BuildHostTransportFactories | None = None,
+    build_phase_recorder: BuildPhaseRecorder = DISABLED_RECORDER,
 ) -> str | None:
     """Build the Run's kernel on the selected host and drive it `running -> succeeded` or failed.
 
@@ -166,6 +173,7 @@ async def build_handler(
             resolver=resolver,
             secret_registry=secret_registry,
             transport_factories=transport_factories,
+            build_phase_recorder=build_phase_recorder,
         )
     finally:
         if restore_autocommit:
@@ -179,6 +187,7 @@ async def _build_handler_autocommit(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     transport_factories: BuildHostTransportFactories | None = None,
+    build_phase_recorder: BuildPhaseRecorder = DISABLED_RECORDER,
 ) -> str | None:
     payload = load_payload(job, BuildPayload)
     run_id = UUID(payload.run_id)
@@ -196,6 +205,7 @@ async def _build_handler_autocommit(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"run_id": str(run_id)},
         )
+    set_provider_kind(run.target_kind.value)
     result = await existing_build_result(conn, run_id)
     if result is None:
         result = await _build_and_record(
@@ -207,6 +217,7 @@ async def _build_handler_autocommit(
             resolver=resolver,
             secret_registry=secret_registry,
             transport_factories=transport_factories,
+            build_phase_recorder=build_phase_recorder,
         )
     await finalize_build(conn, job, run, result)
     await _release_build_lease(conn, run_id)
@@ -223,6 +234,7 @@ async def _build_and_record(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
     transport_factories: BuildHostTransportFactories | None = None,
+    build_phase_recorder: BuildPhaseRecorder = DISABLED_RECORDER,
 ) -> BuildStepResult:
     """Resolve the host, run the build, and shape the ledger result; mark FAILED on error.
 
@@ -246,6 +258,8 @@ async def _build_and_record(
             secret_registry=secret_registry,
             kernel_src=kernel_src,
             transport_factories=transport_factories,
+            recorder=build_phase_recorder,
+            provider=run.target_kind.value,
         )
     except CategorizedError as exc:
         await _fail_build(conn, job, run, exc.category)

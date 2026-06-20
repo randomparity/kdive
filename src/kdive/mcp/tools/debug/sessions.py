@@ -15,6 +15,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
+from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.mcp.tools.debug.ops import DebugRuntimeResolver, _register_debug_ops
 from kdive.mcp.tools.debug.sessions_lifecycle import (
     _GDBSTUB,
@@ -56,6 +57,7 @@ class DebugSessionHandlers(_LifecycleDebugSessionHandlers):
         insert_session_locked: _InsertSession | None = None,
         secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
         secret_registry: SecretRegistry,
+        telemetry: DebugSessionTelemetry | None = None,
     ) -> DebugSessionHandlers:
         return cls(
             connector_for_run=_resolved_connector_for_run(resolver),
@@ -65,6 +67,7 @@ class DebugSessionHandlers(_LifecycleDebugSessionHandlers):
             ),
             secret_backend_factory=secret_backend_factory,
             secret_registry=secret_registry,
+            telemetry=telemetry,
         )
 
 
@@ -84,6 +87,7 @@ def register(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
+    telemetry: DebugSessionTelemetry | None = None,
 ) -> None:
     """Register the ``debug.*`` tools on ``app``, bound to ``pool``."""
     runtime = DebugRuntimeResolver(resolver)
@@ -92,6 +96,7 @@ def register(
         runtime_resolver=runtime,
         secret_backend_factory=_secret_backend_factory(secret_registry),
         secret_registry=secret_registry,
+        telemetry=telemetry,
     )
 
     @app.tool(

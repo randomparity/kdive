@@ -41,6 +41,7 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.mcp.tools.debug.ops import DebugEngineRuntime, DebugRuntimeResolver
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -232,6 +233,7 @@ class DebugSessionHandlers:
         insert_session_locked: _InsertSession | None = None,
         secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
         secret_registry: SecretRegistry,
+        telemetry: DebugSessionTelemetry | None = None,
     ) -> None:
         self._connector_for_run = connector_for_run
         self._detach_resources = detach_resources
@@ -240,6 +242,7 @@ class DebugSessionHandlers:
         )
         self._secret_backend_factory = secret_backend_factory
         self._secret_registry = secret_registry
+        self._telemetry = telemetry or DebugSessionTelemetry.disabled()
 
     @classmethod
     def from_resolver(
@@ -250,6 +253,7 @@ class DebugSessionHandlers:
         insert_session_locked: _InsertSession | None = None,
         secret_backend_factory: Callable[[UUID], SecretBackend] | None = None,
         secret_registry: SecretRegistry,
+        telemetry: DebugSessionTelemetry | None = None,
     ) -> DebugSessionHandlers:
         return cls(
             connector_for_run=_resolved_connector_for_run(resolver),
@@ -257,6 +261,7 @@ class DebugSessionHandlers:
             insert_session_locked=insert_session_locked,
             secret_backend_factory=secret_backend_factory,
             secret_registry=secret_registry,
+            telemetry=telemetry,
         )
 
     async def start_session(
@@ -392,6 +397,9 @@ class DebugSessionHandlers:
                 async with resources.runtime.lock_for(session_id):
                     resources.runtime.reap(session_id)
             self._secret_registry.release(_secret_scope(uid))
+            seconds = (datetime.now(UTC) - resolved_session.session.created_at).total_seconds()
+            outcome = "ok" if envelope.status != "error" else "error"
+            self._telemetry.record(resolved_session.session.transport, outcome, seconds)
             return envelope
 
 

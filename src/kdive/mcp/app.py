@@ -24,6 +24,7 @@ from kdive.diagnostics.service import DiagnosticsService, default_service_factor
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import control, image_build, runs, systems, vmcore
+from kdive.jobs.handlers.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry, JobHandler
 from kdive.mcp.auth import build_verifier
 from kdive.mcp.middleware import (
@@ -52,6 +53,7 @@ from kdive.mcp.tools.catalog import images as catalog_images
 from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_tools
 from kdive.mcp.tools.debug import introspect
 from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.mcp.tools.lifecycle import control as control_tools
 from kdive.mcp.tools.lifecycle import vmcore as vmcore_tools
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_tools
@@ -195,6 +197,7 @@ def _register_debug_tools(app: FastMCP, pool: AsyncConnectionPool, assembly: App
         pool,
         resolver=assembly.resolver,
         secret_registry=assembly.secret_registry,
+        telemetry=DebugSessionTelemetry(meter=metrics.get_meter("kdive.mcp")),
     )
 
 
@@ -269,6 +272,8 @@ def _register_run_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
+    from kdive.jobs.build_telemetry import BuildPhaseRecorder
+
     runs.register_handlers(
         registry,
         ports=runs.RunHandlerPorts(
@@ -276,6 +281,7 @@ def _register_run_handlers(
             secret_registry=assembly.secret_registry,
             transport_factories=assembly.transport_factories,
             artifact_store=assembly.object_stores.optional_upload_store,
+            build_phase_recorder=BuildPhaseRecorder(meter=metrics.get_meter("kdive.worker")),
         ),
     )
 
@@ -291,7 +297,11 @@ def _register_vmcore_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
-    vmcore.register_handlers(registry, resolver=assembly.resolver)
+    vmcore.register_handlers(
+        registry,
+        resolver=assembly.resolver,
+        telemetry=CaptureTelemetry(meter=metrics.get_meter("kdive.worker")),
+    )
 
 
 def _register_diagnostics_handlers(

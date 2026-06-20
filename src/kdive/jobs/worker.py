@@ -132,6 +132,10 @@ class Worker:
                 self._telemetry.observe_queue_depth(await queue.count_claimable(conn))
         if job is None:
             return None
+        if self._telemetry.enabled and job.heartbeat_at is not None and job.created_at is not None:
+            self._telemetry.record_time_to_claim(
+                job.kind.value, (job.heartbeat_at - job.created_at).total_seconds()
+            )
         handler = self._registry.get(job.kind)
         if handler is None:
             async with self._pool.connection() as conn:
@@ -226,6 +230,8 @@ class Worker:
                 )
                 await _compensate_run_failure(conn, failed_job, category)
             self._telemetry.record_job_failure(failed_job, category)
+            if failed_job.state is JobState.QUEUED:
+                self._telemetry.record_job_retry(job.kind.value)
             _log.warning("job %s failed: %s", job.id, category, exc_info=True)
             return
         async with self._pool.connection() as conn:

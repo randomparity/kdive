@@ -6,18 +6,28 @@ import asyncio
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import cast
 from uuid import UUID
 
 import pytest
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_host_policy import KERNEL_SRC_UNSET_DETAIL
 from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
+from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.providers.ports import TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport
-from kdive.providers.shared.build_host.dispatch import run_build_on_host
+from kdive.providers.shared.build_host.dispatch import (
+    BuildHostTransportFactory,
+    _build_over_transport_session,
+    run_build_on_host,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN_ID = UUID("00000000-0000-0000-0000-0000000000d1")
@@ -54,7 +64,7 @@ class _RecordingBuilder:
     def __init__(self) -> None:
         self.called = False
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(self, run_id: UUID, profile: ServerBuildProfile, **_: object) -> BuildOutput:
         self.called = True
         return BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
 
@@ -113,7 +123,7 @@ class _ThreadRecordingBuilder:
     def over_transport(self, transport: object, **_kw: object) -> _ThreadRecordingBuilder:
         return self
 
-    def build(self, run_id: UUID, profile: object) -> BuildOutput:
+    def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
         self.build_thread = threading.current_thread()
         return BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
 
@@ -215,3 +225,136 @@ def test_local_git_build_skips_warm_tree_admission() -> None:
     )
     assert builder.called is True
     assert out.kernel_ref == "k"
+
+
+# ---------------------------------------------------------------------------
+# PROVISION phase telemetry: _build_over_transport_session (ADR-0191 G1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeTransportCtx:
+    """A fake transport context manager that records __enter__ and __exit__ calls."""
+
+    transport: _FakeTransport = field(default_factory=_FakeTransport)
+    entered: bool = False
+    exited: bool = False
+
+    def __enter__(self) -> _FakeTransport:
+        self.entered = True
+        return self.transport
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.exited = True
+
+
+def _provision_points(reader: InMemoryMetricReader) -> list:
+    data = reader.get_metrics_data()
+    if data is None:
+        return []
+    out = []
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                if m.name == "kdive.build.phase.duration":
+                    out.extend(
+                        p
+                        for p in m.data.data_points
+                        if (p.attributes or {}).get("build_phase") == BuildPhase.PROVISION.value
+                    )
+    return out
+
+
+def _git_profile() -> ServerBuildProfile:
+    parsed = BuildProfile.parse(_GIT_PROFILE)
+    assert isinstance(parsed, ServerBuildProfile)
+    return parsed
+
+
+def _ephemeral_host() -> BuildHost:
+    return BuildHost(
+        id=UUID("00000000-0000-0000-0000-0000000000e1"),
+        name="eph",
+        kind=BuildHostKind.EPHEMERAL_LIBVIRT,
+        address=None,
+        ssh_credential_ref=None,
+        base_image_volume="kdive-build-base.qcow2",
+        workspace_root="/build",
+        max_concurrent=2,
+        enabled=True,
+        state=BuildHostState.READY,
+    )
+
+
+def test_provision_phase_point_emitted_on_happy_path() -> None:
+    """_build_over_transport_session emits a PROVISION point with outcome=ok when all succeeds."""
+    reader = InMemoryMetricReader()
+    recorder = BuildPhaseRecorder(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    ctx = _FakeTransportCtx()
+
+    def _factory(
+        _host: BuildHost, _registry: SecretRegistry, _run_id: UUID, _source: object
+    ) -> _FakeTransportCtx:
+        return ctx
+
+    builder = _ThreadRecordingBuilder()
+    host = _ephemeral_host()
+    profile = _git_profile()
+
+    _build_over_transport_session(
+        builder,
+        cast(BuildHostTransportFactory, _factory),
+        host=host,
+        run_id=_RUN_ID,
+        parsed=profile,
+        source=None,
+        secret_registry=SecretRegistry(),
+        recorder=recorder,
+    )
+
+    pts = _provision_points(reader)
+    assert pts, "No provision phase point recorded"
+    assert pts[0].attributes["outcome"] == "ok"
+    assert ctx.entered is True
+    assert ctx.exited is True
+
+
+def test_provision_phase_point_recorded_and_exit_called_when_build_body_raises() -> None:
+    """When the build body raises, the PROVISION point is still emitted and __exit__ is called."""
+    reader = InMemoryMetricReader()
+    recorder = BuildPhaseRecorder(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    ctx = _FakeTransportCtx()
+
+    def _factory(
+        _host: BuildHost, _registry: SecretRegistry, _run_id: UUID, _source: object
+    ) -> _FakeTransportCtx:
+        return ctx
+
+    class _FailingBuilder:
+        def over_transport(self, transport: object, **_kw: object) -> _FailingBuilder:
+            return self
+
+        def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
+            raise RuntimeError("build body exploded")
+
+    host = _ephemeral_host()
+    profile = _git_profile()
+
+    with pytest.raises(RuntimeError, match="build body exploded"):
+        _build_over_transport_session(
+            cast(TransportCapableBuilder, _FailingBuilder()),
+            cast(BuildHostTransportFactory, _factory),
+            host=host,
+            run_id=_RUN_ID,
+            parsed=profile,
+            source=None,
+            secret_registry=SecretRegistry(),
+            recorder=recorder,
+        )
+
+    # Provision succeeded (enter returned ok), so the provision point has outcome=ok.
+    pts = _provision_points(reader)
+    assert pts, "No provision phase point recorded after build-body failure"
+    assert pts[0].attributes["outcome"] == "ok"
+    # Transport teardown must have been called even though the build raised.
+    assert ctx.exited is True

@@ -13,6 +13,7 @@ class CaptureOutput(NamedTuple):
     raw: StoredArtifact
     redacted: StoredArtifact
     vmcore_build_id: str
+    raw_size_bytes: int
 
 
 class CrashResult(NamedTuple):

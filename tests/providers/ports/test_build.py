@@ -13,7 +13,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 class _PlainBuilder:
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(self, run_id: UUID, profile: ServerBuildProfile, **_: object) -> BuildOutput:
         return BuildOutput(kernel_ref="kernel", debuginfo_ref="vmlinux", build_id=str(run_id))
 
 

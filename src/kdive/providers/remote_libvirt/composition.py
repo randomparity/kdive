@@ -70,6 +70,7 @@ from kdive.providers.remote_libvirt.transport_reset import RemoteLibvirtTranspor
 from kdive.providers.shared.build_host.dispatch import BuildHostTransportFactory
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
 from kdive.providers.shared.debug_common.hostpolicy import allow_acl_remote
+from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
@@ -177,6 +178,7 @@ async def build_console_hosting(
     *,
     secret_registry: SecretRegistry,
     running_systems_factory: RunningSystemsFactory,
+    console_telemetry: ConsoleTelemetry | None = None,
 ) -> ConsoleHosting | None:
     """Build the single-leader remote console hosting loop, or ``None`` when unconfigured.
 
@@ -209,6 +211,7 @@ async def build_console_hosting(
             ),
             store=part_store,
             secret_registry=secret_registry,
+            telemetry=console_telemetry,
         )
 
     loop = ConsoleHostingLoop(

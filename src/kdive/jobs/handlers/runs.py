@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from kdive.domain.operations.jobs import JobKind
+from kdive.jobs.build_telemetry import BuildPhaseRecorder
 from kdive.jobs.handlers.runs_boot import boot_handler
 from kdive.jobs.handlers.runs_build import (
     BuildHostTransportFactories,
@@ -40,6 +41,7 @@ class RunHandlerPorts:
     secret_registry: SecretRegistry
     transport_factories: BuildHostTransportFactories | None = None
     artifact_store: ObjectStore | None = None
+    build_phase_recorder: BuildPhaseRecorder = field(default_factory=BuildPhaseRecorder.disabled)
 
 
 def register_handlers(
@@ -56,6 +58,7 @@ def register_handlers(
             resolver=ports.resolver,
             secret_registry=ports.secret_registry,
             transport_factories=ports.transport_factories,
+            build_phase_recorder=ports.build_phase_recorder,
         ),
     )
     registry.register(

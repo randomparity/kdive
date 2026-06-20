@@ -476,10 +476,13 @@ async def _run_worker(secret_registry: SecretRegistry, telemetry: Telemetry) -> 
 
 
 async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry) -> None:
+    from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
     from kdive.process_health.server import build_postgres_ping
     from kdive.process_health.worker import build_worker_probe
     from kdive.providers.assembly.composition import ProviderComposition
     from kdive.providers.infra.libvirt_event_loop import ensure_libvirt_event_loop
+    from kdive.reconciler.build_host_fleet import BuildHostTelemetry
+    from kdive.reconciler.console_telemetry import ConsoleTelemetry
     from kdive.reconciler.fleet import FleetTelemetry
     from kdive.reconciler.loop import ReconcileConfig, Reconciler
     from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
@@ -506,7 +509,11 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
         discovery_task = asyncio.create_task(_register_provider_resources(pool, provider_resolver))
         console_hosting = None
         try:
-            console_hosting = await provider_composition.build_reconciler_console_hosting()
+            console_hosting = await provider_composition.build_reconciler_console_hosting(
+                console_telemetry=ConsoleTelemetry(
+                    meter=telemetry.meter_provider.get_meter("kdive.reconciler")
+                ),
+            )
             reconciler = Reconciler(
                 pool,
                 provider_composition.build_reconciler_reaper(),
@@ -526,7 +533,13 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
                     fleet_telemetry=FleetTelemetry(
                         meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
                     ),
+                    build_host_telemetry=BuildHostTelemetry(
+                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
+                    ),
                     admission_metrics=AdmissionMetrics(
+                        meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
+                    ),
+                    debug_session_telemetry=DebugSessionTelemetry(
                         meter=telemetry.meter_provider.get_meter("kdive.reconciler"),
                     ),
                 ),

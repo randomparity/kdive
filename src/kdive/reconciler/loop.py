@@ -28,6 +28,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
+from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import (
@@ -38,6 +39,7 @@ from kdive.providers.infra.reaping import (
     NullDumpVolumeReaper,
 )
 from kdive.providers.shared.build_host.reachability import BuildHostProber
+from kdive.reconciler.build_host_fleet import BuildHostTelemetry, read_build_host_snapshot
 from kdive.reconciler.cleanup import gc as gc_repairs
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
@@ -138,6 +140,10 @@ _NULL_BUILD_VM_REAPER: BuildVmReaper = NullBuildVmReaper()
 # stateless default field without a per-call construction (ruff B008).
 _NULL_ADMISSION_METRICS: AdmissionMetrics = AdmissionMetrics.disabled()
 
+# The default (no-op) debug-session telemetry (ADR-0191 H3): a module-level singleton so it
+# is a stateless default field without a per-call construction (ruff B008).
+_NULL_DEBUG_SESSION_TELEMETRY: DebugSessionTelemetry = DebugSessionTelemetry.disabled()
+
 # The process-singleton inventory reconcile pass (ADR-0112): held here so its last-good
 # parse cache (keyed by the systems.toml hash) survives across reconcile passes — the parse
 # step is skipped when the file is unchanged, but the reconcile-against-DB step still runs
@@ -215,7 +221,9 @@ class ReconcileConfig:
     heartbeat_tick: timedelta = timedelta(seconds=1)
     telemetry: ReconcilerTelemetry | None = None
     fleet_telemetry: FleetTelemetry | None = None
+    build_host_telemetry: BuildHostTelemetry | None = None
     admission_metrics: AdmissionMetrics = field(default=_NULL_ADMISSION_METRICS)
+    debug_session_telemetry: DebugSessionTelemetry = field(default=_NULL_DEBUG_SESSION_TELEMETRY)
 
 
 _DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
@@ -259,7 +267,10 @@ def _repair_plan(
         _RepairSpec(
             "dead_sessions",
             lambda conn: _repair_dead_sessions(
-                conn, config.debug_session_stale_after, config.resetter
+                conn,
+                config.debug_session_stale_after,
+                config.resetter,
+                config.debug_session_telemetry,
             ),
         ),
         _RepairSpec("leaked_domains", lambda conn: _repair_leaked_domains(conn, reaper)),
@@ -450,6 +461,7 @@ class Reconciler:
         self._heartbeat_tick = config.heartbeat_tick.total_seconds()
         self._telemetry = config.telemetry or ReconcilerTelemetry.disabled()
         self._fleet_telemetry = config.fleet_telemetry or FleetTelemetry.disabled()
+        self._build_host_telemetry = config.build_host_telemetry or BuildHostTelemetry.disabled()
 
     async def run_once(self) -> ReconcileReport:
         """Run one reconciliation pass."""
@@ -497,6 +509,20 @@ class Reconciler:
             return
         self._fleet_telemetry.refresh(snapshot)
 
+    async def _refresh_build_host_snapshot(self) -> None:
+        """Read build-host lease/capacity/reachability into the gauge cache (ADR-0191 G2/G3).
+
+        Best-effort: a read failure is logged and leaves the previous cached snapshot in place
+        — the build-host gauges are observability, never load-bearing for the repair pass.
+        """
+        try:
+            async with self._pool.connection() as conn:
+                snapshot = await read_build_host_snapshot(conn)
+        except Exception:  # noqa: BLE001 - a snapshot read must never starve the repair loop
+            _log.warning("reconciler: build-host snapshot read failed this pass", exc_info=True)
+            return
+        self._build_host_telemetry.refresh(snapshot)
+
     def _start_heartbeat_ticker(self, stop: asyncio.Event) -> asyncio.Task[None] | None:
         if self._config.heartbeat is None:
             return None
@@ -517,6 +543,7 @@ class Reconciler:
                     span.set_outcome("error")
                     _log.exception("reconcile pass failed; continuing after %ss", interval)
             await self._refresh_fleet_snapshot()
+            await self._refresh_build_host_snapshot()
             next_due = time.monotonic() + interval
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=interval)

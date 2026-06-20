@@ -139,7 +139,13 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
         def build_reconciler_build_host_prober(self) -> object:
             return expected_build_host_prober
 
-        async def build_reconciler_console_hosting(self) -> None:
+        async def build_reconciler_console_hosting(
+            self,
+            *,
+            enable_remote_libvirt: bool | None = None,
+            console_telemetry: object | None = None,
+        ) -> None:
+            del enable_remote_libvirt, console_telemetry
             return None
 
     monkeypatch.setattr(composition, "ProviderComposition", _FakeProviderComposition)

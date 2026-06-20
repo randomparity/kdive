@@ -46,8 +46,10 @@ from kdive.build_configs.defaults import (
 )
 from kdive.components.references import ComponentRef
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
+from kdive.domain.build_phase import BuildPhase
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host import execution as _build_exec
@@ -218,7 +220,14 @@ class RemoteLibvirtBuild:
             workspace_cleanup=lambda ws: transport.cleanup(str(ws)),
         )
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(
+        self,
+        run_id: UUID,
+        profile: ServerBuildProfile,
+        *,
+        recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+        provider: str = "",
+    ) -> BuildOutput:
         """Build a kernel, publish a vmlinuz+modules bundle + debuginfo; return refs + build-id.
 
         Raises:
@@ -229,16 +238,22 @@ class RemoteLibvirtBuild:
         """
         workspace = self._orchestrator.workspace_path(run_id)
         try:
-            self._orchestrator.build_workspace(run_id, profile)
+            self._orchestrator.build_workspace(
+                run_id, profile, recorder=recorder, provider=provider
+            )
             mod_root = self._staging_factory()
             try:
-                if self._run_modules_install(workspace, mod_root) != 0:
-                    raise _build_exec.build_failure("make modules_install exited non-zero", run_id)
-                build_id = self._read_build_id(workspace)
-                kernel_source = self._make_bundle(workspace, mod_root)
-                vmlinux_source = self._read_vmlinux_source(workspace)
-                kernel = self.publish(run_id, "kernel", kernel_source)
-                vmlinux = self.publish(run_id, "vmlinux", vmlinux_source)
+                with recorder.phase(BuildPhase.MODULES, provider):
+                    if self._run_modules_install(workspace, mod_root) != 0:
+                        raise _build_exec.build_failure(
+                            "make modules_install exited non-zero", run_id
+                        )
+                with recorder.phase(BuildPhase.ARTIFACT, provider):
+                    build_id = self._read_build_id(workspace)
+                    kernel_source = self._make_bundle(workspace, mod_root)
+                    vmlinux_source = self._read_vmlinux_source(workspace)
+                    kernel = self.publish(run_id, "kernel", kernel_source)
+                    vmlinux = self.publish(run_id, "vmlinux", vmlinux_source)
             finally:
                 self._staging_cleanup(mod_root)
             return BuildOutput(kernel_ref=kernel.key, debuginfo_ref=vmlinux.key, build_id=build_id)

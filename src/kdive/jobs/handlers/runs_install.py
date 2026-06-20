@@ -16,6 +16,7 @@ from kdive.domain.operations.jobs import Job
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.runs_common import abandon_run_step_best_effort
 from kdive.jobs.payloads import RunPayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports import InstallRequest
 from kdive.security import audit
@@ -51,7 +52,9 @@ async def install_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"run_id": str(run_id), "system_id": str(system_id)},
         )
-    runtime = await resolver.runtime_for_system(conn, system_id)
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    runtime = binding.runtime
     installer = runtime.installer
     method = install_method_for(system, runtime.profile_policy)
     kernel_ref = run.kernel_ref

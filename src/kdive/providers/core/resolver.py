@@ -133,13 +133,21 @@ class ProviderResolver:
         if first_failure is not None:
             raise first_failure
 
-    async def runtime_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderRuntime:
+    async def binding_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderBinding:
+        """Resolve the System's provider kind and bound runtime (ADR-0191 F)."""
         kind, name = await self._kind_and_name(conn, _KIND_FOR_SYSTEM, system_id, "system")
-        return self.resolve(kind).for_resource(name)
+        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
+
+    async def binding_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderBinding:
+        """Resolve the Run's provider kind and bound runtime (ADR-0191 F)."""
+        kind, name = await self._kind_and_name(conn, _KIND_FOR_RUN, run_id, "run")
+        return ProviderBinding(kind=kind, runtime=self.resolve(kind).for_resource(name))
+
+    async def runtime_for_system(self, conn: AsyncConnection, system_id: UUID) -> ProviderRuntime:
+        return (await self.binding_for_system(conn, system_id)).runtime
 
     async def runtime_for_run(self, conn: AsyncConnection, run_id: UUID) -> ProviderRuntime:
-        kind, name = await self._kind_and_name(conn, _KIND_FOR_RUN, run_id, "run")
-        return self.resolve(kind).for_resource(name)
+        return (await self.binding_for_run(conn, run_id)).runtime
 
     async def runtime_for_allocation(
         self, conn: AsyncConnection, allocation_id: UUID

@@ -22,6 +22,7 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
+from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provider_policy import rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.core.resolver import ProviderResolver
@@ -191,7 +192,9 @@ async def provision_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    runtime = await resolver.runtime_for_system(conn, system_id)
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    runtime = binding.runtime
     provisioner = runtime.provisioner
     if system.state is not SystemState.PROVISIONING:
         if system.state in TERMINAL_SYSTEM_STATES:
@@ -240,7 +243,9 @@ async def reprovision_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    provisioner = (await resolver.runtime_for_system(conn, system_id)).provisioner
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    provisioner = binding.runtime.provisioner
     if system.state is not SystemState.REPROVISIONING:
         return str(system_id)
     profile = ProvisioningProfile.parse(system.provisioning_profile)
@@ -311,7 +316,9 @@ async def teardown_handler(
                 transition=f"{old.value}->torn_down",
                 tool="systems.teardown",
             )
-    provisioner = (await resolver.runtime_for_system(conn, system_id)).provisioner
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    provisioner = binding.runtime.provisioner
     await asyncio.to_thread(provisioner.teardown, domain_name)
     return str(system_id)
 

@@ -123,7 +123,9 @@ class LocalLibvirtRetrieve:
             self._extract_redacted(data),
             Sensitivity.REDACTED,
         )
-        return CaptureOutput(raw=raw, redacted=redacted, vmcore_build_id=build_id)
+        return CaptureOutput(
+            raw=raw, redacted=redacted, vmcore_build_id=build_id, raw_size_bytes=len(data)
+        )
 
     def _put(self, system_id: UUID, name: str, data: bytes, sens: Sensitivity) -> StoredArtifact:
         if self._store is None:
