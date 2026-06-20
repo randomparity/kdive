@@ -34,7 +34,7 @@ unit suffix, e.g. `_seconds`).
 | H1 | `kdive.vmcore.capture.duration` (s) | histogram | worker | `capture_method`, `provider`, `outcome` |
 | H1 | `kdive.vmcore.capture.bytes` | histogram | worker | `capture_method`, `provider` |
 | H2 | `kdive.console.bytes` | counter | reconciler | `outcome` |
-| H3 | `kdive.debug.session.duration` (s) | histogram | server | `transport`, `outcome` |
+| H3 | `kdive.debug.session.duration` (s) | histogram | server + reconciler | `transport`, `outcome` |
 | I | `kdive.job.time_to_claim` (s) | histogram | worker | `job_kind` |
 | I | `kdive.job.retries` | counter | worker | `job_kind` |
 
@@ -47,6 +47,8 @@ unit suffix, e.g. `_seconds`).
 - `capture_method` → `CaptureMethod` (ADR-0049): {`console`, `host_dump`, `gdbstub`, `kdump`};
   vmcore emits {`kdump`, `host_dump`}.
 - `transport` → `DebugTransportKind` = {`gdbstub`, `drgn-live`}.
+- `outcome` (existing) gains `reaped` for H3 (reconciler-detached dead sessions), alongside the
+  existing `{ok, error}` and ADR-0190's admission `{granted, rejected, queued}`.
 - `build_host` → **deployment-bounded** (the operator-configured `build_hosts` rows), not a
   code enum (ADR §1). The guard test bounds it to the seeded host set.
 - `provider` (existing) → `ResourceKind`; `job_kind` (existing) → `JobKind`.
@@ -135,11 +137,20 @@ unit suffix, e.g. `_seconds`).
 
 ### H3 — debug-session duration
 
-- New `DebugSessionTelemetry` (server meter): `kdive.debug.session.duration` histogram;
-  `record(transport, outcome, seconds)`; `disabled()` no-op. Injected into the debug-session
-  registrar (`metrics.get_meter("kdive.mcp")`).
-- `end_session` computes `now - session.created_at` and records with the session's transport
-  and the detach outcome (`ok`/`error`).
+- New `DebugSessionTelemetry`: `kdive.debug.session.duration` histogram;
+  `record(transport, outcome, seconds)`; `disabled()` no-op. Built once per process from that
+  process's meter — `metrics.get_meter("kdive.mcp")` for the server, `"kdive.reconciler"` for
+  the reconciler (the same instrument name on both meters aggregates across processes at the
+  collector, like `kdive_errors_total`).
+- **Server (clean close).** `end_session` computes `now - session.created_at` and records with
+  the session's transport and the detach outcome (`ok`/`error`).
+- **Reconciler (reaped close).** A session whose worker/client dies is detached by
+  `repair_dead_sessions` (`reconciler/repairs/debug_sessions.py`) via a direct `UPDATE … RETURNING`
+  that never calls `end_session`. Those sessions — the long/abandoned ones an operator most
+  wants to see — would otherwise be absent from the histogram. The reaper's `RETURNING` gains
+  `created_at` (it already returns `transport`) and records each reaped session with
+  `outcome=reaped`, so the duration metric covers both clean and reaped closes rather than
+  biasing toward short clean sessions.
 
 ### I — job/queue health
 

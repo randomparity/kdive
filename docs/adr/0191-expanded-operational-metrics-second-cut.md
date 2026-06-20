@@ -133,10 +133,15 @@ assembled byte length. The finalize seam is the **remote-libvirt** console colle
 console (the #117 etag-refresh flow) is not covered, so the counter is remote-console bytes,
 not a fleet total — documented so it is not misread.
 
-**H3 — debug-session duration (`kdive.mcp`).** `kdive_debug_session_duration_seconds`
-histogram `{transport, outcome}`, recorded at `end_session` from
-`now - session.created_at`. The live session **count** is already
-`kdive_debug_sessions{state}` (ADR-0190 B), so only duration is added here.
+**H3 — debug-session duration (`kdive.mcp` + `kdive.reconciler`).**
+`kdive_debug_session_duration_seconds` histogram `{transport, outcome}`, recorded at
+`end_session` from `now - session.created_at` (clean close, `outcome ∈ {ok, error}`) **and** at
+the reconciler's `repair_dead_sessions` for sessions whose worker/client died (`outcome=reaped`)
+— the reaper detaches via a direct `UPDATE` that never calls `end_session`, so recording only
+the clean path would bias the histogram toward short client-ended sessions and omit the
+abandoned ones. The reaper's `RETURNING` gains `created_at` to compute the duration. The live
+session **count** is already `kdive_debug_sessions{state}` (ADR-0190 B), so only duration is
+added here.
 
 ### 5. I — job/queue health (`kdive.worker`)
 
