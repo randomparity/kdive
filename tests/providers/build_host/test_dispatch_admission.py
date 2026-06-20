@@ -54,7 +54,7 @@ class _RecordingBuilder:
     def __init__(self) -> None:
         self.called = False
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(self, run_id: UUID, profile: ServerBuildProfile, **_: object) -> BuildOutput:
         self.called = True
         return BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
 
@@ -113,7 +113,7 @@ class _ThreadRecordingBuilder:
     def over_transport(self, transport: object, **_kw: object) -> _ThreadRecordingBuilder:
         return self
 
-    def build(self, run_id: UUID, profile: object) -> BuildOutput:
+    def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
         self.build_thread = threading.current_thread()
         return BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
 

@@ -36,7 +36,9 @@ from kdive.components.references import (
     ComponentRef,
 )
 from kdive.config.core_settings import BUILD_WORKSPACE, KERNEL_SRC
+from kdive.domain.build_phase import BuildPhase
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import ServerBuildProfile
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host import execution as _build_exec
@@ -197,7 +199,14 @@ class LocalLibvirtBuild:
             workspace_cleanup=lambda ws: transport.cleanup(str(ws)),
         )
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(
+        self,
+        run_id: UUID,
+        profile: ServerBuildProfile,
+        *,
+        recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+        provider: str = "",
+    ) -> BuildOutput:
         """Build a kernel and store two artifacts; return their refs and the build-id.
 
         Raises:
@@ -208,10 +217,13 @@ class LocalLibvirtBuild:
         """
         workspace = self._orchestrator.workspace_path(run_id)
         try:
-            self._orchestrator.build_workspace(run_id, profile)
-            build_id = self._read_build_id(workspace)
-            kernel = self.publish(run_id, "kernel", self._read_kernel_source(workspace))
-            vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
+            self._orchestrator.build_workspace(
+                run_id, profile, recorder=recorder, provider=provider
+            )
+            with recorder.phase(BuildPhase.ARTIFACT, provider):
+                build_id = self._read_build_id(workspace)
+                kernel = self.publish(run_id, "kernel", self._read_kernel_source(workspace))
+                vmlinux = self.publish(run_id, "vmlinux", self._read_vmlinux_source(workspace))
             return BuildOutput(kernel_ref=kernel.key, debuginfo_ref=vmlinux.key, build_id=build_id)
         finally:
             self._orchestrator.cleanup_workspace(workspace)

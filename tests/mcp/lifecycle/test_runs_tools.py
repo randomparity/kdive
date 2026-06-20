@@ -2617,7 +2617,7 @@ class _FakeBuilder:
         self.calls: list[UUID] = []
         self._error = error
 
-    def build(self, run_id: UUID, profile: Any) -> BuildOutput:
+    def build(self, run_id: UUID, profile: Any, **_: object) -> BuildOutput:
         self.calls.append(run_id)
         if self._error is not None:
             raise CategorizedError("boom", category=self._error)
@@ -2631,7 +2631,7 @@ class _FakeBuilder:
 class _MissingBuildOutputBuilder:
     """Raises the typed failure used when an expected build artifact is absent after make."""
 
-    def build(self, run_id: UUID, profile: Any) -> BuildOutput:
+    def build(self, run_id: UUID, profile: Any, **_: object) -> BuildOutput:
         raise CategorizedError(
             "bzImage is missing or unreadable",
             category=ErrorCategory.BUILD_FAILURE,

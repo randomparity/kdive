@@ -10,7 +10,9 @@ from uuid import UUID
 from kdive.build_artifacts.results import BuildOutput
 from kdive.db.build_host_policy import check_warm_tree_source_admission
 from kdive.db.build_hosts import BuildHost, BuildHostKind
+from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.jobs.build_telemetry import DISABLED_RECORDER, BuildPhaseRecorder
 from kdive.profiles.build import GitKernelSource, GitSourceRef, ServerBuildProfile, is_git_source
 from kdive.providers.ports import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport
@@ -52,6 +54,8 @@ async def run_build_on_host(
     secret_registry: SecretRegistry,
     kernel_src: str,
     transport_factories: BuildHostTransportFactories | None = None,
+    recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+    provider: str = "",
 ) -> BuildOutput:
     """Run ``builder`` on the selected build host.
 
@@ -68,7 +72,9 @@ async def run_build_on_host(
             await asyncio.to_thread(
                 check_warm_tree_source_admission, kernel_src, host_kind=host.kind
             )
-        return await asyncio.to_thread(builder.build, run_id, parsed)
+        return await asyncio.to_thread(
+            lambda: builder.build(run_id, parsed, recorder=recorder, provider=provider)
+        )
     capable = _require_transport_capable(builder, host, run_id)
     factories = _transport_factories(transport_factories)
     factory = factories.get(host.kind)
@@ -97,6 +103,8 @@ async def run_build_on_host(
         parsed=parsed,
         source=_git_source(parsed),
         secret_registry=secret_registry,
+        recorder=recorder,
+        provider=provider,
     )
 
 
@@ -137,6 +145,8 @@ def _build_over_transport_session(
     parsed: ServerBuildProfile,
     source: GitSourceRef | None,
     secret_registry: SecretRegistry,
+    recorder: BuildPhaseRecorder = DISABLED_RECORDER,
+    provider: str = "",
 ) -> BuildOutput:
     """Run the whole transport-session lifecycle synchronously (caller offloads it to a thread).
 
@@ -146,7 +156,10 @@ def _build_over_transport_session(
     module-global name so a test monkeypatching it on this module still applies inside the worker
     thread (ADR-0181).
     """
-    with factory(host, secret_registry, run_id, source) as transport:
+    transport_ctx = factory(host, secret_registry, run_id, source)
+    with recorder.phase(BuildPhase.PROVISION, provider):
+        transport = transport_ctx.__enter__()
+    try:
         git_remote, git_ref = _git_coords(parsed, run_id)
         bound = bind_over_transport(
             builder,
@@ -156,7 +169,13 @@ def _build_over_transport_session(
             git_ref=git_ref,
             secret_registry=secret_registry,
         )
-        return bound.build(run_id, parsed)
+        result = bound.build(run_id, parsed, recorder=recorder, provider=provider)
+    except BaseException as exc:
+        transport_ctx.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    else:
+        transport_ctx.__exit__(None, None, None)
+    return result
 
 
 def _git_coords(parsed: ServerBuildProfile, run_id: UUID) -> tuple[str, str]:

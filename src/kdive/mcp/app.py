@@ -269,6 +269,8 @@ def _register_run_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
 ) -> None:
+    from kdive.jobs.build_telemetry import BuildPhaseRecorder
+
     runs.register_handlers(
         registry,
         ports=runs.RunHandlerPorts(
@@ -276,6 +278,7 @@ def _register_run_handlers(
             secret_registry=assembly.secret_registry,
             transport_factories=assembly.transport_factories,
             artifact_store=assembly.object_stores.optional_upload_store,
+            build_phase_recorder=BuildPhaseRecorder(meter=metrics.get_meter("kdive.worker")),
         ),
     )
 

@@ -124,7 +124,7 @@ class _BuildProvider:
     def __init__(self) -> None:
         self.calls: list[tuple[UUID, str]] = []
 
-    def build(self, run_id: UUID, profile: ServerBuildProfile) -> BuildOutput:
+    def build(self, run_id: UUID, profile: ServerBuildProfile, **_: object) -> BuildOutput:
         assert isinstance(profile.config, LocalComponentRef)
         self.calls.append((run_id, profile.config.path))
         return BuildOutput(kernel_ref="k", debuginfo_ref="v", build_id="deadbeef")

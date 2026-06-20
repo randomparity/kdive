@@ -77,7 +77,7 @@ class _RecordingBuilder:
     def __init__(self) -> None:
         self.calls: list[UUID] = []
 
-    def build(self, run_id: UUID, profile: object) -> BuildOutput:
+    def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
         self.calls.append(run_id)
         return BuildOutput(
             kernel_ref=f"proj/runs/{run_id}/kernel",
@@ -92,7 +92,7 @@ class _FailingBuilder:
     def __init__(self) -> None:
         self.calls: list[UUID] = []
 
-    def build(self, run_id: UUID, profile: object) -> BuildOutput:
+    def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
         self.calls.append(run_id)
         raise CategorizedError("make exited non-zero", category=ErrorCategory.BUILD_FAILURE)
 
