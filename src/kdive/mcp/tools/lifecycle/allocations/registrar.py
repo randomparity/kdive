@@ -134,9 +134,19 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         limit: Annotated[
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
     ) -> ToolResponse:
-        """List allocations visible in a project."""
-        return await _list_allocations(pool, current_context(), project=project, limit=limit)
+        """List allocations visible in a project, newest first.
+
+        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+        ``cursor`` for the next page.
+        """
+        return await _list_allocations(
+            pool, current_context(), project=project, limit=limit, cursor=cursor
+        )
 
 
 def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:

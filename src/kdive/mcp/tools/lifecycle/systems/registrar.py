@@ -258,14 +258,23 @@ def _register_systems_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         limit: Annotated[
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = _DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
     ) -> ToolResponse:
-        """List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires viewer."""
+        """List the caller's Systems, filterable by allocation/state/shape/PCIe. Requires viewer.
+
+        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+        ``cursor`` for the next page.
+        """
         request = _SystemsListRequest(
             allocation_id=allocation_id,
             state=state,
             shape=shape,
             pcie=pcie,
             limit=limit,
+            cursor=cursor,
         )
         return await _list_systems(
             pool,

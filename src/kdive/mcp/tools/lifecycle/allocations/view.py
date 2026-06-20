@@ -16,12 +16,16 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools._common import ConfigErrorReason
+from kdive.mcp.tools._common import ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools.lifecycle.allocations.common import (
     MAX_WAIT_S,
     POLL_INTERVAL_S,
@@ -93,23 +97,50 @@ async def wait_allocation(
             await sleep(min(POLL_INTERVAL_S, deadline - now))
 
 
+_ALLOCATIONS_LIST_TAG = "allocations.list"
+
+
 async def list_allocations(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, project: str, limit: int
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    project: str,
+    limit: int,
+    cursor: str | None = None,
 ) -> ToolResponse:
-    """Return the newest allocations for a project in one collection envelope."""
+    """Return a page of the newest allocations for a project (keyset-paginated, ADR-0192).
+
+    Fetches one row past ``limit`` to set ``data.truncated``/``data.next_cursor`` exactly
+    from the last kept allocation's ``(created_at, id)``. A ``cursor`` resumes strictly
+    after a prior page; a malformed/wrong-tool cursor is an ``invalid_cursor`` config error.
+    """
     require_project(ctx, project)
     require_role(ctx, project, Role.VIEWER)
     capped = _clamp_list_limit(limit)
+    after = None
+    if cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, cursor)
+        except InvalidCursor:
+            return _invalid_cursor_error("allocations")
+    seek = ""
+    params: list[object] = [project]
+    if after is not None:
+        seek = " AND (created_at, id) < (%s, %s)"
+        params.extend(after)
+    params.append(capped + 1)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
-                "SELECT * FROM allocations WHERE project = %s "
-                "ORDER BY created_at DESC, id LIMIT %s",
-                (project, capped),
+                "SELECT * FROM allocations WHERE project = %s"
+                + seek
+                + " ORDER BY created_at DESC, id DESC LIMIT %s",
+                params,
             )
             rows = await cur.fetchall()
+        kept, truncated = _paginate(rows, capped)
         responses: list[ToolResponse] = []
-        for row in rows:
+        for row in kept:
             try:
                 responses.append(envelope_for_allocation(Allocation.model_validate(row)))
             except ValueError:
@@ -119,10 +150,18 @@ async def list_allocations(
                         str(row.get("id", "?")), ErrorCategory.INFRASTRUCTURE_FAILURE
                     )
                 )
+        # The cursor boundary is the last kept *row* (raw columns), not the last
+        # successfully-validated model, so a degraded trailing row never shifts the page
+        # boundary and skips a healthy successor.
+        next_cursor = (
+            _encode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"])
+            if truncated and kept
+            else None
+        )
         return ToolResponse.collection(
             "allocations",
             "ok",
             responses,
             suggested_next_actions=["allocations.get", "allocations.release"],
-            data={"project": project},
+            data={"project": project, "truncated": truncated, "next_cursor": next_cursor},
         )

@@ -17,12 +17,16 @@ from kdive.domain.lifecycle import System
 from kdive.domain.pcie import parse_match_spec
 from kdive.log import bind_context
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools.debug.sessions_read import active_session_ids_for_system
 from kdive.mcp.tools.lifecycle._recovery import iso, provisioning_profile_summary
 from kdive.security.authz.context import RequestContext
@@ -41,6 +45,7 @@ class SystemsListRequest:
     shape: str | None = None
     pcie: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
+    cursor: str | None = None
 
 
 def system_envelope(
@@ -252,19 +257,40 @@ async def list_systems(
     if isinstance(filters, ToolResponse):
         return filters
     capped = _clamp_list_limit(request.limit)
+    after = None
+    if request.cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_SYSTEMS_LIST_TAG, request.cursor)
+        except InvalidCursor:
+            return _invalid_cursor_error("systems")
     with bind_context(principal=ctx.principal):
         if not viewer_projects:
-            return _systems_collection([])
+            return _systems_collection([], truncated=False, next_cursor=None)
+        clauses = list(filters.clauses)
+        params: list[object] = list(filters.params)
+        if after is not None:
+            clauses.append(sql.SQL("(s.created_at, s.id) < (%s, %s)"))
+            params.extend(after)
         query = sql.SQL(
             "SELECT s.*, r.kind AS resource_kind, a.resource_id AS resource_id FROM systems s "
             "JOIN allocations a ON a.id = s.allocation_id "
             "JOIN resources r ON r.id = a.resource_id "
-            "WHERE {where} ORDER BY s.created_at DESC, s.id LIMIT %s"
-        ).format(where=sql.SQL(" AND ").join(filters.clauses))
+            "WHERE {where} ORDER BY s.created_at DESC, s.id DESC LIMIT %s"
+        ).format(where=sql.SQL(" AND ").join(clauses))
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(query, (*filters.params, capped))
+            await cur.execute(query, (*params, capped + 1))
             rows = await cur.fetchall()
-        return _systems_collection([_split_placement(row) for row in rows])
+        kept, truncated = _paginate(rows, capped)
+        next_cursor = (
+            _encode_ts_uuid_cursor(_SYSTEMS_LIST_TAG, kept[-1]["created_at"], kept[-1]["id"])
+            if truncated and kept
+            else None
+        )
+        return _systems_collection(
+            [_split_placement(row) for row in kept],
+            truncated=truncated,
+            next_cursor=next_cursor,
+        )
 
 
 def _split_placement(row: dict[str, object]) -> tuple[System, str, str | None]:
@@ -275,7 +301,15 @@ def _split_placement(row: dict[str, object]) -> tuple[System, str, str | None]:
     return System.model_validate(row), resource_kind, resource_id_str
 
 
-def _systems_collection(systems: list[tuple[System, str, str | None]]) -> ToolResponse:
+_SYSTEMS_LIST_TAG = "systems.list"
+
+
+def _systems_collection(
+    systems: list[tuple[System, str, str | None]],
+    *,
+    truncated: bool,
+    next_cursor: str | None,
+) -> ToolResponse:
     """Render Systems (each with its backing Resource kind + id) into one envelope."""
     return ToolResponse.collection(
         "systems",
@@ -285,4 +319,5 @@ def _systems_collection(systems: list[tuple[System, str, str | None]]) -> ToolRe
             for system, resource_kind, resource_id in systems
         ],
         suggested_next_actions=["systems.get", "runs.create"],
+        data={"truncated": truncated, "next_cursor": next_cursor},
     )

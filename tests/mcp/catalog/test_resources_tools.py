@@ -235,13 +235,16 @@ def test_describe_malformed_id_is_error(migrated_url: str) -> None:
 
 
 async def _register_remote(
-    pool: AsyncConnectionPool, *, host_uri: str = "qemu+tls://h/system"
+    pool: AsyncConnectionPool,
+    *,
+    host_uri: str = "qemu+tls://h/system",
+    name: str | None = None,
 ) -> str:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            "INSERT INTO resources (kind, capabilities, pool, cost_class, status, host_uri) "
-            "VALUES (%s, '{}', 'default', 'remote', 'available', %s) RETURNING id",
-            (ResourceKind.REMOTE_LIBVIRT.value, host_uri),
+            "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, host_uri) "
+            "VALUES (%s, %s, '{}', 'default', 'remote', 'available', %s) RETURNING id",
+            (ResourceKind.REMOTE_LIBVIRT.value, name, host_uri),
         )
         row = await cur.fetchone()
     assert row is not None
@@ -313,6 +316,65 @@ def test_describe_remote_uses_provider_runtime_staged_probe(migrated_url: str) -
     resp = asyncio.run(_run())
     staged = [json_mapping(r) for r in data_sequence(resp, "staged_base_images")]
     assert calls == [["fedora.qcow2"]]
+    assert staged == [{"name": "fedora", "volume": "fedora.qcow2", "staged": "staged"}]
+
+
+def _resolver_with_rebound_staged_probe(
+    *,
+    unbound: catalog_resources_tools.StagedVolumeProbe,
+    bound_by_name: dict[str, catalog_resources_tools.StagedVolumeProbe],
+) -> ProviderResolver:
+    unused_port = cast(Any, object())
+
+    def _runtime(probe: catalog_resources_tools.StagedVolumeProbe) -> ProviderRuntime:
+        return ProviderRuntime(
+            profile_policy=unused_port,
+            provisioner=unused_port,
+            builder=unused_port,
+            installer=unused_port,
+            booter=unused_port,
+            connector=unused_port,
+            controller=unused_port,
+            retriever=unused_port,
+            crash_postmortem=unused_port,
+            vmcore_introspector=unused_port,
+            live_introspector=unused_port,
+            staged_volume_probe=probe,
+        )
+
+    base = _runtime(unbound)
+    object.__setattr__(base, "rebind_for_resource", lambda name: _runtime(bound_by_name[name]))
+    return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: base})
+
+
+def test_describe_remote_binds_staged_probe_to_described_host(migrated_url: str) -> None:
+    # A named remote resource must probe through for_resource(name): the host-bound probe runs and
+    # the unbound runtime's probe (which would degrade to "unknown") never does (#625, ADR-0194).
+    async def unbound(volumes: list[str]) -> dict[str, str]:
+        raise AssertionError("the unbound runtime probe must not run for a named remote resource")
+
+    bound_calls: list[list[str]] = []
+
+    async def bound(volumes: list[str]) -> dict[str, str]:
+        bound_calls.append(volumes)
+        return dict.fromkeys(volumes, "staged")
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool, name="ub26")
+            await _insert_remote_image(pool, name="fedora", volume="fedora.qcow2")
+            return await catalog_resources_tools.describe_resource(
+                pool,
+                CTX,
+                res_id,
+                resolver=_resolver_with_rebound_staged_probe(
+                    unbound=unbound, bound_by_name={"ub26": bound}
+                ),
+            )
+
+    resp = asyncio.run(_run())
+    staged = [json_mapping(r) for r in data_sequence(resp, "staged_base_images")]
+    assert bound_calls == [["fedora.qcow2"]]
     assert staged == [{"name": "fedora", "volume": "fedora.qcow2", "staged": "staged"}]
 
 
@@ -1053,5 +1115,64 @@ def test_drain_unknown_mode_rejected(migrated_url: str) -> None:
         assert resp.error_category == "configuration_error"
         assert row["cordoned"] is False  # unknown mode → no role resolved → no cordon
         assert audited == []
+
+    asyncio.run(_run())
+
+
+def test_list_paginates_with_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(5):
+                await _register(pool, host_uri=f"qemu:///h{i}")
+            seen: list[str] = []
+            cursor: str | None = None
+            for _ in range(10):
+                page = await catalog_resources_tools.list_resources(
+                    pool, CTX, kind=None, limit=2, cursor=cursor
+                )
+                seen.extend(item.object_id for item in page.items)
+                if not page.data["truncated"]:
+                    break
+                cursor = cast(str, page.data["next_cursor"])
+        assert len(seen) == 5
+        assert len(set(seen)) == 5
+
+    asyncio.run(_run())
+
+
+def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(2):
+                await _register(pool, host_uri=f"qemu:///e{i}")
+            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=2)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_list_truncated_count_is_over_visible_rows(migrated_url: str) -> None:
+    # A hidden row between visible rows must not consume a page slot: truncation is over
+    # the VISIBLE rows, not the raw fetch (ADR-0192).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(3):
+                await _register(pool, host_uri=f"qemu:///v{i}")
+            hidden = await _register(pool, host_uri="qemu:///hidden")
+            await _set_affinity(pool, hidden, owner_project="other")
+            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, limit=3)
+        assert len(resp.items) == 3
+        assert resp.data["truncated"] is False
+
+    asyncio.run(_run())
+
+
+def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await catalog_resources_tools.list_resources(pool, CTX, kind=None, cursor="!!!")
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
 
     asyncio.run(_run())

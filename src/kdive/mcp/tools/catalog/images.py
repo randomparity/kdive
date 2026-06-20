@@ -11,26 +11,39 @@ included — so the operator can see in-flight and seeded images.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastmcp import FastMCP
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from pydantic import Field
 
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageVisibility
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import decode_cursor as _decode_cursor
+from kdive.mcp.tools._common import encode_cursor as _encode_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 
 _LIST_TOOL = "images.list"
+_LIST_TAG = "images.list"
 
 _LIST_SQL = """
     SELECT *
     FROM image_catalog
-    WHERE visibility = %(public)s
-       OR (visibility = %(private)s AND owner = ANY(%(projects)s))
+    WHERE (visibility = %(public)s
+           OR (visibility = %(private)s AND owner = ANY(%(projects)s)))
+      AND (%(after)s::boolean IS FALSE
+           OR (provider, name, arch) > (%(p)s, %(n)s, %(a)s))
     ORDER BY provider, name, arch
+    LIMIT %(limit)s
 """
 
 
@@ -51,23 +64,55 @@ def _row_envelope(entry: ImageCatalogEntry) -> ToolResponse:
     )
 
 
-async def list_images(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
+async def list_images(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    limit: int = DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
+) -> ToolResponse:
     """List the public catalog images plus the caller's projects' private images.
 
     The private filter is parameterized on the caller's viewer-authorized project set, so a
-    private row owned by an unauthorized project is never selected.
+    private row owned by an unauthorized project is never selected. Keyset-paginated over the
+    ``(provider, name, arch)`` natural key (ADR-0192): fetches one row past ``limit`` to set
+    ``data.truncated`` / ``data.next_cursor`` from the last kept row's key.
     """
+    capped = _clamp_list_limit(limit)
+    after_parts: list[str] | None = None
+    if cursor:
+        try:
+            after_parts = _decode_cursor(_LIST_TAG, cursor, arity=3)
+        except InvalidCursor:
+            return _invalid_cursor_error("images")
     with bind_context(principal=ctx.principal):
         params = {
             "public": ImageVisibility.PUBLIC.value,
             "private": ImageVisibility.PRIVATE.value,
             "projects": projects_with_role(ctx, Role.VIEWER),
+            "after": after_parts is not None,
+            "p": after_parts[0] if after_parts else "",
+            "n": after_parts[1] if after_parts else "",
+            "a": after_parts[2] if after_parts else "",
+            "limit": capped + 1,
         }
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(_LIST_SQL, params)
             rows = await cur.fetchall()
-    items = [_row_envelope(ImageCatalogEntry.model_validate(row)) for row in rows]
-    return ToolResponse.collection("images", "ok", items, suggested_next_actions=[_LIST_TOOL])
+    kept, truncated = _paginate(rows, capped)
+    items = [_row_envelope(ImageCatalogEntry.model_validate(row)) for row in kept]
+    next_cursor = (
+        _encode_cursor(_LIST_TAG, (kept[-1]["provider"], kept[-1]["name"], kept[-1]["arch"]))
+        if truncated and kept
+        else None
+    )
+    return ToolResponse.collection(
+        "images",
+        "ok",
+        items,
+        suggested_next_actions=[_LIST_TOOL],
+        data={"truncated": truncated, "next_cursor": next_cursor},
+    )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -78,6 +123,18 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
-    async def images_list() -> ToolResponse:
-        """List published image catalog entries."""
-        return await list_images(pool, current_context())
+    async def images_list(
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
+    ) -> ToolResponse:
+        """List published image catalog entries.
+
+        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+        ``cursor`` for the next page.
+        """
+        return await list_images(pool, current_context(), limit=limit, cursor=cursor)

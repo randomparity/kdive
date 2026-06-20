@@ -34,10 +34,14 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import not_found as _not_found
+from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, require_role
 
@@ -201,18 +205,42 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
         return ToolResponse.from_job(job)
 
 
-async def list_jobs(pool: AsyncConnectionPool, ctx: RequestContext, *, limit: int) -> ToolResponse:
-    """Return the newest jobs (capped) in one collection envelope."""
+_JOBS_LIST_TAG = "jobs.list"
+
+
+async def list_jobs(
+    pool: AsyncConnectionPool, ctx: RequestContext, *, limit: int, cursor: str | None = None
+) -> ToolResponse:
+    """Return a page of the newest jobs (keyset-paginated) in one collection envelope.
+
+    Follows the ADR-0192 contract: fetches one row past ``limit`` to set
+    ``data.truncated`` exactly and mints ``data.next_cursor`` from the last kept job's
+    ``(created_at, id)``. A ``cursor`` from a prior page resumes strictly after it; a
+    malformed or wrong-tool cursor is an ``invalid_cursor`` configuration error.
+    """
     capped = _clamp_list_limit(limit)
+    after = None
+    if cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_JOBS_LIST_TAG, cursor)
+        except InvalidCursor:
+            return _invalid_cursor_error("jobs")
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            jobs = await queue.recent_jobs(conn, capped, _readable_projects(ctx))
-        responses = [_job_response(job) for job in jobs]
+            jobs = await queue.recent_jobs(conn, capped + 1, _readable_projects(ctx), after=after)
+        kept, truncated = _paginate(jobs, capped)
+        next_cursor = (
+            _encode_ts_uuid_cursor(_JOBS_LIST_TAG, kept[-1].created_at, kept[-1].id)
+            if truncated and kept
+            else None
+        )
+        responses = [_job_response(job) for job in kept]
         return ToolResponse.collection(
             "jobs",
             "ok",
             responses,
             suggested_next_actions=["jobs.get", "jobs.wait", "jobs.cancel"],
+            data={"truncated": truncated, "next_cursor": next_cursor},
         )
 
 
@@ -268,6 +296,14 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         limit: Annotated[
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
     ) -> ToolResponse:
-        """List jobs visible to the caller."""
-        return await list_jobs(pool, current_context(), limit=limit)
+        """List jobs visible to the caller, newest first.
+
+        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+        ``cursor`` to read the next page.
+        """
+        return await list_jobs(pool, current_context(), limit=limit, cursor=cursor)

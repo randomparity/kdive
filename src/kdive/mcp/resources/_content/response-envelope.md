@@ -105,3 +105,40 @@ accepts an optional `idempotency_key` ([ADR-0193](../adr/0193-uniform-mutation-i
 `*.list` tools return a sequence of `ToolResponse` objects, one envelope per item.
 Batch callers isolate construction per item so a single failed row does not blank
 the whole list.
+
+### Pagination
+
+Every `*.list` tool is opt-in keyset-paginated
+([ADR-0192](../adr/0192-list-pagination-envelope.md)). The contract lives in `data`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `truncated` | `bool` | `true` iff more rows match than were returned. Deterministic, never best-effort. |
+| `next_cursor` | `str \| None` | An opaque continuation token, present (non-`null`) **iff** `truncated` is `true`. Pass it back as the next call's `cursor` to read the next page. |
+| `total` | `int` | Present only where it is cheap to compute (the bounded single-System `artifacts.list`). |
+| `count` | `int` | The per-page item count (always present on a collection). |
+
+Each list tool also takes an optional `cursor` request parameter (and a `limit`,
+default 50, capped at 200). To read a full result set, call the tool, then keep
+re-calling it with `cursor = data.next_cursor` until `data.truncated` is `false`:
+
+```text
+page = jobs.list(limit=50)
+while page.data.truncated:
+    page = jobs.list(limit=50, cursor=page.data.next_cursor)
+```
+
+Rules:
+
+- **Cursors are opaque.** Do not parse or construct one — only echo back a
+  `next_cursor` you received. The token encodes the page boundary, not a row offset.
+- **Cursors are tool-specific.** A cursor minted by one list is rejected by another
+  with a `configuration_error` (`data.reason = "invalid_cursor"`); a malformed cursor
+  is the same error. A bad cursor is never silently treated as "first page".
+- **Cursors are not security tokens.** Every page re-applies the caller's project/role
+  scoping, so a cursor only shifts the page boundary within rows the caller may see.
+- **Keyset, not offset.** Following a cursor is stable under concurrent inserts: a row
+  added at the head never makes a later page skip or repeat a row.
+- **`inventory.list` is the one non-continuable list.** It summarizes two independent
+  streams (allocations + systems), so it reports `truncated` but emits no `next_cursor`;
+  narrow it with the `project` / `resource_id` filters instead.

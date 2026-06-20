@@ -171,3 +171,45 @@ def test_list_includes_pending_and_defined_states(migrated_url: str) -> None:
         assert "baseline" in _names(resp)
 
     asyncio.run(_run())
+
+
+def test_list_paginates_with_natural_key_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(5):
+                await _insert(pool, name=f"img-{i}", visibility="public", owner=None)
+            seen: set[str] = set()
+            cursor: str | None = None
+            for _ in range(10):
+                page = await catalog_images.list_images(pool, _ctx(), limit=2, cursor=cursor)
+                seen |= _names(page)
+                if not page.data["truncated"]:
+                    break
+                nxt = page.data["next_cursor"]
+                assert isinstance(nxt, str)
+                cursor = nxt
+        assert seen == {f"img-{i}" for i in range(5)}
+
+    asyncio.run(_run())
+
+
+def test_list_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert(pool, name="a", visibility="public", owner=None)
+            await _insert(pool, name="b", visibility="public", owner=None)
+            resp = await catalog_images.list_images(pool, _ctx(), limit=2)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await catalog_images.list_images(pool, _ctx(), cursor="!!!")
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())

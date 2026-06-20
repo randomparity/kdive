@@ -122,12 +122,21 @@ async def _authorized_redacted_artifact(
 async def artifacts_list(
     pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str
 ) -> ToolResponse:
-    """Return the System's `redacted` artifacts in one collection envelope."""
+    """Return the System's `redacted` artifacts in one collection envelope.
+
+    A System's artifact set is naturally bounded, so this carries the uniform pagination
+    keys (ADR-0192) — ``data.total`` (the cheap row count) and ``data.truncated`` (always
+    ``false``: the whole set is returned) — but takes no ``cursor`` and runs no keyset query.
+    """
+    items = _artifact_list_items(
+        await list_redacted_system_artifacts(pool, ctx, system_id=system_id)
+    )
     return ToolResponse.collection(
         system_id,
         "ok",
-        _artifact_list_items(await list_redacted_system_artifacts(pool, ctx, system_id=system_id)),
+        items,
         suggested_next_actions=["artifacts.get"],
+        data={"truncated": False, "total": len(items)},
     )
 
 

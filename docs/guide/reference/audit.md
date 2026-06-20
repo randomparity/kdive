@@ -8,11 +8,14 @@
 
 Read audit_log: project form (admin) or cross-project (platform_auditor).
 
-Returns the most recent matching rows (capped at 500, newest first);
-``data.truncated`` is "true" when the cap is hit — narrow with filters.
+Returns the most recent matching rows, newest first, keyset-paginated:
+``data.truncated`` is ``true`` when more rows match than were returned — pass
+``data.next_cursor`` back as ``cursor`` for the next page, or narrow with filters.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
+| `limit` | integer | no | Maximum rows returned (capped at 200). |
 | `request` | object(scope=project) \| object(scope=all-projects) | yes | Project or all-projects audit query request. |
 
 `request` fields:

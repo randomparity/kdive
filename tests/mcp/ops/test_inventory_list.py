@@ -197,7 +197,9 @@ def test_auditor_lists_all_projects_and_audits(migrated_url: str) -> None:
         assert sys_by_project["proj-b"]["state"] == "crashed"
         alloc_projects = {a["project"] for a in _allocations(resp)}
         assert alloc_projects == {"proj-a", "proj-b"}
-        assert resp.data["truncated"] == "false"
+        assert resp.data["truncated"] is False
+        assert resp.data["allocation_count"] == 2
+        assert resp.data["system_count"] == 2
         # Exactly one platform_audit_log row, zero audit_log writes.
         rows = await _platform_audit_rows(migrated_url)
         assert rows == [("user-1", "platform_auditor", "inventory.list", "all-projects")]
@@ -332,5 +334,33 @@ def test_absent_resource_id_filter_is_empty_not_not_found(migrated_url: str) -> 
         assert resp.error_category is None
         assert _systems(resp) == []
         assert _allocations(resp) == []
+
+    asyncio.run(_run())
+
+
+def test_either_stream_at_cap_sets_truncated(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                res = await _resource(conn)
+                for i in range(3):
+                    await _alloc(conn, res, "proj-a", f"alice-{i}")
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            resp = await inventory_tools.list_inventory(pool, ctx, limit=2)
+        assert resp.data["truncated"] is True
+        assert resp.data["allocation_count"] == 2  # capped to the limit
+        assert resp.data["system_count"] == 0
+        assert "next_cursor" not in resp.data  # dual-stream summary is not continuable
+
+    asyncio.run(_run())
+
+
+def test_both_streams_under_cap_not_truncated(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            resp = await inventory_tools.list_inventory(pool, ctx, limit=50)
+        assert resp.data["truncated"] is False
 
     asyncio.run(_run())

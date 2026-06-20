@@ -86,7 +86,7 @@ Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `build_profile` | object(source=server) \| object(source=external) | yes | Build profile for the Run's kernel. source='server' builds from a kernel tree (kernel_source_ref required); source='external' ingests a prebuilt artifact. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. See docs/operating/build-source-staging.md for staging the source. |
+| `build_profile` | object(source=server) \| object(source=external) | yes | Build profile for the Run's kernel. source='server' builds from a kernel tree (kernel_source_ref required); source='external' ingests a prebuilt artifact. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. See resource://kdive/docs/operating/build-source-staging.md for staging the source. |
 | `expected_boot_failure` | object(free-form) (nullable) | no | Optional expected boot failure, e.g. {'kind':'console_crash','pattern':'Oops'}. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `investigation_id` | string | yes | Investigation to attach the Run to. |

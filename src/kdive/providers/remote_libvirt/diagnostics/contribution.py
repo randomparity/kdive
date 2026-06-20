@@ -44,6 +44,7 @@ def _checks() -> list[Check]:
         checks.append(
             RemoteLibvirtReachabilityCheck(
                 provider=_REMOTE_PROVIDER,
+                resource_id=name,
                 probe=reachability.remote_libvirt_reachability_probe(
                     config_factory=lambda n=name: remote_config_for_resource(n)
                 ),
@@ -52,6 +53,7 @@ def _checks() -> list[Check]:
         checks.append(
             BaseImageStagingCheck(
                 provider=_REMOTE_PROVIDER,
+                resource_id=name,
                 probe=base_image_staging.base_image_staging_probe(
                     config_factory=lambda n=name: remote_config_for_resource(n),
                     volume_factory=lambda n=name: resolve_base_image_staged_volume_for(n),

@@ -37,7 +37,8 @@ BUILDHOST_AGENT_ID = "ephemeral_libvirt_buildhost_agent"
 BUILDHOST_AGENT_FIX = (
     "an ephemeral_libvirt build host's throwaway builder boots but its qemu-guest-agent never "
     "becomes usable; rebuild or repair the operator-staged base build image so its guest agent "
-    "starts (docs/operating/build-source-staging.md), then re-run doctor --with-buildhost-agent"
+    "starts (resource://kdive/docs/operating/build-source-staging.md), then re-run doctor "
+    "--with-buildhost-agent"
 )
 
 # The build-lane remediation the local-kernel-src check surfaces as its ``fix`` (ADR-0163). It is
@@ -48,8 +49,8 @@ BUILDHOST_AGENT_FIX = (
 # stays free of a provider import.
 LOCAL_KERNEL_SRC_FIX = (
     "stage a kernel source tree on the build worker and set KDIVE_KERNEL_SRC to its absolute "
-    "path (docs/operating/build-source-staging.md), or route builds to a registered git build "
-    "host (build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)"
+    "path (resource://kdive/docs/operating/build-source-staging.md), or route builds to a "
+    "registered git build host (build_hosts.register_ssh / build_hosts.register_ephemeral_libvirt)"
 )
 
 # The operator remediation the base-image-staging check surfaces as its ``fix`` (ADR-0080,
@@ -107,6 +108,13 @@ class CheckResult:
             ``transport_failure`` vs ``configuration_error`` for a reachability probe. ``None``
             on ``pass`` (a clean read has no failure to categorize); a ``pass`` carrying one is a
             producer bug, mirroring the ``fix``-only-on-``fail`` rule.
+        resource_id: The registered resource this result pertains to — for remote-libvirt the
+            ``[[remote_libvirt]]`` instance ``name`` (= the resource row's ``name`` under the
+            ``(kind, name)`` identity, ADR-0112/0187), so a fanned-out fleet check names *which*
+            host it probed. ``None`` for a fleet-aggregate or resource-independent check
+            (``secret_ref``, ``local_kernel_src``, ``ephemeral_libvirt_buildhost_agent``), like
+            ``provider`` is ``None`` for a provider-independent check. Legal on any status — an
+            operator most needs the host name on a failing/erroring host (ADR-0194).
     """
 
     check_id: str
@@ -115,6 +123,7 @@ class CheckResult:
     fix: str | None = None
     provider: str | None = None
     failure_category: str | None = None
+    resource_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.status is CheckStatus.FAIL and not self.fix:
@@ -446,9 +455,12 @@ class RemoteLibvirtReachabilityCheck(Check):
     failure ADR-0091 forbids.
     """
 
-    def __init__(self, *, provider: str, probe: ReachabilityProbe) -> None:
+    def __init__(
+        self, *, provider: str, probe: ReachabilityProbe, resource_id: str | None = None
+    ) -> None:
         self._provider = provider
         self._probe = probe
+        self._resource_id = resource_id
 
     @property
     def id(self) -> str:
@@ -467,6 +479,7 @@ class RemoteLibvirtReachabilityCheck(Check):
                 detail="remote-libvirt host is reachable over qemu+tls (libvirt-reachable only; "
                 "config usability still surfaces at provision)",
                 provider=self._provider,
+                resource_id=self._resource_id,
             )
         if outcome is ReachabilityOutcome.UNREACHABLE:
             return CheckResult(
@@ -479,6 +492,7 @@ class RemoteLibvirtReachabilityCheck(Check):
                 ),
                 provider=self._provider,
                 failure_category=_TRANSPORT_FAILURE,
+                resource_id=self._resource_id,
             )
         return CheckResult(
             check_id=self.id,
@@ -486,6 +500,7 @@ class RemoteLibvirtReachabilityCheck(Check):
             detail="remote-libvirt reachability could not be probed; check the [[remote_libvirt]] "
             "URI, TLS cert refs, and systems.toml inventory",
             provider=self._provider,
+            resource_id=self._resource_id,
             failure_category=_CONFIGURATION_ERROR,
         )
 
@@ -522,9 +537,12 @@ class BaseImageStagingCheck(Check):
     failure ADR-0091 forbids.
     """
 
-    def __init__(self, *, provider: str, probe: BaseImageStagingProbe) -> None:
+    def __init__(
+        self, *, provider: str, probe: BaseImageStagingProbe, resource_id: str | None = None
+    ) -> None:
         self._provider = provider
         self._probe = probe
+        self._resource_id = resource_id
 
     @property
     def id(self) -> str:
@@ -542,6 +560,7 @@ class BaseImageStagingCheck(Check):
                 status=CheckStatus.PASS,
                 detail="base image volume is staged on the remote host's storage pool",
                 provider=self._provider,
+                resource_id=self._resource_id,
             )
         if outcome is BaseImageStagingOutcome.NOT_STAGED:
             return CheckResult(
@@ -551,6 +570,7 @@ class BaseImageStagingCheck(Check):
                 fix=BASE_VOLUME_NOT_STAGED_FIX,
                 provider=self._provider,
                 failure_category=_CONFIGURATION_ERROR,
+                resource_id=self._resource_id,
             )
         if outcome is BaseImageStagingOutcome.UNREACHABLE:
             return CheckResult(
@@ -559,6 +579,7 @@ class BaseImageStagingCheck(Check):
                 detail="remote-libvirt host unreachable; cannot verify base-image staging",
                 provider=self._provider,
                 failure_category=_TRANSPORT_FAILURE,
+                resource_id=self._resource_id,
             )
         return CheckResult(
             check_id=self.id,
@@ -567,6 +588,7 @@ class BaseImageStagingCheck(Check):
             "base_image / [[image]] staged volume, the storage pool, and the inventory",
             provider=self._provider,
             failure_category=_CONFIGURATION_ERROR,
+            resource_id=self._resource_id,
         )
 
 
