@@ -20,6 +20,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.guest.build_transport import GuestExecBuildTransport
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import libvirt_error
+from tests.providers.remote_libvirt.fakes import FakeDomain
 
 
 class _FakeAgent:
@@ -66,7 +67,7 @@ def _transport(
     agent: _FakeAgent, *, registry: SecretRegistry | None = None
 ) -> GuestExecBuildTransport:
     return GuestExecBuildTransport(
-        domain=object(),
+        domain=FakeDomain("build-vm"),
         agent_command=agent,
         secret_registry=registry or SecretRegistry(),
         poll_s=0.0,

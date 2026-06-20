@@ -28,11 +28,11 @@ redacted ``transcript_snippet`` and the persisted ``StoredArtifact`` are masked.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, NamedTuple, Protocol
+from typing import NamedTuple, Protocol
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
+from kdive.providers.remote_libvirt.guest.agent import AgentExecResult, GuestDomain
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -46,7 +46,7 @@ class _StorePort(Protocol):
 
 
 class _AgentExec(Protocol):
-    def run(self, domain: Any, argv: list[str]) -> AgentExecResult: ...
+    def run(self, domain: GuestDomain, argv: list[str]) -> AgentExecResult: ...
 
 
 class ArtifactChannelResult(NamedTuple):
@@ -101,7 +101,7 @@ class InTargetArtifactChannel:
 
     def exec_with_capability(
         self,
-        domain: Any,
+        domain: GuestDomain,
         *,
         capability_url: str,
         argv: list[str],

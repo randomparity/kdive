@@ -21,11 +21,24 @@ import binascii
 import json
 import time
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+
+
+class GuestDomain(Protocol):
+    """The libvirt domain-handle slice the guest-exec seam needs: the domain name.
+
+    The handle is otherwise forwarded opaquely to ``libvirt_qemu.qemuAgentCommand``; the only
+    method this seam calls on it directly is :meth:`name` (for audit ``details``). Both the real
+    ``libvirt.virDomain`` and the test fakes satisfy this structurally, replacing the bare ``Any``
+    that previously crossed the guest-exec and artifact-channel seams.
+    """
+
+    def name(self) -> str: ...
+
 
 # Each guest-agent round-trip (guest-exec spawn, guest-exec-status poll) is itself a fast
 # operation — it never blocks on the in-guest command's completion. A positive per-call
@@ -62,7 +75,7 @@ BUILD_DETERMINISTIC_CONFIG_CODES: frozenset[int] = _DETERMINISTIC_CONFIG_CODES |
 
 
 def classify_agent_libvirt_error(
-    domain: Any, exc: libvirt.libvirtError, *, deterministic_codes: frozenset[int]
+    domain: GuestDomain, exc: libvirt.libvirtError, *, deterministic_codes: frozenset[int]
 ) -> CategorizedError:
     """Map a guest-agent libvirt error onto the correct failure category (ADR-0159, ADR-0168).
 
@@ -94,7 +107,7 @@ def classify_agent_libvirt_error(
     )
 
 
-type AgentCommand = Callable[[Any, str, int, int], str]
+type AgentCommand = Callable[[GuestDomain, str, int, int], str]
 type Sleep = Callable[[float], None]
 type Monotonic = Callable[[], float]
 
@@ -107,7 +120,7 @@ class AgentExecResult(NamedTuple):
     stderr: bytes
 
 
-def qemu_agent_command(domain: Any, command: str, timeout: int, flags: int) -> str:
+def qemu_agent_command(domain: GuestDomain, command: str, timeout: int, flags: int) -> str:
     """Production opener: run a guest-agent command and return its JSON reply.
 
     Imported lazily so the package stays importable where the ``libvirt-qemu`` binding
@@ -192,7 +205,7 @@ class GuestAgentExec:
         self._sleep = sleep
         self._monotonic = monotonic
 
-    def run(self, domain: Any, argv: list[str]) -> AgentExecResult:
+    def run(self, domain: GuestDomain, argv: list[str]) -> AgentExecResult:
         """Run ``argv`` in-guest and return its captured stdout/stderr/exit status.
 
         ``argv[0]`` is the program path; the remainder are its arguments. The command
@@ -222,7 +235,7 @@ class GuestAgentExec:
         pid = self._spawn(domain, program, args)
         return self._await_exit(domain, pid)
 
-    def _spawn(self, domain: Any, program: str, args: list[str]) -> int:
+    def _spawn(self, domain: GuestDomain, program: str, args: list[str]) -> int:
         command = json.dumps(
             {
                 "execute": "guest-exec",
@@ -238,7 +251,7 @@ class GuestAgentExec:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             ) from exc
 
-    def _await_exit(self, domain: Any, pid: int) -> AgentExecResult:
+    def _await_exit(self, domain: GuestDomain, pid: int) -> AgentExecResult:
         deadline = self._monotonic() + self._timeout_s
         status_command = json.dumps({"execute": "guest-exec-status", "arguments": {"pid": pid}})
         while True:
@@ -265,7 +278,7 @@ class GuestAgentExec:
                 )
             self._sleep(self._poll_s)
 
-    def _agent(self, domain: Any, command: str) -> dict[str, Any]:
+    def _agent(self, domain: GuestDomain, command: str) -> dict[str, Any]:
         try:
             raw = self._agent_command(domain, command, self._agent_call_timeout_s, 0)
         except libvirt.libvirtError as exc:
@@ -287,7 +300,7 @@ class GuestAgentExec:
         return decoded
 
 
-def _domain_name(domain: Any) -> str:
+def _domain_name(domain: GuestDomain) -> str:
     try:
         return domain.name()
     except libvirt.libvirtError, AttributeError:

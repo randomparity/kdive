@@ -22,6 +22,7 @@ from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.providers.remote_libvirt.fakes import FakeDomain
 
 # A presigned URL with no secret-name substring (token/secret/password/api_key), so the
 # only thing that can mask it in the transcript is the registry's exact-value masking —
@@ -98,7 +99,7 @@ def _run(
     capability_url: str = _CAPABILITY_URL,
 ):
     return channel.exec_with_capability(
-        object(),
+        FakeDomain("build-vm"),
         capability_url=capability_url,
         argv=["/usr/bin/curl", "-fsS", "-o", "/boot/vmlinuz", capability_url],
         owner_kind="systems",
