@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEM_SHAPES
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Allocation, SystemShape
@@ -25,7 +26,6 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog import availability as availability_tools
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.mcp.json_data import data_mapping, data_sequence, json_mapping
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 

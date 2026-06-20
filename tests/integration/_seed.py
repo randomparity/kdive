@@ -25,6 +25,7 @@ from kdive.db.repositories import (
     RUNS,
     SYSTEMS,
 )
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting import Budget, Quota
 from kdive.domain.capacity.state import (
     AllocationState,
@@ -35,7 +36,6 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Allocation, Investigation, Run, System
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

@@ -13,6 +13,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, IllegalTransition
 from kdive.domain.catalog.resources import ResourceKind
@@ -37,7 +38,6 @@ from kdive.mcp.tools.lifecycle.allocations.view import (
 )
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import AuthorizationError, Role
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)

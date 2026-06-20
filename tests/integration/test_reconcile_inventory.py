@@ -1342,10 +1342,10 @@ def test_reconcile_resources_is_idempotent(migrated_url: str, tmp_path: Path) ->
 def test_discovery_insert_path_writes_managed_by_discovery(migrated_url: str) -> None:
     # Invariant 5 (load-bearing): a host discovered AFTER the migration must insert at
     # 'discovery', not the column default 'runtime'. Exercises the real registrar insert path.
+    from kdive.db.resource_discovery import register_discovered_resource
     from kdive.domain.capacity.state import ResourceStatus
     from kdive.domain.catalog.discovery import ResourceRecord
     from kdive.domain.catalog.resources import ResourceKind
-    from kdive.services.resources.discovery import register_discovered_resource
 
     async def _run() -> None:
         record = ResourceRecord(

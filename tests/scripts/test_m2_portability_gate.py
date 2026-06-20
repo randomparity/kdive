@@ -49,14 +49,14 @@ def test_render_report_lists_allowlisted_and_flags_violations() -> None:
     md = render_report(
         {
             "src/kdive/domain/catalog/resources.py": 4,
-            "src/kdive/services/resources/discovery.py": 7,
+            "src/kdive/db/resource_discovery.py": 7,
         }
     )
     assert "# M2 portability report" in md
     assert "src/kdive/domain/catalog/resources.py" in md
     assert "allowlist" in md.lower()
     # a non-allowlisted core file renders under the Violations section + a fail verdict
-    assert "## Violations" in md and "src/kdive/services/resources/discovery.py" in md
+    assert "## Violations" in md and "src/kdive/db/resource_discovery.py" in md
     assert "gate FAILED" in md
 
 
@@ -88,9 +88,9 @@ def test_parse_numstat_counts_binary_files_as_touched() -> None:
 def test_violations_excludes_allowlisted_files() -> None:
     touched = {
         "src/kdive/store/objectstore.py": 12,
-        "src/kdive/services/resources/discovery.py": 4,
+        "src/kdive/db/resource_discovery.py": 4,
     }
-    assert violations(touched) == {"src/kdive/services/resources/discovery.py": 4}
+    assert violations(touched) == {"src/kdive/db/resource_discovery.py": 4}
 
 
 def test_allowlist_is_exactly_the_named_touch_points() -> None:

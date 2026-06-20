@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.accounting import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
@@ -41,7 +42,6 @@ from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.systems_support import fault_inject_profile, granted_allocation, upload_profile
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn

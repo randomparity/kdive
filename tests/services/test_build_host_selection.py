@@ -299,7 +299,7 @@ async def _record_async[T](items: list[T], item: T, value: bool) -> bool:
 
 
 def test_warm_tree_admission_rejects_empty_for_local() -> None:
-    from kdive.services.runs.build_host_policy import KERNEL_SRC_UNSET_DETAIL
+    from kdive.db.build_host_policy import KERNEL_SRC_UNSET_DETAIL
 
     with pytest.raises(CategorizedError) as excinfo:
         build_host_selection.check_warm_tree_source_admission("", host_kind=BuildHostKind.LOCAL)
@@ -308,7 +308,7 @@ def test_warm_tree_admission_rejects_empty_for_local() -> None:
 
 
 def test_warm_tree_admission_rejects_invalid_for_local() -> None:
-    from kdive.services.runs.build_host_policy import KERNEL_SRC_INVALID_DETAIL
+    from kdive.db.build_host_policy import KERNEL_SRC_INVALID_DETAIL
 
     with pytest.raises(CategorizedError) as excinfo:
         build_host_selection.check_warm_tree_source_admission(

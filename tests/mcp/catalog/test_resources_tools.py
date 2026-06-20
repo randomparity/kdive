@@ -15,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
@@ -28,7 +29,6 @@ from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.services.allocation.release import ReleaseOutcome
-from kdive.services.resources.discovery import register_discovered_resource
 from tests.mcp.json_data import data_sequence, json_mapping
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 

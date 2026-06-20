@@ -2,7 +2,7 @@
 
 The build-host boundary for :class:`~kdive.diagnostics.checks.LocalKernelSrcCheck`: it resolves
 ``KDIVE_KERNEL_SRC`` from the config snapshot and classifies it over the single shared
-``warm_tree_source_error`` predicate (``services/runs/build_host_policy.py``) — the same rule
+``warm_tree_source_error`` predicate (``db/build_host_policy.py``) — the same rule
 the build-time ``sync_tree`` and the admission-time ``check_warm_tree_source_admission`` enforce
 (ADR-0161).
 
@@ -25,12 +25,12 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.config.core_settings import KERNEL_SRC
-from kdive.db.build_hosts import WORKER_LOCAL_ID, get_by_id
-from kdive.diagnostics.checks import WarmTreeSourceOutcome, WarmTreeSourceProbe
-from kdive.services.runs.build_host_policy import (
+from kdive.db.build_host_policy import (
     KERNEL_SRC_UNSET_DETAIL,
     warm_tree_source_error,
 )
+from kdive.db.build_hosts import WORKER_LOCAL_ID, get_by_id
+from kdive.diagnostics.checks import WarmTreeSourceOutcome, WarmTreeSourceProbe
 
 _log = logging.getLogger(__name__)
 

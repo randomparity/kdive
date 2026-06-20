@@ -705,7 +705,7 @@ def test_local_empty_kernel_src_fails_admission(
 ) -> None:
     """An empty KDIVE_KERNEL_SRC on a worker-local warm build fails the BUILD job at
     admission with CONFIGURATION_ERROR, and the builder never runs (ADR-0158)."""
-    from kdive.services.runs.build_host_policy import KERNEL_SRC_UNSET_DETAIL
+    from kdive.db.build_host_policy import KERNEL_SRC_UNSET_DETAIL
 
     monkeypatch.setenv("KDIVE_KERNEL_SRC", "")
 
