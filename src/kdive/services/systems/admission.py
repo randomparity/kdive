@@ -10,7 +10,7 @@ in ``kdive.jobs.handlers.systems``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -103,11 +103,15 @@ class CreateSystemRequest:
     allocation_id: UUID
     profile: ProvisioningProfileInput
     mode: CreateSystemMode
+    # Idempotency recorder (ADR-0193): awaited with the success result inside the admission
+    # transaction so the key and the System/job commit atomically. None = no idempotency.
+    recorder: SystemRecorder | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ProvisionDefinedRequest:
     system_id: UUID
+    recorder: SystemRecorder | None = None
 
 
 class AdmissionFailureReason(StrEnum):
@@ -152,6 +156,11 @@ class DefinedSystemAdmitted:
 
 
 type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted | DefinedSystemAdmitted
+
+# Idempotency recorder (ADR-0193): given the open admission connection and a success result,
+# persists the success envelope in that transaction. The success envelope is built by the MCP
+# adapter (which owns response shaping) and closed over in the callback.
+type SystemRecorder = Callable[[AsyncConnection, AdmissionResult], Awaitable[None]]
 
 
 def _failure_from_error(subject_id: UUID, exc: CategorizedError) -> AdmissionFailure:
@@ -239,6 +248,7 @@ class SystemAdmission:
             profile_policy=self.profile_policy,
             component_sources=self.component_sources,
             rootfs_validator=self.rootfs_validator,
+            recorder=request.recorder,
         )
 
     async def create_for_allocation(
@@ -310,7 +320,7 @@ class SystemAdmission:
             except CategorizedError as exc:
                 return _failure_from_error(alloc.id, exc)
             if request.mode == "provision":
-                return await _provision_create_response(
+                result = await _provision_create_response(
                     conn,
                     ctx,
                     alloc,
@@ -320,16 +330,22 @@ class SystemAdmission:
                     rootfs_validator=self.rootfs_validator,
                     timeout=timeout,
                 )
-            return await _define_create_response(
-                conn,
-                ctx,
-                alloc,
-                existing,
-                profile=stored,
-                profile_policy=self.profile_policy,
-                rootfs_validator=self.rootfs_validator,
-                timeout=timeout,
-            )
+            else:
+                result = await _define_create_response(
+                    conn,
+                    ctx,
+                    alloc,
+                    existing,
+                    profile=stored,
+                    profile_policy=self.profile_policy,
+                    rootfs_validator=self.rootfs_validator,
+                    timeout=timeout,
+                )
+            # Record the success envelope inside the admission transaction (idempotency,
+            # ADR-0193) — atomic with the System insert / job enqueue. A failure is not cached.
+            if request.recorder is not None and not isinstance(result, AdmissionFailure):
+                await request.recorder(conn, result)
+            return result
 
 
 async def _within_system_quota(conn: AsyncConnection, project: str) -> bool:
@@ -570,6 +586,7 @@ async def _provision_defined_locked(
     profile_policy: ProfilePolicy,
     component_sources: ComponentSourceCapabilities,
     rootfs_validator: RootfsValidator,
+    recorder: SystemRecorder | None = None,
 ) -> AdmissionResult:
     async with pool.connection() as probe:
         probe_system = await SYSTEMS.get(probe, system_id)
@@ -602,7 +619,7 @@ async def _provision_defined_locked(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
             )
-        return await _provision_defined_response(
+        result = await _provision_defined_response(
             conn,
             ctx,
             system,
@@ -611,6 +628,9 @@ async def _provision_defined_locked(
             component_sources=component_sources,
             rootfs_validator=rootfs_validator,
         )
+        if recorder is not None and not isinstance(result, AdmissionFailure):
+            await recorder(conn, result)
+        return result
 
 
 async def _provision_defined_response(

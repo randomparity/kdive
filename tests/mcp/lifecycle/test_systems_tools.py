@@ -214,13 +214,19 @@ async def _enqueue_teardown(pool: AsyncConnectionPool, system_id: str) -> Job:
 
 
 async def _provision(
-    pool: AsyncConnectionPool, ctx: RequestContext, alloc_id: str, profile: dict[str, Any]
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    alloc_id: str,
+    profile: dict[str, Any],
+    *,
+    idempotency_key: str | None = None,
 ):
     return await _SYSTEM_PROVISION_HANDLERS.provision_system(
         pool,
         ctx,
         allocation_id=alloc_id,
         profile=profile,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -336,6 +342,28 @@ def test_provision_retry_is_idempotent(migrated_url: str) -> None:
                 audit_n = await cur.fetchone()
         assert sys_n is not None and sys_n["n"] == 1  # one System
         assert audit_n is not None and audit_n["n"] == 1  # active flip audited once
+
+    asyncio.run(_run())
+
+
+def test_provision_keyed_retry_replays_one_system(migrated_url: str) -> None:
+    """A keyed retry replays the identical envelope, mints one System, records one key."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            first = await _provision(pool, _ctx(), alloc_id, _profile(), idempotency_key="k1")
+            second = await _provision(pool, _ctx(), alloc_id, _profile(), idempotency_key="k1")
+            assert first.model_dump() == second.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'systems.provision'"
+                )
+                key_n = await cur.fetchone()
+        assert sys_n is not None and sys_n["n"] == 1
+        assert key_n is not None and key_n["n"] == 1
 
     asyncio.run(_run())
 
