@@ -66,10 +66,14 @@ Two diagnostics surfaces fail to let an operator find that host:
 
 `src/kdive/mcp/tools/catalog/resources.py`
 
-- `_runtime_staged_probe(resolver, kind)` becomes `_runtime_staged_probe(resolver, kind, name)` and
-  resolves `resolver.resolve(kind).for_resource(name).staged_volume_probe`. When `name is None`,
-  return `None` (an unnamed remote resource cannot be host-resolved → the existing `"unknown"`
-  degrade).
+- `_runtime_staged_probe(resolver, kind)` becomes `_runtime_staged_probe(resolver, kind, name)`. It
+  resolves `runtime = resolver.resolve(kind)`, then binds to the host with
+  `runtime.for_resource(name)` **when `name` is not `None`** (else uses the unbound `runtime`), and
+  returns its `staged_volume_probe`. For remote-libvirt a present name rebinds `config_factory` to
+  `remote_config_for_resource(name)` so the probe connects to the described host; for single-host
+  providers `for_resource` is identity. A `None` name (a resource row without an instance name —
+  only the reconcile-less synthetic case) keeps the prior unbound behavior, which degrades to
+  `"unknown"` exactly as before, so the change is strictly additive for that path.
 - `describe_resource` passes `resource.name` to `_runtime_staged_probe`.
 - Update the `staged_base_images` docstring note: the live probe is bound to the described host, so
   a reachable host returns `staged`/`absent`/`pool_absent`; `"unknown"` means the probe could not
@@ -111,12 +115,13 @@ Two diagnostics surfaces fail to let an operator find that host:
 
 `tests/mcp/catalog/test_resources_tools.py`
 
-- A new test driving `describe_resource` with a resolver whose runtime sets `rebind_for_resource`
-  asserts the probe used is the **bound** one (the unbound probe must not be called) — verifies the
-  call goes through `for_resource(resource.name)`.
-- A test that a resource with `name is None` skips the probe and reports `"unknown"` (degrade path).
-- The existing `test_describe_remote_uses_provider_runtime_staged_probe` keeps passing (its resolver
-  sets no rebind hook, so `for_resource` is identity).
+- A new test driving `describe_resource` for a **named** remote resource with a resolver whose
+  runtime sets `rebind_for_resource(name)` asserts the bound probe (selected by the described host's
+  name) is the one called, not the unbound runtime's probe — verifies the call goes through
+  `for_resource(resource.name)`.
+- The existing `test_describe_remote_uses_provider_runtime_staged_probe` keeps passing (its resource
+  has no name → unbound runtime, and its resolver sets no rebind hook, so `for_resource` is
+  identity anyway).
 
 ## Edge cases
 

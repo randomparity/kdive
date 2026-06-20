@@ -235,13 +235,16 @@ def test_describe_malformed_id_is_error(migrated_url: str) -> None:
 
 
 async def _register_remote(
-    pool: AsyncConnectionPool, *, host_uri: str = "qemu+tls://h/system"
+    pool: AsyncConnectionPool,
+    *,
+    host_uri: str = "qemu+tls://h/system",
+    name: str | None = None,
 ) -> str:
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            "INSERT INTO resources (kind, capabilities, pool, cost_class, status, host_uri) "
-            "VALUES (%s, '{}', 'default', 'remote', 'available', %s) RETURNING id",
-            (ResourceKind.REMOTE_LIBVIRT.value, host_uri),
+            "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, host_uri) "
+            "VALUES (%s, %s, '{}', 'default', 'remote', 'available', %s) RETURNING id",
+            (ResourceKind.REMOTE_LIBVIRT.value, name, host_uri),
         )
         row = await cur.fetchone()
     assert row is not None
@@ -313,6 +316,65 @@ def test_describe_remote_uses_provider_runtime_staged_probe(migrated_url: str) -
     resp = asyncio.run(_run())
     staged = [json_mapping(r) for r in data_sequence(resp, "staged_base_images")]
     assert calls == [["fedora.qcow2"]]
+    assert staged == [{"name": "fedora", "volume": "fedora.qcow2", "staged": "staged"}]
+
+
+def _resolver_with_rebound_staged_probe(
+    *,
+    unbound: catalog_resources_tools.StagedVolumeProbe,
+    bound_by_name: dict[str, catalog_resources_tools.StagedVolumeProbe],
+) -> ProviderResolver:
+    unused_port = cast(Any, object())
+
+    def _runtime(probe: catalog_resources_tools.StagedVolumeProbe) -> ProviderRuntime:
+        return ProviderRuntime(
+            profile_policy=unused_port,
+            provisioner=unused_port,
+            builder=unused_port,
+            installer=unused_port,
+            booter=unused_port,
+            connector=unused_port,
+            controller=unused_port,
+            retriever=unused_port,
+            crash_postmortem=unused_port,
+            vmcore_introspector=unused_port,
+            live_introspector=unused_port,
+            staged_volume_probe=probe,
+        )
+
+    base = _runtime(unbound)
+    object.__setattr__(base, "rebind_for_resource", lambda name: _runtime(bound_by_name[name]))
+    return ProviderResolver({ResourceKind.REMOTE_LIBVIRT: base})
+
+
+def test_describe_remote_binds_staged_probe_to_described_host(migrated_url: str) -> None:
+    # A named remote resource must probe through for_resource(name): the host-bound probe runs and
+    # the unbound runtime's probe (which would degrade to "unknown") never does (#625, ADR-0194).
+    async def unbound(volumes: list[str]) -> dict[str, str]:
+        raise AssertionError("the unbound runtime probe must not run for a named remote resource")
+
+    bound_calls: list[list[str]] = []
+
+    async def bound(volumes: list[str]) -> dict[str, str]:
+        bound_calls.append(volumes)
+        return dict.fromkeys(volumes, "staged")
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool, name="ub26")
+            await _insert_remote_image(pool, name="fedora", volume="fedora.qcow2")
+            return await catalog_resources_tools.describe_resource(
+                pool,
+                CTX,
+                res_id,
+                resolver=_resolver_with_rebound_staged_probe(
+                    unbound=unbound, bound_by_name={"ub26": bound}
+                ),
+            )
+
+    resp = asyncio.run(_run())
+    staged = [json_mapping(r) for r in data_sequence(resp, "staged_base_images")]
+    assert bound_calls == [["fedora.qcow2"]]
     assert staged == [{"name": "fedora", "volume": "fedora.qcow2", "staged": "staged"}]
 
 

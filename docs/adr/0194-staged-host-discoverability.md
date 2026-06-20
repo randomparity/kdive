@@ -70,8 +70,10 @@ surface a real per-volume verdict (`staged`/`absent`/`pool_absent`) and `"unknow
   `config_factory` to `remote_config_for_resource(resource.name)` (ADR-0187), so the probe opens a
   `qemu+tls://` connection to the host being described and returns its real per-volume verdict. For
   single-host providers `for_resource` is identity, so their behavior is unchanged. When
-  `resource.name` is `None` the probe is skipped (degrades to `"unknown"`, the existing
-  unresolvable contract), since an unnamed remote resource cannot be host-resolved.
+  `resource.name` is `None` the binding is skipped and the unbound runtime's probe runs as before
+  (it degrades to `"unknown"`, the existing unresolvable contract) — a named resource is the
+  reconcile invariant for remote-libvirt, so the `None` path is the synthetic/non-reconciled case
+  and stays strictly back-compatible.
 - The probe's status vocabulary is kept but its meaning is tightened in the docstring and a test:
   `staged`/`absent`/`pool_absent` are real per-volume verdicts for a reachable host, `unreachable`
   is a transport failure or timeout, and `"unknown"` is reserved for "the probe could not run"

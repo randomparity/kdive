@@ -84,9 +84,10 @@ async def probe_staged_volumes(
         pki_base_dir: Optional base dir for the materialized pkipath (tests pass a tmp dir).
 
     Returns:
-        A ``{volume: status}`` map where status is one of ``staged`` / ``absent`` / ``pool_absent``
-        (live pool verdicts), ``unreachable`` (host/RPC failure or timeout), or ``unknown`` (the
-        remote config could not be resolved).
+        A ``{volume: status}`` map. For a reachable host the status is a real per-volume verdict —
+        ``staged`` / ``absent`` / ``pool_absent``. ``unreachable`` is a host/RPC failure or timeout.
+        ``unknown`` is reserved for "the probe could not run" — the remote config could not be
+        resolved (e.g. an unbound runtime, ADR-0194) — never a reachable-but-not-staged verdict.
     """
     if not volumes:
         return {}
