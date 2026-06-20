@@ -52,11 +52,15 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.idempotency.envelope import keyed_mutation
 
 # Systems that have a started libvirt domain (so a power op has something to act on).
 _STARTED_SYSTEM = frozenset({SystemState.READY, SystemState.CRASHED})
 _FORCE_CRASH = JobKind.FORCE_CRASH
 _POWER = JobKind.POWER
+# Idempotency-store kinds (the registered tool names); ADR-0193.
+_POWER_KIND = "control.power"
+_FORCE_CRASH_KIND = "control.force_crash"
 # Power on is a reversible lifecycle move (operator); off/cycle/reset tear into a running
 # guest and are destructive-administration ops (admin) — ADR-0037 §1/§2.
 _POWER_ON_ACTIONS = frozenset({PowerAction.ON})
@@ -75,6 +79,7 @@ async def power_system(
     system_id: str,
     action: str,
     resolver: ProviderResolver,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit a power op on a started System and enqueue a `power` job.
 
@@ -106,14 +111,28 @@ async def power_system(
                 require_role(ctx, system.project, _power_required_role(power_action))
             if system.state not in _STARTED_SYSTEM:
                 return _config_error(system_id, data={"current_status": system.state.value})
-            job = await queue.enqueue(
+            # A supplied key makes the power action idempotent by replacing the per-call uuid4
+            # in the dedup key; absent, every call is a distinct power job (ADR-0193).
+            dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
+
+            async def _enqueue() -> ToolResponse:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.POWER,
+                    PowerPayload(system_id=system_id, action=power_action),
+                    job_authorizing(ctx, system.project),
+                    f"{system_id}:power:{power_action.value}:{dedup_suffix}",
+                )
+                return job_envelope(job, "system_id", uid)
+
+            return await keyed_mutation(
                 conn,
-                JobKind.POWER,
-                PowerPayload(system_id=system_id, action=power_action),
-                job_authorizing(ctx, system.project),
-                f"{system_id}:power:{power_action.value}:{uuid4()}",
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=system.project,
+                kind=_POWER_KIND,
+                do_work=_enqueue,
             )
-        return job_envelope(job, "system_id", uid)
 
 
 async def _authorize_destructive(
@@ -167,6 +186,7 @@ async def force_crash_system(
     *,
     system_id: str,
     resolver: ProviderResolver,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Gate, admit, and enqueue a `force_crash` job for a `ready` System (admin + gate).
 
@@ -188,14 +208,25 @@ async def force_crash_system(
                 return gated
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
-            job = await queue.enqueue(
+
+            async def _enqueue() -> ToolResponse:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.FORCE_CRASH,
+                    SystemPayload(system_id=system_id),
+                    job_authorizing(ctx, system.project),
+                    f"{system_id}:force_crash",
+                )
+                return job_envelope(job, "system_id", uid)
+
+            return await keyed_mutation(
                 conn,
-                JobKind.FORCE_CRASH,
-                SystemPayload(system_id=system_id),
-                job_authorizing(ctx, system.project),
-                f"{system_id}:force_crash",
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=system.project,
+                kind=_FORCE_CRASH_KIND,
+                do_work=_enqueue,
             )
-        return job_envelope(job, "system_id", uid)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
@@ -224,11 +255,20 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             str,
             Field(description="Power action: `on` (operator) or `off`/`cycle`/`reset` (admin)."),
         ],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Power action on a started System: `on` is reversible (operator); off/cycle/reset
         are destructive (admin). Enqueues a power job."""
         return await power_system(
-            pool, current_context(), system_id=system_id, action=action, resolver=resolver
+            pool,
+            current_context(),
+            system_id=system_id,
+            action=action,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
         )
 
     @app.tool(
@@ -250,8 +290,16 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     )
     async def control_force_crash(
         system_id: Annotated[str, Field(description="The ready System to force-crash via NMI.")],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + gate."""
         return await force_crash_system(
-            pool, current_context(), system_id=system_id, resolver=resolver
+            pool,
+            current_context(),
+            system_id=system_id,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
         )

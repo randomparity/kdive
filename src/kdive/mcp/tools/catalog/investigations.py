@@ -48,6 +48,7 @@ from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, projects_with_role, require_role
 from kdive.serialization import JsonValue
+from kdive.services.idempotency.envelope import keyed_mutation
 
 _log = logging.getLogger(__name__)
 type InvestigationListItem = Investigation | ToolResponse
@@ -209,6 +210,7 @@ async def open_investigation(
     title: str,
     description: str | None = None,
     external_refs: list[ExternalRefInput] | None = None,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Mint an Investigation (`open`) for the caller's project."""
     require_project(ctx, project)
@@ -226,35 +228,46 @@ async def open_investigation(
                 detail="each external_refs entry must carry a tracker, id, and url",
             )
         now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
-        async with pool.connection() as conn, conn.transaction():
-            inv = await INVESTIGATIONS.insert(
+        async with pool.connection() as conn:
+
+            async def _insert() -> ToolResponse:
+                inv = await INVESTIGATIONS.insert(
+                    conn,
+                    Investigation(
+                        id=uuid4(),
+                        created_at=now,
+                        updated_at=now,
+                        principal=ctx.principal,
+                        agent_session=ctx.agent_session,
+                        project=project,
+                        title=title,
+                        description=normalized_description,
+                        external_refs=refs,
+                        state=InvestigationState.OPEN,
+                    ),
+                )
+                await audit.record(
+                    conn,
+                    ctx,
+                    audit.AuditEvent(
+                        tool="investigations.open",
+                        object_kind="investigations",
+                        object_id=inv.id,
+                        transition="->open",
+                        args={"project": project, "title": title},
+                        project=project,
+                    ),
+                )
+                return await _envelope_for_investigation(conn, inv)
+
+            return await keyed_mutation(
                 conn,
-                Investigation(
-                    id=uuid4(),
-                    created_at=now,
-                    updated_at=now,
-                    principal=ctx.principal,
-                    agent_session=ctx.agent_session,
-                    project=project,
-                    title=title,
-                    description=normalized_description,
-                    external_refs=refs,
-                    state=InvestigationState.OPEN,
-                ),
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=project,
+                kind="investigations.open",
+                do_work=_insert,
             )
-            await audit.record(
-                conn,
-                ctx,
-                audit.AuditEvent(
-                    tool="investigations.open",
-                    object_kind="investigations",
-                    object_id=inv.id,
-                    transition="->open",
-                    args={"project": project, "title": title},
-                    project=project,
-                ),
-            )
-            return await _envelope_for_investigation(conn, inv)
 
 
 async def get_investigation(
@@ -711,6 +724,10 @@ def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> No
             list[ExternalRefInput] | None,
             Field(description="Optional external tracker refs (each with tracker, id, url)."),
         ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Open an investigation."""
         return await open_investigation(
@@ -720,6 +737,7 @@ def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> No
             title=title,
             description=description,
             external_refs=external_refs,
+            idempotency_key=idempotency_key,
         )
 
 

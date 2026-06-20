@@ -54,10 +54,14 @@ from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
+from kdive.services.idempotency.envelope import keyed_mutation
 
 _log = logging.getLogger(__name__)
 
 _TRIAGE_COMMANDS: tuple[str, ...] = ("log", "bt")
+
+# Idempotency-store kind for vmcore.fetch (the registered tool name); ADR-0193.
+_VMCORE_FETCH_KIND = "vmcore.fetch"
 
 
 # --- vmcore.fetch (admission) --------------------------------------------------------------
@@ -83,6 +87,7 @@ class VmcoreHandlers:
         *,
         system_id: str,
         method: CaptureMethod | str = CaptureMethod.HOST_DUMP,
+        idempotency_key: str | None = None,
     ) -> ToolResponse:
         return await with_runtime_for_system(
             pool,
@@ -95,6 +100,7 @@ class VmcoreHandlers:
                 system_id=system_id,
                 method=method,
                 supported_methods=runtime.supported_capture_methods,
+                idempotency_key=idempotency_key,
             ),
             required_role=Role.OPERATOR,
         )
@@ -161,6 +167,7 @@ async def _fetch_vmcore(
     system_id: str,
     method: CaptureMethod | str = CaptureMethod.HOST_DUMP,
     supported_methods: frozenset[CaptureMethod],
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
     """Admit a `capture_vmcore` job on a `crashed` System (operator); return the job handle."""
     uid = _as_uuid(system_id)
@@ -188,14 +195,25 @@ async def _fetch_vmcore(
             require_role(ctx, system.project, Role.OPERATOR)
             if system.state is not SystemState.CRASHED:
                 return _config_error(system_id, data={"current_status": system.state.value})
-            job = await queue.enqueue(
+
+            async def _enqueue() -> ToolResponse:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.CAPTURE_VMCORE,
+                    CaptureVmcorePayload(system_id=system_id, method=capture_method),
+                    job_authorizing(ctx, system.project),
+                    f"{system_id}:capture_vmcore:{capture_method.value}",
+                )
+                return job_envelope(job, "system_id", uid)
+
+            return await keyed_mutation(
                 conn,
-                JobKind.CAPTURE_VMCORE,
-                CaptureVmcorePayload(system_id=system_id, method=capture_method),
-                job_authorizing(ctx, system.project),
-                f"{system_id}:capture_vmcore:{capture_method.value}",
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=system.project,
+                kind=_VMCORE_FETCH_KIND,
+                do_work=_enqueue,
             )
-        return job_envelope(job, "system_id", uid)
 
 
 # --- vmcore.list ---------------------------------------------------------------------------
@@ -333,6 +351,10 @@ def register(
             CaptureMethod,
             Field(description="Capture method; must be supported by the local-libvirt provider."),
         ] = CaptureMethod.HOST_DUMP,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Capture and persist a vmcore."""
         return await handlers.fetch_vmcore(
@@ -340,6 +362,7 @@ def register(
             current_context(),
             system_id=system_id,
             method=method,
+            idempotency_key=idempotency_key,
         )
 
     @app.tool(

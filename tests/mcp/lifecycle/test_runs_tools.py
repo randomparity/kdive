@@ -958,6 +958,7 @@ async def _create(
     *,
     profile=None,
     reuse_requirement: RunReuseRequirementInput | None = None,
+    idempotency_key: str | None = None,
 ):
     return await create_run(
         pool,
@@ -969,7 +970,56 @@ async def _create(
             reuse_requirement=reuse_requirement,
         ),
         resolver=provider_resolver(),
+        idempotency_key=idempotency_key,
     )
+
+
+def test_create_keyed_retry_replays_one_run(migrated_url: str) -> None:
+    """Canonical #619 acceptance: a keyed retry returns the identical envelope, one Run row."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            first = await _create(pool, _ctx(), inv_id, sys_id, idempotency_key="k1")
+            assert first.status == "created"
+            # Simulate a transport drop: the first envelope never reached the client; it retries.
+            second = await _create(pool, _ctx(), inv_id, sys_id, idempotency_key="k1")
+            assert second.model_dump() == first.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM runs WHERE investigation_id = %s", (inv_id,)
+                )
+                runs = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'runs.create'"
+                )
+                keys = await cur.fetchone()
+        assert runs is not None and runs["n"] == 1
+        assert keys is not None and keys["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_create_unkeyed_calls_create_two_runs(migrated_url: str) -> None:
+    """Without a key, two creates make two Runs (today's behavior, unchanged)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, state=InvestigationState.OPEN)
+            sys_id = await _seed_system(pool)
+            first = await _create(pool, _ctx(), inv_id, sys_id)
+            sys_id2 = await _seed_system(pool)
+            second = await _create(pool, _ctx(), inv_id, sys_id2)
+            assert first.object_id != second.object_id
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM runs WHERE investigation_id = %s", (inv_id,)
+                )
+                runs = await cur.fetchone()
+        assert runs is not None and runs["n"] == 2
+
+    asyncio.run(_run())
 
 
 def test_create_first_run_flips_investigation_active(migrated_url: str) -> None:

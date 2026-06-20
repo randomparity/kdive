@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from typing import cast
 
+from psycopg import AsyncConnection
+from psycopg.errors import UniqueViolation
 from psycopg_pool import AsyncConnectionPool
 from pydantic import JsonValue
 
+from kdive.domain.errors import CategorizedError
 from kdive.mcp.responses import ToolResponse
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
+from kdive.services.idempotency.envelope import (
+    record_envelope,
+    resolve_conflict,
+    resolve_envelope_replay,
+    validate_idempotency_key,
+)
 from kdive.services.runs.admission import (
     TARGET_KIND_VOCAB_REASONS,
     RunCreateError,
@@ -19,6 +28,8 @@ from kdive.services.runs.admission import RunCreateRequest as RunCreateRequest
 from kdive.services.runs.admission import RunReuseRequirementInput as RunReuseRequirementInput
 from kdive.services.runs.admission import create_run as _create_run
 
+_RUNS_CREATE_KIND = "runs.create"
+
 
 async def create_run(
     pool: AsyncConnectionPool,
@@ -26,11 +37,66 @@ async def create_run(
     request: RunCreateRequest,
     *,
     resolver: ProviderResolver,
+    idempotency_key: str | None = None,
 ) -> ToolResponse:
+    if idempotency_key is None:
+        try:
+            result = await _create_run(pool, ctx, request, resolver=resolver)
+        except RunCreateError as exc:
+            return ToolResponse.failure_from_error(
+                exc.object_id, exc, data=_vocab_for(exc, resolver)
+            )
+        return _created_response(result)
+    return await _create_run_keyed(pool, ctx, request, resolver=resolver, key=idempotency_key)
+
+
+async def _create_run_keyed(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    request: RunCreateRequest,
+    *,
+    resolver: ProviderResolver,
+    key: str,
+) -> ToolResponse:
+    """Run runs.create under replay-idempotency (ADR-0193).
+
+    Validates the key, resolves a replay up-front, else creates the Run while recording the
+    success envelope inside the Run-insert transaction (atomic). A key collision is resolved
+    read-after-conflict to the winner's envelope (or ``CONFLICT`` for cross-tool reuse).
+    """
     try:
-        result = await _create_run(pool, ctx, request, resolver=resolver)
+        validate_idempotency_key(key)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error("idempotency_key", exc)
+    async with pool.connection() as conn:
+        replay = await resolve_envelope_replay(
+            conn, principal=ctx.principal, key=key, kind=_RUNS_CREATE_KIND
+        )
+    if replay is not None:
+        return replay
+
+    async def _record(record_conn: AsyncConnection, result: RunCreateResult) -> None:
+        await record_envelope(
+            record_conn,
+            principal=ctx.principal,
+            key=key,
+            project=result.project,
+            kind=_RUNS_CREATE_KIND,
+            envelope=_created_response(result),
+        )
+
+    try:
+        result = await _create_run(pool, ctx, request, resolver=resolver, recorder=_record)
     except RunCreateError as exc:
         return ToolResponse.failure_from_error(exc.object_id, exc, data=_vocab_for(exc, resolver))
+    except UniqueViolation:
+        async with pool.connection() as conn:
+            try:
+                return await resolve_conflict(
+                    conn, principal=ctx.principal, key=key, kind=_RUNS_CREATE_KIND
+                )
+            except CategorizedError as exc:
+                return ToolResponse.failure_from_error("idempotency_key", exc)
     return _created_response(result)
 
 

@@ -9,9 +9,11 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.build_hosts import list_all_hosts
+from kdive.domain.capacity.state import RunState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest as _RunBindRequest
 from kdive.mcp.tools.lifecycle.runs.bind import bind_run as _bind_run
@@ -26,6 +28,8 @@ from kdive.mcp.tools.lifecycle.runs.create import (
     RunReuseRequirementInput as _RunReuseRequirementInput,
 )
 from kdive.mcp.tools.lifecycle.runs.create import create_run as _create_run
+from kdive.mcp.tools.lifecycle.runs.list import RunsListRequest as _RunsListRequest
+from kdive.mcp.tools.lifecycle.runs.list import list_runs as _list_runs
 from kdive.mcp.tools.lifecycle.runs.profile_examples import (
     build_host_profile_examples as _build_host_profile_examples,
 )
@@ -53,6 +57,7 @@ def register(
 ) -> None:
     """Register the `runs.*` tools on ``app``, bound to ``pool``."""
     _register_runs_get(app, pool, resolver)
+    _register_runs_list(app, pool)
     _register_runs_create(app, pool, resolver)
     _register_runs_bind(app, pool)
     _register_runs_cancel(app, pool)
@@ -85,6 +90,45 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
     ) -> ToolResponse:
         """Return one run; `succeeded` means build done. `data.steps` has install/boot status."""
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
+
+
+def _register_runs_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.list",
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def runs_list(
+        system_id: Annotated[
+            str | None, Field(description="Only Runs bound to this System id.")
+        ] = None,
+        investigation_id: Annotated[
+            str | None, Field(description="Only Runs under this Investigation id.")
+        ] = None,
+        state: Annotated[
+            RunState | None, Field(description="Only Runs in this build-phase state.")
+        ] = None,
+        limit: Annotated[
+            int, Field(description="Maximum rows returned (capped at 200).")
+        ] = _DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's next_cursor."),
+        ] = None,
+    ) -> ToolResponse:
+        """List the caller's Runs, filterable by system/investigation/state. Requires viewer.
+
+        Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
+        ``cursor`` for the next page.
+        """
+        request = _RunsListRequest(
+            system_id=system_id,
+            investigation_id=investigation_id,
+            state=state,
+            limit=limit,
+            cursor=cursor,
+        )
+        return await _list_runs(pool, current_context(), request)
 
 
 def _register_runs_create(
@@ -147,6 +191,10 @@ def _register_runs_create(
                 )
             ),
         ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Create a run, bound to a system or unbound against a target_kind."""
         request = _RunCreateRequest(
@@ -157,7 +205,13 @@ def _register_runs_create(
             expected_boot_failure=expected_boot_failure,
             reuse_requirement=reuse_requirement,
         )
-        return await _create_run(pool, current_context(), request, resolver=resolver)
+        return await _create_run(
+            pool,
+            current_context(),
+            request,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
+        )
 
 
 def _register_runs_bind(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -236,6 +290,10 @@ def _register_runs_build(
                 "build of a Run."
             ),
         ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Enqueue a kernel build for a run."""
         ctx = current_context()
@@ -249,6 +307,7 @@ def _register_runs_build(
                 ctx,
                 run_id,
                 cmdline=cmdline,
+                idempotency_key=idempotency_key,
             ),
             required_role=Role.OPERATOR,
         )
@@ -314,9 +373,13 @@ def _register_runs_install(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def runs_install(
         run_id: Annotated[str, Field(description="The Run whose built kernel to install.")],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Install a built run onto its system."""
-        return await _install_run(pool, current_context(), run_id)
+        return await _install_run(pool, current_context(), run_id, idempotency_key=idempotency_key)
 
 
 def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -339,9 +402,13 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def runs_boot(
         run_id: Annotated[str, Field(description="The Run whose installed kernel to boot.")],
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
     ) -> ToolResponse:
         """Boot an installed run."""
-        return await _boot_run(pool, current_context(), run_id)
+        return await _boot_run(pool, current_context(), run_id, idempotency_key=idempotency_key)
 
 
 def _register_runs_profile_examples(app: FastMCP, pool: AsyncConnectionPool) -> None:

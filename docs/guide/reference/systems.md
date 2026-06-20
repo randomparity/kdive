@@ -13,6 +13,7 @@ Use `systems.provision` instead when the profile needs no upload window. Operato
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to create a DEFINED System for. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System; an 'upload' rootfs opens a pre-provision rootfs-upload window. |
 
 `profile` fields:
@@ -112,6 +113,7 @@ System. Operator only.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to provision a System for. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System create lane. |
 
 `profile` fields:
@@ -167,6 +169,7 @@ Requires operator.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `system_id` | string | yes | Defined System whose stored profile should be provisioned. |
 
 ## `systems.reprovision`
@@ -184,6 +187,7 @@ use `systems.provision` instead. Requires operator and opt-in.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `profile` | object(schema_version=1) | yes | New provisioning profile; must opt in to reprovision. |
 | `system_id` | string | yes | The ready System to reprovision in place. |
 
@@ -242,4 +246,5 @@ Enqueue teardown for a System. Requires admin on the System's project.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `system_id` | string | yes | The System to tear down. |

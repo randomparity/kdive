@@ -60,12 +60,14 @@ async def _fetch_vmcore(
     *,
     system_id: str,
     method: str = "host_dump",
+    idempotency_key: str | None = None,
 ):
     return await _vmcore_handlers().fetch_vmcore(
         pool,
         ctx,
         system_id=system_id,
         method=method,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -168,6 +170,49 @@ def test_fetch_vmcore_crashed_enqueues_job(migrated_url: str) -> None:
                 )
                 row = await cur.fetchone()
         assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_keyed_retry_replays_one_job(migrated_url: str) -> None:
+    """A repeated idempotency_key returns the identical envelope and enqueues one job."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            first = await _fetch_vmcore(pool, _ctx(), system_id=sys_id, idempotency_key="k1")
+            second = await _fetch_vmcore(pool, _ctx(), system_id=sys_id, idempotency_key="k1")
+            assert first.model_dump() == second.model_dump()
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'capture_vmcore' "
+                    "AND dedup_key = %s",
+                    (f"{sys_id}:capture_vmcore:host_dump",),
+                )
+                jobs = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'vmcore.fetch'"
+                )
+                keys = await cur.fetchone()
+        assert jobs is not None and jobs["n"] == 1
+        assert keys is not None and keys["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_oversized_key_is_config_error(migrated_url: str) -> None:
+    """An over-long idempotency_key fails closed before any enqueue."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            resp = await _fetch_vmcore(pool, _ctx(), system_id=sys_id, idempotency_key="x" * 201)
+            assert resp.status == "error"
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'capture_vmcore'")
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 0
 
     asyncio.run(_run())
 

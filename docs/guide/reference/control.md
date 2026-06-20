@@ -16,6 +16,7 @@ Inject an NMI to crash a ready System; drives ready->crashed. Requires admin + g
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `system_id` | string | yes | The ready System to force-crash via NMI. |
 
 ## `control.power`
@@ -34,4 +35,5 @@ are destructive (admin). Enqueues a power job.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `action` | string | yes | Power action: `on` (operator) or `off`/`cycle`/`reset` (admin). |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `system_id` | string | yes | The started System to act on. |
