@@ -70,6 +70,7 @@ A template typo (wrong field, missing ``[image.source]``) makes this fail.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import jinja2
@@ -121,19 +122,25 @@ _CONTEXT = {
 }
 
 
-def _render() -> str:
+def _parsed() -> InventoryDoc:
+    # The template emits the paste-in fragment ([[image]] + [[remote_libvirt]]) with no
+    # schema_version (that lives at the top of the deployment's systems.toml). Compose a
+    # full v2 doc, decode the TOML, and hand the dict to InventoryDoc.parse — which takes
+    # a decoded mapping (model.py:245), not a string, and requires schema_version=2.
     text = _TEMPLATE.read_text(encoding="utf-8")
-    return jinja2.Template(text, undefined=jinja2.StrictUndefined).render(**_CONTEXT)
+    rendered = jinja2.Template(text, undefined=jinja2.StrictUndefined).render(**_CONTEXT)
+    data = tomllib.loads("schema_version = 2\n" + rendered)
+    return InventoryDoc.parse(data)
 
 
 def test_template_emits_one_image_block_per_selected_image() -> None:
-    doc = InventoryDoc.parse(_render())
+    doc = _parsed()
     names = sorted(img.name for img in doc.image)
     assert names == sorted(i["name"] for i in _SELECTED)
 
 
 def test_template_image_identities_unique_and_staged() -> None:
-    doc = InventoryDoc.parse(_render())
+    doc = _parsed()
     for img in doc.image:
         assert img.provider == "remote-libvirt"
         assert img.arch == "x86_64"
@@ -142,16 +149,16 @@ def test_template_image_identities_unique_and_staged() -> None:
 
 
 def test_template_default_base_image_resolves() -> None:
-    doc = InventoryDoc.parse(_render())
+    doc = _parsed()
     declared = {img.name for img in doc.image}
     assert doc.remote_libvirt[0].base_image in declared
     assert doc.remote_libvirt[0].base_image == "fedora-kdive-remote-base-43"
 ```
 
-- [ ] **Step 2: Confirm `InventoryDoc.parse` signature**
+- [ ] **Step 2: Confirm the model attribute names**
 
-Run: `uv run python -c "from kdive.inventory.model import InventoryDoc; import inspect; print(inspect.signature(InventoryDoc.parse))"`
-If `parse` takes a TOML string, the test stands. If it takes a path/bytes, adapt `_render()`/the call (e.g. `tomllib.loads` then `InventoryDoc(**data)`), keeping the three assertions. Verify `.image[*].source.volume`, `.remote_libvirt[*].base_image` attribute names against `model.py`.
+Run: `uv run python -c "from kdive.inventory.model import InventoryDoc; print(InventoryDoc.parse.__doc__[:80])"`
+`InventoryDoc.parse(data: dict)` takes a decoded TOML mapping and requires `schema_version: Literal[2]` (confirmed model.py:245/:190). Verify `.image[*].source.volume` and `.remote_libvirt[*].base_image` attribute names against `model.py` before relying on the assertions.
 
 - [ ] **Step 3: Run the test, verify it fails**
 
@@ -325,6 +332,8 @@ git commit -m "feat(ansible): emit a per-host image catalog in systems.toml fact
 - Consumes: `kdive_selected_images`, `kdive_requested_images`, `kdive_image_catalog`, `kdive_image_defaults`, `image_arch_alias`, `helper_src`, `storage_pool_target`, `force_image_rebuild` (from Task 1 / existing group vars).
 - `build_one.yml` is `include_tasks`-d with `loop_var: image`; inside, the per-image effective fields are `image.<field> | default(kdive_image_defaults.<field>)`.
 
+> **Ordering note:** `build_one.yml` references `include_tasks: build_scratch.yml`, which Task 3 creates. The scratch branch is **dormant** until Task 3 (no host_images entry exercises it in CI, and ansible-lint/`--syntax-check` do not resolve dynamic includes, so Task 2 lints green). The role is only executed on hardware after the full feature lands, so the intermediate commit is safe.
+
 - [ ] **Step 1: Rewrite `tasks/main.yml` as validate-then-loop**
 
 ```yaml
@@ -465,6 +474,7 @@ Port the old single-image body, replacing globals with `image` fields. Compute p
             '--run-command', 'chmod 0755 /usr/local/sbin/' ~ item,
             '--run-command', 'restorecon -v /usr/local/sbin/' ~ item] }}
   loop: "{{ img_helpers }}"
+  when: (not img_staged.stat.exists) or img_force | bool
 
 - name: "[{{ image.name }}] Install the in-guest helpers into the image"
   ansible.builtin.command:  # noqa: command-instead-of-module
@@ -600,11 +610,12 @@ Build a minimal root tree from the host family, then assemble a bootable qcow2 v
   when: ansible_os_family == 'Debian'
   changed_when: true
 
-- name: "[{{ image.name }}] Assemble the bootable qcow2 from the rootfs"
+- name: "[{{ image.name }}] Assemble a partitioned qcow2 from the rootfs"
   ansible.builtin.command:  # noqa: command-instead-of-module
-    # virt-make-fs builds a partitioned filesystem image; the bare image is then
-    # bootable via the in-guest grub installed in the bootstrap above. UNVALIDATED
-    # (no scratch-capable host in CI/available hardware — see README caveat).
+    # virt-make-fs builds a partitioned filesystem image from the rootfs. The
+    # bootloader install (grub to the ESP) is NOT done here and is UNVALIDATED —
+    # the scratch/bare path has no test host in CI or available hardware, so its
+    # bootability must be confirmed on hardware (see README caveat).
     argv:
       - virt-make-fs
       - --partition=gpt
