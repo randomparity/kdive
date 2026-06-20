@@ -26,15 +26,18 @@ Return one durable job visible to the caller.
 
 `implemented` · `read-only`
 
-List jobs visible to the caller, newest first.
+List jobs visible to the caller, newest first, filterable by status/kind/investigation.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``cursor`` to read the next page.
+``cursor`` to read the next page. Filters compose with the cursor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's next_cursor. |
+| `investigation_id` | string (nullable) | no | Only run-bearing jobs (build/install/boot) whose Run belongs to this Investigation. |
+| `kind` | `provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check` (nullable) | no | Only jobs of this kind. |
 | `limit` | integer | no | Maximum rows returned (capped at 200). |
+| `status` | `queued`, `running`, `succeeded`, `failed`, `canceled` (nullable) | no | Only jobs in this lifecycle state. |
 
 ## `jobs.wait`
 

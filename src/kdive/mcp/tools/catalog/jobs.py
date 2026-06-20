@@ -28,7 +28,7 @@ from pydantic import Field
 from kdive.db.repositories import JOBS, ObjectNotFound
 from kdive.domain.capacity.state import IllegalTransition, JobState
 from kdive.domain.errors import ErrorCategory
-from kdive.domain.operations.jobs import Job
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
@@ -40,6 +40,7 @@ from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
 from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
 from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
+from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.security.authz.context import RequestContext
@@ -209,7 +210,14 @@ _JOBS_LIST_TAG = "jobs.list"
 
 
 async def list_jobs(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, limit: int, cursor: str | None = None
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    limit: int,
+    cursor: str | None = None,
+    status: JobState | None = None,
+    kind: JobKind | None = None,
+    investigation_id: str | None = None,
 ) -> ToolResponse:
     """Return a page of the newest jobs (keyset-paginated) in one collection envelope.
 
@@ -217,8 +225,19 @@ async def list_jobs(
     ``data.truncated`` exactly and mints ``data.next_cursor`` from the last kept job's
     ``(created_at, id)``. A ``cursor`` from a prior page resumes strictly after it; a
     malformed or wrong-tool cursor is an ``invalid_cursor`` configuration error.
+
+    Optional server-side filters (ADR-0197): ``status``/``kind`` narrow by lifecycle
+    state / job kind; ``investigation_id`` narrows to the run-bearing jobs whose Run
+    belongs to that Investigation (a malformed id is an ``invalid_uuid`` configuration
+    error). Filters compose with the cursor — following ``next_cursor`` drains the full
+    filtered set.
     """
     capped = _clamp_list_limit(limit)
+    investigation_uid = None
+    if investigation_id is not None:
+        investigation_uid = _as_uuid(investigation_id)
+        if investigation_uid is None:
+            return _invalid_uuid_error("investigation_id", investigation_id)
     after = None
     if cursor:
         try:
@@ -227,7 +246,15 @@ async def list_jobs(
             return _invalid_cursor_error("jobs")
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
-            jobs = await queue.recent_jobs(conn, capped + 1, _readable_projects(ctx), after=after)
+            jobs = await queue.recent_jobs(
+                conn,
+                capped + 1,
+                _readable_projects(ctx),
+                after=after,
+                status=status,
+                kind=kind,
+                investigation_id=investigation_uid,
+            )
         kept, truncated = _paginate(jobs, capped)
         next_cursor = (
             _encode_ts_uuid_cursor(_JOBS_LIST_TAG, kept[-1].created_at, kept[-1].id)
@@ -293,6 +320,17 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def jobs_list(
+        status: Annotated[
+            JobState | None, Field(description="Only jobs in this lifecycle state.")
+        ] = None,
+        kind: Annotated[JobKind | None, Field(description="Only jobs of this kind.")] = None,
+        investigation_id: Annotated[
+            str | None,
+            Field(
+                description="Only run-bearing jobs (build/install/boot) whose Run belongs to "
+                "this Investigation."
+            ),
+        ] = None,
         limit: Annotated[
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
@@ -301,9 +339,17 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Opaque continuation cursor from a prior page's next_cursor."),
         ] = None,
     ) -> ToolResponse:
-        """List jobs visible to the caller, newest first.
+        """List jobs visible to the caller, newest first, filterable by status/kind/investigation.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` to read the next page.
+        ``cursor`` to read the next page. Filters compose with the cursor.
         """
-        return await list_jobs(pool, current_context(), limit=limit, cursor=cursor)
+        return await list_jobs(
+            pool,
+            current_context(),
+            limit=limit,
+            cursor=cursor,
+            status=status,
+            kind=kind,
+            investigation_id=investigation_id,
+        )
