@@ -82,6 +82,19 @@ class WorkerTelemetry:
             unit="1",
             description="Failed provider operations, by provider and job kind.",
         )
+        # ADR-0191 I: queue latency — time from enqueue to first claim, by job kind.
+        self._time_to_claim: Histogram = meter.create_histogram(
+            "kdive.job.time_to_claim",
+            unit="s",
+            description="Queue latency from enqueue to claim, by job kind.",
+            explicit_bucket_boundaries_advisory=list(_DURATION_BUCKETS),
+        )
+        # ADR-0191 I: non-terminal requeues (retries), by job kind.
+        self._retries: Counter = meter.create_counter(
+            "kdive.job.retries",
+            unit="1",
+            description="Job requeues (non-terminal failures), by job kind.",
+        )
 
     def _observe_depth(self, _options: CallbackOptions) -> Iterable[Observation]:
         return [Observation(self._last_depth)]
@@ -148,6 +161,16 @@ class WorkerTelemetry:
         """
         if self._enabled and job.state is JobState.FAILED:
             self._errors.add(1, {"error_category": category.value})
+
+    def record_time_to_claim(self, job_kind: str, seconds: float) -> None:
+        """Record enqueue→claim latency (no-op when disabled or seconds < 0)."""
+        if self._enabled and seconds >= 0.0:
+            self._time_to_claim.record(seconds, {"job_kind": job_kind})
+
+    def record_job_retry(self, job_kind: str) -> None:
+        """Count one non-terminal requeue (no-op when disabled)."""
+        if self._enabled:
+            self._retries.add(1, {"job_kind": job_kind})
 
 
 class JobSpan:

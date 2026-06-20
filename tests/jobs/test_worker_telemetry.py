@@ -197,3 +197,37 @@ def test_provider_op_not_recorded_for_untagged_job_and_no_leak() -> None:
     points = _points_for(reader, "kdive.provider.op.duration")
     kinds = {p.attributes["job_kind"] for p in points}
     assert "teardown" not in kinds
+
+
+# --- Group I: time-to-claim + retries (ADR-0191 I) ---
+
+
+def test_record_time_to_claim_emits_one_point_with_job_kind() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_time_to_claim("build", 3.0)
+    points = _points_for(reader, "kdive.job.time_to_claim")
+    assert len(points) == 1
+    assert points[0].attributes["job_kind"] == "build"
+
+
+def test_record_time_to_claim_negative_seconds_is_noop() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_time_to_claim("build", -1.0)
+    assert _points_for(reader, "kdive.job.time_to_claim") == []
+
+
+def test_record_time_to_claim_disabled_is_noop() -> None:
+    WorkerTelemetry.disabled().record_time_to_claim("build", 3.0)  # must not raise
+
+
+def test_record_job_retry_increments_counter_with_job_kind() -> None:
+    telemetry, reader, _ = _telemetry()
+    telemetry.record_job_retry("build")
+    points = _points_for(reader, "kdive.job.retries")
+    assert len(points) == 1
+    assert points[0].attributes["job_kind"] == "build"
+    assert points[0].value == 1
+
+
+def test_record_job_retry_disabled_is_noop() -> None:
+    WorkerTelemetry.disabled().record_job_retry("build")  # must not raise
