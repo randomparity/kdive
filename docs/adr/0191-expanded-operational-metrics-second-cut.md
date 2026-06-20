@@ -118,14 +118,20 @@ already covered by `kdive_reconciler_repairs_total{repair_kind="build_host_state
 `{capture_method, provider, outcome}` and `kdive_vmcore_capture_bytes` histogram
 `{capture_method, provider}` (raw vmcore size), recorded in `capture_handler` around
 `retriever.capture` + finalize. `capture_method` ∈ {`kdump`, `host_dump`} for vmcore;
-`bytes` is recorded only on success.
+`bytes` is recorded only on success. The byte size is not on `CaptureOutput` today, so a
+`raw_size_bytes: int` field is added to that NamedTuple (in-process port-contract change, no
+DB/migration impact) and set by each provider to `len(data)` of the raw vmcore it writes; the
+handler reads `output.raw_size_bytes` rather than issuing an extra object HEAD. The `provider`
+label reuses the F `binding_for_system` resolver addition.
 
 **H2 — finalized console bytes (`kdive.reconciler`).** `kdive_console_bytes_total` **counter**,
 label `{outcome}` ∈ {`success`, `empty`} — **no per-System label**. The issue's "per System"
 framing is a per-object label, which the allowlist forbids; the honest aggregate is total
-console bytes finalized across the fleet, split only by whether the finalized stream had
-content. Incremented at console finalization (`ConsoleCollector.finalize` →
-`write_console_artifact`) with the assembled byte length.
+console bytes finalized, split only by whether the finalized stream had content. Incremented at
+console finalization (`ConsoleCollector.finalize` → `write_console_artifact`) with the
+assembled byte length. The finalize seam is the **remote-libvirt** console collector; local
+console (the #117 etag-refresh flow) is not covered, so the counter is remote-console bytes,
+not a fleet total — documented so it is not misread.
 
 **H3 — debug-session duration (`kdive.mcp`).** `kdive_debug_session_duration_seconds`
 histogram `{transport, outcome}`, recorded at `end_session` from

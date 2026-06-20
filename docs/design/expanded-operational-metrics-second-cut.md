@@ -103,10 +103,20 @@ unit suffix, e.g. `_seconds`).
 - New `jobs/handlers/capture_telemetry.py` `CaptureTelemetry` (worker meter): the two
   histograms; `record(capture_method, provider, outcome, *, size_bytes=None)`; `disabled()`
   no-op. Injected into the vmcore registrar (built from `metrics.get_meter("kdive.worker")`).
-- `capture_handler` resolves the binding (provider kind), times `retriever.capture` +
-  `finalize_capture`, and on success records duration + bytes (`CaptureOutput.raw` size); on
-  failure records duration with `outcome=error` and no bytes. `capture_method` comes from the
-  job payload `method`.
+- **Byte source.** `CaptureOutput` (`providers/ports/retrieve.py`) carries no size today
+  (`raw`/`redacted` are `StoredArtifact`, which holds only key/etag/sensitivity/retention).
+  Add a `raw_size_bytes: int` field to the `CaptureOutput` NamedTuple — an in-process
+  port-contract change, no DB/schema/migration impact — set by each provider's `capture` to
+  `len(data)` of the raw vmcore it writes (the size is already in hand at write time, e.g.
+  `local_libvirt/retrieve.py`; the remote kdump path has it on `CoreInfo.size_bytes`). Every
+  `CaptureOutput(...)` construction site (local/remote/fault-inject providers + tests) is
+  updated. The handler reads `output.raw_size_bytes`; no extra S3 HEAD round-trip.
+- **Provider label.** `capture_handler` today uses `resolver.runtime_for_system` (runtime
+  only, no kind). It switches to the **F `binding_for_system`** addition (one binding
+  resolution serving both this label and F's contextvar tag) so the `provider` kind is in hand.
+- `capture_handler` times `retriever.capture` + `finalize_capture`, and on success records
+  duration + `output.raw_size_bytes`; on failure records duration with `outcome=error` and no
+  bytes. `capture_method` comes from the job payload `method`.
 
 ### H2 — finalized console bytes
 
@@ -116,6 +126,12 @@ unit suffix, e.g. `_seconds`).
 - Wired where the reconciler finalizes console collectors (`reconciler/console` hosting →
   `ConsoleCollector.finalize` / `write_console_artifact`). The collector reports the assembled
   byte length to the telemetry at finalize. No per-System label.
+- **Scope.** This finalize path is the **remote-libvirt** console collector
+  (`providers/remote_libvirt/console/`). Local-libvirt console uses the separate #117
+  etag-refresh artifact flow, which this hook does not cover, so the counter measures remote
+  console bytes — not a fleet-wide total. Documented here so a dashboard does not misread it as
+  all-provider console volume; extending to local console is a follow-up if local consoles grow
+  a comparable finalize seam.
 
 ### H3 — debug-session duration
 
