@@ -69,10 +69,20 @@ A cursor is an opaque base64url-encoded JSON object `{"t": <tool-tag>, "k": [<ke
   `systems.list` (the key shapes differ; a cross-tool replay would otherwise produce a
   malformed predicate or a silently wrong page).
 - `k` is the sort key of the **last returned** row, serialized as strings: a timestamp list
-  uses `(created_at_iso, id_str)`. The handler rebuilds the keyset predicate
-  `(created_at, id) < (%s, %s)` for `DESC, DESC` order (`>` for `ASC`), binding the decoded
-  parts as parameters. The codec is the single chokepoint; per-tool handlers only declare
-  their sort columns and order direction.
+  uses `(created_at_iso, id_str)`. The handler rebuilds the keyset predicate as a row-value
+  comparison `(created_at, id) < (%s, %s)` for `DESC, DESC` order (`>` for `ASC, ASC`),
+  binding the decoded parts as parameters. The codec is the single chokepoint; per-tool
+  handlers only declare their sort columns and order direction.
+
+The row-value tuple predicate is valid **only when every sort column sorts the same
+direction**. `allocations.list` and `systems.list` order `created_at DESC, id` today — a
+*mixed* order (id implicitly ASC) for which `(a, b) < (x, y)` is not the correct seek. Their
+`ORDER BY` is normalized to `created_at DESC, id DESC` so a single uniform-direction tuple
+predicate is always correct; since `id` is a unique UUID this only reorders rows sharing one
+`created_at` microsecond and changes no other behavior. `jobs.list` / `investigations.list`
+/ `audit.query` already order `… DESC, id DESC`; `resources.list` / `images.list` are
+uniform ASC. A cursor timestamp must round-trip to the exact stored (microsecond, tz-aware)
+value so the `a = x` arm matches the boundary row.
 
 The cursor is **not** a security token and carries no signature. It expresses only "rows
 ordered before key K"; project/role scoping is still applied by the same `WHERE` clause on
