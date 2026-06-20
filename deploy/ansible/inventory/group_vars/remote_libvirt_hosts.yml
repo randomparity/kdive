@@ -5,5 +5,7 @@
 # control node lacking a `dev.pdx.drc.nz` search domain cannot resolve the bare names
 # and every play fails at the SSH connection. Deriving `ansible_host` from the FQDN
 # keeps a single source of truth (the host_vars entry) and makes the inventory portable
-# across control nodes.
-ansible_host: "{{ remote_host_fqdn }}"
+# across control nodes. `| mandatory` fails loud at templating with a named error if a
+# host joins this group without a remote_host_fqdn, instead of silently rendering an
+# empty ansible_host and timing out the SSH connection.
+ansible_host: "{{ remote_host_fqdn | mandatory }}"
