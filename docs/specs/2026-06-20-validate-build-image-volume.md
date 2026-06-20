@@ -55,9 +55,14 @@ write or audit row.
 `ShellBuildTransport.clone` runs `git init dest` first. Today any non-zero exit →
 `infrastructure_failure`. Reclassify only the **command-not-found shape**:
 
-- `init.returncode == 127`, **or**
-- the init stderr matches a git-not-found signal (`"not found"` / `"No such file"` together with
-  `git`, on the redacted tail).
+- **Primary:** `init.returncode == 127`. This is the reliable signal — the guest-exec transport
+  runs `/bin/sh -c 'cd … && exec git init …'` and the qemu-guest-agent reports the real
+  `exitcode` (`guest/build_transport.py::_exec_shell`), so a missing `git` yields rc 127; the
+  SSH transport likewise propagates the remote shell's 127.
+- **Backstop only:** the init stderr matches a git-not-found signal — `git` **and** a
+  not-found token (`"not found"` / `"No such file"`) on the redacted tail. This covers a
+  transport that fails to surface 127; it is a narrow backstop, never an override of a non-127
+  rc produced by some other fault (a permission/disk fault keeps `infrastructure_failure`).
 
 When that shape holds, raise `missing_dependency` (`ErrorCategory.MISSING_DEPENDENCY`, the
 precedent for absent build tooling) with:
@@ -76,6 +81,10 @@ so the build-job failure an operator polls carries the pointer.
 ## Out of scope
 
 - Probing the volume contents at registration (no transport at registration time).
+- Make-time toolchain-missing failures (`flex`/`bison`/`bc`/`make`/libelf headers) are **not**
+  reclassified — they keep their existing `build_failure`. `git init` is the canonical,
+  first-hit "git: not found"-class signal the issue names; the registration heuristic (change 1)
+  and the build-host agent diagnostic remain the broader net for a toolchain-incomplete image.
 - A new request field or MCP tool; SSH/local registration paths.
 - Editing `diagnostics/checks.py` (sibling #625/#629 own it; the pointer is a string literal).
 - The `runs.profile_examples`/build_hosts list registrars (sibling #626 owns those).
@@ -93,10 +102,11 @@ Registration (`tests/mcp/ops/test_build_hosts.py`, direct handler + injected poo
 
 Build-time (`tests/providers/build_host/test_shell_transport.py`, `_RecordingTransport`):
 
-- `git init` rc 127 → `missing_dependency`, `details["diagnostic"]` is the pointer;
-- `git init` stderr "sh: git: not found" (rc nonzero, not 127) → `missing_dependency`;
+- `git init` rc 127 → `missing_dependency`, `details["diagnostic"]` is the pointer (primary);
+- `git init` stderr "sh: git: not found" (rc nonzero, not 127) → `missing_dependency` (backstop);
 - `git init` rc 1 "permission denied" → still `infrastructure_failure` (regression guard for the
-  existing `test_clone_init_non_zero_is_infrastructure_failure`);
+  existing `test_clone_init_non_zero_is_infrastructure_failure`; the backstop must not fire on a
+  non-not-found stderr);
 - ordering/other clone paths unchanged.
 
 ## Guardrails
