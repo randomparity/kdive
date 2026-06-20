@@ -1,7 +1,9 @@
 # kdive — Grafana metrics dashboard
 
-`kdive-overview.json` is a portable Grafana dashboard (Grafana 10+, schema v39) showing all 29
-operational metrics kdive emits, grouped into nine collapsible subsystem rows.
+`kdive-overview.json` is a portable Grafana dashboard (Grafana 10+, schema v36) showing all 29
+operational metrics kdive emits, grouped into nine collapsible subsystem rows. It uses only
+features stable since Grafana 9 (timeseries, bar gauge, datasource templating); newer Grafana
+versions up-migrate the schema on import.
 
 ## Import
 

@@ -4,7 +4,7 @@
   "tags": [
     "kdive"
   ],
-  "schemaVersion": 39,
+  "schemaVersion": 36,
   "version": 1,
   "editable": true,
   "refresh": "30s",
@@ -606,7 +606,14 @@
       },
       "options": {
         "displayMode": "gradient",
-        "orientation": "horizontal"
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
       "targets": [
         {
@@ -617,7 +624,8 @@
           "expr": "sum by (provider) (kdive_host_capacity_used) / sum by (provider) (kdive_host_capacity_total)",
           "legendFormat": "{{provider}}",
           "refId": "A",
-          "range": true
+          "range": false,
+          "instant": true
         }
       ],
       "id": 16,

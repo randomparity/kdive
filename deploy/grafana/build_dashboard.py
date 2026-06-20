@@ -86,7 +86,7 @@ def build_dashboard() -> dict:
         "title": "kdive — Metrics Overview",
         "uid": "kdive-overview",
         "tags": ["kdive"],
-        "schemaVersion": 39,
+        "schemaVersion": 36,
         "version": 1,
         "editable": True,
         "refresh": "30s",
@@ -144,8 +144,15 @@ def _timeseries(
 
 
 def _bargauge(title: str, targets: list[dict], *, unit: str = "short") -> dict:
+    for target in targets:
+        target["range"] = False
+        target["instant"] = True
     panel = _panel("bargauge", title, targets, unit, False)
-    panel["options"] = {"displayMode": "gradient", "orientation": "horizontal"}
+    panel["options"] = {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+    }
     return panel
 
 
