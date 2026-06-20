@@ -1,0 +1,9 @@
+---
+# The inventory hostname (ub26-big, fed44-big, rock10-big) is a bare label, not a
+# resolvable name. SSH reaches each host at its fully-qualified domain name, which is
+# already declared per host in host_vars as `remote_host_fqdn`. Without this mapping a
+# control node lacking a `dev.pdx.drc.nz` search domain cannot resolve the bare names
+# and every play fails at the SSH connection. Deriving `ansible_host` from the FQDN
+# keeps a single source of truth (the host_vars entry) and makes the inventory portable
+# across control nodes.
+ansible_host: "{{ remote_host_fqdn }}"
