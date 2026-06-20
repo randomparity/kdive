@@ -9,6 +9,7 @@ from opentelemetry import metrics as otel_metrics
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.domain.capacity.state import AllocationState
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
@@ -131,6 +132,9 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
     )
     async def allocations_list(
         project: Annotated[str, Field(description="Project whose allocations to list.")],
+        state: Annotated[
+            AllocationState | None, Field(description="Only allocations in this lifecycle state.")
+        ] = None,
         limit: Annotated[
             int, Field(description="Maximum rows returned (capped at 200).")
         ] = DEFAULT_LIST_LIMIT,
@@ -139,13 +143,13 @@ def _register_allocations_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Opaque continuation cursor from a prior page's next_cursor."),
         ] = None,
     ) -> ToolResponse:
-        """List allocations visible in a project, newest first.
+        """List allocations visible in a project, newest first, filterable by state.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-        ``cursor`` for the next page.
+        ``cursor`` for the next page. The ``state`` filter composes with the cursor.
         """
         return await _list_allocations(
-            pool, current_context(), project=project, limit=limit, cursor=cursor
+            pool, current_context(), project=project, limit=limit, cursor=cursor, state=state
         )
 
 

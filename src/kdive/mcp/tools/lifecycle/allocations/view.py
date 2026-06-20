@@ -107,12 +107,17 @@ async def list_allocations(
     project: str,
     limit: int,
     cursor: str | None = None,
+    state: AllocationState | None = None,
 ) -> ToolResponse:
     """Return a page of the newest allocations for a project (keyset-paginated, ADR-0192).
 
     Fetches one row past ``limit`` to set ``data.truncated``/``data.next_cursor`` exactly
     from the last kept allocation's ``(created_at, id)``. A ``cursor`` resumes strictly
     after a prior page; a malformed/wrong-tool cursor is an ``invalid_cursor`` config error.
+
+    Optional ``state`` filter (ADR-0197) narrows by lifecycle state, applied before the
+    keyset seek so the cursor stays a pure boundary and following ``next_cursor`` drains
+    the full filtered set.
     """
     require_project(ctx, project)
     require_role(ctx, project, Role.VIEWER)
@@ -123,17 +128,20 @@ async def list_allocations(
             after = _decode_ts_uuid_cursor(_ALLOCATIONS_LIST_TAG, cursor)
         except InvalidCursor:
             return _invalid_cursor_error("allocations")
-    seek = ""
+    filters = ""
     params: list[object] = [project]
+    if state is not None:
+        filters += " AND state = %s"
+        params.append(state.value)
     if after is not None:
-        seek = " AND (created_at, id) < (%s, %s)"
+        filters += " AND (created_at, id) < (%s, %s)"
         params.extend(after)
     params.append(capped + 1)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT * FROM allocations WHERE project = %s"
-                + seek
+                + filters
                 + " ORDER BY created_at DESC, id DESC LIMIT %s",
                 params,
             )
