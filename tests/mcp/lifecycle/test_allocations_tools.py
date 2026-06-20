@@ -666,6 +666,57 @@ def test_list_allocations_requires_viewer_role(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_list_allocations_paginates_with_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=5)
+            for _ in range(5):
+                await _request(pool, _ctx())
+            first = await list_allocations(pool, _ctx(), project="proj", limit=2)
+            assert first.data["truncated"] is True
+            cursor = first.data["next_cursor"]
+            assert isinstance(cursor, str)
+
+            seen = [item.object_id for item in first.items]
+            for _ in range(10):
+                page = await list_allocations(pool, _ctx(), project="proj", limit=2, cursor=cursor)
+                seen.extend(item.object_id for item in page.items)
+                if not page.data["truncated"]:
+                    break
+                next_cursor = page.data["next_cursor"]
+                assert isinstance(next_cursor, str)
+                cursor = next_cursor
+        assert len(seen) == 5
+        assert len(set(seen)) == 5
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_no_truncation_at_exactly_limit(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=2)
+            await _request(pool, _ctx())
+            await _request(pool, _ctx())
+            resp = await list_allocations(pool, _ctx(), project="proj", limit=2)
+        assert resp.data["truncated"] is False
+        assert resp.data["next_cursor"] is None
+
+    asyncio.run(_run())
+
+
+def test_list_allocations_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _register(pool, cap=1)
+            await _request(pool, _ctx())
+            resp = await list_allocations(pool, _ctx(), project="proj", limit=2, cursor="garbage")
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())
+
+
 def test_pick_by_kind_skips_cordoned_host(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
