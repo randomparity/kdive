@@ -70,17 +70,36 @@ unchanged), running `prom/prometheus:v3.12.0`, mounting a committed
 host (the UI is the point); the scraped aux ports stay unpublished. Brought up with
 `docker compose --profile obs up -d prometheus`.
 
+TSDB storage is ephemeral container-local (no named volume), mirroring the k8s `emptyDir`
+demo posture — a `docker compose down` drops the history by design. **Only the config file is
+mounted read-only**; `/prometheus` (the TSDB write path) is left writable container-local, so
+the read-only mount never wedges Prometheus's own storage.
+
 ## Acceptance criteria → verification
 
+`helm template` and `docker compose config` validate the *manifest that wraps* the scrape
+config, never the embedded Prometheus DSL — a syntactically valid but semantically wrong
+relabel rule or static target renders fine and scrapes nothing. So the tests parse the
+**rendered/committed `prometheus.yml` content** and assert on it directly (always-on,
+in-process, no live cluster), which closes the render-vs-scrape gap; the live "targets are
+`up`" check is a documented manual step, flagged as not-CI-covered.
+
 - `bundledObservability=true` renders Prometheus Deployment/ConfigMap/SA/Role/RoleBinding/
-  Service, scrape config references all three aux ports via annotation relabeling, Service is
-  ClusterIP `9090` — `tests/helm/test_helm_render.py`.
+  Service, the Service is ClusterIP `9090`, and the **parsed ConfigMap `prometheus.yml`** keeps
+  on `__meta_kubernetes_pod_annotation_prometheus_io_scrape`, takes `__metrics_path__` from the
+  `prometheus.io/path` annotation, joins `__address__` from the `prometheus.io/port` annotation,
+  and scopes SD to the release namespace — `tests/helm/test_helm_render.py`.
 - `bundledObservability=false` (default) renders none of them; deployment count unchanged —
   `tests/helm/test_helm_render.py`.
-- The compose `prometheus` service parses, is on the `obs` profile, scrapes the three aux
-  ports, publishes `9090`, and the static config is valid — `tests/compose/test_compose_config.py`.
-- BYO path + runbook note documented — chart README + `kubernetes-deploy.md` runbook + compose
-  README.
+- The compose `prometheus` service parses, is on the `obs` profile, publishes `9090`, and the
+  scraped aux ports stay unpublished; the **parsed `deploy/compose/prometheus.yml`** has the
+  three static targets `server:9464`/`worker:9465`/`reconciler:9466` matching the `_AUX_PORTS`
+  contract — `tests/compose/test_compose_config.py`.
+- `promtool check config` passes on both rendered configs when a `promtool` binary is present
+  (skips cleanly when absent, like the `helm` gate) — bonus semantic check over the always-on
+  content assertions above.
+- BYO path + runbook note (including the live "targets `up`" verification) documented — chart
+  README + `kubernetes-deploy.md` runbook + compose README.
 - No change to app metrics emission — no `src/kdive/**` edits.
 
 ## Edge cases / failure modes
@@ -97,3 +116,7 @@ host (the UI is the point); the scraped aux ports stay unpublished. Brought up w
 - **Aux port never re-exposed:** k8s Prometheus Service is `9090`-only; compose publishes only
   `9090`. The existing "no Service fronts the aux port" / "aux port not published" tests still
   hold.
+- **Semantically-wrong-but-valid scrape config:** the primary failure mode for this issue. A
+  mistyped relabel source label or a renamed/wrong static target renders and parses cleanly but
+  collects nothing. Caught by parsing the `prometheus.yml` content in the tests (above), not by
+  the manifest-level render/parse tools.
