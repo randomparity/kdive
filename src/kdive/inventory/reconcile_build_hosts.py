@@ -47,7 +47,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.build_hosts import BuildHostKind
-from kdive.inventory.errors import InventoryError
+from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.model import BuildHostInstance, InventoryDoc
 from kdive.inventory.reconcile import (
     CONFIG_MANAGED_BY,
@@ -236,59 +236,23 @@ def _record(name: str, detail: str = "") -> ReconcileRecord:
     return ReconcileRecord(name=name, entry=f"build_host[{name}]", detail=detail)
 
 
+_ROWS = RowTyper("build_hosts")
+
+
 def _upsert_row(row: Mapping[str, object]) -> _UpsertBuildHostRow:
     return _UpsertBuildHostRow(
-        id=_expect_uuid(row, "id"),
-        kind=_expect_str(row, "kind"),
-        base_image_volume=_expect_optional_str(row, "base_image_volume"),
-        workspace_root=_expect_str(row, "workspace_root"),
-        max_concurrent=_expect_int(row, "max_concurrent"),
-        enabled=_expect_bool(row, "enabled"),
-        managed_by=_expect_str(row, "managed_by"),
+        id=_ROWS.uuid(row, "id"),
+        kind=_ROWS.string(row, "kind"),
+        base_image_volume=_ROWS.optional_string(row, "base_image_volume"),
+        workspace_root=_ROWS.string(row, "workspace_root"),
+        max_concurrent=_ROWS.integer(row, "max_concurrent"),
+        enabled=_ROWS.boolean(row, "enabled"),
+        managed_by=_ROWS.string(row, "managed_by"),
     )
 
 
 def _prune_row(row: Mapping[str, object]) -> _PruneBuildHostRow:
-    return _PruneBuildHostRow(id=_expect_uuid(row, "id"), name=_expect_str(row, "name"))
-
-
-def _expect_uuid(row: Mapping[str, object], field: str) -> UUID:
-    value = row[field]
-    if not isinstance(value, UUID):
-        raise _row_error(field, "uuid")
-    return value
-
-
-def _expect_str(row: Mapping[str, object], field: str) -> str:
-    value = row[field]
-    if not isinstance(value, str):
-        raise _row_error(field, "str")
-    return value
-
-
-def _expect_optional_str(row: Mapping[str, object], field: str) -> str | None:
-    value = row[field]
-    if value is not None and not isinstance(value, str):
-        raise _row_error(field, "str or null")
-    return value
-
-
-def _expect_int(row: Mapping[str, object], field: str) -> int:
-    value = row[field]
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise _row_error(field, "int")
-    return value
-
-
-def _expect_bool(row: Mapping[str, object], field: str) -> bool:
-    value = row[field]
-    if not isinstance(value, bool):
-        raise _row_error(field, "bool")
-    return value
-
-
-def _row_error(field: str, expected: str) -> InventoryError:
-    return InventoryError("build_hosts", field, f"database row expected {expected}")
+    return _PruneBuildHostRow(id=_ROWS.uuid(row, "id"), name=_ROWS.string(row, "name"))
 
 
 __all__ = ["reconcile_build_hosts"]
