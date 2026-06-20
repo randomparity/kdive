@@ -85,7 +85,7 @@ Prometheus renderer (`health/metrics_text.py`) maps to `kdive_<area>_<name>`.
   and an `AdmissionMetrics` emitter (`record_decision(outcome)`, `record_wait(seconds)`,
   `disabled()`).
 - `_AdmissionReason` = {none, quota, budget, capacity, affinity, pcie, configuration,
-  queue_timeout} (8). `outcome` ∈ {granted, rejected, queued}.
+  queue_timeout, unknown} (9). `outcome` ∈ {granted, rejected, queued}.
 - `classify` keys on the **full outcome shape**, not the category alone, because the success
   flag and the error categories are both overloaded:
   - **`granted=True` and `allocation.state == GRANTED`** → (`granted`, `none`).
