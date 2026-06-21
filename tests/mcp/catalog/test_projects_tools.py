@@ -63,6 +63,15 @@ def test_role_less_membership_is_surfaced_with_empty_role() -> None:
     assert _items(resp) == [{"project": "x", "role": ""}]
 
 
+def test_each_granted_project_item_has_ok_status() -> None:
+    ctx = _ctx(
+        projects=("a", "b"),
+        roles={"a": Role.VIEWER, "b": Role.OPERATOR},
+    )
+    resp = whoami(ctx)
+    assert [item.status for item in resp.items] == ["ok", "ok"]
+
+
 def test_platform_only_token_has_no_items_but_reports_platform_roles() -> None:
     ctx = _ctx(
         projects=(),
