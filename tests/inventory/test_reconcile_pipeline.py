@@ -14,19 +14,21 @@ from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile_images import ImageHeadStore
 
 
-def _recorder(name: str, calls: list[str]):
-    async def _fn(*_args: object, **_kwargs: object) -> ReconcileDiff:
+def _recorder(name: str, calls: list[str], received: dict[str, tuple[object, ...]]):
+    async def _fn(*args: object, **_kwargs: object) -> ReconcileDiff:
         calls.append(name)
+        received[name] = args
         return ReconcileDiff()
 
     return _fn
 
 
-def _int_recorder(name: str, calls: list[str]):
+def _int_recorder(name: str, calls: list[str], received: dict[str, tuple[object, ...]]):
     """A recorder for the override GC step, which returns an ``int`` (the cleared count)."""
 
-    async def _fn(*_args: object, **_kwargs: object) -> int:
+    async def _fn(*args: object, **_kwargs: object) -> int:
         calls.append(name)
+        received[name] = args
         return 0
 
     return _fn
@@ -34,6 +36,7 @@ def _int_recorder(name: str, calls: list[str]):
 
 def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
+    received: dict[str, tuple[object, ...]] = {}
     for name in (
         "reconcile_images",
         "reconcile_coefficients",
@@ -41,18 +44,24 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_build_hosts",
         "reconcile_build_configs",
     ):
-        monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls))
+        monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls, received))
     monkeypatch.setattr(
-        reconcile_pipeline, "reconcile_overrides_gc", _int_recorder("reconcile_overrides_gc", calls)
+        reconcile_pipeline,
+        "reconcile_overrides_gc",
+        _int_recorder("reconcile_overrides_gc", calls, received),
     )
 
     # The sub-passes are monkeypatched, so the args are inert sentinels; cast satisfies the
-    # signature without standing up a real connection/doc/store.
+    # signature without standing up a real connection/doc/store. Distinct objects let each
+    # recorder assert it received the right one in the right position.
+    conn = object()
+    doc = object()
+    store = object()
     asyncio.run(
         reconcile_pipeline.reconcile_all(
-            cast("AsyncConnection", object()),
-            cast("InventoryDoc", object()),
-            cast("ImageHeadStore", object()),
+            cast("AsyncConnection", conn),
+            cast("InventoryDoc", doc),
+            cast("ImageHeadStore", store),
         )
     )
 
@@ -67,3 +76,12 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_build_configs",
         "reconcile_overrides_gc",
     ]
+
+    # Each pass receives exactly the orchestrator's connection/doc (and store where applicable)
+    # in the documented positional order — a misforwarded or dropped argument is a real bug.
+    assert received["reconcile_images"] == (conn, doc, store)
+    assert received["reconcile_coefficients"] == (conn, doc)
+    assert received["reconcile_resources"] == (conn, doc)
+    assert received["reconcile_build_hosts"] == (conn, doc)
+    assert received["reconcile_build_configs"] == (conn, doc, store)
+    assert received["reconcile_overrides_gc"] == (conn, doc)
