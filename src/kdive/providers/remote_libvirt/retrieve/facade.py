@@ -17,7 +17,6 @@ from kdive.providers.remote_libvirt.guest.agent import (
     qemu_agent_command,
 )
 from kdive.providers.remote_libvirt.retrieve.common import (
-    MAX_CORE_BYTES,
     OpenRetrieveConnection,
     StorePort,
     open_libvirt_capture,
@@ -25,8 +24,6 @@ from kdive.providers.remote_libvirt.retrieve.common import (
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
     HostDumpCapturer,
     HostDumpOptions,
-    read_core_build_id_from_file,
-    read_core_dmesg_from_file,
 )
 from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     DEFAULT_PUT_EXPIRY_S,
@@ -35,6 +32,11 @@ from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
     KdumpCapturer,
 )
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
+from kdive.providers.shared.debug_common.core_file import (
+    MAX_CORE_BYTES,
+    read_core_build_id_from_file,
+    read_core_dmesg_from_file,
+)
 from kdive.providers.shared.debug_common.crash_postmortem import (
     FetchObject,
     ReadBuildId,

@@ -25,7 +25,6 @@ from kdive.providers.remote_libvirt.guest.agent import (
 from kdive.providers.remote_libvirt.guest.artifact_channel import InTargetArtifactChannel
 from kdive.providers.remote_libvirt.retrieve.common import (
     HELPER,
-    MAX_CORE_BYTES,
     OWNER_KIND,
     RETENTION,
     TENANT,
@@ -41,6 +40,7 @@ from kdive.providers.remote_libvirt.retrieve.common import (
     persist_redacted,
     readiness_failure,
 )
+from kdive.providers.shared.debug_common.core_file import MAX_CORE_BYTES
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend

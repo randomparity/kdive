@@ -32,7 +32,6 @@ HELPER = "/usr/local/sbin/kdive-capture-vmcore"
 TENANT = "remote-libvirt"
 RETENTION = "vmcore"
 OWNER_KIND = "systems"
-MAX_CORE_BYTES = 5 * 1024**3
 
 
 class CoreInfo(NamedTuple):

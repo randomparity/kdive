@@ -7,7 +7,6 @@ import contextlib
 import hashlib
 import logging
 import os
-import re
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -38,16 +37,13 @@ from kdive.providers.remote_libvirt.retrieve.common import (
     lookup,
     persist_redacted,
 )
+from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend
 
 _log = logging.getLogger(__name__)
 
-DMESG_UNAVAILABLE = (
-    b"[kdive] dmesg could not be extracted from this host_dump core "
-    b"(kernel debuginfo required); see the crash postmortem for the kernel log\n"
-)
 DIR_POOL_TYPES = frozenset({"dir", "fs", "netfs"})
 SPOOL_CHUNK_BYTES = 8 * 1024 * 1024
 
@@ -55,49 +51,6 @@ SPOOL_CHUNK_BYTES = 8 * 1024 * 1024
 def host_dump_volume_name(system_id: UUID) -> str:
     """The deterministic per-System dump-volume filename inside the storage pool."""
     return f"kdive-host-dump-{system_id}.kdump"
-
-
-def open_core_program(core: Path) -> Any:  # pragma: no cover - live_vm (drgn)
-    try:
-        import drgn  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
-    except ImportError as exc:
-        raise CategorizedError(
-            "drgn is not installed on this worker host; host_dump build-id/dmesg needs it",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-        ) from exc
-    prog = drgn.Program()
-    prog.set_core_dump(os.fspath(core))
-    return prog
-
-
-def read_core_build_id_from_file(core: Path) -> str:  # pragma: no cover - live_vm (drgn)
-    """The crashed kernel's GNU build-id from a compressed-kdump core's VMCOREINFO."""
-    prog = open_core_program(core)
-    vmcoreinfo = bytes(prog["VMCOREINFO"].value_())
-    match = re.search(rb"BUILD-ID=([0-9a-f]{40})", vmcoreinfo)
-    if match is None:
-        raise CategorizedError(
-            "host_dump core carries no VMCOREINFO BUILD-ID line; cannot verify provenance",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    return match.group(1).decode("ascii")
-
-
-def read_core_dmesg_from_file(core: Path) -> bytes:  # pragma: no cover - live_vm (drgn)
-    """The kernel log buffer from an ELF/kdump core (drgn ``get_dmesg``)."""
-    from drgn.helpers.linux.printk import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
-        get_dmesg,
-    )
-
-    prog = open_core_program(core)
-    try:
-        return get_dmesg(prog)
-    except Exception as exc:
-        raise CategorizedError(
-            "could not extract dmesg from the host_dump core; the printk ring buffer needs the "
-            "guest kernel's debuginfo, which is not loaded at capture time",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        ) from exc
 
 
 class HostDumpOptions(NamedTuple):
