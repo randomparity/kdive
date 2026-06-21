@@ -44,8 +44,12 @@ block so the serialize-merge conflict is small. Note the exact `tuning.py` hunks
   (`build_hosts/lifecycle.py`); `BuildHost` dataclass does **not** carry `managed_by`. `tuning.py`'s
   `set_host_capacity` `_update_host_cap` does a blind id-only UPDATE returning `rowcount==1`.
 - A new MCP tool needs **three** registrations: its registrar `@app.tool`, an entry in
-  `tests/mcp/core/test_tool_docs.py`, and `exposure.py` `PUBLIC_TOOLS` (+ a `CLASSIFIED_TOOLS`
-  scope). `inventory.clear_override` is `_PLAT_ADMIN`.
+  `tests/mcp/core/test_tool_docs.py`, and a scope in `exposure.py` **`CLASSIFIED_TOOLS`** (the gated
+  map — `inventory.clear_override` is `_PLAT_ADMIN`, sitting beside `build_hosts.remove: _PLAT_ADMIN`).
+  **Not** `PUBLIC_TOOLS` — that frozenset is for intentionally-ungated open reads (an admin mutation
+  there would be mislabeled as public). The completeness guard asserts
+  `CLASSIFIED_TOOLS | PUBLIC_TOOLS == live registry`. The registrar is wired into `mcp/app.py` via a
+  `_pool_only_plane_registrar` entry (it needs only pool + ctx, no provider resolver).
 
 ---
 
@@ -60,8 +64,14 @@ block so the serialize-merge conflict is small. Note the exact `tuning.py` hunks
 
 1. Add a `reason: str = ""` parameter (after `force`). The MCP registrar tool gains a `reason`
    argument (a non-secret audit string).
-2. The tool first resolves the row's `managed_by` / `kind` / `name`. Keep the existing
-   `_locked_runtime_row` runtime path **unchanged** (no `reason`, no ledger). Add a config path:
+2. **Branch dispatch.** Today `_locked_runtime_row` SELECTs `... WHERE id=%s AND
+   managed_by='runtime' FOR UPDATE`, so a config row misses and falls into `_classify_absent` (which
+   returns `CONFLICT`). B1 must route a config remote-libvirt row to the new accept path **before**
+   that rejection. Restructure so the tool first reads the row's `managed_by` + `kind` (unfiltered)
+   to dispatch: `runtime` → existing path unchanged (no `reason`, no ledger); `config` +
+   `remote_libvirt` → new config path below; `config`+other-kind / `discovery` → `CONFLICT`
+   (existing `_classify_absent` message); truly absent → `not_found`. Keep the existing
+   `_locked_runtime_row` runtime path **unchanged** for the runtime branch. The config path:
    when the row is `managed_by='config'` **and** `kind='remote_libvirt'`:
    - require a non-empty `reason` (strip-and-check) → else `config_error(resource_id, ...)`
      (`CONFIGURATION_ERROR`) **before** any row mutation.
@@ -125,8 +135,14 @@ least the ledger entry exists so reconcile suppresses it).
    UPDATE`, check `build_host_leases` first — if leased → `UPDATE build_hosts SET enabled = false`
    (cordon), else `DELETE`; then `set_override(conn, OverrideIdentity(BUILD_HOST,
    BUILD_HOST_RESOURCE_KIND, name), disposition=REMOVED, reason=reason, actor=...)`; audit.
-   - **Note:** if reusing `prune_or_cordon_build_host`, it opens its own transaction — so for the
-     config path, **inline** the lease-check + cordon/delete inside the tool's single transaction so
+   - **Serialization (mirror the helper):** the parent `build_hosts` row must be SELECTed
+     `FOR UPDATE` **before** the `build_host_leases` check (as written above). This is the exact lock
+     `prune_or_cordon_build_host` relies on — it conflicts with the implicit `FOR KEY SHARE` a
+     concurrent lease INSERT takes on the parent row, so a lease cannot land between the liveness
+     check and the delete to hit `ON DELETE RESTRICT` mid-pass. Do **not** instead lock only the
+     `build_host_leases` rows.
+   - **Note:** `prune_or_cordon_build_host` opens its own transaction — so for the config path,
+     **inline** the FOR UPDATE + lease-check + cordon/delete inside the tool's single transaction so
      the `set_override` is atomic with the row change (mirror the resource inline pattern).
 6. Success envelope reports `removed` (deleted) or `cordoned` (disabled) disposition.
 
@@ -184,9 +200,9 @@ block change; `export_*` (C) is untouched.
 
 **Files (new):** `src/kdive/mcp/tools/ops/inventory_overrides.py` (handler + registrar) — or extend
 an existing ops module; keep it out of `resources/` and `build_hosts/` since it spans both. Wire its
-registrar into `mcp/app.py` `_PLANE_REGISTRARS`. **Three registrations:** the registrar `@app.tool`,
-`tests/mcp/core/test_tool_docs.py`, and `exposure.py` `PUBLIC_TOOLS` + a `CLASSIFIED_TOOLS`
-(`_PLAT_ADMIN`) scope.
+registrar into `mcp/app.py` via a `_pool_only_plane_registrar` entry. **Three registrations:** the
+registrar `@app.tool`, `tests/mcp/core/test_tool_docs.py`, and `exposure.py` **`CLASSIFIED_TOOLS`**
+with a `_PLAT_ADMIN` scope (**not** `PUBLIC_TOOLS` — this is a gated admin mutation).
 
 **Where it fits:** spec §4 — the re-add path (clears a `removed`/`detached` entry).
 
