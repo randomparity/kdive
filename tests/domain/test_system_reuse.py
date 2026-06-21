@@ -111,6 +111,20 @@ def test_read_sizing_fallback_rejects_missing_profile_sizing() -> None:
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details == {"missing": ["memory_mb"]}
+    assert str(exc.value) == "provisioning profile is missing required sizing: memory_mb"
+
+
+def test_read_sizing_fallback_lists_all_missing_fields_comma_separated() -> None:
+    alloc = _alloc(vcpus=None, memory_gb=None, disk_gb=None)
+    profile = _profile()
+    del profile["vcpu"]
+    del profile["disk_gb"]
+
+    with pytest.raises(CategorizedError) as exc:
+        read_system_sizing(alloc, _system(profile))
+
+    assert exc.value.details == {"missing": ["vcpu", "disk_gb"]}
+    assert str(exc.value) == "provisioning profile is missing required sizing: vcpu, disk_gb"
 
 
 def test_read_sizing_fallback_rejects_non_integer_profile_sizing() -> None:
@@ -123,6 +137,20 @@ def test_read_sizing_fallback_rejects_non_integer_profile_sizing() -> None:
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details == {"invalid": ["memory_mb"]}
+    assert str(exc.value) == "provisioning profile has non-integer sizing: memory_mb"
+
+
+def test_read_sizing_fallback_lists_all_non_integer_fields_comma_separated() -> None:
+    alloc = _alloc(vcpus=None, memory_gb=None, disk_gb=None)
+    profile = _profile()
+    profile["vcpu"] = "4"
+    profile["disk_gb"] = 40.0
+
+    with pytest.raises(CategorizedError) as exc:
+        read_system_sizing(alloc, _system(profile))
+
+    assert exc.value.details == {"invalid": ["vcpu", "disk_gb"]}
+    assert str(exc.value) == "provisioning profile has non-integer sizing: vcpu, disk_gb"
 
 
 # --- snapshot_satisfies: sizing -------------------------------------------------------
