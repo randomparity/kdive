@@ -29,12 +29,13 @@ Mark a host unschedulable; placement skips/rejects it. Requires platform operato
 
 `implemented` · `destructive`
 
-Deregister a runtime resource.
+Deregister a runtime or config-owned remote-libvirt resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `force` | boolean | no | Typed confirmation required to deregister a resource with live allocations (destructive-tier). |
-| `resource_id` | string | yes | The runtime Resource UUID to deregister. |
+| `reason` | string | no | Audit reason; required (non-empty) when deregistering a config-owned remote-libvirt resource (durable removal via the override ledger). Ignored for a runtime resource. |
+| `resource_id` | string | yes | The Resource UUID to deregister. |
 
 ## `resources.describe`
 
