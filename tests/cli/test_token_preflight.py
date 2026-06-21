@@ -98,6 +98,33 @@ def test_accepts_two_segment_token() -> None:
     ensure_token_valid(two_segment, now=1000, margin_s=30)
 
 
+@pytest.mark.parametrize(
+    ("claims", "expected_body_len"),
+    [
+        # A 35-char (len % 4 == 3) body: the correct pad count is 1. A wrong modulus
+        # (e.g. `% 4` -> `% 5`) under-pads this length, so base64.urlsafe_b64decode raises
+        # binascii.Error, _decode_exp returns None, and the token is wrongly refused. This
+        # is the body length that pins the modulus in the padding line.
+        ({"exp": 10_000_000, "s": ""}, 35),
+        # A 20-char (len % 4 == 0) body needs zero padding: the padding line must add an
+        # empty string, exercising the no-padding branch.
+        ({"exp": 100_000}, 20),
+    ],
+)
+def test_accepts_token_across_body_padding_lengths(
+    claims: dict[str, object], expected_body_len: int
+) -> None:
+    # _jwt_with_claims strips '=' padding, so the body fed to _decode_exp is unpadded; the
+    # source's `body += "=" * (-len(body) % 4)` line is the only thing that restores it.
+    # base64.urlsafe_b64decode rejects an under-padded body (binascii.Error), so a mutant
+    # that corrupts the pad count makes _decode_exp return None for one of these body
+    # lengths and the token is wrongly refused. The exp is far past now so a decodable body
+    # is accepted.
+    token = _jwt_with_claims(claims)
+    assert len(token.split(".")[1]) == expected_body_len
+    ensure_token_valid(token, now=0, margin_s=30)
+
+
 def test_default_margin_is_thirty_seconds() -> None:
     # Called without margin_s, the default 30s applies: exp-now == 30 is refused (<=),
     # exp-now == 31 is accepted. This pins the default value, not just an explicit arg.

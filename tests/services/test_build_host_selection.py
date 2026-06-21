@@ -224,6 +224,11 @@ def test_disabled_host_is_not_available(monkeypatch: pytest.MonkeyPatch) -> None
 
         assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
         assert str(exc.value) == "build host 'builder' is not available"
+        assert exc.value.details == {
+            "build_host": "builder",
+            "enabled": False,
+            "state": BuildHostState.READY.value,
+        }
 
     asyncio.run(_run())
 
@@ -251,6 +256,11 @@ def test_unreachable_but_enabled_host_is_not_available(
 
         assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
         assert str(exc.value) == "build host 'builder' is not available"
+        assert exc.value.details == {
+            "build_host": "builder",
+            "enabled": True,
+            "state": BuildHostState.UNREACHABLE.value,
+        }
 
     asyncio.run(_run())
 
