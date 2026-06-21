@@ -10,6 +10,7 @@ debuginfo as ``debuginfo_ref``. Fakes are local to this file — nothing imports
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import subprocess
 import tarfile
@@ -595,17 +596,24 @@ def test_build_fails_when_fragment_symbol_dropped(tmp_path: Path) -> None:
 
 def test_real_run_modules_install_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[str]] = []
+    captured_kwargs: list[dict[str, object]] = []
 
-    def _capture(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+    def _capture(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         captured.append(argv)
-        return subprocess.CompletedProcess(argv, 0)
+        captured_kwargs.append(kwargs)
+        return subprocess.CompletedProcess(argv, 7)
 
     monkeypatch.setattr(subprocess, "run", _capture)
-    assert build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage")) == 0
+    # The make returncode is passed through unchanged (not normalized).
+    assert build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage")) == 7
     argv = captured[0]
     assert argv[:3] == ["make", "-C", "/ws"]
     assert "modules_install" in argv
     assert "INSTALL_MOD_PATH=/stage" in argv
+    # A bounded, non-checking run: the long build timeout and check=False (return the code,
+    # do not raise on non-zero) — guards timeout/check kwarg mutations.
+    assert captured_kwargs[0]["timeout"] == build_host_execution.MAKE_TIMEOUT_S
+    assert captured_kwargs[0]["check"] is False
 
 
 def test_real_run_modules_install_timeout_is_build_failure(
@@ -620,6 +628,8 @@ def test_real_run_modules_install_timeout_is_build_failure(
         build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make modules_install exceeded the build timeout"
+    assert caught.value.details == {"timeout_s": build_host_execution.MAKE_TIMEOUT_S}
 
 
 def test_real_run_modules_install_missing_make_is_missing_dependency(
@@ -634,6 +644,247 @@ def test_real_run_modules_install_missing_make_is_missing_dependency(
         build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
 
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "make is required for kernel builds"
+    assert caught.value.details == {"tool": "make"}  # the launching tool, named for the operator
+
+
+def test_real_run_modules_install_launch_oserror_is_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-FileNotFound OSError on launch is an infrastructure fault, not a missing dependency
+    # (guards the launch_failure category argument in run_make_target).
+    def _oserror(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise PermissionError("cannot exec make")
+
+    monkeypatch.setattr(subprocess, "run", _oserror)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"tool": "make", "op": "launch"}
+
+
+def test_real_run_make_falls_back_to_one_job_without_cpu_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the platform reports no cpu count, the build still runs at -j1 (guards the
+    # ``os.cpu_count() or 1`` fallback).
+    captured: list[list[str]] = []
+
+    def _capture(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(build_host_execution.os, "cpu_count", lambda: None)
+    monkeypatch.setattr(subprocess, "run", _capture)
+
+    build_host_execution.real_run_make(Path("/ws"))
+
+    assert captured[0][3] == "-j1"
+
+
+def test_real_run_make_argv_and_returncode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+    captured_kwargs: list[dict[str, object]] = []
+
+    def _capture(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        captured_kwargs.append(kwargs)
+        return subprocess.CompletedProcess(argv, 3)
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+
+    assert build_host_execution.real_run_make(Path("/ws")) == 3
+    argv = captured[0]
+    assert argv[:3] == ["make", "-C", "/ws"]
+    expected_jobs = os.cpu_count() or 1
+    assert argv[3] == f"-j{expected_jobs}"  # parallel build at cpu_count (>=1)
+    assert captured_kwargs[0]["timeout"] == build_host_execution.MAKE_TIMEOUT_S
+    assert captured_kwargs[0]["check"] is False
+
+
+def test_real_run_make_timeout_is_build_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(["make"], timeout=build_host_execution.MAKE_TIMEOUT_S)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_run_make(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make exceeded the build timeout"
+    assert caught.value.details == {"timeout_s": build_host_execution.MAKE_TIMEOUT_S}
+
+
+def test_real_run_make_launch_oserror_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-FileNotFound OSError on launch maps to INFRASTRUCTURE_FAILURE (a launch fault), not
+    # MISSING_DEPENDENCY — guards the launch_failure category/op branch.
+    def _oserror(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise PermissionError("cannot exec make")
+
+    monkeypatch.setattr(subprocess, "run", _oserror)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_run_make(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "make failed to launch"
+    assert caught.value.details == {"tool": "make", "op": "launch"}
+
+
+def _build_gnu_note(build_id_hex: str) -> bytes:
+    desc = bytes.fromhex(build_id_hex)
+    header = (
+        (4).to_bytes(4, "little")  # namesz for "GNU\0"
+        + len(desc).to_bytes(4, "little")  # descsz
+        + (3).to_bytes(4, "little")  # NT_GNU_BUILD_ID
+    )
+    return header + b"GNU\x00" + desc
+
+
+def test_real_read_build_id_objcopy_argv_and_parsed_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+    captured_kwargs: list[dict[str, object]] = []
+    build_id = "abcdef0123456789"
+
+    def _objcopy(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        captured_kwargs.append(kwargs)
+        Path(argv[-1]).write_bytes(_build_gnu_note(build_id))  # the note output file
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", _objcopy)
+
+    assert build_host_execution.real_read_build_id(Path("/ws")) == build_id
+    argv = captured[0]
+    assert argv[:5] == ["objcopy", "-O", "binary", "--only-section=.notes", "/ws/vmlinux"]
+    assert captured_kwargs[0]["timeout"] == build_host_execution.OBJCOPY_TIMEOUT_S
+    assert captured_kwargs[0]["check"] is True  # a non-zero objcopy must raise CalledProcessError
+
+
+def test_real_read_build_id_objcopy_failure_is_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(subprocess, "run", _fail)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "objcopy failed to extract vmlinux notes"
+
+
+def test_real_read_build_id_objcopy_timeout_is_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(["objcopy"], timeout=build_host_execution.OBJCOPY_TIMEOUT_S)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "objcopy exceeded the build-id extraction timeout"
+    assert caught.value.details == {"timeout_s": build_host_execution.OBJCOPY_TIMEOUT_S}
+
+
+def test_real_read_build_id_missing_objcopy_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError("objcopy")
+
+    monkeypatch.setattr(subprocess, "run", _missing)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert caught.value.details == {"tool": "objcopy"}
+
+
+def test_real_read_build_id_launch_oserror_is_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-FileNotFound OSError launching objcopy is an infrastructure fault (guards the
+    # launch_failure category argument).
+    def _oserror(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise PermissionError("cannot exec objcopy")
+
+    monkeypatch.setattr(subprocess, "run", _oserror)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"tool": "objcopy", "op": "launch"}
+
+
+def test_read_text_file_missing_is_categorized(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.read_text_file(
+            tmp_path / "nope.config",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            file_label=".config",
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == ".config is missing or unreadable"
+    assert caught.value.details == {"file": ".config"}
+
+
+def test_read_text_file_reads_existing(tmp_path: Path) -> None:
+    target = tmp_path / "ok.config"
+    target.write_text("CONFIG_X=y\n")
+    assert (
+        build_host_execution.read_text_file(
+            target, category=ErrorCategory.CONFIGURATION_ERROR, file_label=".config"
+        )
+        == "CONFIG_X=y\n"
+    )
+
+
+def test_read_bytes_file_missing_is_categorized(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.read_bytes_file(
+            tmp_path / "absent", category=ErrorCategory.BUILD_FAILURE, output="vmlinux"
+        )
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "vmlinux is missing or unreadable"
+    assert caught.value.details == {"output": "vmlinux"}
+
+
+def test_launch_failure_missing_vs_other_oserror() -> None:
+    missing = build_host_execution.launch_failure(
+        "objcopy", FileNotFoundError(), category=ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    assert missing.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(missing) == "objcopy is required for kernel builds"
+    assert missing.details == {"tool": "objcopy"}
+
+    other = build_host_execution.launch_failure(
+        "objcopy", PermissionError(), category=ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    assert other.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(other) == "objcopy failed to launch"
+    assert other.details == {"tool": "objcopy", "op": "launch"}
+
+
+def test_workspace_failure_is_infrastructure_with_op_and_path() -> None:
+    err = build_host_execution.workspace_failure("rmtree", "/ws/123", OSError("boom"))
+    assert err.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(err) == "build workspace rmtree failed"
+    assert err.details == {"op": "rmtree", "path": "/ws/123"}
 
 
 def _write_fake_build_tree(workspace: Path, mod_root: Path, version: str = "6.9.0") -> None:
