@@ -24,16 +24,19 @@ class _FakeStore:
         self._fail_abort = fail_abort
 
     def head(self, key: str) -> HeadResult | None:
-        sizes = {".part0001": (6, "c0"), ".part0002": (4, "c1")}
-        for suffix, (size, sha) in sizes.items():
-            if key.endswith(suffix):
-                return HeadResult(size_bytes=size, checksum_sha256=sha, etag="e")
+        sizes = {
+            f"{_PREFIX}vmlinux.part0001": (6, "c0"),
+            f"{_PREFIX}vmlinux.part0002": (4, "c1"),
+        }
+        if key in sizes:
+            size, sha = sizes[key]
+            return HeadResult(size_bytes=size, checksum_sha256=sha, etag="e")
         return None
 
     def create_multipart_upload(
         self, key: str, *, sensitivity: Sensitivity, retention_class: str
     ) -> str:
-        self.events.append(("create", key))
+        self.events.append(("create", key, sensitivity, retention_class))
         return "uid"
 
     def upload_part_copy(
@@ -41,17 +44,17 @@ class _FakeStore:
     ) -> str:
         if self._fail_copy_at == part_number:
             raise CategorizedError("boom", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
-        self.events.append(("copy", part_number, source_key))
+        self.events.append(("copy", part_number, source_key, key, upload_id))
         return f"etag-{part_number}"
 
     def complete_multipart_upload(
         self, key: str, upload_id: str, parts: Sequence[tuple[int, str]]
     ) -> str:
-        self.events.append(("complete", tuple(parts)))
+        self.events.append(("complete", tuple(parts), key, upload_id))
         return "final"
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
-        self.events.append(("abort", key))
+        self.events.append(("abort", key, upload_id))
         if self._fail_abort:
             raise CategorizedError("abort failed", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
@@ -69,11 +72,31 @@ def test_reassemble_verifies_copies_in_order_completes() -> None:
     assert store.events[3][1] == ((1, "etag-1"), (2, "etag-2"))
 
 
+def test_reassemble_passes_expected_arguments_to_store() -> None:
+    store = _FakeStore()
+    reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
+
+    create = store.events[0]
+    assert create == ("create", _FINAL, Sensitivity.SENSITIVE, "build")
+
+    first_copy = store.events[1]
+    assert first_copy[2] == f"{_PREFIX}vmlinux.part0001"
+    assert first_copy[3] == _FINAL
+    assert first_copy[4] == "uid"
+
+    second_copy = store.events[2]
+    assert second_copy[2] == f"{_PREFIX}vmlinux.part0002"
+
+    complete = store.events[3]
+    assert complete[2] == _FINAL
+    assert complete[3] == "uid"
+
+
 def test_reassemble_aborts_on_copy_failure() -> None:
     store = _FakeStore(fail_copy_at=2)
     with pytest.raises(CategorizedError):
         reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
-    assert ("abort", _FINAL) in store.events
+    assert ("abort", _FINAL, "uid") in store.events
 
 
 def test_reassemble_preserves_copy_failure_when_abort_also_fails(
@@ -85,7 +108,7 @@ def test_reassemble_preserves_copy_failure_when_abort_also_fails(
         pytest.raises(CategorizedError, match="boom"),
     ):
         reassemble_chunked(store, prefix=_PREFIX, final_key=_FINAL, entry=_entry())
-    assert ("abort", _FINAL) in store.events
+    assert ("abort", _FINAL, "uid") in store.events
     record = next(
         record for record in caplog.records if "multipart upload abort failed" in record.message
     )
@@ -113,4 +136,5 @@ def test_reassemble_rejects_non_chunked_entry_before_mpu() -> None:
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details == {"name": "vmlinux"}
+    assert str(exc.value) == "artifact is not declared as chunked"
     assert store.events == []
