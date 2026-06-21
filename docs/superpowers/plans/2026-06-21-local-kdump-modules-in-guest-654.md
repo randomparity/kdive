@@ -193,13 +193,13 @@ git commit -m "feat: add modules_ref to BuildOutput and BuildStepResult"
 
 - [ ] **Step 1: Write the failing test — modules produced when kdump-capable**
 
-Add to `tests/providers/local_libvirt/test_build.py` (the `_Seams`/`_FakeStore`/`_builder` helpers already exist; `_GOOD_CONFIG` already contains `CONFIG_CRASH_DUMP=y`). Extend `_Seams` with module seams and add tests:
+Add to `tests/providers/local_libvirt/test_build.py` (the `_Seams`/`_FakeStore`/`_builder`/`_profile()` helpers and the module-level `_RUN` UUID constant already exist; `_GOOD_CONFIG` already contains `CONFIG_CRASH_DUMP=y`). Use the file's `_RUN`/`_profile()` convention, not a fresh `uuid4()`. Extend `_Seams` with module seams and add tests:
 
 ```python
 def test_build_publishes_modules_ref_when_config_is_kdump_capable(tmp_path: Path) -> None:
     store, seams = _FakeStore(), _Seams()  # _GOOD_CONFIG has CONFIG_CRASH_DUMP=y
     builder = _builder(store, seams, tmp_path)
-    output = builder.build(uuid4(), _profile())
+    output = builder.build(_RUN, _profile())
     assert output.modules_ref is not None
     assert "modules" in store.artifacts
 
@@ -207,7 +207,7 @@ def test_build_publishes_modules_ref_when_config_is_kdump_capable(tmp_path: Path
 def test_build_skips_modules_ref_when_config_not_kdump_capable(tmp_path: Path) -> None:
     store, seams = _FakeStore(), _Seams(config_text="CONFIG_DEBUG_INFO_DWARF5=y\n")
     builder = _builder(store, seams, tmp_path)
-    output = builder.build(uuid4(), _profile())
+    output = builder.build(_RUN, _profile())
     assert output.modules_ref is None
     assert "modules" not in store.artifacts
 ```
@@ -406,7 +406,7 @@ def test_build_modules_install_failure_is_build_failure(tmp_path: Path) -> None:
     store, seams = _FakeStore(), _Seams(modules_install_returncode=2)
     builder = _builder(store, seams, tmp_path)
     with pytest.raises(CategorizedError) as caught:
-        builder.build(uuid4(), _profile())
+        builder.build(_RUN, _profile())
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
 ```
 
@@ -435,13 +435,15 @@ git commit -m "feat: local build publishes a kdump modules_ref when crash-dump-c
 
 - [ ] **Step 1: Write the failing test**
 
-In `tests/jobs/handlers/test_runs_build.py`, find the test asserting the ledger result shape (search for `kernel_ref` assertions) and add one that the handler copies `modules_ref` from a fake builder's `BuildOutput` into the persisted `BuildStepResult`. Mirror the existing build-success test's fixtures; assert the stored `run_steps` build row's `result` contains `modules_ref`.
+In `tests/jobs/handlers/test_runs_build.py`, mirror the existing build-success test (the one that runs `build_handler` and asserts the persisted `kernel_ref`/`debuginfo_ref` via `existing_build_result`). Add `test_build_handler_persists_modules_ref`: reuse that test's fixtures but have the fake builder/resolver return a `BuildOutput` whose `modules_ref="runs/<run_id>/modules"`, run `build_handler`, and assert the persisted result carries it.
 
 ```python
-async def test_build_handler_persists_modules_ref(...) -> None:
-    # arrange a fake builder returning BuildOutput(..., modules_ref="runs/<id>/modules")
-    # act: run build_handler
-    # assert: existing_build_result(conn, run_id).modules_ref == "runs/<id>/modules"
+async def test_build_handler_persists_modules_ref(<copy the success test's fixture params>) -> None:
+    # fake builder returns BuildOutput(kernel_ref=..., debuginfo_ref=..., build_id=...,
+    #                                  modules_ref="runs/<run_id>/modules")
+    await build_handler(conn, job, resolver=resolver, secret_registry=registry)
+    result = await existing_build_result(conn, run_id)
+    assert result is not None and result.modules_ref == "runs/<run_id>/modules"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -482,7 +484,7 @@ git commit -m "feat: persist modules_ref from the build output to the run-steps 
 **Files:**
 - Modify: `src/kdive/providers/ports/lifecycle.py:59-68`
 - Modify: `src/kdive/jobs/handlers/runs_install.py:26,63-79`
-- Test: `tests/jobs/handlers/` install handler test (mirror the existing one that asserts `initrd_ref` flows into `InstallRequest`)
+- Test: `tests/jobs/handlers/test_runs_install.py` (mirror the existing test there that asserts `initrd_ref` flows from the build ledger into `InstallRequest` via the fake installer)
 
 **Interfaces:**
 - Consumes: `installed_modules_ref(conn, run_id)` (Task 1).
@@ -490,11 +492,11 @@ git commit -m "feat: persist modules_ref from the build output to the run-steps 
 
 - [ ] **Step 1: Write the failing test**
 
-In the install-handler test module (search `tests/` for `installed_initrd_ref` usage / the install handler test), add a test that a Run whose build ledger carries `modules_ref` produces an `InstallRequest` with that `modules_ref` (capture the `InstallRequest` via a fake installer).
+In `tests/jobs/handlers/test_runs_install.py`, mirror the existing test that captures the `InstallRequest` through the fake installer and asserts `initrd_ref`. Add `test_install_handler_passes_modules_ref`: seed the Run's build ledger with a `BuildStepResult` carrying `modules_ref="runs/<id>/modules"` (the same way the existing test seeds `initrd_ref`), run the install handler, and assert the captured `InstallRequest.modules_ref` equals that value.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run python -m pytest <that test file> -k modules_ref -q`
+Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py -k modules_ref -q`
 Expected: FAIL — `TypeError: ... 'modules_ref'` or the captured request's `modules_ref` is unset.
 
 - [ ] **Step 3: Add the field to `InstallRequest`**
@@ -540,13 +542,13 @@ from kdive.services.runs.steps import installed_initrd_ref, installed_modules_re
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `uv run python -m pytest <that test file> -q && just type`
+Run: `uv run python -m pytest tests/jobs/handlers/test_runs_install.py -q && just type`
 Expected: PASS; clean types.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/kdive/providers/ports/lifecycle.py src/kdive/jobs/handlers/runs_install.py tests/
+git add src/kdive/providers/ports/lifecycle.py src/kdive/jobs/handlers/runs_install.py tests/jobs/handlers/test_runs_install.py
 git commit -m "feat: thread modules_ref through the install request"
 ```
 
@@ -566,17 +568,35 @@ git commit -m "feat: thread modules_ref through the install request"
 
 - [ ] **Step 1: Write failing tests for the broadened gate**
 
-In `tests/providers/local_libvirt/test_install.py`, add a fake module-writer to the install fakes and `_install(...)` helper (param `module_writer`), then:
+In `tests/providers/local_libvirt/test_install.py`, add a fake module-writer + a fake fetch-recorder, and an `events: list[str]` shared by the fake domain, the fetch seam, and the writer so ordering is assertable. Extend `_install(...)` with `module_writer` and `fetch_modules` params. The fake domain must report `isActive() == 1` and append `"destroy"` to `events` on `destroy()` (so the force-off guard is observable). Then:
 
 ```python
 def test_install_kdump_with_modules_ref_injects_and_no_initrd_rendered(tmp_path: Path) -> None:
-    conn = _conn_with_existing()
-    writer = _FakeModuleWriter()
-    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer)
+    conn = _conn_with_existing()  # its domain is active
+    events: list[str] = []
+    writer = _FakeModuleWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer, fetch_modules=fetch)
     inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
-    assert writer.injected  # modules written to the overlay
+    assert writer.injected
+    assert fetch.refs == ["runs/r/modules"]            # the modules tarball was fetched
+    assert events.index("destroy") < events.index("fetch") < events.index("inject")  # force-off first
     assert len(conn.defined_xml) == 1
-    assert "<initrd>" not in conn.defined_xml[0]  # production boot has no initrd
+    assert "<initrd>" not in conn.defined_xml[0]        # production boot has no initrd
+
+
+def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(tmp_path: Path) -> None:
+    # The corruption guard must fire before the writer touches the overlay, regardless of outcome.
+    conn = _conn_with_existing()
+    events: list[str] = []
+    writer = _FakeModuleWriter(events, fail=True)
+    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer,
+                    fetch_modules=_RecordingFetch(events))
+    with pytest.raises(CategorizedError) as caught:
+        inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert events[0] == "destroy"   # force-off happened before the failed inject
+    assert conn.defined_xml == []   # nothing redefined
 
 
 def test_install_kdump_with_neither_modules_nor_initrd_is_config_error(tmp_path: Path) -> None:
@@ -588,19 +608,31 @@ def test_install_kdump_with_neither_modules_nor_initrd_is_config_error(tmp_path:
     assert conn.defined_xml == []
 ```
 
-`_FakeModuleWriter`:
+Fakes:
 
 ```python
 @dataclass
 class _FakeModuleWriter:
+    events: list[str]
     injected: bool = False
     fail: bool = False
 
     def inject(self, overlay: str, modules_tar: Path) -> None:
+        self.events.append("inject")
         if self.fail:
             raise CategorizedError("synthetic inject failure",
                                    category=ErrorCategory.INFRASTRUCTURE_FAILURE)
         self.injected = True
+
+
+@dataclass
+class _RecordingFetch:
+    events: list[str]
+    refs: list[str] = field(default_factory=list)
+
+    def __call__(self, ref: str, dest: Path) -> None:
+        self.events.append("fetch")
+        self.refs.append(ref)
 ```
 
 The existing `test_install_kdump_without_initrd_is_config_error_before_redefine` stays valid (KDUMP + neither). The existing `test_install_kdump_with_initrd_proceeds` stays valid (KDUMP + `initrd_ref` → upload-lane path admitted).
@@ -632,6 +664,8 @@ Add the injection step inside `install()` (after staging the kernel, before the 
 ```
 
 `_force_off_if_active` opens the connection, looks up the domain, and `destroy()`s it if `isActive()` (idempotent, mirrors `_power_cycle`).
+
+**Partial-failure note:** injection mutates the per-System overlay before the later `defineXML`. If a subsequent install step fails, the overlay keeps the injected `/lib/modules/<ver>` — this is benign because install records no `run_steps` row on failure (ADR-0030 §2), so the worker's retry re-enters injection and the idempotent clobber-then-extract self-heals any partial write. No separate rollback is needed; do not attempt to "undo" the overlay write.
 
 - [ ] **Step 4: Broaden the kdump gate**
 
