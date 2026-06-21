@@ -19,6 +19,7 @@ from kdive.inventory.reconcile_build_configs import reconcile_build_configs
 from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
 from kdive.inventory.reconcile_coefficients import reconcile_coefficients
 from kdive.inventory.reconcile_images import ImageHeadStore, reconcile_images
+from kdive.inventory.reconcile_overrides import reconcile_overrides_gc
 from kdive.inventory.reconcile_resources import reconcile_resources
 
 
@@ -27,10 +28,12 @@ async def reconcile_all(
 ) -> ReconcileDiff:
     """Reconcile ``doc`` into the catalog in dependency order; return one merged diff.
 
-    Order: images → **coefficients → resources** → build hosts → build configs. Coefficients
-    precede resources so a host lands priced (ADR-0115 §2); build configs run last, with no
-    cross-entity dependency (ADR-0122 §4). Each sub-pass owns its own locks and transactions;
-    this helper only sequences them and folds the per-entity diffs.
+    Order: images → **coefficients → resources** → build hosts → build configs → override GC.
+    Coefficients precede resources so a host lands priced (ADR-0115 §2); build configs run with no
+    cross-entity dependency (ADR-0122 §4). The inventory-override GC (ADR-0199) runs **last**, after
+    the resource and build-host passes have applied this ``doc``, so it sees the post-reconcile live
+    rows and drops settled ledger entries. Each sub-pass owns its own locks and transactions; this
+    helper only sequences them and folds the per-entity diffs.
     """
     merged = ReconcileDiff()
     _extend(merged, await reconcile_images(conn, doc, store))
@@ -38,6 +41,7 @@ async def reconcile_all(
     _extend(merged, await reconcile_resources(conn, doc))
     _extend(merged, await reconcile_build_hosts(conn, doc))
     _extend(merged, await reconcile_build_configs(conn, doc, store))
+    await reconcile_overrides_gc(conn, doc)
     return merged
 
 

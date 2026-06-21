@@ -22,6 +22,16 @@ def _recorder(name: str, calls: list[str]):
     return _fn
 
 
+def _int_recorder(name: str, calls: list[str]):
+    """A recorder for the override GC step, which returns an ``int`` (the cleared count)."""
+
+    async def _fn(*_args: object, **_kwargs: object) -> int:
+        calls.append(name)
+        return 0
+
+    return _fn
+
+
 def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     for name in (
@@ -32,6 +42,9 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
         "reconcile_build_configs",
     ):
         monkeypatch.setattr(reconcile_pipeline, name, _recorder(name, calls))
+    monkeypatch.setattr(
+        reconcile_pipeline, "reconcile_overrides_gc", _int_recorder("reconcile_overrides_gc", calls)
+    )
 
     # The sub-passes are monkeypatched, so the args are inert sentinels; cast satisfies the
     # signature without standing up a real connection/doc/store.
@@ -45,10 +58,12 @@ def test_pipeline_invokes_coefficients_before_resources(monkeypatch: pytest.Monk
 
     # The load-bearing invariant: a host's price is upserted before its row is reconciled.
     assert calls.index("reconcile_coefficients") < calls.index("reconcile_resources")
+    # The override GC runs last, after the resource/build-host passes apply the doc (ADR-0199).
     assert calls == [
         "reconcile_images",
         "reconcile_coefficients",
         "reconcile_resources",
         "reconcile_build_hosts",
         "reconcile_build_configs",
+        "reconcile_overrides_gc",
     ]

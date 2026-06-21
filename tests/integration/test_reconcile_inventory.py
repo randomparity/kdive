@@ -2109,3 +2109,425 @@ def test_drift_detected_under_concurrent_ops_override(migrated_url: str) -> None
             assert await _coeff_row(pool, "premium") == Decimal("1.0")
 
     asyncio.run(_run())
+
+
+# --- Inventory override ledger (ADR-0199, #638) ------------------------------------------
+#
+# Sub-issue A: the reconcile inventory pass consults inventory_overrides so a runtime mutation
+# wins over systems.toml without losing drift repair for an identity with NO ledger entry.
+# These tests hand-insert ledger rows (the operator-facing mutation tools land in sub-issue B)
+# and assert each disposition's reconcile behavior plus the no-entry drift-repair regression.
+
+
+async def _set_ledger(
+    conn: psycopg.AsyncConnection,
+    *,
+    source_kind: str,
+    resource_kind: str,
+    name: str,
+    disposition: str,
+) -> None:
+    from kdive.inventory.overrides import (
+        InventoryOverrideDisposition,
+        InventorySourceKind,
+        OverrideIdentity,
+        set_override,
+    )
+
+    identity = OverrideIdentity(
+        source_kind=InventorySourceKind(source_kind), resource_kind=resource_kind, name=name
+    )
+    await set_override(
+        conn,
+        identity,
+        disposition=InventoryOverrideDisposition(disposition),
+        reason="test",
+        actor="operator",
+    )
+
+
+async def _ledger_exists(
+    conn: psycopg.AsyncConnection, *, source_kind: str, resource_kind: str, name: str
+) -> bool:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT 1 FROM inventory_overrides "
+            "WHERE source_kind = %s AND resource_kind = %s AND name = %s",
+            (source_kind, resource_kind, name),
+        )
+        return await cur.fetchone() is not None
+
+
+async def reconcile_all_for_test(conn: psycopg.AsyncConnection, doc: InventoryDoc) -> None:
+    """Run the resource + build-host passes then the override GC (the GC's input is the doc).
+
+    The full ``reconcile_all`` also runs the image/coefficient passes, which need a store; these
+    ledger tests touch neither, so this helper drives only the resource path plus the GC step the
+    GC tests assert.
+    """
+    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+    from kdive.inventory.reconcile_overrides import reconcile_overrides_gc
+
+    await reconcile_resources(conn, doc)
+    await reconcile_build_hosts(conn, doc)
+    await reconcile_overrides_gc(conn, doc)
+
+
+def test_removed_ledger_skips_recreate_across_passes(migrated_url: str, tmp_path: Path) -> None:
+    # A `removed` entry for a still-declared fault-inject identity: reconcile does not (re)create
+    # the row, across two passes — the file still declares it, so this is ledger-driven, not
+    # file-departure.
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-gone")))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with await _connect(migrated_url) as seed:
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-gone",
+                    disposition="removed",
+                )
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            assert (
+                await _resource_count(check, kind="fault-inject", host_uri="fault-inject://local")
+                == 0
+            )
+
+    asyncio.run(_run())
+
+
+def test_removed_ledger_cordons_a_live_row_not_deletes(migrated_url: str, tmp_path: Path) -> None:
+    # A `removed` entry whose row is live: the row is cordoned (not deleted). The file still
+    # declares the identity, so the cordon is ledger-driven, not file-departure.
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-live")))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            async with await _connect(migrated_url) as seed:
+                row = await _resource_by_name(seed, "fi-live")
+                rid = row["id"]
+                assert isinstance(rid, UUID)
+                await _seed_live_allocation_on(seed, rid)
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-live",
+                    disposition="removed",
+                )
+            async with pool.connection() as conn:
+                diff = await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            cordoned = await _resource_by_name(check, "fi-live")  # still present, cordoned
+        assert cordoned["cordoned"] is True
+        assert "fi-live" in {c.name for c in diff.cordoned}
+        assert "fi-live" not in {p.name for p in diff.pruned}
+
+    asyncio.run(_run())
+
+
+def test_removed_ledger_deletes_a_never_allocated_row(migrated_url: str, tmp_path: Path) -> None:
+    # A `removed` entry whose row never held an allocation is hard-deleted (FK-safe). A resource
+    # that ever held an allocation keeps an accounting FK and cannot be row-deleted — it stays
+    # cordoned (see test_removed_ledger_cordons_a_live_row_not_deletes); a never-allocated one is
+    # deletable, so the ledger-driven delete fires.
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-del")))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            async with await _connect(migrated_url) as seed:
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-del",
+                    disposition="removed",
+                )
+            async with pool.connection() as conn:
+                diff = await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            assert (
+                await _resource_count(check, kind="fault-inject", host_uri="fault-inject://local")
+                == 0
+            )
+        assert "fi-del" in {p.name for p in diff.pruned}
+
+    asyncio.run(_run())
+
+
+def test_detached_ledger_preserves_runtime_cap_over_file(migrated_url: str, tmp_path: Path) -> None:
+    # A `detached` entry: a file concurrent_allocation_cap that differs from the live row does
+    # NOT overwrite the runtime cap. The row's existence/identity is kept; only the field
+    # overwrite is skipped.
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            # Seed the row at cap=1 (no ledger), then runtime-bump it to cap=5 and detach.
+            doc1 = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-det", cap=1)))
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc1)
+            async with await _connect(migrated_url) as seed:
+                await seed.execute(
+                    "UPDATE resources SET capabilities = "
+                    "jsonb_set(capabilities, '{concurrent_allocation_cap}', '5') "
+                    "WHERE name = 'fi-det'"
+                )
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-det",
+                    disposition="detached",
+                )
+            # Reconcile a file that declares cap=1 again: the runtime cap=5 must survive.
+            doc2 = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-det", cap=1)))
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc2)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "fi-det")
+        assert _row_caps(row)["concurrent_allocation_cap"] == 5  # runtime value preserved
+
+    asyncio.run(_run())
+
+
+def test_detached_hand_deleted_row_is_gced_then_reasserted(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # A `detached` entry whose row was hand-deleted: A3 skips the re-insert (no stale resurrect),
+    # A4 GCs the entry, and the following no-entry pass re-asserts the file. Two-pass behavior.
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-hd", cap=2)))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            async with await _connect(migrated_url) as seed:
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-hd",
+                    disposition="detached",
+                )
+                await seed.execute("DELETE FROM resources WHERE name = 'fi-hd'")
+            # Pass N: absent row + detached -> A3 skips re-insert; the GC drops the entry.
+            async with pool.connection() as conn:
+                await reconcile_all_for_test(conn, doc)
+            async with await _connect(migrated_url) as check:
+                assert not await _ledger_exists(
+                    check, source_kind="resource", resource_kind="fault-inject", name="fi-hd"
+                )
+            # Pass N+1: no entry -> the file is re-asserted, row returns at the file values.
+            async with pool.connection() as conn:
+                await reconcile_all_for_test(conn, doc)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "fi-hd")
+        assert _row_caps(row)["concurrent_allocation_cap"] == 2  # re-asserted file value
+
+    asyncio.run(_run())
+
+
+def test_no_entry_identity_is_still_drift_repaired(migrated_url: str, tmp_path: Path) -> None:
+    # Regression guarding ADR-0021: an identity with NO ledger entry is still fully drift-repaired
+    # — re-created when its row is hand-deleted, and pruned when it leaves the file.
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-drift")))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            # Hand-delete the row: the next pass re-creates it (no ledger entry).
+            async with await _connect(migrated_url) as seed:
+                await seed.execute("DELETE FROM resources WHERE name = 'fi-drift'")
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            async with await _connect(migrated_url) as check:
+                assert (
+                    await _resource_count(
+                        check, kind="fault-inject", host_uri="fault-inject://local"
+                    )
+                    == 1
+                )
+            # Drop it from the file: the next pass prunes it (no ledger entry).
+            empty = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
+            async with pool.connection() as conn:
+                diff = await reconcile_resources(conn, empty)
+        async with await _connect(migrated_url) as check:
+            assert (
+                await _resource_count(check, kind="fault-inject", host_uri="fault-inject://local")
+                == 0
+            )
+        assert "fi-drift" in {p.name for p in diff.pruned}
+
+    asyncio.run(_run())
+
+
+def test_build_host_removed_ledger_skips_recreate(migrated_url: str, tmp_path: Path) -> None:
+    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-gone")))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with await _connect(migrated_url) as seed:
+                await _set_ledger(
+                    seed,
+                    source_kind="build_host",
+                    resource_kind="build-host",
+                    name="bh-gone",
+                    disposition="removed",
+                )
+            async with pool.connection() as conn:
+                await reconcile_build_hosts(conn, doc)
+            async with pool.connection() as conn:
+                await reconcile_build_hosts(conn, doc)
+        async with await _connect(migrated_url) as check:
+            assert await _build_host_count(check, "bh-gone") == 0
+
+    asyncio.run(_run())
+
+
+def test_build_host_detached_preserves_runtime_max_concurrent(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            doc1 = load_inventory(
+                _write_toml(tmp_path, _build_host_toml(name="bh-det", max_concurrent=2))
+            )
+            async with pool.connection() as conn:
+                await reconcile_build_hosts(conn, doc1)
+            async with await _connect(migrated_url) as seed:
+                await seed.execute(
+                    "UPDATE build_hosts SET max_concurrent = 7 WHERE name = 'bh-det'"
+                )
+                await _set_ledger(
+                    seed,
+                    source_kind="build_host",
+                    resource_kind="build-host",
+                    name="bh-det",
+                    disposition="detached",
+                )
+            doc2 = load_inventory(
+                _write_toml(tmp_path, _build_host_toml(name="bh-det", max_concurrent=2))
+            )
+            async with pool.connection() as conn:
+                await reconcile_build_hosts(conn, doc2)
+        async with await _connect(migrated_url) as check:
+            row = await _build_host_by_name(check, "bh-det")
+        assert row["max_concurrent"] == 7  # runtime value preserved
+
+    asyncio.run(_run())
+
+
+def test_build_host_no_entry_is_still_drift_repaired(migrated_url: str, tmp_path: Path) -> None:
+    from kdive.inventory.reconcile_build_hosts import reconcile_build_hosts
+
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _build_host_toml(name="bh-drift")))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_build_hosts(conn, doc)
+            async with await _connect(migrated_url) as seed:
+                await seed.execute("DELETE FROM build_hosts WHERE name = 'bh-drift'")
+            async with pool.connection() as conn:
+                await reconcile_build_hosts(conn, doc)
+            async with await _connect(migrated_url) as check:
+                assert await _build_host_count(check, "bh-drift") == 1
+            empty = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
+            async with pool.connection() as conn:
+                diff = await reconcile_build_hosts(conn, empty)
+        async with await _connect(migrated_url) as check:
+            assert await _build_host_count(check, "bh-drift") == 0
+        assert "bh-drift" in {p.name for p in diff.pruned}
+
+    asyncio.run(_run())
+
+
+def test_removed_ledger_gced_when_identity_leaves_file(migrated_url: str, tmp_path: Path) -> None:
+    # A4 GC: a `removed` entry whose identity is no longer declared in the file is dropped (the
+    # operator exported + re-applied, so file-departure prune now owns the removal).
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with await _connect(migrated_url) as seed:
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-settled",
+                    disposition="removed",
+                )
+            empty = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
+            async with pool.connection() as conn:
+                await reconcile_all_for_test(conn, empty)
+        async with await _connect(migrated_url) as check:
+            assert not await _ledger_exists(
+                check, source_kind="resource", resource_kind="fault-inject", name="fi-settled"
+            )
+
+    asyncio.run(_run())
+
+
+def test_detached_ledger_gced_when_file_matches_live(migrated_url: str, tmp_path: Path) -> None:
+    # A4 GC: a `detached` entry whose file values now equal the live row is dropped (the override
+    # has converged with the file). A still-divergent detached entry is retained.
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-conv", cap=3)))
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)
+            async with await _connect(migrated_url) as seed:
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-conv",
+                    disposition="detached",
+                )
+            # File values already equal the live row (cap=3), so the override is a no-op -> GC'd.
+            async with pool.connection() as conn:
+                await reconcile_all_for_test(conn, doc)
+        async with await _connect(migrated_url) as check:
+            assert not await _ledger_exists(
+                check, source_kind="resource", resource_kind="fault-inject", name="fi-conv"
+            )
+
+    asyncio.run(_run())
+
+
+def test_detached_ledger_retained_when_file_still_diverges(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            doc1 = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-div", cap=1)))
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc1)
+            async with await _connect(migrated_url) as seed:
+                await seed.execute(
+                    "UPDATE resources SET capabilities = "
+                    "jsonb_set(capabilities, '{concurrent_allocation_cap}', '9') "
+                    "WHERE name = 'fi-div'"
+                )
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-div",
+                    disposition="detached",
+                )
+            # File still declares cap=1, live row is 9 -> divergent -> entry retained.
+            doc2 = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-div", cap=1)))
+            async with pool.connection() as conn:
+                await reconcile_all_for_test(conn, doc2)
+        async with await _connect(migrated_url) as check:
+            assert await _ledger_exists(
+                check, source_kind="resource", resource_kind="fault-inject", name="fi-div"
+            )
+
+    asyncio.run(_run())
