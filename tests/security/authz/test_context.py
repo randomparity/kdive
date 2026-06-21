@@ -22,10 +22,15 @@ def test_context_from_claims_preserves_agent_session() -> None:
     assert ctx.agent_session == "sess-1"
 
 
-def test_context_from_claims_accepts_string_agent_session() -> None:
-    # A string agent_session must not trip the type guard.
-    ctx = context_from_claims({"sub": "alice", "agent_session": "sess-1"})
-    assert ctx.principal == "alice"
+def test_context_from_claims_rejects_non_string_agent_session() -> None:
+    with pytest.raises(AuthError, match="agent_session claim is not a string"):
+        context_from_claims({"sub": "alice", "agent_session": 7})
+
+
+def test_context_from_claims_allows_absent_agent_session() -> None:
+    # The guard only fires for present-but-non-string values; absence yields None.
+    ctx = context_from_claims({"sub": "alice"})
+    assert ctx.agent_session is None
 
 
 def test_context_from_claims_preserves_valid_projects() -> None:
