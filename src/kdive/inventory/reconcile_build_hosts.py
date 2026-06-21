@@ -49,6 +49,13 @@ from psycopg.rows import dict_row
 from kdive.db.build_hosts import BuildHostKind
 from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.model import BuildHostInstance, InventoryDoc
+from kdive.inventory.overrides import (
+    BUILD_HOST_RESOURCE_KIND,
+    InventoryOverride,
+    InventoryOverrideDisposition,
+    InventorySourceKind,
+    lookup_many,
+)
 from kdive.inventory.reconcile import (
     CONFIG_MANAGED_BY,
     ReconcileDiff,
@@ -97,13 +104,25 @@ async def reconcile_build_hosts(conn: AsyncConnection, doc: InventoryDoc) -> Rec
     """
     diff = ReconcileDiff()
     async with inventory_pass_lock(conn):
-        await _upsert_config_build_hosts(conn, doc, diff)
-        await _prune_departed(conn, doc, diff)
+        overrides = await lookup_many(conn, InventorySourceKind.BUILD_HOST)
+        await _upsert_config_build_hosts(conn, doc, diff, overrides)
+        await _prune_departed(conn, doc, diff, overrides)
     return diff
 
 
+def _disposition(
+    overrides: Mapping[tuple[str, str], InventoryOverride], name: str
+) -> InventoryOverrideDisposition | None:
+    """The override disposition for a build host ``name``, or ``None`` if un-overridden."""
+    entry = overrides.get((BUILD_HOST_RESOURCE_KIND, name))
+    return entry.disposition if entry is not None else None
+
+
 async def _upsert_config_build_hosts(
-    conn: AsyncConnection, doc: InventoryDoc, diff: ReconcileDiff
+    conn: AsyncConnection,
+    doc: InventoryDoc,
+    diff: ReconcileDiff,
+    overrides: Mapping[tuple[str, str], InventoryOverride],
 ) -> None:
     """Create or change-detectingly update each config-expressible ``[[build_host]]`` by name."""
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
@@ -115,7 +134,10 @@ async def _upsert_config_build_hosts(
                     "inventory: build host %r not config-expressible: %s", inst.name, reason
                 )
                 continue
-            await _upsert_one(cur, inst, diff)
+            disposition = _disposition(overrides, inst.name)
+            if disposition is InventoryOverrideDisposition.REMOVED:
+                continue  # ledger suppresses this identity; the prune sweep removes a live row
+            await _upsert_one(cur, inst, diff, detached=disposition is not None)
 
 
 def _unexpressible_reason(inst: BuildHostInstance) -> str | None:
@@ -149,7 +171,9 @@ def _unexpressible_reason(inst: BuildHostInstance) -> str | None:
     return None
 
 
-async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) -> None:
+async def _upsert_one(
+    cur: Any, inst: BuildHostInstance, diff: ReconcileDiff, *, detached: bool = False
+) -> None:
     """Create or update one config build-host row keyed by ``name`` (adopt-on-collision).
 
     A row whose ``name`` already exists is updated in place and flipped to ``managed_by='config'``
@@ -157,7 +181,15 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
     cordoned host re-enables it. Only the config-owned fields are written; ``state`` is left to
     the reachability probe. Append to ``created``/``updated`` only on a real change so a steady
     state is a no-op (the idempotency contract).
+
+    ``detached`` (ADR-0199) marks a build host whose runtime-owned fields the operator owns: a
+    **present** row is left untouched (the file does not clobber the runtime ``max_concurrent`` /
+    enablement), and an **absent** (hand-deleted) row is **not** re-inserted (that would resurrect
+    stale file values under a still-active override) — it is left for the GC step to clear, after
+    which the next no-entry pass re-asserts the file.
     """
+    if detached:
+        return  # present row: runtime owns its values; absent row: GC clears, no-entry re-asserts
     await cur.execute(
         "SELECT id, kind, base_image_volume, workspace_root, max_concurrent, enabled, managed_by "
         "FROM build_hosts WHERE name = %s FOR UPDATE",
@@ -207,8 +239,21 @@ async def _upsert_one(cur: Any, inst: BuildHostInstance, diff: ReconcileDiff) ->
         diff.updated.append(_record(inst.name))
 
 
-async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: ReconcileDiff) -> None:
-    """Prune (or cordon) each config build host whose ``name`` left the file."""
+async def _prune_departed(
+    conn: AsyncConnection,
+    doc: InventoryDoc,
+    diff: ReconcileDiff,
+    overrides: Mapping[tuple[str, str], InventoryOverride],
+) -> None:
+    """Prune (or cordon) each config build host whose ``name`` left the file or is ``removed``.
+
+    A ``removed`` ledger entry (ADR-0199) suppresses a still-declared host, so its row is
+    cordoned-if-leased / deleted-once-idle even though the file still declares it. A ``detached``
+    host's row is runtime-owned and is never pruned here. Unlike resources, a build host carries no
+    retained-accounting FK (``build_host_leases`` rows are deleted on release), so the existing
+    :func:`prune_or_cordon_build_host` contract (cordon if a lease is in flight, else delete) is
+    FK-safe for the ``removed`` path too.
+    """
     declared = {inst.name for inst in doc.build_host if _unexpressible_reason(inst) is None}
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -218,8 +263,12 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
     for raw_row in rows:
         row = _prune_row(raw_row)
         name = row.name
-        if name in declared:
+        disposition = _disposition(overrides, name)
+        is_removed = disposition is InventoryOverrideDisposition.REMOVED
+        if name in declared and not is_removed:
             continue
+        if disposition is not None and not is_removed:
+            continue  # a `detached` row is runtime-owned; never prune it
         outcome = await prune_or_cordon_build_host(conn, row.id)
         record = ReconcileRecord(name=name, entry=f"build_host[{name}]")
         if outcome.cordoned:

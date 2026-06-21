@@ -50,12 +50,18 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.model import InventoryDoc, LocalLibvirtInstance
+from kdive.inventory.overrides import (
+    InventoryOverrideDisposition,
+    InventorySourceKind,
+    lookup_many,
+)
 from kdive.inventory.reconcile import (
     CONFIG_MANAGED_BY,
     DISCOVERY_MANAGED_BY,
     ReconcileDiff,
     ReconcileRecord,
     inventory_pass_lock,
+    prune_or_cordon_removed_resource,
     prune_or_cordon_resource,
     resource_identity_lock,
 )
@@ -142,15 +148,27 @@ async def reconcile_resources(conn: AsyncConnection, doc: InventoryDoc) -> Recon
     """
     diff = ReconcileDiff()
     async with inventory_pass_lock(conn):
-        await _create_config_resources(conn, doc, diff)
+        overrides = await lookup_many(conn, InventorySourceKind.RESOURCE)
+        await _create_config_resources(conn, doc, diff, overrides)
         await _overlay_local_libvirt(conn, doc, diff)
         await _name_unconfigured_discovered(conn, doc, diff)
-        await _prune_departed(conn, doc, diff)
+        await _prune_departed(conn, doc, diff, overrides)
     return diff
 
 
+def _disposition(
+    overrides: Mapping[tuple[str, str], Any], kind: ResourceKind, name: str
+) -> InventoryOverrideDisposition | None:
+    """The override disposition for ``(kind, name)``, or ``None`` for an un-overridden identity."""
+    entry = overrides.get((kind.value, name))
+    return entry.disposition if entry is not None else None
+
+
 async def _create_config_resources(
-    conn: AsyncConnection, doc: InventoryDoc, diff: ReconcileDiff
+    conn: AsyncConnection,
+    doc: InventoryDoc,
+    diff: ReconcileDiff,
+    overrides: Mapping[tuple[str, str], Any],
 ) -> None:
     """Upsert the config-owned kinds: fault-inject (no host) and remote-libvirt.
 
@@ -163,6 +181,9 @@ async def _create_config_resources(
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         for inst in doc.fault_inject:
+            disposition = _disposition(overrides, ResourceKind.FAULT_INJECT, inst.name)
+            if disposition is InventoryOverrideDisposition.REMOVED:
+                continue  # ledger suppresses this identity; the prune sweep deletes a live row
             caps: ResourceCaps = {
                 VCPUS_KEY: inst.vcpus,
                 MEMORY_MB_KEY: inst.memory_mb,
@@ -182,8 +203,12 @@ async def _create_config_resources(
                     diff,
                     declared=declared,
                     adopt_by_host=False,
+                    detached=disposition is InventoryOverrideDisposition.DETACHED,
                 )
         for inst in doc.remote_libvirt:
+            disposition = _disposition(overrides, ResourceKind.REMOTE_LIBVIRT, inst.name)
+            if disposition is InventoryOverrideDisposition.REMOVED:
+                continue  # ledger suppresses this identity; the prune sweep deletes a live row
             caps: ResourceCaps = {
                 VCPUS_KEY: inst.vcpus,
                 MEMORY_MB_KEY: inst.memory_mb,
@@ -204,6 +229,7 @@ async def _create_config_resources(
                     declared=declared,
                     adopt_by_host=True,
                     discovery_owned_keys=(VCPUS_KEY, MEMORY_MB_KEY),
+                    detached=disposition is InventoryOverrideDisposition.DETACHED,
                 )
 
 
@@ -214,6 +240,7 @@ async def _upsert_config_resource(
     declared: _DeclaredResource,
     adopt_by_host: bool,
     discovery_owned_keys: tuple[str, ...] = (),
+    detached: bool = False,
 ) -> None:
     """Create or change-detectingly update one config-owned resource row keyed by (kind, name).
 
@@ -230,6 +257,14 @@ async def _upsert_config_resource(
     ``vcpus`` / ``memory_mb`` hardware facts): a present existing value wins over the
     config-supplied one, so the config value is only a fallback for a pure-config host with no
     discovered size.
+
+    ``detached`` (ADR-0199) marks an identity whose live row's runtime values the operator owns:
+    the field-overwrite branch (:func:`_update_config_resource`) is **skipped** so the file does
+    not clobber the runtime value, while the existence/adoption branch still runs so a
+    ``managed_by`` flip is repaired. A **hand-deleted** ``detached`` row is **not** re-inserted
+    (that would resurrect
+    stale file values under a still-active override) — it is left absent for the GC step to clear,
+    after which the next no-entry pass re-asserts the file.
     """
     row = await _find_existing(
         cur,
@@ -239,6 +274,8 @@ async def _upsert_config_resource(
         adopt_by_host=adopt_by_host,
     )
     if row is None:
+        if detached:
+            return  # GC clears the entry; the next no-entry pass re-asserts the file
         await _insert_config_resource(
             cur,
             diff,
@@ -259,6 +296,8 @@ async def _upsert_config_resource(
             caps=merged,
         )
         return
+    if detached:
+        return  # runtime owns the live row's values; do not overwrite them from the file
     await _update_config_resource(
         cur,
         diff,
@@ -441,8 +480,19 @@ async def _name_unconfigured_discovered(
             await cur.execute("UPDATE resources SET name = %s WHERE id = %s", (name, row.id))
 
 
-async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: ReconcileDiff) -> None:
-    """Prune (or cordon) each config resource whose (kind, name) left the file."""
+async def _prune_departed(
+    conn: AsyncConnection,
+    doc: InventoryDoc,
+    diff: ReconcileDiff,
+    overrides: Mapping[tuple[str, str], Any],
+) -> None:
+    """Prune (or cordon) each config resource whose (kind, name) left the file or is ``removed``.
+
+    A ``removed`` ledger entry (ADR-0199) suppresses a still-declared identity, so its row must be
+    cordoned-if-live / deleted-once-idle even though the file still declares it — without this it
+    would be skipped by the ``identity in declared`` guard and never reach the prune contract. A
+    ``detached`` identity's row is runtime-owned and is never pruned here.
+    """
     declared = _declared_config_identities(doc)
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -452,11 +502,25 @@ async def _prune_departed(conn: AsyncConnection, doc: InventoryDoc, diff: Reconc
     for raw in rows:
         row = _prune_row(raw)
         identity = (row.kind, row.name)
-        if identity in declared:
+        disposition = overrides.get(identity)
+        is_removed = (
+            disposition is not None
+            and disposition.disposition is InventoryOverrideDisposition.REMOVED
+        )
+        if identity in declared and not is_removed:
             continue
+        if disposition is not None and not is_removed:
+            continue  # a `detached` row is runtime-owned; never prune it
         name = row.name
         kind = ResourceKind(row.kind)
-        outcome = await prune_or_cordon_resource(conn, row.id, name, kind=kind)
+        # A `removed` identity uses the FK-safe ledger-removal contract (cordon if any allocation
+        # row exists, delete only a never-allocated row); a file-departed identity keeps the
+        # established file-departure contract (cordon if a live allocation exists).
+        outcome = (
+            await prune_or_cordon_removed_resource(conn, row.id, name, kind=kind)
+            if is_removed
+            else await prune_or_cordon_resource(conn, row.id, name, kind=kind)
+        )
         record = ReconcileRecord(name=name, entry=f"resource[{identity[0]}/{name}]")
         if outcome.cordoned:
             diff.cordoned.append(record)

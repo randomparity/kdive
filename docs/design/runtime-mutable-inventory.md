@@ -104,6 +104,16 @@ file-absence as prune or DB-absence as re-create for runtime-mutated rows, witho
 drift repair's original benefit."* An identity with **no ledger entry** still gets full
 drift repair; only the explicitly-overridden ones are exempted.
 
+**"Delete once idle" is FK-safe, not literal.** `allocations.resource_id` is
+`NOT NULL REFERENCES resources(id)` with no `ON DELETE`, and allocation rows are retained for
+accounting after they go terminal, so a resource that **ever** held an allocation cannot be
+row-deleted (the same constraint `resources.deregister` documents). The `removed` reconcile delete
+therefore deletes only a **never-allocated** row and **cordons** a row with any allocation history
+(live or terminal) — the cordon is the durable suppression, the ledger entry keeps it suppressed,
+and an operator export later drops the entry. A build host has no such retained FK
+(`build_host_leases` rows are deleted on release), so its `removed` row is deleted once it holds no
+in-flight lease.
+
 **`detached` is value-loss-safe only while its row lives.** The ledger is intent-only — it
 carries no field values. So a `detached` override protects the live row's runtime values *in
 place*; it cannot reconstruct them if the row is hand-deleted. Rather than resurrect the row
