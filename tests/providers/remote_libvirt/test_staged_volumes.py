@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from typing import cast
 
 import libvirt
 import pytest
@@ -156,7 +157,8 @@ class _PostOpenLibvirtErrorConn:
 
     def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
         del name
-        return _PostOpenLibvirtErrorPool(self._code)
+        # _PostOpenLibvirtErrorPool duck-types the pool seam (only the lookup path is exercised).
+        return cast("_Pool", _PostOpenLibvirtErrorPool(self._code))
 
     def close(self) -> None:
         pass

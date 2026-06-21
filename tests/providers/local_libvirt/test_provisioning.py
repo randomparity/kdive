@@ -21,6 +21,9 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.providers.local_libvirt.lifecycle import xml as xml_module
+from kdive.providers.local_libvirt.lifecycle.materialize import (
+    RootfsMaterializationContext,
+)
 from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     ProvisioningFiles,
@@ -898,9 +901,9 @@ def test_validate_rootfs_ref_local_uses_default_allowed_roots(
     # default ROOTFS_DIR root; the default must be a usable list, not None.
     seen_roots: list[list[Path]] = []
 
-    def fake_materialize(rootfs: object, *, context: object) -> Path:
+    def fake_materialize(rootfs: object, *, context: RootfsMaterializationContext) -> Path:
         del rootfs
-        seen_roots.append(list(context.allowed_roots))  # type: ignore[attr-defined]
+        seen_roots.append(list(context.allowed_roots))
         return Path("/var/lib/kdive/rootfs/fedora-40.qcow2")
 
     monkeypatch.setattr(provisioning_module, "materialize_rootfs_base", fake_materialize)

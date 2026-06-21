@@ -473,7 +473,7 @@ def test_session_network_timeout_surfaces_last_probe_output(tmp_path: Any) -> No
 
     # Every route poll emits a *distinct* stdout marker so an off-by-one "last probe" index is
     # caught; the final poll's marker (tracked in state["last_marker"]) must be the surfaced one.
-    state = {"n": 0, "last_marker": ""}
+    state: dict[str, Any] = {"n": 0, "last_marker": ""}
 
     def _agent(domain: Any, command: str, timeout: int, flags: int) -> str:
         msg = json.loads(command)

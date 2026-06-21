@@ -113,11 +113,11 @@ def _make_loop(
         return collectors[system_id]
 
     return console_hosting.ConsoleHostingLoop(
-        leader_lock=leader_lock,  # ty: ignore[invalid-argument-type]
-        running_systems=_ListRunningSystems(running),  # ty: ignore[invalid-argument-type]
-        collector_factory=_factory,  # ty: ignore[invalid-argument-type]
+        leader_lock=leader_lock,
+        running_systems=_ListRunningSystems(running),
+        collector_factory=_factory,
         registry=registry,
-        pump_runner=pump_runner,  # ty: ignore[invalid-argument-type]
+        pump_runner=pump_runner,
     )
 
 
@@ -125,7 +125,7 @@ def test_collector_registry_tracks_added_collector() -> None:
     registry = console_hosting.CollectorRegistry()
     collector = _FakeCollector(_SYSTEM_ID)
 
-    registry.add(collector)  # ty: ignore[invalid-argument-type]
+    registry.add(collector)
 
     assert registry.has(_SYSTEM_ID) is True
     assert registry.get(_SYSTEM_ID) is collector
@@ -134,9 +134,9 @@ def test_collector_registry_tracks_added_collector() -> None:
 
 def test_collector_registry_drop_cancels_pump_and_closes() -> None:
     pump_runner = _RecordingPumpRunner()
-    registry = console_hosting.CollectorRegistry(pump_runner)  # ty: ignore[invalid-argument-type]
+    registry = console_hosting.CollectorRegistry(pump_runner)
     collector = _FakeCollector(_SYSTEM_ID)
-    registry.add(collector)  # ty: ignore[invalid-argument-type]
+    registry.add(collector)
 
     registry.drop(_SYSTEM_ID)
 
@@ -161,7 +161,7 @@ def test_console_hosting_loop_tick_acquires_leadership_and_opens_collectors() ->
         lock = _FakeLeaderLock(acquire=True, held=True)
         collector = _FakeCollector(_SYSTEM_ID)
         pump_runner = _RecordingPumpRunner()
-        registry = console_hosting.CollectorRegistry(pump_runner)  # ty: ignore[invalid-argument-type]
+        registry = console_hosting.CollectorRegistry(pump_runner)
         loop = _make_loop(
             leader_lock=lock,
             running={_SYSTEM_ID},
@@ -203,7 +203,7 @@ def test_console_hosting_loop_stop_releases_lock_when_leader() -> None:
     async def _run() -> None:
         lock = _FakeLeaderLock(acquire=True, held=True)
         pump_runner = _RecordingPumpRunner()
-        registry = console_hosting.CollectorRegistry(pump_runner)  # ty: ignore[invalid-argument-type]
+        registry = console_hosting.CollectorRegistry(pump_runner)
         loop = _make_loop(
             leader_lock=lock,
             running=set(),
@@ -228,12 +228,12 @@ def test_asyncio_pump_runner_tracks_and_cancels_task() -> None:
         runner = console_hosting.AsyncioPumpRunner()
         collector = _FakeCollector(_SYSTEM_ID)
 
-        runner.start(collector)  # ty: ignore[invalid-argument-type]
+        runner.start(collector)
         first_task = runner._tasks[_SYSTEM_ID]
 
         # Starting the same collector again is a no-op (dedup keyed on _tasks):
         # exactly one task remains and it is the original one.
-        runner.start(collector)  # ty: ignore[invalid-argument-type]
+        runner.start(collector)
         assert len(runner._tasks) == 1
         assert runner._tasks[_SYSTEM_ID] is first_task
 
@@ -290,9 +290,9 @@ def test_asyncio_pump_runner_throttles_idle_collector(monkeypatch: pytest.Monkey
             idle.pump_calls += 1
             return False  # "no data": forces the idle-backoff branch every iteration
 
-        idle.pump_once = _idle_pump  # type: ignore[method-assign]
+        idle.pump_once = _idle_pump  # ty: ignore[invalid-assignment]
 
-        runner.start(idle)  # ty: ignore[invalid-argument-type]
+        runner.start(idle)
         task = runner._tasks[_SYSTEM_ID]
         try:
             await _wait_until(lambda: idle.pump_calls >= 1)
@@ -323,9 +323,9 @@ def test_asyncio_pump_runner_isolates_pump_exception_and_continues() -> None:
                 raise RuntimeError("transient pump failure")
             return True
 
-        collector.pump_once = _pump  # type: ignore[method-assign]
+        collector.pump_once = _pump  # ty: ignore[invalid-assignment]
 
-        runner.start(collector)  # ty: ignore[invalid-argument-type]
+        runner.start(collector)
         task = runner._tasks[_SYSTEM_ID]
         try:
             # The first call raises; the loop must recover and pump again. The error path
@@ -349,7 +349,7 @@ def test_console_hosting_loop_drops_streams_when_leadership_lost() -> None:
         lock = _FakeLeaderLock(acquire=True, held=True)
         collector = _FakeCollector(_SYSTEM_ID)
         pump_runner = _RecordingPumpRunner()
-        registry = console_hosting.CollectorRegistry(pump_runner)  # ty: ignore[invalid-argument-type]
+        registry = console_hosting.CollectorRegistry(pump_runner)
         loop = _make_loop(
             leader_lock=lock,
             running={_SYSTEM_ID},
@@ -380,7 +380,7 @@ def test_console_hosting_loop_fails_closed_when_lock_check_raises() -> None:
         lock = _FakeLeaderLock(acquire=True, held=True)
         collector = _FakeCollector(_SYSTEM_ID)
         pump_runner = _RecordingPumpRunner()
-        registry = console_hosting.CollectorRegistry(pump_runner)  # ty: ignore[invalid-argument-type]
+        registry = console_hosting.CollectorRegistry(pump_runner)
         loop = _make_loop(
             leader_lock=lock,
             running={_SYSTEM_ID},
@@ -394,7 +394,7 @@ def test_console_hosting_loop_fails_closed_when_lock_check_raises() -> None:
         async def _boom() -> bool:
             raise RuntimeError("lock backend unreachable")
 
-        lock.is_held = _boom  # type: ignore[method-assign]
+        lock.is_held = _boom  # ty: ignore[invalid-assignment]
         await loop.tick()
 
         assert loop.is_leader is False
@@ -407,7 +407,7 @@ def test_asyncio_pump_runner_cancel_unknown_id_is_noop() -> None:
     async def _run() -> None:
         runner = console_hosting.AsyncioPumpRunner()
         tracked = _FakeCollector(_SYSTEM_ID)
-        runner.start(tracked)  # ty: ignore[invalid-argument-type]
+        runner.start(tracked)
         try:
             other = UUID("22222222-2222-2222-2222-222222222222")
 

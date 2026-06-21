@@ -27,6 +27,7 @@ from kdive.diagnostics.checks import (
     CheckStatus,
     ReachabilityOutcome,
     SecretRefCheck,
+    TlsProbe,
     TlsProbeOutcome,
 )
 from kdive.diagnostics.service import (
@@ -38,6 +39,7 @@ from kdive.diagnostics.service import (
     default_service_factory,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
 from kdive.providers.remote_libvirt.diagnostics import contribution as remote_contribution
 
@@ -182,9 +184,9 @@ def test_remote_worker_checks_build_runnable_tls_and_gdbstub_checks(
         assert port_range == "47000-47099"
         return True
 
-    tls_configs: list[object] = []
+    tls_configs: list[RemoteLibvirtConfig] = []
 
-    def _capture_tls_probe(config):
+    def _capture_tls_probe(config: RemoteLibvirtConfig) -> TlsProbe:
         # The TLS probe must be bound to the host's real config (its uri), not None.
         tls_configs.append(config)
         return tls_probe

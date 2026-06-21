@@ -16,7 +16,7 @@ import subprocess
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -1024,7 +1024,12 @@ def test_build_records_modules_then_artifact_phase_with_provider(tmp_path: Path)
     store, seams = _FakeStore(), _Seams()
     recorder = _RecordingRecorder()
 
-    _builder(store, seams, tmp_path).build(_RUN, _profile(), recorder=recorder, provider="rl")
+    _builder(store, seams, tmp_path).build(
+        _RUN,
+        _profile(),
+        recorder=recorder,  # ty: ignore[invalid-argument-type]
+        provider="rl",
+    )
 
     # The recorder threaded into build_workspace records the source/configure/compile phases;
     # build() then records MODULES and ARTIFACT. The full ordered sequence proves both that the
@@ -1064,7 +1069,11 @@ def test_build_default_provider_label_is_empty_string(tmp_path: Path) -> None:
     store, seams = _FakeStore(), _Seams()
     recorder = _RecordingRecorder()
 
-    _builder(store, seams, tmp_path).build(_RUN, _profile(), recorder=recorder)
+    _builder(store, seams, tmp_path).build(
+        _RUN,
+        _profile(),
+        recorder=recorder,  # ty: ignore[invalid-argument-type]
+    )
 
     post_make = [p for p in recorder.phases if p[0] in (BuildPhase.MODULES, BuildPhase.ARTIFACT)]
     assert post_make == [(BuildPhase.MODULES, ""), (BuildPhase.ARTIFACT, "")]
@@ -1178,7 +1187,7 @@ def test_apply_patch_git_apply_failure_is_configuration_error(
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(caught.value) == "patch_ref does not apply against the kernel tree"
-    assert "does not apply" in caught.value.details["stderr"]
+    assert "does not apply" in cast(str, caught.value.details["stderr"])
     assert captured[0][:5] == ["git", "apply", "-p1", "-v", "--"]
     assert captured[0][-1] == str(patch)
 
@@ -1198,7 +1207,7 @@ def test_apply_patch_unreadable_patch_is_configuration_error(
     def _read_text(self: Path, *args: object, **kwargs: object) -> str:
         if self == patch:
             raise PermissionError("denied")
-        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+        return real_read_text(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(Path, "read_text", _read_text)
 
@@ -1270,7 +1279,7 @@ def test_apply_patch_silent_skip_no_tree_change_is_configuration_error(
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "silently skipped" in str(caught.value)
-    assert "Skipped patch 'init/main.c'." in caught.value.details["stderr"]
+    assert "Skipped patch 'init/main.c'." in cast(str, caught.value.details["stderr"])
     assert (workspace / "init" / "main.c").read_text() == original
 
 
@@ -1514,7 +1523,7 @@ def test_clone_tree_git_init_failure_is_infrastructure(
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(caught.value) == "git init failed"
-    assert "boom" in caught.value.details["stderr"]
+    assert "boom" in cast(str, caught.value.details["stderr"])
     # The first git invocation is hardened: it disables redirect-following and ambient config.
     first = captured[0]
     assert first[0] == "git"
@@ -1601,7 +1610,7 @@ def test_clone_tree_checkout_failure_is_configuration_error(
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(caught.value) == "git checkout FETCH_HEAD failed"
-    assert "boom" in caught.value.details["stderr"]
+    assert "boom" in cast(str, caught.value.details["stderr"])
 
 
 def test_sync_tree_missing_rsync_is_missing_dependency(
@@ -1668,7 +1677,8 @@ def test_sync_tree_rsync_argv_and_failure(tmp_path: Path, monkeypatch: pytest.Mo
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(caught.value) == "rsync failed to materialize the workspace tree"
-    assert "link failed" in caught.value.details["stderr"]  # the redacted rsync stderr tail
+    # the redacted rsync stderr tail
+    assert "link failed" in cast(str, caught.value.details["stderr"])
     # rsync archive+delete with a trailing slash on both src and dst (an in-place mirror).
     argv = captured[0]
     assert argv[:4] == ["rsync", "-a", "--delete", "--"]

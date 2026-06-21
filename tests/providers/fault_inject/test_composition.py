@@ -22,7 +22,8 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.profiles.build import ServerBuildProfile
+from kdive.profiles.provisioning import ProvisioningProfile, RootfsSource
 from kdive.providers.fault_inject import composition
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT
 from kdive.providers.fault_inject.build import FaultInjectBuild
@@ -92,7 +93,7 @@ def test_build_runtime_wires_fault_inject_ports_and_capabilities() -> None:
     assert isinstance(runtime.debug.engine, FaultInjectDebugEngine)
     assert runtime.debug.attach_seam is fault_inject_attach_seam
     assert runtime.rootfs_validator is not None
-    assert runtime.rootfs_validator(object()) is None
+    assert runtime.rootfs_validator(cast(RootfsSource, object())) is None
     assert runtime.component_sources.provider == ResourceKind.FAULT_INJECT.value
     assert runtime.component_sources.accepted_component_sources == {
         ROOTFS_COMPONENT: frozenset({"catalog", "local"}),
@@ -195,7 +196,7 @@ def test_build_stores_redacted_kernel_and_debuginfo_and_returns_their_refs() -> 
     builder = FaultInjectBuild(store_factory=lambda: store)
     run_id = uuid4()
 
-    output = builder.build(run_id, cast("object", object()))
+    output = builder.build(run_id, cast(ServerBuildProfile, object()))
 
     kernel_req, debuginfo_req = store.requests
     assert kernel_req.name == "kernel"

@@ -673,7 +673,7 @@ def test_file_adapter_creates_temp_in_target_parent(
 
     def spy_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
         captured["dir"] = kwargs.get("dir")
-        return real_mkstemp(*args, **kwargs)
+        return real_mkstemp(*args, **kwargs)  # ty: ignore[no-matching-overload]
 
     monkeypatch.setattr(writeback.tempfile, "mkstemp", spy_mkstemp)
     _run(writeback.MountedFileWriteback(target).write("x = 1\n"))
@@ -693,7 +693,7 @@ def test_file_adapter_temp_name_is_hidden_and_marked(
     def spy_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
         captured["prefix"] = kwargs.get("prefix")
         captured["suffix"] = kwargs.get("suffix")
-        return real_mkstemp(*args, **kwargs)
+        return real_mkstemp(*args, **kwargs)  # ty: ignore[no-matching-overload]
 
     monkeypatch.setattr(writeback.tempfile, "mkstemp", spy_mkstemp)
     _run(writeback.MountedFileWriteback(target).write("x = 1\n"))
@@ -792,7 +792,7 @@ def test_configmap_client_routes_through_the_injected_transport(
     def guarded_init(self: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
         if kwargs.get("transport") is None:
             raise AssertionError("client built without the injected transport (real network path)")
-        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+        real_init(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", guarded_init)
 

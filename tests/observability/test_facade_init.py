@@ -16,14 +16,16 @@ from collections.abc import Iterator
 import pytest
 from opentelemetry.sdk._logs.export import (
     BatchLogRecordProcessor,
-    LogExportResult,
     LogRecordExporter,
+    LogRecordExportResult,
 )
 from opentelemetry.sdk.metrics.export import (
     MetricExporter,
     MetricExportResult,
+    MetricsData,
     PeriodicExportingMetricReader,
 )
+from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 
@@ -262,7 +264,7 @@ class _FakeOtlpSpanExporter(SpanExporter):
 
     def __init__(self, *, endpoint: str | None = None, **_kwargs: object) -> None:
         self.endpoint = endpoint
-        self.exported: list[object] = []
+        self.exported: list[ReadableSpan] = []
 
     def export(self, spans):  # type: ignore[no-untyped-def]
         self.exported.extend(spans)
@@ -281,7 +283,7 @@ class _FakeOtlpMetricExporter(MetricExporter):
     def __init__(self, *, endpoint: str | None = None, **_kwargs: object) -> None:
         super().__init__()
         self.endpoint = endpoint
-        self.exported: list[object] = []
+        self.exported: list[MetricsData] = []
 
     def export(self, metrics_data, timeout_millis: float = 10000, **_kwargs: object):  # type: ignore[no-untyped-def]
         self.exported.append(metrics_data)
@@ -303,7 +305,7 @@ class _FakeOtlpLogExporter(LogRecordExporter):
 
     def export(self, batch):  # type: ignore[no-untyped-def]
         self.exported.extend(batch)
-        return LogExportResult.SUCCESS
+        return LogRecordExportResult.SUCCESS
 
     def shutdown(self) -> None:
         return None
@@ -398,7 +400,9 @@ def test_otlp_on_redacts_secret_from_exported_span(_otlp_seam: dict[str, object]
     inner = _otlp_seam["span"]
     assert isinstance(inner, _FakeOtlpSpanExporter)
     assert len(inner.exported) == 1
-    exported_value = dict(inner.exported[0].attributes)["db.connection_string"]
+    exported_value = dict(inner.exported[0].attributes)[  # ty: ignore[no-matching-overload]
+        "db.connection_string"
+    ]
     assert _SECRET not in exported_value
     assert "[REDACTED]" in exported_value
 
@@ -437,7 +441,7 @@ def test_otlp_on_redacts_secret_from_exported_metric(_otlp_seam: dict[str, objec
     assert inner.exported
     metrics_data = inner.exported[-1]
     point = metrics_data.resource_metrics[0].scope_metrics[0].metrics[0].data.data_points[0]
-    exported_value = dict(point.attributes)["db.connection_string"]
+    exported_value = dict(point.attributes)["db.connection_string"]  # ty: ignore[no-matching-overload]
     assert _SECRET not in exported_value
     assert "[REDACTED]" in exported_value
 

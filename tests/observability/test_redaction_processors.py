@@ -8,7 +8,7 @@ guards against is "logs are clean so we assumed traces were too."
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from opentelemetry.instrumentation.logging.handler import LoggingHandler
@@ -25,7 +25,7 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from kdive.observability import redaction as orx
@@ -242,7 +242,8 @@ def test_metric_exporter_copies_inner_preferred_temporality() -> None:
     inner = _RecordingMetricExporter(preferred_temporality=preferred)
     exporter = orx.RedactingMetricExporter(inner, _registry())
 
-    assert exporter._preferred_temporality[Counter] is AggregationTemporality.DELTA
+    temporality = cast("dict[type, AggregationTemporality]", exporter._preferred_temporality)
+    assert temporality[Counter] is AggregationTemporality.DELTA
 
 
 def test_metric_exporter_copies_inner_preferred_aggregation() -> None:
@@ -268,7 +269,8 @@ def test_metric_exporter_copies_inner_preferred_aggregation() -> None:
             return None
 
     exporter = orx.RedactingMetricExporter(_AggExporter(), _registry())
-    assert exporter._preferred_aggregation[Counter] is aggregation
+    preferred_aggregation = cast("dict[type, object]", exporter._preferred_aggregation)
+    assert preferred_aggregation[Counter] is aggregation
 
 
 def test_metric_exporter_skips_metric_without_data_points() -> None:
@@ -289,7 +291,11 @@ def test_metric_exporter_skips_metric_without_data_points() -> None:
     class _Data:
         resource_metrics = [_Resource()]
 
-    orx._redact_metrics_data(Redactor(registry=_registry()), _Data())  # must not raise
+    # _Data duck-types MetricsData for the no-data-points path.
+    orx._redact_metrics_data(
+        Redactor(registry=_registry()),
+        cast("MetricsData", _Data()),  # must not raise
+    )
 
 
 def test_log_processor_force_flush_returns_true() -> None:
@@ -312,6 +318,7 @@ def test_span_exporter_force_flush_delegates() -> None:
             calls.append(timeout_millis)
             return True
 
-    exporter = orx.RedactingSpanExporter(_Inner(), _registry())
+    # _Inner duck-types SpanExporter to record force_flush delegation.
+    exporter = orx.RedactingSpanExporter(cast("SpanExporter", _Inner()), _registry())
     assert exporter.force_flush() is True
     assert calls == [30000]

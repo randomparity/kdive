@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any
+from typing import Any, cast
 
 import libvirt
 import pytest
@@ -204,7 +204,7 @@ def test_write_bytes_failure_redacts_registered_secret_in_stderr() -> None:
     with pytest.raises(CategorizedError) as exc:
         _transport(agent, registry=registry).write_bytes("/build/dest.bin", b"x")
     assert "tok-supersecret" not in str(exc.value.details)
-    assert "[REDACTED]" in exc.value.details["stderr"]
+    assert "[REDACTED]" in cast(str, exc.value.details["stderr"])
 
 
 def test_clone_runs_init_fetch_verify_checkout_via_agent() -> None:

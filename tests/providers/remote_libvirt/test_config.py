@@ -28,6 +28,7 @@ from kdive.providers.remote_libvirt.config import (
 )
 from kdive.providers.remote_libvirt.lifecycle.gdb import (
     DOMAIN_PREFIX,
+    Domain,
     allocate_gdb_port,
     used_gdb_ports,
 )
@@ -502,7 +503,7 @@ class _FakeDomain:
 
 
 class _FakeConn:
-    def __init__(self, domains: list[_FakeDomain]) -> None:
+    def __init__(self, domains: list[Domain]) -> None:
         self._domains = domains
 
     def listAllDomains(self, flags: int = 0):  # noqa: N802 - libvirt API name
@@ -595,7 +596,7 @@ class _ErrDomain:
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
         exc = libvirt.libvirtError("boom")
-        exc.get_error_code = lambda: self._code  # type: ignore[method-assign]
+        exc.get_error_code = lambda: self._code  # ty: ignore[invalid-assignment]
         raise exc
 
 
@@ -604,7 +605,7 @@ def test_used_gdb_ports_skips_a_domain_that_vanishes_mid_walk() -> None:
     # kdive domain is still enumerated.
     conn = _FakeConn(
         [
-            _ErrDomain(f"{DOMAIN_PREFIX}gone", libvirt.VIR_ERR_NO_DOMAIN),  # type: ignore[list-item]
+            _ErrDomain(f"{DOMAIN_PREFIX}gone", libvirt.VIR_ERR_NO_DOMAIN),
             _FakeDomain(f"{DOMAIN_PREFIX}b", 47011),
         ]
     )
@@ -613,9 +614,7 @@ def test_used_gdb_ports_skips_a_domain_that_vanishes_mid_walk() -> None:
 
 def test_used_gdb_ports_per_domain_error_is_infrastructure_failure() -> None:
     # A non-NO_DOMAIN libvirt error reading a domain's XML is an infrastructure fault.
-    conn = _FakeConn(
-        [_ErrDomain(f"{DOMAIN_PREFIX}a", libvirt.VIR_ERR_INTERNAL_ERROR)]  # type: ignore[list-item]
-    )
+    conn = _FakeConn([_ErrDomain(f"{DOMAIN_PREFIX}a", libvirt.VIR_ERR_INTERNAL_ERROR)])
     with pytest.raises(CategorizedError) as excinfo:
         used_gdb_ports(conn)
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

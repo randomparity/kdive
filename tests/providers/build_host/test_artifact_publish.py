@@ -282,7 +282,7 @@ def test_remote_file_sha256sum_nonzero_is_build_failure() -> None:
     assert caught.value.details is not None
     assert caught.value.details["path"] == "/p"
     # last 512 chars only — keeps the tail, drops the head.
-    stderr = caught.value.details["stderr"]
+    stderr = cast("str", caught.value.details["stderr"])
     assert stderr.endswith("TAIL")
     assert len(stderr) == 512
     assert not stderr.startswith("head")
@@ -361,7 +361,7 @@ def test_remote_file_stat_nonzero_is_build_failure() -> None:
     assert caught.value.details is not None
     assert caught.value.details["path"] == "/p"
     # last 512 chars only — keeps the tail, drops the head.
-    stderr = caught.value.details["stderr"]
+    stderr = cast("str", caught.value.details["stderr"])
     assert stderr.endswith("TAIL")
     assert len(stderr) == 512
     assert not stderr.startswith("head")

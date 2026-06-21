@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -234,7 +235,7 @@ def test_rederive_failure_names_operation(tmp_path: Path, monkeypatch: pytest.Mo
     managed_public_key_path(env=env).unlink()  # force the re-derive branch
 
     def _timeout(argv: list[str], **kwargs: object) -> object:
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=cast("float", kwargs["timeout"]))
 
     monkeypatch.setattr("kdive.prereqs.managed_ssh_key.subprocess.run", _timeout)
     with pytest.raises(ManagedKeyError) as caught:

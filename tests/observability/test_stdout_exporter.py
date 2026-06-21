@@ -21,6 +21,7 @@ from opentelemetry.sdk._logs.export import LogRecordExportResult, SimpleLogRecor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
+from opentelemetry.util.types import AnyValue
 
 from kdive.observability.stdout_exporter import (
     StdoutJsonLogExporter,
@@ -40,7 +41,7 @@ def _make_record(
     timestamp: int | None = _FIXED_TS_NS,
     observed_timestamp: int | None = None,
     severity_text: str | None = "WARNING",
-    body: object | None = "hello",
+    body: AnyValue = "hello",
     trace_id: int | None = _TRACE_ID,
     span_id: int | None = _SPAN_ID,
     attributes: dict[str, Any] | None = None,

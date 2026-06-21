@@ -8,8 +8,9 @@ families render through the Prometheus text renderer.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
+from opentelemetry.metrics import CallbackOptions
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -234,9 +235,10 @@ def test_build_host_callbacks_yield_empty_before_first_refresh() -> None:
     telem = BuildHostTelemetry(meter=meter)
     # The pre-first-pass empty snapshot makes every callback yield zero observations
     # rather than crashing on a missing snapshot.
-    assert list(telem._leases_callback(None)) == []
-    assert list(telem._capacity_callback(None)) == []
-    assert list(telem._reachable_callback(None)) == []
+    none_options = cast(CallbackOptions, None)
+    assert list(telem._leases_callback(none_options)) == []
+    assert list(telem._capacity_callback(none_options)) == []
+    assert list(telem._reachable_callback(none_options)) == []
 
 
 def test_build_host_telemetry_refresh_replaces_snapshot() -> None:

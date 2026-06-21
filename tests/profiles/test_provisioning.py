@@ -118,7 +118,8 @@ def test_dump_profile_emits_json_native_scalars() -> None:
     boot_method = dumped["boot_method"]
     assert type(boot_method) is str
     assert boot_method == "direct-kernel"
-    capture = dumped["provider"]["fault-inject"]["capture_method"]
+    provider = cast("dict[str, dict[str, object]]", dumped["provider"])
+    capture = provider["fault-inject"]["capture_method"]
     assert type(capture) is str
     assert capture == "host_dump"
 

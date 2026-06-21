@@ -33,7 +33,7 @@ def test_parse_literal_terms_rejects_empty() -> None:
 
 def test_parse_literal_terms_rejects_non_str() -> None:
     with pytest.raises(ArtifactSearchInputError, match=r"^pattern must be 1-256 characters$"):
-        parse_literal_terms(b"abc")  # type: ignore[arg-type]
+        parse_literal_terms(b"abc")  # ty: ignore[invalid-argument-type]
 
 
 def test_parse_literal_terms_rejects_nul() -> None:

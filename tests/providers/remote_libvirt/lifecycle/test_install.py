@@ -81,7 +81,7 @@ class _RecordingAgent(_ScriptedAgent):
     def __call__(self, domain: object, command: str, timeout: int, flags: int) -> str:
         payload = json.loads(command)
         if payload["execute"] == "guest-exec":
-            self._seen_domains.append(domain.name())  # type: ignore[attr-defined]
+            self._seen_domains.append(domain.name())  # ty: ignore[unresolved-attribute]
         return super().__call__(domain, command, timeout, flags)
 
 

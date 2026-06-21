@@ -6,10 +6,12 @@ import asyncio
 from typing import cast
 
 import pytest
+from psycopg import AsyncConnection
 
 from kdive.domain.lifecycle import Run
-from kdive.domain.operations.jobs import JobKind
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers import runs, runs_boot
+from kdive.jobs.handlers.runs_build import BuildHostTransportFactories
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.artifacts.artifact_search import (
@@ -17,6 +19,7 @@ from kdive.security.artifacts.artifact_search import (
     search_text,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.store.objectstore import ObjectStore
 
 
 def test_boot_handler_facade_and_leaf_console_patch_surface() -> None:
@@ -89,8 +92,8 @@ def _ports() -> runs.RunHandlerPorts:
     return runs.RunHandlerPorts(
         resolver=cast(ProviderResolver, object()),
         secret_registry=cast(SecretRegistry, object()),
-        transport_factories=cast(object, "transport-factories"),  # type: ignore[arg-type]
-        artifact_store=cast(object, "artifact-store"),  # type: ignore[arg-type]
+        transport_factories=cast(BuildHostTransportFactories, "transport-factories"),
+        artifact_store=cast(ObjectStore, "artifact-store"),
     )
 
 
@@ -129,10 +132,17 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
         if kind not in claimed:
             assert registry.get(kind) is None, f"facade should not claim {kind}"
 
-    conn, job = object(), object()
-    assert asyncio.run(registry.get(JobKind.BUILD)(conn, job)) == "build"  # type: ignore[misc]
-    assert asyncio.run(registry.get(JobKind.INSTALL)(conn, job)) == "install"  # type: ignore[misc]
-    assert asyncio.run(registry.get(JobKind.BOOT)(conn, job)) == "boot"  # type: ignore[misc]
+    conn = cast(AsyncConnection, object())
+    job = cast(Job, object())
+
+    def _dispatch(kind: JobKind) -> str | None:
+        handler = registry.get(kind)
+        assert handler is not None
+        return asyncio.run(handler(conn, job))
+
+    assert _dispatch(JobKind.BUILD) == "build"
+    assert _dispatch(JobKind.INSTALL) == "install"
+    assert _dispatch(JobKind.BOOT) == "boot"
 
     # Each lambda threads the shared conn/job plus the ports the leaf handler needs.
     assert calls["build"][0] is conn and calls["build"][1] is job

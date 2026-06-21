@@ -146,18 +146,18 @@ def test_pci_descriptor_without_class_is_skipped() -> None:
 
 def test_list_pcie_requests_only_pci_devices() -> None:
     # The node-device enumeration must pass the PCI-device filter flag, not a placeholder.
-    flags: list[object] = []
+    recorded_flags: list[object] = []
 
     class _RecordingConn(FakeLibvirtConn):
         def listAllDevices(  # noqa: N802 - mirrors the libvirt binding name
-            self, flags_arg: int = 0
+            self, flags: int = 0
         ) -> list[FakeNodeDevice]:
-            flags.append(flags_arg)
+            recorded_flags.append(flags)
             return list(self.node_devices)
 
     conn = _RecordingConn(node_devices=[FakeNodeDevice("pci_0000_3b_00_0", pci_nodedev_xml())])
     _discovery(conn).list_resources()
-    assert flags == [libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV]
+    assert recorded_flags == [libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV]
 
 
 def test_pcie_descriptor_has_no_free_flag() -> None:

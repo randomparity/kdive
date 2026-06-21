@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -178,7 +178,8 @@ def test_validation_error_message_is_fixed_and_details_carry_errors() -> None:
     assert str(caught.value) == "invalid build profile"
     errors = caught.value.details["errors"]
     assert isinstance(errors, list) and errors
-    assert any(tuple(entry.get("loc", ())) == ("kernel_source_ref",) for entry in errors)
+    entries = cast("list[dict[str, Any]]", errors)
+    assert any(tuple(entry.get("loc", ())) == ("kernel_source_ref",) for entry in entries)
 
 
 def test_validation_error_details_omit_input_url_and_context() -> None:
@@ -192,7 +193,8 @@ def test_validation_error_details_omit_input_url_and_context() -> None:
 
     errors = caught.value.details["errors"]
     assert errors
-    for entry in errors:
+    entries = cast("list[dict[str, Any]]", errors)
+    for entry in entries:
         assert "input" not in entry
         assert "url" not in entry
         assert "ctx" not in entry

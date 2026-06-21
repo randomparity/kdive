@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from kdive.components.references import (
@@ -85,7 +87,8 @@ def test_parse_component_ref_errors_omit_url_and_input_noise() -> None:
     with pytest.raises(CategorizedError) as caught:
         parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
 
-    for error in caught.value.details["errors"]:
+    errors = cast("list[dict[str, object]]", caught.value.details["errors"])
+    for error in errors:
         assert "url" not in error
         assert "input" not in error
 
@@ -99,7 +102,6 @@ def test_parse_component_ref_surfaces_sha256_validator_message() -> None:
     # framing prefix. Pinning the product message (not the pydantic prefix) keeps the test
     # robust to a pydantic bump while still catching any change to the guidance text itself.
     expected = "sha256 must be 'sha256:<64 lowercase hex chars>'"
-    product_messages = [
-        error["msg"].removeprefix("Value error, ") for error in caught.value.details["errors"]
-    ]
+    errors = cast("list[dict[str, str]]", caught.value.details["errors"])
+    product_messages = [error["msg"].removeprefix("Value error, ") for error in errors]
     assert expected in product_messages

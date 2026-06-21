@@ -20,7 +20,7 @@ from kdive.db.build_hosts import BuildHost, BuildHostKind, BuildHostState
 from kdive.domain.build_phase import BuildPhase
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.jobs.build_telemetry import BuildPhaseRecorder
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
 from kdive.providers.ports import TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.dispatch import (
@@ -596,7 +596,9 @@ def test_remote_build_wires_session_args_through_run_build_on_host() -> None:
             parsed,
             secret_registry=registry,
             kernel_src="",
-            transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
+            transport_factories={
+                BuildHostKind.EPHEMERAL_LIBVIRT: cast(BuildHostTransportFactory, _factory)
+            },
             recorder=recorder,
             provider="remotevirt",
         )
@@ -604,7 +606,7 @@ def test_remote_build_wires_session_args_through_run_build_on_host() -> None:
     # run_id, source (the git ref), secret_registry all flow to the factory.
     assert factory_args["run_id"] == _RUN_ID
     assert factory_args["reg"] is registry
-    git_source = factory_args["source"]
+    git_source = cast("GitSourceRef | None", factory_args["source"])
     assert git_source is not None and git_source.remote == "https://git.example/linux.git"
     # recorder + provider flow to the build call.
     assert builder.build_args == (_RUN_ID, parsed)
@@ -628,7 +630,9 @@ def test_remote_build_default_provider_is_empty_string() -> None:
             _git_parsed(),
             secret_registry=SecretRegistry(),
             kernel_src="",
-            transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
+            transport_factories={
+                BuildHostKind.EPHEMERAL_LIBVIRT: cast(BuildHostTransportFactory, _factory)
+            },
             recorder=recorder,
         )
     )

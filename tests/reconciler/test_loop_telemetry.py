@@ -117,6 +117,8 @@ def _metric_meta(reader: InMemoryMetricReader, name: str) -> tuple[str, str]:
         for sm in rm.scope_metrics:
             for metric in sm.metrics:
                 if metric.name == name:
+                    assert metric.unit is not None
+                    assert metric.description is not None
                     return metric.unit, metric.description
     raise AssertionError(f"metric {name!r} not found")
 
@@ -179,7 +181,9 @@ def test_pass_span_default_outcome_is_ok() -> None:
     telemetry, reader, exporter = _telemetry()
     with telemetry.pass_span():
         pass
-    assert exporter.get_finished_spans()[0].attributes["outcome"] == "ok"
+    attributes = exporter.get_finished_spans()[0].attributes
+    assert attributes is not None
+    assert attributes["outcome"] == "ok"
     assert _hist_points(reader, "kdive.reconcile.duration") == {(("outcome", "ok"),): 1}
 
 
@@ -190,7 +194,9 @@ def test_pass_span_error_outcome_sets_error_status() -> None:
         span.set_outcome("error")
 
     finished = exporter.get_finished_spans()
-    assert finished[0].attributes["outcome"] == "error"
+    attributes = finished[0].attributes
+    assert attributes is not None
+    assert attributes["outcome"] == "error"
     assert finished[0].status.status_code is StatusCode.ERROR
 
     points = _hist_points(reader, "kdive.reconcile.duration")
@@ -502,7 +508,7 @@ def test_run_cancels_heartbeat_ticker_on_exit(monkeypatch: pytest.MonkeyPatch) -
             stop.set()
             return _empty_report()
 
-        reconciler.run_once = one_shot  # type: ignore[method-assign]
+        reconciler.run_once = one_shot  # ty: ignore[invalid-assignment]
         await asyncio.wait_for(reconciler.run(stop), timeout=2)
 
         # Right after run() returns (still inside this loop), the never-ending ticker must

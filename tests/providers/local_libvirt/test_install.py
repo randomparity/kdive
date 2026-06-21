@@ -7,6 +7,7 @@ import subprocess
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import libvirt
@@ -705,7 +706,7 @@ def test_domain_exit_probe_runs_bounded_captured_no_raise(
 
     install._domain_exit_probe("kdive-abc")
 
-    kwargs = recorded["kwargs"]
+    kwargs = cast("dict[str, object]", recorded["kwargs"])
     assert isinstance(kwargs, dict)
     # Output must be captured and decoded so stdout/stderr parsing works, the probe must be
     # time-bounded so a wedged host cannot hang the boot loop, and check=False so a nonzero

@@ -58,11 +58,11 @@ def _metric_names(reader: InMemoryMetricReader) -> set[str]:
     return names
 
 
-def _instruments(reader: InMemoryMetricReader) -> dict[str, tuple[str, str]]:
+def _instruments(reader: InMemoryMetricReader) -> dict[str, tuple[str | None, str | None]]:
     """Map each emitted instrument name to its ``(unit, description)`` contract."""
     data = reader.get_metrics_data()
     assert data is not None
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str | None, str | None]] = {}
     for rm in data.resource_metrics:
         for sm in rm.scope_metrics:
             for metric in sm.metrics:

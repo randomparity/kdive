@@ -537,6 +537,7 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
 
     from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID
     from kdive.diagnostics.service import default_service_factory
+    from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
     from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 
     _load_remote_config(monkeypatch, tmp_path)
@@ -545,7 +546,9 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
         None, pool=pool, provider_contributions=diagnostic_provider_contributions()
     )
     assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
-    dispatcher = service._worker_mode.dispatcher  # noqa: SLF001
+    # The dispatcher field is typed as the WorkerCheckDispatcher Protocol; narrow to the
+    # concrete impl to inspect its wired pool/provider/check-id internals.
+    dispatcher = cast(JobWorkerCheckDispatcher, service._worker_mode.dispatcher)  # noqa: SLF001
     assert dispatcher._pool is pool  # noqa: SLF001
     assert dispatcher._provider == "remote-libvirt"  # noqa: SLF001
     assert set(dispatcher._worker_check_ids) == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}  # noqa: SLF001

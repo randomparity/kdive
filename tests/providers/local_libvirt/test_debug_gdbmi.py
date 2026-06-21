@@ -406,7 +406,7 @@ def test_read_memory_rejects_non_int_address(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _engine().read_memory(
             _attachment(_FakeMiController(), tmp_path),
-            address="0x10",  # type: ignore[arg-type]
+            address="0x10",  # ty: ignore[invalid-argument-type]
             byte_count=4,
         )
     assert exc.value.details["code"] == "bad_read_range"
@@ -418,7 +418,7 @@ def test_read_memory_rejects_non_int_byte_count(tmp_path: Path) -> None:
         _engine().read_memory(
             _attachment(_FakeMiController(), tmp_path),
             address=0x10,
-            byte_count="4",  # type: ignore[arg-type]
+            byte_count="4",  # ty: ignore[invalid-argument-type]
         )
     assert exc.value.details["code"] == "bad_read_range"
     assert str(exc.value) == "address and byte_count must be integers"

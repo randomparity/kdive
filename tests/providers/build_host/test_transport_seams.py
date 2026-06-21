@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -663,7 +663,7 @@ def test_transport_read_build_id_argv_and_parse(tmp_path: Path) -> None:
     import kdive.providers.shared.build_host.transports.transport_seams as seams
 
     original = seams.parse_gnu_build_id
-    seams.parse_gnu_build_id = lambda _blob: sentinel
+    seams.parse_gnu_build_id = lambda _blob: sentinel  # ty: ignore[invalid-assignment]
     try:
         result = transport_read_build_id(transport)(ws)
     finally:
@@ -826,7 +826,7 @@ def test_apply_patch_nonzero_git_apply_redacts_stderr_with_registry(tmp_path: Pa
         _transport_apply_patch(transport, str(patch_file), ws, registry)
 
     assert str(exc_info.value) == "patch_ref does not apply against the kernel tree"
-    stderr = exc_info.value.details["stderr"]
+    stderr = cast(str, exc_info.value.details["stderr"])
     # The registered secret is redacted (so passing a None registry would NOT redact it).
     assert "TOPSECRET" not in stderr
     assert "[REDACTED]" in stderr
@@ -851,7 +851,7 @@ def test_apply_patch_skipped_stderr_raises_with_redacted_details(tmp_path: Path)
     message = str(exc_info.value)
     assert message.startswith("patch_ref was silently skipped")
     assert "skipped one or" in message
-    stderr = exc_info.value.details["stderr"]
+    stderr = cast(str, exc_info.value.details["stderr"])
     assert "HUSH" not in stderr
 
 
@@ -908,7 +908,7 @@ def test_build_workspace_patch_failure_redacts_with_run_secret_registry(tmp_path
     with pytest.raises(CategorizedError) as exc_info:
         orch.build_workspace(_RUN, _profile({"patch_ref": str(patch_file)}))
 
-    assert "CHECKOUTSECRET" not in exc_info.value.details["stderr"]
+    assert "CHECKOUTSECRET" not in cast(str, exc_info.value.details["stderr"])
 
 
 def test_apply_patch_invalid_ref_names_patch_ref_kind(tmp_path: Path) -> None:

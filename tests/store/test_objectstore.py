@@ -152,7 +152,7 @@ class _RecordingPutClient:
     def put_object(self, **kwargs: object) -> dict[str, object]:
         body = kwargs.get("Body")
         if hasattr(body, "read"):
-            kwargs["Body"] = body.read()  # ty: ignore[possibly-unbound-attribute]
+            kwargs["Body"] = body.read()  # ty: ignore[call-non-callable]
         self.last_kwargs = kwargs
         return {"ETag": '"stored-etag"'}
 

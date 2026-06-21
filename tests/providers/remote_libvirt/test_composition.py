@@ -72,7 +72,7 @@ def test_rebind_for_resource_threads_resource_name_into_provisioner(
     assert cfg.uri == "qemu+tls://host-b.example/system"
     assert seen == ["host-b"]
     # The rebind must also thread the original secret_registry into the rebound runtime, not None.
-    assert bound.installer._secret_registry is registry
+    assert bound.installer._secret_registry is registry  # ty: ignore[unresolved-attribute]
 
 
 def test_for_resource_is_identity_without_rebind_hook() -> None:
@@ -166,7 +166,9 @@ def test_build_runtime_debug_capabilities_are_wired() -> None:
     assert runtime.debug.attach_seam is composition.remote_attach_seam
     assert runtime.debug.engine is not None
     # The remote engine must use the ACL-remote host policy (not the loopback default).
-    assert runtime.debug.engine._host_policy is composition.allow_acl_remote
+    assert (
+        runtime.debug.engine._host_policy is composition.allow_acl_remote  # ty: ignore[unresolved-attribute]
+    )
 
 
 def test_build_runtime_engine_redactor_uses_the_provider_secret_registry() -> None:
@@ -176,7 +178,7 @@ def test_build_runtime_engine_redactor_uses_the_provider_secret_registry() -> No
     registry.register("s3cr3t-token", scope=None)  # pragma: allowlist secret
     runtime = composition.build_runtime(secret_registry=registry)
 
-    redactor = runtime.debug.engine._redactor_factory()
+    redactor = runtime.debug.engine._redactor_factory()  # ty: ignore[unresolved-attribute]
     assert redactor is not None
     assert "s3cr3t-token" not in redactor.redact_text("value=s3cr3t-token tail")
 
@@ -184,10 +186,12 @@ def test_build_runtime_engine_redactor_uses_the_provider_secret_registry() -> No
 def test_build_runtime_validators_and_component_sources() -> None:
     runtime = composition.build_runtime(secret_registry=SecretRegistry())
     # build_config_validator is the builder's bound method (not None / not a stand-in).
-    assert runtime.build_config_validator == runtime.builder.validate_config_ref
+    assert (
+        runtime.build_config_validator == runtime.builder.validate_config_ref  # ty: ignore[unresolved-attribute]
+    )
     # rootfs_validator accepts any rootfs and returns None (remote has no rootfs to validate).
     assert runtime.rootfs_validator is not None
-    assert runtime.rootfs_validator(object()) is None
+    assert runtime.rootfs_validator(object()) is None  # ty: ignore[invalid-argument-type]
     # component_sources reflects _component_sources(): the remote provider id and source map.
     sources = runtime.component_sources
     assert sources.provider == ResourceKind.REMOTE_LIBVIRT.value
@@ -210,17 +214,20 @@ def test_build_runtime_threads_secret_registry_into_each_registry_port() -> None
     registry = SecretRegistry()
     runtime = composition.build_runtime(secret_registry=registry)
 
-    assert runtime.installer._secret_registry is registry
-    assert runtime.live_introspector._secret_registry is registry
-    assert runtime.vmcore_introspector._secret_registry is registry
+    assert runtime.installer._secret_registry is registry  # ty: ignore[unresolved-attribute]
+    assert runtime.live_introspector._secret_registry is registry  # ty: ignore[unresolved-attribute]
+    assert runtime.vmcore_introspector._secret_registry is registry  # ty: ignore[unresolved-attribute]
     # retriever composes three capturers; each must receive the provider registry.
-    assert runtime.retriever._kdump._secret_registry is registry
-    assert runtime.retriever._host_dump._secret_registry is registry
-    assert runtime.retriever._postmortem._secret_registry is registry
+    assert runtime.retriever._kdump._secret_registry is registry  # ty: ignore[unresolved-attribute]
+    assert runtime.retriever._host_dump._secret_registry is registry  # ty: ignore[unresolved-attribute]
+    assert runtime.retriever._postmortem._secret_registry is registry  # ty: ignore[unresolved-attribute]
     # controller and provisioner consume the registry lazily via a secret-backend factory
     # closure; the built backend must carry the provider registry, not None.
-    assert runtime.controller._secret_backend_factory()._registry is registry
-    assert runtime.provisioner._connections.secret_backend_factory()._registry is registry
+    assert runtime.controller._secret_backend_factory()._registry is registry  # ty: ignore[unresolved-attribute]
+    assert (
+        runtime.provisioner._connections.secret_backend_factory()._registry  # ty: ignore[unresolved-attribute]
+        is registry
+    )
 
 
 def test_build_runtime_threads_config_factory_into_each_config_port() -> None:
@@ -236,13 +243,13 @@ def test_build_runtime_threads_config_factory_into_each_config_port() -> None:
         secret_registry=SecretRegistry(), config_factory=lambda: sentinel
     )
 
-    assert runtime.installer._config_factory() is sentinel
-    assert runtime.controller._config_factory() is sentinel
-    assert runtime.connector._config_factory() is sentinel
-    assert runtime.live_introspector._config_factory() is sentinel
-    assert runtime.retriever._kdump._config_factory() is sentinel
-    assert runtime.retriever._host_dump._config_factory() is sentinel
-    assert runtime.provisioner._connections.config() is sentinel
+    assert runtime.installer._config_factory() is sentinel  # ty: ignore[unresolved-attribute]
+    assert runtime.controller._config_factory() is sentinel  # ty: ignore[unresolved-attribute]
+    assert runtime.connector._config_factory() is sentinel  # ty: ignore[unresolved-attribute]
+    assert runtime.live_introspector._config_factory() is sentinel  # ty: ignore[unresolved-attribute]
+    assert runtime.retriever._kdump._config_factory() is sentinel  # ty: ignore[unresolved-attribute]
+    assert runtime.retriever._host_dump._config_factory() is sentinel  # ty: ignore[unresolved-attribute]
+    assert runtime.provisioner._connections.config() is sentinel  # ty: ignore[unresolved-attribute]
 
 
 def test_build_runtime_staged_volume_probe_threads_config_factory(
@@ -269,7 +276,7 @@ def test_build_runtime_staged_volume_probe_threads_config_factory(
     runtime = composition.build_runtime(
         secret_registry=SecretRegistry(), config_factory=fake_config_factory
     )
-    result = runtime.staged_volume_probe(["vol-1", "vol-2"])  # type: ignore[misc]
+    result = runtime.staged_volume_probe(["vol-1", "vol-2"])  # ty: ignore[call-non-callable]
 
     assert result == "sentinel"
     assert captured["volumes"] == ["vol-1", "vol-2"]

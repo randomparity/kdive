@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -355,7 +356,7 @@ def test_introspect_live_threads_handle_into_domain_lookup():
     # The stripped domain name must be threaded into conn.lookupByName, and the looked-up domain
     # (not None) must be handed to the agent round-trip.
     looked_up: list[str] = []
-    agent_domains: list[object] = []
+    agent_domains: list[_FakeDomain] = []
 
     class _RecordingConn:
         def lookupByName(self, name):  # noqa: N802 - libvirt binding name
@@ -549,7 +550,7 @@ def test_helper_tasks_truncates_beyond_the_task_limit():
         _FakeTask(pid=i, tgid=i, comm="d", state="D", stack=[]) for i in range(_TASK_LIMIT + 5)
     ]
     out = helper_tasks(_ProgramFromLists(tasks=tasks))
-    assert len(out["tasks"]) == _TASK_LIMIT
+    assert len(cast(list[object], out["tasks"])) == _TASK_LIMIT
     assert out["truncated"] is True
 
 
@@ -560,7 +561,8 @@ def test_helper_tasks_degrades_unwind_failure_to_marker():
         tasks=[_FakeTask(pid=7, tgid=7, comm="x", state="D", stack=RuntimeError("boom"))]
     )
     out = helper_tasks(prog)
-    assert out["tasks"][0]["kernel_stack"] == ["<stack unavailable: RuntimeError>"]
+    tasks = cast(list[dict[str, object]], out["tasks"])
+    assert tasks[0]["kernel_stack"] == ["<stack unavailable: RuntimeError>"]
     assert out["truncated"] is False
 
 
@@ -596,7 +598,8 @@ def test_helper_modules_counts_decode_errors_without_failing():
         ]
     )
     out = helper_modules(prog)
-    assert [m["name"] for m in out["modules"]] == ["ok"]
+    modules = cast(list[dict[str, object]], out["modules"])
+    assert [m["name"] for m in modules] == ["ok"]
     assert out["decode_errors"] == 1
     assert out["all_failed"] is False
 
@@ -691,7 +694,7 @@ def test_assemble_report_byte_cap_trims_tasks_and_sets_truncated():
         secret_registry=SecretRegistry(),
     )
     assert out.truncated is True
-    assert len(out.tasks["tasks"]) < len(rows)
+    assert len(cast(list[object], out.tasks["tasks"])) < len(rows)
 
 
 def test_assemble_report_byte_cap_counts_modules_toward_the_budget():

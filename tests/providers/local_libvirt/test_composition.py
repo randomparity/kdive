@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from kdive.components.references import (
     CONFIG_COMPONENT,
     INITRD_COMPONENT,
@@ -90,11 +92,16 @@ def test_build_runtime_threads_secret_registry_into_secret_aware_ports() -> None
     runtime = composition.build_runtime(secret_registry=registry)
 
     # The single caller-supplied registry must reach every secret-aware port, not be
-    # dropped (which would silently disable redaction for that port).
-    assert runtime.builder._secret_registry is registry
-    assert runtime.retriever._secret_registry is registry
-    assert runtime.vmcore_introspector._secret_registry is registry
-    assert runtime.live_introspector._secret_registry is registry
+    # dropped (which would silently disable redaction for that port). The runtime fields
+    # are typed as ports (Protocols); narrow to the concrete impls to inspect the wiring.
+    builder = cast("LocalLibvirtBuild", runtime.builder)
+    retriever = cast("LocalLibvirtRetrieve", runtime.retriever)
+    vmcore_introspector = cast("LocalLibvirtVmcoreIntrospect", runtime.vmcore_introspector)
+    live_introspector = cast("LocalLibvirtLiveIntrospect", runtime.live_introspector)
+    assert builder._secret_registry is registry
+    assert retriever._secret_registry is registry
+    assert vmcore_introspector._secret_registry is registry
+    assert live_introspector._secret_registry is registry
 
 
 def test_build_runtime_debug_uses_default_attach_seam() -> None:
@@ -111,7 +118,9 @@ def test_build_runtime_redactor_factory_masks_values_from_the_registry() -> None
     runtime = composition.build_runtime(secret_registry=registry)
     assert runtime.debug is not None
 
-    redactor = runtime.debug.engine._redactor_factory()
+    # ty resolves the name `_redactor_factory` to the module-level helper of the same
+    # name, masking the instance attribute set in GdbMiEngine.__init__; it exists at runtime.
+    redactor = runtime.debug.engine._redactor_factory()  # ty: ignore[unresolved-attribute]
     assert isinstance(redactor, Redactor)
     masked = redactor.redact_text("prefix local-libvirt-capability-secret suffix")
     assert "local-libvirt-capability-secret" not in masked

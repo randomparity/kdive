@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.prompts.base import Prompt
 from mcp.types import TextContent
 
 from kdive.mcp.prompts.registrar import (
@@ -144,7 +145,7 @@ def test_registered_prompts_carry_their_spec_title_and_description() -> None:
     register(app, tool_maturity=_full_maturity_map())
     specs = {spec.name: spec for spec in CANONICAL_PROMPTS}
 
-    async def _listed() -> dict[str, object]:
+    async def _listed() -> dict[str, Prompt]:
         return {p.name: p for p in await app.list_prompts()}
 
     listed = asyncio.run(_listed())

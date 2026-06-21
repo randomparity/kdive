@@ -26,6 +26,7 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition
+from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.infra.reaping import OwnedDomain
@@ -784,7 +785,9 @@ def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(
     captured: list[object] = []
     real_with = composition._with_discovery_registration
 
-    def _spy_with(runtime: ProviderRuntime, registration: object) -> ProviderRuntime:
+    def _spy_with(
+        runtime: ProviderRuntime, registration: ProviderDiscoveryRegistration
+    ) -> ProviderRuntime:
         captured.append(registration)
         assert registration is not None
         return real_with(runtime, registration)
