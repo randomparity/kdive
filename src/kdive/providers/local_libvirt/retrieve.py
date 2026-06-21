@@ -210,27 +210,48 @@ def _libvirt_uri() -> str:
 
 
 class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
-    """Read-only libguestfs view of a System's overlay, listing/reading /var/crash cores."""
+    """Read-only libguestfs view of a System's overlay, listing/reading /var/crash cores.
+
+    The libguestfs appliance is launched once in the constructor and reused for both the
+    listing and the read; the caller closes it via ``close()``. Every guestfs call is wrapped
+    so a corrupt/locked overlay or a vanished core surfaces as a typed ``CategorizedError``
+    (the provider contract), not a raw ``guestfs.Error``.
+    """
+
+    def __init__(self, overlay: str) -> None:
+        self._overlay = overlay
+        self._guest = self._mount(overlay)
 
     def list_vmcores(self, overlay: str) -> list[VmcoreEntry]:
-        guest = self._mount(overlay)
         try:
             entries: list[VmcoreEntry] = []
-            for path in guest.glob_expand(_VAR_CRASH_GLOB):
-                stat = guest.statns(path)
+            for path in self._guest.glob_expand(_VAR_CRASH_GLOB):
+                stat = self._guest.statns(path)
                 entries.append(
                     VmcoreEntry(path=path, mtime=stat["st_mtime_sec"], size_bytes=stat["st_size"])
                 )
             return entries
-        finally:
-            guest.close()
+        except Exception as exc:
+            raise self._io_failure("listing /var/crash cores", exc) from exc
 
     def read_vmcore(self, overlay: str, path: str) -> bytes:
-        guest = self._mount(overlay)
         try:
-            return guest.read_file(path)
-        finally:
-            guest.close()
+            return self._guest.read_file(path)
+        except Exception as exc:
+            raise self._io_failure("reading the kdump core", exc) from exc
+
+    def close(self) -> None:
+        try:
+            self._guest.close()
+        except Exception:
+            _log.warning("libguestfs handle close failed; continuing", exc_info=True)
+
+    def _io_failure(self, op: str, exc: Exception) -> CategorizedError:
+        return CategorizedError(
+            f"libguestfs failed {op} from the System overlay",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"overlay": self._overlay, "error": type(exc).__name__},
+        )
 
     @staticmethod
     def _mount(overlay: str):  # type: ignore[no-untyped-def]
@@ -242,14 +263,23 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
                 category=ErrorCategory.MISSING_DEPENDENCY,
             ) from exc
         guest = guestfs.GuestFS(python_return_dict=True)
-        guest.add_drive_opts(overlay, readonly=1)
-        guest.launch()
-        roots = guest.inspect_os()
+        try:
+            guest.add_drive_opts(overlay, readonly=1)
+            guest.launch()
+            roots = guest.inspect_os()
+        except Exception as exc:
+            guest.close()
+            raise CategorizedError(
+                "libguestfs failed to open the System overlay",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"overlay": overlay, "error": type(exc).__name__},
+            ) from exc
         if not roots:
             guest.close()
             raise CategorizedError(
                 "could not inspect the System overlay to find /var/crash",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"overlay": overlay},
             )
         guest.mount_ro(roots[0], "/")
         return guest
@@ -277,9 +307,12 @@ def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (l
 
 def _real_wait_for_vmcore(system_id: UUID) -> bytes | None:  # pragma: no cover - live_vm
     _force_off_domain(system_id)
-    return harvest_vmcore(
-        _LibguestfsCoreReader(), overlay_path(system_id), max_bytes=MAX_CORE_BYTES
-    )
+    overlay = overlay_path(system_id)
+    reader = _LibguestfsCoreReader(overlay)
+    try:
+        return harvest_vmcore(reader, overlay, max_bytes=MAX_CORE_BYTES)
+    finally:
+        reader.close()
 
 
 def _real_read_build_id(data: bytes) -> str:  # pragma: no cover - live_vm (drgn)
