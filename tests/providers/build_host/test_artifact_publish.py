@@ -349,7 +349,7 @@ def test_remote_file_stat_nonzero_is_build_failure() -> None:
     class _FailStat(_FakeTransport):
         def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
             if argv[0] == "stat":
-                return CommandResult(returncode=2, stdout="", stderr="no stat")
+                return CommandResult(returncode=2, stdout="", stderr="head" + "x" * 600 + "TAIL")
             return super().run(argv, cwd=cwd, timeout_s=timeout_s)
 
     store, transport = _FakeStore(), _FailStat()
@@ -357,7 +357,14 @@ def test_remote_file_stat_nonzero_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as caught:
         _publish_remote(store, transport, "/p")
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
-    assert "stat" in str(caught.value)
+    assert str(caught.value) == "stat of a build artifact exited non-zero"
+    assert caught.value.details is not None
+    assert caught.value.details["path"] == "/p"
+    # last 512 chars only — keeps the tail, drops the head.
+    stderr = caught.value.details["stderr"]
+    assert stderr.endswith("TAIL")
+    assert len(stderr) == 512
+    assert not stderr.startswith("head")
     assert store.presigns == []
 
 
