@@ -75,7 +75,7 @@ Status: active
 - [ ] **Step 4: Run the harness against the UNCHANGED role — verify RED**
 
 Run: `just test-ansible`
-Expected: FAIL — `substring_collision` deletes `[]` (expected `7 6`), `prefix_collision` deletes `[]` (expected `7 6`); `comment_column` passes (old `grep -vF` already keeps the current allow and prunes the stale). The point is `substring_collision`/`prefix_collision` go red, proving the harness catches the bug.
+Expected: FAIL — only `substring_collision` goes red (deletes `[]`, expected `7 6`); it is the one case that reproduces the bug, because `110.0.0.0/24` *contains* `10.0.0.0/24` and `grep -vF` excludes it. `prefix_collision` and `comment_column` already pass under the buggy role (`10.0.0.0/2` does not contain `10.0.0.0/24`, and the commented current allow still contains `10.0.0.0/24`), so they are regression guards, not bug-reproductions — their job is to go red under a *wrong fix* (see Task 2 Step 5), not under the current bug.
 
 - [ ] **Step 5: Do NOT commit yet** — RED state is not committed; proceed to Task 2 to reach GREEN in the same logical change.
 
@@ -114,7 +114,9 @@ Expected: PASS — all cases, including `substring_collision` → `[7 6]`, `pref
 Run: `just lint-ansible` then `just lint-shell`
 Expected: both PASS (no yamllint/ansible-lint/shellcheck/shfmt findings).
 
-- [ ] **Step 5: Mutation check — prove the new cases catch the bug.** Temporarily revert only the matcher line in `main.yml` back to `grep -vF "{{ worker_cidr }}"`, run `just test-ansible`, and confirm `substring_collision` + `prefix_collision` go RED. Restore the awk line. Record the observed failure in the PR body (do not commit the reverted state).
+- [ ] **Step 5: Mutation check — two mutations, prove the new cases catch failures.** Run each, then restore the correct awk line; record both observed failures in the PR body (do not commit either mutated state):
+  - **(a) Re-introduce the bug:** revert the matcher line to `grep -vF "{{ worker_cidr }}"`. Expected: `substring_collision` goes RED (deletes `[]`, expected `7 6`) — proves the bug-fix is tested. (`prefix_collision`/`comment_column` stay green under this mutation.)
+  - **(b) The tempting wrong fix:** change the matcher to `awk -v cidr="{{ worker_cidr }}" '$NF != cidr'`. Expected: `comment_column` goes RED (the comment shifts `$NF` off the source, so the current `10.0.0.0/24` allows are deleted too) — proves the field-after-`IN` choice is tested.
 
 - [ ] **Step 6: Commit Tasks 1+2 as one logical change**
 
