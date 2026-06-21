@@ -1,11 +1,29 @@
-"""Tests for the local-libvirt kdump host-side overlay harvest (ADR-0203)."""
+"""Tests for the local-libvirt kdump host-side overlay harvest (ADR-0203).
+
+The ``live_vm``-gated acceptance test at the bottom of this module validates the full
+in-guest kdump capture arc — ``control.force_crash`` → real ``/var/crash/<ts>/vmcore``
+on the overlay → ``LocalLibvirtRetrieve.capture(method=KDUMP)`` harvests it host-side
+without staging a core — on an operator KVM host (ADR-0203).  See §4b of
+``docs/operating/runbooks/four-method-live-run.md`` for the manual end-to-end runbook.
+
+The test is collected but skipped in CI (``just test`` deselects ``live_vm``).  Run it
+with ``just test-live`` on a host that satisfies:
+  - ``KDIVE_LIBVIRT_URI`` pointing at the local libvirtd
+  - ``KDIVE_LIVE_VM_SYSTEM_ID`` set to a System UUID already installed with a
+    kdump-capable kernel (crashkernel= reserved, kdump service active)
+  - ``KDIVE_S3_*`` object-store env vars (object-store endpoint + bucket)
+  - ``guestfs`` (libguestfs Python binding) and ``drgn`` importable in the worker venv
+"""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -157,3 +175,93 @@ def test_redact_dmesg_scrubs_a_registered_secret(tmp_path: Path) -> None:
     out = redact_dmesg(core, lambda _p: b"login password=hunter2 done", registry)
     assert b"hunter2" not in out
     assert b"password=" in out
+
+
+# ---------------------------------------------------------------------------
+# live_vm acceptance: real panic → kdump core → harvest without staging
+# ---------------------------------------------------------------------------
+#
+# Validates the full #654 arc on an operator KVM host.  CI deselects ``live_vm``
+# (``just test`` runs ``-m "not live_vm and not live_stack"``), so this is SKIPPED
+# unless the operator runs ``just test-live`` with all prerequisites satisfied.
+#
+# Manual end-to-end runbook (including kdump service wire-up and drgn/libguestfs
+# venv prep): docs/operating/runbooks/four-method-live-run.md §4b.
+
+_SYS_ENV = "KDIVE_LIVE_VM_SYSTEM_ID"
+_URI_ENV = "KDIVE_LIBVIRT_URI"
+
+_FORCE_CRASH_WAIT_S = 60  # seconds to poll for the vmcore after the NMI
+_VMCORE_POLL_INTERVAL_S = 5
+
+
+@pytest.mark.live_vm
+def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - live_vm
+    """Force-crash a kdump System; verify vmcore.fetch harvests a real core host-side.
+
+    Asserts (real-seam, not mocked):
+      1. ``control.force_crash`` injects NMI over the real libvirt connection.
+      2. ``LocalLibvirtRetrieve.capture(method=KDUMP)`` drives the libguestfs overlay
+         harvest (``_real_wait_for_vmcore``), streams the core to the object store, and
+         returns a ``CaptureOutput`` with a non-empty ``vmcore_build_id`` and a positive
+         ``raw_size_bytes`` — confirming a real ``/var/crash/<ts>/vmcore`` was written
+         by the in-guest kdump service without any staging step.
+      3. No staging artifact exists: the raw ref lives under ``systems/<uuid>/vmcore-kdump``
+         (not a per-run staging path).
+
+    Skips when ``KDIVE_LIVE_VM_SYSTEM_ID``, ``KDIVE_LIBVIRT_URI``, or ``KDIVE_S3_*``
+    are absent (CI, dev hosts without the KVM prerequisites).
+    """
+    import shutil
+
+    system_id_str = os.environ.get(_SYS_ENV)
+    uri = os.environ.get(_URI_ENV)
+    s3_endpoint = os.environ.get("KDIVE_S3_ENDPOINT_URL")
+    s3_bucket = os.environ.get("KDIVE_S3_BUCKET")
+    if not system_id_str or not uri or not s3_endpoint or not s3_bucket:
+        pytest.skip(
+            f"{_SYS_ENV}, {_URI_ENV}, KDIVE_S3_ENDPOINT_URL, or KDIVE_S3_BUCKET not set; "
+            "local kdump acceptance needs an operator KVM host"
+        )
+    if not shutil.which("virsh"):
+        pytest.skip("virsh not on PATH; local kdump acceptance needs a local libvirt install")
+
+    from kdive.domain.capture import CaptureMethod
+    from kdive.providers.local_libvirt.lifecycle.control import LocalLibvirtControl
+    from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
+    from kdive.providers.shared.runtime_paths import domain_name_for
+    from kdive.security.secrets.secret_registry import SecretRegistry
+
+    system_id = UUID(system_id_str)
+    domain_name = domain_name_for(system_id)
+
+    # Step 1: panic the guest via NMI over the real libvirt connection.
+    control = LocalLibvirtControl.from_env()
+    control.force_crash(domain_name)
+
+    # Step 2: poll until the vmcore appears on the overlay or the window expires.
+    # ``_real_wait_for_vmcore`` (called from capture) owns this; we give kdump time to write
+    # the core before capture opens the libguestfs appliance.
+    deadline = time.monotonic() + _FORCE_CRASH_WAIT_S
+    while time.monotonic() < deadline:
+        time.sleep(_VMCORE_POLL_INTERVAL_S)
+
+    # Step 3: harvest the core via the real seam — libguestfs reads the overlay read-only,
+    # streams the core to a worker spool dir, then uploads it to the object store.
+    retriever = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
+    out = retriever.capture(system_id, CaptureMethod.KDUMP)
+
+    # The core was real: non-empty build-id and positive byte count.
+    assert out.vmcore_build_id, "vmcore_build_id is empty — core may be corrupt or wrong method"
+    assert out.raw_size_bytes > 0, "raw_size_bytes is zero — no core was actually captured"
+
+    # The raw artifact lives under the System's prefix, not a per-run staging path.
+    assert f"systems/{system_id}" in out.raw.key, (
+        f"unexpected raw artifact key {out.raw.key!r}: expected systems/<uuid>/vmcore-kdump"
+    )
+    assert out.raw.key.endswith("vmcore-kdump"), (
+        f"raw key {out.raw.key!r} does not end with vmcore-kdump"
+    )
+    assert out.redacted.key.endswith("vmcore-kdump-redacted"), (
+        f"redacted key {out.redacted.key!r} does not end with vmcore-kdump-redacted"
+    )
