@@ -21,6 +21,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _PACKAGE_REL = "src/kdive"
 
+MARKER = "# kdive-mutate transient config — delete only when no run is in flight\n"
+
 
 class MutateError(Exception):
     """A user-facing wrapper error (bad arguments, broken baseline, etc.)."""
@@ -55,3 +57,28 @@ def resolve_test_paths(test_args: list[str]) -> list[str]:
             raise MutateError(f"test path does not exist: {arg}")
         resolved.append(path.relative_to(_ROOT).as_posix())
     return resolved
+
+
+def render_config(only_mutate_rel: str, test_paths: list[str]) -> str:
+    """Render the transient ``setup.cfg`` ``[mutmut]`` section as text.
+
+    ``source_paths`` is the whole package so ``import kdive.*`` resolves in mutmut's
+    isolated copy; ``only_mutate`` scopes generation to the target file. The test
+    selection uses newline-token form so the marker expression stays one token.
+    """
+    selection_tokens = ["-m", "not live_vm and not live_stack", *test_paths]
+    selection = "".join(f"    {token}\n" for token in selection_tokens)
+    return (
+        f"{MARKER}"
+        "[mutmut]\n"
+        f"source_paths={_PACKAGE_REL}\n"
+        f"only_mutate={only_mutate_rel}\n"
+        "pytest_add_cli_args_test_selection=\n"
+        f"{selection}"
+        "mutate_only_covered_lines=true\n"
+        "max_stack_depth=8\n"
+        "do_not_mutate_patterns=logger.\\w+\n"
+        "also_copy=\n"
+        "    pyproject.toml\n"
+        "    tests\n"
+    )
