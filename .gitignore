@@ -53,3 +53,6 @@ scorecard.png
 /artifacts/coverage-campaign/
 
 deploy/ansible/artifacts/
+
+# mutation testing (scripts/mutate.py): mutmut's working/cache dir
+/mutants/
