@@ -51,6 +51,55 @@ def test_payload_without_resource_id_reconstructs_none() -> None:
     assert result.resource_id is None
 
 
+def test_roundtrip_preserves_provider_and_detail() -> None:
+    src = [
+        CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "tls verified", provider="remote-libvirt"),
+        CheckResult(GDBSTUB_ACL_ID, CheckStatus.PASS, "acl open", provider="local-libvirt"),
+    ]
+    out = deserialize_results(serialize_results(src))
+    assert [(r.detail, r.provider) for r in out] == [
+        ("tls verified", "remote-libvirt"),
+        ("acl open", "local-libvirt"),
+    ]
+
+
+def test_serialize_emits_compact_json() -> None:
+    src = [CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="remote-libvirt")]
+    raw = serialize_results(src)
+    assert ", " not in raw
+    assert ": " not in raw
+    assert '"provider":"remote-libvirt"' in raw
+
+
+def test_empty_payload_message() -> None:
+    with pytest.raises(ResultCodecError) as excinfo:
+        deserialize_results("")
+    assert str(excinfo.value) == "empty diagnostics result"
+
+
+def test_invalid_json_message() -> None:
+    with pytest.raises(ResultCodecError, match="diagnostics result is not valid JSON"):
+        deserialize_results("not json")
+
+
+def test_missing_results_list_message() -> None:
+    with pytest.raises(ResultCodecError) as excinfo:
+        deserialize_results("{}")
+    assert str(excinfo.value) == "diagnostics result has no 'results' list"
+
+
+def test_unexpected_check_id_message() -> None:
+    payload = '{"results": [{"check_id": "secret_ref", "status": "pass", "detail": "x"}]}'
+    with pytest.raises(ResultCodecError, match="unexpected worker-vantage check id"):
+        deserialize_results(payload)
+
+
+def test_invalid_item_message() -> None:
+    payload = '{"results": [{"check_id": "provider_tls", "status": "weird", "detail": "x"}]}'
+    with pytest.raises(ResultCodecError, match="invalid diagnostics result item"):
+        deserialize_results(payload)
+
+
 @pytest.mark.parametrize("raw", [None, "", "not json", "{}", '{"results": 3}', "[]"])
 def test_malformed_raises(raw: str | None) -> None:
     with pytest.raises(ResultCodecError):
