@@ -27,6 +27,21 @@ def _run(coro: Awaitable[None]) -> None:
     asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _block_real_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every adapter test here is fully offline: file writes go to tmp dirs and the ConfigMap
+    # HTTP boundary is exercised through httpx.MockTransport. Block real socket connections so a
+    # mutant that bypasses the injected transport (building a real-network client) fails fast and
+    # deterministically instead of hanging on a connect timeout.
+    import socket
+
+    def _refuse(*args: object, **kwargs: object) -> None:
+        raise OSError("real network access is blocked in this test module")
+
+    monkeypatch.setattr(socket.socket, "connect", _refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", _refuse)
+
+
 # ---- skeleton guard -------------------------------------------------------------------
 
 
@@ -665,6 +680,27 @@ def test_file_adapter_creates_temp_in_target_parent(
     assert captured["dir"] == target.parent
 
 
+def test_file_adapter_temp_name_is_hidden_and_marked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The temp file must be a dotfile (".systems-") with a ".tmp" suffix so an interrupted write
+    # leaves an obviously-transient, hidden artifact rather than a plausible config file. Pin the
+    # prefix/suffix passed to mkstemp so a dropped or re-cased affix is caught.
+    target = tmp_path / "systems.toml"
+    captured: dict[str, object] = {}
+    real_mkstemp = writeback.tempfile.mkstemp
+
+    def spy_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        captured["prefix"] = kwargs.get("prefix")
+        captured["suffix"] = kwargs.get("suffix")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(writeback.tempfile, "mkstemp", spy_mkstemp)
+    _run(writeback.MountedFileWriteback(target).write("x = 1\n"))
+    assert captured["prefix"] == ".systems-"
+    assert captured["suffix"] == ".tmp"
+
+
 def test_file_adapter_overwrites_existing(tmp_path: Path) -> None:
     target = tmp_path / "systems.toml"
     target.write_text("old = 1\n")
@@ -727,6 +763,75 @@ def test_configmap_patch_issues_the_expected_request() -> None:
     # the body is a strategic-merge patch on data.<key>, carrying the exact document.
     payload = json.loads(str(captured["body"]))
     assert payload == {"data": {"systems.toml": "schema_version = 2\n"}}
+
+
+def test_configmap_sends_canonical_header_names_verbatim() -> None:
+    # httpx normalizes header *lookups*, so request.headers.get(...) hides the case the code
+    # actually emits. Assert the raw wire names so a re-cased header literal is caught.
+    captured: dict[str, list[str]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["names"] = [name.decode() for name, _ in request.headers.raw]
+        return httpx.Response(200)
+
+    _run(_configmap_adapter(handler).write("x = 1\n"))
+    names = captured["names"]
+    assert "Authorization" in names
+    assert "Content-Type" in names
+    assert "Accept" in names
+
+
+def test_configmap_stores_the_injected_transport() -> None:
+    # The injected transport must be retained on the instance; dropping it (storing None) would
+    # make `write` build a real-network client instead of routing through the mock.
+    transport = httpx.MockTransport(lambda request: httpx.Response(200))
+    adapter = writeback.ConfigMapWriteback(
+        namespace="kdive",
+        name="kdive-systems",
+        key="systems.toml",
+        token="tok",  # noqa: S106
+        api_base="https://10.0.0.1:443",
+        transport=transport,
+    )
+    assert adapter._transport is transport
+
+
+def test_configmap_client_routes_through_the_injected_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `_client` must build its client with the injected transport. If the transport branch is
+    # inverted or the transport argument is dropped, httpx is asked to build a real-network
+    # client (transport=None); fail loudly on that so the mutant cannot survive.
+    real_init = httpx.AsyncClient.__init__
+
+    def guarded_init(self: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
+        if kwargs.get("transport") is None:
+            raise AssertionError("client built without the injected transport (real network path)")
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", guarded_init)
+
+    captured: dict[str, bool] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["called"] = True
+        return httpx.Response(200)
+
+    _run(_configmap_adapter(handler).write("x = 1\n"))
+    assert captured.get("called") is True
+
+
+def test_configmap_defaults_to_tls_verification() -> None:
+    # The constructor default for `verify` must keep TLS verification on; flipping it to False
+    # would silently disable certificate checking for the API patch.
+    adapter = writeback.ConfigMapWriteback(
+        namespace="kdive",
+        name="kdive-systems",
+        key="systems.toml",
+        token="tok",  # noqa: S106
+        api_base="https://10.0.0.1:443",
+    )
+    assert adapter._verify is True
 
 
 def test_configmap_strips_trailing_slash_from_api_base() -> None:
