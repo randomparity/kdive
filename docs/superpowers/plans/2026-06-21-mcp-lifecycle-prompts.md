@@ -73,10 +73,10 @@ individually (not only via `just ci`).
 5. `test_register_returns_count_and_lists_three_prompts` — register against a bare
    `FastMCP("probe")` with a fabricated map covering every referenced tool; assert
    `register(...) == len(CANONICAL_PROMPTS) == 3` and the three names are listed via
-   `await app._list_prompts()`.
+   `await app.list_prompts()` (public API; objects carry `.name`).
 6. `test_each_prompt_renders_nonempty_body_naming_every_step_tool` — for each spec,
-   `await app._get_prompt(name, {})` then `.render({})`; assert the rendered user message
-   text contains every `step.tool` of that spec.
+   `await app.render_prompt(name, {})` → `PromptResult`; assert
+   `result.messages[0].content.text` contains every `step.tool` of that spec.
 
 **Acceptance:** all six tests pass; `register` is pure (no FastMCP-internals access);
 `uv run python -m pytest tests/mcp/prompts -q` green; `just lint` + `just type` green.
@@ -111,7 +111,13 @@ and the test package removes the feature with no other change.
 3. `test_lifecycle_prompts_expected_maturity_matches_registry` — the independent
    drift guard: a hardcoded `EXPECTED_STEP_MATURITY` table in the test (tool → expected
    maturity, human-reviewed) asserted equal to the live registry's maturity for every
-   referenced step. A promotion/demotion fails here until the table is updated.
+   referenced step. A promotion/demotion fails here until the table is updated. Concrete
+   snapshot to encode (re-confirm against the live registry at implementation time):
+   - `implemented`: `investigations.open`, `resources.list`, `allocations.request`,
+     `allocations.wait`, `systems.define`, `runs.create`, `runs.complete_build`.
+   - `partial`: `runs.build`, `runs.install`, `runs.boot`, `debug.start_session`,
+     `introspect.run`, `debug.end_session`, `control.force_crash`, `vmcore.fetch`,
+     `vmcore.list`, `postmortem.triage`, `introspect.from_vmcore`.
 4. `test_prompts_add_no_tools` — assert the registered tool-name set is identical with
    and without `_register_lifecycle_prompts` in `_PLANE_REGISTRARS` (graceful
    degradation / no behavioral coupling), reusing the monkeypatch pattern in
@@ -139,11 +145,12 @@ a static, advisory surface); `live_vm` / `live_stack` markers stay gated and unt
 
 ## Self-contained notes for an implementer
 
-- FastMCP prompt API (fastmcp-slim 3.4.2, verified): `app.add_prompt(Prompt.from_function(fn, name=, title=, description=))`;
-  list via `await app._list_prompts()` (objects with `.name`); fetch via
-  `await app._get_prompt(name, {})` then `await prompt.render({})` → `PromptResult` with
-  `.messages`, each `.content.text`. A function returning `str` → one user-role text
-  message.
+- FastMCP prompt API (fastmcp-slim 3.4.2, verified): register via
+  `app.add_prompt(Prompt.from_function(fn, name=, title=, description=))`; list via the
+  public `await app.list_prompts()` (objects with `.name`); render via the public
+  `await app.render_prompt(name, {})` → `PromptResult` with `.messages`, each
+  `.content.text`. A function returning `str` → one user-role text message. Use the
+  public methods, not the `_`-prefixed protocol internals.
 - Tool meta lives on the registered `Tool.meta` dict; partial shape is
   `{"maturity": "partial", "maturity_detail": {"reason": ..., "detail": ..., "promotion": ...}}`
   (`src/kdive/mcp/tools/_docmeta.py`).
