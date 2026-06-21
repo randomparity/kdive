@@ -30,7 +30,7 @@ from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.accounting.cost import Selector, resolve_coeff
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
-from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.catalog.resources import ManagedBy, Resource, ResourceKind
 from kdive.domain.lifecycle import Allocation
 from kdive.inventory.model import InventoryDoc
 from kdive.mcp.auth import RequestContext
@@ -71,7 +71,13 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
 
 
 async def _resource(
-    conn: psycopg.AsyncConnection, *, cap: int = 5, cost_class: str = "local"
+    conn: psycopg.AsyncConnection,
+    *,
+    cap: int = 5,
+    cost_class: str = "local",
+    kind: ResourceKind = ResourceKind.LOCAL_LIBVIRT,
+    managed_by: ManagedBy = ManagedBy.RUNTIME,
+    name: str | None = None,
 ) -> UUID:
     res = await RESOURCES.insert(
         conn,
@@ -79,7 +85,8 @@ async def _resource(
             id=uuid4(),
             created_at=_DT,
             updated_at=_DT,
-            kind=ResourceKind.LOCAL_LIBVIRT,
+            kind=kind,
+            name=name,
             capabilities={
                 CONCURRENT_ALLOCATION_CAP_KEY: cap,
                 "vcpus": 16,
@@ -89,6 +96,7 @@ async def _resource(
             cost_class=cost_class,
             status=ResourceStatus.AVAILABLE,
             host_uri="qemu:///system",
+            managed_by=managed_by,
         ),
     )
     return res.id
@@ -150,6 +158,18 @@ async def _live_count(conn: psycopg.AsyncConnection, resource_id: UUID) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def _override_disposition(url: str, *, kind: str, name: str) -> str | None:
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT disposition FROM inventory_overrides "
+            "WHERE source_kind = 'resource' AND resource_kind = %s AND name = %s",
+            (kind, name),
+        )
+        row = await cur.fetchone()
+    return None if row is None else str(row[0])
 
 
 # ---- set_cost_class_coeff -------------------------------------------------------------
@@ -273,6 +293,59 @@ def test_set_capacity_updates_capabilities_jsonb(migrated_url: str) -> None:
             assert row.capabilities["vcpus"] == 16
         rows = await _platform_audit_rows(migrated_url)
         assert rows == [("op-1", "platform_operator", "ops.set_host_capacity", str(res))]
+
+    asyncio.run(_run())
+
+
+def test_set_capacity_config_host_writes_detached_override(migrated_url: str) -> None:
+    """A config-owned host's cap change writes a `detached` ledger entry (ADR-0199, M2.7 B)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                res = await _resource(
+                    conn,
+                    cap=5,
+                    kind=ResourceKind.REMOTE_LIBVIRT,
+                    managed_by=ManagedBy.CONFIG,
+                    name="rl-detach",
+                )
+            resp = await tuning.set_host_capacity(
+                pool, _OPERATOR, resource_id=str(res), concurrent_allocation_cap=3
+            )
+            assert resp.status == "ok", resp.model_dump()
+            async with pool.connection() as conn:
+                row = await RESOURCES.get(conn, res)
+            assert row is not None and row.capabilities[CONCURRENT_ALLOCATION_CAP_KEY] == 3
+        disposition = await _override_disposition(
+            migrated_url, kind=ResourceKind.REMOTE_LIBVIRT.value, name="rl-detach"
+        )
+        assert disposition == "detached"
+
+    asyncio.run(_run())
+
+
+def test_set_capacity_runtime_host_writes_no_override(migrated_url: str) -> None:
+    """A runtime host's cap change writes no ledger entry (reconcile never clobbers it)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                res = await _resource(
+                    conn,
+                    cap=5,
+                    kind=ResourceKind.REMOTE_LIBVIRT,
+                    managed_by=ManagedBy.RUNTIME,
+                    name="rl-runtime-cap",
+                )
+            resp = await tuning.set_host_capacity(
+                pool, _OPERATOR, resource_id=str(res), concurrent_allocation_cap=2
+            )
+            assert resp.status == "ok", resp.model_dump()
+        disposition = await _override_disposition(
+            migrated_url, kind=ResourceKind.REMOTE_LIBVIRT.value, name="rl-runtime-cap"
+        )
+        assert disposition is None
 
     asyncio.run(_run())
 

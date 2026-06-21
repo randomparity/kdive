@@ -2,6 +2,22 @@
 
 # `inventory` tools
 
+## `inventory.clear_override`
+
+`implemented`
+
+Clear a config identity's override so reconcile re-asserts the file. Platform admin.
+
+The re-add path for a config host removed at runtime: deletes the ledger entry so the
+next no-entry reconcile pass re-creates the file-declared identity. Returns not_found
+when no override exists (idempotent).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | The identity name whose override to clear. |
+| `resource_kind` | string | yes | Resource kind (e.g. 'remote-libvirt') for a resource, or 'build-host' for a build host. |
+| `source_kind` | string | yes | Inventory family: 'resource' or 'build_host'. |
+
 ## `inventory.list`
 
 `implemented` · `read-only`

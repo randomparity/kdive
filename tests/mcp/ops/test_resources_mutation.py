@@ -210,6 +210,33 @@ async def _audit_rows(url: str) -> list[tuple[object, ...]]:
         return list(await cur.fetchall())
 
 
+async def _override_row(
+    url: str, *, source_kind: str, resource_kind: str, name: str
+) -> dict[str, object] | None:
+    """Return the inventory_overrides row for an identity, or ``None``."""
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT disposition, reason, actor FROM inventory_overrides "
+            "WHERE source_kind = %s AND resource_kind = %s AND name = %s",
+            (source_kind, resource_kind, name),
+        )
+        return await cur.fetchone()
+
+
+async def _insert_terminal_allocation(pool: AsyncConnectionPool, resource_id: UUID) -> UUID:
+    """Insert a terminal (released) allocation so the row carries allocation history."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "INSERT INTO allocations (resource_id, state, principal, project) "
+            "VALUES (%s, %s, 'p', 'team-a') RETURNING id",
+            (resource_id, AllocationState.RELEASED.value),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
 def _destructive_hint(tool: object) -> bool | None:
     annotations = getattr(tool, "annotations", None)
     value = getattr(annotations, "destructiveHint", None)
@@ -698,6 +725,194 @@ def test_deregister_absent_id_not_found(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             resp = await deregister_resource(pool, _admin_ctx(), resource_id=str(uuid4()))
         assert resp.error_category == ErrorCategory.NOT_FOUND.value
+
+    asyncio.run(_run())
+
+
+# --- config-owned remote-libvirt deregister (ADR-0199, M2.7 B) ---
+
+
+def test_deregister_config_remote_libvirt_idle_deletes_and_writes_removed(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            rid = await _insert_resource(
+                pool,
+                kind=ResourceKind.REMOTE_LIBVIRT.value,
+                name="rl-idle",
+                managed_by=ManagedBy.CONFIG.value,
+            )
+            resp = await deregister_resource(
+                pool, _admin_ctx(), resource_id=str(rid), reason="decommissioning host"
+            )
+        assert resp.status == "deregistered", resp.model_dump()
+        assert resp.data is not None and resp.data["disposition"] == "deleted"
+        assert await _resource_full_row(migrated_url, str(rid)) is None
+        override = await _override_row(
+            migrated_url,
+            source_kind="resource",
+            resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
+            name="rl-idle",
+        )
+        assert override is not None
+        assert override["disposition"] == "removed"
+        assert override["reason"] == "decommissioning host"
+
+    asyncio.run(_run())
+
+
+def test_deregister_config_remote_libvirt_with_history_cordons(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            rid = await _insert_resource(
+                pool,
+                kind=ResourceKind.REMOTE_LIBVIRT.value,
+                name="rl-history",
+                managed_by=ManagedBy.CONFIG.value,
+            )
+            await _insert_terminal_allocation(pool, rid)
+            resp = await deregister_resource(
+                pool, _admin_ctx(), resource_id=str(rid), reason="retire but keep accounting"
+            )
+        assert resp.status == "deregistered", resp.model_dump()
+        assert resp.data is not None and resp.data["disposition"] == "cordoned"
+        row = await _resource_full_row(migrated_url, str(rid))
+        assert row is not None and row["cordoned"] is True
+        override = await _override_row(
+            migrated_url,
+            source_kind="resource",
+            resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
+            name="rl-history",
+        )
+        assert override is not None and override["disposition"] == "removed"
+
+    asyncio.run(_run())
+
+
+def test_deregister_config_remote_libvirt_live_refused_without_force(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            rid = await _insert_resource(
+                pool,
+                kind=ResourceKind.REMOTE_LIBVIRT.value,
+                name="rl-live",
+                managed_by=ManagedBy.CONFIG.value,
+            )
+            await _insert_live_allocation(pool, rid)
+            refused = await deregister_resource(
+                pool, _admin_ctx(), resource_id=str(rid), reason="oops still live"
+            )
+            assert refused.error_category == ErrorCategory.CONFLICT.value
+            # no ledger write, no cordon on the refused path
+            assert (
+                await _override_row(
+                    migrated_url,
+                    source_kind="resource",
+                    resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
+                    name="rl-live",
+                )
+                is None
+            )
+            row = await _resource_full_row(migrated_url, str(rid))
+            assert row is not None and row["cordoned"] is False
+            forced = await deregister_resource(
+                pool, _admin_ctx(), resource_id=str(rid), reason="force retire", force=True
+            )
+        assert forced.status == "deregistered", forced.model_dump()
+        assert forced.data is not None and forced.data["disposition"] == "cordoned"
+        override = await _override_row(
+            migrated_url,
+            source_kind="resource",
+            resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
+            name="rl-live",
+        )
+        assert override is not None and override["disposition"] == "removed"
+
+    asyncio.run(_run())
+
+
+def test_deregister_config_remote_libvirt_blank_reason_rejected(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            rid = await _insert_resource(
+                pool,
+                kind=ResourceKind.REMOTE_LIBVIRT.value,
+                name="rl-noreason",
+                managed_by=ManagedBy.CONFIG.value,
+            )
+            resp = await deregister_resource(pool, _admin_ctx(), resource_id=str(rid), reason="   ")
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        # no row change, no ledger write
+        assert await _resource_full_row(migrated_url, str(rid)) is not None
+        assert (
+            await _override_row(
+                migrated_url,
+                source_kind="resource",
+                resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
+                name="rl-noreason",
+            )
+            is None
+        )
+
+    asyncio.run(_run())
+
+
+def test_deregister_config_fault_inject_still_rejected(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            rid = await _insert_resource(
+                pool,
+                kind=ResourceKind.FAULT_INJECT.value,
+                name="fi-cfg-scope",
+                managed_by=ManagedBy.CONFIG.value,
+                host_uri="fault-inject://local",
+            )
+            resp = await deregister_resource(
+                pool, _admin_ctx(), resource_id=str(rid), reason="not in scope"
+            )
+        assert resp.error_category == ErrorCategory.CONFLICT.value
+
+    asyncio.run(_run())
+
+
+def test_deregister_discovery_local_libvirt_still_rejected(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            rid = await _insert_resource(
+                pool,
+                kind=ResourceKind.LOCAL_LIBVIRT.value,
+                name="ll-disc",
+                managed_by=ManagedBy.DISCOVERY.value,
+            )
+            resp = await deregister_resource(
+                pool, _admin_ctx(), resource_id=str(rid), reason="should be rejected"
+            )
+        assert resp.error_category == ErrorCategory.CONFLICT.value
+
+    asyncio.run(_run())
+
+
+def test_deregister_runtime_writes_no_ledger_entry(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            rid = await _insert_resource(
+                pool,
+                kind=ResourceKind.REMOTE_LIBVIRT.value,
+                name="rl-runtime",
+                managed_by=ManagedBy.RUNTIME.value,
+            )
+            resp = await deregister_resource(pool, _admin_ctx(), resource_id=str(rid))
+        assert resp.status == "deregistered", resp.model_dump()
+        assert (
+            await _override_row(
+                migrated_url,
+                source_kind="resource",
+                resource_kind=ResourceKind.REMOTE_LIBVIRT.value,
+                name="rl-runtime",
+            )
+            is None
+        )
 
     asyncio.run(_run())
 
