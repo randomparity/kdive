@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import io
 import json
 import logging
+import sys
 import uuid
 
 import pytest
@@ -174,6 +176,94 @@ def test_non_serializable_context_value_is_coerced_not_crashed() -> None:
     setattr(record, klog._CTX_RECORD_ATTR, {"object_id": object_id})
     payload = json.loads(formatter.format(record))
     assert payload["object_id"] == str(object_id)
+
+
+def test_timestamp_is_utc_aware() -> None:
+    logger, stream = _capture_logger("kdive.test.ts")
+    logger.info("when")
+    record = _last_record(stream)
+    parsed = _dt.datetime.fromisoformat(record["ts"])
+    assert parsed.tzinfo is not None, "timestamp must carry an explicit timezone"
+    assert parsed.utcoffset() == _dt.timedelta(0), "timestamp must be in UTC"
+
+
+def test_format_without_context_attr_emits_no_context_fields() -> None:
+    formatter = klog.JsonFormatter()
+    record = logging.LogRecord("kdive.test.noctx", logging.INFO, __file__, 0, "plain", None, None)
+    payload = json.loads(formatter.format(record))
+    assert payload["msg"] == "plain"
+    for field in ("request_id", "job_id", "principal", "object_id", "transition"):
+        assert field not in payload
+
+
+def test_configure_logging_default_level_is_info() -> None:
+    root = logging.getLogger()
+    before = list(root.handlers)
+    before_level = root.level
+    try:
+        klog.configure_logging(secret_registry=SecretRegistry())
+        assert root.level == logging.INFO
+    finally:
+        root.handlers = before
+        root.setLevel(before_level)
+
+
+def test_configure_logging_applies_named_level() -> None:
+    root = logging.getLogger()
+    before = list(root.handlers)
+    before_level = root.level
+    try:
+        klog.configure_logging(level="DEBUG", secret_registry=SecretRegistry())
+        assert root.level == logging.DEBUG
+    finally:
+        root.handlers = before
+        root.setLevel(before_level)
+
+
+def test_configure_logging_unknown_level_falls_back_to_info() -> None:
+    root = logging.getLogger()
+    before = list(root.handlers)
+    before_level = root.level
+    try:
+        klog.configure_logging(level="NOT_A_LEVEL", secret_registry=SecretRegistry())
+        assert root.level == logging.INFO
+    finally:
+        root.handlers = before
+        root.setLevel(before_level)
+
+
+def test_configure_logging_handler_streams_to_stderr() -> None:
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        root.handlers = []
+        klog.configure_logging(secret_registry=SecretRegistry())
+        kdive_handlers = [h for h in root.handlers if isinstance(h, klog._KdiveHandler)]
+        assert len(kdive_handlers) == 1
+        assert kdive_handlers[0].stream is sys.stderr
+    finally:
+        root.handlers = before
+
+
+def test_configure_logging_redaction_uses_supplied_registry() -> None:
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        root.handlers = []
+        registry = SecretRegistry()
+        klog.configure_logging(secret_registry=registry)
+        registry.register("hunter2", scope=None)
+        handler = next(h for h in root.handlers if isinstance(h, klog._KdiveHandler))
+        redaction_filters = [f for f in handler.filters if isinstance(f, SecretRedactionFilter)]
+        assert len(redaction_filters) == 1
+        record = logging.LogRecord(
+            "kdive.test.redact", logging.INFO, __file__, 0, "hunter2 leaked", None, None
+        )
+        redaction_filters[0].filter(record)
+        assert "hunter2" not in record.getMessage()
+        assert REDACTION in record.getMessage()
+    finally:
+        root.handlers = before
 
 
 def test_context_is_isolated_between_concurrent_tasks() -> None:
