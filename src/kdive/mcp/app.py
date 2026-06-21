@@ -9,7 +9,7 @@ no job handler because they do not own a ``JobKind``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +34,7 @@ from kdive.mcp.middleware import (
     ToolExposureMiddleware,
     UsageTrackingMiddleware,
 )
+from kdive.mcp.prompts import registrar as lifecycle_prompts
 from kdive.mcp.resources import registrar as doc_resources
 from kdive.mcp.tools.accounting.admin import register as register_accounting_admin
 from kdive.mcp.tools.accounting.estimate import register as register_accounting_estimate
@@ -257,6 +258,26 @@ def _register_doc_resources(
     doc_resources.register(app)
 
 
+def _register_lifecycle_prompts(
+    app: FastMCP, _pool: AsyncConnectionPool, _assembly: AppAssembly
+) -> None:
+    """Register the canonical lifecycle prompts (ADR-0202).
+
+    Reads each registered tool's maturity from the live registry and passes it to the pure
+    prompts registrar, which tags every ``partial`` step and fails fast on an unknown or
+    ``planned`` referenced tool. Must run after every tool registrar (it reads tool metas);
+    it is appended last in ``_PLANE_REGISTRARS``.
+    """
+    tool_maturity = {
+        tool.name: lifecycle_prompts.ToolMaturity(
+            maturity=(tool.meta or {}).get("maturity", "implemented"),
+            reason=(tool.meta or {}).get("maturity_detail", {}).get("reason"),
+        )
+        for tool in _registered_tools(app)
+    }
+    lifecycle_prompts.register(app, tool_maturity=tool_maturity)
+
+
 def _register_system_handlers(
     registry: HandlerRegistry,
     assembly: WorkerHandlerAssembly,
@@ -350,6 +371,8 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _register_ops_images_tools,
     _register_ops_secrets_tools,
     _register_doc_resources,
+    # Must stay last: reads every registered tool's maturity to render the prompts (ADR-0202).
+    _register_lifecycle_prompts,
 )
 
 
@@ -431,6 +454,18 @@ ENVELOPE_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+def _registered_tools(app: FastMCP) -> Iterator[Tool]:
+    """Yield each registered `Tool` from the local provider's component store.
+
+    Concentrates the one private-registry accessor (`app.local_provider._components`) used by
+    both the envelope-schema sweep (ADR-0170) and the lifecycle-prompts maturity read
+    (ADR-0202), so the FastMCP-internals coupling lives in a single place.
+    """
+    for component in app.local_provider._components.values():
+        if isinstance(component, Tool):
+            yield component
+
+
 def _advertise_envelope_output_schema(app: FastMCP) -> int:
     """Override every registered tool's advertised `outputSchema` with the envelope schema.
 
@@ -443,10 +478,9 @@ def _advertise_envelope_output_schema(app: FastMCP) -> int:
     Returns the number of tools swept.
     """
     swept = 0
-    for component in app.local_provider._components.values():
-        if isinstance(component, Tool):
-            component.output_schema = dict(ENVELOPE_OUTPUT_SCHEMA)
-            swept += 1
+    for tool in _registered_tools(app):
+        tool.output_schema = dict(ENVELOPE_OUTPUT_SCHEMA)
+        swept += 1
     if swept == 0:
         raise RuntimeError(
             "no tools found to advertise an envelope outputSchema for; the FastMCP registry "
