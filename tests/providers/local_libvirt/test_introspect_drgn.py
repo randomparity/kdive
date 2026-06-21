@@ -300,11 +300,57 @@ def test_from_vmcore_happy_path_populates_report() -> None:
     assert out.truncated is False
 
 
+def test_from_vmcore_happy_path_populates_every_section_distinctly() -> None:
+    """tasks/modules/sysinfo are each routed to their own helper, not collapsed to one."""
+    prog = _FakeProgram(
+        tasks=[_FakeTask(42, "blocked", "D")],
+        modules=[_FakeModule("nfs", refcount=3)],
+    )
+    out = _introspector(program=prog).from_vmcore(
+        vmcore_ref="v", debuginfo_ref="d", expected_build_id="deadbeef"
+    )
+    # modules section carries module rows (not task rows misrouted by a bad helper name).
+    module_rows = cast("list[dict[str, object]]", out.modules["modules"])
+    assert module_rows[0]["name"] == "nfs"
+    assert module_rows[0]["refcount"] == 3
+    # tasks section carries the blocked task.
+    task_rows = cast("list[dict[str, object]]", out.tasks["tasks"])
+    assert task_rows[0]["pid"] == 42
+    # sysinfo section carries uts data, not module/task rows.
+    assert out.sysinfo["release"] == "6.8.0"
+    assert "modules" not in out.sysinfo
+    assert "tasks" not in out.modules
+
+
 def test_from_vmcore_build_id_mismatch_is_configuration_error() -> None:
     introspector = _introspector(observed_build_id="0ther")
     with pytest.raises(CategorizedError) as exc:
         introspector.from_vmcore(vmcore_ref="v", debuginfo_ref="d", expected_build_id="deadbeef")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_from_vmcore_build_id_mismatch_records_offending_ref_in_details() -> None:
+    """The provenance failure names the offending vmcore ref under the documented key."""
+    introspector = _introspector(observed_build_id="0ther")
+    with pytest.raises(CategorizedError) as exc:
+        introspector.from_vmcore(
+            vmcore_ref="run-7/core", debuginfo_ref="d", expected_build_id="deadbeef"
+        )
+    assert exc.value.details == {"vmcore_ref": "run-7/core"}
+
+
+def test_from_vmcore_requires_both_drgn_seams() -> None:
+    """A single configured seam is still off-gate: both must be present to introspect."""
+    only_open = LocalLibvirtVmcoreIntrospect(
+        fetch_object=lambda ref: ref.encode("utf-8"),
+        read_vmcore_build_id=lambda data: "deadbeef",
+        secret_registry=SecretRegistry(),
+        open_program=lambda core, vmlinux: _FakeProgram(),
+        run_helper=None,
+    )
+    with pytest.raises(CategorizedError) as exc:
+        only_open.from_vmcore(vmcore_ref="v", debuginfo_ref="d", expected_build_id="deadbeef")
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
 
 def test_from_vmcore_open_failure_is_debug_attach_failure() -> None:
@@ -470,6 +516,18 @@ def test_run_modules_decode_skew_degrades_not_raises() -> None:
     )
     assert out.modules["all_failed"] is True
     assert out.modules["modules"] == []
+
+
+def test_run_requires_both_live_seams() -> None:
+    """A single configured live seam is still off-gate: both must be present."""
+    only_open = LocalLibvirtLiveIntrospect(
+        secret_registry=SecretRegistry(),
+        open_live_program=lambda _handle: _FakeProgram(),
+        run_helper=None,
+    )
+    with pytest.raises(CategorizedError) as exc:
+        only_open.introspect_live(transport_handle="ssh://127.0.0.1:22", helper="tasks")
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
 
 def test_live_from_env_real_seam_raises_missing_dependency() -> None:
