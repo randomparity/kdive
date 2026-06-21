@@ -87,6 +87,19 @@ def test_singleton_resolver_is_gone() -> None:
     assert not hasattr(config_module, "resolve_base_image_staged_volume")
 
 
+def test_systems_toml_path_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
+    config.load()
+    assert config_module._systems_toml_path() == Path("./systems.toml")
+
+
+def test_systems_toml_path_honours_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "custom.toml"
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(target))
+    config.load()
+    assert config_module._systems_toml_path() == target
+
+
 def test_by_name_builds_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_inventory(tmp_path, monkeypatch)
     cfg = remote_config_for_resource(_RESOURCE)
@@ -152,6 +165,7 @@ def test_malformed_inventory_is_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(excinfo.value).startswith("systems.toml is present but invalid:")
 
 
 def _instance(name: str, uri: str) -> RemoteLibvirtInstance:
@@ -190,7 +204,10 @@ def test_remote_config_for_resource_unknown_name_is_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_for_resource("nope")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "nope" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "nope" in message
+    # The error lists the sorted declared instance names so an operator sees the valid set.
+    assert "(declared: ['host-a', 'host-b'])" in message
 
 
 def test_all_remote_configs_returns_every_instance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -261,6 +278,17 @@ def test_resolve_base_image_staged_volume_unknown_resource_is_configuration_erro
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_resolve_base_image_unknown_instance_lists_declared_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_inventory(tmp_path, monkeypatch)
+    with pytest.raises(CategorizedError) as excinfo:
+        resolve_base_image_staged_volume_for("no-such-host")
+    message = str(excinfo.value)
+    assert "no-such-host" in message
+    assert "(declared: ['ub24-big'])" in message
+
+
 def test_resolve_base_image_staged_volume_each_instance_resolves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -323,6 +351,58 @@ def test_bad_gdbstub_range_is_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_staged_volume_absent_image_raises_categorized_not_stopiteration() -> None:
+    # Directly exercise the absent-image branch: with no matching [[image]], the lookup must
+    # surface a CONFIGURATION_ERROR, not leak a bare StopIteration from next().
+    instance = _instance("host-a", "qemu+tls://a.example/system")
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._staged_volume_for_instance(instance, [])
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "names no" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("rng", "expected"),
+    [
+        ("1:65535", (1, 65535)),  # extreme-but-valid bounds (ports 1 and 65535 are in range)
+        ("47000:47001", (47000, 47001)),
+    ],
+)
+def test_valid_gdbstub_range_bounds_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rng: str,
+    expected: tuple[int, int],
+) -> None:
+    instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', f'gdbstub_range = "{rng}"')
+    _write_inventory(tmp_path, monkeypatch, instances=instance)
+    cfg = remote_config_for_resource(_RESOURCE)
+    assert (cfg.gdb_port_min, cfg.gdb_port_max) == expected
+
+
+@pytest.mark.parametrize(
+    ("bad", "needle"),
+    [
+        ("47000:65536", "outside 1..65535"),  # upper bound: 65536 is rejected
+        ("notint:47099", "non-integer ports"),
+        ("47000", "is not 'min:max'"),
+        ("47099:47000", "is inverted"),
+    ],
+)
+def test_bad_gdbstub_range_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad: str,
+    needle: str,
+) -> None:
+    instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', f'gdbstub_range = "{bad}"')
+    _write_inventory(tmp_path, monkeypatch, instances=instance)
+    with pytest.raises(CategorizedError) as excinfo:
+        remote_config_for_resource(_RESOURCE)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert needle in str(excinfo.value)
 
 
 def test_single_port_range_names_the_reserved_probe_port(
