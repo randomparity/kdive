@@ -249,6 +249,84 @@ def test_build_host_telemetry_refresh_replaces_snapshot() -> None:
     assert [(p.value, dict(p.attributes)) for p in points] == [(5, {"build_host": "builder-02"})]
 
 
+def _fleet_metrics(reader: InMemoryMetricReader) -> dict[str, Any]:
+    by_name: dict[str, Any] = {}
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                by_name[metric.name] = metric
+    return by_name
+
+
+def _points_as_map(metric: Any, label_key: str) -> dict[str, Any]:
+    return {dict(p.attributes)[label_key]: p.value for p in metric.data.data_points}
+
+
+def test_fleet_inventory_gauge_emits_state_keyed_counts() -> None:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    telem = FleetTelemetry(meter=meter)
+    telem.refresh(
+        FleetSnapshot(
+            inventory={
+                "allocations": {
+                    AllocationState.GRANTED.value: 2,
+                    AllocationState.ACTIVE.value: 5,
+                }
+            },
+            capacity_used={},
+            capacity_total={},
+        )
+    )
+    metric = _fleet_metrics(reader)["kdive.allocations"]
+    assert metric.unit == "1"
+    assert metric.description == "allocations grouped by lifecycle state (live count)."
+    assert _points_as_map(metric, "state") == {
+        AllocationState.GRANTED.value: 2,
+        AllocationState.ACTIVE.value: 5,
+    }
+
+
+def test_fleet_capacity_gauges_keep_used_and_total_distinct() -> None:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    telem = FleetTelemetry(meter=meter)
+    # Distinct used vs total values catch a used/total source swap.
+    telem.refresh(
+        FleetSnapshot(
+            inventory={},
+            capacity_used={"local-libvirt": 3},
+            capacity_total={"local-libvirt": 9},
+        )
+    )
+    metrics = _fleet_metrics(reader)
+    used = metrics["kdive.host.capacity.used"]
+    total = metrics["kdive.host.capacity.total"]
+    assert used.unit == "1"
+    assert total.unit == "1"
+    assert used.description == "Host-cap slots occupied per provider."
+    assert total.description == "Advertised host-cap slots per provider."
+    assert _points_as_map(used, "provider") == {"local-libvirt": 3}
+    assert _points_as_map(total, "provider") == {"local-libvirt": 9}
+
+
+def test_fleet_callbacks_handle_missing_and_empty_snapshot() -> None:
+    meter = MeterProvider(metric_readers=[InMemoryMetricReader()]).get_meter("test")
+    telem = FleetTelemetry(meter=meter)
+    # Pre-refresh empty snapshot: every callback yields zero observations, no crash.
+    inv = telem._inventory_callback("allocations")
+    used_cb = telem._capacity_callback(used=True)
+    total_cb = telem._capacity_callback(used=False)
+    assert list(inv(None)) == []
+    assert list(used_cb(None)) == []
+    assert list(total_cb(None)) == []
+    # A snapshot missing the requested table yields no observations (not a crash).
+    telem.refresh(FleetSnapshot(inventory={"runs": {}}, capacity_used={}, capacity_total={}))
+    assert list(inv(None)) == []
+
+
 def test_new_metric_families_render_to_prometheus_text() -> None:
     reader = InMemoryMetricReader()
     _emit_everything(reader)
