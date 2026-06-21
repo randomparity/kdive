@@ -108,12 +108,20 @@ class _Conn:
         raise libvirt_error(libvirt.VIR_ERR_NO_STORAGE_POOL)
 
 
+def test_lookup_pool_returns_pool_for_requested_name() -> None:
+    pool = _Pool()
+    conn = _Conn({"default": pool})
+
+    assert lookup_pool(conn, "default") is pool
+
+
 def test_lookup_pool_maps_absent_pool_to_configuration_error() -> None:
     with pytest.raises(CategorizedError) as caught:
         lookup_pool(_Conn(), "missing")
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert caught.value.details == {"pool": "missing"}
+    assert str(caught.value) == "storage pool 'missing' does not exist on the remote host"
 
 
 def test_lookup_pool_maps_unexpected_libvirt_error_to_infrastructure() -> None:
@@ -125,6 +133,7 @@ def test_lookup_pool_maps_unexpected_libvirt_error_to_infrastructure() -> None:
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"pool": "default"}
+    assert str(caught.value) == "libvirt error looking up storage pool"
 
 
 def test_ensure_overlay_reuses_existing_overlay() -> None:
@@ -159,6 +168,8 @@ def test_ensure_overlay_missing_base_volume_is_configuration_error() -> None:
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert caught.value.details == {"base_image_volume": _BASE_VOLUME}
+    assert repr(_BASE_VOLUME) in str(caught.value)
+    assert "is not staged on the remote" in str(caught.value)
 
 
 def test_ensure_overlay_create_error_is_provisioning_failure() -> None:
@@ -172,6 +183,7 @@ def test_ensure_overlay_create_error_is_provisioning_failure() -> None:
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
     assert caught.value.details == {"volume": overlay_volume_name(_SYSTEM_ID)}
+    assert str(caught.value) == "could not create the per-System overlay volume"
 
 
 def test_cleanup_overlay_only_deletes_created_overlay() -> None:
@@ -241,3 +253,4 @@ def test_delete_volume_unexpected_delete_error_is_infrastructure() -> None:
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"volume": overlay_name}
+    assert str(caught.value) == "libvirt error deleting overlay volume"
