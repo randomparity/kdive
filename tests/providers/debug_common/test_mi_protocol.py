@@ -161,6 +161,7 @@ def test_result_payload_dict_returns_empty_without_result_dict() -> None:
         ("-7", -7),
         ("+7", None),
         ("0x10", None),
+        ("X5", None),
         (42, None),
         (None, None),
     ],
