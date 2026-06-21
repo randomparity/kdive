@@ -32,7 +32,10 @@ In scope:
 2. **Wire the export tool**: `ops.export_systems_toml` gains an opt-in `persist: bool = False`
    parameter. When `persist=False` (default) it behaves exactly as today (returns text, writes
    nothing). When `persist=True` it additionally writes the serialized document through the
-   configured adapter, and reports the outcome in the response.
+   configured adapter, and reports the outcome in the response. **A persist of a document that
+   still contains a `REPLACE_ME_*` placeholder is refused** (see "Skeleton guard" below): persisting
+   an unedited `remote_libvirt` skeleton would write a `systems.toml` that does not parse, silently
+   stalling the reconciler's inventory pass.
 3. **Operator runbook + RBAC manifest**: a runbook step for the real ConfigMap path, including the
    `Role`/`RoleBinding`/`ServiceAccount` manifest granting `patch`+`get` on `kdive-systems`, and
    how to set the opt-in.
@@ -103,10 +106,22 @@ restart re-reads it). This is why the ConfigMap path needs the API write, not a 
 
 ### The mounted-file path
 
-For a PVC-backed `KDIVE_SYSTEMS_TOML` (a writable volume, not a ConfigMap mount), write atomically:
-serialize to a temp file in the same directory, `os.replace` onto the target so a reader never sees
-a half-written file. Offloaded to a thread (`asyncio.to_thread`) so the event loop is not blocked on
-disk I/O.
+For a writable `KDIVE_SYSTEMS_TOML` (a writable volume, **not** a ConfigMap mount, which is
+read-only), write atomically: serialize to a temp file in the same directory, `os.replace` onto the
+target so a reader never sees a half-written file. Offloaded to a thread (`asyncio.to_thread`) so
+the event loop is not blocked on disk I/O.
+
+**Cross-pod reach is the operator's responsibility, and the runbook says so plainly.** The
+`ops.*` tools run in the **server** pod; the inventory pass that re-reads `systems.toml` runs in
+the **reconciler** pod (and the worker resolves connections from it). The default chart mounts
+`systems.toml` from a **read-only ConfigMap** on every pod, so the `file` adapter cannot make a
+written file visible to the reconciler under the default deployment — the ConfigMap path is the
+supported k8s shape. The `file` adapter is for deployments where `KDIVE_SYSTEMS_TOML` already
+points at a volume the writer and the reader share (e.g. a single host running all processes, or an
+operator-provisioned `ReadWriteMany` PVC mounted on both the server and the reconciler). The chart
+does not provision such a PVC; the runbook documents the constraint and does not claim the default
+chart supports the `file` path. The `file` adapter writes only the file it is told to; it does not
+attempt to reach another pod.
 
 ### Tool wiring
 
@@ -126,6 +141,24 @@ Adding a parameter to the existing tool is **not** a new tool — the three-regi
 (registrar / `test_tool_docs` / `exposure.py`) stays as-is; only the tool's signature and generated
 doc change.
 
+### Skeleton guard
+
+A `remote_libvirt` block is exported as a skeleton with `REPLACE_ME_*` placeholders for the
+file-only connection/debug fields (ADR-0199; the serializer's `_REMOTE_PLACEHOLDERS`). Those are
+required fields, so an unedited skeleton does **not** parse. Persisting it to the live source and
+restarting would feed the reconciler a malformed `systems.toml`, which per `KDIVE_SYSTEMS_TOML`'s
+contract fails the inventory pass quietly (a malformed file is logged and skipped, not fatal) —
+i.e. the running inventory silently stops being reconciled, the exact failure the operator was
+trying to avoid.
+
+So `persist=True` refuses when the serialized document contains the placeholder marker
+(`REPLACE_ME_`): it returns a `CONFIGURATION_ERROR` whose detail tells the operator the export
+contains skeleton placeholders that must be completed before the document can be a usable source,
+and that they can still take the returned `data["toml"]` text and complete it by hand. The marker
+is a single shared constant so the serializer and the guard cannot drift. This guard does not fire
+for an inventory with no `remote_libvirt` hosts (or one whose images are all built, not `defined`),
+so the common images/build_hosts/cost_classes round-trip still persists cleanly.
+
 ## Failure modes & edges
 
 - **Writeback off, `persist=True`** → `CONFIGURATION_ERROR`, names `KDIVE_INVENTORY_WRITEBACK` and
@@ -139,8 +172,14 @@ doc change.
 - **Serializer raises** (e.g. a resource missing a required sizing capability — `_require_int`) →
   the existing serializer `ValueError` surfaces; the write never runs (serialize-then-write order),
   so a bad snapshot never half-persists.
+- **Persist of an unedited skeleton** (`REPLACE_ME_*` present) → `CONFIGURATION_ERROR`, refused
+  before any write (the skeleton guard); the returned text is still available to complete by hand.
 - **Concurrent writeback** → last-writer-wins at the store; acceptable (the operator drives this
   explicitly and serially).
+- **ConfigMap mount propagation lag** → after a successful patch, a *running* reconciler in another
+  pod re-reads the updated `systems.toml` only after kubelet syncs the ConfigMap to the mount (up to
+  its sync period) or on a pod restart. The acceptance signal is "a pod restart reproduces the live
+  inventory", not "the next reconcile pass takes immediate effect"; the runbook states this.
 
 ## Testing
 
@@ -150,6 +189,10 @@ CI-covered (no cluster, no real file-system dependency beyond a tmp dir):
   `serialize_inventory(snapshot)`; the response reports `persisted=true` and the target kind.
 - **Off path**: `persist=True` with writeback unset returns `CONFIGURATION_ERROR` and writes
   nothing.
+- **Skeleton guard**: `persist=True` on a snapshot containing a `remote_libvirt` host (whose export
+  carries `REPLACE_ME_*`) returns `CONFIGURATION_ERROR` and writes nothing; a snapshot with no
+  placeholders (images/build_hosts/cost_classes only) persists. The guard constant is the same one
+  the serializer emits (a drift test asserts they match).
 - **Factory**: `resolve_writeback_target` returns the right adapter per setting value, `None` when
   off, and a `CONFIGURATION_ERROR` on an unknown value.
 - **ConfigMap adapter, transport mocked**: a 200 issues the expected `PATCH` (URL, headers,
