@@ -176,19 +176,24 @@ introspect.from_vmcore(run_id=<B's run>)
 Confirm a non-empty `tasks` dict in the response's `report`. A missing `VMCOREINFO` is a
 `configuration_error` and is **not** a 4/4 pass — do not accept a missing-build-id skip as success.
 
-**local-libvirt kdump (ADR-0203).** On local-libvirt the capture is host-side, not an
-in-guest upload: the worker force-stops System B's domain (over `KDIVE_LIBVIRT_URI`) and reads
-the guest-written `/var/crash/<ts>/vmcore` directly out of the System's qcow2 overlay with a
-read-only libguestfs mount, then extracts build-id + redacted dmesg with drgn. There is no
-crash→reboot→upload window to wait out, but two prerequisites apply on the **worker host**:
+**local-libvirt kdump (ADR-0203, ADR-0206).** On local-libvirt the capture is host-side, not an
+in-guest upload: a from-source kernel build publishes a `modules_ref` (the `/lib/modules/<ver>`
+tree as a tarball). `runs.install` injects the modules into the per-System qcow2 overlay via
+host-side libguestfs, the guest's `kdumpctl` builds a crash initramfs in-guest, and on
+`control.force_crash` the guest writes a real `/var/crash/<ts>/vmcore`. The worker then
+force-stops System B's domain (over `KDIVE_LIBVIRT_URI`) and harvests the vmcore host-side
+from the qcow2 overlay with a read-only libguestfs mount, extracting build-id + redacted
+dmesg with drgn. There is no crash→reboot→upload window to wait out, but two prerequisites
+apply on the **worker host**:
 
 - `libguestfs` (the `guestfs` Python binding) must be importable by the **worker venv**
   alongside `drgn`; absence is a `missing_dependency`, not a silent skip. Wiring both into the
   venv is a one-time step — see [Wire the worker venv](#wire-the-worker-venv-drgn--libguestfs)
   below.
 - The provisioning profile must set `crashkernel` so `capture_method` selects `kdump` and the
-  boot cmdline reserves crash memory (the install preflight refuses a kdump boot whose
-  initramfs carries no capture hook).
+  boot cmdline reserves crash memory. The install gate is satisfied when either the build
+  supplied injected modules (`modules_ref`) or a separate initrd was uploaded (`initrd_ref`);
+  a local kdump System with neither is a `configuration_error` (see ADR-0206).
 
 #### Wire the worker venv (drgn + libguestfs)
 
