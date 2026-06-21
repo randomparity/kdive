@@ -27,6 +27,18 @@ def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
 
 
+def _stub_python(bindir: Path, name: str, *, imports_ok: bool) -> Path:
+    """Write a python-interpreter stub that succeeds (or fails) on `-c "import ..."`.
+
+    Mirrors how the script probes the worker venv: `"$PY" -c "import guestfs, drgn"`.
+    """
+    body = "exit 0" if imports_ok else 'echo "ModuleNotFoundError" >&2\nexit 1'
+    p = bindir / name
+    p.write_text(f"#!/bin/sh\n{body}\n")
+    p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return p
+
+
 def test_all_healthy_exits_zero(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -35,12 +47,44 @@ def test_all_healthy_exits_zero(tmp_path: Path) -> None:
     _stub(bindir, "id", "echo kvm libvirt")
     _stub(bindir, "qemu-system-x86_64", "exit 0")
     _stub(bindir, "qemu-img", "exit 0")
+    py = _stub_python(bindir, "venv-python", imports_ok=True)
     kvm = tmp_path / "kvm"
     kvm.write_text("")
-    env = {"PATH": str(bindir), "HOME": str(tmp_path), "KDIVE_KVM_NODE": str(kvm)}
+    env = {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(kvm),
+        "KDIVE_PYTHON": str(py),
+    }
     result = _run(env)
     assert result.returncode == 0, result.stderr
     assert "ready" in result.stdout.lower()
+
+
+def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
+    """The venv interpreter cannot import guestfs/drgn -> fail with an actionable fix."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "virsh", 'case "$*" in *net-info*) echo "Active: yes";; esac\nexit 0')
+    _stub(bindir, "id", "echo kvm libvirt")
+    _stub(bindir, "qemu-system-x86_64", "exit 0")
+    _stub(bindir, "qemu-img", "exit 0")
+    py = _stub_python(bindir, "venv-python", imports_ok=False)
+    kvm = tmp_path / "kvm"
+    kvm.write_text("")
+    env = {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(kvm),
+        "KDIVE_PYTHON": str(py),
+    }
+    result = _run(env)
+    assert result.returncode == 1
+    err = result.stderr.lower()
+    assert "guestfs" in err and "drgn" in err
+    # The hint must point at both fixes: the live group and the libguestfs binding.
+    assert "uv sync --group live" in result.stderr
+    assert "python3-libguestfs" in result.stderr
 
 
 def test_missing_kvm_node_fails(tmp_path: Path) -> None:

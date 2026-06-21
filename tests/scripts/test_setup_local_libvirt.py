@@ -26,6 +26,12 @@ def _stub(bindir: Path, name: str, body: str) -> None:
     p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _python_stub_body(calllog: Path) -> str:
+    """python3 stub: succeed on the preflight `-c import` probe without logging it; log
+    every other invocation (the onboarding helper) so tests can assert what ran."""
+    return f'case "$*" in\n  -c*) exit 0 ;;\n  *) echo "$@" >> "{calllog}" ;;\nesac\nexit 0'
+
+
 def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -37,7 +43,9 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     kvm = tmp_path / "kvm"
     kvm.write_text("")
     calllog = tmp_path / "python.log"
-    _stub(bindir, "python3", f'echo "$@" >> "{calllog}"\nexit 0')
+    # check-local-libvirt.sh also probes `python3 -c "import guestfs, drgn"`; that probe must
+    # succeed (exit 0) but is not an onboarding call, so keep it out of the helper call log.
+    _stub(bindir, "python3", _python_stub_body(calllog))
     # Stub bin first so it shadows real python3/virsh/etc.; system bins follow so the
     # scripts' `dirname` (and other coreutils) resolve.
     env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "KDIVE_KVM_NODE": str(kvm)}
@@ -109,7 +117,7 @@ def test_preflight_failure_aborts(tmp_path: Path) -> None:
     _stub(bindir, "qemu-system-x86_64", "exit 0")
     _stub(bindir, "qemu-img", "exit 0")
     calllog = tmp_path / "python.log"
-    _stub(bindir, "python3", f'echo "$@" >> "{calllog}"\nexit 0')
+    _stub(bindir, "python3", _python_stub_body(calllog))
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
         "HOME": str(tmp_path),

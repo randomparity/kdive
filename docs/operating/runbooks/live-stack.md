@@ -34,6 +34,11 @@ deployment (the production-shaped path), see
   `ghcr.io/navikt/mock-oauth2-server:3.0.3`; if that tag no longer resolves on ghcr.io,
   re-pin it to a current tag before `just stack-up`.
 - The repo set up: `just setup` (or `uv sync --locked`).
+- For **local-libvirt `kdump`** capture, the worker venv additionally needs `drgn`
+  (`uv sync --group live`) and the system `guestfs` binding wired in; this is a one-time step
+  documented in the
+  [four-method runbook §4b](four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
+  `scripts/check-local-libvirt.sh` flags the gap with the fix.
 - The VM fixtures built (below).
 - If you run a **published** kdive image from `ghcr.io/randomparity/kdive` rather than a
   locally built one, verify its signature first. The release workflow cosign-signs each
