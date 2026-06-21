@@ -11,13 +11,61 @@ import base64
 import hashlib
 
 import httpx
+import pytest
 
-from kdive.artifacts.storage import ArtifactWriteRequest, PresignPutRequest
+from kdive.artifacts.storage import (
+    ArtifactWriteRequest,
+    PresignPutRequest,
+    owner_prefix,
+)
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.errors import CategorizedError, ErrorCategory
 
 
 def _b64_sha256(data: bytes) -> str:
     return base64.b64encode(hashlib.sha256(data).digest()).decode()
+
+
+def test_owner_prefix_builds_trailing_slash_key() -> None:
+    assert owner_prefix("t", "runs", "r1") == "t/runs/r1/"
+
+
+@pytest.mark.parametrize(
+    ("tenant", "kind", "object_id", "expected_label"),
+    [
+        ("", "runs", "r1", "tenant"),
+        ("t", "", "r1", "kind"),
+        ("t", "runs", "", "object_id"),
+    ],
+)
+def test_owner_prefix_empty_component_names_its_label(
+    tenant: str, kind: str, object_id: str, expected_label: str
+) -> None:
+    # An empty component is rejected with a configuration error that names WHICH component failed;
+    # the label must match the position (tenant/kind/object_id), not a neighbor's.
+    with pytest.raises(CategorizedError) as exc:
+        owner_prefix(tenant, kind, object_id)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == f"artifact key component '{expected_label}' must not be empty"
+
+
+@pytest.mark.parametrize(
+    ("tenant", "kind", "object_id", "expected_label"),
+    [
+        ("a/b", "runs", "r1", "tenant"),
+        ("t", "ru/ns", "r1", "kind"),
+        ("t", "runs", "r/1", "object_id"),
+    ],
+)
+def test_owner_prefix_illegal_char_component_names_its_label(
+    tenant: str, kind: str, object_id: str, expected_label: str
+) -> None:
+    # A component carrying a path separator is rejected with the offending component's label, so a
+    # traversal-bearing value cannot be mislabeled (which would misdirect the operator's fix).
+    with pytest.raises(CategorizedError) as exc:
+        owner_prefix(tenant, kind, object_id)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value).startswith(f"artifact key component '{expected_label}' has an illegal")
 
 
 def test_presigned_get_fetches_the_published_object(minio_store, key_ns: str) -> None:
