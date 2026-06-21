@@ -37,7 +37,7 @@ real libguestfs `download` call `live_vm`-gated.
 ## Design
 
 `GuestCoreReader` (the unit-tested seam) changes its read method from returning bytes to
-**downloading the chosen core to a caller-owned temp file and returning its `Path`**:
+**downloading the chosen core into a destination temp file the caller provides**:
 
 ```python
 class GuestCoreReader(Protocol):
@@ -132,10 +132,12 @@ and asserts the path is gone after both a successful capture and a store-failure
 ## Risks
 
 - **Temp-file lifecycle.** A leaked multi-GB temp file is as bad as the RAM buffer it
-  replaces. The temp file is created by `harvest_vmcore`'s caller boundary and unlinked in a
-  `finally` in `capture`; a unit test asserts deletion on both the success and store-failure
-  paths.
-- **Seam signature churn.** The build-id/extract-redacted seams move from `bytes` to `Path`.
-  The bytes-based `run_crash_postmortem` build-id seam is deliberately distinct and
-  untouched; the test suite (`just type` whole-tree + the retrieve tests) catches any
-  mismatched caller.
+  replaces. Ownership is split with no leak window (see "Temp-file ownership"): the seam
+  cleans up on its own failure, `capture` cleans up a returned path in a `try/finally` whose
+  first statement is the seam call. Unit tests assert deletion on the success and the
+  store-failure paths.
+- **Seam topology.** The KDUMP capture path gets a **new** Path-based build-id seam and the
+  existing `extract_redacted` seam is re-typed to `Path` (it has only the one caller). The
+  shared bytes-based `read_vmcore_build_id` seam that `run_crash_postmortem` also uses is
+  left unchanged. `just type` (whole-tree) plus the retrieve tests catch any mismatched
+  caller.
