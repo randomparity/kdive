@@ -439,7 +439,13 @@ def test_real_make_overlay_timeout_is_provisioning_failure(
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
-    assert caught.value.details["timeout_s"] == storage_module._QEMU_IMG_TIMEOUT_S
+    assert str(caught.value) == "qemu-img exceeded the overlay creation timeout"
+    assert caught.value.details == {
+        "op": "create_overlay",
+        "overlay": "overlay.qcow2",
+        "tool": "qemu-img",
+        "timeout_s": storage_module._QEMU_IMG_TIMEOUT_S,
+    }
 
 
 def test_real_make_overlay_missing_qemu_img_is_missing_dependency(
@@ -465,17 +471,64 @@ def test_real_make_overlay_uses_resolved_qemu_img_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[list[str]] = []
+    kwargs_seen: list[dict[str, object]] = []
     monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
 
-    def _record(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    def _record(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
+        kwargs_seen.append(kwargs)
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(storage_module.subprocess, "run", _record)
 
     storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
-    assert calls[0][0] == "/usr/bin/qemu-img"
+    # The full argv must create a qcow2 overlay backed by the qcow2 base: a wrong format flag
+    # (e.g. raw backing) would make the guest read the qcow2 header as raw and fail to mount.
+    assert calls[0] == [
+        "/usr/bin/qemu-img",
+        "create",
+        "-q",
+        "-f",
+        "qcow2",
+        "-F",
+        "qcow2",
+        "-b",
+        "/base.qcow2",
+        "/overlay.qcow2",
+    ]
+    # Output must be captured as text for the nonzero-return stderr tail, and check must stay
+    # False so the function classifies failures itself instead of raising CalledProcessError.
+    assert kwargs_seen[0]["capture_output"] is True
+    assert kwargs_seen[0]["text"] is True
+    assert kwargs_seen[0]["check"] is False
+    assert kwargs_seen[0]["timeout"] == storage_module._QEMU_IMG_TIMEOUT_S
+
+
+def test_real_make_overlay_unresolvable_qemu_img_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When qemu-img is not on PATH (which returns None) the function fails fast with a
+    # MISSING_DEPENDENCY before ever invoking subprocess.run.
+    monkeypatch.setattr(storage_module.shutil, "which", lambda _tool: None)
+
+    def _must_not_run(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("subprocess.run must not be reached when qemu-img is unresolvable")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _must_not_run)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == (
+        "qemu-img is not installed; cannot create the per-System rootfs overlay"
+    )
+    assert caught.value.details == {
+        "op": "create_overlay",
+        "overlay": "overlay.qcow2",
+        "tool": "qemu-img",
+    }
 
 
 def test_real_make_overlay_nonzero_return_is_provisioning_failure(
@@ -493,6 +546,7 @@ def test_real_make_overlay_nonzero_return_is_provisioning_failure(
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(caught.value) == "qemu-img failed to create the per-System rootfs overlay"
     assert caught.value.details == {
         "op": "create_overlay",
         "overlay": "overlay.qcow2",
@@ -514,6 +568,7 @@ def test_real_make_overlay_launch_oserror_is_infrastructure_failure(
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to launch qemu-img to create the per-System rootfs overlay"
     assert caught.value.details == {
         "op": "create_overlay",
         "overlay": "overlay.qcow2",
@@ -535,11 +590,17 @@ def test_real_remove_overlay_oserror_is_infrastructure_failure(
         storage_module._real_remove_overlay("/rootfs/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to remove the per-System rootfs overlay"
     assert caught.value.details == {
         "op": "remove_overlay",
         "overlay": "overlay.qcow2",
         "error": "PermissionError",
     }
+
+
+def test_real_remove_overlay_absent_file_is_noop(tmp_path: Path) -> None:
+    # An absent overlay is the achieved post-state: unlink(missing_ok=True) must not raise.
+    storage_module._real_remove_overlay(str(tmp_path / "gone-overlay.qcow2"))
 
 
 def test_teardown_removes_the_overlay() -> None:
