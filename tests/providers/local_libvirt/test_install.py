@@ -405,7 +405,8 @@ def test_stage_object_categorizes_local_write_failure(tmp_path: Path) -> None:
 
 
 def test_install_categorizes_staging_mkdir_failure(tmp_path: Path) -> None:
-    # A regular file where the per-System staging dir must be makes mkdir(parents=True) fail.
+    # A regular file where the per-System staging dir must be makes mkdir(parents=True) fail
+    # with a non-permission OSError (NotADirectoryError) → stays infrastructure_failure.
     (tmp_path / str(_SYS)).write_bytes(b"not-a-dir")
     inst = _install(conn=_conn_with_existing(), staging_root=tmp_path)
 
@@ -414,6 +415,36 @@ def test_install_categorizes_staging_mkdir_failure(tmp_path: Path) -> None:
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert excinfo.value.details["op"] == "mkdir"
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses the directory-mode write check, so mkdir would not raise",
+)
+def test_install_unwritable_staging_root_is_config_error(tmp_path: Path) -> None:
+    # An unwritable staging root (the #655 symptom: a root-owned parent) makes the per-Run
+    # mkdir raise PermissionError. That is operator misconfiguration, not retry-able
+    # infrastructure: it must surface as a CONFIGURATION_ERROR naming the env var, the path
+    # tried, and an actionable remedy.
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir()
+    staging_root.chmod(0o500)  # readable/executable but not writable by the run user
+    try:
+        inst = _install(conn=_conn_with_existing(), staging_root=staging_root)
+
+        with pytest.raises(CategorizedError) as excinfo:
+            inst.install(_request(initrd_ref=_INITRD_REF))
+    finally:
+        staging_root.chmod(0o700)  # restore so tmp_path cleanup can recurse
+
+    err = excinfo.value
+    assert err.category is ErrorCategory.CONFIGURATION_ERROR
+    assert err.details["env_var"] == "KDIVE_INSTALL_STAGING"
+    # The remedy and the configured staging root are both surfaced for the operator.
+    assert str(staging_root) in str(err.details["staging_root"])
+    remedy = str(err.details["remedy"])
+    assert "writable" in remedy
+    assert "virt_image_t" in remedy
 
 
 # --- live_vm real redefine + boot ----------------------------------------------------

@@ -82,7 +82,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
-| `KDIVE_INSTALL_STAGING` | worker | `/var/lib/kdive/install` | no | Worker staging root for install artifacts. |
+| `KDIVE_INSTALL_STAGING` | worker | `/var/lib/kdive/install` | no | Worker staging root for install artifacts. Must be writable by the run user; the default's parent (/var/lib/kdive) is root-owned, so on a source checkout pre-create it (or repoint this var) — on SELinux hosts with the virt_image_t label. An unwritable root fails install with a configuration_error (ADR-0204). |
 
 ## inventory
 
