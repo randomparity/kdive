@@ -53,7 +53,10 @@ Local QEMU domains run on the same host as the kdive worker. The guest writes it
 core to `/var/crash/<timestamp>/vmcore` **on its own root disk** — the per-System qcow2
 overlay at `local_libvirt/lifecycle/storage.py::overlay_path(system_id)`. The harvest reads
 that file directly out of the overlay host-side, with no guest agent and no live shared
-filesystem:
+filesystem. `LocalLibvirtRetrieve.capture` already calls the injected
+`_wait_for_vmcore(system_id)` seam **exactly once** and maps a `None` return to
+`READINESS_FAILURE` (`retrieve.py`); the harvest is therefore a single offline read, not a
+poll loop — if the core is not yet on disk the operator re-fetches.
 
 1. **Quiesce.** Open the local libvirt connection, look up the domain, and force it off
    (`destroy`, idempotent if already shut off). The System is `crashed` when `vmcore.fetch`
@@ -64,28 +67,49 @@ filesystem:
    `/var/crash/*/vmcore` (depth-bounded), newest by mtime first — mirroring the in-guest
    helper's `find $CRASH_DIR -maxdepth 2 -name vmcore | sort -rn | head -n1` convention.
 3. **Read.** Read the newest core's bytes (subject to the shared 5 GiB single-object
-   ceiling, `MAX_CORE_BYTES`). No matching core within the readiness window → `None`, which
-   `LocalLibvirtRetrieve.capture` already turns into a `READINESS_FAILURE`.
-4. **Extract.** Build-id and redacted dmesg come from the harvested core via the existing
-   drgn helpers shared with remote host_dump (`read_core_build_id_from_file`,
-   `read_core_dmesg_from_file`); dmesg extraction degrades to the `DMESG_UNAVAILABLE`
-   sentinel when the guest kernel's printk buffer can't be read without debuginfo, exactly
-   as remote host_dump does.
-5. **Advertise.** Add `CaptureMethod.KDUMP` to local-libvirt's `supported_capture_methods`
+   ceiling, `MAX_CORE_BYTES`). No matching core present → `None` → `READINESS_FAILURE`.
+4. **Extract build-id.** `LocalLibvirtRetrieve.from_env` currently wires
+   `read_vmcore_build_id=default_read_vmcore_build_id`, which is itself an unimplemented
+   `live_vm` placeholder (`crash_postmortem.py`) — and it also feeds the postmortem
+   provenance check (`crash_postmortem.run_crash_postmortem` reads the build-id off the
+   vmcore bytes to match `debuginfo_ref`). Local must supply a **real** bytes→build-id
+   reader (write the harvested bytes to a temp file, call the existing Path-based
+   `read_core_build_id_from_file` shared with remote host_dump). Wiring it once fixes both
+   capture build-id and local postmortem provenance.
+5. **Extract redacted dmesg.** Implement `_real_extract_redacted` to write the bytes to a
+   temp file and call the existing `read_core_dmesg_from_file` (drgn `get_dmesg`), degrading
+   to the `DMESG_UNAVAILABLE` sentinel when the printk buffer can't be read without
+   debuginfo — exactly as remote host_dump does. The degrade decision (sentinel vs raise) is
+   factored into a pure helper taking an injected extractor, so both the success and the
+   extractor-raises paths are unit-tested with fakes; only the real drgn call sits behind the
+   `live_vm` pragma.
+6. **Advertise.** Add `CaptureMethod.KDUMP` to local-libvirt's `supported_capture_methods`
    so admission accepts it.
+
+### Precondition: System state and core freshness
+
+The CRASHED transition is pre-existing shared machinery — the same `SystemState.CRASHED`
+gate `vmcore.fetch` already enforces for HOST_DUMP — and is **not** redesigned here. At
+fetch time the domain may be running (a kdump that rebooted back to multi-user), paused, or
+already shut off; `destroy` is idempotent across all three. Force-stopping a kdump-rebooted
+guest is the accepted consequence (ADR-0203): the core was written to the overlay before
+any reboot, so it survives the force-off. The harvest trusts kdump to have synced the core
+to disk before its post-dump action (reboot/halt); a torn write would surface as a
+malformed core at postmortem, not as a wrong-but-plausible capture.
 
 ### Testability split
 
 The seam boundary keeps logic CI-testable and isolates the hardware edge:
 
 - **Pure, unit-tested (fakes):** newest-core selection (newest-wins, ties, empty, malformed
-  listing), the readiness/timeout poll loop, the `> MAX_CORE_BYTES` rejection, the
-  `absent → None → READINESS_FAILURE` contract, and `supported_capture_methods` now
-  including KDUMP (admission accepts `kdump` for local, rejects unknown). These drive a
-  `GuestCoreReader` protocol (`list_vmcores`, `read_vmcore`) with an in-memory fake.
+  listing), the `> MAX_CORE_BYTES` rejection, the `absent → None → READINESS_FAILURE`
+  contract, the dmesg-degrade decision (sentinel vs raise, via an injected extractor), and
+  `supported_capture_methods` now including KDUMP (admission accepts `kdump` for local,
+  rejects unknown). Selection/read drive a `GuestCoreReader` protocol (`list_vmcores`,
+  `read_vmcore`) with an in-memory fake.
 - **`# pragma: no cover - live_vm` edge:** the real libguestfs mount/read, the
-  `domain.destroy()` force-off, and the drgn build-id/dmesg calls. Selected by `from_env`,
-  exercised only under the `live_vm` marker.
+  `domain.destroy()` force-off, and the real drgn build-id/dmesg calls. Selected by
+  `from_env`, exercised only under the `live_vm` marker.
 
 ### Failure contract
 
@@ -104,8 +128,10 @@ CI-verifiable (this PR, unit tests):
 
 - local-libvirt `supported_capture_methods` includes `KDUMP`; `vmcore.fetch(method=kdump)`
   on a local crashed System is admitted (no longer `method not supported by provider`).
-- newest-core selection, readiness/timeout, size-cap, and `None → READINESS_FAILURE` paths
-  are covered with fakes.
+- newest-core selection, size-cap rejection, and the `absent → None → READINESS_FAILURE`
+  path are covered with fakes.
+- the dmesg-degrade helper returns the `DMESG_UNAVAILABLE` sentinel when its injected
+  extractor raises, and the extracted bytes when it succeeds.
 - the full existing `LocalLibvirtRetrieve.capture` orchestration still passes for KDUMP via
   injected seams.
 
