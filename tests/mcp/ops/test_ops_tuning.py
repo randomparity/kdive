@@ -23,6 +23,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
@@ -475,3 +476,137 @@ def test_export_round_trips_through_the_model(migrated_url: str) -> None:
         assert by_name["premium"] == Decimal("2.5")
 
     asyncio.run(_run())
+
+
+# ---- export_systems_toml --------------------------------------------------------------
+
+
+async def _seed_inventory(conn: psycopg.AsyncConnection) -> None:
+    await conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, visibility, capabilities, volume, state, "
+        " managed_by) "
+        "VALUES ('remote-libvirt', 'base', 'x86_64', 'qcow2', '/dev/vda', 'public', '{}', "
+        " 'vol-x', 'registered', 'config')"
+    )
+    caps = {"vcpus": 8, "memory_mb": 16384, "concurrent_allocation_cap": 2}
+    await conn.execute(
+        "INSERT INTO resources (kind, name, capabilities, pool, cost_class, status, host_uri, "
+        " managed_by) "
+        "VALUES ('remote-libvirt', 'host-a', %s, 'remote', 'remote', 'available', "
+        " 'qemu+tls://host/system', 'config')",
+        (Jsonb(caps),),
+    )
+    await conn.execute(
+        "INSERT INTO build_hosts "
+        "(name, kind, workspace_root, max_concurrent, managed_by) "
+        "VALUES ('bh-local', 'local', '/var/lib/kdive/build', 4, 'config')"
+    )
+
+
+def test_export_systems_toml_requires_platform_operator(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await tuning.export_systems_toml(pool, _ctx())
+            assert resp.status == "error"
+            assert resp.error_category == "authorization_denied"
+        assert await _count_platform_audit(migrated_url) == 0
+
+    asyncio.run(_run())
+
+
+def test_export_systems_toml_auditor_denied_but_audited(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            resp = await tuning.export_systems_toml(pool, ctx)
+            assert resp.status == "error"
+            assert resp.error_category == "authorization_denied"
+        rows = await _platform_audit_rows(migrated_url)
+        assert len(rows) == 1
+        assert rows[0][2] == "ops.export_systems_toml"
+
+    asyncio.run(_run())
+
+
+def test_export_systems_toml_emits_and_audits(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_inventory(conn)
+            resp = await tuning.export_systems_toml(pool, _OPERATOR)
+            assert resp.status == "ok"
+            toml_text = str(resp.data["toml"])
+            assert "schema_version = 2" in toml_text
+            assert 'name = "host-a"' in toml_text
+            assert 'name = "bh-local"' in toml_text
+        rows = await _platform_audit_rows(migrated_url)
+        export_rows = [r for r in rows if r[2] == "ops.export_systems_toml"]
+        assert len(export_rows) == 1
+        assert export_rows[0][3] == "all-inventory"
+
+    asyncio.run(_run())
+
+
+def test_export_systems_toml_is_byte_deterministic(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_inventory(conn)
+            first = await tuning.export_systems_toml(pool, _OPERATOR)
+            second = await tuning.export_systems_toml(pool, _OPERATOR)
+            assert first.data["toml"] == second.data["toml"]
+
+    asyncio.run(_run())
+
+
+def test_export_systems_toml_omits_removed_identity(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_inventory(conn)
+                await conn.execute(
+                    "INSERT INTO inventory_overrides "
+                    "(source_kind, resource_kind, name, disposition, reason, actor) "
+                    "VALUES ('resource', 'remote-libvirt', 'host-a', 'removed', 'gone', 'op')"
+                )
+            resp = await tuning.export_systems_toml(pool, _OPERATOR)
+            toml_text = str(resp.data["toml"])
+        assert "host-a" not in toml_text  # removed identity omitted
+
+    asyncio.run(_run())
+
+
+def test_export_systems_toml_round_trips_through_reconcile(migrated_url: str) -> None:
+    # Export, fill the remote skeleton, re-parse, and reconcile against a fresh DB; the resulting
+    # config rows match the original state for images/build_hosts + resource identity/sizing.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_inventory(conn)
+            resp = await tuning.export_systems_toml(pool, _OPERATOR)
+            toml_text = str(resp.data["toml"])
+        completed = _complete_remote(toml_text, base_image="base")
+        doc = InventoryDoc.parse(tomllib.loads(completed))
+        assert doc.remote_libvirt[0].name == "host-a"
+        assert doc.remote_libvirt[0].vcpus == 8
+        assert doc.remote_libvirt[0].memory_mb == 16384
+        assert doc.remote_libvirt[0].concurrent_allocation_cap == 2
+        assert doc.build_host[0].name == "bh-local"
+        assert doc.image[0].name == "base"
+
+    asyncio.run(_run())
+
+
+def _complete_remote(text: str, *, base_image: str) -> str:
+    completions = {
+        "base_image": base_image,
+        "gdb_addr": "10.0.0.1:1234",
+        "gdbstub_range": "1234-1240",
+        "client_cert_ref": "ref://cc",
+        "client_key_ref": "ref://ck",  # pragma: allowlist secret
+        "ca_cert_ref": "ref://ca",
+    }
+    for field, value in completions.items():
+        text = text.replace(f'{field} = "REPLACE_ME_{field}"', f'{field} = "{value}"')
+    return text
