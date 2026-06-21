@@ -116,6 +116,12 @@ test-live-stack:
     fi
     exit "$rc"
 
+# Mutation-test ONE module against an explicit test path (see docs/development/mutation-testing.md).
+# Reports surviving mutants — code changes no test caught. mutmut runs ephemerally (not a locked dep).
+#   just mutate src/kdive/domain/errors.py tests/domain/test_errors.py
+mutate source *tests:
+    uv run --with 'mutmut==3.6.0' python scripts/mutate.py {{source}} {{tests}}
+
 # Build wheel + sdist with build info baked in, then remove the stamp so it never lingers
 # in the editable checkout (a leftover would shadow live-git version reporting). Pass
 # release=true only when building from a release tag.
