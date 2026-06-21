@@ -201,6 +201,38 @@ def _build_vm_with_agent(
     )
 
 
+# --- default connections wiring -----------------------------------------------------
+
+
+def test_init_builds_default_connections_with_injected_seams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When no connections object is injected, the default is built from the secret registry,
+    # config factory, and the provision opener — each must be threaded through, not dropped.
+    import kdive.providers.remote_libvirt.lifecycle.build_vm as build_vm_module
+
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    def _fake_connections(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(build_vm_module, "remote_libvirt_connections", _fake_connections)
+
+    registry = SecretRegistry()
+
+    def _factory() -> Any:
+        return _config()
+
+    vm = EphemeralBuildVm(secret_registry=registry, config_factory=_factory)
+
+    assert vm._connections is sentinel
+    assert captured["secret_registry"] is registry
+    assert captured["config_factory"] is _factory
+    assert captured["open_connection"] is build_vm_module.open_libvirt_provision
+
+
 # --- build-domain XML ---------------------------------------------------------------
 
 
@@ -215,6 +247,103 @@ def test_render_build_domain_xml_has_agent_channel_and_no_gdbstub() -> None:
     assert recorded_gdb_port(xml) is None
 
 
+def test_render_build_domain_xml_full_structure() -> None:
+    # Distinct, non-default values for every parameter so a wrong attribute name or a swapped
+    # value cannot pass by coinciding with a default.
+    from defusedxml.ElementTree import fromstring as _fromstring
+
+    xml = render_build_domain_xml(
+        RUN_ID,
+        pool="build-pool",
+        volume="overlay.qcow2",
+        network="isolated-net",
+        machine="q35",
+        vcpus=6,
+        memory_mib=4096,
+        arch="aarch64",
+    )
+    root = _fromstring(xml)
+
+    assert root.tag == "domain"
+    assert root.get("type") == "kvm"
+    assert root.findtext("name") == DOMAIN_NAME
+    assert root.findtext("uuid") == str(RUN_ID)
+
+    memory = root.find("memory")
+    assert memory is not None
+    assert memory.get("unit") == "MiB"
+    assert memory.text == "4096"
+    assert root.findtext("vcpu") == "6"
+
+    os_type = root.find("os/type")
+    assert os_type is not None
+    assert os_type.get("arch") == "aarch64"
+    assert os_type.get("machine") == "q35"
+    assert os_type.text == "hvm"
+    boot = root.find("os/boot")
+    assert boot is not None
+    assert boot.get("dev") == "hd"
+
+    assert root.find("features/acpi") is not None
+
+    disk = root.find("devices/disk")
+    assert disk is not None
+    assert disk.get("type") == "volume"
+    assert disk.get("device") == "disk"
+    driver = disk.find("driver")
+    assert driver is not None
+    assert driver.get("name") == "qemu"
+    assert driver.get("type") == "qcow2"
+    source = disk.find("source")
+    assert source is not None
+    assert source.get("pool") == "build-pool"
+    assert source.get("volume") == "overlay.qcow2"
+    target = disk.find("target")
+    assert target is not None
+    assert target.get("dev") == "vda"
+    assert target.get("bus") == "virtio"
+
+    interface = root.find("devices/interface")
+    assert interface is not None
+    assert interface.get("type") == "network"
+    iface_source = interface.find("source")
+    assert iface_source is not None
+    assert iface_source.get("network") == "isolated-net"
+    iface_model = interface.find("model")
+    assert iface_model is not None
+    assert iface_model.get("type") == "virtio"
+
+    channel = root.find("devices/channel")
+    assert channel is not None
+    assert channel.get("type") == "unix"
+    chan_target = channel.find("target")
+    assert chan_target is not None
+    assert chan_target.get("type") == "virtio"
+    assert chan_target.get("name") == "org.qemu.guest_agent.0"
+
+    # The kdive metadata build marker carries the run id (the reaper key).
+    from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
+
+    build_marker = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}build")
+    assert build_marker is not None
+    assert build_marker.text == str(RUN_ID)
+
+
+def test_render_build_domain_xml_uses_default_sizing() -> None:
+    from defusedxml.ElementTree import fromstring as _fromstring
+
+    xml = render_build_domain_xml(
+        RUN_ID, pool="default", volume=OVERLAY, network="default", machine="pc"
+    )
+    root = _fromstring(xml)
+    # Defaults: 4 vCPUs, 8192 MiB, x86_64 (a builder wants headroom; ADR-0100).
+    assert root.findtext("vcpu") == "4"
+    assert root.findtext("memory") == "8192"
+    os_type = root.find("os/type")
+    assert os_type is not None
+    assert os_type.get("arch") == "x86_64"
+
+
 # --- session lifecycle --------------------------------------------------------------
 
 
@@ -227,6 +356,8 @@ def test_session_provisions_yields_transport_and_tears_down(tmp_path: Any) -> No
         # The domain is defined + started while the session is open.
         assert DOMAIN_NAME in conn.domains
         assert conn.domains[DOMAIN_NAME].active
+        # The defined domain XML references this run's overlay volume (run-id-derived name).
+        assert f'volume="{OVERLAY}"' in conn.defined_xml[0]
 
     # After the session exits, the domain is destroyed + undefined and the overlay deleted.
     assert DOMAIN_NAME not in conn.domains
@@ -330,6 +461,102 @@ def test_session_network_never_ready_raises_and_tears_down(tmp_path: Any) -> Non
     assert OVERLAY in conn.pools["default"].deleted
 
 
+def test_session_network_timeout_surfaces_last_probe_output(tmp_path: Any) -> None:
+    # On the network deadline the *last* probe's stderr/stdout is surfaced under the
+    # probe_stderr/probe_stdout keys (stdout tail-trimmed to 200 chars), the failing domain is
+    # named, and a registered secret in the probe stderr is scrubbed (ADR-0144).
+    from kdive.security.secrets.redaction import REDACTION
+
+    secret = "route-probe-secret-1234"  # pragma: allowlist secret - test fixture value
+    registry = SecretRegistry()
+    registry.register(secret, scope=None)
+
+    # Every route poll emits a *distinct* stdout marker so an off-by-one "last probe" index is
+    # caught; the final poll's marker (tracked in state["last_marker"]) must be the surfaced one.
+    state: dict[str, Any] = {"n": 0, "last_marker": ""}
+
+    def _agent(domain: Any, command: str, timeout: int, flags: int) -> str:
+        msg = json.loads(command)
+        if msg["execute"] == "guest-ping":
+            return json.dumps({"return": {}})
+        if msg["execute"] == "guest-exec":
+            state["n"] += 1
+            return json.dumps({"return": {"pid": state["n"]}})
+        marker = f"poll-{state['n']:03d}"
+        state["last_marker"] = marker
+        payload = ("X" * 250) + marker  # > 200 chars so the tail-trim is observable
+        out = base64.b64encode(payload.encode()).decode()
+        err = base64.b64encode(f"no route to host {secret}".encode()).decode()
+        # rc 1 forever: the route never appears, driving the gate to its deadline.
+        return json.dumps(
+            {"return": {"exited": True, "exitcode": 1, "out-data": out, "err-data": err}}
+        )
+
+    conn = _conn_with_base()
+
+    def _open(_uri: str) -> Any:
+        return conn
+
+    vm = EphemeralBuildVm(
+        secret_registry=registry,
+        connections=remote_libvirt_connections(
+            secret_registry=registry,
+            config_factory=_config,
+            open_connection=_open,
+            secret_backend_factory=RecordingBackend,
+            pki_base_dir=tmp_path,
+        ),
+        agent_command=_agent,
+        timing=BuildVmTiming(
+            sleep=lambda _s: None,
+            monotonic=_ticker(),
+            network_timeout_s=5.0,
+            network_poll_s=1.0,
+        ),
+    )
+
+    with pytest.raises(CategorizedError) as exc, vm.session(_BASE_VOLUME, run_id=RUN_ID):
+        pass
+
+    details = exc.value.details
+    assert details["domain"] == DOMAIN_NAME
+    # The registered secret in the probe stderr is scrubbed.
+    assert secret not in str(details["probe_stderr"])
+    assert REDACTION in str(details["probe_stderr"])
+    # The surfaced stdout is the LAST poll's payload, tail-trimmed to 200 chars.
+    probe_stdout = str(details["probe_stdout"])
+    assert len(probe_stdout) == 200
+    assert state["n"] >= 3  # several polls happened, so an off-by-one index would differ
+    assert probe_stdout.endswith(state["last_marker"])
+
+
+def test_session_fails_on_deterministic_agent_config_error_during_network_gate(
+    tmp_path: Any,
+) -> None:
+    """A non-unresponsive deterministic agent config error during the route gate is fatal (#584).
+
+    Only VIR_ERR_AGENT_UNRESPONSIVE is the transient NetworkManager churn; a denied/unsupported
+    agent command must propagate, not be retried as "not ready".
+    """
+
+    def _agent(domain: Any, command: str, timeout: int, flags: int) -> str:
+        msg = json.loads(command)
+        if msg["execute"] == "guest-ping":
+            return json.dumps({"return": {}})
+        # The route probe's guest-exec hits a deterministic, non-unresponsive config error.
+        raise libvirt_error(libvirt.VIR_ERR_OPERATION_DENIED)
+
+    conn = _conn_with_base()
+    vm = _build_vm_with_agent(conn, tmp_path, _agent, network_timeout_s=30.0, network_poll_s=1.0)
+
+    with pytest.raises(CategorizedError) as exc, vm.session(_BASE_VOLUME, run_id=RUN_ID):
+        pass
+
+    assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    # Teardown still ran.
+    assert DOMAIN_NAME not in conn.domains
+
+
 def test_session_tolerates_transient_agent_drop_during_network_gate(tmp_path: Any) -> None:
     """A code-86 agent drop while the network comes up is transient: keep polling, yield (#584)."""
     conn = _conn_with_base()
@@ -364,6 +591,8 @@ def test_session_fails_when_source_unreachable_naming_source(tmp_path: Any) -> N
 
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
     # The unreachable source is named (host present), and the git stderr is surfaced.
+    assert "build VM cannot reach build source" in str(exc.value)
+    assert "git.example/linux.git" in str(exc.value)
     assert "git.example/linux.git" in str(exc.value.details["remote"])
     assert "unable to access" in str(exc.value.details["stderr"])
     # The egress probe ran and was the last guest-exec (no clone followed).
@@ -381,6 +610,12 @@ def test_session_yields_when_egress_works(tmp_path: Any) -> None:
     with vm.session(_BASE_VOLUME, run_id=RUN_ID, source=_SOURCE) as transport:
         assert isinstance(transport, GuestExecBuildTransport)
         assert len(agent.ls_remote_commands) == 1
+        # The preflight runs in / with the exact git ls-remote argv (HEAD, --exit-code, the
+        # end-of-options `--`), so a swapped flag or working directory is caught.
+        assert (
+            "cd / && exec git ls-remote --quiet --exit-code "
+            f"-- {_REMOTE} HEAD" in agent.ls_remote_commands[0]
+        )
     assert DOMAIN_NAME not in conn.domains
 
 
@@ -425,6 +660,47 @@ def test_session_redacts_credential_in_unreachable_source(tmp_path: Any) -> None
     assert "git.example/linux.git" in str(exc.value.details["remote"])
     assert "hunter2" not in rendered
     assert "alice:hunter2" not in rendered
+
+
+def test_session_redacts_registered_secret_in_egress_stderr(tmp_path: Any) -> None:
+    # The egress stderr detail is scrubbed against the build VM's secret registry, so a
+    # registered secret leaked into git's stderr never reaches the error detail.
+    from kdive.security.secrets.redaction import REDACTION
+
+    secret = "topsecretvalue9876"  # pragma: allowlist secret - test fixture value
+    registry = SecretRegistry()
+    registry.register(secret, scope=None)
+
+    conn = _conn_with_base()
+    agent = _EgressAgent(
+        route_rc=0, egress_rc=128, egress_stderr=f"fatal: auth failed using {secret}"
+    )
+
+    def _open(_uri: str) -> Any:
+        return conn
+
+    vm = EphemeralBuildVm(
+        secret_registry=registry,
+        connections=remote_libvirt_connections(
+            secret_registry=registry,
+            config_factory=_config,
+            open_connection=_open,
+            secret_backend_factory=RecordingBackend,
+            pki_base_dir=tmp_path,
+        ),
+        agent_command=agent,
+        timing=BuildVmTiming(sleep=lambda _s: None, monotonic=_ticker()),
+    )
+
+    with (
+        pytest.raises(CategorizedError) as exc,
+        vm.session(_BASE_VOLUME, run_id=RUN_ID, source=_SOURCE),
+    ):
+        pass
+
+    stderr_detail = str(exc.value.details["stderr"])
+    assert secret not in stderr_detail
+    assert REDACTION in stderr_detail
 
 
 def test_session_propagates_agent_drop_during_preflight(tmp_path: Any) -> None:

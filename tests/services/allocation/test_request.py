@@ -100,9 +100,15 @@ def test_request_admission_returns_sizing_errors(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(request_service, "resolve_request_sizing", sizing_error)
 
     async def _run() -> None:
-        result = await request_admission(_CONN, _ctx(), project="proj", spec=_spec())
+        # by-id so the selector ("id") differs from the result default ("kind"): the error
+        # result must thread the real selector, not fall back to the default.
+        result = await request_admission(
+            _CONN, _ctx(), project="proj", spec=_spec(kind=None, resource_id=_RESOURCE_ID)
+        )
         assert result.error is error
-        assert result.object_id == ResourceKind.LOCAL_LIBVIRT.value
+        assert result.object_id == str(_RESOURCE_ID)
+        assert result.project == "proj"
+        assert result.selector == "id"
 
     asyncio.run(_run())
 
@@ -136,13 +142,18 @@ def test_request_admission_rejects_malformed_pcie_before_placement(
 def test_request_admission_returns_configuration_error_when_no_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    placement_conns: list[object] = []
+    kinds_conns: list[object] = []
+
     async def sizing(*_: object, **__: object) -> ResolvedSizing:
         return _sizing()
 
-    async def placement(*_: object, **__: object) -> PlacementCandidates:
+    async def placement(_conn: object, _request: object) -> PlacementCandidates:
+        placement_conns.append(_conn)
         return PlacementCandidates(resources=[])
 
-    async def registered_kinds(*_: object, **__: object) -> tuple[str, ...]:
+    async def registered_kinds(_conn: object) -> tuple[str, ...]:
+        kinds_conns.append(_conn)
         return ("remote-libvirt",)
 
     monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
@@ -155,6 +166,12 @@ def test_request_admission_returns_configuration_error_when_no_target(
         assert by_kind.resource is None
         assert by_kind.category is ErrorCategory.CONFIGURATION_ERROR
         assert by_kind.available_kinds == ("remote-libvirt",)
+        assert by_kind.object_id == ResourceKind.LOCAL_LIBVIRT.value
+        assert by_kind.project == "proj"
+        assert by_kind.selector == "kind"
+        # conn is threaded through placement and the kind enumeration, not dropped.
+        assert placement_conns == [_CONN]
+        assert kinds_conns == [_CONN]
 
     asyncio.run(_run())
 
@@ -226,10 +243,13 @@ def test_request_admission_by_id_no_target_omits_available_kinds(
 ) -> None:
     # A by-id no-target denial leaves available_kinds None (the caller named a host); the kind
     # enumeration must not even be queried (#471, ADR-0132).
+    placement_requests: list[PlacementRequest] = []
+
     async def sizing(*_: object, **__: object) -> ResolvedSizing:
         return _sizing()
 
-    async def placement(*_: object, **__: object) -> PlacementCandidates:
+    async def placement(_conn: object, placement_request: object) -> PlacementCandidates:
+        placement_requests.append(cast(PlacementRequest, placement_request))
         return PlacementCandidates(resources=[])
 
     async def registered_kinds(*_: object, **__: object) -> tuple[str, ...]:
@@ -241,11 +261,15 @@ def test_request_admission_by_id_no_target_omits_available_kinds(
 
     async def _run() -> None:
         result = await request_admission(
-            _CONN, _ctx(), project="proj", spec=_spec(resource_id=_RESOURCE_ID)
+            _CONN, _ctx(), project="proj", spec=_spec(kind=None, resource_id=_RESOURCE_ID)
         )
         assert result.resource is None
         assert result.category is ErrorCategory.CONFIGURATION_ERROR
         assert result.available_kinds is None
+        assert result.selector == "id"
+        assert result.object_id == str(_RESOURCE_ID)
+        assert placement_requests[0].project == "proj"
+        assert placement_requests[0].resource_id == _RESOURCE_ID
 
     asyncio.run(_run())
 
@@ -266,7 +290,11 @@ def test_request_admission_uses_capacity_candidate_for_denial(
         queueable=True,
     )
 
-    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+    sizing_conns: list[object] = []
+    admit_conns: list[object] = []
+
+    async def sizing(_conn: object, **__: object) -> ResolvedSizing:
+        sizing_conns.append(_conn)
         return _sizing(pcie_match="8086:1572", shape="gpu-small")
 
     async def placement(_conn: AsyncConnection, placement_request: object) -> PlacementCandidates:
@@ -274,6 +302,7 @@ def test_request_admission_uses_capacity_candidate_for_denial(
         return PlacementCandidates(resources=[], capacity_candidate=resource)
 
     async def admit(_conn: AsyncConnection, admission_request: object) -> AdmissionOutcome:
+        admit_conns.append(_conn)
         admission_requests.append(cast(AllocationRequest, admission_request))
         return denial
 
@@ -282,23 +311,48 @@ def test_request_admission_uses_capacity_candidate_for_denial(
     monkeypatch.setattr(request_service, "admit", admit)
 
     async def _run() -> None:
+        # by-pool denial: selector threads as "pool" into the denial result, not the default.
         result = await request_admission(
             _CONN,
             _ctx(),
             project="proj",
-            spec=_spec(pcie_devices=("class=02",), on_capacity="queue"),
+            spec=_spec(
+                kind=None,
+                pool="big-remote",
+                pcie_devices=("class=02",),
+                on_capacity="queue",
+            ),
             idempotency_key="idem-1",
         )
         assert result.resource is resource
         assert result.denial is denial
+        assert result.object_id == "big-remote"
+        assert result.project == "proj"
+        assert result.selector == "pool"
+        # conn is threaded into sizing and admit, never replaced.
+        assert sizing_conns == [_CONN]
+        assert admit_conns == [_CONN]
         placement_request = placement_requests[0]
         admission_request = admission_requests[0]
         assert placement_request.pcie_specs == ("class=02", "8086:1572")
+        assert placement_request.kind is None
+        assert placement_request.pool == "big-remote"
+        assert placement_request.resource_id is None
+        assert placement_request.project == "proj"
         assert admission_request.resource is resource
+        assert admission_request.ctx is not None
+        assert admission_request.project == "proj"
         assert admission_request.pcie_specs == ("class=02", "8086:1572")
         assert admission_request.shape == "gpu-small"
         assert admission_request.on_capacity == "queue"
         assert admission_request.idempotency_key == "idem-1"
+        assert admission_request.window == 3
+        assert admission_request.disk_gb == 20
+        assert admission_request.selector.vcpus == 2
+        assert admission_request.selector.memory_gb == 4
+        assert admission_request.requested_kind is None
+        assert admission_request.requested_pool == "big-remote"
+        assert admission_request.requested_resource_id is None
 
     asyncio.run(_run())
 
@@ -306,14 +360,20 @@ def test_request_admission_uses_capacity_candidate_for_denial(
 def test_request_admission_returns_granted_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
     resource = _resource()
     allocation = _allocation()
+    placement_requests: list[PlacementRequest] = []
+    admission_requests: list[AllocationRequest] = []
+    sizing_calls: list[dict[str, object]] = []
 
-    async def sizing(*_: object, **__: object) -> ResolvedSizing:
-        return _sizing()
+    async def sizing(_conn: object, **kwargs: object) -> ResolvedSizing:
+        sizing_calls.append(kwargs)
+        return _sizing(vcpus=6, memory_gb=12, disk_gb=80)
 
-    async def placement(*_: object, **__: object) -> PlacementCandidates:
+    async def placement(_conn: object, placement_request: object) -> PlacementCandidates:
+        placement_requests.append(cast(PlacementRequest, placement_request))
         return PlacementCandidates(resources=[resource])
 
-    async def admit(*_: object, **__: object) -> AdmissionOutcome:
+    async def admit(_conn: object, admission_request: object) -> AdmissionOutcome:
+        admission_requests.append(cast(AllocationRequest, admission_request))
         return AdmissionOutcome(granted=True, allocation=allocation)
 
     monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
@@ -325,11 +385,130 @@ def test_request_admission_returns_granted_allocation(monkeypatch: pytest.Monkey
             _CONN,
             _ctx(),
             project="proj",
-            spec=_spec(resource_id=resource.id),
+            spec=_spec(resource_id=resource.id, kind=None, shape="big", disk_gb=80),
         )
         assert result.object_id == str(resource.id)
+        assert result.project == "proj"
+        assert result.selector == "id"
         assert result.resource is resource
         assert result.allocation is allocation
+
+        assert sizing_calls[0] == {
+            "shape": "big",
+            "vcpus": 2,
+            "memory_gb": 4,
+            "disk_gb": 80,
+        }
+
+        placement_request = placement_requests[0]
+        assert placement_request.resource_id == resource.id
+        assert placement_request.kind is None
+        assert placement_request.pool is None
+
+        admission_request = admission_requests[0]
+        # by-id selector: requested_kind/requested_pool stay None, resource_id threads through.
+        assert admission_request.requested_kind is None
+        assert admission_request.requested_pool is None
+        assert admission_request.requested_resource_id == resource.id
+        assert admission_request.selector.vcpus == 6
+        assert admission_request.selector.memory_gb == 12
+        assert admission_request.disk_gb == 80
+
+    asyncio.run(_run())
+
+
+def test_request_admission_by_kind_grant_threads_requested_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = _resource()
+    placement_requests: list[PlacementRequest] = []
+    admission_requests: list[AllocationRequest] = []
+
+    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+        return _sizing()
+
+    async def placement(_conn: object, placement_request: object) -> PlacementCandidates:
+        placement_requests.append(cast(PlacementRequest, placement_request))
+        return PlacementCandidates(resources=[resource])
+
+    async def admit(_conn: object, admission_request: object) -> AdmissionOutcome:
+        admission_requests.append(cast(AllocationRequest, admission_request))
+        return AdmissionOutcome(granted=True, allocation=_allocation())
+
+    monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
+    monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "admit", admit)
+
+    async def _run() -> None:
+        # by-kind selector: kind threads into placement AND becomes requested_kind;
+        # pool/id stay None.
+        await request_admission(_CONN, _ctx(), project="proj", spec=_spec())
+        assert placement_requests[0].kind is ResourceKind.LOCAL_LIBVIRT
+        assert placement_requests[0].pool is None
+        admission_request = admission_requests[0]
+        assert admission_request.requested_kind is ResourceKind.LOCAL_LIBVIRT
+        assert admission_request.requested_pool is None
+        assert admission_request.requested_resource_id is None
+
+    asyncio.run(_run())
+
+
+def test_request_admission_by_pool_does_not_set_requested_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # selector != "kind": requested_kind must be None even though spec.kind could be inspected.
+    resource = _resource()
+    admission_requests: list[AllocationRequest] = []
+
+    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+        return _sizing()
+
+    async def placement(*_: object, **__: object) -> PlacementCandidates:
+        return PlacementCandidates(resources=[resource])
+
+    async def admit(_conn: object, admission_request: object) -> AdmissionOutcome:
+        admission_requests.append(cast(AllocationRequest, admission_request))
+        return AdmissionOutcome(granted=True, allocation=_allocation())
+
+    monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
+    monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "admit", admit)
+
+    async def _run() -> None:
+        await request_admission(
+            _CONN, _ctx(), project="proj", spec=_spec(kind=None, pool="big-remote")
+        )
+        assert admission_requests[0].requested_kind is None
+
+    asyncio.run(_run())
+
+
+def test_request_admission_denies_when_granted_without_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # granted=True but allocation=None must fall through to the denial result (the `and` guard),
+    # never returning an allocation=None "grant".
+    resource = _resource()
+    outcome = AdmissionOutcome(granted=True, allocation=None)
+
+    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+        return _sizing()
+
+    async def placement(*_: object, **__: object) -> PlacementCandidates:
+        return PlacementCandidates(resources=[resource])
+
+    async def admit(*_: object, **__: object) -> AdmissionOutcome:
+        return outcome
+
+    monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
+    monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "admit", admit)
+
+    async def _run() -> None:
+        result = await request_admission(_CONN, _ctx(), project="proj", spec=_spec())
+        assert result.allocation is None
+        assert result.denial is outcome
+        assert result.resource is resource
 
     asyncio.run(_run())
 

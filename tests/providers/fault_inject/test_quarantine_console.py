@@ -183,6 +183,84 @@ def test_concurrent_op_release_does_not_evict_this_ops_value(tmp_path: Path) -> 
     assert value_a not in registry.snapshot()
 
 
+def test_write_requests_carry_the_fault_inject_artifact_metadata(tmp_path: Path) -> None:
+    # Both persists must address the System owner and the fault-inject retention class; a
+    # dropped/None owner_id or retention_class would misfile the quarantined console object.
+    registry = SecretRegistry()
+    store = _SpyStore(registry)
+    scope = f"op-{uuid4()}"
+    ref = _sentinel_ref(tmp_path)
+    system_id = uuid4()
+
+    _console(tmp_path, registry, store, scope, ref).emit_and_persist(system_id=system_id)
+
+    assert len(store.requests) == 2
+    for request in store.requests:
+        assert request.owner_kind == "systems"
+        assert request.owner_id == str(system_id)
+        assert request.retention_class == "console"
+        assert request.tenant == "fault-inject"
+    # The two writes are the quarantined raw then the redacted heal, in that order.
+    assert store.requests[0].sensitivity is Sensitivity.QUARANTINED
+    assert store.requests[1].sensitivity is Sensitivity.REDACTED
+
+
+def test_transcript_frames_the_credential_with_console_boot_lines(tmp_path: Path) -> None:
+    # The synthetic transcript must include the boot/ready frame around the echoed credential;
+    # an emptied or altered boot line changes the persisted console body.
+    registry = SecretRegistry()
+    store = _SpyStore(registry)
+    scope = f"op-{uuid4()}"
+    ref = _sentinel_ref(tmp_path)
+
+    output = _console(tmp_path, registry, store, scope, ref).emit_and_persist(system_id=uuid4())
+
+    quar_body = store.objects[output.quarantined.key].data.decode("utf-8")
+    assert quar_body == (
+        "fault-inject console boot\n"
+        f"[bmc] handshake echoed credential {_SENTINEL} to the console\n"
+        "fault-inject console ready\n"
+    )
+    assert _SENTINEL in quar_body
+
+
+def test_heal_refetches_the_quarantined_object_by_its_etag(tmp_path: Path) -> None:
+    # The re-fetch must address the just-written quarantined object by its concrete etag, not a
+    # null/blind read — a dropped etag would let the heal read a different revision.
+    registry = SecretRegistry()
+    ref = _sentinel_ref(tmp_path)
+    scope = f"op-{uuid4()}"
+
+    class _EtagRecordingStore:
+        def __init__(self) -> None:
+            self.objects: dict[str, ArtifactWriteRequest] = {}
+            self.get_etags: list[str | None] = []
+
+        def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
+            self.objects[request.key()] = request
+            return StoredArtifact(
+                request.key(), "etag-42", request.sensitivity, request.retention_class
+            )
+
+        def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+            self.get_etags.append(etag)
+            request = self.objects[key]
+            return FetchedArtifact(request.data, request.sensitivity, request.retention_class)
+
+    store = _EtagRecordingStore()
+    console = FaultInjectQuarantineConsole(
+        backend=FileRefBackend(tmp_path, registry, scope=scope),
+        registry=registry,
+        store_factory=lambda: store,
+        secret_ref=ref,
+        secrets_root=tmp_path,
+        scope=scope,
+    )
+    console.emit_and_persist(system_id=uuid4())
+
+    assert store.get_etags == ["etag-42"]
+
+
 def test_for_op_binds_backend_to_the_op_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

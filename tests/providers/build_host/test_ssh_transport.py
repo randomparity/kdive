@@ -265,6 +265,34 @@ def test_construction_rejects_unsafe_address_before_subprocess(address: str) -> 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_construction_leading_dash_message_and_details() -> None:
+    with pytest.raises(CategorizedError) as exc_info:
+        SshBuildTransport(
+            address="-oProxyCommand=x",  # noqa: S106 — test payload
+            identity_path=_FAKE_IDENTITY,
+            secret_registry=SecretRegistry(),
+        )
+
+    error = exc_info.value
+    assert str(error) == "ssh address must not start with '-' (would be parsed as an ssh option)"
+    assert error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert error.details == {"field": "address"}
+
+
+def test_construction_control_character_message_and_details() -> None:
+    with pytest.raises(CategorizedError) as exc_info:
+        SshBuildTransport(
+            address="host\ninjected",
+            identity_path=_FAKE_IDENTITY,
+            secret_registry=SecretRegistry(),
+        )
+
+    error = exc_info.value
+    assert str(error) == "ssh address contains a control character or newline"
+    assert error.category == ErrorCategory.CONFIGURATION_ERROR
+    assert error.details == {"field": "address"}
+
+
 # ---------------------------------------------------------------------------
 # 4c. read_text / read_bytes / write_bytes — argv shape + base64 round-trip
 # ---------------------------------------------------------------------------
@@ -339,7 +367,33 @@ def test_write_bytes_argv_shape_and_pipes_base64_stdin() -> None:
     assert "base64 -d" in remote_cmd
     assert "/build/dest.bin" in remote_cmd
     # The base64 payload is fed via stdin, not embedded in the argv.
-    assert mock_run.call_args.kwargs["input"] == encoded
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["input"] == encoded
+    assert kwargs["timeout"] == 60
+    assert kwargs["check"] is False
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+
+
+def test_write_bytes_non_zero_raises_infrastructure_failure() -> None:
+    """write_bytes raises INFRASTRUCTURE_FAILURE with redacted stderr on a non-zero exit."""
+    secret = "leaked-key-material"  # pragma: allowlist secret
+    registry = SecretRegistry()
+    registry.register(secret, scope=None)
+    transport = SshBuildTransport(
+        address=_FAKE_ADDRESS, identity_path=_FAKE_IDENTITY, secret_registry=registry
+    )
+
+    with (
+        patch(_RUN_TARGET, return_value=_completed(returncode=1, stderr=f"denied {secret}")),
+        pytest.raises(CategorizedError) as exc_info,
+    ):
+        transport.write_bytes("/build/dest.bin", b"data")
+
+    error = exc_info.value
+    assert error.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.details["path"] == "/build/dest.bin"
+    assert secret not in str(error.details["stderr"])
 
 
 def test_read_bytes_non_zero_raises_infrastructure_failure() -> None:
@@ -428,7 +482,11 @@ def test_check_reachable_runs_bare_true_no_cd() -> None:
     assert remote_cmd == "true"
     assert "cd " not in remote_cmd
     assert "&&" not in remote_cmd
-    assert mock_run.call_args.kwargs["timeout"] == 15
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["timeout"] == 15
+    assert kwargs["check"] is False
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
 
 
 def test_check_reachable_non_zero_returns_false_and_logs_redacted(
@@ -453,19 +511,47 @@ def test_check_reachable_non_zero_returns_false_and_logs_redacted(
     assert caplog.records, "a failed probe must log at warning"
     logged = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in logged
+    # The non-secret portion of the stderr tail must be carried into the log (the redacted
+    # tail is logged, not dropped), with the secret masked out.
+    assert "Permission denied" in logged
+    assert any(
+        r.getMessage().startswith(f"ssh reachability probe to {_FAKE_ADDRESS} failed (rc=255):")
+        for r in caplog.records
+    )
 
 
-def test_check_reachable_timeout_returns_false() -> None:
-    """A subprocess timeout → False (not raised)."""
-    with patch(_RUN_TARGET, side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=15)):
+@pytest.mark.parametrize("timeout_s", [15, 42])
+def test_check_reachable_timeout_returns_false(
+    timeout_s: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A subprocess timeout → False (not raised), logged with host and the actual timeout.
+
+    Driving two distinct timeouts pins the timeout to the ``timeout_s`` argument so a mutant
+    that hardcodes a literal in the log message cannot survive.
+    """
+    with (
+        patch(_RUN_TARGET, side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=timeout_s)),
+        caplog.at_level("WARNING"),
+    ):
+        ok = _transport().check_reachable(timeout_s=timeout_s)
+
+    assert ok is False
+    assert any(
+        r.getMessage() == f"ssh reachability probe to {_FAKE_ADDRESS} timed out after {timeout_s}s"
+        for r in caplog.records
+    )
+
+
+def test_check_reachable_launch_oserror_returns_false(caplog: pytest.LogCaptureFixture) -> None:
+    """An ssh launch failure (OSError) → False (not raised), logged with the host."""
+    with (
+        patch(_RUN_TARGET, side_effect=OSError("ssh: command not found")),
+        caplog.at_level("WARNING"),
+    ):
         ok = _transport().check_reachable(timeout_s=15)
 
     assert ok is False
-
-
-def test_check_reachable_launch_oserror_returns_false() -> None:
-    """An ssh launch failure (OSError) → False (not raised)."""
-    with patch(_RUN_TARGET, side_effect=OSError("ssh: command not found")):
-        ok = _transport().check_reachable(timeout_s=15)
-
-    assert ok is False
+    assert any(
+        r.getMessage() == f"ssh reachability probe to {_FAKE_ADDRESS} could not launch ssh"
+        for r in caplog.records
+    )

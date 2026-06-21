@@ -56,6 +56,26 @@ def test_list_resources_returns_remote_record(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []  # and deletes its pkipath
 
 
+def test_list_resources_materializes_pkipath_under_configured_base_dir(tmp_path: Path) -> None:
+    # The injected pki_base_dir governs where the per-op TLS materials are staged: the URI
+    # handed to the opener must carry a pkipath under tmp_path (not the system temp dir).
+    seen: dict[str, str] = {}
+
+    def _opener(uri: str) -> FakeConn:
+        seen["uri"] = uri
+        return FakeConn()
+
+    discovery = RemoteLibvirtDiscovery(
+        config=_config(),
+        secret_backend=RecordingBackend(),
+        open_connection=_opener,
+        pki_base_dir=tmp_path,
+    )
+    discovery.list_resources()
+
+    assert f"pkipath={tmp_path}" in seen["uri"]
+
+
 def test_malformed_capabilities_xml_yields_unknown_arch(tmp_path: Path) -> None:
     class _BadXmlConn(FakeConn):
         def getCapabilities(self) -> str:  # noqa: N802 - libvirt binding name
@@ -77,6 +97,56 @@ def test_from_env_without_inventory_raises_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         RemoteLibvirtDiscovery.from_env(secret_registry=SecretRegistry(), resource_name="ub24-big")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+_INVENTORY = """schema_version = 2
+
+[[image]]
+provider = "remote-libvirt"
+name = "fedora-kdive-remote-base-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "fedora-kdive-remote-base-43.qcow2"
+
+[[remote_libvirt]]
+name = "ub24-big"
+uri = "qemu+tls://host.example/system"
+gdb_addr = "192.168.10.20"
+gdbstub_range = "47000:47099"
+client_cert_ref = "remote/clientcert.pem"
+client_key_ref = "remote/clientkey.pem"  # pragma: allowlist secret
+ca_cert_ref = "remote/cacert.pem"
+base_image = "fedora-kdive-remote-base-43"
+cost_class = "remote"
+vcpus = 16
+memory_mb = 65536
+"""
+
+
+def test_from_env_wires_named_instance_with_live_collaborators(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kdive.config as config
+    from kdive.providers.remote_libvirt.transport import open_libvirt
+
+    path = tmp_path / "systems.toml"
+    path.write_text(_INVENTORY)
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+    config.load()
+
+    discovery = RemoteLibvirtDiscovery.from_env(
+        secret_registry=SecretRegistry(), resource_name="ub24-big"
+    )
+
+    # The named instance's URI is resolved into the config (not some other instance/None).
+    assert discovery.host_uri == "qemu+tls://host.example/system"
+    # The production opener and a real secret backend are wired, not left unset.
+    assert discovery._open_connection is open_libvirt
+    assert discovery._secret_backend is not None
 
 
 def test_capabilities_advertise_provisioning_knobs(tmp_path: Path) -> None:

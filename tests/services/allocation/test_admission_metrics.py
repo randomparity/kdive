@@ -132,11 +132,33 @@ def _metrics() -> tuple[AdmissionMetrics, InMemoryMetricReader]:
     return AdmissionMetrics(meter=meter), reader
 
 
+def _metric_names(reader: InMemoryMetricReader) -> set[str]:
+    data = reader.get_metrics_data()
+    if data is None:
+        return set()
+    return {
+        metric.name
+        for rm in data.resource_metrics
+        for sm in rm.scope_metrics
+        for metric in sm.metrics
+    }
+
+
 def test_record_decision_increments_counter() -> None:
     metrics, reader = _metrics()
     metrics.record_decision(_denial(ErrorCategory.QUOTA_EXCEEDED))
     points = _points(reader, "kdive.allocation.admission")
     assert points[(("outcome", "rejected"), ("reason", "quota"))] == 1
+
+
+def test_instrument_names_are_the_published_contract() -> None:
+    # Dashboards/alerts query these exact instrument names; a rename silently breaks them.
+    metrics, reader = _metrics()
+    metrics.record_decision(_denial(ErrorCategory.QUOTA_EXCEEDED))
+    metrics.record_promotion(1.0)
+    names = _metric_names(reader)
+    assert "kdive.allocation.admission" in names
+    assert "kdive.allocation.wait" in names
 
 
 def test_record_promotion_emits_grant_and_wait() -> None:
@@ -147,11 +169,39 @@ def test_record_promotion_emits_grant_and_wait() -> None:
     assert _histogram_count(reader, "kdive.allocation.wait") == 1
 
 
+def test_record_promotion_records_zero_wait() -> None:
+    # A synchronous grant waits ~0s; a zero wait is still a real sample and must be recorded.
+    metrics, reader = _metrics()
+    metrics.record_promotion(0.0)
+    assert _histogram_count(reader, "kdive.allocation.wait") == 1
+
+
+def test_record_promotion_skips_negative_wait() -> None:
+    # A negative wait is unobservable nonsense (clock skew); it must never reach the histogram.
+    metrics, reader = _metrics()
+    metrics.record_promotion(-1.0)
+    assert _histogram_count(reader, "kdive.allocation.wait") == 0
+
+
 def test_record_queue_timeout_increments_rejections() -> None:
     metrics, reader = _metrics()
     metrics.record_queue_timeout(3)
     points = _points(reader, "kdive.allocation.admission")
     assert points[(("outcome", "rejected"), ("reason", "queue_timeout"))] == 3
+
+
+def test_record_queue_timeout_defaults_to_one() -> None:
+    metrics, reader = _metrics()
+    metrics.record_queue_timeout()
+    points = _points(reader, "kdive.allocation.admission")
+    assert points[(("outcome", "rejected"), ("reason", "queue_timeout"))] == 1
+
+
+def test_record_queue_timeout_zero_count_emits_nothing() -> None:
+    # A zero reap count is a no-op; it must not emit a spurious zero-value rejection point.
+    metrics, reader = _metrics()
+    metrics.record_queue_timeout(0)
+    assert "kdive.allocation.admission" not in _metric_names(reader)
 
 
 def test_disabled_metrics_are_noop() -> None:

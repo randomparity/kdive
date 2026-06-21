@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
@@ -9,6 +11,7 @@ from kdive.domain.catalog.resource_capabilities import (
     VCPUS_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.fault_inject.capabilities import (
     FAULT_RATE_KEY,
     MAX_LATENCY_S_KEY,
@@ -78,10 +81,85 @@ def test_seed_and_cap_are_read_from_the_environment() -> None:
         secret_ref="fault-inject/sentinel",  # pragma: allowlist secret - ref, not a value
     )
 
+    assert discovery.host_uri == "fault-inject://test"
     (record,) = discovery.list_resources()
+    assert record["resource_id"] == "fault-inject://test"
     capabilities = record["capabilities"]
 
     assert capabilities[SEED_KEY] == 12345
     assert capabilities[CONCURRENT_ALLOCATION_CAP_KEY] == 4
     assert capabilities[FAULT_RATE_KEY] == {"provision": 0.5}
     assert capabilities[MAX_LATENCY_S_KEY] == {"provision": 9.0}
+
+
+def test_from_env_reads_each_field_from_its_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_FAULT_INJECT_URI", "fault-inject://from-env")
+    monkeypatch.setenv("KDIVE_FAULT_INJECT_ALLOCATION_CAP", "7")
+    monkeypatch.setenv("KDIVE_FAULT_INJECT_SEED", "42")
+    monkeypatch.setenv(
+        "KDIVE_FAULT_INJECT_SECRET_REF",  # pragma: allowlist secret - env var name
+        "fault-inject/from-env-sentinel",  # pragma: allowlist secret - ref, not a value
+    )
+
+    discovery = FaultInjectDiscovery.from_env()
+
+    assert discovery.host_uri == "fault-inject://from-env"
+    assert discovery.concurrent_allocation_cap == 7
+    assert discovery.seed == 42
+    assert (
+        discovery.secret_ref == "fault-inject/from-env-sentinel"  # pragma: allowlist secret
+    )
+    # The inert happy-path maps are not env-driven; from_env always seeds them empty.
+    assert discovery.fault_rate == {}
+    assert discovery.max_latency_s == {}
+
+
+def test_from_env_falls_back_to_setting_defaults_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "KDIVE_FAULT_INJECT_URI",
+        "KDIVE_FAULT_INJECT_ALLOCATION_CAP",
+        "KDIVE_FAULT_INJECT_SEED",
+        "KDIVE_FAULT_INJECT_SECRET_REF",  # pragma: allowlist secret - env var name
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    discovery = FaultInjectDiscovery.from_env()
+
+    assert discovery.host_uri == "fault-inject://local"
+    assert discovery.concurrent_allocation_cap == 1
+    assert discovery.seed == 0
+    assert discovery.secret_ref == "fault-inject/console-sentinel"  # pragma: allowlist secret
+
+
+def test_from_env_rejects_non_integer_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_FAULT_INJECT_ALLOCATION_CAP", "not-an-int")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        FaultInjectDiscovery.from_env()
+
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "KDIVE_FAULT_INJECT_ALLOCATION_CAP" in str(excinfo.value)
+
+
+def test_from_env_rejects_non_integer_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_FAULT_INJECT_SEED", "not-an-int")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        FaultInjectDiscovery.from_env()
+
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "KDIVE_FAULT_INJECT_SEED" in str(excinfo.value)
+
+
+def test_capabilities_describe_the_synthetic_gdbstub_engine() -> None:
+    discovery = FaultInjectDiscovery.from_env()
+
+    (record,) = discovery.list_resources()
+    capabilities = record["capabilities"]
+
+    assert capabilities["arch"] == "synthetic"
+    assert capabilities["transports"] == ["gdbstub"]

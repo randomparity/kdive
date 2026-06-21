@@ -266,3 +266,108 @@ def test_list_verb_denial_exits_authorization_denied(
     _install_session(monkeypatch, _denied("resources"))
     code = asyncio.run(reads.resources_list(_args(kind=None)))
     assert code == 3
+
+
+def test_record_verb_denial_exits_authorization_denied(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # A single-record verb must surface the same nonzero exit a denial returns, not the
+    # success exit 0 that ignoring the envelope would leave.
+    _install_session(monkeypatch, _denied("s1"))
+    code = asyncio.run(reads.systems_show(_args(system_id="s1")))
+    assert code == 3
+
+
+def test_fixtures_list_denial_exits_authorization_denied(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _install_session(monkeypatch, _denied("fixtures"))
+    code = asyncio.run(reads.fixtures_list(_args()))
+    assert code == 3
+
+
+def test_allocations_list_json_projects_declared_columns(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _install_session(
+        monkeypatch,
+        _collection([_item("al-1", "active", {"project": "p", "system": "s"})]),
+    )
+    asyncio.run(reads.allocations_list(argparse.Namespace(json=True, project="p")))
+    assert json.loads(capsys.readouterr().out) == [
+        {"id": "al-1", "project": "p", "system": "s", "state": "active"}
+    ]
+
+
+def test_systems_list_json_projects_columns_and_passes_state_filter(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    client = _install_session(
+        monkeypatch,
+        _collection([_item("sy-1", "running", {"project": "p"})]),
+    )
+    asyncio.run(reads.systems_list(argparse.Namespace(json=True, state="running")))
+    assert client.calls == [("systems.list", {"state": "running"})]
+    assert json.loads(capsys.readouterr().out) == [
+        {"id": "sy-1", "project": "p", "state": "running"}
+    ]
+
+
+def test_jobs_list_json_projects_declared_columns(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    _install_session(
+        monkeypatch,
+        _collection([_item("jo-1", "queued", {"kind": "boot"})]),
+    )
+    asyncio.run(reads.jobs_list(argparse.Namespace(json=True, limit=None)))
+    assert json.loads(capsys.readouterr().out) == [
+        {"id": "jo-1", "kind": "boot", "state": "queued"}
+    ]
+
+
+def test_inventory_show_json_projects_columns_and_passes_project_filter(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    client = _install_session(
+        monkeypatch,
+        _collection([_item("k1", "ok", {"key": "k1", "backend": "minio", "status": "ready"})]),
+    )
+    asyncio.run(reads.inventory_show(argparse.Namespace(json=True, project="proj-a")))
+    assert client.calls == [("inventory.list", {"project": "proj-a"})]
+    assert json.loads(capsys.readouterr().out) == [
+        {"key": "k1", "backend": "minio", "status": "ready"}
+    ]
+
+
+def test_fixtures_list_json_projects_declared_columns(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _install_session(
+        monkeypatch,
+        _data_envelope({"fixtures": [{"provider": "local-libvirt", "name": "base", "arch": "x"}]}),
+    )
+    asyncio.run(reads.fixtures_list(argparse.Namespace(json=True)))
+    assert json.loads(capsys.readouterr().out) == [
+        {"provider": "local-libvirt", "name": "base", "arch": "x"}
+    ]
+
+
+def test_record_verbs_send_the_declared_id_payload_key(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    cases = [
+        (reads.allocations_get, "allocation_id", "allocations.get"),
+        (reads.systems_show, "system_id", "systems.get"),
+        (reads.runs_show, "run_id", "runs.get"),
+        (reads.jobs_get, "job_id", "jobs.get"),
+    ]
+    for handler, key, tool in cases:
+        client = _install_session(monkeypatch, _data_envelope({}))
+        asyncio.run(handler(_args(**{key: "obj-1"})))
+        assert client.calls == [(tool, {key: "obj-1"})]
+
+
+def test_payload_omits_missing_optional_filter(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    # A list verb whose optional filter attr is absent sends no filter, rather than raising.
+    client = _install_session(monkeypatch, _collection([]))
+    asyncio.run(reads.allocations_list(argparse.Namespace(json=False)))
+    assert client.calls == [("allocations.list", {})]

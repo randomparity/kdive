@@ -15,8 +15,12 @@ from kdive.artifacts.storage import PresignedUpload
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports.build_transport import CommandResult
 from kdive.providers.shared.build_host.transports.shell_transport import (
+    _CLONE_TIMEOUT_S,
     _MAX_REMOTE_READ_B64_BYTES,
+    _UPLOAD_TIMEOUT_S,
     ShellBuildTransport,
+    _extract_etag_from_headers,
+    _is_command_not_found,
     _validate_url,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -27,6 +31,32 @@ def test_validate_url_still_rejects_control_char_after_relocation() -> None:
     with pytest.raises(CategorizedError) as exc:
         _validate_url("https://example.com/x\n")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "presigned URL contains a control character"
+
+
+def test_validate_url_accepts_a_clean_url() -> None:
+    _validate_url("https://example.com/object?sig=abc")
+
+
+def test_is_command_not_found_true_on_exit_127_regardless_of_stderr() -> None:
+    # rc 127 is the canonical signal even when stderr does not name git.
+    assert _is_command_not_found(_ok(returncode=127, stderr="boom"), "boom") is True
+
+
+def test_is_command_not_found_requires_git_named_with_a_not_found_token() -> None:
+    # The stderr backstop fires only when *git* is named together with a not-found token.
+    assert _is_command_not_found(_ok(returncode=1), "git: not found") is True
+    assert _is_command_not_found(_ok(returncode=1), "git: no such file") is True
+    # git named but no not-found token, or a not-found token without git — both must be False.
+    assert _is_command_not_found(_ok(returncode=1), "git: permission denied") is False
+    assert _is_command_not_found(_ok(returncode=1), "cc: not found") is False
+    assert _is_command_not_found(_ok(returncode=1), "cc: no such file") is False
+
+
+def test_extract_etag_preserves_a_value_containing_a_colon() -> None:
+    # The header value is split on the FIRST colon only, so a colon inside the value survives.
+    assert _extract_etag_from_headers('ETag: "a:b:c"') == '"a:b:c"'
+    assert _extract_etag_from_headers("Content-Type: text/plain") == ""
 
 
 class _RecordingTransport(ShellBuildTransport):
@@ -58,15 +88,18 @@ def test_read_bytes_issues_base64_and_decodes() -> None:
     payload = b"\x00\x01\x02\xff data"
     t = _RecordingTransport([_ok(stdout=base64.b64encode(payload).decode())])
     assert t.read_bytes("/x.bin") == payload
-    argv, cwd, _ = t.calls[0]
+    argv, cwd, timeout_s = t.calls[0]
     assert argv == ["base64", "-w0", "/x.bin"]
     assert cwd == "/"
+    assert timeout_s == 30
 
 
-def test_read_text_decodes_utf8() -> None:
+def test_read_text_decodes_utf8_from_the_requested_path() -> None:
     text = "# café CONFIG_CRASH_DUMP=y\n"
     t = _RecordingTransport([_ok(stdout=base64.b64encode(text.encode()).decode())])
     assert t.read_text("/.config") == text
+    # read_text must forward the exact path through to read_bytes' base64 call.
+    assert t.calls[0][0] == ["base64", "-w0", "/.config"]
 
 
 def test_read_text_invalid_utf8_is_configuration_error() -> None:
@@ -74,6 +107,8 @@ def test_read_text_invalid_utf8_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.read_text("/.config")
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "remote file '/.config' is not valid UTF-8"
+    assert exc.value.details == {"path": "/.config"}
 
 
 def test_read_bytes_oversize_is_configuration_error() -> None:
@@ -81,6 +116,21 @@ def test_read_bytes_oversize_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.read_bytes("/huge.bin")
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "remote file '/huge.bin' exceeds the maximum readable size"
+    assert exc.value.details == {
+        "path": "/huge.bin",
+        "max_b64_bytes": _MAX_REMOTE_READ_B64_BYTES,
+    }
+
+
+def test_read_bytes_accepts_output_exactly_at_the_size_cap() -> None:
+    # The cap is exclusive (> not >=): output of exactly _MAX bytes is still decoded.
+    payload = b"\x00" * 4
+    encoded = base64.b64encode(payload).decode()
+    encoded = encoded + "A" * (_MAX_REMOTE_READ_B64_BYTES - len(encoded))
+    # Pad to exactly the cap with valid base64 ('A' is valid); decode must not raise oversize.
+    t = _RecordingTransport([_ok(stdout="A" * _MAX_REMOTE_READ_B64_BYTES)])
+    assert isinstance(t.read_bytes("/at-cap.bin"), bytes)
 
 
 def test_read_bytes_non_zero_is_infrastructure_failure() -> None:
@@ -88,6 +138,9 @@ def test_read_bytes_non_zero_is_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.read_bytes("/missing")
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(exc.value) == "remote read_bytes failed for '/missing'"
+    assert exc.value.details["path"] == "/missing"
+    assert "No such file" in str(exc.value.details["stderr"])
 
 
 def test_read_bytes_malformed_base64_is_infrastructure_failure() -> None:
@@ -95,6 +148,7 @@ def test_read_bytes_malformed_base64_is_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.read_bytes("/corrupt")
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(exc.value) == "remote read_bytes returned malformed base64"
     assert exc.value.details == {"path": "/corrupt"}
 
 
@@ -115,6 +169,9 @@ def test_clone_issues_init_fetch_verify_checkout_in_order() -> None:
     ]
     assert argvs[2] == ["git", "-C", "/src", "rev-parse", "--verify", "--quiet", "FETCH_HEAD"]
     assert argvs[3] == ["git", "-C", "/src", "checkout", "FETCH_HEAD"]
+    # Every clone step runs from / with the clone timeout budget.
+    assert all(cwd == "/" for _, cwd, _ in t.calls)
+    assert all(timeout_s == _CLONE_TIMEOUT_S for *_, timeout_s in t.calls)
 
 
 def test_clone_init_non_zero_is_infrastructure_failure() -> None:
@@ -122,7 +179,20 @@ def test_clone_init_non_zero_is_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.clone("https://git.example/linux.git", "v6.9", "/src")
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(exc.value) == "git init failed on remote"
     assert "permission denied" in str(exc.value.details["stderr"])
+
+
+def test_clone_rejects_an_unsafe_remote_naming_the_remote_arg() -> None:
+    # The "remote"/"ref" label passed to validate_git_arg surfaces in the rejection message.
+    t = _RecordingTransport()
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("-bad", "v6.9", "/src")
+    assert "remote" in str(exc.value)
+    t = _RecordingTransport()
+    with pytest.raises(CategorizedError) as exc:
+        t.clone("https://git.example/linux.git", "-bad", "/src")
+    assert "ref" in str(exc.value)
 
 
 def test_clone_init_command_not_found_is_missing_dependency_with_diagnostic() -> None:
@@ -131,6 +201,9 @@ def test_clone_init_command_not_found_is_missing_dependency_with_diagnostic() ->
     with pytest.raises(CategorizedError) as exc:
         t.clone("https://git.example/linux.git", "v6.9", "/src")
     assert exc.value.category == ErrorCategory.MISSING_DEPENDENCY
+    assert str(exc.value) == (
+        "the build host's base image is missing the kernel build toolchain (git)"
+    )
     assert exc.value.details["diagnostic"] == "ops.diagnostics --with-buildhost-agent"
     assert "git" in str(exc.value.details["stderr"])
 
@@ -150,6 +223,7 @@ def test_clone_fetch_non_zero_is_configuration_error_with_fetch_stderr() -> None
     with pytest.raises(CategorizedError) as exc:
         t.clone("https://git.example/linux.git", "v6.9", "/src")
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "git fetch failed on remote"
     assert "Could not resolve host" in str(exc.value.details["stderr"])
     # Only init + fetch ran; checkout was never reached.
     assert [c[0][:2] for c in t.calls] == [["git", "init"], ["git", "-C"]]
@@ -163,6 +237,7 @@ def test_clone_checkout_non_zero_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.clone("https://git.example/linux.git", "v6.9", "/src")
     assert exc.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "git checkout FETCH_HEAD failed on remote"
     assert "checkout boom" in str(exc.value.details["stderr"])
 
 
@@ -181,6 +256,9 @@ def test_clone_masked_fetch_without_fetch_head_surfaces_fetch_stderr() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.clone("https://git.example/linux.git", "v6.9", "/src")
     assert exc.value.category == ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == (
+        "git fetch produced no FETCH_HEAD on remote (the fetch did not complete)"
+    )
     assert "Could not resolve host" in str(exc.value.details["stderr"])
     assert "pathspec" not in str(exc.value.details["stderr"])
     # init + fetch + rev-parse ran; checkout was never reached.
@@ -210,9 +288,32 @@ def test_upload_file_builds_curl_and_parses_etag() -> None:
     t = _RecordingTransport([_ok(stdout=headers)])
     etag = t.upload_file("/build/bzImage", presigned)
     assert etag == _EMPTY_MD5
-    argv, cwd, _ = t.calls[0]
-    assert "curl" in argv and "--upload-file" in argv and presigned.url in argv
-    assert "-H" in argv and "x-amz-checksum-sha256: abc123" in argv
+    argv, cwd, timeout_s = t.calls[0]
+    # The exact curl invocation matters: PUT, fail-on-error, header dump to stdout, body discarded.
+    assert argv == [
+        "curl",
+        "-fsS",
+        "-X",
+        "PUT",
+        "--upload-file",
+        "/build/bzImage",
+        "-H",
+        "x-amz-checksum-sha256: abc123",
+        "-D",
+        "-",
+        "-o",
+        "/dev/null",
+        presigned.url,
+    ]
+    assert cwd == "/"
+    assert timeout_s == _UPLOAD_TIMEOUT_S
+
+
+def test_upload_file_strips_quotes_only_from_the_etag() -> None:
+    presigned = PresignedUpload(url="https://s3.example/put", required_headers={})
+    t = _RecordingTransport([_ok(stdout='HTTP/1.1 200 OK\r\nETag: "v:1:2"\r\n\r\n')])
+    # The ETag value contains colons; the parser splits on the first colon and strips quotes.
+    assert t.upload_file("/build/bzImage", presigned) == "v:1:2"
 
 
 def test_upload_file_non_zero_is_infrastructure_failure() -> None:
@@ -220,6 +321,8 @@ def test_upload_file_non_zero_is_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         t.upload_file("/build/bzImage", PresignedUpload(url="https://s3/p", required_headers={}))
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(exc.value) == "remote curl PUT failed"
+    assert exc.value.details == {"url": "https://s3/p"}
 
 
 def test_upload_file_missing_etag_is_infrastructure_failure() -> None:
@@ -230,13 +333,14 @@ def test_upload_file_missing_etag_is_infrastructure_failure() -> None:
             PresignedUpload(url="https://s3.example/put?sig=secret", required_headers={}),
         )
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(exc.value) == "remote curl PUT response did not include an ETag"
     assert exc.value.details == {"url": "https://s3.example/put?sig=secret"}
 
 
 def test_cleanup_issues_rm_rf() -> None:
     t = _RecordingTransport([_ok()])
     t.cleanup("/build/scratch")
-    assert t.calls[0][0] == ["rm", "-rf", "/build/scratch"]
+    assert t.calls[0] == (["rm", "-rf", "/build/scratch"], "/", 60)
 
 
 def test_cleanup_suppresses_non_zero_rm() -> None:

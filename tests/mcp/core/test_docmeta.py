@@ -14,13 +14,17 @@ def test_read_only_sets_only_read_hint() -> None:
 def test_destructive_sets_destructive_not_readonly() -> None:
     a = _docmeta.destructive()
     assert a.destructiveHint is True
-    assert a.readOnlyHint is not True
+    # An explicit False (not an absent/None hint) so clients see "definitely not
+    # read-only" rather than "unspecified".
+    assert a.readOnlyHint is False
 
 
 def test_mutating_is_not_readonly_not_destructive() -> None:
     a = _docmeta.mutating()
-    assert a.readOnlyHint is not True
-    assert a.destructiveHint is not True
+    # Both hints are explicitly False — a mutating tool is neither read-only nor
+    # destructive, stated positively rather than left unset.
+    assert a.readOnlyHint is False
+    assert a.destructiveHint is False
 
 
 def test_destructive_tools_set_is_the_reviewed_set() -> None:

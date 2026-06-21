@@ -105,3 +105,62 @@ def test_dispatch_unknown_command_exits() -> None:
     args = argparse.Namespace(command="nope", subcommand=None)
     with pytest.raises(SystemExit):
         asyncio.run(dispatch.run(args))
+
+
+def _route_spies(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    # Replace every leaf handler with a spy so a routing test observes which branch _dispatch
+    # selected without running real session/transport machinery.
+    called: dict[str, bool] = {}
+
+    async def _tool_call(args: argparse.Namespace) -> int:
+        called["tool_call"] = True
+        return 0
+
+    def _login(args: argparse.Namespace) -> int:
+        called["login"] = True
+        return 0
+
+    async def _doctor(args: argparse.Namespace) -> int:
+        called["doctor"] = True
+        return 0
+
+    async def _run_verb(args: argparse.Namespace) -> int:
+        called["run_verb"] = True
+        return 0
+
+    monkeypatch.setattr(dispatch, "_tool_call", _tool_call)
+    monkeypatch.setattr(dispatch, "_login", _login)
+    monkeypatch.setattr(dispatch.commands.doctor, "doctor", _doctor)
+    monkeypatch.setattr(dispatch.commands, "run_verb", _run_verb)
+    return called
+
+
+def test_dispatch_routes_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = _route_spies(monkeypatch)
+    args = argparse.Namespace(command="tool", tool_command="call")
+    assert asyncio.run(dispatch.run(args)) == 0
+    assert called == {"tool_call": True}
+
+
+def test_dispatch_does_not_route_tool_without_call_subcommand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `tool` with a non-`call` subcommand must fall through to run_verb, not the passthrough.
+    called = _route_spies(monkeypatch)
+    args = argparse.Namespace(command="tool", tool_command="list", subcommand=None)
+    assert asyncio.run(dispatch.run(args)) == 0
+    assert called == {"run_verb": True}
+
+
+def test_dispatch_routes_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = _route_spies(monkeypatch)
+    args = argparse.Namespace(command="login")
+    assert asyncio.run(dispatch.run(args)) == 0
+    assert called == {"login": True}
+
+
+def test_dispatch_routes_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = _route_spies(monkeypatch)
+    args = argparse.Namespace(command="doctor")
+    assert asyncio.run(dispatch.run(args)) == 0
+    assert called == {"doctor": True}

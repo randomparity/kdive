@@ -110,3 +110,6 @@ def test_pending_then_budget_exhausted_returns_worker_unavailable() -> None:
     results = asyncio.run(_dispatcher(queue, clock_ticks=[0.0, 100.0]).run_worker_checks())
     assert all(r.status is CheckStatus.ERROR for r in results)
     assert all("livez" in r.detail for r in results)
+    # The synthetic unavailable results carry the dispatcher's provider so the operator
+    # view attributes the failure to the right provider, not a null one.
+    assert all(r.provider == "remote-libvirt" for r in results)

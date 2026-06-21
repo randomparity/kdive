@@ -76,11 +76,15 @@ class _FakeAgent:
         self._status_sequence = list(status_sequence or [True])
         self.commands: list[dict[str, Any]] = []
         self.timeouts: list[int] = []
+        self.domains: list[object] = []
+        self.flags: list[int] = []
 
     def __call__(self, domain: object, command: str, timeout: int, flags: int) -> str:
         parsed = json.loads(command)
         self.commands.append(parsed)
         self.timeouts.append(timeout)
+        self.domains.append(domain)
+        self.flags.append(flags)
         if parsed["execute"] == "guest-exec":
             return json.dumps({"return": {"pid": 4242}})
         if parsed["execute"] == "guest-exec-status":
@@ -121,6 +125,22 @@ def test_run_returns_captured_stdout_and_exit_status() -> None:
     assert exec_args["path"] == "/usr/bin/curl"
     assert exec_args["arg"] == ["-fsS", "https://store/obj"]
     assert exec_args["capture-output"] is True
+    # The status poll addresses the pid returned by guest-exec under the qmp keys.
+    status_args = agent.commands[1]["arguments"]
+    assert status_args == {"pid": 4242}
+    # Both round-trips forward the real domain handle and the non-blocking flag bits (0).
+    assert agent.domains == [_DOMAIN, _DOMAIN]
+    assert agent.flags == [0, 0]
+
+
+def test_run_captures_stderr_from_the_err_data_field() -> None:
+    # stderr is decoded from the agent's ``err-data`` capture; reading any other key
+    # would silently drop the in-guest error output.
+    agent = _FakeAgent(exitcode=2, out=b"stdout-bytes", err=b"stderr-bytes")
+    result = _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
+    assert result.exit_status == 2
+    assert result.stdout == b"stdout-bytes"
+    assert result.stderr == b"stderr-bytes"
 
 
 def test_run_polls_until_the_command_exits() -> None:
@@ -135,6 +155,8 @@ def test_run_rejects_a_non_allowlisted_program() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         _exec(agent).run(_DOMAIN, ["/bin/sh", "-c", "curl https://store/obj"])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(excinfo.value) == "guest-agent exec program '/bin/sh' is not allowlisted"
+    assert excinfo.value.details == {"program": "/bin/sh"}
     assert agent.commands == []  # rejected before any agent round-trip
 
 
@@ -143,6 +165,7 @@ def test_run_rejects_an_empty_argv() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         _exec(agent).run(_DOMAIN, [])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(excinfo.value) == "guest-agent exec requires a non-empty argv"
     assert agent.commands == []
 
 
@@ -166,9 +189,12 @@ def test_agent_unreachable_maps_to_transport_failure() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         _exec_raising(raised).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(excinfo.value) == (
+        "qemu-guest-agent command failed (agent unreachable or not connected)"
+    )
     assert excinfo.value.details["libvirt_error"] == "guest agent is not connected"
     assert excinfo.value.details["libvirt_error_code"] is None
-    assert "domain" in excinfo.value.details
+    assert excinfo.value.details["domain"] == "build-vm"
 
 
 @pytest.mark.parametrize("code", _DETERMINISTIC_CODES)
@@ -179,9 +205,13 @@ def test_deterministic_libvirt_error_maps_to_configuration_error(code: int) -> N
     with pytest.raises(CategorizedError) as excinfo:
         _exec_raising(libvirt_error(code)).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(excinfo.value) == (
+        "qemu-guest-agent is not usable on this build host "
+        "(not configured, unsupported, denied, or unresponsive)"
+    )
     assert excinfo.value.details["libvirt_error_code"] == code
     assert excinfo.value.details["libvirt_error"]  # the libvirt error string, non-empty
-    assert "domain" in excinfo.value.details
+    assert excinfo.value.details["domain"] == "build-vm"
 
 
 @pytest.mark.parametrize(
@@ -268,6 +298,7 @@ def test_qemu_agent_command_maps_missing_libvirt_qemu(
         qemu_agent_command(_DOMAIN, "{}", 1, 0)
 
     assert excinfo.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(excinfo.value) == ("libvirt_qemu binding is required for qemu-guest-agent commands")
     assert excinfo.value.details == {"dependency": "libvirt_qemu"}
 
 
@@ -308,6 +339,7 @@ def test_malformed_agent_response_maps_to_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "guest agent returned a non-JSON reply"
 
 
 def test_agent_calls_use_a_bounded_positive_timeout() -> None:
@@ -338,6 +370,9 @@ def test_exited_with_neither_exitcode_nor_signal_is_not_success() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == (
+        "guest agent reported a process exit without an exit code or signal"
+    )
 
 
 def test_run_times_out_when_the_command_never_exits() -> None:
@@ -352,3 +387,40 @@ def test_run_times_out_when_the_command_never_exits() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(excinfo.value) == "in-guest command did not exit within 6s"
+    assert excinfo.value.details == {"domain": "build-vm", "timeout_s": 6.0}
+
+
+def test_run_times_out_exactly_at_the_deadline() -> None:
+    # The deadline check is ``>=``: once the clock reaches the deadline value the poll
+    # loop must stop. A clock pinned at the deadline would loop forever under a strict
+    # ``>`` comparison, so the bounded iterator exhausting would surface a different
+    # failure than the timeout error this asserts.
+    agent = _FakeAgent(status_sequence=[False] * 50)
+    exc = GuestAgentExec(
+        agent_command=agent,
+        allowed_programs=_ALLOWED,
+        timeout_s=4.0,
+        sleep=lambda _s: None,
+        monotonic=iter([0.0, 4.0, 4.0]).__next__,
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(excinfo.value) == "in-guest command did not exit within 4s"
+
+
+def test_run_sleeps_the_configured_poll_interval_between_polls() -> None:
+    # Each not-yet-exited poll waits the configured poll interval; the seam must pass the
+    # concrete poll_s (not None) to the injected sleep so a real run paces its round-trips.
+    slept: list[float] = []
+    agent = _FakeAgent(out=b"done", status_sequence=[False, False, True])
+    exc = GuestAgentExec(
+        agent_command=agent,
+        allowed_programs=_ALLOWED,
+        poll_s=0.25,
+        sleep=slept.append,
+        monotonic=_float_clock(),
+    )
+    exc.run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
+    assert slept == [0.25, 0.25]

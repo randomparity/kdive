@@ -23,6 +23,17 @@ def _points(reader: InMemoryMetricReader, name: str) -> list[Any]:
     return out
 
 
+def _metric(reader: InMemoryMetricReader, name: str) -> Any:
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                if m.name == name:
+                    return m
+    raise AssertionError(f"metric {name!r} not exported")
+
+
 def test_record_success_emits_duration_and_bytes() -> None:
     reader = InMemoryMetricReader()
     tel = CaptureTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
@@ -47,6 +58,37 @@ def test_record_error_emits_duration_but_no_bytes() -> None:
     assert dur_pts, "duration not emitted on error"
     assert dur_pts[0].attributes["outcome"] == "error"
     assert not byte_pts, "bytes must not be emitted on error"
+
+
+def test_histograms_declare_their_schema_and_bucket_boundaries() -> None:
+    reader = InMemoryMetricReader()
+    tel = CaptureTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    tel.record("host_dump", "local-libvirt", "ok", seconds=5.0, size_bytes=1024)
+
+    duration = _metric(reader, "kdive.vmcore.capture.duration")
+    assert duration.unit == "s"
+    assert duration.description == "vmcore capture wall-clock duration, by method and provider."
+    assert duration.data.data_points[0].explicit_bounds == (
+        1.0,
+        5.0,
+        15.0,
+        60.0,
+        300.0,
+        900.0,
+        1800.0,
+    )
+
+    size = _metric(reader, "kdive.vmcore.capture.bytes")
+    assert size.unit == "By"
+    assert size.description == "Raw vmcore size captured, by method and provider."
+    assert size.data.data_points[0].explicit_bounds == (
+        1e6,
+        1e7,
+        1e8,
+        5e8,
+        1e9,
+        5e9,
+    )
 
 
 def test_disabled_is_noop() -> None:

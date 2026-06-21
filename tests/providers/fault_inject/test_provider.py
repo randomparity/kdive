@@ -181,6 +181,75 @@ def test_open_transport_rejects_the_legacy_ssh_kind() -> None:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+# --- TransportHandleData.decode -------------------------------------------------------
+
+
+def test_decode_round_trips_encode() -> None:
+    original = TransportHandleData(kind="gdbstub", host="127.0.0.1", port=1234)
+    assert TransportHandleData.decode(original.encode()) == original
+
+
+def test_decode_splits_scheme_on_first_separator() -> None:
+    # The host segment may itself contain "://"; the scheme is taken from the FIRST split.
+    decoded = TransportHandleData.decode("gdbstub://a://b:1234")
+    assert decoded.kind == "gdbstub"
+    assert decoded.host == "a://b"
+    assert decoded.port == 1234
+
+
+def test_decode_splits_port_on_last_colon() -> None:
+    # The host may contain colons; the port is taken from the LAST colon split.
+    decoded = TransportHandleData.decode("gdbstub://a:b:1234")
+    assert decoded.host == "a:b"
+    assert decoded.port == 1234
+
+
+def test_decode_rejects_unknown_scheme() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        TransportHandleData.decode("carrier-pigeon://127.0.0.1:1234")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "transport handle has no known transport scheme"
+
+
+def test_decode_rejects_missing_scheme_separator() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        TransportHandleData.decode("gdbstub")
+    assert str(exc.value) == "transport handle has no known transport scheme"
+
+
+def test_decode_rejects_empty_host() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        TransportHandleData.decode("gdbstub://:1234")
+    assert str(exc.value) == "transport handle must be <kind>://host:port"
+
+
+def test_decode_rejects_missing_port_separator() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        TransportHandleData.decode("gdbstub://127.0.0.1")
+    assert str(exc.value) == "transport handle must be <kind>://host:port"
+
+
+def test_decode_rejects_non_numeric_port() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        TransportHandleData.decode("gdbstub://127.0.0.1:abc")
+    assert str(exc.value) == "transport handle port must be numeric"
+
+
+def test_decode_accepts_port_lower_bound() -> None:
+    assert TransportHandleData.decode("gdbstub://127.0.0.1:1").port == 1
+
+
+def test_decode_accepts_port_upper_bound() -> None:
+    assert TransportHandleData.decode("gdbstub://127.0.0.1:65535").port == 65535
+
+
+@pytest.mark.parametrize("port", [0, 65536])
+def test_decode_rejects_out_of_range_port(port: int) -> None:
+    with pytest.raises(CategorizedError) as exc:
+        TransportHandleData.decode(f"gdbstub://127.0.0.1:{port}")
+    assert str(exc.value) == "transport handle port is outside 1..65535"
+
+
 # --- Control ---------------------------------------------------------------------------
 
 

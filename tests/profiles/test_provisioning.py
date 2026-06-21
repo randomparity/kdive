@@ -107,6 +107,23 @@ def test_valid_fault_inject_profile_parses_and_dumps_alias() -> None:
     }
 
 
+def test_dump_profile_emits_json_native_scalars() -> None:
+    # The dump is for JSON persistence, so enum-typed fields must serialize to plain
+    # strings (StrEnum compares equal to its value, so an == check would not notice a
+    # non-json dump mode — assert the concrete type instead).
+    data = _valid()
+    data["provider"] = {"fault-inject": {"capture_method": "host_dump"}}
+    dumped = dump_profile(ProvisioningProfile.parse(data))
+
+    boot_method = dumped["boot_method"]
+    assert type(boot_method) is str
+    assert boot_method == "direct-kernel"
+    provider = cast("dict[str, dict[str, object]]", dumped["provider"])
+    capture = provider["fault-inject"]["capture_method"]
+    assert type(capture) is str
+    assert capture == "host_dump"
+
+
 def test_provider_section_rejects_multiple_providers() -> None:
     data = _valid()
     data["provider"]["fault-inject"] = {}
@@ -160,6 +177,15 @@ def test_profile_digest_is_stable_hex() -> None:
     digest = profile_digest(ProvisioningProfile.parse(_valid()))
     assert len(digest) == 64  # sha256 hex
     assert int(digest, 16) >= 0  # all hex
+
+
+def test_profile_digest_matches_known_canonical_value() -> None:
+    # The digest is computed over the sorted-key, compact-separator JSON encoding of the
+    # parsed profile (ADR-0038 §3). Pinning the exact hex guards the canonical encoding:
+    # any change to key ordering or the item/key separators changes the digest and so
+    # would break dedup-key stability across deploys.
+    digest = profile_digest(ProvisioningProfile.parse(_valid()))
+    assert digest == "7816a75b88ec33507ca2416236a673b6a9a3ec06524c11739871ac13ef8b2f5f"
 
 
 def test_profile_digest_ignores_input_key_order() -> None:
@@ -362,6 +388,35 @@ def test_error_details_do_not_leak_submitted_values() -> None:
     assert "S3CRET-LOOKING-VALUE" not in str(caught.value.details)
 
 
+def test_parse_error_carries_scrubbed_pydantic_errors() -> None:
+    # The parse boundary maps Pydantic's ValidationError onto the wire taxonomy with a
+    # fixed message and a details["errors"] list, scrubbing the submitted values, URLs,
+    # and pydantic context out so a profile referencing secret material cannot leak it
+    # (ADR-0024 decision 3).
+    # A blank ``arch`` yields a pydantic ``string_too_short`` error whose context
+    # (``min_length``) would surface unless ``include_context=False`` strips it, and the
+    # sentinel exercises the input-scrubbing flag.
+    data = _valid()
+    data["arch"] = "   "
+    data["memory_mb"] = "S3CRET-LOOKING-VALUE"
+
+    with pytest.raises(CategorizedError) as caught:
+        ProvisioningProfile.parse(data)
+
+    assert str(caught.value) == "invalid provisioning profile"
+    details = caught.value.details
+    assert details is not None
+    errors = cast(list[dict[str, Any]], details["errors"])
+    assert isinstance(errors, list)
+    assert errors  # at least the arch and memory_mb failures
+    for entry in errors:
+        # Scrubbing flags: include_url/include_input/include_context are all False, so the
+        # per-error dicts carry no documentation URL, no submitted input, and no context.
+        assert "url" not in entry
+        assert "input" not in entry
+        assert "ctx" not in entry
+
+
 def test_profile_is_frozen() -> None:
     profile = ProvisioningProfile.parse(_valid())
 
@@ -470,6 +525,7 @@ def test_rootfs_upload_window_helpers_report_and_reject_upload_profiles() -> Non
     with pytest.raises(CategorizedError) as exc:
         reject_rootfs_upload_without_window(_LOCAL_POLICY, profile)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "upload-kind rootfs requires systems.define upload window"
 
 
 def test_rootfs_upload_window_helpers_allow_non_upload_profiles() -> None:
@@ -511,6 +567,12 @@ def test_reconcile_rejects_conflicting_restatement(field: str, bad: int) -> None
     with pytest.raises(CategorizedError) as caught:
         reconcile_profile_sizing(data, _SNAPSHOT)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    resolved = {"vcpu": 2, "memory_mb": 4096, "disk_gb": 20}[field]
+    assert str(caught.value) == (
+        f"provisioning profile {field}={bad!r} conflicts with the "
+        f"allocation's resolved size {resolved}"
+    )
+    assert caught.value.details == {"field": field, "resolved": str(resolved)}
 
 
 def test_reconcile_does_not_mutate_input() -> None:
@@ -530,6 +592,18 @@ def test_require_concrete_sizing_rejects_missing() -> None:
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     missing = cast(list[str], caught.value.details["missing"])
     assert "disk_gb" in missing
+
+
+def test_require_concrete_sizing_message_lists_every_missing_field() -> None:
+    # Two omitted fields exercise the comma-space join of the human-readable message.
+    data = _valid()
+    del data["vcpu"]
+    del data["disk_gb"]
+    parsed = ProvisioningProfile.parse(data)
+    with pytest.raises(CategorizedError) as caught:
+        require_concrete_sizing(parsed)
+    assert str(caught.value) == "provisioning profile is missing required sizing: vcpu, disk_gb"
+    assert caught.value.details == {"missing": ["vcpu", "disk_gb"]}
 
 
 def test_require_concrete_sizing_accepts_full() -> None:

@@ -81,6 +81,17 @@ def test_extension_on_expired_lease_bills_from_now_to_cap() -> None:
     assert result.new_expiry == _NOW + timedelta(hours=24)
 
 
+def test_extension_landing_exactly_at_now_on_lapsed_lease_is_a_noop() -> None:
+    # Lapsed lease whose +extend target lands exactly on ``now``: the billable base is
+    # max(now, expiry) == now, so the clamped target equals the base. That boundary must be
+    # treated as "cannot extend" — zero billable hours AND the expiry left untouched (not
+    # advanced to now), matching the at-cap no-op behaviour.
+    expiry = _NOW - timedelta(hours=1)
+    result = clamp_extension_hours(expiry, Decimal(1), _NOW)
+    assert result.added_hours == Decimal(0)
+    assert result.new_expiry == expiry
+
+
 def test_extension_respects_custom_max_bound() -> None:
     expiry = _NOW + timedelta(hours=1)
     result = clamp_extension_hours(

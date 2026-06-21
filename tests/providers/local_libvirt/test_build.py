@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import struct
 import subprocess
@@ -20,6 +21,7 @@ from kdive.components.references import (
     CatalogComponentRef,
     LocalComponentRef,
 )
+from kdive.domain.build_phase import BuildPhase
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import (
@@ -125,6 +127,8 @@ class _Seams:
     call_order: list[str] = field(default_factory=list)
     workspace_cleanups: list[Path] = field(default_factory=list)
     merged_fragments: list[bytes] = field(default_factory=list)
+    checkout_workspaces: list[Path] = field(default_factory=list)
+    make_workspaces: list[Path] = field(default_factory=list)
 
     def checkout(
         self, run_id: UUID, profile: ServerBuildProfile, workspace: Path, fragment_bytes: bytes
@@ -132,6 +136,7 @@ class _Seams:
         self.checkout_calls += 1
         self.call_order.append("checkout")
         self.merged_fragments.append(fragment_bytes)
+        self.checkout_workspaces.append(workspace)
 
     def run_olddefconfig(self, workspace: Path) -> int:
         self.olddefconfig_calls += 1
@@ -145,6 +150,7 @@ class _Seams:
     def run_make(self, workspace: Path) -> int:
         self.make_calls += 1
         self.call_order.append("make")
+        self.make_workspaces.append(workspace)
         return self.make_returncode
 
     def read_kernel_source(self, workspace: Path) -> ArtifactSource:
@@ -179,6 +185,18 @@ def _builder(
         catalog_fetch=catalog_fetch or (lambda _name: _FRAGMENT_BYTES),
         workspace_cleanup=seams.workspace_cleanups.append,
     )
+
+
+@dataclass
+class _RecordingRecorder:
+    """A BuildPhaseRecorder stand-in that records ``(BuildPhase, provider)`` per phase."""
+
+    phases: list[tuple[Any, str]] = field(default_factory=list)
+
+    @contextlib.contextmanager
+    def phase(self, build_phase: Any, provider: str) -> Any:
+        self.phases.append((build_phase, provider))
+        yield
 
 
 # --- build-id note parser ------------------------------------------------------------
@@ -367,6 +385,60 @@ def test_build_store_failure_propagates_infrastructure(tmp_path: Path) -> None:
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
+def test_build_passes_run_id_workspace_to_every_step(tmp_path: Path) -> None:
+    # Every build step operates on the per-run workspace <root>/<run_id>: checkout, make,
+    # and the final cleanup all see the same run-keyed path, not the bare root or "None".
+    store, seams = _FakeStore(), _Seams()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    expected = tmp_path / str(_RUN)
+    assert seams.checkout_workspaces == [expected]
+    assert seams.make_workspaces == [expected]
+    assert seams.workspace_cleanups == [expected]
+
+
+def test_build_records_phases_with_provider_through_recorder(tmp_path: Path) -> None:
+    # build() threads its recorder and provider tag into the orchestrator's source/configure/
+    # compile phases and wraps the artifact step in an ARTIFACT phase; the recorder sees every
+    # phase tagged with the caller's provider.
+    store, seams = _FakeStore(), _Seams()
+    recorder = _RecordingRecorder()
+
+    _builder(store, seams, tmp_path).build(
+        _RUN, _profile(), recorder=cast(Any, recorder), provider="local-libvirt"
+    )
+
+    recorded_phases = [phase for phase, _ in recorder.phases]
+    assert recorded_phases == [
+        BuildPhase.SOURCE_SYNC,
+        BuildPhase.CONFIGURE,
+        BuildPhase.COMPILE,
+        BuildPhase.ARTIFACT,
+    ]
+    assert {provider for _, provider in recorder.phases} == {"local-libvirt"}
+
+
+def test_build_default_provider_tag_is_empty(tmp_path: Path) -> None:
+    # When the caller omits provider, the recorder phases carry the empty-string tag.
+    store, seams = _FakeStore(), _Seams()
+    recorder = _RecordingRecorder()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile(), recorder=cast(Any, recorder))
+
+    assert {provider for _, provider in recorder.phases} == {""}
+
+
+def test_publish_stores_artifact_under_build_retention_class(tmp_path: Path) -> None:
+    # A published artifact carries the "build" retention class: build() reaps its workspace but
+    # the retention class is the durable artifact-lifecycle signal, set on every store row.
+    store, seams = _FakeStore(), _Seams()
+
+    stored = _builder(store, seams, tmp_path).publish(_RUN, "kernel", ArtifactBytes(b"bz"))
+
+    assert stored.retention_class == "build"
+
+
 # --- over_transport: build on a remote host, publish via presigned PUT ---------------
 
 
@@ -379,6 +451,7 @@ class _RemoteTransport:
     reads: list[str] = field(default_factory=list)
     uploaded: list[str] = field(default_factory=list)
     cleanups: list[str] = field(default_factory=list)
+    clones: list[tuple[str, str, str]] = field(default_factory=list)
 
     def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> Any:
         from kdive.providers.ports.build_transport import CommandResult
@@ -407,7 +480,7 @@ class _RemoteTransport:
         self.files[path] = data
 
     def clone(self, remote: str, ref: str, dest: str) -> None:
-        return None
+        self.clones.append((remote, ref, dest))
 
     def upload_file(self, path: str, presigned: Any) -> str:
         self.uploaded.append(path)
@@ -488,6 +561,8 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
     assert transport.reads == [str(workspace / "vmlinux.note")]
     heads = [a[0] for a in transport.runs]
     assert "make" in heads and "objcopy" in heads
+    # The git clone runs on the host with the requested remote/ref into the per-run workspace.
+    assert transport.clones == [("https://git.example/linux.git", "v6.9", str(workspace))]
 
 
 def test_over_transport_build_removes_clone_dir_via_transport(tmp_path: Path) -> None:
@@ -609,6 +684,32 @@ def test_validate_config_ref_rejects_local_file_outside_allowed_roots(tmp_path: 
         builder.validate_config_ref(LocalComponentRef(kind="local", path=str(outside)))
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_validate_config_ref_accepts_local_file_inside_allowed_roots(tmp_path: Path) -> None:
+    # A local ref under an allowed root validates cleanly: the handler forwards the actual ref
+    # (not a placeholder) to the orchestrator, so a well-formed ref does not raise.
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    inside = allowed / "in.config"
+    inside.write_text("CONFIG_CRASH_DUMP=y\n", encoding="utf-8")
+    builder = LocalLibvirtBuild(
+        tenant=_TENANT,
+        workspace_root=tmp_path / "workspace",
+        store_factory=lambda: _FakeStore(),
+        checkout=lambda _run, _profile, _workspace, _fragment: None,
+        run_olddefconfig=lambda _workspace: 0,
+        read_config=lambda _workspace: _GOOD_CONFIG,
+        run_make=lambda _workspace: 0,
+        read_kernel_source=lambda _workspace: ArtifactBytes(b"kernel"),
+        read_vmlinux_source=lambda _workspace: ArtifactBytes(b"vmlinux"),
+        read_build_id=lambda _workspace: "deadbeef",
+        secret_registry=SecretRegistry(),
+        catalog_fetch=lambda _name: _FRAGMENT_BYTES,
+        allowed_component_roots=[allowed],
+    )
+
+    builder.validate_config_ref(LocalComponentRef(kind="local", path=str(inside)))
 
 
 # --- real seam argv (the wrappers that only run under live_vm, but whose argv is testable) ----

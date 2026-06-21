@@ -22,6 +22,12 @@ def test_remote_attach_seam_off_gate_reports_missing_dependency():
             host="10.0.0.5", port=47002, run_id="r1", transcript_path=Path("/tmp/t.jsonl")
         )
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    # The failure originates in the debuginfo resolver, which names the live_vm gate and
+    # carries the offending run_id so an operator can trace which Run was refused.
+    assert str(exc.value) == (
+        "resolving a remote Run's debuginfo object runs only under the live_vm gate"
+    )
+    assert exc.value.details == {"run_id": "r1"}
 
 
 def test_remote_policy_accepts_non_loopback_but_loopback_policy_would_reject():

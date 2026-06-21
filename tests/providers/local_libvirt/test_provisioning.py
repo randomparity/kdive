@@ -21,6 +21,9 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle import provisioning as provisioning_module
 from kdive.providers.local_libvirt.lifecycle import storage as storage_module
 from kdive.providers.local_libvirt.lifecycle import xml as xml_module
+from kdive.providers.local_libvirt.lifecycle.materialize import (
+    RootfsMaterializationContext,
+)
 from kdive.providers.local_libvirt.lifecycle.provisioning import (
     LocalLibvirtProvisioning,
     ProvisioningFiles,
@@ -109,6 +112,60 @@ def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
     source = root.find("devices/disk/source")
     assert source is not None
     assert source.get("file") == "/var/lib/kdive/rootfs/fedora-40.qcow2"
+
+
+def test_render_returns_a_unicode_string() -> None:
+    # encoding="unicode" yields a str; a byte-string would break the defineXML seam that expects
+    # text and the test parsers that call _safe_fromstring on a str.
+    assert isinstance(_render(), str)
+
+
+def test_render_root_is_a_kvm_domain() -> None:
+    # The root must be <domain type="kvm">; a wrong tag or hypervisor type makes libvirt reject
+    # the XML or run the guest under the wrong driver.
+    root = _safe_fromstring(_render())
+    assert root.tag == "domain"
+    assert root.get("type") == "kvm"
+
+
+def test_render_memory_uses_mib_unit() -> None:
+    # libvirt reads <memory unit="MiB"> case-sensitively; a wrong-case unit makes it fall back to
+    # KiB and the guest boots with ~1024x too little RAM.
+    root = _safe_fromstring(_render())
+    memory = root.find("memory")
+    assert memory is not None
+    assert memory.get("unit") == "MiB"
+    assert memory.text == "4096"
+
+
+def test_render_os_type_is_hvm() -> None:
+    root = _safe_fromstring(_render())
+    os_type = root.find("os/type")
+    assert os_type is not None
+    assert os_type.text == "hvm"
+
+
+def test_render_disk_is_file_backed_disk_device() -> None:
+    root = _safe_fromstring(_render())
+    disk = root.find("devices/disk")
+    assert disk is not None
+    assert disk.get("type") == "file"
+    assert disk.get("device") == "disk"
+
+
+def test_render_disk_target_uses_virtio_bus() -> None:
+    root = _safe_fromstring(_render())
+    target = root.find("devices/disk/target")
+    assert target is not None
+    assert target.get("dev") == "vda"
+    assert target.get("bus") == "virtio"
+
+
+def test_render_serial_target_is_port_zero() -> None:
+    root = _safe_fromstring(_render())
+    target = root.find("devices/serial/target")
+    assert target is not None
+    assert target.get("port") == "0"
 
 
 def test_render_declares_qcow2_disk_driver() -> None:
@@ -439,7 +496,13 @@ def test_real_make_overlay_timeout_is_provisioning_failure(
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
-    assert caught.value.details["timeout_s"] == storage_module._QEMU_IMG_TIMEOUT_S
+    assert str(caught.value) == "qemu-img exceeded the overlay creation timeout"
+    assert caught.value.details == {
+        "op": "create_overlay",
+        "overlay": "overlay.qcow2",
+        "tool": "qemu-img",
+        "timeout_s": storage_module._QEMU_IMG_TIMEOUT_S,
+    }
 
 
 def test_real_make_overlay_missing_qemu_img_is_missing_dependency(
@@ -465,17 +528,64 @@ def test_real_make_overlay_uses_resolved_qemu_img_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[list[str]] = []
+    kwargs_seen: list[dict[str, object]] = []
     monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
 
-    def _record(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    def _record(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
+        kwargs_seen.append(kwargs)
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(storage_module.subprocess, "run", _record)
 
     storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
-    assert calls[0][0] == "/usr/bin/qemu-img"
+    # The full argv must create a qcow2 overlay backed by the qcow2 base: a wrong format flag
+    # (e.g. raw backing) would make the guest read the qcow2 header as raw and fail to mount.
+    assert calls[0] == [
+        "/usr/bin/qemu-img",
+        "create",
+        "-q",
+        "-f",
+        "qcow2",
+        "-F",
+        "qcow2",
+        "-b",
+        "/base.qcow2",
+        "/overlay.qcow2",
+    ]
+    # Output must be captured as text for the nonzero-return stderr tail, and check must stay
+    # False so the function classifies failures itself instead of raising CalledProcessError.
+    assert kwargs_seen[0]["capture_output"] is True
+    assert kwargs_seen[0]["text"] is True
+    assert kwargs_seen[0]["check"] is False
+    assert kwargs_seen[0]["timeout"] == storage_module._QEMU_IMG_TIMEOUT_S
+
+
+def test_real_make_overlay_unresolvable_qemu_img_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When qemu-img is not on PATH (which returns None) the function fails fast with a
+    # MISSING_DEPENDENCY before ever invoking subprocess.run.
+    monkeypatch.setattr(storage_module.shutil, "which", lambda _tool: None)
+
+    def _must_not_run(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("subprocess.run must not be reached when qemu-img is unresolvable")
+
+    monkeypatch.setattr(storage_module.subprocess, "run", _must_not_run)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == (
+        "qemu-img is not installed; cannot create the per-System rootfs overlay"
+    )
+    assert caught.value.details == {
+        "op": "create_overlay",
+        "overlay": "overlay.qcow2",
+        "tool": "qemu-img",
+    }
 
 
 def test_real_make_overlay_nonzero_return_is_provisioning_failure(
@@ -493,6 +603,7 @@ def test_real_make_overlay_nonzero_return_is_provisioning_failure(
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(caught.value) == "qemu-img failed to create the per-System rootfs overlay"
     assert caught.value.details == {
         "op": "create_overlay",
         "overlay": "overlay.qcow2",
@@ -514,6 +625,7 @@ def test_real_make_overlay_launch_oserror_is_infrastructure_failure(
         storage_module._real_make_overlay("/base.qcow2", "/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to launch qemu-img to create the per-System rootfs overlay"
     assert caught.value.details == {
         "op": "create_overlay",
         "overlay": "overlay.qcow2",
@@ -535,11 +647,17 @@ def test_real_remove_overlay_oserror_is_infrastructure_failure(
         storage_module._real_remove_overlay("/rootfs/overlay.qcow2")
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to remove the per-System rootfs overlay"
     assert caught.value.details == {
         "op": "remove_overlay",
         "overlay": "overlay.qcow2",
         "error": "PermissionError",
     }
+
+
+def test_real_remove_overlay_absent_file_is_noop(tmp_path: Path) -> None:
+    # An absent overlay is the achieved post-state: unlink(missing_ok=True) must not raise.
+    storage_module._real_remove_overlay(str(tmp_path / "gone-overlay.qcow2"))
 
 
 def test_teardown_removes_the_overlay() -> None:
@@ -705,6 +823,95 @@ def test_from_env_does_not_connect(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///system")
     prov = LocalLibvirtProvisioning.from_env()  # building must not open a connection
     assert isinstance(prov, LocalLibvirtProvisioning)
+
+
+def test_from_env_connect_callable_opens_the_configured_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # from_env wires the configured URI into a lazy connect callable; invoking it must call
+    # libvirt.open with that exact URI (not None and not a different value).
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu+ssh://host/system")
+    opened: list[object] = []
+
+    def fake_open(uri: object) -> _ProvConn:
+        opened.append(uri)
+        return _ProvConn()
+
+    monkeypatch.setattr(provisioning_module.libvirt, "open", fake_open)
+
+    prov = LocalLibvirtProvisioning.from_env()
+    conn = prov._connect()
+
+    assert opened == ["qemu+ssh://host/system"]
+    assert isinstance(conn, _ProvConn)
+
+
+def test_provision_failure_message_and_details_carry_system_id() -> None:
+    # A define/start failure surfaces a PROVISIONING_FAILURE whose human message names the
+    # operation and whose details carry the System id for triage.
+    conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn).provision(_SYS, _profile())
+
+    assert str(caught.value) == "libvirt failed to define/start the domain"
+    assert caught.value.details == {"system_id": str(_SYS)}
+
+
+def test_provision_passes_real_system_id_to_materialize_and_define() -> None:
+    # provision threads the caller's system_id (not None or a placeholder) through both the
+    # rootfs materialization seam and the define/start failure details.
+    seen: list[UUID] = []
+    conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=ProvisioningFiles(
+            make_overlay=lambda _base, _overlay: None,
+            remove_overlay=lambda _overlay: None,
+            overlay_exists=lambda _overlay: False,
+            prepare_console_log=lambda _path: None,
+        ),
+        materialize_rootfs=lambda rootfs, system_id: (
+            seen.append(system_id) or rootfs.path  # type: ignore[func-returns-value]
+        ),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        prov.provision(_SYS, _profile())
+
+    assert seen == [_SYS]
+    assert caught.value.details == {"system_id": str(_SYS)}
+
+
+def test_teardown_lookup_error_message_and_details_name_the_domain() -> None:
+    # A non-NO_DOMAIN lookup failure is an INFRASTRUCTURE_FAILURE whose message names the
+    # "looking up" verb and whose details carry the domain name.
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(lookup_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn).teardown(name)
+
+    assert str(caught.value) == "libvirt error looking up domain"
+    assert caught.value.details == {"domain": name}
+
+
+def test_validate_rootfs_ref_local_uses_default_allowed_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A provisioning built without explicit allowed_roots validates a local rootfs against the
+    # default ROOTFS_DIR root; the default must be a usable list, not None.
+    seen_roots: list[list[Path]] = []
+
+    def fake_materialize(rootfs: object, *, context: RootfsMaterializationContext) -> Path:
+        del rootfs
+        seen_roots.append(list(context.allowed_roots))
+        return Path("/var/lib/kdive/rootfs/fedora-40.qcow2")
+
+    monkeypatch.setattr(provisioning_module, "materialize_rootfs_base", fake_materialize)
+
+    prov = LocalLibvirtProvisioning(connect=lambda: _ProvConn())
+    prov.validate_rootfs_ref(_profile().provider.local_libvirt.rootfs)
+
+    assert seen_roots == [[Path(provisioning_module.ROOTFS_DIR)]]
 
 
 def test_domain_xml_has_serial_console_with_log() -> None:

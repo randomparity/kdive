@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.prompts.base import Prompt
 from mcp.types import TextContent
 
 from kdive.mcp.prompts.registrar import (
@@ -109,3 +110,46 @@ def test_each_prompt_renders_nonempty_body_naming_every_step_tool() -> None:
         assert body.strip()
         for step in spec.steps:
             assert step.tool in body, f"{spec.name} body omits {step.tool}"
+
+
+def test_render_numbers_steps_sequentially_from_one_on_their_own_lines() -> None:
+    spec = PromptSpec(
+        name="probe",
+        title="Probe",
+        description="d",
+        summary="s",
+        steps=(
+            Step(tool="a.first", purpose="p1"),
+            Step(tool="a.second", purpose="p2"),
+            Step(tool="a.third", purpose="p3"),
+        ),
+    )
+    maturity = {
+        "a.first": ToolMaturity(maturity="implemented", reason=None),
+        "a.second": ToolMaturity(maturity="implemented", reason=None),
+        "a.third": ToolMaturity(maturity="implemented", reason=None),
+    }
+    body = _render_body(spec, maturity)
+    # Numbering starts at 1 (not 0 and not 2) and each step is on its own line.
+    assert "1. a.first — p1" in body
+    assert "2. a.second — p2" in body
+    assert "3. a.third — p3" in body
+    assert "0. a.first" not in body
+    assert "2. a.first" not in body
+    # The steps are newline-separated, not joined into a single run.
+    assert "1. a.first — p1\n2. a.second — p2\n3. a.third — p3" in body
+
+
+def test_registered_prompts_carry_their_spec_title_and_description() -> None:
+    app = FastMCP("probe")
+    register(app, tool_maturity=_full_maturity_map())
+    specs = {spec.name: spec for spec in CANONICAL_PROMPTS}
+
+    async def _listed() -> dict[str, Prompt]:
+        return {p.name: p for p in await app.list_prompts()}
+
+    listed = asyncio.run(_listed())
+    for name, spec in specs.items():
+        prompt = listed[name]
+        assert prompt.title == spec.title
+        assert prompt.description == spec.description

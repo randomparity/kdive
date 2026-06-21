@@ -165,9 +165,22 @@ def test_representative_illegal_transition_raises_with_context() -> None:
         ensure_transition(SystemState.TORN_DOWN, SystemState.READY)
 
 
+def test_illegal_transition_message_names_the_lifecycle_and_both_states() -> None:
+    # The message must identify which lifecycle and which edge was refused, so an operator
+    # can locate the offending transition rather than read a generic "NoneType" message.
+    with pytest.raises(IllegalTransition) as exc:
+        ensure_transition(SystemState.TORN_DOWN, SystemState.READY)
+    message = str(exc.value)
+    assert "SystemState" in message
+    assert "torn_down -> ready" in message
+
+
 def test_mixing_two_object_enums_is_a_programming_error() -> None:
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError) as exc:
         can_transition(SystemState.READY, RunState.RUNNING)
+    # The error must name *both* mismatched lifecycles in order so the caller bug is diagnosable.
+    message = str(exc.value)
+    assert "across SystemState and RunState" in message
 
 
 def test_allocation_expiry_edges_are_legal_from_granted_and_active() -> None:

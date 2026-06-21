@@ -90,6 +90,39 @@ def test_list_dump_volumes_fans_out_over_the_fleet(tmp_path: Path) -> None:
     assert conn_a.closed and conn_b.closed
 
 
+def test_list_reports_each_volumes_name_system_id_and_mtime(tmp_path: Path) -> None:
+    # A single deterministic dump volume must round-trip every field the reconciler reads:
+    # its name, the System UUID parsed from that name, and the store mtime from its XML.
+    conn = _FakeConn()
+    reaper = _reaper(conn, tmp_path)
+
+    volumes = asyncio.run(reaper.list_dump_volumes())
+
+    assert len(volumes) == 1
+    (volume,) = volumes
+    assert volume.name == host_dump_volume_name(_SID)
+    assert volume.system_id == _SID
+    assert volume.mtime_epoch_s == 1700000000.0
+
+
+def test_list_keeps_dump_prefixed_volumes_without_a_parseable_system_id(tmp_path: Path) -> None:
+    # A kdive-host-dump- volume whose suffix is not a UUID has system_id=None but is still
+    # reported (the reconciler must see it to reap it); a foreign volume is filtered out.
+    matching = _FakeVolume(host_dump_volume_name(_SID))
+    prefix_only = _FakeVolume("kdive-host-dump-not-a-uuid.kdump")
+    foreign = _FakeVolume("some-overlay.qcow2")
+    conn = _FakeConn(volumes=[matching, prefix_only, foreign])
+    reaper = _reaper(conn, tmp_path)
+
+    volumes = asyncio.run(reaper.list_dump_volumes())
+
+    reported = {vol.name: vol.system_id for vol in volumes}
+    assert reported == {
+        host_dump_volume_name(_SID): _SID,
+        "kdive-host-dump-not-a-uuid.kdump": None,
+    }
+
+
 def test_delete_dump_volume_skips_hosts_without_the_volume(tmp_path: Path) -> None:
     # Host A does not have the volume (NO_STORAGE_VOL); host B does — the reaper deletes on B.
     conn_a = _FakeConn(volume_error=libvirt_error(libvirt.VIR_ERR_NO_STORAGE_VOL))
@@ -103,6 +136,23 @@ def test_delete_dump_volume_skips_hosts_without_the_volume(tmp_path: Path) -> No
 
     assert conn_a.pool.volume.deleted == 0
     assert conn_b.pool.volume.deleted == 1
+
+
+def test_delete_stops_at_the_first_host_that_holds_the_volume(tmp_path: Path) -> None:
+    # Delete-by-name reaps a single host's copy: once a host reports it handled the volume the
+    # fan-out stops, so a later host that also has the name is never touched.
+    conn_a = _FakeConn()
+    conn_b = _FakeConn()
+    reaper = _fleet_reaper(
+        {"qemu+tls://host-a.example/system": conn_a, "qemu+tls://host-b.example/system": conn_b},
+        tmp_path,
+    )
+
+    asyncio.run(reaper.delete_dump_volume(host_dump_volume_name(_SID)))
+
+    assert conn_a.pool.volume.deleted == 1
+    assert conn_b.pool.volume.deleted == 0
+    assert conn_b.pool.lookups == []
 
 
 def test_delete_dump_volume_treats_missing_volume_as_done(tmp_path: Path) -> None:
@@ -123,9 +173,25 @@ def test_delete_dump_volume_preserves_non_absence_lookup_failures(tmp_path: Path
         asyncio.run(reaper.delete_dump_volume(host_dump_volume_name(_SID)))
 
     assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(raised.value) == "libvirt error looking up host_dump volume"
+    assert raised.value.details == {"volume": host_dump_volume_name(_SID)}
     assert conn.pool.lookups == [host_dump_volume_name(_SID)]
     assert conn.pool.volume.deleted == 0
     assert conn.closed
+
+
+def test_delete_surfaces_libvirt_failures_raised_by_the_delete_call(tmp_path: Path) -> None:
+    # A non-absence error from delete() (not lookup) is wrapped as an infrastructure failure
+    # carrying the volume name, not swallowed.
+    conn = _FakeConn(delete_error=libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR))
+    reaper = _reaper(conn, tmp_path)
+
+    with pytest.raises(CategorizedError) as raised:
+        asyncio.run(reaper.delete_dump_volume(host_dump_volume_name(_SID)))
+
+    assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(raised.value) == "libvirt error deleting host_dump volume"
+    assert raised.value.details == {"volume": host_dump_volume_name(_SID)}
 
 
 class _SecretBackend:
@@ -134,11 +200,18 @@ class _SecretBackend:
 
 
 class _FakeVolume:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        name: str | None = None,
+        *,
+        delete_error: libvirt.libvirtError | None = None,
+    ) -> None:
+        self._name = name if name is not None else host_dump_volume_name(_SID)
+        self._delete_error = delete_error
         self.deleted = 0
 
     def name(self) -> str:
-        return host_dump_volume_name(_SID)
+        return self._name
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802
         del flags
@@ -148,19 +221,28 @@ class _FakeVolume:
 
     def delete(self, flags: int = 0) -> int:
         del flags
+        if self._delete_error is not None:
+            raise self._delete_error
         self.deleted += 1
         return 0
 
 
 class _FakePool:
-    def __init__(self, volume_error: libvirt.libvirtError | None = None) -> None:
+    def __init__(
+        self,
+        volume_error: libvirt.libvirtError | None = None,
+        *,
+        delete_error: libvirt.libvirtError | None = None,
+        volumes: list[_FakeVolume] | None = None,
+    ) -> None:
         self._volume_error = volume_error
-        self.volume = _FakeVolume()
+        self.volumes = volumes if volumes is not None else [_FakeVolume(delete_error=delete_error)]
+        self.volume = self.volumes[0]
         self.lookups: list[str] = []
 
     def listAllVolumes(self, flags: int = 0) -> list[_FakeVolume]:  # noqa: N802
         del flags
-        return [self.volume]
+        return self.volumes
 
     def storageVolLookupByName(self, name: str) -> _FakeVolume:  # noqa: N802
         self.lookups.append(name)
@@ -174,8 +256,14 @@ class _FakePool:
 
 
 class _FakeConn:
-    def __init__(self, volume_error: libvirt.libvirtError | None = None) -> None:
-        self.pool = _FakePool(volume_error)
+    def __init__(
+        self,
+        volume_error: libvirt.libvirtError | None = None,
+        *,
+        delete_error: libvirt.libvirtError | None = None,
+        volumes: list[_FakeVolume] | None = None,
+    ) -> None:
+        self.pool = _FakePool(volume_error, delete_error=delete_error, volumes=volumes)
         self.closed = False
 
     def storagePoolLookupByName(self, name: str) -> _FakePool:  # noqa: N802

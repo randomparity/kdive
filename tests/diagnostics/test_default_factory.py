@@ -27,6 +27,7 @@ from kdive.diagnostics.checks import (
     CheckStatus,
     ReachabilityOutcome,
     SecretRefCheck,
+    TlsProbe,
     TlsProbeOutcome,
 )
 from kdive.diagnostics.service import (
@@ -38,6 +39,7 @@ from kdive.diagnostics.service import (
     default_service_factory,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig
 from kdive.providers.remote_libvirt.diagnostics import base_image_staging, reachability
 from kdive.providers.remote_libvirt.diagnostics import contribution as remote_contribution
 
@@ -163,6 +165,11 @@ def test_provider_diagnostics_registration_includes_remote_libvirt() -> None:
     assert contributions[0].unavailable_worker_checks
 
 
+def test_contribution_names_the_remote_libvirt_provider() -> None:
+    # The contribution must carry the provider name so its rows attribute to remote-libvirt.
+    assert remote_contribution.diagnostic_contribution().provider == "remote-libvirt"
+
+
 def test_remote_worker_checks_build_runnable_tls_and_gdbstub_checks(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -177,10 +184,18 @@ def test_remote_worker_checks_build_runnable_tls_and_gdbstub_checks(
         assert port_range == "47000-47099"
         return True
 
-    monkeypatch.setattr(remote_contribution, "provider_tls_probe", lambda _config: tls_probe)
+    tls_configs: list[RemoteLibvirtConfig] = []
+
+    def _capture_tls_probe(config: RemoteLibvirtConfig) -> TlsProbe:
+        # The TLS probe must be bound to the host's real config (its uri), not None.
+        tls_configs.append(config)
+        return tls_probe
+
+    monkeypatch.setattr(remote_contribution, "provider_tls_probe", _capture_tls_probe)
     monkeypatch.setattr(remote_contribution, "gdbstub_acl_probe", lambda: acl_probe)
 
     checks = remote_contribution.diagnostic_contribution().worker_checks()
+    assert [c.uri for c in tls_configs] == ["qemu+tls://host.example/system"]
     assert {check.id for check in checks} == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
     results = [asyncio.run(check.run()) for check in checks]
     by_id = {result.check_id: result for result in results}
@@ -221,6 +236,56 @@ def test_fanned_out_checks_carry_each_instance_name_as_resource_id(
         by_id.setdefault(result.check_id, set()).add(result.resource_id)
     assert by_id[REACHABILITY_ID] == {"ub24-big", "ub24-small"}
     assert by_id[BASE_IMAGE_STAGING_ID] == {"ub24-big", "ub24-small"}
+
+    # Every fanned-out reachability + base-image row attributes to the remote-libvirt provider.
+    providers = {result.check_id: result.provider for result in results}
+    assert providers[REACHABILITY_ID] == "remote-libvirt"
+    assert providers[BASE_IMAGE_STAGING_ID] == "remote-libvirt"
+
+
+def test_checks_resolve_each_host_by_its_own_name(monkeypatch, tmp_path: Path) -> None:
+    # Each fanned-out check binds a config/volume factory that resolves *that host's* name.
+    # Capture the factories the contribution hands the probe builders, then invoke them: a factory
+    # wired to None, returning None, or resolving the wrong arg cannot produce both real configs.
+    _with_remote_instance(monkeypatch, tmp_path, instances=_INSTANCE + _SECOND_INSTANCE)
+
+    captured_config_factories: list = []
+    captured_volume_factories: list = []
+
+    def _capture_reach(*, config_factory, **_):
+        captured_config_factories.append(config_factory)
+
+        async def _probe() -> ReachabilityOutcome:
+            return ReachabilityOutcome.REACHABLE
+
+        return _probe
+
+    def _capture_staging(*, config_factory, volume_factory, **_):
+        captured_config_factories.append(config_factory)
+        captured_volume_factories.append(volume_factory)
+
+        async def _probe() -> BaseImageStagingOutcome:
+            return BaseImageStagingOutcome.STAGED
+
+        return _probe
+
+    monkeypatch.setattr(reachability, "remote_libvirt_reachability_probe", _capture_reach)
+    monkeypatch.setattr(base_image_staging, "base_image_staging_probe", _capture_staging)
+
+    remote_contribution.diagnostic_contribution().checks()
+
+    # Each captured config factory must resolve to a real declared host (both URIs present).
+    resolved_uris = sorted(factory().uri for factory in captured_config_factories)
+    assert resolved_uris == [
+        "qemu+tls://host.example/system",
+        "qemu+tls://host.example/system",
+        "qemu+tls://host2.example/system",
+        "qemu+tls://host2.example/system",
+    ]
+    # Each captured volume factory must resolve a non-empty staged-volume name per host.
+    resolved_volumes = [factory() for factory in captured_volume_factories]
+    assert len(resolved_volumes) == 2
+    assert all(volume for volume in resolved_volumes)
 
 
 def test_worker_checks_fan_out_one_row_per_declared_instance(monkeypatch, tmp_path: Path) -> None:

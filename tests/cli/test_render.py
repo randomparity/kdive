@@ -14,6 +14,21 @@ def test_json_mode_is_stable(capsys) -> None:
     assert json.loads(capsys.readouterr().out) == ROWS
 
 
+def test_json_mode_is_pretty_printed_with_two_space_indent(capsys) -> None:
+    # The JSON contract is a 2-space indented, multi-line document (not compact).
+    render([{"id": "r1"}], columns=["id"], as_json=True)
+    out = capsys.readouterr().out
+    assert out == '[\n  {\n    "id": "r1"\n  }\n]\n'
+
+
+def test_json_mode_serializes_non_json_values_via_str(capsys) -> None:
+    # ``default=str`` lets non-JSON-native values (e.g. a path) serialize as their str().
+    from pathlib import PurePosixPath
+
+    render([{"id": PurePosixPath("/a/b")}], columns=["id"], as_json=True)
+    assert json.loads(capsys.readouterr().out) == [{"id": "/a/b"}]
+
+
 def test_json_mode_projects_only_requested_columns(capsys) -> None:
     rows = [{"id": "r1", "kind": "k", "secret": "x"}]
     render(rows, columns=["id", "kind"], as_json=True)
@@ -34,6 +49,19 @@ def test_table_mode_columns_are_aligned(capsys) -> None:
     # Every line is the same width because the columns are left-justified to a fixed width.
     assert len({len(line.rstrip()) for line in lines}) >= 1
     assert lines[0].startswith("id")
+
+
+def test_table_mode_left_justifies_header_and_cells(capsys) -> None:
+    # A short cell in a column widened by a long cell is padded on the RIGHT (left-justified),
+    # so the next column starts at a fixed offset. Right-justification would flip the padding.
+    rows = [{"id": "short"}, {"id": "a-much-longer-value"}, {"id": "x"}]
+    render(rows, columns=["id", "kind"], as_json=False)
+    lines = capsys.readouterr().out.splitlines()
+    # Header column is left-justified: "id" sits at the start, padding follows it.
+    assert lines[0].startswith("id ")
+    # The narrow "x" data cell is left-justified within the column width.
+    assert lines[3].startswith("x ")
+    assert not lines[3].startswith(" ")
 
 
 def test_empty_rows_table_still_prints_header(capsys) -> None:
@@ -83,3 +111,37 @@ def test_render_record_none_value_renders_blank(capsys) -> None:
     out = capsys.readouterr().out
     assert "host" in out
     assert "None" not in out
+
+
+def test_render_record_lines_have_no_trailing_whitespace(capsys) -> None:
+    # A ``None`` value renders blank, and the trailing gap/pad is stripped from the line.
+    render_record({"id": "r1", "host": None}, as_json=False)
+    lines = capsys.readouterr().out.splitlines()
+    for line in lines:
+        assert line == line.rstrip(), f"unexpected trailing whitespace: {line!r}"
+    # The blank-valued line is just the (left-justified) key with no trailing gap.
+    assert lines[1] == "host"
+
+
+def test_render_record_keys_are_left_justified(capsys) -> None:
+    # Keys are padded to the widest key on the RIGHT so values line up in a column.
+    render_record({"id": "r1", "hostname": "h"}, as_json=False)
+    lines = capsys.readouterr().out.splitlines()
+    # "id" is the short key: left-justified means it starts the line, padding follows.
+    assert lines[0].startswith("id ")
+    assert not lines[0].startswith(" id")
+    # Both values start at the same column offset (aligned).
+    assert lines[0].index("r1") == lines[1].rindex("h")
+
+
+def test_render_record_json_is_pretty_printed(capsys) -> None:
+    render_record({"id": "r1"}, as_json=True)
+    out = capsys.readouterr().out
+    assert out == '{\n  "id": "r1"\n}\n'
+
+
+def test_render_record_json_serializes_non_json_values_via_str(capsys) -> None:
+    from pathlib import PurePosixPath
+
+    render_record({"path": PurePosixPath("/a/b")}, as_json=True)
+    assert json.loads(capsys.readouterr().out) == {"path": "/a/b"}

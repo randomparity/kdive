@@ -62,15 +62,31 @@ def test_pre_admission_error_classifies_by_category() -> None:
     result = RequestAdmissionResult(
         "obj",
         "proj",
-        error=CategorizedError("bad", category=ErrorCategory.CONFIGURATION_ERROR),
+        error=CategorizedError("bad", category=ErrorCategory.QUOTA_EXCEEDED),
     )
     outcome = _outcome_for_metrics(result)
     assert outcome is not None
-    assert classify(outcome) == (AdmissionDecision.REJECTED, _AdmissionReason.CONFIGURATION)
+    # The error outcome is recorded as a non-grant under the error's own category.
+    assert outcome.granted is False
+    assert outcome.category is ErrorCategory.QUOTA_EXCEEDED
+    assert classify(outcome)[0] is AdmissionDecision.REJECTED
 
 
-def test_no_schedulable_resource_is_a_rejection() -> None:
-    result = RequestAdmissionResult("obj", "proj", category=ErrorCategory.CONFIGURATION_ERROR)
+def test_no_schedulable_resource_records_the_supplied_category() -> None:
+    result = RequestAdmissionResult("obj", "proj", category=ErrorCategory.QUOTA_EXCEEDED)
     outcome = _outcome_for_metrics(result)
     assert outcome is not None
+    assert outcome.granted is False
+    # The result's own category is used when present (not defaulted away).
+    assert outcome.category is ErrorCategory.QUOTA_EXCEEDED
+    assert classify(outcome)[0] is AdmissionDecision.REJECTED
+
+
+def test_no_schedulable_resource_without_category_defaults_to_configuration() -> None:
+    result = RequestAdmissionResult("obj", "proj", category=None)
+    outcome = _outcome_for_metrics(result)
+    assert outcome is not None
+    assert outcome.granted is False
+    # An absent category falls back to CONFIGURATION_ERROR.
+    assert outcome.category is ErrorCategory.CONFIGURATION_ERROR
     assert classify(outcome)[0] is AdmissionDecision.REJECTED

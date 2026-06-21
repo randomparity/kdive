@@ -23,6 +23,8 @@ def test_oidc_ping_requires_jwks_uri() -> None:
                 await ping()
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
             assert exc.value.details["variable"] == "KDIVE_OIDC_JWKS_URI"
+            assert "suggest" in exc.value.details
+            assert "KDIVE_OIDC_JWKS_URI is not set" in str(exc.value)
         finally:
             config.reset()
 

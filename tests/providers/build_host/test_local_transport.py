@@ -49,13 +49,27 @@ def test_run_argv_preserved() -> None:
 
 
 def test_run_file_not_found_maps_to_missing_dependency() -> None:
-    """run() surfaces FileNotFoundError as MISSING_DEPENDENCY CategorizedError."""
+    """run() surfaces FileNotFoundError as MISSING_DEPENDENCY naming the tool (argv[0])."""
     with patch(_RUN_TARGET, side_effect=FileNotFoundError("no such file")):
         transport = LocalBuildTransport()
         with pytest.raises(CategorizedError) as exc_info:
             transport.run(["make", "-C", "/ws"], cwd="/ws", timeout_s=60)
 
     assert exc_info.value.category == ErrorCategory.MISSING_DEPENDENCY
+    # The failing tool is argv[0] ("make"), not a later token nor None.
+    assert exc_info.value.details == {"tool": "make"}
+    assert str(exc_info.value).startswith("make ")
+
+
+def test_run_other_oserror_maps_to_infrastructure_failure() -> None:
+    """A non-FileNotFoundError OSError launch failure carries INFRASTRUCTURE_FAILURE."""
+    with patch(_RUN_TARGET, side_effect=PermissionError("denied")):
+        transport = LocalBuildTransport()
+        with pytest.raises(CategorizedError) as exc_info:
+            transport.run(["make", "-C", "/ws"], cwd="/ws", timeout_s=60)
+
+    assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc_info.value.details == {"tool": "make", "op": "launch"}
 
 
 def test_run_timeout_maps_to_build_failure() -> None:
@@ -67,6 +81,8 @@ def test_run_timeout_maps_to_build_failure() -> None:
             transport.run(["make", "-C", "/ws"], cwd="/ws", timeout_s=60)
 
     assert exc_info.value.category == ErrorCategory.BUILD_FAILURE
+    assert str(exc_info.value) == "command exceeded the build timeout"
+    assert exc_info.value.details == {"timeout_s": 60}
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +97,7 @@ def test_clone_raises_configuration_error() -> None:
         transport.clone("https://git.kernel.org/pub/scm/linux.git", "v6.9", "/dest")
 
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc_info.value) == "git provenance is not valid for a local build host"
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +132,7 @@ def test_read_text_invalid_utf8_maps_to_configuration_error(tmp_path: Path) -> N
         transport.read_text(str(p))
     assert exc_info.value.category == ErrorCategory.CONFIGURATION_ERROR
     assert exc_info.value.details == {"path": str(p)}
+    assert str(exc_info.value) == "local build transport could not decode UTF-8 text"
 
 
 def test_read_bytes_missing_file_maps_to_infrastructure_failure(tmp_path: Path) -> None:
@@ -124,6 +142,7 @@ def test_read_bytes_missing_file_maps_to_infrastructure_failure(tmp_path: Path) 
         transport.read_bytes(str(p))
     assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc_info.value.details == {"path": str(p)}
+    assert str(exc_info.value) == "local build transport could not read bytes"
 
 
 def test_read_bytes_returns_file_bytes(tmp_path: Path) -> None:
@@ -149,6 +168,7 @@ def test_write_bytes_failure_maps_to_infrastructure_failure(tmp_path: Path) -> N
         transport.write_bytes(str(target), b"hello")
     assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc_info.value.details == {"path": str(target)}
+    assert str(exc_info.value) == "local build transport could not write bytes"
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +203,39 @@ def test_upload_file_calls_http_put_and_strips_etag(tmp_path: Path) -> None:
     assert etag == "abc123"  # quotes stripped
 
 
+_URLOPEN_TARGET = "kdive.providers.shared.build_host.transports.transport.urllib.request.urlopen"
+
+
+def test_upload_file_uses_injected_put_not_the_default(tmp_path: Path) -> None:
+    """An injected http_put must be used; the urllib default must not run when one is given."""
+    f = tmp_path / "bzImage"
+    f.write_bytes(b"payload")
+
+    def injected_put(_url: str, _data: bytes, _headers: dict[str, str]) -> str:
+        return '"injected-etag"'
+
+    presigned = PresignedUpload(url="https://s3.example.com/put", required_headers={})
+    transport = LocalBuildTransport(http_put=injected_put)
+
+    # If the default path were taken (e.g. the ctor wired the wrong branch), urlopen would
+    # fire; force it to fail so that path cannot silently succeed via the network.
+    with patch(_URLOPEN_TARGET, side_effect=AssertionError("default path must not run")):
+        etag = transport.upload_file(str(f), presigned)
+
+    assert etag == "injected-etag"
+
+
+def test_upload_file_strips_only_quotes_not_other_chars(tmp_path: Path) -> None:
+    """Only surrounding double-quotes are stripped; characters inside are preserved."""
+    f = tmp_path / "bzImage"
+    f.write_bytes(b"payload")
+    # ETag content begins and ends with 'X' to catch an over-broad strip set.
+    transport = LocalBuildTransport(http_put=lambda _u, _d, _h: '"Xy9X"')
+    presigned = PresignedUpload(url="https://s3.example.com/put", required_headers={})
+
+    assert transport.upload_file(str(f), presigned) == "Xy9X"
+
+
 def test_upload_file_put_failure_maps_to_infrastructure_failure(tmp_path: Path) -> None:
     payload = tmp_path / "bzImage"
     payload.write_bytes(b"kernel-image-bytes")
@@ -198,6 +251,7 @@ def test_upload_file_put_failure_maps_to_infrastructure_failure(tmp_path: Path) 
         )
     assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc_info.value.details == {"url": "https://s3.example.com/put?<redacted>"}
+    assert str(exc_info.value) == "local build transport could not upload file"
 
 
 def test_upload_file_missing_etag_maps_to_infrastructure_failure(tmp_path: Path) -> None:
@@ -212,6 +266,7 @@ def test_upload_file_missing_etag_maps_to_infrastructure_failure(tmp_path: Path)
         )
     assert exc_info.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc_info.value.details == {"url": "https://s3.example.com/put"}
+    assert str(exc_info.value) == ("local build transport upload response did not include an ETag")
 
 
 # ---------------------------------------------------------------------------

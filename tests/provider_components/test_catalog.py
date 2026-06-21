@@ -56,6 +56,8 @@ def test_load_fixture_catalog_filters_provider(tmp_path: Path) -> None:
     assert [entry.name for entry in catalog.rootfs_for_provider("local-libvirt")] == ["base"]
     assert catalog.rootfs_for_provider("remote-libvirt") == []
     assert catalog.profile("local-libvirt", "console-ready_x86_64") is not None
+    assert catalog.profile("local-libvirt", "missing-profile") is None
+    assert catalog.profile("remote-libvirt", "console-ready_x86_64") is None
 
 
 def test_fixture_catalog_hides_non_public_rootfs_entries(tmp_path: Path) -> None:

@@ -10,6 +10,8 @@ never a confident "host down". The boundary (the libvirt connection) is mocked; 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 import libvirt
 
@@ -222,6 +224,32 @@ def test_adapter_unreachable_when_getinfo_fails_after_open(tmp_path) -> None:
         pki_base_dir=tmp_path,
     )
     assert _run_probe(probe) is ReachabilityOutcome.UNREACHABLE
+
+
+def test_adapter_materializes_pkipath_under_injected_base_dir(tmp_path) -> None:
+    # The injected pki_base_dir must scope the transient TLS pkipath: the composed connect
+    # URI carries `pkipath=<dir>`, and that dir must live under the base dir we passed (never
+    # the ambient system tempdir). This pins the pki_base_dir plumbing through _probe_sync.
+    captured: dict[str, str] = {}
+
+    def open_connection(uri: str) -> _FakeConn:
+        captured["uri"] = uri
+        return _FakeConn(info=[0, 1, 2])
+
+    probe = remote_libvirt_reachability_probe(
+        config_factory=_config,
+        open_connection=open_connection,
+        secret_backend_factory=_FakeBackend,
+        pki_base_dir=tmp_path,
+    )
+    assert _run_probe(probe) is ReachabilityOutcome.REACHABLE
+
+    query = urlsplit(captured["uri"]).query
+    pkipath_param = next(
+        value for key, value in parse_qsl(query, keep_blank_values=True) if key == "pkipath"
+    )
+    pki_dir = Path(pkipath_param)
+    assert pki_dir.parent == tmp_path
 
 
 def test_adapter_uses_default_env_secret_backend(tmp_path, monkeypatch) -> None:

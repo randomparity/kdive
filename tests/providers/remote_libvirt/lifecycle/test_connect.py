@@ -40,6 +40,36 @@ def test_open_gdbstub_returns_handle_for_reachable_stub():
     assert (decoded.kind, decoded.host, decoded.port) == ("gdbstub", "10.0.0.5", 47002)
 
 
+def test_open_gdbstub_resolves_port_and_probes_with_composed_endpoint():
+    seen: dict[str, object] = {}
+
+    def resolve_port(system: SystemHandle) -> int:
+        seen["resolved_system"] = str(system)
+        return 47002
+
+    def probe(host: str, port: int) -> bool:
+        seen["probe_host"] = host
+        seen["probe_port"] = port
+        return True
+
+    c = _connect(resolve_port=resolve_port, probe=probe)
+    c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
+    # The port is resolved from the requested system; the probe targets the ACL'd host
+    # (gdb_addr) and the resolved port.
+    assert seen == {
+        "resolved_system": "kdive-sys",
+        "probe_host": "10.0.0.5",
+        "probe_port": 47002,
+    }
+
+
+def test_from_env_threads_passed_config_factory():
+    factory = lambda: _config()  # noqa: E731 - terse fixture factory
+    c = RemoteLibvirtConnect.from_env(config_factory=factory)
+    # from_env must pass the caller's factory through, not drop it.
+    assert c._config_factory is factory
+
+
 def test_open_gdbstub_unset_gdb_addr_is_configuration_error():
     c = _connect(
         resolve_port=lambda system: 47002,
@@ -49,6 +79,7 @@ def test_open_gdbstub_unset_gdb_addr_is_configuration_error():
     with pytest.raises(CategorizedError) as exc:
         c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == ("remote gdbstub host (instance gdb_addr in systems.toml) is unset")
 
 
 def test_open_gdbstub_unreachable_is_debug_attach_failure():
@@ -56,6 +87,8 @@ def test_open_gdbstub_unreachable_is_debug_attach_failure():
     with pytest.raises(CategorizedError) as exc:
         c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert str(exc.value) == "remote gdbstub did not answer RSP framing"
+    assert exc.value.details == {"host": "10.0.0.5", "port": 47002}
 
 
 def test_open_gdbstub_socket_fault_is_transport_failure():
@@ -66,6 +99,8 @@ def test_open_gdbstub_socket_fault_is_transport_failure():
     with pytest.raises(CategorizedError) as exc:
         c.open_transport(SystemHandle("kdive-sys"), "gdbstub")
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == "gdbstub transport socket fault"
+    assert exc.value.details == {"port": 47002}
 
 
 def test_unknown_kind_is_configuration_error():
@@ -73,6 +108,7 @@ def test_unknown_kind_is_configuration_error():
     with pytest.raises(CategorizedError) as exc:
         c.open_transport(SystemHandle("kdive-sys"), "ssh")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "unsupported transport kind: 'ssh'"
 
 
 def test_open_transport_drgn_live_returns_bare_domain_handle():

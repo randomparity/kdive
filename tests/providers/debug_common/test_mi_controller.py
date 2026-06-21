@@ -53,6 +53,7 @@ def test_timeout_error_preserves_command_timeout_and_transport_code() -> None:
     error = timeout_error("-exec-continue", 1.5)
 
     assert error.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(error) == "gdb/MI command timed out after 1.5s: -exec-continue"
     assert error.details == {
         "code": "transport_stall",
         "command": "-exec-continue",
@@ -78,6 +79,8 @@ def test_write_maps_pygdbmi_timeout_to_categorized_error() -> None:
 
     assert exc_info.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc_info.value.details["command"] == "-target-select remote 127.0.0.1:1234"
+    # The real timeout value (not None) must be carried into the error.
+    assert exc_info.value.details["timeout_seconds"] == 0.25
 
 
 def test_read_uses_non_raising_poll() -> None:
@@ -95,6 +98,7 @@ def test_get_gdb_response_maps_or_suppresses_timeout() -> None:
         controller.get_gdb_response(timeout_sec=0.5)
 
     assert exc_info.value.details["command"] == "get_gdb_response"
+    assert exc_info.value.details["timeout_seconds"] == 0.5
     assert controller.get_gdb_response(timeout_sec=0.5, raise_error_on_timeout=False) == []
 
 

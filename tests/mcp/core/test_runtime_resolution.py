@@ -6,14 +6,19 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from types import TracebackType
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._runtime_resolution import (
+    _AUTHORIZED_ALLOCATION_KIND,
+    _AUTHORIZED_RUN_KIND,
+    _AUTHORIZED_SYSTEM_KIND,
     RuntimeCallback,
     with_runtime_for_allocation,
     with_runtime_for_run,
@@ -35,6 +40,11 @@ _WRAPPERS: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse]]], .
     ("allocation", with_runtime_for_allocation),
     ("system", with_runtime_for_system),
     ("run", with_runtime_for_run),
+)
+_WRAPPER_SQL: tuple[tuple[str, Callable[..., Coroutine[Any, Any, ToolResponse]], str], ...] = (
+    ("allocation", with_runtime_for_allocation, _AUTHORIZED_ALLOCATION_KIND),
+    ("system", with_runtime_for_system, _AUTHORIZED_SYSTEM_KIND),
+    ("run", with_runtime_for_run, _AUTHORIZED_RUN_KIND),
 )
 
 
@@ -64,9 +74,10 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self, row: dict[str, object] | None) -> None:
         self.cursor_obj = _FakeCursor(row)
+        self.cursor_kwargs: dict[str, object] | None = None
 
     def cursor(self, **kwargs: object) -> _FakeCursor:
-        del kwargs
+        self.cursor_kwargs = kwargs
         return self.cursor_obj
 
 
@@ -221,6 +232,28 @@ def test_runtime_wrapper_authorizes_project_before_resolving_runtime(
     assert result.error_category == "not_found"
     assert result.data == {"object_kind": kind, "object_id": _OBJECT_ID}
     assert resolver.calls == []
+
+
+@pytest.mark.parametrize(("kind", "wrapper", "sql"), _WRAPPER_SQL)
+def test_runtime_wrapper_resolves_and_invokes_callback_on_authorized_object(
+    kind: str, wrapper: Callable[..., Coroutine[Any, Any, ToolResponse]], sql: str
+) -> None:
+    del kind
+    pool = _FakePool(_row())
+    resolver = _FakeResolver()
+
+    result = asyncio.run(_call(wrapper, pool, resolver, _OBJECT_ID, _ctx()))
+
+    assert result.object_id == _OBJECT_ID
+    assert result.status == "succeeded"
+    assert result.error_category is None
+    assert resolver.calls == [ResourceKind.LOCAL_LIBVIRT]
+    cursor = pool.conn.cursor_obj
+    assert cursor.executed is not None
+    executed_sql, executed_params = cursor.executed
+    assert executed_sql == sql
+    assert executed_params == (UUID(_OBJECT_ID),)
+    assert pool.conn.cursor_kwargs == {"row_factory": dict_row}
 
 
 async def _success_response(runtime: ProviderRuntime) -> ToolResponse:

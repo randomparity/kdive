@@ -71,6 +71,16 @@ def test_both_absent_lists_role_then_opt_in() -> None:
     assert exc.value.missing == ["admin_role", "profile_opt_in"]
 
 
+def test_denial_message_names_missing_checks_for_audit() -> None:
+    # The exception's str() is the audit/log reason line (ADR-0130): it must spell out the
+    # missing checks, not collapse to an empty message.
+    with pytest.raises(DestructiveOpDenied) as exc:
+        assert_destructive_allowed(_ctx(Role.OPERATOR), _allocation(), _op(False))
+    assert (
+        str(exc.value) == "destructive op denied; missing checks: ['admin_role', 'profile_opt_in']"
+    )
+
+
 def test_operator_required_role_allows_operator() -> None:
     # Reprovision's role factor is operator (ADR-0038): an operator with opt-in passes.
     assert (

@@ -26,12 +26,33 @@ def test_rsp_frame_wraps_with_mod256_checksum() -> None:
     assert rsp_frame("?") == b"$?#3f"
 
 
+def test_rsp_frame_checksum_wraps_at_256() -> None:
+    # "~~~" sums to 378; mod-256 is 0x7a (122), which a mod-257 mutant would not produce.
+    assert rsp_frame("~~~") == b"$~~~#7a"
+
+
 def test_valid_rsp_frame_accepts_complete_checksum_valid_frame() -> None:
     assert valid_rsp_frame(b"$?#3f") is True
 
 
+def test_valid_rsp_frame_accepts_wrapped_checksum() -> None:
+    # Mirrors rsp_frame's mod-256 wrap so the validator's modulus is pinned too.
+    assert valid_rsp_frame(b"$~~~#7a") is True
+
+
 def test_valid_rsp_frame_ignores_leading_ack() -> None:
     assert valid_rsp_frame(b"+$?#3f") is True
+
+
+def test_valid_rsp_frame_ignores_leading_nack() -> None:
+    # A leading '-' (nack) is an ack byte and is skipped just like '+'.
+    assert valid_rsp_frame(b"-$?#3f") is True
+
+
+def test_valid_rsp_frame_uses_first_hash_as_terminator() -> None:
+    # The first '#' terminates the frame. `$a##84` would only validate if the *last* '#'
+    # were used (payload "a#" sums to 0x84); using the first '#' it must be rejected.
+    assert valid_rsp_frame(b"$a##84") is False
 
 
 def test_valid_rsp_frame_rejects_trailing_bytes() -> None:
@@ -69,6 +90,36 @@ def test_rsp_reachable_returns_false_when_connection_fails(
     monkeypatch.setattr(rsp_mod.socket, "create_connection", fail_connect)
 
     assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is False
+
+
+class _FakeSocket:
+    """A connected socket that answers one valid RSP frame, then EOF."""
+
+    def __init__(self) -> None:
+        self._chunks = [b"+" + rsp_frame("?"), b""]
+
+    def sendall(self, _data: bytes) -> None:
+        return None
+
+    def settimeout(self, _timeout: float) -> None:
+        return None
+
+    def recv(self, _size: int) -> bytes:
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+def test_rsp_reachable_true_when_peer_answers_valid_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A reachable stub that answers a valid frame within the deadline returns True; this also
+    # pins the deadline computation (a None/already-elapsed deadline would never read the reply).
+    monkeypatch.setattr(
+        rsp_mod.socket, "create_connection", lambda _addr, *, timeout: _FakeSocket()
+    )
+    assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is True
 
 
 # --- TransportHandleData codec -------------------------------------------------------------
@@ -139,7 +190,22 @@ def test_open_transport_non_gdbstub_kind_is_configuration_error_without_probing(
     with pytest.raises(CategorizedError) as exc:
         _connector(probe).open_transport(_SYSTEM, cast(DebugTransportKind, "tcp"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # The message names the offending kind so the operator sees what was rejected.
+    assert str(exc.value) == "unsupported transport kind: 'tcp'"
     assert probe.calls == []  # rejected before any IO
+
+
+def test_open_gdbstub_resolves_endpoint_for_the_requested_system() -> None:
+    seen: list[SystemHandle] = []
+
+    def resolver(system: SystemHandle) -> tuple[str, int]:
+        seen.append(system)
+        return ("127.0.0.1", 1234)
+
+    probe = _FakeProbe(result=True)
+    connector = LocalLibvirtConnect(resolve_endpoint=resolver, probe=probe)
+    connector.open_transport(_SYSTEM, "gdbstub")
+    assert seen == [_SYSTEM]
 
 
 def test_open_transport_non_loopback_host_is_configuration_error_without_probing() -> None:
@@ -147,6 +213,7 @@ def test_open_transport_non_loopback_host_is_configuration_error_without_probing
     with pytest.raises(CategorizedError) as exc:
         _connector(probe, host="10.0.0.1").open_transport(_SYSTEM, "gdbstub")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "gdbstub host must be a loopback IP literal"
     assert probe.calls == []  # F2: no outbound connect to a non-loopback host
 
 
@@ -161,16 +228,20 @@ def test_open_transport_hostname_host_is_configuration_error_without_probing() -
 def test_open_transport_unreachable_stub_is_debug_attach_failure() -> None:
     probe = _FakeProbe(result=False)
     with pytest.raises(CategorizedError) as exc:
-        _connector(probe).open_transport(_SYSTEM, "gdbstub")
+        _connector(probe, port=4242).open_transport(_SYSTEM, "gdbstub")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
-    assert probe.calls == [("127.0.0.1", 1234)]
+    assert str(exc.value) == "gdbstub did not answer RSP framing"
+    assert exc.value.details == {"port": 4242}
+    assert probe.calls == [("127.0.0.1", 4242)]
 
 
 def test_open_transport_socket_fault_is_transport_failure() -> None:
     probe = _FakeProbe(raises=OSError("connection reset"))
     with pytest.raises(CategorizedError) as exc:
-        _connector(probe).open_transport(_SYSTEM, "gdbstub")
+        _connector(probe, port=4242).open_transport(_SYSTEM, "gdbstub")
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == "gdbstub transport socket fault"
+    assert exc.value.details == {"port": 4242}
 
 
 def test_open_transport_reachable_stub_returns_decodable_handle() -> None:
@@ -185,6 +256,10 @@ def test_from_env_resolver_raises_missing_dependency() -> None:
     with pytest.raises(CategorizedError) as exc:
         connector.open_transport(_SYSTEM, "gdbstub")
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(exc.value) == (
+        "resolving a libvirt domain's gdbstub endpoint runs only under the live_vm gate"
+    )
+    assert exc.value.details == {"system": str(_SYSTEM)}
 
 
 def test_close_transport_is_noop_and_never_raises() -> None:
@@ -246,6 +321,7 @@ def test_open_ssh_transport_non_loopback_host_is_configuration_error_without_io(
     with pytest.raises(CategorizedError) as exc:
         _ssh_connector(ssh, host="10.0.0.1").open_transport(_SYSTEM, "drgn-live")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "ssh host must be a loopback IP literal"
     assert ssh.calls == []  # F2: no outbound SSH connect to a non-loopback host
 
 
@@ -260,15 +336,36 @@ def test_open_ssh_transport_hostname_host_is_configuration_error_without_io() ->
 def test_open_ssh_transport_unreachable_is_debug_attach_failure() -> None:
     ssh = _FakeSshConnect(result=False)
     with pytest.raises(CategorizedError) as exc:
-        _ssh_connector(ssh).open_transport(_SYSTEM, "drgn-live")
+        _ssh_connector(ssh, port=2222).open_transport(_SYSTEM, "drgn-live")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert str(exc.value) == "ssh endpoint did not accept a connection"
+    assert exc.value.details == {"port": 2222}
 
 
 def test_open_ssh_transport_socket_fault_is_transport_failure() -> None:
     ssh = _FakeSshConnect(raises=OSError("connection reset"))
     with pytest.raises(CategorizedError) as exc:
-        _ssh_connector(ssh).open_transport(_SYSTEM, "drgn-live")
+        _ssh_connector(ssh, port=2222).open_transport(_SYSTEM, "drgn-live")
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == "ssh transport socket fault"
+    assert exc.value.details == {"port": 2222}
+
+
+def test_open_ssh_resolves_endpoint_for_the_requested_system() -> None:
+    seen: list[SystemHandle] = []
+
+    def ssh_resolver(system: SystemHandle) -> tuple[str, int]:
+        seen.append(system)
+        return ("127.0.0.1", 22)
+
+    connector = LocalLibvirtConnect(
+        resolve_endpoint=lambda _s: ("127.0.0.1", 1234),
+        probe=_FakeProbe(),
+        resolve_ssh_endpoint=ssh_resolver,
+        ssh_connect=_FakeSshConnect(result=True),
+    )
+    connector.open_transport(_SYSTEM, "drgn-live")
+    assert seen == [_SYSTEM]
 
 
 def test_open_unsupported_kind_is_configuration_error() -> None:
@@ -277,6 +374,7 @@ def test_open_unsupported_kind_is_configuration_error() -> None:
             _SYSTEM, cast(DebugTransportKind, "telnet")
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "unsupported transport kind: 'telnet'"
 
 
 def test_from_env_ssh_resolver_raises_missing_dependency() -> None:
@@ -284,6 +382,11 @@ def test_from_env_ssh_resolver_raises_missing_dependency() -> None:
     with pytest.raises(CategorizedError) as exc:
         connector.open_transport(_SYSTEM, "drgn-live")
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(exc.value) == (
+        "resolving a libvirt guest's loopback-forwarded ssh endpoint runs only under "
+        "the live_vm gate"
+    )
+    assert exc.value.details == {"system": str(_SYSTEM)}
 
 
 def test_close_ssh_transport_is_noop_and_never_raises() -> None:
