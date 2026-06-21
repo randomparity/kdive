@@ -404,3 +404,101 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     assert required_scopes("systems.teardown") == frozenset({ExposureScope.PROJECT_ADMIN})
     assert required_scopes("ops.reconcile_now") == frozenset({ExposureScope.PLATFORM_OPERATOR})
     assert required_scopes("allocations.request") == frozenset({ExposureScope.PROJECT_OPERATOR})
+
+
+# --- Canonical lifecycle prompts (ADR-0202) ---------------------------------------------
+
+# Independent, human-reviewed expected maturity per referenced prompt step (the drift
+# guard). A registry-vs-registry compare would be vacuous, so this table is asserted equal
+# to the live registry; a promotion/demotion of any referenced tool fails here until the
+# expectation is updated, making a journey's maturity shape a reviewed event.
+_EXPECTED_STEP_MATURITY: dict[str, str] = {
+    "investigations.open": "implemented",
+    "resources.list": "implemented",
+    "allocations.request": "implemented",
+    "allocations.wait": "implemented",
+    "systems.define": "implemented",
+    "runs.create": "implemented",
+    "runs.complete_build": "implemented",
+    "runs.build": "partial",
+    "runs.install": "partial",
+    "runs.boot": "partial",
+    "debug.start_session": "partial",
+    "introspect.run": "partial",
+    "debug.end_session": "partial",
+    "control.force_crash": "partial",
+    "vmcore.fetch": "partial",
+    "vmcore.list": "partial",
+    "postmortem.triage": "partial",
+    "introspect.from_vmcore": "partial",
+}
+
+
+def _built_app() -> FastMCP:
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    return build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
+
+
+def _rendered_prompt_body(app: FastMCP, name: str) -> str:
+    from mcp.types import TextContent
+
+    async def _run() -> str:
+        result = await app.render_prompt(name, {})
+        content = result.messages[0].content
+        assert isinstance(content, TextContent)
+        return content.text
+
+    return asyncio.run(_run())
+
+
+def test_build_app_registers_lifecycle_prompts() -> None:
+    from kdive.mcp.prompts.registrar import CANONICAL_PROMPTS
+
+    app = _built_app()
+
+    async def _names() -> set[str]:
+        return {p.name for p in await app.list_prompts()}
+
+    listed = asyncio.run(_names())
+    assert {spec.name for spec in CANONICAL_PROMPTS} <= listed
+    for spec in CANONICAL_PROMPTS:
+        body = _rendered_prompt_body(app, spec.name)
+        for step in spec.steps:
+            assert step.tool in body, f"{spec.name} body omits {step.tool}"
+
+
+def test_lifecycle_prompts_disclose_partial_steps() -> None:
+    # runs.build is partial in the live registry; runs.create is implemented.
+    body = _rendered_prompt_body(_built_app(), "build_boot_debug")
+    build_line = next(line for line in body.splitlines() if "runs.build " in line)
+    create_line = next(line for line in body.splitlines() if "runs.create " in line)
+    assert "[partial" in build_line
+    assert "[partial" not in create_line
+
+
+def test_lifecycle_prompts_expected_maturity_matches_registry() -> None:
+    app = _built_app()
+    live = {
+        tool.name: (tool.meta or {}).get("maturity", "implemented")
+        for tool in app_module._registered_tools(app)
+    }
+    for tool, expected in _EXPECTED_STEP_MATURITY.items():
+        assert tool in live, f"prompt references unregistered tool {tool!r}"
+        assert live[tool] == expected, (
+            f"{tool} maturity drifted: registry={live[tool]!r} expected={expected!r}; "
+            "update _EXPECTED_STEP_MATURITY after reviewing the journey"
+        )
+
+
+def test_prompts_add_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Graceful degradation: the prompts plane registers no tools and removes none.
+    with_prompts = {t.name for t in asyncio.run(_built_app().list_tools())}
+
+    without = tuple(
+        r for r in app_module._PLANE_REGISTRARS if r is not app_module._register_lifecycle_prompts
+    )
+    assert len(without) == len(app_module._PLANE_REGISTRARS) - 1
+    monkeypatch.setattr(app_module, "_PLANE_REGISTRARS", without)
+    without_prompts = {t.name for t in asyncio.run(_built_app().list_tools())}
+
+    assert with_prompts == without_prompts
