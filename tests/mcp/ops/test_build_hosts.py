@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from fastmcp import FastMCP
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
@@ -170,6 +171,40 @@ async def _insert_lease(pool: AsyncConnectionPool, host_id: UUID) -> UUID:
             (run_id, host_id),
         )
     return run_id
+
+
+async def _insert_config_host(pool: AsyncConnectionPool, *, name: str) -> UUID:
+    """Insert a ``managed_by='config'`` local build host (M2.7 B)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "INSERT INTO build_hosts "
+            "  (name, kind, workspace_root, max_concurrent, managed_by) "
+            "VALUES (%s, 'local', '/build', 2, 'config') RETURNING id",
+            (name,),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+async def _host_enabled(url: str, name: str) -> bool:
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor() as cur:
+        await cur.execute("SELECT enabled FROM build_hosts WHERE name = %s", (name,))
+        row = await cur.fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+async def _build_host_override(url: str, name: str) -> dict[str, object] | None:
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT disposition, reason, actor FROM inventory_overrides "
+            "WHERE source_kind = 'build_host' AND resource_kind = 'build-host' AND name = %s",
+            (name,),
+        )
+        return await cur.fetchone()
 
 
 def _destructive_hint(tool: object) -> bool | None:
@@ -708,5 +743,68 @@ def test_remove_audit_row_written_and_host_deleted(migrated_url: str) -> None:
         assert any(r[2] == "build_hosts.remove" for r in rows)
         for row in rows:
             assert _SECRET_VALUE not in str(row)
+
+    asyncio.run(_run())
+
+
+# --- config-owned build-host remove (ADR-0199, M2.7 B) ---
+
+
+def test_remove_config_host_idle_deletes_and_writes_removed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_config_host(pool, name="cfg-build")
+            resp = await remove_build_host(
+                pool, _admin_ctx(), name="cfg-build", reason="decommission"
+            )
+        assert resp.status == "removed", resp.model_dump()
+        assert await _host_exists(migrated_url, "cfg-build") is False
+        override = await _build_host_override(migrated_url, "cfg-build")
+        assert override is not None
+        assert override["disposition"] == "removed"
+        assert override["reason"] == "decommission"
+
+    asyncio.run(_run())
+
+
+def test_remove_config_host_leased_cordons_and_writes_removed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            host_id = await _insert_config_host(pool, name="cfg-leased")
+            await _insert_lease(pool, host_id)
+            resp = await remove_build_host(
+                pool, _admin_ctx(), name="cfg-leased", reason="retire while busy"
+            )
+        assert resp.status == "removed", resp.model_dump()
+        # Cordoned (disabled), not deleted — the lease pins the row (FK ON DELETE RESTRICT).
+        assert await _host_exists(migrated_url, "cfg-leased") is True
+        assert await _host_enabled(migrated_url, "cfg-leased") is False
+        override = await _build_host_override(migrated_url, "cfg-leased")
+        assert override is not None and override["disposition"] == "removed"
+
+    asyncio.run(_run())
+
+
+def test_remove_config_host_blank_reason_rejected(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_config_host(pool, name="cfg-noreason")
+            resp = await remove_build_host(pool, _admin_ctx(), name="cfg-noreason", reason="  ")
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        # no row change, no ledger write
+        assert await _host_exists(migrated_url, "cfg-noreason") is True
+        assert await _build_host_override(migrated_url, "cfg-noreason") is None
+
+    asyncio.run(_run())
+
+
+def test_remove_runtime_host_writes_no_ledger_entry(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_host(pool, name="rt-build")
+            resp = await remove_build_host(pool, _admin_ctx(), name="rt-build")
+        assert resp.status == "removed", resp.model_dump()
+        assert await _host_exists(migrated_url, "rt-build") is False
+        assert await _build_host_override(migrated_url, "rt-build") is None
 
     asyncio.run(_run())

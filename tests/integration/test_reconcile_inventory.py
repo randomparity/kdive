@@ -2531,3 +2531,58 @@ def test_detached_ledger_retained_when_file_still_diverges(
             )
 
     asyncio.run(_run())
+
+
+# A runtime-added host (managed_by='runtime') is never pruned by the inventory reconcile, which
+# only sweeps managed_by='config' rows (ADR-0199, M2.7 B #639). This locks in the runtime-add
+# acceptance criterion: register_remote_libvirt -> schedulable without restart, survives passes.
+
+
+async def _insert_runtime_remote_libvirt(conn: psycopg.AsyncConnection, *, name: str) -> UUID:
+    """Insert a leased runtime remote-libvirt row (what register_remote_libvirt creates)."""
+    from datetime import UTC, datetime, timedelta
+
+    rid = uuid4()
+    lease = datetime.now(UTC) + timedelta(hours=1)
+    await conn.execute(
+        "INSERT INTO resources (id, kind, name, capabilities, pool, cost_class, status, "
+        " host_uri, managed_by, lease_expires_at) "
+        "VALUES (%s, 'remote-libvirt', %s, %s, 'default', 'remote', 'available', "
+        " 'qemu+tls://rt/system', 'runtime', %s)",
+        (
+            rid,
+            name,
+            Jsonb({"vcpus": 8, "memory_mb": 16384, "concurrent_allocation_cap": 1}),
+            lease,
+        ),
+    )
+    return rid
+
+
+def test_runtime_added_remote_libvirt_survives_reconcile_passes(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            rid = await _insert_runtime_remote_libvirt(seed, name="rt-survivor")
+        # The file declares a DIFFERENT config remote host, so the prune sweep runs but must not
+        # touch the runtime row (it is not managed_by='config').
+        doc = load_inventory(_write_toml(tmp_path, _remote_libvirt_toml(name="cfg-other")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+            await reconcile_resources(conn, doc)  # a second pass: still not pruned
+        async with await _connect(migrated_url) as check, check.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT managed_by FROM resources WHERE id = %s", (rid,))
+            row = await cur.fetchone()
+        assert row is not None  # survived both passes
+        assert row["managed_by"] == "runtime"  # still runtime-owned, unchanged
+        # and no override ledger entry was created for the runtime add
+        async with await _connect(migrated_url) as check:
+            assert not await _ledger_exists(
+                check, source_kind="resource", resource_kind="remote-libvirt", name="rt-survivor"
+            )
+
+    asyncio.run(_run())

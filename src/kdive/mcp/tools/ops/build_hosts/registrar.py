@@ -101,9 +101,18 @@ def _register_build_hosts_remove(app: FastMCP, pool: AsyncConnectionPool) -> Non
     @app.tool(name=REMOVE_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def build_hosts_remove(
         name: Annotated[str, Field(description="The build host name to remove.")],
+        reason: Annotated[
+            str,
+            Field(
+                description=(
+                    "Audit reason; required (non-empty) when removing a config-owned build host "
+                    "(durable removal via the override ledger). Ignored for a runtime host."
+                )
+            ),
+        ] = "",
     ) -> ToolResponse:
         """Remove a registered build host."""
-        return await remove_build_host(pool, current_context(), name=name)
+        return await remove_build_host(pool, current_context(), name=name, reason=reason)
 
 
 __all__ = ["register"]

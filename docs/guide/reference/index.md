@@ -55,6 +55,7 @@
 | [`images.upload`](images.md#imagesupload) | `implemented` |
 | [`introspect.from_vmcore`](introspect.md#introspectfrom_vmcore) | `partial` |
 | [`introspect.run`](introspect.md#introspectrun) | `partial` |
+| [`inventory.clear_override`](inventory.md#inventoryclear_override) | `implemented` |
 | [`inventory.list`](inventory.md#inventorylist) | `implemented` |
 | [`investigations.close`](investigations.md#investigationsclose) | `implemented` |
 | [`investigations.get`](investigations.md#investigationsget) | `implemented` |

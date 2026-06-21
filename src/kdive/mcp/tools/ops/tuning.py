@@ -19,12 +19,14 @@ role gets an ``authorization_denied`` envelope (the denial is audited iff the ca
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
 from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
@@ -32,7 +34,15 @@ import kdive.config as config
 from kdive.config.core_settings import INVENTORY_WRITEBACK, MAX_BUILD_CONFIG_BYTES
 from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resources import ManagedBy, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.inventory.overrides import (
+    InventoryOverrideDisposition,
+    InventorySourceKind,
+    OverrideIdentity,
+    set_override,
+)
+from kdive.inventory.reconcile import resource_identity_lock
 from kdive.inventory.serialize import read_inventory_snapshot, serialize_inventory
 from kdive.inventory.writeback import (
     WritebackTarget,
@@ -251,6 +261,11 @@ async def set_host_capacity(
 
     Admission honors the new cap on the next request. Lowering it below the live count
     blocks new placement without evicting anyone. Audited to ``platform_audit_log``.
+
+    For a ``managed_by='config'`` host the change writes a ``detached`` override-ledger entry
+    (ADR-0199) in the same transaction under the per-identity lock, so reconcile stops re-asserting
+    the file's cap and the runtime value sticks across passes. A runtime/discovery host writes no
+    entry (reconcile never overwrites a runtime row's cap; a discovery row is outside the ledger).
     """
     with bind_context(principal=ctx.principal):
         try:
@@ -268,13 +283,27 @@ async def set_host_capacity(
                 suggested_next_actions=[_SET_CAPACITY_TOOL],
             )
         async with pool.connection() as conn, conn.transaction():
-            updated = await _update_host_cap(conn, target, cap)
-            if not updated:
+            host = await _lock_host_for_cap(conn, target)
+            if host is None:
                 return ToolResponse.failure(
                     _CAPACITY_OBJECT_ID,
                     ErrorCategory.CONFIGURATION_ERROR,
                     suggested_next_actions=["resources.list"],
                 )
+            async with resource_identity_lock(conn, host.kind, host.name):
+                await _merge_host_cap(conn, target, cap)
+                if host.managed_by == ManagedBy.CONFIG.value:
+                    await set_override(
+                        conn,
+                        OverrideIdentity(
+                            source_kind=InventorySourceKind.RESOURCE,
+                            resource_kind=host.kind.value,
+                            name=host.name,
+                        ),
+                        disposition=InventoryOverrideDisposition.DETACHED,
+                        reason=_SET_CAPACITY_TOOL,
+                        actor=actor_for(ctx),
+                    )
             await _audit_applied(
                 conn,
                 ctx,
@@ -347,21 +376,53 @@ async def _upsert_coeff(conn: AsyncConnection, cost_class: str, coeff: Decimal) 
         )
 
 
-async def _update_host_cap(conn: AsyncConnection, resource_id: UUID, cap: int) -> bool:
+@dataclass(frozen=True, slots=True)
+class _CapHostRow:
+    """The identity/ownership fields a cap change needs for the lock key and ledger PK."""
+
+    kind: ResourceKind
+    name: str
+    managed_by: str
+
+
+async def _lock_host_for_cap(conn: AsyncConnection, resource_id: UUID) -> _CapHostRow | None:
+    """SELECT … FOR UPDATE the host's ``(kind, name, managed_by)``; ``None`` when the id is absent.
+
+    Read under ``FOR UPDATE`` before the cap merge so the lock key (``(kind, name)``) and the
+    ledger PK are available and the row cannot change ownership underneath the detach decision. A
+    config host with no ``name`` cannot be detached (the ledger is keyed by name); that is
+    impossible for a config-declared identity (reconcile always names it), so a missing name is
+    treated as a non-detachable row and the cap merge still applies.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT kind, name, managed_by FROM resources WHERE id = %s FOR UPDATE",
+            (resource_id,),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    name = row["name"]
+    return _CapHostRow(
+        kind=ResourceKind(str(row["kind"])),
+        name=str(name) if name is not None else "",
+        managed_by=str(row["managed_by"]),
+    )
+
+
+async def _merge_host_cap(conn: AsyncConnection, resource_id: UUID, cap: int) -> None:
     """Merge ``concurrent_allocation_cap`` into the host's capabilities jsonb in place.
 
     A targeted ``jsonb ||`` merge (not a whole-model upsert) so a concurrent status/health
     write cannot be clobbered by a stale read, and the rest of the host's capabilities are
-    preserved. Returns ``False`` if no host has that id.
+    preserved. The row was already locked ``FOR UPDATE`` by :func:`_lock_host_for_cap`.
     """
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "UPDATE resources "
-            "SET capabilities = capabilities || jsonb_build_object(%s::text, %s::int) "
-            "WHERE id = %s",
-            (CONCURRENT_ALLOCATION_CAP_KEY, cap, resource_id),
-        )
-        return cur.rowcount == 1
+    await conn.execute(
+        "UPDATE resources "
+        "SET capabilities = capabilities || jsonb_build_object(%s::text, %s::int) "
+        "WHERE id = %s",
+        (CONCURRENT_ALLOCATION_CAP_KEY, cap, resource_id),
+    )
 
 
 async def _audit_applied(

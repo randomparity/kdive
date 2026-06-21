@@ -98,7 +98,7 @@ def _register_resources_deregister(app: FastMCP, pool: AsyncConnectionPool) -> N
         name=DEREGISTER_TOOL, annotations=_docmeta.destructive(), meta={"maturity": "implemented"}
     )
     async def resources_deregister(
-        resource_id: Annotated[str, Field(description="The runtime Resource UUID to deregister.")],
+        resource_id: Annotated[str, Field(description="The Resource UUID to deregister.")],
         force: Annotated[
             bool,
             Field(
@@ -108,10 +108,20 @@ def _register_resources_deregister(app: FastMCP, pool: AsyncConnectionPool) -> N
                 )
             ),
         ] = False,
+        reason: Annotated[
+            str,
+            Field(
+                description=(
+                    "Audit reason; required (non-empty) when deregistering a config-owned "
+                    "remote-libvirt resource (durable removal via the override ledger). Ignored "
+                    "for a runtime resource."
+                )
+            ),
+        ] = "",
     ) -> ToolResponse:
-        """Deregister a runtime resource."""
+        """Deregister a runtime or config-owned remote-libvirt resource."""
         return await deregister_resource(
-            pool, current_context(), resource_id=resource_id, force=force
+            pool, current_context(), resource_id=resource_id, force=force, reason=reason
         )
 
 

@@ -62,3 +62,4 @@ Remove a registered build host.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | The build host name to remove. |
+| `reason` | string | no | Audit reason; required (non-empty) when removing a config-owned build host (durable removal via the override ledger). Ignored for a runtime host. |
