@@ -83,6 +83,8 @@ def test_assert_persistable_rejects_a_placeholder() -> None:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     # the marker is named so the operator knows what to complete; no secret echoed.
     assert serialize.REMOTE_PLACEHOLDER_PREFIX in str(exc.value)
+    # the details carry the marker under the exact key the tool/log reads.
+    assert exc.value.details == {"marker": writeback.WRITEBACK_PLACEHOLDER_MARKER}
 
 
 def test_guard_marker_matches_a_freshly_serialized_skeleton() -> None:
@@ -607,6 +609,7 @@ def test_file_adapter_missing_parent_is_configuration_error(tmp_path: Path) -> N
         _run(writeback.MountedFileWriteback(target).write("x = 1\n"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(target) in str(exc.value)
+    assert exc.value.details == {"path": str(target)}
     assert not target.exists()
 
 
@@ -628,25 +631,64 @@ def _configmap_adapter(
 
 
 def test_configmap_patch_issues_the_expected_request() -> None:
+    import json
+
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        captured["called"] = True
         captured["method"] = request.method
         captured["url"] = str(request.url)
         captured["auth"] = request.headers.get("authorization")
         captured["content_type"] = request.headers.get("content-type")
+        captured["accept"] = request.headers.get("accept")
         captured["body"] = request.content.decode()
         return httpx.Response(200, json={"kind": "ConfigMap"})
 
     _run(_configmap_adapter(handler).write("schema_version = 2\n"))
+    # the mock transport must actually be used (not bypassed for a real-network client).
+    assert captured.get("called") is True
     assert captured["method"] == "PATCH"
     # httpx canonicalizes the default :443 out of the URL; assert the path, not the port form.
     assert str(captured["url"]).endswith("/api/v1/namespaces/kdive/configmaps/kdive-systems")
     assert str(captured["url"]).startswith("https://10.0.0.1")
     assert captured["auth"] == "Bearer tok-abc"
     assert captured["content_type"] == "application/strategic-merge-patch+json"
-    assert '"systems.toml"' in str(captured["body"])
-    assert "schema_version = 2" in str(captured["body"])
+    assert captured["accept"] == "application/json"
+    # the body is a strategic-merge patch on data.<key>, carrying the exact document.
+    payload = json.loads(str(captured["body"]))
+    assert payload == {"data": {"systems.toml": "schema_version = 2\n"}}
+
+
+def test_configmap_strips_trailing_slash_from_api_base() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200)
+
+    adapter = writeback.ConfigMapWriteback(
+        namespace="kdive",
+        name="kdive-systems",
+        key="systems.toml",
+        token="tok",  # noqa: S106
+        api_base="https://10.0.0.1:443/",
+        transport=httpx.MockTransport(handler),
+    )
+    _run(adapter.write("x = 1\n"))
+    # a trailing slash on api_base must not produce a double slash before /api.
+    assert "//api/v1" not in str(captured["url"]).replace("https://", "")
+    assert str(captured["url"]).endswith("/api/v1/namespaces/kdive/configmaps/kdive-systems")
+
+
+def test_configmap_401_maps_to_configuration_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "unauthorized"})
+
+    with pytest.raises(CategorizedError) as exc:
+        _run(_configmap_adapter(handler).write("x = 1\n"))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"configmap": "kdive-systems", "status": 401}
 
 
 def test_configmap_403_maps_to_configuration_error() -> None:
@@ -657,6 +699,26 @@ def test_configmap_403_maps_to_configuration_error() -> None:
         _run(_configmap_adapter(handler).write("x = 1\n"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "kdive-systems" in str(exc.value)
+    assert exc.value.details == {"configmap": "kdive-systems", "status": 403}
+
+
+def test_configmap_300_is_not_treated_as_success() -> None:
+    # the success window is 2xx only; a 3xx redirect must surface as a failure, not silently pass.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(300, json={"message": "multiple choices"})
+
+    with pytest.raises(CategorizedError) as exc:
+        _run(_configmap_adapter(handler).write("x = 1\n"))
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"target": "configmap", "status": 300}
+
+
+def test_configmap_2xx_other_than_200_succeeds() -> None:
+    # 201/204 are still success; the lower bound of the window is 200, not 201.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"kind": "ConfigMap"})
+
+    _run(_configmap_adapter(handler).write("x = 1\n"))
 
 
 def test_configmap_500_is_infrastructure_failure_without_body() -> None:
@@ -672,6 +734,7 @@ def test_configmap_500_is_infrastructure_failure_without_body() -> None:
     # the response body (which can echo cluster internals) is never surfaced.
     assert leaky_body not in str(exc.value)
     assert leaky_body not in repr(exc.value.details)
+    assert exc.value.details == {"target": "configmap", "status": 500}
 
 
 def test_configmap_transport_error_is_infrastructure_failure() -> None:
@@ -684,6 +747,10 @@ def test_configmap_transport_error_is_infrastructure_failure() -> None:
     # the token is never echoed in an error.
     assert "tok-abc" not in str(exc.value)
     assert "tok-abc" not in repr(exc.value.details)
+    # the details name the failing target and the exception type (not its message).
+    assert exc.value.details == {"target": "configmap", "error": "ConnectError"}
+    assert "ConnectError" in str(exc.value)
+    assert "connection refused" not in str(exc.value)
 
 
 def test_configmap_from_in_cluster_without_mount_is_configuration_error(tmp_path: Path) -> None:
@@ -738,3 +805,165 @@ def test_factory_configmap_outside_a_pod_is_configuration_error(
     with pytest.raises(CategorizedError) as exc:
         writeback.resolve_writeback_target()
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # the configmap branch was taken: the message is the in-cluster failure, NOT the
+    # "unknown value" error a mis-typed selector would raise.
+    assert "running in a Kubernetes pod" in str(exc.value)
+    assert "unknown" not in str(exc.value).lower()
+
+
+def test_factory_empty_value_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    # an explicitly empty (whitespace) selector is treated as off, not an unknown value.
+    _load_env(monkeypatch, KDIVE_INVENTORY_WRITEBACK="   ")
+    assert writeback.resolve_writeback_target() is None
+
+
+def test_factory_value_is_case_insensitive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "systems.toml"))
+    _load_env(monkeypatch, KDIVE_INVENTORY_WRITEBACK="FILE")
+    target = writeback.resolve_writeback_target()
+    assert isinstance(target, writeback.MountedFileWriteback)
+
+
+def test_factory_file_adapter_targets_the_configured_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # the selected file adapter must write to KDIVE_SYSTEMS_TOML, not some other path.
+    target_path = tmp_path / "nested" / "systems.toml"
+    target_path.parent.mkdir()
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(target_path))
+    _load_env(monkeypatch, KDIVE_INVENTORY_WRITEBACK="file")
+    adapter = writeback.resolve_writeback_target()
+    assert isinstance(adapter, writeback.MountedFileWriteback)
+    _run(adapter.write("x = 1\n"))
+    assert target_path.read_text() == "x = 1\n"
+
+
+def test_factory_unknown_value_carries_accepted_values_in_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _load_env(monkeypatch, KDIVE_INVENTORY_WRITEBACK="bogus")
+    with pytest.raises(CategorizedError) as exc:
+        writeback.resolve_writeback_target()
+    assert exc.value.details == {
+        "variable": "KDIVE_INVENTORY_WRITEBACK",
+        "accepted_values": ["off", "configmap", "file"],
+    }
+
+
+def test_factory_configmap_in_a_pod_uses_default_and_overridden_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_sa_mount(tmp_path, namespace="ns-x")
+    monkeypatch.setattr(writeback, "_SERVICE_ACCOUNT_DIR", tmp_path)
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.9")
+
+    _load_env(monkeypatch, KDIVE_INVENTORY_WRITEBACK="configmap")
+    default_target = writeback.resolve_writeback_target()
+    assert isinstance(default_target, writeback.ConfigMapWriteback)
+    # default ConfigMap name, the file-name key, and the namespace from the mount.
+    assert default_target._name == "kdive-systems"
+    assert default_target._key == "systems.toml"
+    assert default_target._namespace == "ns-x"
+
+    _load_env(
+        monkeypatch,
+        KDIVE_INVENTORY_WRITEBACK="configmap",
+        KDIVE_INVENTORY_WRITEBACK_CONFIGMAP="custom-cm",
+    )
+    custom_target = writeback.resolve_writeback_target()
+    assert isinstance(custom_target, writeback.ConfigMapWriteback)
+    assert custom_target._name == "custom-cm"
+
+
+# ---- ConfigMapWriteback.from_in_cluster -----------------------------------------------
+
+
+def _write_sa_mount(sa_dir: Path, *, token: str = "tok", namespace: str = "kdive") -> None:
+    sa_dir.mkdir(parents=True, exist_ok=True)
+    (sa_dir / "token").write_text(token)
+    (sa_dir / "namespace").write_text(namespace)
+    (sa_dir / "ca.crt").write_text("---ca---")
+
+
+def test_from_in_cluster_builds_adapter_from_mount_and_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_sa_mount(tmp_path, token="tok-xyz", namespace="ns-1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.1.2.3")
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "6443")
+    adapter = writeback.ConfigMapWriteback.from_in_cluster(
+        name="my-cm", key="systems.toml", service_account_dir=tmp_path
+    )
+    assert adapter.target_kind == "configmap"
+    assert adapter._namespace == "ns-1"
+    assert adapter._name == "my-cm"
+    assert adapter._key == "systems.toml"
+    assert adapter._token == "tok-xyz"  # noqa: S105
+    assert adapter._api_base == "https://10.1.2.3:6443"
+    assert adapter._verify == str(tmp_path / "ca.crt")
+
+
+def test_from_in_cluster_defaults_port_to_443(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_sa_mount(tmp_path)
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.delenv("KUBERNETES_SERVICE_PORT", raising=False)
+    adapter = writeback.ConfigMapWriteback.from_in_cluster(
+        name="cm", key="k", service_account_dir=tmp_path
+    )
+    assert adapter._api_base == "https://10.0.0.1:443"
+
+
+def test_from_in_cluster_missing_token_names_the_token(tmp_path: Path) -> None:
+    (tmp_path / "namespace").write_text("kdive")
+    (tmp_path / "ca.crt").write_text("ca")
+    with pytest.raises(CategorizedError) as exc:
+        writeback.ConfigMapWriteback.from_in_cluster(
+            name="cm", key="k", service_account_dir=tmp_path
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "but the service-account token is not" in str(exc.value)
+    assert exc.value.details == {"variable": "KDIVE_INVENTORY_WRITEBACK"}
+
+
+def test_from_in_cluster_empty_token_is_treated_as_missing(tmp_path: Path) -> None:
+    # a present-but-blank token file must fail closed, naming the token.
+    _write_sa_mount(tmp_path, token="   ")
+    with pytest.raises(CategorizedError) as exc:
+        writeback.ConfigMapWriteback.from_in_cluster(
+            name="cm", key="k", service_account_dir=tmp_path
+        )
+    assert "but the service-account token is not" in str(exc.value)
+
+
+def test_from_in_cluster_missing_namespace_names_the_namespace(tmp_path: Path) -> None:
+    (tmp_path / "token").write_text("tok")
+    (tmp_path / "ca.crt").write_text("ca")
+    with pytest.raises(CategorizedError) as exc:
+        writeback.ConfigMapWriteback.from_in_cluster(
+            name="cm", key="k", service_account_dir=tmp_path
+        )
+    assert "but the pod namespace is not" in str(exc.value)
+
+
+def test_from_in_cluster_missing_ca_names_the_ca(tmp_path: Path) -> None:
+    (tmp_path / "token").write_text("tok")
+    (tmp_path / "namespace").write_text("kdive")
+    with pytest.raises(CategorizedError) as exc:
+        writeback.ConfigMapWriteback.from_in_cluster(
+            name="cm", key="k", service_account_dir=tmp_path
+        )
+    assert "but the service-account CA (ca.crt) is not" in str(exc.value)
+
+
+def test_from_in_cluster_missing_service_host_names_the_env_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_sa_mount(tmp_path)
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    with pytest.raises(CategorizedError) as exc:
+        writeback.ConfigMapWriteback.from_in_cluster(
+            name="cm", key="k", service_account_dir=tmp_path
+        )
+    assert "but the KUBERNETES_SERVICE_HOST is not" in str(exc.value)
