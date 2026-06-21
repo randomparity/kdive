@@ -2,6 +2,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+from tests.host_capabilities import requires_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -45,6 +47,8 @@ def test_stack_stop_uses_pid_file_not_process_name_patterns() -> None:
     assert "pkill" not in text
 
 
+# The foreground path blocks on `wait -n` (bash >= 4.3); the --daemon path returns before it.
+@requires_bash(4, 3, "wait -n")
 def test_stack_start_foreground_exits_when_any_child_exits(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

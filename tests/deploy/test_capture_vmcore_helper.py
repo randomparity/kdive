@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.host_capabilities import requires_gnu_find
+
 HELPER = (
     Path(__file__).resolve().parents[2]
     / "deploy"
@@ -55,6 +57,8 @@ def test_absent_dump_dir_is_clean_present_false(tmp_path: Path) -> None:
     assert set(payload) == _INSPECT_KEYS
 
 
+# Scanning the dump directory uses GNU `find -printf` (absent in BSD/macOS find).
+@requires_gnu_find("dump-directory scan")
 def test_empty_dump_dir_is_clean_present_false(tmp_path: Path) -> None:
     """An existing-but-empty dump directory is also a clean present=false."""
     code, payload = _inspect(tmp_path)
@@ -63,6 +67,7 @@ def test_empty_dump_dir_is_clean_present_false(tmp_path: Path) -> None:
     assert set(payload) == _INSPECT_KEYS
 
 
+@requires_gnu_find("dump-directory scan")
 def test_present_core_reports_base64_sha_and_size(tmp_path: Path) -> None:
     """A core under <dir>/*/vmcore yields present=true with a base64 sha256 and its byte size."""
     body = b"\x7fELF" + b"kdive-test-core" * 64
