@@ -32,7 +32,6 @@ from kdive.domain.catalog.resource_capabilities import (
     VCPUS_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.inventory._row_typing import RowTyper
 from kdive.inventory.overrides import (
     BUILD_HOST_RESOURCE_KIND,
     InventoryOverrideDisposition,
@@ -326,10 +325,6 @@ def _require_int(value: int | None, name: str, field: str) -> int:
 
 
 # ---- read_inventory_snapshot (DB read + ledger honoring) ------------------------------
-
-_IMAGE_ROWS = RowTyper("image_catalog")
-_RESOURCE_ROWS = RowTyper("resources")
-_BUILD_HOST_ROWS = RowTyper("build_hosts")
 
 
 async def read_inventory_snapshot(conn: AsyncConnection) -> InventorySnapshot:
