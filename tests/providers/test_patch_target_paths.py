@@ -190,6 +190,17 @@ def test_parse_gnu_build_id_skips_a_non_gnu_note_then_finds_the_gnu_note() -> No
     assert parse_gnu_build_id(other + gnu) == "abcdef01"
 
 
+def test_parse_gnu_build_id_skips_a_type3_note_whose_name_is_not_gnu() -> None:
+    # A note with the right note_type (3 == NT_GNU_BUILD_ID) but a NON-"GNU" name (b"FOO") must be
+    # skipped, not accepted: only `note_type == 3 AND name == b"GNU"` returns. Isolates the
+    # `name == b"GNU"` conjunct — a mutant dropping it would return the FOO descriptor's hex.
+    foo_desc = bytes.fromhex("11223344")
+    foo = struct.pack("<III", 4, len(foo_desc), 3) + b"FOO\x00" + foo_desc
+    build_id = bytes.fromhex("abcdef01")
+    gnu = struct.pack("<III", 4, len(build_id), 3) + b"GNU\x00" + build_id
+    assert parse_gnu_build_id(foo + gnu) == "abcdef01"
+
+
 def test_extract_build_id_ranged_returns_the_note_build_id() -> None:
     blob = _elf_with_build_id(bytes.fromhex("0011223344"))
     store = _FakeStore({"vmlinux": blob}, {})

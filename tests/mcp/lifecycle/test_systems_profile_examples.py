@@ -426,3 +426,46 @@ def test_remote_base_volume_requires_name_match_and_staged_source(
     volume = _profile_of(remote)["provider"]["remote-libvirt"]["base_image_volume"]
     assert volume == "REPLACE_ME-base-image-volume"
     assert "some-other-image" not in json.dumps(examples)
+
+
+def test_remote_base_volume_requires_staged_source_kind(tmp_path: Path) -> None:
+    # The matching PUBLIC remote image exists and its name equals the instance base_image, but its
+    # source kind is s3 (not staged) — there is no host volume to provision from. The lookup must
+    # return None and fall back to the placeholder. Isolates the `isinstance(..., StagedSource)`
+    # conjunct: a mutant dropping it (or widening the `and` to `or`) would surface a real reference.
+    doc = InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "image": [
+                {
+                    "provider": "remote-libvirt",
+                    "name": "remote-base",
+                    "arch": "x86_64",
+                    "format": "qcow2",
+                    "root_device": "/dev/vda1",
+                    "visibility": "public",
+                    "source": {"kind": "s3", "object_key": "images/remote-base.qcow2"},
+                }
+            ],
+            "remote_libvirt": [
+                {
+                    "name": "remote-host",
+                    "cost_class": "remote",
+                    "uri": "qemu+tls://h/system",
+                    "gdb_addr": "10.0.0.5",
+                    "gdbstub_range": "1234-1240",
+                    "client_cert_ref": "secret://c",  # pragma: allowlist secret
+                    "client_key_ref": "secret://k",  # pragma: allowlist secret
+                    "ca_cert_ref": "secret://a",  # pragma: allowlist secret
+                    "base_image": "remote-base",
+                    "vcpus": 4,
+                    "memory_mb": 8192,
+                }
+            ],
+        }
+    )
+    examples = _examples(doc)
+    remote = examples["remote-libvirt"]
+    assert remote["uses_real_reference"] is False
+    volume = _profile_of(remote)["provider"]["remote-libvirt"]["base_image_volume"]
+    assert volume == "REPLACE_ME-base-image-volume"

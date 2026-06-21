@@ -12,6 +12,7 @@ import asyncio
 
 import pytest
 
+from kdive.db.build_hosts import WORKER_LOCAL_ID
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
@@ -318,13 +319,15 @@ def test_factory_defaults_do_not_opt_into_egress_or_buildhost_agent(monkeypatch,
     # The opt-in flags default OFF: a bare factory call builds a service rather than raising the
     # egress fail-fast (with_egress defaulting True) or the no-pool buildhost-agent fail-fast
     # (with_buildhost_agent defaulting True, which needs a pool).
-    from kdive.diagnostics.service import default_service_factory
+    from kdive.diagnostics.service import _DEFAULT_PER_CHECK_TIMEOUT, default_service_factory
 
     _load_minimal_config(monkeypatch, tmp_path)
     service = default_service_factory(None)
     assert isinstance(service, DiagnosticsService)
-    # The default (no buildhost-agent) keeps the tight per-check timeout, not the generous one.
-    assert service._timeout < 180.0  # noqa: SLF001
+    # The default (no buildhost-agent) keeps the tight per-check timeout, not the generous 600s
+    # buildhost cap. Pin the exact constant so any mutation of the default value is caught.
+    assert service._timeout == _DEFAULT_PER_CHECK_TIMEOUT  # noqa: SLF001
+    assert _DEFAULT_PER_CHECK_TIMEOUT == 10.0
 
 
 def test_factory_with_egress_fail_fast_names_the_egress_flag(monkeypatch, tmp_path) -> None:
@@ -351,12 +354,83 @@ def test_factory_buildhost_agent_without_pool_fail_fast_names_the_flag(
     assert str(exc.value).startswith("ephemeral_libvirt_buildhost_agent (--with-buildhost-agent)")
 
 
+class _StubCursor:
+    """An async cursor stub for ``SELECT * FROM build_hosts WHERE id = %s``.
+
+    Honors the queried id: the seeded row comes back only when the lookup uses ``WORKER_LOCAL_ID``,
+    so a probe that passes the wrong host id (or ``None``) reads ``None`` and fails open to enabled.
+    """
+
+    def __init__(self, row: dict[str, object]) -> None:
+        self._row = row
+        self._matched = False
+
+    async def __aenter__(self) -> _StubCursor:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def execute(self, _sql: str, params: object = None) -> None:
+        queried_id = params[0] if isinstance(params, (tuple, list)) and params else params
+        self._matched = queried_id == self._row["id"]
+
+    async def fetchone(self) -> dict[str, object] | None:
+        return self._row if self._matched else None
+
+
+class _StubConn:
+    def __init__(self, row: dict[str, object]) -> None:
+        self._row = row
+
+    def cursor(self, *_args: object, **_kwargs: object) -> _StubCursor:
+        return _StubCursor(self._row)
+
+
+class _StubConnCtx:
+    def __init__(self, row: dict[str, object]) -> None:
+        self._row = row
+
+    async def __aenter__(self) -> _StubConn:
+        return _StubConn(self._row)
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class _StubPool:
+    """A minimal AsyncConnectionPool stand-in whose connection yields one seeded row.
+
+    Unlike ``cast(AsyncConnectionPool, object())`` — which raises inside ``pool.connection()`` and
+    makes ``local_host_enabled_probe`` fail OPEN to enabled (indistinguishable from the default
+    always-enabled probe) — this exercises the real DB-read path, so the wired ``enabled`` flag is
+    observable in the verdict.
+    """
+
+    def __init__(self, *, enabled: bool) -> None:
+        self._row: dict[str, object] = {
+            "id": WORKER_LOCAL_ID,
+            "name": "worker-local",
+            "kind": "local",
+            "address": None,
+            "ssh_credential_ref": None,
+            "base_image_volume": None,
+            "workspace_root": "/srv/kdive",
+            "max_concurrent": 1,
+            "enabled": enabled,
+            "state": "ready",
+        }
+
+    def connection(self) -> _StubConnCtx:
+        return _StubConnCtx(self._row)
+
+
 def test_build_host_check_with_pool_runs_its_warm_tree_and_enabled_probes(
     monkeypatch, tmp_path
 ) -> None:
-    # With a pool, _build_host_checks wires BOTH a warm-tree source probe and an enabled probe
-    # into the assembled local_kernel_src check. A dropped/None probe would raise at run time and
-    # surface as an error; here KDIVE_KERNEL_SRC points at an existing tree so the check PASSes.
+    # With a pool, _build_host_checks wires BOTH a warm-tree source probe and an enabled probe into
+    # the assembled local_kernel_src check. KDIVE_KERNEL_SRC points at an existing tree (USABLE),
+    # and the seeded worker-local host reads back ENABLED, so the warm-tree verdict is surfaced.
     from typing import cast
 
     from psycopg_pool import AsyncConnectionPool
@@ -365,12 +439,49 @@ def test_build_host_check_with_pool_runs_its_warm_tree_and_enabled_probes(
     from kdive.diagnostics.service import _build_host_checks
 
     _load_minimal_config(monkeypatch, tmp_path)
-    # KDIVE_KERNEL_SRC is set to tmp_path (an existing absolute tree) by _load_minimal_config, so
-    # the warm-tree probe resolves USABLE. The fake pool fails open to "enabled" at probe time.
-    checks = _build_host_checks(cast(AsyncConnectionPool, object()))
+    checks = _build_host_checks(cast(AsyncConnectionPool, _StubPool(enabled=True)))
     assert [c.id for c in checks] == [LOCAL_KERNEL_SRC_ID]
     result = asyncio.run(run_check(checks[0], timeout=5.0))
     assert result.status is CheckStatus.PASS
+    # The ENABLED host means the warm-tree probe is what decides the verdict, not the suppression.
+    assert "KDIVE_KERNEL_SRC points at an existing absolute tree" in result.detail
+
+
+def test_build_host_check_without_pool_runs_the_warm_tree_probe(monkeypatch, tmp_path) -> None:
+    # Without a pool, _build_host_checks still assembles the local_kernel_src check with a real
+    # warm-tree probe (and the always-enabled default). KDIVE_KERNEL_SRC points at an existing tree,
+    # so it PASSes on the warm-tree verdict. A dropped/None warm-tree probe would raise at run time.
+    from kdive.diagnostics.checks import LOCAL_KERNEL_SRC_ID, run_check
+    from kdive.diagnostics.service import _build_host_checks
+
+    _load_minimal_config(monkeypatch, tmp_path)
+    checks = _build_host_checks(None)
+    assert [c.id for c in checks] == [LOCAL_KERNEL_SRC_ID]
+    result = asyncio.run(run_check(checks[0], timeout=5.0))
+    assert result.status is CheckStatus.PASS
+    assert "KDIVE_KERNEL_SRC points at an existing absolute tree" in result.detail
+
+
+def test_build_host_check_enabled_probe_suppresses_when_seeded_host_disabled(
+    monkeypatch, tmp_path
+) -> None:
+    # The enabled_probe wiring is observable: a DISABLED seeded worker-local host makes the check
+    # suppress its warm-tree verdict and return the n/a PASS instead. Dropping the
+    # enabled_probe=... wiring (or passing pool=None) falls back to the always-enabled default,
+    # which would surface the warm-tree USABLE detail here instead — killing that mutant.
+    from typing import cast
+
+    from psycopg_pool import AsyncConnectionPool
+
+    from kdive.diagnostics.checks import run_check
+    from kdive.diagnostics.service import _build_host_checks
+
+    _load_minimal_config(monkeypatch, tmp_path)
+    checks = _build_host_checks(cast(AsyncConnectionPool, _StubPool(enabled=False)))
+    result = asyncio.run(run_check(checks[0], timeout=5.0))
+    assert result.status is CheckStatus.PASS
+    assert "the seeded local build host is disabled" in result.detail
+    assert "KDIVE_KERNEL_SRC points at an existing absolute tree" not in result.detail
 
 
 _REMOTE_SYSTEMS = """\
