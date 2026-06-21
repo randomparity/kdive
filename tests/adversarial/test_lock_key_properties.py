@@ -56,3 +56,13 @@ def test_string_keyed_project_lock_is_deterministic_and_in_range(project: str) -
 def test_distinct_project_strings_separate(a: str, b: str) -> None:
     if a != b:
         assert _lock_key(LockScope.PROJECT, a) != _lock_key(LockScope.PROJECT, b)
+
+
+def test_lock_key_wire_format_is_stable() -> None:
+    # The derived key is the on-the-wire pg_advisory_lock identifier: any drift in the
+    # digest input (scope bytes, the NUL separator, key bytes, or byte order) silently
+    # changes every lock key, so two processes on different code versions would stop
+    # serializing against each other. Pin the exact derivation for fixed inputs.
+    fixed_uuid = UUID("12345678-1234-5678-1234-567812345678")
+    assert _lock_key(LockScope.ALLOCATION, fixed_uuid) == 3739314786859465954
+    assert _lock_key(LockScope.PROJECT, "demo") == 6290104168325931531
