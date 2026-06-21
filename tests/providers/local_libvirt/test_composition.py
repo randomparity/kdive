@@ -14,6 +14,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.local_libvirt import composition
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
+from kdive.providers.local_libvirt.debug.gdbmi import default_attach_seam
 from kdive.providers.local_libvirt.debug.introspect import (
     LocalLibvirtLiveIntrospect,
     LocalLibvirtVmcoreIntrospect,
@@ -28,6 +29,7 @@ from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.local_libvirt.rootfs_build import LocalLibvirtRootfsBuildPlane
 from kdive.providers.shared.debug_common.gdbmi import GdbMiEngine
+from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -81,3 +83,35 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     }
     assert runtime.build_config_validator is not None
     assert runtime.rootfs_validator is not None
+
+
+def test_build_runtime_threads_secret_registry_into_secret_aware_ports() -> None:
+    registry = SecretRegistry()
+    runtime = composition.build_runtime(secret_registry=registry)
+
+    # The single caller-supplied registry must reach every secret-aware port, not be
+    # dropped (which would silently disable redaction for that port).
+    assert runtime.builder._secret_registry is registry
+    assert runtime.retriever._secret_registry is registry
+    assert runtime.vmcore_introspector._secret_registry is registry
+    assert runtime.live_introspector._secret_registry is registry
+
+
+def test_build_runtime_debug_uses_default_attach_seam() -> None:
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+    assert runtime.debug is not None
+    assert runtime.debug.attach_seam is default_attach_seam
+
+
+def test_build_runtime_redactor_factory_masks_values_from_the_registry() -> None:
+    registry = SecretRegistry()
+    # Seed before composing: the factory's Redactor snapshots the registry it is given,
+    # so a value registered now proves the factory was wired to THIS registry.
+    registry.register("local-libvirt-capability-secret", scope=object())
+    runtime = composition.build_runtime(secret_registry=registry)
+    assert runtime.debug is not None
+
+    redactor = runtime.debug.engine._redactor_factory()
+    assert isinstance(redactor, Redactor)
+    masked = redactor.redact_text("prefix local-libvirt-capability-secret suffix")
+    assert "local-libvirt-capability-secret" not in masked
