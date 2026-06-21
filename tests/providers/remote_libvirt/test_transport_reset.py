@@ -191,6 +191,37 @@ def test_fleet_handle_matching_no_host_is_a_noop(tmp_path: Path) -> None:
     assert domain.calls == []
 
 
+def test_pki_base_dir_roots_the_materialized_pkipath(tmp_path: Path) -> None:
+    # The injected pki_base_dir must reach remote_connection so the per-op pkipath is
+    # materialized under the worker-local base (ADR-0077), not the shared system temp dir.
+    domain = FakeDomain(_DOMAIN)
+    conn = FakeControlConn({_DOMAIN: domain})
+    opened: list[str] = []
+
+    def open_connection(uri: str) -> FakeControlConn:
+        opened.append(uri)
+        return conn
+
+    resetter = RemoteLibvirtTransportResetter(
+        secret_registry=SecretRegistry(),
+        configs_factory=lambda: [_config()],
+        open_connection=open_connection,
+        secret_backend_factory=RecordingBackend,
+        pki_base_dir=tmp_path,
+    )
+
+    async def scenario() -> None:
+        await resetter.reset(
+            transport="gdbstub",
+            transport_handle=f"gdbstub://{_GDB_ADDR}:1234",
+            domain_name=_DOMAIN,
+        )
+
+    asyncio.run(scenario())
+    assert len(opened) == 1
+    assert f"pkipath={tmp_path}/kdive-remote-pki-" in opened[0]
+
+
 def test_monitor_error_maps_to_transport_failure(tmp_path: Path) -> None:
     domain = FakeDomain(_DOMAIN, raise_on={"qemuMonitorCommand": libvirt.VIR_ERR_OPERATION_FAILED})
 
@@ -204,3 +235,6 @@ def test_monitor_error_maps_to_transport_failure(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         asyncio.run(scenario())
     assert exc.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(exc.value) == "re-arming the remote gdbstub failed"
+    # The freed port is carried under the exact "port" key for downstream diagnostics.
+    assert exc.value.details == {"port": 1234}
