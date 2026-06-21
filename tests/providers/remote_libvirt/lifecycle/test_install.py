@@ -71,6 +71,20 @@ class _ScriptedAgent:
         raise AssertionError(payload)
 
 
+class _RecordingAgent(_ScriptedAgent):
+    """A scripted agent that records the domain name handed to each guest-exec spawn."""
+
+    def __init__(self, handler: _Handler, seen_domains: list[str]) -> None:
+        super().__init__(handler)
+        self._seen_domains = seen_domains
+
+    def __call__(self, domain: object, command: str, timeout: int, flags: int) -> str:
+        payload = json.loads(command)
+        if payload["execute"] == "guest-exec":
+            self._seen_domains.append(domain.name())  # type: ignore[attr-defined]
+        return super().__call__(domain, command, timeout, flags)
+
+
 class _FakeDomain:
     def __init__(self, name: str) -> None:
         self._name = name
@@ -237,15 +251,69 @@ def test_install_loopback_endpoint_fails_before_touching_the_guest(
     assert store.presigned == []  # never minted the GET
 
 
+def test_install_targets_the_requests_domain_and_owner() -> None:
+    # The install op must look up and exec against the System's own domain (kdive-<id>) and
+    # persist the transcript under that System's owner id, never a null/other identity.
+    seen_domains: list[str] = []
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        return AgentExecResult(0, b"ok", b"")
+
+    store = _FakeStore()
+    agent = _RecordingAgent(handler, seen_domains)
+    inst = RemoteLibvirtInstall(
+        secret_registry=SecretRegistry(),
+        config_factory=_config,
+        open_connection=lambda _uri: _FakeConn(),
+        store_factory=lambda: store,
+        agent_command=agent,
+        secret_backend_factory=_backend,
+        sleep=lambda _s: None,
+    )
+    request = _request(CaptureMethod.HOST_DUMP, "console=ttyS0")
+    inst.install(request)
+
+    expected_domain = f"kdive-{request.system_id}"
+    assert seen_domains == [expected_domain]
+    assert store.writes[0].owner_id == str(request.system_id)
+    assert store.writes[0].owner_kind == "systems"
+
+
+def test_install_opens_connection_with_pkipath_under_configured_base_dir(tmp_path) -> None:  # noqa: ANN001
+    # The injected pki_base_dir governs where the per-op TLS materials are staged; the opener
+    # must receive a URI whose pkipath lives under tmp_path, not the system temp dir.
+    seen: dict[str, str] = {}
+
+    def _opener(uri: str) -> _FakeConn:
+        seen["uri"] = uri
+        return _FakeConn()
+
+    inst = RemoteLibvirtInstall(
+        secret_registry=SecretRegistry(),
+        config_factory=_config,
+        open_connection=_opener,
+        store_factory=_FakeStore,
+        agent_command=_ScriptedAgent(lambda _argv: AgentExecResult(0, b"ok", b"")),
+        secret_backend_factory=_backend,
+        pki_base_dir=tmp_path,
+        sleep=lambda _s: None,
+    )
+    inst.install(_request(CaptureMethod.HOST_DUMP, "console=ttyS0"))
+
+    assert f"pkipath={tmp_path}" in seen["uri"]
+
+
 def test_install_nonzero_helper_exit_is_install_failure() -> None:
     def handler(argv: list[str]) -> AgentExecResult:
         return AgentExecResult(3, b"", b"curl: (22) 404")
 
+    request = _request(CaptureMethod.HOST_DUMP, "console=ttyS0")
     with pytest.raises(CategorizedError) as excinfo:
-        _install(handler, _FakeStore(), SecretRegistry()).install(
-            _request(CaptureMethod.HOST_DUMP, "console=ttyS0")
-        )
+        _install(handler, _FakeStore(), SecretRegistry()).install(request)
     assert excinfo.value.category is ErrorCategory.INSTALL_FAILURE
+    assert str(excinfo.value) == "in-guest kernel install exited non-zero"
+    assert excinfo.value.details["system_id"] == str(request.system_id)
+    assert excinfo.value.details["exit_status"] == 3
 
 
 def test_install_failure_surfaces_the_redacted_transcript() -> None:
@@ -339,15 +407,56 @@ def test_boot_ready_when_boot_id_changes_after_reboot() -> None:
     assert state["reboots"] == 1
 
 
+def test_boot_runs_baseline_reboot_and_poll_against_the_systems_domain() -> None:
+    # boot() reads a baseline boot-id, triggers the reboot, then polls boot-id until it
+    # changes — all helper subcommands run against the System's own domain (kdive-<id>).
+    system_id = uuid4()
+    seen_domains: list[str] = []
+    argv_subs: list[str] = []
+    state = {"reboots": 0}
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        argv_subs.append(argv[1])
+        if argv[1] == "boot":
+            state["reboots"] += 1
+            return AgentExecResult(0, b"scheduled", b"")
+        return AgentExecResult(0, (b"BASELINE-ID" if state["reboots"] == 0 else b"FRESH-ID"), b"")
+
+    inst = RemoteLibvirtInstall(
+        secret_registry=SecretRegistry(),
+        config_factory=_config,
+        open_connection=lambda _uri: _FakeConn(),
+        store_factory=_FakeStore,
+        agent_command=_RecordingAgent(handler, seen_domains),
+        secret_backend_factory=_backend,
+        boot_timeout_s=60.0,
+        boot_poll_s=0.0,
+        sleep=lambda _s: None,
+        monotonic=_FakeClock(),
+    )
+    inst.boot(system_id)
+
+    expected_domain = f"kdive-{system_id}"
+    assert set(seen_domains) == {expected_domain}  # every helper call hit the right domain
+    assert argv_subs[0] == "boot-id"  # baseline read first
+    assert "boot" in argv_subs  # reboot triggered
+    assert argv_subs[-1] == "boot-id"  # confirmed by a fresh boot-id read
+
+
 def test_boot_times_out_when_boot_id_never_changes() -> None:
     def handler(argv: list[str]) -> AgentExecResult:
         if argv[1] == "boot":
             return AgentExecResult(0, b"scheduled", b"")  # clean detached return
         return AgentExecResult(0, b"SAME-ID\n", b"")  # never changes
 
+    system_id = uuid4()
     with pytest.raises(CategorizedError) as excinfo:
-        _boot_install(handler, boot_timeout_s=5.0).boot(uuid4())
+        _boot_install(handler, boot_timeout_s=5.0).boot(system_id)
     assert excinfo.value.category is ErrorCategory.BOOT_TIMEOUT
+    assert str(excinfo.value) == (
+        "system did not reboot into a fresh kernel within the boot window"
+    )
+    assert excinfo.value.details == {"system_id": str(system_id), "timeout_s": 5.0}
 
 
 def test_boot_tolerates_clean_nonzero_reboot_exit() -> None:
@@ -369,3 +478,50 @@ def test_boot_unreachable_agent_at_baseline_is_transport_failure() -> None:
     with pytest.raises(CategorizedError) as excinfo:
         _boot_install(handler).boot(uuid4())
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+
+
+def test_boot_nonzero_baseline_boot_id_is_install_failure() -> None:
+    # A non-zero boot-id baseline read is a fault before any reboot; it surfaces as an
+    # install_failure naming the System whose baseline could not be read.
+    system_id = uuid4()
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        return AgentExecResult(2, b"", b"boot-id read failed")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _boot_install(handler).boot(system_id)
+    assert excinfo.value.category is ErrorCategory.INSTALL_FAILURE
+    assert excinfo.value.details == {"system_id": str(system_id), "exit_status": 2}
+
+
+def test_boot_sleeps_the_configured_poll_interval_between_boot_id_polls() -> None:
+    # The await loop waits boot_poll_s between polls; assert the configured interval flows
+    # through to sleep (not None / not some other value).
+    slept: list[float] = []
+    state = {"reboots": 0, "polls": 0}
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        if argv[1] == "boot":
+            state["reboots"] += 1
+            return AgentExecResult(0, b"scheduled", b"")
+        if state["reboots"] == 0:
+            return AgentExecResult(0, b"BASELINE-ID", b"")
+        state["polls"] += 1
+        # Stay on the baseline for one poll (forcing a sleep), then flip.
+        return AgentExecResult(0, (b"BASELINE-ID" if state["polls"] == 1 else b"FRESH-ID"), b"")
+
+    inst = RemoteLibvirtInstall(
+        secret_registry=SecretRegistry(),
+        config_factory=_config,
+        open_connection=lambda _uri: _FakeConn(),
+        store_factory=_FakeStore,
+        agent_command=_ScriptedAgent(handler),
+        secret_backend_factory=_backend,
+        boot_timeout_s=60.0,
+        boot_poll_s=7.0,
+        sleep=slept.append,
+        monotonic=_FakeClock(),
+    )
+    inst.boot(uuid4())
+
+    assert 7.0 in slept
