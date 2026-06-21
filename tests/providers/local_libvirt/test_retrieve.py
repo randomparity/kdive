@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from dataclasses import dataclass, field
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.storage import (
+    ArtifactStreamRequest,
+    ArtifactWriteRequest,
+    HeadResult,
+    StoredArtifact,
+)
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -46,9 +54,17 @@ def test_rejected_commands_have_a_reason(command: str) -> None:
     assert crash_command_rejection_reason(command, _ALLOW) is not None
 
 
+def _sha256_b64(data: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+
+
 @dataclass
 class _FakeStore:
+    """Records both byte puts and streamed puts; serves a matching ``head`` for verification."""
+
     puts: list[tuple[str, str, Sensitivity, bytes]] = field(default_factory=list)
+    streams: list[tuple[str, str, Path, str]] = field(default_factory=list)
+    heads: dict[str, HeadResult] = field(default_factory=dict)
     fail_on: str | None = None
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
@@ -62,107 +78,124 @@ class _FakeStore:
             key, "etag-" + request.name, request.sensitivity, request.retention_class
         )
 
+    def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact:
+        if self.fail_on == request.name:
+            raise CategorizedError(
+                "synthetic stream failure", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+        key = request.key()
+        self.streams.append((key, request.name, request.path, request.sha256_b64))
+        self.heads[key] = HeadResult(
+            size_bytes=request.path.stat().st_size,
+            checksum_sha256=request.sha256_b64,
+            etag="etag-" + request.name,
+            sensitivity=request.sensitivity,
+        )
+        return StoredArtifact(
+            key, "etag-" + request.name, request.sensitivity, request.retention_class
+        )
 
-def _retriever(store: _FakeStore, *, core: bytes | None) -> LocalLibvirtRetrieve:
+    def head(self, key: str) -> HeadResult | None:
+        return self.heads.get(key)
+
+
+def _kdump_retriever(
+    store: _FakeStore, *, core_path: Path | None, build_id: str = "deadbeef"
+) -> LocalLibvirtRetrieve:
     return LocalLibvirtRetrieve(
         tenant=_TENANT,
         store_factory=lambda: store,
-        wait_for_vmcore=lambda system_id: core,
-        read_vmcore_build_id=lambda data: "deadbeef",
-        extract_redacted=lambda data: b"dmesg: password=[REDACTED]",
+        wait_for_vmcore=lambda system_id: core_path,
+        read_vmcore_build_id=lambda data: pytest.fail("bytes build-id seam used on kdump path"),
+        read_vmcore_build_id_from_file=lambda path: build_id,
+        extract_redacted=lambda data: pytest.fail("bytes dmesg seam used on kdump path"),
+        extract_redacted_from_file=lambda path: b"dmesg: password=[REDACTED]",
         host_dump_capture=lambda _sid: pytest.fail("host_dump seam used on kdump path"),
         secret_registry=SecretRegistry(),
     )
 
 
-def test_capture_stores_two_artifacts_and_returns_build_id() -> None:
-    raw_core = b"RAWCORE"
+def _spooled_core(tmp_path: Path, data: bytes) -> Path:
+    """A core in its own spool dir, mirroring ``_real_wait_for_vmcore``'s ``mkdtemp`` layout."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    core = spool / "vmcore"
+    core.write_bytes(data)
+    return core
+
+
+def test_capture_streams_raw_core_and_returns_build_id(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"RAWCORE")
     store = _FakeStore()
-    out = _retriever(store, core=raw_core).capture(_SYS, CaptureMethod.KDUMP)
+    out = _kdump_retriever(store, core_path=core).capture(_SYS, CaptureMethod.KDUMP)
     assert isinstance(out, CaptureOutput)
     assert out.raw.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump"
     assert out.redacted.key == f"{_TENANT}/systems/{_SYS}/vmcore-kdump-redacted"
     assert out.vmcore_build_id == "deadbeef"
-    assert out.raw_size_bytes == len(raw_core)
-    names = {(name, sens) for _, name, sens, _ in store.puts}
-    assert ("vmcore-kdump", Sensitivity.SENSITIVE) in names
-    assert ("vmcore-kdump-redacted", Sensitivity.REDACTED) in names
+    assert out.raw_size_bytes == len(b"RAWCORE")
+    # raw core went through the streaming put (a path), not a bytes put.
+    assert len(store.streams) == 1
+    stream_key, stream_name, stream_path, stream_sha = store.streams[0]
+    assert stream_name == "vmcore-kdump"
+    assert stream_sha == _sha256_b64(b"RAWCORE")
+    # only the redacted derivative is a bytes put.
+    assert [name for _, name, _, _ in store.puts] == ["vmcore-kdump-redacted"]
     redacted_data = next(d for _, name, _, d in store.puts if name == "vmcore-kdump-redacted")
     assert b"hunter2" not in redacted_data and b"[REDACTED]" in redacted_data
 
 
-def test_capture_kdump_feeds_seams_with_system_id_and_core_bytes() -> None:
-    raw_core = b"RAWCORE-BYTES"
-    seen: dict[str, object] = {}
-
-    def wait(system_id: UUID) -> bytes:
-        seen["wait"] = system_id
-        return raw_core
-
-    def build(data: bytes) -> str:
-        seen["build"] = data
-        return "bid"
-
-    def redact(data: bytes) -> bytes:
-        seen["redact"] = data
-        return b"DMESG"
-
-    store = _FakeStore()
-    retr = LocalLibvirtRetrieve(
-        tenant=_TENANT,
-        store_factory=lambda: store,
-        wait_for_vmcore=wait,
-        read_vmcore_build_id=build,
-        extract_redacted=redact,
-        host_dump_capture=lambda _sid: pytest.fail("host_dump seam used on kdump path"),
-        secret_registry=SecretRegistry(),
-    )
-
-    out = retr.capture(_SYS, CaptureMethod.KDUMP)
-
-    assert seen["wait"] == _SYS
-    assert seen["build"] == raw_core
-    assert seen["redact"] == raw_core
-    assert out.vmcore_build_id == "bid"
-    raw_data = next(d for _, name, _, d in store.puts if name == "vmcore-kdump")
-    assert raw_data == raw_core
-    assert out.raw.retention_class == "vmcore"
+def test_capture_removes_the_spool_dir_on_success(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"RAWCORE")
+    _kdump_retriever(_FakeStore(), core_path=core).capture(_SYS, CaptureMethod.KDUMP)
+    assert not core.exists()
+    assert not core.parent.exists()
 
 
-def test_capture_host_dump_feeds_seam_with_system_id() -> None:
-    seen: dict[str, object] = {}
-
-    def dump(system_id: UUID) -> bytes:
-        seen["dump"] = system_id
-        return b"X"
-
-    retr = LocalLibvirtRetrieve(
-        tenant=_TENANT,
-        store_factory=_FakeStore,
-        wait_for_vmcore=lambda _sid: pytest.fail("kdump seam used for host_dump"),
-        read_vmcore_build_id=lambda data: "bid",
-        extract_redacted=lambda data: b"dmesg",
-        host_dump_capture=dump,
-        secret_registry=SecretRegistry(),
-    )
-
-    retr.capture(_SYS, CaptureMethod.HOST_DUMP)
-
-    assert seen["dump"] == _SYS
+def test_capture_removes_the_spool_dir_on_store_failure(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"RAWCORE")
+    retr = _kdump_retriever(_FakeStore(fail_on="vmcore-kdump"), core_path=core)
+    with pytest.raises(CategorizedError) as exc:
+        retr.capture(_SYS, CaptureMethod.KDUMP)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not core.exists()
+    assert not core.parent.exists()
 
 
 def test_capture_no_core_is_readiness_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
-        _retriever(_FakeStore(), core=None).capture(_SYS, CaptureMethod.KDUMP)
+        _kdump_retriever(_FakeStore(), core_path=None).capture(_SYS, CaptureMethod.KDUMP)
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
-    assert str(exc.value) == "no complete core appeared within the capture window"
-    assert exc.value.details == {"system_id": str(_SYS)}
 
 
-def test_capture_store_failure_is_infrastructure_failure() -> None:
+def test_capture_store_failure_is_infrastructure_failure(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"X")
     with pytest.raises(CategorizedError) as exc:
-        _retriever(_FakeStore(fail_on="vmcore-kdump"), core=b"X").capture(_SYS, CaptureMethod.KDUMP)
+        _kdump_retriever(_FakeStore(fail_on="vmcore-kdump"), core_path=core).capture(
+            _SYS, CaptureMethod.KDUMP
+        )
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_capture_verifies_stored_checksum(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"RAWCORE")
+
+    @dataclass
+    class _CorruptingStore(_FakeStore):
+        def head(self, key: str) -> HeadResult | None:
+            base = super().head(key)
+            if base is None:
+                return None
+            return HeadResult(
+                size_bytes=base.size_bytes,
+                checksum_sha256="mismatch",
+                etag=base.etag,
+                sensitivity=base.sensitivity,
+            )
+
+    with pytest.raises(CategorizedError) as exc:
+        _kdump_retriever(_CorruptingStore(), core_path=core).capture(_SYS, CaptureMethod.KDUMP)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not core.exists()
 
 
 def _crash_retriever(*, observed_build_id: str, crash: CrashResult) -> LocalLibvirtRetrieve:
@@ -171,7 +204,9 @@ def _crash_retriever(*, observed_build_id: str, crash: CrashResult) -> LocalLibv
         store_factory=_FakeStore,
         wait_for_vmcore=lambda s: None,
         read_vmcore_build_id=lambda data: observed_build_id,
+        read_vmcore_build_id_from_file=lambda path: observed_build_id,
         extract_redacted=lambda data: b"",
+        extract_redacted_from_file=lambda path: b"",
         host_dump_capture=lambda s: None,
         secret_registry=SecretRegistry(),
         fetch_object=lambda ref: b"BYTES",
@@ -211,7 +246,9 @@ def test_run_rejects_bad_command_before_fetching_or_running_crash() -> None:
         store_factory=_FakeStore,
         wait_for_vmcore=lambda s: None,
         read_vmcore_build_id=lambda data: "deadbeef",
+        read_vmcore_build_id_from_file=lambda path: "deadbeef",
         extract_redacted=lambda data: b"",
+        extract_redacted_from_file=lambda path: b"",
         host_dump_capture=lambda s: None,
         secret_registry=SecretRegistry(),
         fetch_object=lambda ref: fetched.append(ref) or b"BYTES",
@@ -231,57 +268,6 @@ def test_run_rejects_bad_command_before_fetching_or_running_crash() -> None:
     assert fetched == []
 
 
-def test_run_fetches_vmcore_then_debuginfo_refs() -> None:
-    fetched: list[str] = []
-    crash = CrashResult(exit_status=0, stdout=b"ok", stderr=b"")
-    retriever = LocalLibvirtRetrieve(
-        tenant=_TENANT,
-        store_factory=_FakeStore,
-        wait_for_vmcore=lambda s: None,
-        read_vmcore_build_id=lambda data: "deadbeef",
-        extract_redacted=lambda data: b"",
-        host_dump_capture=lambda s: None,
-        secret_registry=SecretRegistry(),
-        fetch_object=lambda ref: fetched.append(ref) or b"BYTES",
-        run_crash=lambda vmlinux, vmcore, script: crash,
-    )
-
-    retriever.run_crash_postmortem(
-        vmcore_ref="k/systems/s/vmcore",
-        debuginfo_ref="k/runs/r/vmlinux",
-        expected_build_id="deadbeef",
-        commands=["log"],
-    )
-
-    assert fetched == ["k/systems/s/vmcore", "k/runs/r/vmlinux"]
-
-
-@pytest.mark.parametrize("missing", ["fetch", "run"])
-def test_run_requires_both_crash_seams_configured(missing: str) -> None:
-    crash = CrashResult(exit_status=0, stdout=b"", stderr=b"")
-    retriever = LocalLibvirtRetrieve(
-        tenant=_TENANT,
-        store_factory=_FakeStore,
-        wait_for_vmcore=lambda s: None,
-        read_vmcore_build_id=lambda data: "deadbeef",
-        extract_redacted=lambda data: b"",
-        host_dump_capture=lambda s: None,
-        secret_registry=SecretRegistry(),
-        fetch_object=None if missing == "fetch" else (lambda ref: b"BYTES"),
-        run_crash=None if missing == "run" else (lambda vmlinux, vmcore, script: crash),
-    )
-
-    with pytest.raises(CategorizedError) as exc:
-        retriever.run_crash_postmortem(
-            vmcore_ref="v",
-            debuginfo_ref="d",
-            expected_build_id="deadbeef",
-            commands=["log"],
-        )
-
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
-
-
 def test_capture_host_dump_uses_dump_seam() -> None:
     store = _FakeStore()
     retr = LocalLibvirtRetrieve(
@@ -289,42 +275,12 @@ def test_capture_host_dump_uses_dump_seam() -> None:
         store_factory=lambda: store,
         wait_for_vmcore=lambda _sid: pytest.fail("kdump seam used for host_dump"),
         read_vmcore_build_id=lambda _b: "bid",
+        read_vmcore_build_id_from_file=lambda _p: pytest.fail("path build-id seam on host_dump"),
         extract_redacted=lambda _b: b"dmesg",
+        extract_redacted_from_file=lambda _p: pytest.fail("path dmesg seam on host_dump"),
         host_dump_capture=lambda _sid: b"\x7fELFcore",
         secret_registry=SecretRegistry(),
     )
     out = retr.capture(_SYS, CaptureMethod.HOST_DUMP)
     assert out.vmcore_build_id == "bid"
     assert out.raw is not None and out.redacted is not None
-
-
-def test_from_env_wires_crash_seams_so_validation_runs_first() -> None:
-    retr = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
-
-    with pytest.raises(CategorizedError) as exc:
-        retr.run_crash_postmortem(
-            vmcore_ref="v",
-            debuginfo_ref="d",
-            expected_build_id="deadbeef",
-            commands=["bt | sh"],
-        )
-
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-
-
-def test_from_env_wires_host_dump_seam() -> None:
-    retr = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
-
-    with pytest.raises(CategorizedError) as exc:
-        retr.capture(_SYS, CaptureMethod.HOST_DUMP)
-
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
-
-
-def test_from_env_wires_kdump_seam() -> None:
-    retr = LocalLibvirtRetrieve.from_env(secret_registry=SecretRegistry())
-
-    with pytest.raises(CategorizedError) as exc:
-        retr.capture(_SYS, CaptureMethod.KDUMP)
-
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY

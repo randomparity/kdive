@@ -36,9 +36,11 @@ from tests.mcp.json_data import data_str
 DRAIN_DEADLINE_S = 600.0
 POLL_INTERVAL_S = 2.0
 
-# The remote allocation's disk request and the provision profile's disk_gb must agree, or
-# reconcile_profile_sizing rejects the mismatch before provision runs (#315). One source.
+# An allocation's disk request and its provision profile's disk_gb must agree exactly, or
+# reconcile_profile_sizing rejects the mismatch before provision runs (#315/#656, ADR-0205).
+# One source per spine keeps the allocate request and the profile factory from drifting apart.
 REMOTE_ALLOCATION_DISK_GB = 10
+LOCAL_ALLOCATION_DISK_GB = 10
 
 _ARTIFACT_DIR_ENV = "KDIVE_ARTIFACT_DIR"
 

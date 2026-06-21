@@ -68,7 +68,12 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     assert isinstance(runtime.live_introspector, LocalLibvirtLiveIntrospect)
     assert isinstance(runtime.rootfs_build_plane, LocalLibvirtRootfsBuildPlane)
     assert runtime.supported_capture_methods == frozenset(
-        {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
+        {
+            CaptureMethod.CONSOLE,
+            CaptureMethod.HOST_DUMP,
+            CaptureMethod.GDBSTUB,
+            CaptureMethod.KDUMP,
+        }
     )
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, GdbMiEngine)

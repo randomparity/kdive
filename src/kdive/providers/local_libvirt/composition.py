@@ -112,7 +112,12 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
         supported_capture_methods=frozenset(
-            {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
+            {
+                CaptureMethod.CONSOLE,
+                CaptureMethod.HOST_DUMP,
+                CaptureMethod.GDBSTUB,
+                CaptureMethod.KDUMP,
+            }
         ),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
