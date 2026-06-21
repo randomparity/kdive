@@ -227,11 +227,59 @@ def test_asyncio_pump_runner_tracks_and_cancels_task() -> None:
         collector = _FakeCollector(_SYSTEM_ID)
 
         runner.start(collector)  # ty: ignore[invalid-argument-type]
-        # Starting the same collector again is a no-op (dedup keyed on _tasks).
+        first_task = runner._tasks[_SYSTEM_ID]
+
+        # Starting the same collector again is a no-op (dedup keyed on _tasks):
+        # exactly one task remains and it is the original one.
         runner.start(collector)  # ty: ignore[invalid-argument-type]
-        await asyncio.sleep(0)
+        assert len(runner._tasks) == 1
+        assert runner._tasks[_SYSTEM_ID] is first_task
+
+        # The running task actually pumps the collector off-loop.
+        for _ in range(100):
+            await asyncio.sleep(0)
+            if collector.pump_calls > 0:
+                break
+        assert collector.pump_calls > 0
+        pumped_before_cancel = collector.pump_calls
+
+        # cancel() removes the entry and actually cancels the task. The bounded
+        # wait_for pins that cancel() truly cancels: if it did not, the task
+        # would pump forever and the await would never settle.
         runner.cancel(_SYSTEM_ID)
-        await asyncio.sleep(0)
+        assert _SYSTEM_ID not in runner._tasks
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first_task, timeout=2.0)
+        assert first_task.cancelled()
+
+        # Pumping has stopped: once the cancelled task is awaited, no further
+        # pumps are dispatched (at most one in-flight off-loop call may settle).
+        settled = collector.pump_calls
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert collector.pump_calls == settled
+        assert settled >= pumped_before_cancel
+
+    asyncio.run(_run())
+
+
+def test_asyncio_pump_runner_cancel_unknown_id_is_noop() -> None:
+    async def _run() -> None:
+        runner = console_hosting.AsyncioPumpRunner()
+        tracked = _FakeCollector(_SYSTEM_ID)
+        runner.start(tracked)  # ty: ignore[invalid-argument-type]
+        try:
+            other = UUID("22222222-2222-2222-2222-222222222222")
+
+            # Cancelling an id that was never started must not raise and must
+            # leave the tracked task untouched.
+            runner.cancel(other)
+
+            assert _SYSTEM_ID in runner._tasks
+            assert runner._tasks[_SYSTEM_ID].cancelled() is False
+        finally:
+            runner.cancel_all()
+            await asyncio.sleep(0)
 
     asyncio.run(_run())
 
