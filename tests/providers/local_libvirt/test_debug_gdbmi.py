@@ -45,11 +45,12 @@ class _FakeMiController:
         self._reads = list(reads or [])
         self._response_timeout = response_timeout
         self.written: list[str] = []
+        self.write_timeouts: list[float] = []
         self.read_timeouts: list[float] = []
         self.exited = False
 
     def write(self, command: str, *, timeout_sec: float) -> list[dict[str, object]]:
-        del timeout_sec
+        self.write_timeouts.append(timeout_sec)
         self.written.append(command)
         return self._responses.get(
             command, [{"type": "result", "message": "done", "payload": None}]
@@ -517,7 +518,26 @@ def test_execution_control_rejects_bad_timeout_before_resume(
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["code"] == "bad_continue_timeout"
+    reported = exc.value.details["timeout_sec"]
+    assert isinstance(reported, float)
+    assert reported == timeout_sec or (math.isnan(reported) and math.isnan(timeout_sec))
+    assert str(exc.value) == "gdb/MI continue timeout must be a finite non-negative number"
     assert engine.executed == []
+
+
+def test_execution_control_wait_for_stop_uses_slice_timeout_and_count(
+    tmp_path: Path,
+) -> None:
+    engine = _ExecutionEngine()
+    control = ExecutionControl(engine, command_timeout_sec=1.0)
+    controller = _FakeMiController(reads=[])
+    attachment = _attachment(controller, tmp_path)
+
+    stop = control.wait_for_stop(attachment, timeout_sec=0.0)
+
+    assert stop is None
+    # int(0.0 / 0.5) + 1 == 1 -> exactly one poll slice, each at the slice timeout.
+    assert controller.read_timeouts == [0.5]
 
 
 def test_execution_control_wait_for_stop_records_reads_and_transcript(
@@ -569,8 +589,16 @@ def test_execution_control_resume_raises_transport_stall_after_interrupt_timeout
 
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert exc.value.details["code"] == "transport_stall"
+    assert exc.value.details["verb"] == "-exec-continue"
+    assert (
+        str(exc.value)
+        == "gdb/MI RSP went silent: interrupt issued but no *stopped arrived; link stalled"
+    )
     assert engine.executed == ["-exec-continue"]
     assert controller.written == ["-exec-interrupt"]
+    # interrupt issues its write at the configured command timeout and transcribes the verb.
+    assert controller.write_timeouts == [1.0]
+    assert "-exec-interrupt" in engine.transcript_commands
 
 
 def test_continue_returns_stop_on_breakpoint_hit(tmp_path: Path) -> None:
