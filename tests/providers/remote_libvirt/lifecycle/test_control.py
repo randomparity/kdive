@@ -64,9 +64,35 @@ def test_power_on_already_running_swallowed(tmp_path: Path) -> None:
 
 
 def test_power_absent_domain_is_control_failure(tmp_path: Path) -> None:
+    name = domain_name_for(_SYSTEM_ID)
     with pytest.raises(CategorizedError) as exc:
-        _control(None, tmp_path).power(domain_name_for(_SYSTEM_ID), PowerAction.ON)
+        _control(None, tmp_path).power(name, PowerAction.ON)
     assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert str(exc.value) == "libvirt error looking up domain"
+    assert exc.value.details == {"domain": name}
+
+
+def test_connection_materializes_pki_under_the_configured_base_dir(tmp_path: Path) -> None:
+    # The injected pki_base_dir must reach the TLS materialization so per-op cert material stays
+    # inside the caller's sandbox; the composed connection URI references that pkipath.
+    name = domain_name_for(_SYSTEM_ID)
+    conn = FakeControlConn({name: FakeDomain(name)})
+    seen_uris: list[str] = []
+
+    def opener(uri: str) -> FakeControlConn:
+        seen_uris.append(uri)
+        return conn
+
+    RemoteLibvirtControl(
+        secret_registry=SecretRegistry(),
+        config_factory=_config,
+        open_connection=opener,
+        secret_backend_factory=RecordingBackend,
+        pki_base_dir=tmp_path,
+    ).power(name, PowerAction.ON)
+
+    assert seen_uris
+    assert str(tmp_path) in seen_uris[0]
 
 
 def test_power_other_error_is_control_failure(tmp_path: Path) -> None:
@@ -93,3 +119,55 @@ def test_force_crash_libvirt_error_is_control_failure(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _control(domain, tmp_path).force_crash(domain_name_for(_SYSTEM_ID))
     assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+
+
+class _FlagRecordingDomain(FakeDomain):
+    """A FakeDomain that also records the flags argument passed to reset/reboot."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.flags: dict[str, int] = {}
+
+    def reset(self, flags: int) -> int:
+        self.flags["reset"] = flags
+        return super().reset(flags)
+
+    def reboot(self, flags: int) -> int:
+        self.flags["reboot"] = flags
+        return super().reboot(flags)
+
+
+def test_power_reset_passes_zero_flags(tmp_path: Path) -> None:
+    # libvirt's reset/reboot flags argument is reserved and must be 0; a nonzero value is
+    # rejected by the binding.
+    domain = _FlagRecordingDomain(domain_name_for(_SYSTEM_ID))
+    _control(domain, tmp_path).power(domain_name_for(_SYSTEM_ID), PowerAction.RESET)
+    assert domain.flags == {"reset": 0}
+
+
+def test_power_cycle_passes_zero_flags(tmp_path: Path) -> None:
+    domain = _FlagRecordingDomain(domain_name_for(_SYSTEM_ID))
+    _control(domain, tmp_path).power(domain_name_for(_SYSTEM_ID), PowerAction.CYCLE)
+    assert domain.flags == {"reboot": 0}
+
+
+def test_power_failure_message_and_details_name_action_and_domain(tmp_path: Path) -> None:
+    # A non-idempotent libvirt error surfaces a CONTROL_FAILURE whose message names the action
+    # verb and whose details carry the domain name.
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name, raise_on={"reset": libvirt.VIR_ERR_INTERNAL_ERROR})
+    with pytest.raises(CategorizedError) as exc:
+        _control(domain, tmp_path).power(name, PowerAction.RESET)
+
+    assert str(exc.value) == "libvirt error reset-ing domain"
+    assert exc.value.details == {"domain": name}
+
+
+def test_force_crash_failure_message_and_details_name_the_domain(tmp_path: Path) -> None:
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name, raise_on={"injectNMI": libvirt.VIR_ERR_INTERNAL_ERROR})
+    with pytest.raises(CategorizedError) as exc:
+        _control(domain, tmp_path).force_crash(name)
+
+    assert str(exc.value) == "libvirt error injecting NMI into domain"
+    assert exc.value.details == {"domain": name}
