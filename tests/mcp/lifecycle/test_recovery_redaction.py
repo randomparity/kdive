@@ -3,16 +3,42 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from kdive.domain.capacity.state import RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle import Run, System
 from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.mcp.tools.lifecycle.systems.view import system_envelope
+from kdive.services.runs.steps import StepProgress
 
 _PLANTED = "PLANTED-DO-NOT-LEAK"  # a benign marker; the test asserts it never leaks
 _DT = datetime(2026, 6, 18, tzinfo=UTC)
+
+
+def _run(
+    *,
+    state: RunState = RunState.RUNNING,
+    system_id: UUID | None = None,
+    expected_boot_failure: dict[str, object] | None = None,
+    kernel_ref: str | None = None,
+    debuginfo_ref: str | None = None,
+) -> Run:
+    return Run(
+        id=uuid4(),
+        created_at=_DT,
+        updated_at=_DT,
+        principal="u",
+        project="proj",
+        investigation_id=uuid4(),
+        system_id=system_id,
+        target_kind=ResourceKind.LOCAL_LIBVIRT,
+        state=state,
+        build_profile={"source": "server", "build_host": "build-1"},
+        expected_boot_failure=expected_boot_failure,
+        kernel_ref=kernel_ref,
+        debuginfo_ref=debuginfo_ref,
+    )
 
 
 def test_system_envelope_excludes_ssh_credential_ref() -> None:
@@ -59,3 +85,124 @@ def test_run_envelope_excludes_git_remote_token() -> None:
     )
     resp = envelope_for_run(run)
     assert _PLANTED not in resp.model_dump_json()
+
+
+# --- envelope_for_run: non-failed envelope shape -------------------------------------
+
+
+def test_envelope_created_run_advances_to_build() -> None:
+    run = _run(state=RunState.CREATED, system_id=uuid4())
+
+    resp = envelope_for_run(run)
+
+    assert resp.status == "created"
+    assert resp.object_id == str(run.id)
+    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+
+
+def test_envelope_running_run_advances_to_build() -> None:
+    run = _run(state=RunState.RUNNING, system_id=uuid4())
+
+    resp = envelope_for_run(run)
+
+    assert resp.suggested_next_actions == ["runs.get", "runs.build"]
+
+
+def test_envelope_canceled_run_only_offers_get() -> None:
+    run = _run(state=RunState.CANCELED, system_id=uuid4())
+
+    resp = envelope_for_run(run)
+
+    assert resp.suggested_next_actions == ["runs.get"]
+
+
+def test_envelope_succeeded_run_surfaces_steps_and_next_step() -> None:
+    run = _run(state=RunState.SUCCEEDED, system_id=uuid4())
+    progress = StepProgress(install="succeeded", boot="succeeded", boot_outcome=None)
+
+    resp = envelope_for_run(run, step_progress=progress)
+
+    assert resp.suggested_next_actions == ["runs.get", "debug.start_session"]
+    assert resp.data["steps"] == {"build": "succeeded", "install": "succeeded", "boot": "succeeded"}
+
+
+def test_envelope_succeeded_run_without_progress_omits_steps_and_installs_next() -> None:
+    run = _run(state=RunState.SUCCEEDED, system_id=uuid4())
+
+    resp = envelope_for_run(run)
+
+    # No step ledger -> install is the next step and no steps map is surfaced.
+    assert resp.suggested_next_actions == ["runs.get", "runs.install"]
+    assert "steps" not in resp.data
+
+
+def test_envelope_data_carries_run_identity_fields() -> None:
+    system_id = uuid4()
+    run = _run(state=RunState.RUNNING, system_id=system_id)
+
+    data = envelope_for_run(run).data
+
+    assert data["project"] == "proj"
+    assert data["target_kind"] == "local-libvirt"
+    assert data["system_id"] == str(system_id)
+    assert data["active_debug_session_ids"] == []
+    assert data["investigation_id"] == str(run.investigation_id)
+
+
+def test_envelope_succeeded_unbound_run_must_bind_first() -> None:
+    # A SUCCEEDED Run with no bound System advances to runs.bind before install.
+    run = _run(state=RunState.SUCCEEDED, system_id=None)
+
+    resp = envelope_for_run(run)
+
+    assert resp.suggested_next_actions == ["runs.get", "runs.bind"]
+
+
+def test_envelope_unbound_run_reports_null_system_id() -> None:
+    run = _run(state=RunState.RUNNING, system_id=None)
+
+    assert envelope_for_run(run).data["system_id"] is None
+
+
+def test_envelope_surfaces_active_debug_session_ids() -> None:
+    run = _run(state=RunState.RUNNING, system_id=uuid4())
+
+    data = envelope_for_run(run, active_debug_session_ids=["sess-1", "sess-2"]).data
+
+    assert data["active_debug_session_ids"] == ["sess-1", "sess-2"]
+
+
+def test_envelope_includes_required_cmdline_when_supplied() -> None:
+    run = _run(state=RunState.RUNNING, system_id=uuid4())
+
+    with_cmdline = envelope_for_run(run, required_cmdline="console=ttyS0").data
+    without_cmdline = envelope_for_run(run).data
+
+    assert with_cmdline["required_cmdline"] == "console=ttyS0"
+    assert "required_cmdline" not in without_cmdline
+
+
+def test_envelope_refs_carry_artifact_keys() -> None:
+    run = _run(
+        state=RunState.SUCCEEDED,
+        system_id=uuid4(),
+        kernel_ref="s3://b/kernel",
+        debuginfo_ref="s3://b/debuginfo",
+    )
+
+    resp = envelope_for_run(run, step_progress=None)
+
+    assert resp.refs == {"kernel": "s3://b/kernel", "debuginfo": "s3://b/debuginfo"}
+
+
+def test_envelope_surfaces_expected_boot_failure_kind() -> None:
+    run = _run(
+        state=RunState.RUNNING,
+        system_id=uuid4(),
+        expected_boot_failure={"kind": "panic"},
+    )
+
+    data = envelope_for_run(run).data
+
+    assert data["expected_boot_failure"] == "panic"
+    assert data["expected_boot_failure_detail"] == {"kind": "panic"}
