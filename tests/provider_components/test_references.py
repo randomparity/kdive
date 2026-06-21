@@ -66,3 +66,34 @@ def test_parse_component_ref_maps_invalid_payloads_to_config_error(
         parse_component_ref(payload)
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_parse_component_ref_error_carries_message_and_pydantic_errors() -> None:
+    # The wrapped error keeps a stable human message and surfaces the pydantic validation errors
+    # under a "errors" details key for the caller to relay.
+    with pytest.raises(CategorizedError) as caught:
+        parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
+
+    assert str(caught.value) == "invalid component reference"
+    errors = caught.value.details["errors"]
+    assert isinstance(errors, list) and errors
+
+
+def test_parse_component_ref_errors_omit_url_and_input_noise() -> None:
+    # The relayed error dicts must not leak the documentation URL or the (potentially sensitive)
+    # raw input value; include_url/include_input are pinned off.
+    with pytest.raises(CategorizedError) as caught:
+        parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
+
+    for error in caught.value.details["errors"]:
+        assert "url" not in error
+        assert "input" not in error
+
+
+def test_parse_component_ref_surfaces_sha256_validator_message() -> None:
+    # A malformed sha256 must produce the validator's specific guidance, not a generic message.
+    with pytest.raises(CategorizedError) as caught:
+        parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
+
+    messages = [error["msg"] for error in caught.value.details["errors"]]
+    assert "Value error, sha256 must be 'sha256:<64 lowercase hex chars>'" in messages
