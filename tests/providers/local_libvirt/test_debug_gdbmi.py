@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -604,6 +605,13 @@ def test_append_transcript_creates_parent_and_redacts_jsonl(tmp_path: Path) -> N
     assert entry["command"] == "<read>"
     assert secret not in line
     assert "[REDACTED]" in line
+    # The entry carries the canonical keys, and the timestamp is UTC-aware (offset present).
+    assert set(entry) == {"observed_at", "command", "records"}
+    assert isinstance(entry["records"], list)
+    assert entry["records"][0]["type"] == "console"
+    observed = datetime.fromisoformat(entry["observed_at"])
+    assert observed.tzinfo is not None
+    assert observed.utcoffset() == timedelta(0)
 
 
 # --- continue / interrupt ------------------------------------------------------------------
