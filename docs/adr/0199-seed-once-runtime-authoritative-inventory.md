@@ -39,7 +39,16 @@ session-scoped `inventory-reconcile` lock:
 - **no entry** → today's behavior unchanged (create / repair / prune-or-cordon).
 - **`detached`** → ensure the row's identity exists but do not overwrite its runtime-owned fields
   from the file; never prune.
-- **`removed`** → do not create; cordon a live row (never auto-drain), per ADR-0112 refuse-if-live.
+- **`removed`** → do not create; cordon a live row (never auto-drain) per ADR-0112 refuse-if-live,
+  then delete the cordoned row once it becomes idle (a ledger-driven delete, since the file still
+  declares the identity so the file-departure prune never fires).
+
+A `detached` override is intent-only (it carries no field values), so it protects the live row's
+runtime values in place; if that row is hand-deleted, reconcile GCs the entry and re-asserts the
+file rather than resurrect stale values under a still-active override. A runtime-`removed`
+config-declared identity is re-enabled through an explicit clear-override operation (sub-issue B)
+that deletes the entry so the next no-entry pass re-asserts the file — the file still declares the
+identity, so editing the file is not the re-add path.
 
 A full-inventory export tool (`ops.export_systems_toml`, M2.7 sub-issue C) writes running state
 back to `systems.toml`; once the operator commits the exported file and re-applies the ConfigMap,
@@ -62,9 +71,13 @@ identity without an override entry, and the refuse-if-live prune contract is pre
   - Mutation tools that detach/remove a config-owned identity must take the per-identity lock and
     write the ledger in the same transaction as the row change, so a concurrent reconcile pass
     cannot interleave create/prune for that identity.
-  - The export is values-only: secret material, comments, `[campaign.*]` knobs, and the DB-uncarried
-    fields (`gdbstub_range`, `shapes`) are not reconstructable; the export emits placeholders and a
-    header comment, and an operator reviews before committing.
+  - The export is a values snapshot, and a `remote_libvirt` block is a **skeleton**: the
+    connection/debug fields the provider reads straight from the file (`gdb_addr`, `gdbstub_range`,
+    the three TLS secret refs, `base_image`, `shapes`) are not persisted in `resources`, so the
+    export emits them as operator-supplied placeholders with a header comment. They are required
+    fields, so an unedited skeleton does not parse; a fresh start reproduces the live inventory only
+    after the operator completes them. Images, build_hosts, and cost_classes round-trip with no
+    operator step. The export's first task is a field-by-field persistence audit.
 - **Unchanged:** discovery-owned (`local-libvirt`) rows stay hardware-probe-owned and outside the
   ledger; all other reconciler duties (orphan teardown, leaked-domain reap, zombie sweep,
   debug-session detach) are untouched.
