@@ -45,6 +45,30 @@ def test_build_summary_external_provenance() -> None:
     assert summary["build_source_provenance"] == "external"
 
 
+def test_build_summary_mapping_ref_without_git_is_warm_tree() -> None:
+    # A Mapping kernel_source_ref that lacks a "git" key is warm-tree, NOT git: provenance is
+    # "git" only when the mapping actually carries a git block (both the Mapping check AND the
+    # "git" membership must hold).
+    summary = build_profile_summary(
+        {"source": "server", "kernel_source_ref": {"warm_tree": {"path": "/srv/tree"}}}
+    )
+    assert summary["build_source_provenance"] == "warm-tree"
+
+
+def test_build_summary_none_ref_falls_back_to_warm_tree() -> None:
+    # A missing/None kernel_source_ref must derive warm-tree without raising (the Mapping
+    # guard short-circuits before any membership test on a non-mapping).
+    summary = build_profile_summary({"source": "server"})
+    assert summary["build_source_provenance"] == "warm-tree"
+
+
+def test_build_summary_non_string_source_falls_back_to_server() -> None:
+    # A stored document with a non-string source must surface the literal "server" lane, not
+    # a mangled fallback token.
+    summary = build_profile_summary({"source": 123})
+    assert summary["build_source"] == "server"
+
+
 def test_provisioning_summary_allowlists_only_safe_fields() -> None:
     profile = {
         "arch": "x86_64",
