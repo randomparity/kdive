@@ -282,3 +282,54 @@ def test_tool_call_json_payload_unaffected_by_new_flags() -> None:
     args = build_parser().parse_args(argv)
     assert args.payload == '{"a": 1}'
     assert args.allow_mutating is True
+
+
+# --- build_parser: structure & defaults ------------------------------------------------------
+
+
+def test_parser_prog_is_kdivectl() -> None:
+    assert build_parser().prog == "kdivectl"
+
+
+def test_top_level_command_is_required() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([])
+
+
+def test_tool_subcommand_is_required() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["tool"])
+
+
+def test_login_subcommand_parses_to_command_dest() -> None:
+    args = build_parser().parse_args(["login"])
+    assert args.command == "login"
+    assert args.platform_role is None
+
+
+def test_login_platform_role_accepts_known_roles() -> None:
+    for role in ("platform_admin", "platform_operator"):
+        args = build_parser().parse_args(["login", "--platform-role", role])
+        assert args.platform_role == role
+
+
+def test_login_platform_role_rejects_unknown_role() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["login", "--platform-role", "root"])
+
+
+def test_tool_command_dest_and_name_positional() -> None:
+    args = build_parser().parse_args(["tool", "call", "my.tool"])
+    assert args.command == "tool"
+    assert args.tool_command == "call"
+    assert args.name == "my.tool"
+
+
+def test_tool_call_name_is_required() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["tool", "call"])
+
+
+def test_tool_call_payload_defaults_to_empty_object() -> None:
+    args = build_parser().parse_args(["tool", "call", "x"])
+    assert args.payload == "{}"
