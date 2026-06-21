@@ -155,6 +155,7 @@ def test_ensure_overlay_creates_overlay_from_base_volume() -> None:
     assert overlay == PreparedOverlay(name=overlay_volume_name(_SYSTEM_ID), created=True)
     [xml] = pool.created_xml
     root = fromstring(xml)
+    assert root.tag == "volume"
     assert root.findtext("./name") == overlay.name
     assert root.findtext("./capacity") == "42"
     assert root.findtext("./backingStore/path") == "/pool/kdive-base-fedora-42.qcow2"
