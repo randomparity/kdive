@@ -28,9 +28,14 @@ Export the cost-class coefficient table as a systems.toml fragment. Operator.
 
 ## `ops.export_systems_toml`
 
-`implemented` · `read-only`
+`implemented`
 
-Export the live inventory as a deterministic systems.toml document. Operator.
+Export the live inventory; optionally persist it to the writeback target. Operator.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `document` | string (nullable) | no | A completed systems.toml to persist verbatim instead of the live serialization; required for a fleet with remote_libvirt hosts whose export is a skeleton. Requires persist=true. |
+| `persist` | boolean | no | When true, also persist the inventory to the configured writeback target (KDIVE_INVENTORY_WRITEBACK; off by default). A skeleton export is refused. |
 
 ## `ops.force_release`
 

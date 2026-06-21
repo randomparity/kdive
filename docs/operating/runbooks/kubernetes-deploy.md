@@ -326,7 +326,123 @@ Deploying remote-libvirt also requires the operator-side setup the
 ACL, object-store reachability from the guest, and an operator-staged base-OS image on the host's
 storage pool. Those are host-side obligations independent of this chart install.
 
-## 9. Teardown
+## 9. Persist runtime inventory back to the source (opt-in writeback)
+
+ADR-0199 makes inventory runtime-mutable: an operator can add/remove/modify config-declared systems
+and build-hosts at runtime, and `ops.export_systems_toml` serializes that live state back to a
+`systems.toml` document. By default the export only returns **text** — an operator copies it into
+the version-controlled file and re-applies the `kdive-systems` ConfigMap by hand.
+
+The opt-in **writeback** (M2.7 sub-issue D) lets `ops.export_systems_toml(persist=true)` write that
+document straight to the live source the reconciler re-reads, so a pod restart reproduces the running
+inventory. It is **off by default** and **not exercised by CI** — verify it on your cluster with the
+steps below.
+
+### Enable it
+
+Set the opt-in on the **server** component (where the `ops.*` tools run) via the chart's `config.*`
+ConfigMap, then apply the RBAC so the server's pod may patch the one inventory ConfigMap:
+
+```yaml
+# values overlay
+config:
+  KDIVE_INVENTORY_WRITEBACK: configmap          # off (default) | configmap | file
+  # KDIVE_INVENTORY_WRITEBACK_CONFIGMAP defaults to kdive-systems; set only to override the name
+```
+
+```yaml
+# rbac-writeback.yaml — least privilege: get+patch on the ONE named ConfigMap, nothing else
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kdive-writeback
+  namespace: <ns>
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kdive-systems-writeback
+  namespace: <ns>
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kdive-systems"]    # scoped to this one object — no list/watch, no other CM
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kdive-systems-writeback
+  namespace: <ns>
+subjects:
+  - kind: ServiceAccount
+    name: kdive-writeback
+    namespace: <ns>
+roleRef:
+  kind: Role
+  name: kdive-systems-writeback
+  apiGroup: rbac.authorization.k8s.io
+```
+
+Bind the server Deployment's pod to that ServiceAccount (`spec.template.spec.serviceAccountName:
+kdive-writeback`) so the in-cluster token the adapter reads carries the grant. Apply with
+`kubectl apply -f rbac-writeback.yaml -n <ns>`.
+
+The ConfigMap name (`kdive-systems` above, and `KDIVE_INVENTORY_WRITEBACK_CONFIGMAP`'s default)
+must match the inventory ConfigMap you created and pointed `systems.configMapName` at — set
+`KDIVE_INVENTORY_WRITEBACK_CONFIGMAP` and the Role's `resourceNames` to that name if you named it
+something else. This inventory ConfigMap is operator-created (the chart only mounts it; it is not
+templated by Helm), so a writeback patch does not drift from the Helm release.
+
+### The `remote_libvirt` skeleton: complete it before persisting
+
+A `[[remote_libvirt]]` block is exported as a **skeleton** — the provider reads `gdb_addr`,
+`gdbstub_range`, the three TLS refs, `base_image`, and `shapes` straight from the file, and those
+are not stored in the DB, so the export emits them as `REPLACE_ME_*` placeholders. A skeleton does
+not parse, so `persist=true` **refuses** a document that still contains a placeholder (writing it
+would feed the reconciler a malformed `systems.toml` and silently stall the inventory pass).
+
+The operator flow for a fleet with remote_libvirt hosts:
+
+1. `ops.export_systems_toml()` — get the text in `data.toml`.
+2. Complete every `REPLACE_ME_*` value (set `base_image` to one of the exported `[[image]]` names;
+   fill the connection/debug fields and TLS refs).
+3. `ops.export_systems_toml(persist=true, document="<the completed text>")` — the completed document
+   is written verbatim.
+
+An inventory with no remote_libvirt host and no `defined` image carries no placeholder, so a bare
+`ops.export_systems_toml(persist=true)` persists it directly (images / build_hosts / cost_classes
+round-trip with no operator step).
+
+### Propagation and the `file` target
+
+After a successful ConfigMap patch, a **running** reconciler in another pod re-reads the updated
+`systems.toml` only when kubelet next syncs the ConfigMap to its mount (up to the sync period) or on
+a pod restart. The acceptance signal is "a pod restart reproduces the live inventory", not "the next
+reconcile pass takes immediate effect".
+
+`KDIVE_INVENTORY_WRITEBACK=file` writes the `KDIVE_SYSTEMS_TOML` path directly. The default chart
+mounts `systems.toml` from a **read-only** ConfigMap on every pod, so the `file` target does **not**
+work under the default deployment — it is only for a deployment whose inventory file is a writable
+volume shared by the server and the reconciler (a single host running all processes, or an
+operator-provisioned `ReadWriteMany` PVC mounted on both). The chart does not provision such a
+volume.
+
+### Verify on the cluster
+
+```bash
+# 1. apply the opt-in + RBAC, roll the server, then from an authenticated MCP session:
+#    ops.export_systems_toml(persist=true[, document=<completed text>])  → status "ok", persisted true
+# 2. confirm the ConfigMap's systems.toml key updated:
+kubectl get configmap kdive-systems -n <ns> -o jsonpath='{.data.systems\.toml}' | head
+# 3. restart the reconciler and confirm the live inventory reproduces:
+kubectl rollout restart deployment/kdive-kdive-reconciler -n <ns>
+```
+
+A `403` from the API surfaces as a `configuration_error` naming the missing `patch` grant — re-check
+the Role's `resourceNames` and the RoleBinding's ServiceAccount.
+
+## 10. Teardown
 
 Helm releases are **namespace-scoped**, and `helm uninstall` only acts on one namespace. If you
 installed into a non-default namespace (the bundled demo is commonly installed with `-n

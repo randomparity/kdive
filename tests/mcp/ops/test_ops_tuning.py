@@ -31,7 +31,9 @@ from kdive.domain.accounting.cost import Selector, resolve_coeff
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import ManagedBy, Resource, ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Allocation
+from kdive.inventory import writeback
 from kdive.inventory.model import InventoryDoc
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.ops import tuning
@@ -669,6 +671,215 @@ def test_export_systems_toml_round_trips_through_reconcile(migrated_url: str) ->
         assert doc.image[0].name == "base"
 
     asyncio.run(_run())
+
+
+# ---- export_systems_toml(persist=...) -------------------------------------------------
+
+
+async def _seed_non_remote_inventory(conn: psycopg.AsyncConnection) -> None:
+    # An inventory with NO remote_libvirt host and NO defined image — its export carries no
+    # REPLACE_ME_* placeholder, so a live-serialization persist is allowed.
+    await conn.execute(
+        "INSERT INTO build_hosts (name, kind, workspace_root, max_concurrent, managed_by) "
+        "VALUES ('bh-local', 'local', '/var/lib/kdive/build', 4, 'config')"
+    )
+    await conn.execute(
+        "INSERT INTO cost_class_coefficients (cost_class, coeff) VALUES ('local', '1.0') "
+        "ON CONFLICT (cost_class) DO NOTHING"
+    )
+
+
+def test_persist_without_writeback_target_is_configuration_error(migrated_url: str) -> None:
+    fake = writeback.FakeWriteback()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_non_remote_inventory(conn)
+            resp = await tuning.export_systems_toml(
+                pool, _OPERATOR, persist=True, resolve_target=lambda: None
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+            assert "KDIVE_INVENTORY_WRITEBACK" in str(resp.detail)
+        # writeback off is a config rejection before any target exists — not a writeback attempt,
+        # so it is not audited under the writeback scope.
+        rows = await _platform_audit_rows(migrated_url)
+        assert not [r for r in rows if r[3] == "all-inventory-writeback"]
+
+    asyncio.run(_run())
+    assert fake.written is None
+
+
+def test_persist_clean_export_writes_and_reports(migrated_url: str) -> None:
+    fake = writeback.FakeWriteback()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_non_remote_inventory(conn)
+            resp = await tuning.export_systems_toml(
+                pool, _OPERATOR, persist=True, resolve_target=lambda: fake
+            )
+            assert resp.status == "ok"
+            assert resp.data["persisted"] is True
+            assert resp.data["target"] == "fake"
+            assert resp.data["toml"] == fake.written
+        rows = await _platform_audit_rows(migrated_url)
+        write_rows = [r for r in rows if r[3] == "all-inventory-writeback"]
+        assert len(write_rows) == 1
+
+    asyncio.run(_run())
+    assert fake.written is not None
+    assert "bh-local" in fake.written
+
+
+def test_persist_skeleton_is_refused_and_writes_nothing(migrated_url: str) -> None:
+    # A fleet WITH a remote_libvirt host: its live export is a skeleton (REPLACE_ME_*), so a
+    # bare persist is refused before any write.
+    fake = writeback.FakeWriteback()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_inventory(conn)
+            resp = await tuning.export_systems_toml(
+                pool, _OPERATOR, persist=True, resolve_target=lambda: fake
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+        # a refused writeback attempt against a configured target is still audited.
+        rows = await _platform_audit_rows(migrated_url)
+        assert any(r[3] == "all-inventory-writeback" for r in rows)
+
+    asyncio.run(_run())
+    assert fake.written is None
+
+
+def test_persist_with_completed_document_writes_verbatim(migrated_url: str) -> None:
+    fake = writeback.FakeWriteback()
+
+    async def _run() -> str:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_inventory(conn)
+            exported = await tuning.export_systems_toml(pool, _OPERATOR)
+            completed = _complete_remote(str(exported.data["toml"]), base_image="base")
+            resp = await tuning.export_systems_toml(
+                pool, _OPERATOR, persist=True, document=completed, resolve_target=lambda: fake
+            )
+            assert resp.status == "ok"
+            assert resp.data["persisted"] is True
+            return completed
+
+    completed = asyncio.run(_run())
+    # the operator's completed document is written verbatim, not a re-serialization.
+    assert fake.written == completed
+    # no placeholder VALUE remains (the header prose still mentions REPLACE_ME_* — that is fine).
+    assert writeback.WRITEBACK_PLACEHOLDER_MARKER not in str(fake.written)
+
+
+def test_persist_with_uncompleted_document_is_refused(migrated_url: str) -> None:
+    fake = writeback.FakeWriteback()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_inventory(conn)
+            exported = await tuning.export_systems_toml(pool, _OPERATOR)
+            resp = await tuning.export_systems_toml(
+                pool,
+                _OPERATOR,
+                persist=True,
+                document=str(exported.data["toml"]),  # still has REPLACE_ME_*
+                resolve_target=lambda: fake,
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+    assert fake.written is None
+
+
+def test_document_without_persist_is_refused(migrated_url: str) -> None:
+    fake = writeback.FakeWriteback()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_non_remote_inventory(conn)
+            resp = await tuning.export_systems_toml(
+                pool, _OPERATOR, document="schema_version = 2\n", resolve_target=lambda: fake
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+    assert fake.written is None
+
+
+def test_persist_oversized_document_is_refused(migrated_url: str, monkeypatch: object) -> None:
+    import kdive.config as config
+    from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
+
+    fake = writeback.FakeWriteback()
+    config.load({"KDIVE_MAX_BUILD_CONFIG_BYTES": "32"})
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_non_remote_inventory(conn)
+            resp = await tuning.export_systems_toml(
+                pool,
+                _OPERATOR,
+                persist=True,
+                document="x = 1\n" * 50,
+                resolve_target=lambda: fake,
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+            assert MAX_BUILD_CONFIG_BYTES.name in str(resp.detail)
+
+    asyncio.run(_run())
+    config.reset()
+    assert fake.written is None
+
+
+def test_persist_write_failure_is_surfaced(migrated_url: str) -> None:
+    boom = CategorizedError("configmap unreachable", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+    fake = writeback.FakeWriteback(fail=boom)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _seed_non_remote_inventory(conn)
+            resp = await tuning.export_systems_toml(
+                pool, _OPERATOR, persist=True, resolve_target=lambda: fake
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "infrastructure_failure"
+            assert resp.data.get("persisted") is not True
+        # the failed writeback attempt is recorded under the writeback scope (the outcome rides
+        # in the hashed args_digest; the scope is the observable forensic signal here).
+        rows = await _platform_audit_rows(migrated_url)
+        assert [r for r in rows if r[3] == "all-inventory-writeback"]
+
+    asyncio.run(_run())
+
+
+def test_persist_denied_for_non_operator_writes_nothing(migrated_url: str) -> None:
+    fake = writeback.FakeWriteback()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await tuning.export_systems_toml(
+                pool, _ctx(), persist=True, resolve_target=lambda: fake
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "authorization_denied"
+
+    asyncio.run(_run())
+    assert fake.written is None
 
 
 def _complete_remote(text: str, *, base_image: str) -> str:
