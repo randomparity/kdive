@@ -109,14 +109,25 @@ read that gates create and prune:
 - **`removed`** for a declared identity → **skip create** (do not upsert the row from the file).
   In the prune sweep, a `removed` identity whose row still exists is **cordoned if live, deleted once
   idle** — reuse `prune_or_cordon_resource`, but drive it from the ledger, because the file still
-  declares the identity so the file-departure branch never reaches it. (Implementation: in the prune
-  sweep, an identity that is `removed` in the ledger is treated like a departed identity — it falls
-  through to `prune_or_cordon_resource` regardless of file presence.)
-- **`detached`** for a declared identity → upsert the row's **existence/identity** but **do not
+  declares the identity so the file-departure branch never reaches it.
+  **Concrete change required:** `_prune_departed` (`reconcile_resources.py:454-455`) currently does
+  `if identity in declared: continue` — a `removed` identity *is* in `declared`, so it is skipped
+  before reaching `prune_or_cordon_resource` and the delete-when-idle acceptance silently never
+  fires. Change the guard to keep iterating a `removed` identity:
+  `if identity in declared and removed.get(identity) is None: continue` (where `removed` is the
+  subset of the ledger lookup with `disposition='removed'`). The create side (`_create_config_resources`)
+  must `continue` past a `removed` identity before the upsert so it is not re-created.
+- **`detached`** for a declared identity → keep the row's **existence/identity** but **do not
   overwrite its runtime-owned fields** (`cost_class`, the `capabilities` sizing/cap, `pool`,
-  `host_uri`) from the file. If the row is **absent** (hand-deleted), **GC the `detached` entry**
-  (A4) and let the next no-entry pass re-assert the file — do not resurrect stale values under a
-  still-active override. Never prune a `detached` identity.
+  `host_uri`) from the file. Concretely, in `_upsert_config_resource` (reconcile_resources.py:210-268)
+  the **field-overwrite branch is `_update_config_resource`** (the one that writes host_uri/cost_class/
+  caps/pool) — for a `detached` row, **skip that call**. The **existence/adoption branch**
+  (`_insert_config_resource` when the row is absent, `_adopt_config_resource` when `managed_by`/lease
+  ownership is wrong) still runs so a `managed_by` flip is still repaired. If the row is **absent**
+  (hand-deleted), the existence branch would re-insert it at file values, which resurrects stale
+  values under a still-active override — instead, for a `detached`-and-absent identity **skip the
+  insert and let A4 GC the entry** (see A4, which owns this case); the next no-entry pass re-asserts
+  the file. Never prune a `detached` identity.
 - **no entry** → today's behavior unchanged (create on appear, repair a deleted row, prune/cordon on
   departure). This is the ADR-0021 drift-repair path and must stay byte-for-byte equivalent for a
   no-entry identity.
@@ -138,8 +149,11 @@ untouched so the regression test holds.
    allocation goes terminal, a later pass **deletes** the cordoned row.
 3. `detached` entry + a file `concurrent_allocation_cap` that differs from the live row → the live
    runtime cap **survives** the pass (file value not written).
-4. `detached` entry whose row was hand-deleted → the entry is **GC'd** and the file is re-asserted
-   (row returns at the file values) on the next pass.
+4. `detached` entry whose row was hand-deleted → A3 **skips the re-insert** (does not resurrect
+   stale values); the **A4 GC** (which owns the detached-absent-row case) drops the entry, and the
+   following no-entry pass re-asserts the file (row returns at the file values). This is a
+   two-pass behavior: pass *N* sees absent-row+detached and GCs the entry; pass *N+1* (no entry)
+   re-creates the row. The test asserts both passes.
 5. **Regression (guards ADR-0021):** an identity with **no** entry is still fully drift-repaired —
    re-created when its row is hand-deleted; pruned when it leaves the file. (Two assertions, or two
    tests.)
@@ -157,9 +171,14 @@ A settled ledger entry is redundant and must be dropped so the ledger stays boun
 
 - a **`removed`** entry whose identity is **no longer declared** in the file (the operator exported
   + re-applied, so the file-departure prune now owns the removal);
-- a **`detached`** entry whose **file values equal the live row** (the override has converged with
-  the file), **or** whose **row no longer exists** (the hand-deleted case from A3 — GC then
-  re-assert).
+- a **`detached`** entry whose **file values equal the live row** — "equal" means the exact field set
+  the resource upsert change-detects: `host_uri`, `cost_class`, the merged `capabilities` (the
+  sizing/cap keys), and `pool` (for a build host: `kind`, `base_image_volume`, `workspace_root`,
+  `max_concurrent`). When all of those already match, the override is a no-op and is dropped;
+- a **`detached`** entry whose **row no longer exists** (the hand-deleted case). **A4 owns this case
+  exclusively** — A3 only skips the re-insert; A4 deletes the entry. Implement it as the *first* GC
+  branch (absent row → drop), so the "file values equal live row" comparison is never run against a
+  missing row.
 
 The GC runs as a step in the inventory pass, **after** the resource and build-host sub-passes, under
 the same pass lock. It reads the parsed `InventoryDoc` (to know what the file declares and its
