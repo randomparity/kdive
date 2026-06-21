@@ -1183,6 +1183,37 @@ def test_apply_patch_git_apply_failure_is_configuration_error(
     assert captured[0][-1] == str(patch)
 
 
+def test_apply_patch_unreadable_patch_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The patch resolves to a real file but reading it raises OSError (e.g. EACCES): a
+    # CONFIGURATION_ERROR whose details name the kind, the resolved path, and the error type.
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == patch:
+            raise PermissionError("denied")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "patch_ref could not be read"
+    assert caught.value.details == {
+        "kind": "patch_ref",
+        "path": str(patch),
+        "error": "PermissionError",
+    }
+
+
 def test_apply_patch_timeout_is_configuration_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1518,6 +1549,61 @@ def test_clone_tree_git_fetch_failure_is_configuration_error(
     assert str(caught.value) == "git fetch failed"
 
 
+def test_clone_tree_fetch_head_missing_is_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # init+fetch succeed but rev-parse --verify FETCH_HEAD reports non-zero: the fetch claimed
+    # success yet left no FETCH_HEAD, which is a TRANSPORT_FAILURE (not a config/checkout error).
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        rc = 1 if "rev-parse" in argv else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(caught.value) == "git fetch produced no FETCH_HEAD (the fetch did not complete)"
+
+
+def test_clone_tree_checkout_failure_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # init+fetch+verify succeed but ``git checkout FETCH_HEAD`` fails (e.g. a corrupt fetched
+    # ref): CONFIGURATION_ERROR with the redacted checkout stderr tail.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        rc = 1 if "checkout" in argv else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="checkout: boom")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "git checkout FETCH_HEAD failed"
+    assert "boom" in caught.value.details["stderr"]
+
+
 def test_sync_tree_missing_rsync_is_missing_dependency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1538,6 +1624,30 @@ def test_sync_tree_unset_source_is_configuration_error(tmp_path: Path) -> None:
         build_host_workspace.sync_tree("   ", tmp_path / "ws", SecretRegistry())
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_sync_tree_mkdir_failure_is_infrastructure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rsync is present and the source is valid, but creating the workspace dir raises OSError:
+    # mapped to workspace_failure("mkdir", "build_workspace", ...) -> INFRASTRUCTURE_FAILURE.
+    source = tmp_path / "warm"
+    source.mkdir()
+    workspace = tmp_path / "ws"
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/rsync")
+
+    def _mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        if self == workspace:
+            raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "build workspace mkdir failed"
+    assert caught.value.details == {"op": "mkdir", "path": "build_workspace"}
 
 
 def test_sync_tree_rsync_argv_and_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
