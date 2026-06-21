@@ -142,6 +142,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # ops (platform)
     "ops.diagnostics": _PLAT_OP,
     "ops.export_cost_classes": _PLAT_OP,
+    "ops.export_systems_toml": _PLAT_OP,
     "ops.jobs_list": _PLAT_OP,
     "ops.queue_pause": _PLAT_OP,
     "ops.queue_resume": _PLAT_OP,

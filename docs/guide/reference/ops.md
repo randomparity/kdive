@@ -26,6 +26,12 @@ audited distinctly).
 
 Export the cost-class coefficient table as a systems.toml fragment. Operator.
 
+## `ops.export_systems_toml`
+
+`implemented` · `read-only`
+
+Export the live inventory as a deterministic systems.toml document. Operator.
+
 ## `ops.force_release`
 
 `implemented` · `destructive`

@@ -31,6 +31,7 @@ from pydantic import Field
 from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.inventory.serialize import read_inventory_snapshot, serialize_inventory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -49,6 +50,9 @@ _SET_COEFF_TOOL = "ops.set_cost_class_coeff"
 _SET_CAPACITY_TOOL = "ops.set_host_capacity"
 _EXPORT_TOOL = "ops.export_cost_classes"
 _EXPORT_SCOPE = "all-cost-classes"
+_EXPORT_SYSTEMS_OBJECT_ID = "systems_toml_export"
+_EXPORT_SYSTEMS_TOOL = "ops.export_systems_toml"
+_EXPORT_SYSTEMS_SCOPE = "all-inventory"
 
 
 async def set_cost_class_coeff(
@@ -109,6 +113,38 @@ async def export_cost_classes(pool: AsyncConnectionPool, ctx: RequestContext) ->
             "ok",
             suggested_next_actions=[_EXPORT_TOOL],
             data={"toml": _render_toml(rows)},
+        )
+
+
+async def export_systems_toml(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
+    """Serialize the live inventory to a deterministic ``systems.toml`` document (#640, ADR-0199).
+
+    Read-only (``PLATFORM_OPERATOR``; audited as a platform read). Generalizes
+    :func:`export_cost_classes` to the whole file: images, build_hosts, cost_classes, and the
+    identity/economic/sizing fields of resources, honoring the override ledger (a ``removed``
+    identity is omitted; a ``detached`` one is emitted with its live runtime values). The
+    connection/debug fields the remote-libvirt provider reads from the file (``gdb_addr``,
+    ``gdbstub_range``, the three TLS refs, ``base_image``, ``shapes``) are not persisted, so a
+    ``[[remote_libvirt]]`` block is a skeleton of ``REPLACE_ME_*`` placeholders an operator
+    completes before a fresh start. Returns text in ``data["toml"]``; does **not** write any file
+    (writeback is M2.7 sub-issue D).
+    """
+    with bind_context(principal=ctx.principal):
+        try:
+            require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
+        except AuthorizationError:
+            await audit_platform_denial(
+                pool, ctx, tool=_EXPORT_SYSTEMS_TOOL, scope=_EXPORT_SYSTEMS_SCOPE
+            )
+            return _denied(_EXPORT_SYSTEMS_OBJECT_ID, _EXPORT_SYSTEMS_TOOL)
+        async with pool.connection() as conn:
+            snapshot = await read_inventory_snapshot(conn)
+            await _audit_inventory_read(conn, ctx)
+        return ToolResponse.success(
+            _EXPORT_SYSTEMS_OBJECT_ID,
+            "ok",
+            suggested_next_actions=[_EXPORT_SYSTEMS_TOOL],
+            data={"toml": serialize_inventory(snapshot)},
         )
 
 
@@ -290,6 +326,23 @@ async def _audit_read(conn: AsyncConnection, ctx: RequestContext) -> None:
         )
 
 
+async def _audit_inventory_read(conn: AsyncConnection, ctx: RequestContext) -> None:
+    """Audit the full-inventory export read to ``platform_audit_log`` (no row mutated)."""
+    async with conn.transaction():
+        await audit.record_platform(
+            conn,
+            principal=ctx.principal,
+            agent_session=ctx.agent_session,
+            event=audit.PlatformAuditEvent(
+                tool=_EXPORT_SYSTEMS_TOOL,
+                scope=_EXPORT_SYSTEMS_SCOPE,
+                args={"tool": _EXPORT_SYSTEMS_TOOL},
+                platform_role=held_platform_roles(ctx),
+                actor=actor_for(ctx),
+            ),
+        )
+
+
 def _denied(object_id: str, tool: str) -> ToolResponse:
     return ToolResponse.failure(
         object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
@@ -345,3 +398,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def ops_export_cost_classes() -> ToolResponse:
         """Export the cost-class coefficient table as a systems.toml fragment. Operator."""
         return await export_cost_classes(pool, current_context())
+
+    @app.tool(
+        name=_EXPORT_SYSTEMS_TOOL,
+        annotations=_docmeta.read_only(),
+        meta={"maturity": "implemented"},
+    )
+    async def ops_export_systems_toml() -> ToolResponse:
+        """Export the live inventory as a deterministic systems.toml document. Operator."""
+        return await export_systems_toml(pool, current_context())
