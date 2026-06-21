@@ -85,6 +85,81 @@ def test_list_resources_populates_pcie_descriptors() -> None:
     assert devices[1]["label"] == "8086:7a8a"
 
 
+def test_compose_bdf_uses_all_address_fields() -> None:
+    # Distinct non-zero domain/bus/slot/function (decimal) so a wrong tag or dropped
+    # default cannot coincidentally produce the right hex BDF.
+    conn = FakeLibvirtConn(
+        node_devices=[
+            FakeNodeDevice(
+                "pci_0001_0b_16_3",
+                pci_nodedev_xml(domain=1, bus=11, slot=22, function=3),
+            )
+        ]
+    )
+    device = _discovery(conn).list_resources()[0]["capabilities"][PCIE_DEVICES_KEY][0]
+    assert device["bdf"] == "0001:0b:16.3"
+
+
+def test_compose_bdf_defaults_missing_address_fields_to_zero() -> None:
+    # A PCI capability missing the address elements must default each to 0 (BDF 0000:00:00.0),
+    # not raise — the int(default="0") fallbacks.
+    xml = (
+        "<device><name>pci_min</name>"
+        "<capability type='pci'>"
+        "<class>0x020000</class>"
+        "<product id='0x1572'>NIC</product>"
+        "<vendor id='0x8086'>Intel</vendor>"
+        "</capability></device>"
+    )
+    conn = FakeLibvirtConn(node_devices=[FakeNodeDevice("pci_min", xml)])
+    device = _discovery(conn).list_resources()[0]["capabilities"][PCIE_DEVICES_KEY][0]
+    assert device["bdf"] == "0000:00:00.0"
+
+
+def test_class_code_is_lowercased() -> None:
+    conn = FakeLibvirtConn(
+        node_devices=[FakeNodeDevice("pci_0000_3b_00_0", pci_nodedev_xml(cls="0x0A0BCD"))]
+    )
+    device = _discovery(conn).list_resources()[0]["capabilities"][PCIE_DEVICES_KEY][0]
+    assert device["class_code"] == "0a0bcd"
+
+
+def test_pci_descriptor_without_class_is_skipped() -> None:
+    # No <class> element → empty class_code → descriptor dropped (not coerced to a placeholder).
+    xml = (
+        "<device><name>pci_noclass</name>"
+        "<capability type='pci'>"
+        "<domain>0</domain><bus>59</bus><slot>0</slot><function>0</function>"
+        "<product id='0x1572'>NIC</product>"
+        "<vendor id='0x8086'>Intel</vendor>"
+        "</capability></device>"
+    )
+    conn = FakeLibvirtConn(
+        node_devices=[
+            FakeNodeDevice("pci_noclass", xml),
+            FakeNodeDevice("pci_0000_3b_00_0", pci_nodedev_xml()),
+        ]
+    )
+    devices = _discovery(conn).list_resources()[0]["capabilities"][PCIE_DEVICES_KEY]
+    assert [d["bdf"] for d in devices] == ["0000:3b:00.0"]
+
+
+def test_list_pcie_requests_only_pci_devices() -> None:
+    # The node-device enumeration must pass the PCI-device filter flag, not a placeholder.
+    flags: list[object] = []
+
+    class _RecordingConn(FakeLibvirtConn):
+        def listAllDevices(  # noqa: N802 - mirrors the libvirt binding name
+            self, flags_arg: int = 0
+        ) -> list[FakeNodeDevice]:
+            flags.append(flags_arg)
+            return list(self.node_devices)
+
+    conn = _RecordingConn(node_devices=[FakeNodeDevice("pci_0000_3b_00_0", pci_nodedev_xml())])
+    _discovery(conn).list_resources()
+    assert flags == [libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV]
+
+
 def test_pcie_descriptor_has_no_free_flag() -> None:
     conn = FakeLibvirtConn(node_devices=[FakeNodeDevice("pci_0000_3b_00_0", pci_nodedev_xml())])
     descriptor = _discovery(conn).list_resources()[0]["capabilities"][PCIE_DEVICES_KEY][0]
@@ -154,11 +229,17 @@ def test_list_owned_surfaces_convention_named_untagged_orphan() -> None:
 
 
 def test_list_owned_reraises_non_metadata_libvirt_error() -> None:
+    from kdive.domain.errors import ErrorCategory
+
     conn = FakeLibvirtConn(
         domains=[FakeDomain("vm", system_id=None, raise_code=libvirt.VIR_ERR_INTERNAL_ERROR)]
     )
-    with pytest.raises(CategorizedError):
+    with pytest.raises(CategorizedError) as exc:
         _discovery(conn).list_owned()
+
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.details == {"domain": "vm"}
+    assert str(exc.value) == "libvirt error reading domain metadata"
 
 
 def test_from_env_reads_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,7 +257,34 @@ def test_from_env_defaults_cap_to_one(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_from_env_non_int_cap_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kdive.domain.errors import ErrorCategory
+
     monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///system")
     monkeypatch.setenv("KDIVE_LIBVIRT_ALLOCATION_CAP", "lots")
-    with pytest.raises(CategorizedError):
+    with pytest.raises(CategorizedError) as exc:
         LocalLibvirtDiscovery.from_env()
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "is not an integer" in str(exc.value)
+    assert "lots" in str(exc.value)
+
+
+def test_from_env_connect_opens_configured_host_uri(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kdive.providers.local_libvirt.discovery as discovery_module
+
+    opened: list[object] = []
+    sentinel = object()
+
+    def _fake_open(uri: object) -> object:
+        opened.append(uri)
+        return sentinel
+
+    monkeypatch.setattr(discovery_module.libvirt, "open", _fake_open)
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu+ssh://host/system")
+    monkeypatch.setenv("KDIVE_LIBVIRT_ALLOCATION_CAP", "2")
+
+    disc = LocalLibvirtDiscovery.from_env()
+    conn = disc._connect()
+
+    assert conn is sentinel
+    assert opened == ["qemu+ssh://host/system"]
