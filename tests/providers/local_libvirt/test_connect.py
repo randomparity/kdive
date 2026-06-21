@@ -26,12 +26,33 @@ def test_rsp_frame_wraps_with_mod256_checksum() -> None:
     assert rsp_frame("?") == b"$?#3f"
 
 
+def test_rsp_frame_checksum_wraps_at_256() -> None:
+    # "~~~" sums to 378; mod-256 is 0x7a (122), which a mod-257 mutant would not produce.
+    assert rsp_frame("~~~") == b"$~~~#7a"
+
+
 def test_valid_rsp_frame_accepts_complete_checksum_valid_frame() -> None:
     assert valid_rsp_frame(b"$?#3f") is True
 
 
+def test_valid_rsp_frame_accepts_wrapped_checksum() -> None:
+    # Mirrors rsp_frame's mod-256 wrap so the validator's modulus is pinned too.
+    assert valid_rsp_frame(b"$~~~#7a") is True
+
+
 def test_valid_rsp_frame_ignores_leading_ack() -> None:
     assert valid_rsp_frame(b"+$?#3f") is True
+
+
+def test_valid_rsp_frame_ignores_leading_nack() -> None:
+    # A leading '-' (nack) is an ack byte and is skipped just like '+'.
+    assert valid_rsp_frame(b"-$?#3f") is True
+
+
+def test_valid_rsp_frame_uses_first_hash_as_terminator() -> None:
+    # The first '#' terminates the frame. `$a##84` would only validate if the *last* '#'
+    # were used (payload "a#" sums to 0x84); using the first '#' it must be rejected.
+    assert valid_rsp_frame(b"$a##84") is False
 
 
 def test_valid_rsp_frame_rejects_trailing_bytes() -> None:
@@ -69,6 +90,36 @@ def test_rsp_reachable_returns_false_when_connection_fails(
     monkeypatch.setattr(rsp_mod.socket, "create_connection", fail_connect)
 
     assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is False
+
+
+class _FakeSocket:
+    """A connected socket that answers one valid RSP frame, then EOF."""
+
+    def __init__(self) -> None:
+        self._chunks = [b"+" + rsp_frame("?"), b""]
+
+    def sendall(self, _data: bytes) -> None:
+        return None
+
+    def settimeout(self, _timeout: float) -> None:
+        return None
+
+    def recv(self, _size: int) -> bytes:
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+def test_rsp_reachable_true_when_peer_answers_valid_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A reachable stub that answers a valid frame within the deadline returns True; this also
+    # pins the deadline computation (a None/already-elapsed deadline would never read the reply).
+    monkeypatch.setattr(
+        rsp_mod.socket, "create_connection", lambda _addr, *, timeout: _FakeSocket()
+    )
+    assert rsp_mod.rsp_reachable("127.0.0.1", 1234) is True
 
 
 # --- TransportHandleData codec -------------------------------------------------------------
