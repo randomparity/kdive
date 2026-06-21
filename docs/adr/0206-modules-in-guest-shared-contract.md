@@ -110,8 +110,10 @@ overlay via libguestfs, **clobbers** any existing `/lib/modules/<ver>`, writes t
   `boot()`'s destroy-then-create; the later `boot()` re-creates it.
 - **Idempotent injection.** A failed install records no `run_steps` row (ADR-0030 §2), so a
   retry re-runs injection. It must self-heal a partial prior write: clobber the version dir (or
-  temp-extract + atomic rename) before extracting, and verify `modules.dep` is present and
-  non-empty after `depmod` — not merely that the version dir exists.
+  temp-extract + atomic rename) before extracting, and verify a completion sentinel (`depmod`
+  exits 0 and rewrites `modules.dep`) — not merely that the version dir exists. The sentinel
+  must not require `modules.dep` be non-empty: an all-builtin kdump kernel leaves a valid empty
+  one.
 
 A `GuestModuleWriter` seam mirrors ADR-0203's `GuestCoreReader` split — the
 force-off→fetch→clobber→write→depmod→verify orchestration is pure and unit-tested with a fake;

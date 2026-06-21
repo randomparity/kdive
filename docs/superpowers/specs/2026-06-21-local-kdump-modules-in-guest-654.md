@@ -109,9 +109,12 @@ overlay (`overlay_path`, the file ADR-0203 reads) read-write via libguestfs, wri
   retry re-runs the whole install body, including injection. Injection must therefore be
   idempotent and self-healing of a partial prior write: clobber any existing
   `/lib/modules/<ver>` (remove the version dir, or extract to a temp dir and atomically rename)
-  before extracting, and verify a **content sentinel** — `modules.dep` present and non-empty
-  after `depmod` — not merely that the version directory exists (a half-written tree from a
-  crashed prior attempt would false-pass a directory-presence check).
+  before extracting, and verify a **completion sentinel** — `depmod` exits 0 and the
+  `modules.dep` it rewrites exists (or the extracted file count matches the tarball manifest) —
+  not merely that the version directory exists (a half-written tree from a crashed prior attempt
+  would false-pass a directory-presence check). The sentinel must not assume loadable modules
+  exist: an all-builtin kdump kernel can leave a valid but empty `modules.dep`, so "non-empty"
+  is not a safe completion signal. The exact sentinel is a plan detail.
 
 A new injected `GuestModuleWriter`-style seam mirrors ADR-0203's `GuestCoreReader` split: the
 orchestration (force-off → fetch → mount → clobber → write → depmod → verify-sentinel) is pure
