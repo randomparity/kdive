@@ -5,17 +5,23 @@ mutmut itself is never run here; these test the wrapper's pure decision logic.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from scripts.mutate import (
     MARKER,
     MutateError,
     format_summary,
+    guard_no_existing_config,
     parse_survivors,
     parse_total_mutants,
+    prepare_store,
     render_config,
     resolve_source,
     resolve_test_paths,
+    signature,
+    write_signature,
 )
 
 _RESULTS = (
@@ -134,3 +140,66 @@ def test_format_summary_lists_survivors_and_count() -> None:
 def test_format_summary_celebrates_zero_survivors() -> None:
     out = format_summary(10, [], "src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
     assert "0 surviving" in out
+
+
+def test_signature_is_stable_for_same_target() -> None:
+    a = signature("src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
+    b = signature("src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
+    assert a == b
+
+
+def test_signature_differs_when_target_differs() -> None:
+    a = signature("src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
+    b = signature("src/kdive/domain/cost.py", ["tests/domain/test_errors.py"])
+    assert a != b
+
+
+def test_guard_refuses_existing_marked_config(tmp_path: Path) -> None:
+    cfg = tmp_path / "setup.cfg"
+    cfg.write_text("# kdive-mutate transient config — delete only when no run is in flight\n")
+    with pytest.raises(MutateError, match="in flight"):
+        guard_no_existing_config(cfg)
+
+
+def test_guard_refuses_existing_foreign_config(tmp_path: Path) -> None:
+    cfg = tmp_path / "setup.cfg"
+    cfg.write_text("[flake8]\nmax-line-length = 100\n")
+    with pytest.raises(MutateError, match="refusing to overwrite"):
+        guard_no_existing_config(cfg)
+
+
+def test_guard_passes_when_no_config(tmp_path: Path) -> None:
+    guard_no_existing_config(tmp_path / "setup.cfg")  # no raise
+
+
+def test_prepare_store_clears_on_target_change(tmp_path: Path) -> None:
+    mutants = tmp_path / "mutants"
+    mutants.mkdir()
+    (mutants / ".kdive-target").write_text("old-signature")
+    (mutants / "stale.json").write_text("{}")
+    prepare_store("new-signature", mutants)
+    assert not mutants.exists()
+
+
+def test_prepare_store_keeps_on_same_target(tmp_path: Path) -> None:
+    mutants = tmp_path / "mutants"
+    mutants.mkdir()
+    (mutants / ".kdive-target").write_text("sig")
+    (mutants / "stats.json").write_text("{}")
+    prepare_store("sig", mutants)
+    assert (mutants / "stats.json").exists()
+
+
+def test_prepare_store_clears_when_no_signature(tmp_path: Path) -> None:
+    mutants = tmp_path / "mutants"
+    mutants.mkdir()
+    (mutants / "leftover.json").write_text("{}")  # broken prior run, no signature
+    prepare_store("sig", mutants)
+    assert not mutants.exists()
+
+
+def test_write_signature_records_target(tmp_path: Path) -> None:
+    mutants = tmp_path / "mutants"
+    mutants.mkdir()
+    write_signature("sig", mutants)
+    assert (mutants / ".kdive-target").read_text() == "sig"

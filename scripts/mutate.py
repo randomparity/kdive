@@ -17,6 +17,7 @@ See docs/development/mutation-testing.md.
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -127,3 +128,40 @@ def format_summary(
         lines.append("  each survivor is a code change no test caught — add an assertion.")
     lines.append("  note: result is relative to the test path supplied.")
     return "\n".join(lines) + "\n"
+
+
+def signature(source_rel: str, test_paths: list[str]) -> str:
+    """A stable identifier for a (source, tests) target, used to detect target changes."""
+    return "\n".join([source_rel, *test_paths])
+
+
+def guard_no_existing_config(config_path: Path) -> None:
+    """Refuse to run if a setup.cfg is already present (in-flight run or foreign file)."""
+    if not config_path.exists():
+        return
+    if config_path.read_text().startswith(MARKER):
+        raise MutateError(
+            "a mutate run is in flight (transient setup.cfg present); "
+            "if none is running, delete setup.cfg and retry"
+        )
+    raise MutateError(f"refusing to overwrite existing {config_path.name}")
+
+
+def prepare_store(sig: str, mutants_dir: Path) -> None:
+    """Remove the mutmut store unless it already belongs to this exact target.
+
+    Keeping a matching store lets a re-run reuse mutmut's cache (fast iteration);
+    a changed or signature-less store is removed so summaries never conflate targets.
+    """
+    if not mutants_dir.exists():
+        return
+    marker = mutants_dir / ".kdive-target"
+    if marker.exists() and marker.read_text() == sig:
+        return
+    shutil.rmtree(mutants_dir)
+
+
+def write_signature(sig: str, mutants_dir: Path) -> None:
+    """Record the current target in the store so the next run can detect a change."""
+    if mutants_dir.exists():
+        (mutants_dir / ".kdive-target").write_text(sig)
