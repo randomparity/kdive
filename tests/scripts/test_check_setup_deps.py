@@ -16,8 +16,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.host_capabilities import requires_bash
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-setup-deps.sh"
 BASH = shutil.which("bash")
+
+# The script collects required-tool reports through a `local -n` nameref (bash >= 4.3).
+pytestmark = requires_bash(4, 3, "local -n namerefs")
 
 
 def _run(os_release_id: str, path: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:

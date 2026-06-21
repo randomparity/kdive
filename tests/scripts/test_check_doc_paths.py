@@ -12,8 +12,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from tests.host_capabilities import requires_bash
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-doc-paths.sh"
 BASH = shutil.which("bash")
+
+# The script reads matches with `mapfile` (bash >= 4.0).
+pytestmark = requires_bash(4, 0, "mapfile")
 
 
 def _run(root: Path) -> subprocess.CompletedProcess[str]:
