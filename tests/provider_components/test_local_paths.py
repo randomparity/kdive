@@ -27,6 +27,27 @@ def test_rejects_path_outside_allowed_roots(tmp_path: Path) -> None:
         validate_local_component_path(str(outside), allowed_roots=[tmp_path / "root"])
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "local component path is outside provider allowed roots"
+
+
+def test_rejects_relative_path(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        validate_local_component_path("relative/base.qcow2", allowed_roots=[tmp_path])
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "local component path must be absolute"
+
+
+def test_rejects_nonexistent_absolute_path(tmp_path: Path) -> None:
+    # A strict resolve is required: a path that does not exist must fail here, never resolve
+    # to a phantom location that later slips past the allowed-roots check.
+    missing = tmp_path / "root" / "absent.qcow2"
+
+    with pytest.raises(CategorizedError) as caught:
+        validate_local_component_path(str(missing), allowed_roots=[tmp_path])
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "local component path does not exist"
 
 
 def test_rejects_symlink_escape(tmp_path: Path) -> None:
@@ -42,6 +63,41 @@ def test_rejects_symlink_escape(tmp_path: Path) -> None:
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_accepts_matching_sha256_with_prefix(tmp_path: Path) -> None:
+    # A correct digest (with the "sha256:" prefix stripped before comparison) passes and
+    # returns the resolved path — the digest gate must not reject a genuine match.
+    import hashlib
+
+    root = tmp_path / "root"
+    root.mkdir()
+    image = root / "base.qcow2"
+    payload = b"real image bytes"
+    image.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    result = validate_local_component_path(
+        str(image), allowed_roots=[root], sha256=f"sha256:{digest}"
+    )
+
+    assert result == image.resolve()
+
+
+def test_accepts_matching_sha256_without_prefix(tmp_path: Path) -> None:
+    # The "sha256:" prefix is optional: a bare hex digest must also be accepted.
+    import hashlib
+
+    root = tmp_path / "root"
+    root.mkdir()
+    image = root / "base.qcow2"
+    payload = b"more image bytes"
+    image.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    result = validate_local_component_path(str(image), allowed_roots=[root], sha256=digest)
+
+    assert result == image.resolve()
+
+
 def test_rejects_sha256_mismatch(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -51,6 +107,7 @@ def test_rejects_sha256_mismatch(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as caught:
         validate_local_component_path(str(image), allowed_roots=[root], sha256="sha256:" + "0" * 64)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "local component sha256 does not match"
 
 
 def test_digest_read_failure_maps_to_configuration_error(
@@ -68,3 +125,4 @@ def test_digest_read_failure_maps_to_configuration_error(
     with pytest.raises(CategorizedError) as exc_info:
         validate_local_component_path(str(image), allowed_roots=[root], sha256="sha256:" + "0" * 64)
     assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc_info.value) == "local component sha256 could not be read"
