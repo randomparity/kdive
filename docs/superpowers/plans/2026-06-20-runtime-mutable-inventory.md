@@ -64,9 +64,13 @@ full design in [the spec](../../design/runtime-mutable-inventory.md).
 
 1. **Migration + ledger schema.** Add `inventory_overrides` (`source_kind`, `resource_kind`,
    `name`, `disposition` CHECK in (`detached`,`removed`), `reason`, `actor`, `created_at`;
-   PK `(source_kind, resource_kind, name)`). Update the three migration-version-list assertions
-   (memory: `test_0042_backfills`-style tests assert the version list). Test: migration applies,
-   CHECK rejects an unknown disposition, schema-enum⊆SQL guard.
+   PK `(source_kind, resource_kind, name)`). The next free migration number follows the current
+   head (`0045_allocation_requested_pool.sql` at plan time — confirm the head at implementation).
+   Before committing, find every test that asserts the migration version list / count and update it
+   (`rg -n 'through_004|schema_migrations|all_migrations' tests/db/`) — `tests/db/test_migrate.py`
+   carries the version-walk assertions; the count and the exact assertion names move as migrations
+   land, so discover them, don't assume a fixed set. Test: migration applies, CHECK rejects an
+   unknown disposition, schema-enum⊆SQL guard.
 2. **Ledger repository** (`overrides.py`): `set_override`, `clear_override`, `lookup(kind, name)`,
    `gc_settled(doc, conn)`. Pure-ish helpers over an injected conn; unit-tested directly.
 3. **Reconcile consults the ledger** in `reconcile_resources.py` (and the build-host equivalent):
