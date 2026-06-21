@@ -38,12 +38,22 @@ Verified against `reconcile_resources.py`, `reconcile_build_hosts.py`, `reconcil
 | `base_image` | **file-only** | — skeleton placeholder (validated at parse against `[[image]]`; never stored) |
 | `shapes` | **file-only** | — skeleton placeholder (default `[]`) |
 
-The seven file-only fields are emitted as **placeholders**: `uri`/`gdb_addr`/`gdbstub_range`/the
-three TLS refs/`base_image` as obvious `REPLACE_ME` sentinels, `shapes` as an empty array. The
-provider reads these from the file, so an unedited skeleton **must not** parse (they are required,
-non-default model fields except `shapes`); the operator completes them before a fresh start. Note:
-`uri` **is** persisted (`host_uri`), so the export emits the live value, not a placeholder — but
-the six others plus `base_image` are placeholders.
+The file-only fields are emitted as **placeholders**: `gdb_addr`/`gdbstub_range`/the three TLS
+refs as obvious `REPLACE_ME` sentinels, `shapes` as an empty array. The provider reads these from
+the file, so an unedited skeleton **must not** parse (they are required, non-default model fields
+except `shapes`); the operator completes them before a fresh start. Note: `uri` **is** persisted
+(`host_uri`), so the export emits the live value, not a placeholder.
+
+**`base_image` is special.** It is file-only (not in `resources`), but the model's
+`_check_base_image_refs` (model.py) requires it to name a **declared `[[image]]`**, so a
+`REPLACE_ME` value would fail parse on `base_image` rather than on a missing TLS ref. The export
+emits `base_image = "REPLACE_ME_base_image"` as the placeholder and the header comment instructs
+the operator to set it to one of the exported `[[image]]` names. Caveat the operator must know: if
+a live remote host's `base_image` points at an image that is **not** `managed_by='config'`
+(a runtime/private/discovery image), that image is **not** in the export, so the operator must also
+add a matching `[[image]]` (or repoint `base_image`) for the completed file to parse. The export
+cannot emit a non-config image without misrepresenting its ownership. This is documented in the
+header comment; the round-trip test fills `base_image` with an exported image's name.
 
 ### `[[build_host]]` (`BuildHostInstance`) — fully round-trips
 
@@ -81,12 +91,17 @@ The last case is the lossy one and is documented in the header comment. A `[[ima
 all other columns NULL). A `build` source is therefore not faithfully reconstructable from DB
 columns, and neither is an unrealized `s3` source. Both collapse to the same `defined` DB row.
 **Round-trip equality is defined on DB state, not on the original file** (per the acceptance
-criterion): re-parsing the exported `defined`-row skeleton (an `s3` source with a placeholder key)
-and reconciling it yields the same `defined` row (the placeholder object HEADs absent → stays
-`defined`). A `defined` config row is rare in practice — config images are normally `staged`
-(operator volume) or registered `s3` — so the round-trip-faithful path covers the realistic fleet;
-the `defined` placeholder keeps the export honest (it does not invent a base) and parseable. This
-is called out in the header comment as a placeholder, exactly like the remote skeleton.
+criterion): re-parsing the exported `defined`-row block (an `s3` source with a placeholder
+`object_key` and no digest) and reconciling it yields the same `defined` row — `_realize_s3`
+returns `no_digest` (digest is the registration gate), so the row stays `state='defined'` with
+`object_key=NULL` (verified against the `image_object_present` CHECK: a `defined` row requires
+`object_key IS NULL`, which the no-digest path satisfies). Unlike the remote skeleton, this
+`defined`-image block **does** parse unedited (`S3Source` requires only `object_key`; `digest` is
+optional), so the "unedited skeleton must not parse" gate is a property of the **`remote_libvirt`
+block only**, not the image block. The `defined`-image placeholder is a best-effort honest emission
+(it does not invent a `build` base), not a parse gate. A `defined` config row is rare in practice —
+config images are normally `staged` (operator volume) or registered `s3` — so the
+round-trip-faithful path covers the realistic fleet.
 
 ### `[[cost_class]]` (`CostClassEntry`) — fully round-trips
 
@@ -120,6 +135,21 @@ Byte-identical output for a given DB state. Achieved by:
 - A fixed key order within each block.
 - No timestamps or other non-deterministic content in the body (the header comment is static
   text, no clock read).
+
+**NULL / optional columns are OMITTED, never emitted blank.** A nullable column that is NULL
+(`build_hosts.base_image_volume` for a `local` host, `image_catalog.digest` for a `defined`/digest-less
+row) is **left out of its block** entirely, not emitted as `key = ""`. This is load-bearing for
+round-trip: emitting `base_image_volume = ""` for a `local` build host would set the field to an
+empty string and fail the `build_hosts_fields_check` CHECK on reconcile (`local` requires
+`base_image_volume IS NULL`). A model field that has a default (`max_concurrent=1`,
+`concurrent_allocation_cap=1`, `pool="default"`, `seed=0`) is always emitted explicitly with its
+live value (no reliance on the parser's default), so the export is self-describing and a value
+change round-trips.
+
+**Capabilities jsonb numbers are read as `int` and emitted unquoted.** `vcpus` / `memory_mb` /
+`concurrent_allocation_cap` live in the `capabilities` jsonb as JSON numbers; the reader narrows
+each to `int` (failing loudly if a row holds a non-int, mirroring `_row_typing`'s typed reads) and
+the emitter writes them as bare TOML integers, so they parse back into the model's `int` fields.
 
 `local_libvirt`/`fault_inject` resources are also config-owned and are exported when present
 (discovery-owned `local_libvirt` rows with no config instance carry a derived name but
@@ -179,8 +209,11 @@ holds ≥1 platform role, mirroring `export_cost_classes`). Returns the document
   (export → parse → reconcile → equal DB state) for the realized-source / fully-persisted cases.
 - Byte-deterministic for a given DB state (two exports of the same state are identical).
 - A `remote_libvirt` block is a skeleton naming every operator-supplied placeholder; an unedited
-  skeleton does **not** parse (required file-only fields are placeholders).
-- The round-trip test runs on the operator-**completed** file (placeholders filled).
+  `remote_libvirt` skeleton does **not** parse (required file-only fields are placeholders). The
+  `defined`-image placeholder block is honest-but-parseable (not a parse gate); the round-trip-to-
+  `defined` equality still holds.
+- The round-trip test runs on the operator-**completed** file (TLS/gdb/`base_image` placeholders
+  filled; `base_image` set to an exported `[[image]]` name).
 - A `removed`-ledger identity is omitted; a `detached` identity is emitted with its live runtime
   values.
 
