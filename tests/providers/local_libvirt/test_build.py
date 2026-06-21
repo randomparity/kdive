@@ -122,6 +122,8 @@ class _Seams:
     olddefconfig_calls: int = 0
     make_calls: int = 0
     checkout_calls: int = 0
+    modules_install_returncode: int = 0
+    modules_install_calls: int = 0
     call_order: list[str] = field(default_factory=list)
     workspace_cleanups: list[Path] = field(default_factory=list)
     merged_fragments: list[bytes] = field(default_factory=list)
@@ -156,6 +158,14 @@ class _Seams:
     def read_build_id(self, workspace: Path) -> str:
         return self.build_id.hex()
 
+    def run_modules_install(self, workspace: Path, mod_root: Path) -> int:
+        self.modules_install_calls += 1
+        self.call_order.append("modules_install")
+        return self.modules_install_returncode
+
+    def make_modules_bundle(self, workspace: Path, mod_root: Path) -> ArtifactSource:
+        return ArtifactBytes(b"modules-bundle")
+
 
 def _builder(
     store: _FakeStore,
@@ -175,10 +185,39 @@ def _builder(
         read_kernel_source=seams.read_kernel_source,
         read_vmlinux_source=seams.read_vmlinux_source,
         read_build_id=seams.read_build_id,
+        run_modules_install=seams.run_modules_install,
+        make_modules_bundle=seams.make_modules_bundle,
+        staging_factory=lambda: tmp_path / "modroot",
+        staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
         catalog_fetch=catalog_fetch or (lambda _name: _FRAGMENT_BYTES),
         workspace_cleanup=seams.workspace_cleanups.append,
     )
+
+
+# --- modules_ref: config-driven production -------------------------------------------
+
+
+def test_build_publishes_modules_ref_when_config_is_kdump_capable(tmp_path: Path) -> None:
+    store, seams = _FakeStore(), _Seams()  # _GOOD_CONFIG has CONFIG_CRASH_DUMP=y
+    builder = _builder(store, seams, tmp_path)
+    output = builder.build(_RUN, _profile())
+    assert output.modules_ref is not None
+    assert "modules" in store.artifacts
+
+
+def test_config_is_not_kdump_capable_when_crash_dump_absent() -> None:
+    # Unit test for the predicate: a config without CONFIG_CRASH_DUMP=y is not kdump-capable.
+    assert not build_module._config_is_kdump_capable("CONFIG_DEBUG_INFO_DWARF5=y\n")
+    assert not build_module._config_is_kdump_capable("# CONFIG_CRASH_DUMP is not set\n")
+
+
+def test_build_modules_install_failure_is_build_failure(tmp_path: Path) -> None:
+    store, seams = _FakeStore(), _Seams(modules_install_returncode=2)
+    builder = _builder(store, seams, tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        builder.build(_RUN, _profile())
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
 
 
 # --- build-id note parser ------------------------------------------------------------
@@ -233,12 +272,13 @@ def test_build_returns_two_refs_and_build_id(tmp_path: Path) -> None:
     assert seams.make_calls == 1
 
 
-def test_build_stores_both_artifacts_sensitive(tmp_path: Path) -> None:
+def test_build_stores_artifacts_sensitive(tmp_path: Path) -> None:
+    # _GOOD_CONFIG has CONFIG_CRASH_DUMP=y so modules is also published.
     store, seams = _FakeStore(), _Seams()
     _builder(store, seams, tmp_path).build(_RUN, _profile())
 
     names = {name for _, name, _, _ in store.puts}
-    assert names == {"kernel", "vmlinux"}
+    assert names == {"kernel", "vmlinux", "modules"}
     assert all(sens is Sensitivity.SENSITIVE for _, _, _, sens in store.puts)
     assert all(kind == "runs" for _, _, kind, _ in store.puts)
 
@@ -249,7 +289,8 @@ def test_build_runs_olddefconfig_before_config_validation(tmp_path: Path) -> Non
     _builder(store, seams, tmp_path).build(_RUN, _profile())
 
     assert seams.call_order[:3] == ["checkout", "olddefconfig", "read_config"]
-    assert seams.call_order[-1] == "make"
+    assert "make" in seams.call_order
+    assert seams.call_order.index("make") < seams.call_order.index("modules_install")
 
 
 def test_build_maps_olddefconfig_failure_to_build_failure(tmp_path: Path) -> None:
@@ -347,6 +388,10 @@ def test_build_missing_bzimage_after_make_is_build_failure(tmp_path: Path) -> No
         ),
         read_vmlinux_source=seams.read_vmlinux_source,
         read_build_id=seams.read_build_id,
+        run_modules_install=seams.run_modules_install,
+        make_modules_bundle=seams.make_modules_bundle,
+        staging_factory=lambda: tmp_path / "modroot",
+        staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
     )
@@ -436,12 +481,15 @@ class _PresignStore:
 
 
 def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path) -> None:
-    # A transport-bound local build publishes the bare bzImage + vmlinux via presigned PUT
-    # (no modules bundle), and the worker never reads the artifact bytes — only the objcopy note.
+    # A transport-bound local build publishes the bzImage, vmlinux, and (since _GOOD_CONFIG has
+    # CONFIG_CRASH_DUMP=y) a modules bundle via presigned PUT; the worker never reads artifact
+    # bytes — only the objcopy note.
     store, transport = _PresignStore(), _RemoteTransport()
     workspace = tmp_path / str(_RUN)
+    modules_bundle = str(workspace / "kdive-modules.tar.gz")
     transport.files[str(workspace / "arch/x86/boot/bzImage")] = b"\x01bz"
     transport.files[str(workspace / "vmlinux")] = b"\x7fELFvm"
+    transport.files[modules_bundle] = b""  # tar produces the bundle on the host
 
     base = LocalLibvirtBuild(
         tenant=_TENANT,
@@ -454,6 +502,10 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
         read_kernel_source=lambda _w: ArtifactBytes(b"warm-bz"),
         read_vmlinux_source=lambda _w: ArtifactBytes(b"warm-vm"),
         read_build_id=lambda _w: "deadbeef",
+        run_modules_install=lambda _ws, _mr: 0,
+        make_modules_bundle=lambda _ws, _mr: ArtifactBytes(b"modules-bundle"),
+        staging_factory=lambda: tmp_path / "modroot",
+        staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
         catalog_fetch=lambda _n: _FRAGMENT_BYTES,
     )
@@ -478,11 +530,13 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
 
     assert out.kernel_ref == f"{_TENANT}/runs/{_RUN}/kernel"
     assert out.debuginfo_ref == f"{_TENANT}/runs/{_RUN}/vmlinux"
+    assert out.modules_ref == f"{_TENANT}/runs/{_RUN}/modules"
     assert store.puts == []  # the transport path never PUTs from worker memory
-    assert {p.key for p in store.presigns} == {out.kernel_ref, out.debuginfo_ref}
+    assert {p.key for p in store.presigns} == {out.kernel_ref, out.debuginfo_ref, out.modules_ref}
     assert set(transport.uploaded) == {
         str(workspace / "arch/x86/boot/bzImage"),
         str(workspace / "vmlinux"),
+        modules_bundle,
     }
     # The worker only reads the small objcopy note back, never the artifact bytes.
     assert transport.reads == [str(workspace / "vmlinux.note")]
@@ -495,6 +549,7 @@ def test_over_transport_build_removes_clone_dir_via_transport(tmp_path: Path) ->
     workspace = tmp_path / str(_RUN)
     transport.files[str(workspace / "arch/x86/boot/bzImage")] = b"\x01bz"
     transport.files[str(workspace / "vmlinux")] = b"\x7fELFvm"
+    transport.files[str(workspace / "kdive-modules.tar.gz")] = b""
 
     base = LocalLibvirtBuild(
         tenant=_TENANT,
@@ -507,6 +562,10 @@ def test_over_transport_build_removes_clone_dir_via_transport(tmp_path: Path) ->
         read_kernel_source=lambda _w: ArtifactBytes(b"warm-bz"),
         read_vmlinux_source=lambda _w: ArtifactBytes(b"warm-vm"),
         read_build_id=lambda _w: "deadbeef",
+        run_modules_install=lambda _ws, _mr: 0,
+        make_modules_bundle=lambda _ws, _mr: ArtifactBytes(b"modules-bundle"),
+        staging_factory=lambda: tmp_path / "modroot",
+        staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
         catalog_fetch=lambda _n: _FRAGMENT_BYTES,
     )
@@ -600,6 +659,10 @@ def test_validate_config_ref_rejects_local_file_outside_allowed_roots(tmp_path: 
         read_kernel_source=lambda _workspace: ArtifactBytes(b"kernel"),
         read_vmlinux_source=lambda _workspace: ArtifactBytes(b"vmlinux"),
         read_build_id=lambda _workspace: "deadbeef",
+        run_modules_install=lambda _ws, _mr: 0,
+        make_modules_bundle=lambda _ws, _mr: ArtifactBytes(b""),
+        staging_factory=lambda: tmp_path / "modroot",
+        staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
         allowed_component_roots=[allowed],
@@ -775,6 +838,10 @@ def test_live_vm_real_make_build_id_matches_readelf() -> None:  # pragma: no cov
                 build_host_execution.real_read_vmlinux(ws)
             ),
             read_build_id=build_host_execution.real_read_build_id,
+            run_modules_install=build_host_execution.real_run_modules_install,
+            make_modules_bundle=build_module._local_modules_bundle,
+            staging_factory=build_module._real_staging_factory,
+            staging_cleanup=lambda p: shutil.rmtree(p, ignore_errors=True),
             secret_registry=SecretRegistry(),
             catalog_fetch=build_module.build_config_fetch_from_env(),
         )
