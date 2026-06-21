@@ -640,7 +640,7 @@ def test_execution_control_rejects_bad_timeout_before_resume(
     assert engine.executed == []
 
 
-def test_execution_control_wait_for_stop_uses_slice_timeout_and_count(
+def test_execution_control_wait_for_stop_floor_is_one_slice(
     tmp_path: Path,
 ) -> None:
     engine = _ExecutionEngine()
@@ -651,8 +651,27 @@ def test_execution_control_wait_for_stop_uses_slice_timeout_and_count(
     stop = control.wait_for_stop(attachment, timeout_sec=0.0)
 
     assert stop is None
-    # int(0.0 / 0.5) + 1 == 1 -> exactly one poll slice, each at the slice timeout.
+    # max(1, int(0.0 / 0.5) + 1) == max(1, 1) == 1 -> exactly one poll slice at the slice timeout.
+    # This case pins the max() floor: a floor-of-2 mutant (max(2, ...)) would poll twice here.
     assert controller.read_timeouts == [0.5]
+
+
+def test_execution_control_wait_for_stop_counts_slices_for_positive_timeout(
+    tmp_path: Path,
+) -> None:
+    engine = _ExecutionEngine()
+    control = ExecutionControl(engine, command_timeout_sec=1.0)
+    controller = _FakeMiController(reads=[])
+    attachment = _attachment(controller, tmp_path)
+
+    stop = control.wait_for_stop(attachment, timeout_sec=1.0)
+
+    assert stop is None
+    # max(1, int(1.0 / 0.5) + 1) == max(1, 3) == 3 poll slices. A positive timeout is required to
+    # pin the +1 term: at timeout=0.0 both the real arithmetic and the +1-dropped mutant collapse to
+    # max(1, 0(+1)) == 1. At 1.0 the dropped-+1 mutant yields 2 slices and the +2 mutant 4, so the
+    # exact 3-slice count distinguishes the off-by-one slice arithmetic in either direction.
+    assert controller.read_timeouts == [0.5, 0.5, 0.5]
 
 
 def test_execution_control_wait_for_stop_records_reads_and_transcript(

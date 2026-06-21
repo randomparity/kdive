@@ -179,20 +179,22 @@ def test_search_text_truncates_when_json_budget_exceeded() -> None:
     # The truncation cut-off is decided by re-serializing the running match list with the SAME
     # compact, non-escaping json.dumps args the dataclass uses (separators=(",",":"),
     # ensure_ascii=False). Pin the exact match_count at the budget boundary so that any change to
-    # those serializer args shifts the observed count and is caught:
+    # those serializer args shifts the observed count and is caught.
     #
-    #   * Every line is a match and each match carries the maximum before/after context window, so
-    #     the budget (not max_matches=50) is the limiter; the cut-off lands at exactly 42 matches.
-    #   * Any item- or key-separator change (e.g. compact ","/":" -> default ", "/": ", or the
-    #     key separator alone) inflates the per-match estimate enough to cut off one match earlier
-    #     -> 41, not 42.
-    #   * The non-ASCII "é" payload makes an ensure_ascii=True estimate escape each char to "é"
-    #     (six chars instead of one), blowing the estimate far earlier -> ~9 matches.
-    line = "NEEDLE" + "é" * 42
-    data = ("\n".join([line] * 6000)).encode("utf-8")
-    result = search_text(data, pattern="NEEDLE", before_lines=10, after_lines=20, max_matches=50)
+    # The payload is sized so the JSON budget (not max_matches=50) is the limiter and the cut-off
+    # lands at exactly 35 matches. The boundary is razor-thin: a match object carries four keys
+    # (line/text/before/after), so a key-separator change adds only four chars per match, while an
+    # item-separator change adds one char per array element. The before/after window is therefore
+    # tuned (before=0, after=9) so BOTH the key-separator-only and the item-separator-only widening
+    # drop exactly the 35th match -> 34. (An earlier 42-match payload with a wide context window was
+    # equivalent for the key separator: the four extra chars/match never crossed the boundary.)
+    line = "NEEDLE" + "é" * 174
+    data = ("\n".join([line] * 4000)).encode("utf-8")
+    result = search_text(data, pattern="NEEDLE", before_lines=0, after_lines=9, max_matches=50)
     assert result.truncated is True
-    assert result.match_count == 42
-    # The compact serializer keeps the realized result under budget; the exact count above pins the
-    # cut-off so a wider serializer estimate (which would drop the 42nd match) cannot pass.
+    # Exact count pins the cut-off. Any serializer widening drops the 35th match:
+    #   * item-separator ","->", " -> 34
+    #   * key-separator ":"->": " -> 34
+    #   * ensure_ascii=True escapes each "é" to "é" (six chars), blowing the estimate -> ~6
+    assert result.match_count == 35
     assert len(result.matches_json()) <= MAX_MATCHES_JSON_CHARS
