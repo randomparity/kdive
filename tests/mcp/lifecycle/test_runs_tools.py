@@ -4390,6 +4390,26 @@ def test_install_handler_forwards_initrd_ref_from_build_ledger(migrated_url: str
     asyncio.run(_run())
 
 
+def test_install_handler_passes_modules_ref(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_succeeded_run(pool)
+            await _record_build_ledger(
+                pool, run_id, {"kernel_ref": "k", "modules_ref": f"runs/{run_id}/modules"}
+            )
+            job = await _enqueue_job(pool, JobKind.INSTALL, run_id, "install")
+            installer = _FakeInstaller()
+            async with pool.connection() as conn:
+                await runs_handlers.install_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(installer=installer, profile_policy=_LOCAL_POLICY),
+                )
+        assert installer.calls[0].modules_ref == f"runs/{run_id}/modules"
+
+    asyncio.run(_run())
+
+
 def test_install_handler_no_initrd_when_ledger_initrd_blank(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
