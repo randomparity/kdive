@@ -559,11 +559,86 @@ def test_pass_loop_resets_next_due_so_steady_state_lag_stays_small(
 
 
 def test_pass_loop_refreshes_snapshots_each_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each pass calls both snapshot refreshers (best-effort; failures are swallowed)."""
+    """Each pass awaits both snapshot refreshers exactly once.
+
+    Spies replace the refresher coroutines so the test pins the *calls* the loop body makes
+    (loop.py ``await self._refresh_fleet_snapshot()`` / ``_refresh_build_host_snapshot()``),
+    not construction-time attributes. Deleting either ``await`` statement drops its name from
+    ``calls`` and fails the matching assertion.
+    """
     telemetry = _RecordingTelemetry()
-    reconciler = _run_one_pass(monkeypatch, telemetry, _empty_report())
-    # The _NoConnPool makes both refreshers hit their except path; the pass still completes
-    # (a snapshot read failure must never starve the repair loop), proving both ran without
-    # crashing the loop.
-    assert reconciler._fleet_telemetry is not None
-    assert reconciler._build_host_telemetry is not None
+    reconciler = Reconciler(
+        pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
+        reaper=NullReaper(),
+        config=ReconcileConfig(
+            interval=timedelta(seconds=0),
+            telemetry=cast(ReconcilerTelemetry, telemetry),
+        ),
+    )
+    calls: list[str] = []
+
+    async def _spy_fleet() -> None:
+        calls.append("fleet")
+
+    async def _spy_build_host() -> None:
+        calls.append("build_host")
+
+    monkeypatch.setattr(reconciler, "_refresh_fleet_snapshot", _spy_fleet)
+    monkeypatch.setattr(reconciler, "_refresh_build_host_snapshot", _spy_build_host)
+
+    async def _run() -> None:
+        stop = asyncio.Event()
+
+        async def one_shot_run_once() -> ReconcileReport:
+            stop.set()
+            return _empty_report()
+
+        monkeypatch.setattr(reconciler, "run_once", one_shot_run_once)
+        await asyncio.wait_for(reconciler._pass_loop(stop), timeout=2)
+
+    asyncio.run(_run())
+
+    assert calls.count("fleet") == 1
+    assert calls.count("build_host") == 1
+
+
+def test_pass_loop_swallows_snapshot_read_failure_and_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing snapshot read is best-effort: the refreshers still run and the pass survives.
+
+    The real refreshers run against ``_NoConnPool`` (connection() raises), so both reads hit
+    their ``except`` path. The pass must still complete normally — a snapshot read failure
+    must never starve the repair loop. Module-level read spies confirm the loop actually
+    reached the read attempt rather than short-circuiting before it; a mutant that lets the
+    read failure escape would raise out of ``_pass_loop`` and fail the timeout/await here.
+    """
+    telemetry = _RecordingTelemetry()
+    reconciler = Reconciler(
+        pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
+        reaper=NullReaper(),
+        config=ReconcileConfig(
+            interval=timedelta(seconds=0),
+            telemetry=cast(ReconcilerTelemetry, telemetry),
+        ),
+    )
+
+    async def _run() -> None:
+        stop = asyncio.Event()
+        passes = 0
+
+        async def one_shot_run_once() -> ReconcileReport:
+            nonlocal passes
+            passes += 1
+            stop.set()
+            return _empty_report()
+
+        monkeypatch.setattr(reconciler, "run_once", one_shot_run_once)
+        # Must not raise: _NoConnPool makes both refreshers hit their except-and-return path.
+        await asyncio.wait_for(reconciler._pass_loop(stop), timeout=2)
+        assert passes == 1
+
+    asyncio.run(_run())
+
+    # The pass completed and recorded its single repair report despite both refreshers failing.
+    assert len(telemetry.recorded) == 1
