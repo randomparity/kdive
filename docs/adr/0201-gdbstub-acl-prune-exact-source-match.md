@@ -42,7 +42,7 @@ is **not** string-equal to `worker_cidr`:
 
 ```sh
 | awk -v cidr="{{ worker_cidr }}" \
-    '{ for (i = 1; i <= NF; i++) if ($i == "IN") { if ($(i + 1) != cidr) print; break } }'
+    '{ for (i = 1; i <= NF; i++) if ($i == "IN") { if ($(i + 1) != "" && $(i + 1) != cidr) print; break } }'
 ```
 
 The source is read as **the field immediately after the `IN` direction token**, not as the
@@ -52,11 +52,31 @@ existing grep already lets through and which `$NF` would misread (deleting the c
 when it carries a comment). `awk` exits `0` with no output, so — unlike the `grep` it replaces
 — it needs no `|| true` to stay `set -euo pipefail`-safe; the port grep keeps its `|| true`.
 
+The `$(i + 1) != ""` guard makes the matcher **fail toward not deleting**: a malformed row
+with no source after `IN` is skipped rather than selected for deletion by line number. Today
+no such row can reach `awk` — the upstream port grep anchors a trailing space after `IN `, so
+a sourceless `ALLOW IN` line never matches — but the guard removes that coupling, so a future
+grep edit cannot turn an unparseable row into a blind delete (an over-prune that would drop
+the worker).
+
 The comparison stays a string equality, not a subnet/`ipaddress` comparison: the role writes
 exactly one canonical `worker_cidr` allow per port, so the current rule's source is
 byte-identical to the templated value. Any other source string — a different CIDR, a
 different mask, a substring collision, `Anywhere`, or a `(v6)` source — is a non-current
 source and is correctly pruned.
+
+**Load-bearing assumption — canonical `worker_cidr`.** Equality is correct only if ufw renders
+the `From` column byte-identically to the templated `worker_cidr` string. The role applies
+the allow with `from_ip: "{{ worker_cidr }}"` and does not canonicalize, so an operator who
+supplies a non-canonical form (a host-bit address like `10.0.0.5/24`, a netmask form, or an
+IPv6 source ufw re-renders) gets a stored source that differs from the template — and exact
+equality then fails to match the *current* allow and prunes it, dropping the worker. The
+substring filter tolerated trailing differences and partly masked this; exact equality does
+not, so it is a sharper edge. The mitigation is operational, not code: supply `worker_cidr` as
+the canonical network CIDR (as ufw renders it), and the live re-verification below asserts the
+current allow **survives** the prune, not only that the stale collision is gone. A
+subnet-aware comparison would paper over a non-canonical `worker_cidr` but at the cost of
+under-pruning a stale sub/supernet (see Considered & rejected), so it is not the fix here.
 
 When fixed, the `substring_collision` harness case flips from "no deletion" to deleting the
 stale lines, and two regression fixtures lock the matcher: a prefix-collision source
@@ -71,10 +91,14 @@ its last token.
 - The matcher reads the source column positionally, so a future ufw output that appends a
   `# comment` or `(v6)` column to a protected-port `ALLOW IN` row does not cause the current
   allow to be misread and deleted. The harness pins this with the `comment_column` fixture.
-- This changes the audited security pipeline. Per the gdbstub_acl runbook, the change must be
-  re-verified on real hardware (a live `worker_cidr` change with a substring-colliding stale
-  allow) before a host is registered; the hermetic harness covers the parse/selection logic
-  but not live netfilter application.
+- This changes the audited security pipeline. The hermetic harness covers the parse/selection
+  logic but not live netfilter application, so the change must be re-verified on real hardware
+  before a host is registered, following the off-CIDR ACL refusal check in
+  `deploy/ansible/README.md`: change `worker_cidr` on a host that already carries a stale
+  substring-colliding allow (e.g. move from `10.0.0.0/24` while a `110.0.0.0/24` allow
+  lingers), re-run the role, then assert with `ufw status numbered` both that the stale allow
+  is **gone** and that the new `worker_cidr` allow is **present** (the latter catches a
+  non-canonical-CIDR over-prune).
 - Behavior is unchanged for every previously-correct case: the current allow, the SSH allow,
   the deny rows, and non-protected-port allows are still untouched; broader-mask and
   distinct-CIDR stale allows are still pruned highest-first.

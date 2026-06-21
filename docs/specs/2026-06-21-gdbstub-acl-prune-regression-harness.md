@@ -162,5 +162,7 @@ A harness that stays green under both mutations is inert and does not satisfy th
   `substring_collision` case now expects the stale lines deleted, and two regression fixtures
   were added — `prefix_collision` (a source that is a substring *of* the worker CIDR, pruned)
   and `comment_column` (a trailing ufw comment does not shift the matched source off the
-  current allow). Re-verified per the gdbstub_acl runbook, as that ADR changes the audited
-  security pipeline.*
+  current allow). Because exact equality assumes ufw renders the `From` column identically to
+  the templated `worker_cidr`, ADR-0201's live re-verification (the off-CIDR ACL refusal check
+  in `../../deploy/ansible/README.md`) asserts both that the stale collision is pruned and that
+  the current allow survives.*
