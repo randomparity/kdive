@@ -210,7 +210,7 @@ class LocalLibvirtInstall:
         if request.initrd_ref is not None:
             initrd_path = staging_dir / "initrd"
             self._fetch_initrd(request.initrd_ref, initrd_path)
-        if request.modules_ref is not None:
+        if request.method is CaptureMethod.KDUMP and request.modules_ref is not None:
             self._inject_built_modules(request.system_id, request.modules_ref, staging_dir)
         if request.method is CaptureMethod.KDUMP and not (
             request.modules_ref is not None or initrd_path is not None

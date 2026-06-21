@@ -259,6 +259,24 @@ def test_install_kdump_with_modules_ref_injects_and_no_initrd_rendered(tmp_path:
     assert "<initrd>" not in conn.defined_xml[0]  # production boot has no separate initrd
 
 
+def test_install_non_kdump_with_modules_ref_does_not_force_off_or_inject(tmp_path: Path) -> None:
+    # Module injection (force-off + rw libguestfs mount) is gated on the KDUMP capture method.
+    # A console/gdbstub build also carries a modules_ref (the kdump config is the default), but
+    # its install must not force-off the domain, fetch modules, or require libguestfs.
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)  # its domain is active
+    writer = _FakeModuleWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer, fetch_modules=fetch)
+
+    inst.install(_request(method=CaptureMethod.CONSOLE, modules_ref="runs/r/modules"))
+
+    assert events == []  # no destroy, no fetch, no inject
+    assert not writer.injected
+    assert fetch.refs == []
+    assert len(conn.defined_xml) == 1  # normal direct-kernel boot still defined
+
+
 def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(
     tmp_path: Path,
 ) -> None:

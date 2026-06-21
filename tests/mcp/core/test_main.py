@@ -135,7 +135,7 @@ def test_run_build_fs_debug_kind_sets_debug_packages_and_capabilities(
     )
     run_build_fs(args)
 
-    assert seen_specs[0].packages == ("drgn", "kexec-tools", "makedumpfile")
+    assert seen_specs[0].packages == ("drgn", "kexec-tools", "makedumpfile", "kdump-utils")
     assert seen_specs[0].capabilities == ("agent", "kdump", "drgn")
     assert seen_specs[0].distro == "fedora"
     assert seen_specs[0].source_image_digest == "virt-builder:fedora-43"
