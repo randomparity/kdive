@@ -6,6 +6,10 @@
 set -euo pipefail
 
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
+# The worker imports drgn + the libguestfs binding from the project venv, not system
+# python3. Probe the same interpreter the worker uses; override on a host-services
+# deployment, e.g. KDIVE_PYTHON=/opt/kdive/.venv/bin/python.
+readonly PY="${KDIVE_PYTHON:-python3}"
 fail=0
 
 note_fail() {
@@ -23,6 +27,7 @@ _default_net_active() {
   out="$(virsh -c qemu:///system net-info default 2>/dev/null || true)"
   [[ "$out" == *"Active:"*[Yy]es* ]]
 }
+_venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
 
 _has_kvm || note_fail "${KVM_NODE} not readable/writable (KVM unavailable)" \
   "enable virtualization in BIOS and load kvm modules; ensure your user can access ${KVM_NODE}"
@@ -37,6 +42,10 @@ if _cmd virsh; then
   _default_net_active || note_fail "libvirt 'default' network is not active" \
     "virsh -c qemu:///system net-start default && virsh -c qemu:///system net-autostart default"
 fi
+
+_venv_imports_kdump_deps || note_fail \
+  "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203)" \
+  "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
 
 if ((fail)); then
   printf "\nlocal-libvirt host is NOT ready (see failures above)\n" >&2
