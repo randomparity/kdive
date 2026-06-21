@@ -1,6 +1,6 @@
 # ADR 0203 — Local-libvirt Tier 3 kdump capture via host-side overlay harvest
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-21
 - **Deciders:** kdive maintainers
 
