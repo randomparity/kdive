@@ -34,7 +34,7 @@ from kdive.components.references import (
 )
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.shared.build_host import execution as build_host_execution
@@ -1141,6 +1141,69 @@ def _workspace_with_target(tmp_path: Path) -> Path:
     return workspace
 
 
+def test_apply_patch_missing_git_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: None)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "git is required to apply a build patch"
+
+
+def test_apply_patch_git_apply_failure_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-zero ``git apply`` means the patch does not apply; the redacted stderr tail is kept
+    # and the hardened argv (``git apply -p1 -v -- <patch>``) is asserted.
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    captured: list[list[str]] = []
+
+    def _apply(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="patch does not apply")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _apply)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "patch_ref does not apply against the kernel tree"
+    assert "does not apply" in caught.value.details["stderr"]
+    assert captured[0][:5] == ["git", "apply", "-p1", "-v", "--"]
+    assert captured[0][-1] == str(patch)
+
+
+def test_apply_patch_timeout_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(["git"], timeout=build_host_workspace.GIT_APPLY_TIMEOUT_S)
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "patch_ref does not apply within the timeout"
+    assert caught.value.details == {"timeout_s": build_host_workspace.GIT_APPLY_TIMEOUT_S}
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
 def test_apply_patch_applies_clean_diff(tmp_path: Path) -> None:
     workspace = _workspace_with_target(tmp_path)
@@ -1175,6 +1238,8 @@ def test_apply_patch_silent_skip_no_tree_change_is_configuration_error(
         build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "silently skipped" in str(caught.value)
+    assert "Skipped patch 'init/main.c'." in caught.value.details["stderr"]
     assert (workspace / "init" / "main.c").read_text() == original
 
 
@@ -1199,3 +1264,365 @@ def test_exit_criterion_noop_patch_fails_patch_applied_verification(tmp_path: Pa
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert workspace_main.read_text() == original
+
+
+def test_apply_patch_no_tree_change_reports_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git apply exits 0 with no "Skipped" line but the tree is unchanged: the no-op guard fires
+    # and the error names the patch targets (guards the message and the targets detail).
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    monkeypatch.setattr(
+        build_host_workspace.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "silently skipped" in str(caught.value)
+    assert caught.value.details == {"targets": ["init/main.c"]}
+
+
+# --- workspace: redacted_tail / real_checkout dispatch / sync / merge / clone ---------
+
+
+def test_redacted_tail_returns_only_trailing_slice() -> None:
+    # The returned slice is the *trailing* STDERR_TAIL characters (guards a sign flip on the
+    # slice bound).
+    text = "A" * 1000 + "B" * 2500
+    tail = build_host_workspace.redacted_tail(text)
+    assert len(tail) == build_host_workspace.STDERR_TAIL
+    assert set(tail) == {"B"}
+
+
+def test_redacted_tail_masks_registered_secret() -> None:
+    # A registered secret in the stderr is masked (guards dropping the registry).
+    registry = SecretRegistry()
+    registry.register("topsecret-token-value", scope=None)
+    tail = build_host_workspace.redacted_tail("git failed: topsecret-token-value\n", registry)
+    assert "topsecret-token-value" not in tail
+
+
+def _git_profile() -> ServerBuildProfile:
+    profile = BuildProfile.parse(
+        {
+            "schema_version": 1,
+            "kernel_source_ref": {
+                "git": {"remote": "https://git.kernel.org/pub/scm/linux.git", "ref": "v6.9"}
+            },
+            "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+            "patch_ref": "/tmp/some.patch",
+        }
+    )
+    assert isinstance(profile, ServerBuildProfile)
+    return profile
+
+
+def test_real_checkout_git_lane_clones_with_run_id_and_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A git source dispatches to clone_tree (not sync_tree) and forwards the workspace, run_id,
+    # and secret_registry; merge_config and apply_patch then run against the same workspace.
+    calls: dict[str, Any] = {}
+    monkeypatch.setattr(
+        build_host_workspace,
+        "clone_tree",
+        lambda src, ws, allow, *, run_id, secret_registry: calls.update(
+            clone=(ws, run_id, secret_registry)
+        ),
+    )
+    monkeypatch.setattr(build_host_workspace, "sync_tree", lambda *a, **k: calls.update(sync=True))
+    monkeypatch.setattr(
+        build_host_workspace,
+        "merge_config",
+        lambda frag, ws, run_id: calls.update(merge=(ws, run_id)),
+    )
+    monkeypatch.setattr(
+        build_host_workspace,
+        "apply_patch",
+        lambda ref, ws, reg: calls.update(patch=(ref, ws, reg)),
+    )
+    registry = SecretRegistry()
+    workspace = tmp_path / "ws"
+
+    build_host_workspace.real_checkout(
+        "/warm/src",
+        _git_profile(),
+        workspace,
+        b"frag",
+        run_id=_RUN,
+        secret_registry=registry,
+    )
+
+    assert "sync" not in calls  # the git lane, not the warm-tree lane
+    assert calls["clone"] == (workspace, _RUN, registry)
+    assert calls["merge"] == (workspace, _RUN)
+    assert calls["patch"][0] == "/tmp/some.patch"
+    assert calls["patch"][1] == workspace
+    assert calls["patch"][2] is registry
+
+
+def test_real_checkout_warm_lane_syncs_and_skips_patch_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, Any] = {}
+    monkeypatch.setattr(
+        build_host_workspace, "clone_tree", lambda *a, **k: calls.update(clone=True)
+    )
+    monkeypatch.setattr(
+        build_host_workspace,
+        "sync_tree",
+        lambda src, ws, reg: calls.update(sync=(src, ws, reg)),
+    )
+    monkeypatch.setattr(
+        build_host_workspace, "merge_config", lambda *a, **k: calls.update(merge=True)
+    )
+    monkeypatch.setattr(
+        build_host_workspace, "apply_patch", lambda *a, **k: calls.update(patch=True)
+    )
+    registry = SecretRegistry()
+    workspace = tmp_path / "ws"
+    profile = BuildProfile.parse(
+        {
+            "schema_version": 1,
+            "kernel_source_ref": "file:///warm/src",
+            "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+            "patch_ref": None,  # no patch -> apply_patch must not be called
+        }
+    )
+    assert isinstance(profile, ServerBuildProfile)
+
+    build_host_workspace.real_checkout(
+        "/warm/src", profile, workspace, b"frag", run_id=_RUN, secret_registry=registry
+    )
+
+    assert "clone" not in calls  # the warm-tree lane, not the git lane
+    assert calls["sync"] == ("/warm/src", workspace, registry)
+    assert calls["merge"] is True
+    assert "patch" not in calls
+
+
+def test_clone_tree_empty_allowlist_is_configuration_error(tmp_path: Path) -> None:
+    # An empty allowlist means the operator has not enabled local git builds -> rejected before
+    # any git runs (guards the allowlist gate).
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source, tmp_path / "ws", (), run_id=_RUN, secret_registry=SecretRegistry()
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "allowlist" in str(caught.value).lower()
+
+
+def test_clone_tree_remote_off_allowlist_is_configuration_error(tmp_path: Path) -> None:
+    source = GitSourceRef(remote="https://evil.example/x.git", ref="v6.9")
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),  # non-empty allowlist, but the remote host is not on it
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_clone_tree_missing_git_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The remote is allowlisted, so the gate passes and the missing-git check fires.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: None)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "git is required to clone a kernel source"
+
+
+def test_clone_tree_git_init_failure_is_infrastructure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-zero ``git init`` is an infrastructure failure with the redacted stderr tail; the
+    # hardened git argv (no ambient config, vetted protocols) is asserted on the first call.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    captured: list[list[str]] = []
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="init: boom")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "git init failed"
+    assert "boom" in caught.value.details["stderr"]
+    # The first git invocation is hardened: it disables redirect-following and ambient config.
+    first = captured[0]
+    assert first[0] == "git"
+    assert "http.followRedirects=false" in first
+    assert "protocol.allow=never" in first
+    assert "init" in first
+
+
+def test_clone_tree_git_fetch_failure_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # init succeeds, fetch fails -> CONFIGURATION_ERROR (a bad remote/ref), not infrastructure.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        rc = 1 if "fetch" in argv else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="fetch denied")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "git fetch failed"
+
+
+def test_sync_tree_missing_rsync_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "warm"
+    source.mkdir()
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: None)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), tmp_path / "ws", SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "rsync is required to materialize the warm kernel tree"
+
+
+def test_sync_tree_unset_source_is_configuration_error(tmp_path: Path) -> None:
+    # A blank warm-tree source is rejected as CONFIGURATION_ERROR before any rsync runs.
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree("   ", tmp_path / "ws", SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_sync_tree_rsync_argv_and_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "warm"
+    source.mkdir()
+    workspace = tmp_path / "ws"
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/rsync")
+    captured: list[list[str]] = []
+
+    def _rsync(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 23, stdout="", stderr="rsync: link failed")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _rsync)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "rsync failed to materialize the workspace tree"
+    assert "link failed" in caught.value.details["stderr"]  # the redacted rsync stderr tail
+    # rsync archive+delete with a trailing slash on both src and dst (an in-place mirror).
+    argv = captured[0]
+    assert argv[:4] == ["rsync", "-a", "--delete", "--"]
+    assert argv[-2] == f"{source}/"
+    assert argv[-1] == f"{workspace}/"
+
+
+def test_sync_tree_rsync_timeout_is_infrastructure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "warm"
+    source.mkdir()
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/rsync")
+
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(["rsync"], timeout=build_host_workspace.RSYNC_TIMEOUT_S)
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), tmp_path / "ws", SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"timeout_s": build_host_workspace.RSYNC_TIMEOUT_S}
+
+
+def test_merge_config_defconfig_failure_is_build_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-zero ``make defconfig`` short-circuits before the fragment is written/merged.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *a, **k: 2)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.merge_config(b"CONFIG_X=y\n", workspace, _RUN)
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make defconfig exited non-zero"
+    assert not (workspace / "kdump.config.fragment").exists()  # never written
+
+
+def test_merge_config_runs_merge_script_and_propagates_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *a, **k: 0)
+    captured: list[list[str]] = []
+
+    def _merge(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="merge boom")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _merge)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.merge_config(b"CONFIG_X=y\n", workspace, _RUN)
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "merge_config.sh -m exited non-zero"
+    # the fragment is written and handed to merge_config.sh -m against .config
+    fragment = workspace / "kdump.config.fragment"
+    assert fragment.read_bytes() == b"CONFIG_X=y\n"
+    argv = captured[0]
+    assert argv[:3] == ["scripts/kconfig/merge_config.sh", "-m", ".config"]
+    assert argv[-1] == str(fragment)
