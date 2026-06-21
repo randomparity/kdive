@@ -157,6 +157,10 @@
         executable: /bin/bash
       register: gdbstub_acl_ufw_prune
       changed_when: "'pruned=1' in gdbstub_acl_ufw_prune.stdout"
+      # Tagged so the regression harness (deploy/ansible/tests/) can drive this
+      # security-critical parse-and-delete pipeline in isolation with a fake ufw.
+      tags:
+        - gdbstub_acl_prune
       # NOT gated on gdbstub_acl_ufw_enable: the allow/deny rule tasks above run
       # unconditionally, so a worker_cidr change leaves a stale allow even when this run
       # does not flip ufw active (enable=false, ufw enforced by other means). Pruning

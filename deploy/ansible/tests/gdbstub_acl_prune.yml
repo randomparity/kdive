@@ -1,0 +1,7 @@
+---
+- name: Exercise the gdbstub_acl prune task in isolation (regression harness)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: gdbstub_acl

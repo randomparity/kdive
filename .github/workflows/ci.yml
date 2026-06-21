@@ -86,6 +86,10 @@ jobs:
         # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
         run: just lint-ansible
 
+      - name: Ansible role tests
+        # CI invokes recipes individually (never `just ci`), so list this explicitly to gate PRs.
+        run: just test-ansible
+
       - name: Type check
         run: just type
 

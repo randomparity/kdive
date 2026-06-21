@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Test double for `ufw`, used only by the gdbstub_acl prune regression harness
+# (deploy/ansible/tests/run-gdbstub-acl-prune.sh, issue #616). It handles exactly
+# the two subcommands the prune task issues; any other invocation is a loud failure,
+# because the prune task must make no other ufw call.
+set -euo pipefail
+
+case "${1:-} ${2:-}" in
+"status numbered")
+  # Record that the task ran and reached the pipeline (the harness asserts this so
+  # an empty delete log is provably a real no-op, not a crash or a tag-skip).
+  touch "$FAKE_UFW_STATUS_MARKER"
+  cat "$FAKE_UFW_FIXTURE"
+  ;;
+"--force delete")
+  printf '%s\n' "${3:?fake-ufw: 'delete' needs a rule number}" >>"$FAKE_UFW_DELETE_LOG"
+  ;;
+*)
+  echo "fake-ufw: unexpected invocation: $*" >&2
+  exit 64
+  ;;
+esac

@@ -1,0 +1,13 @@
+# Fixture: stale-present. Mirrors `ufw status numbered` (ufw 0.36.x, Ubuntu 24.04).
+# worker_cidr=10.0.0.0/24; stale 192.168.99.0/24 on the protected ports (lines 6,7).
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 16514/tcp                  ALLOW IN    10.0.0.0/24
+[ 3] 47000:47099/tcp            ALLOW IN    10.0.0.0/24
+[ 4] 16514/tcp                  DENY IN     Anywhere
+[ 5] 47000:47099/tcp            DENY IN     Anywhere
+[ 6] 16514/tcp                  ALLOW IN    192.168.99.0/24
+[ 7] 47000:47099/tcp            ALLOW IN    192.168.99.0/24

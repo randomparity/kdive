@@ -140,8 +140,8 @@ compose-down:
 
 # Lint and format-check the shell scripts (recursively under scripts/).
 lint-shell:
-    shfmt -f scripts deploy/remote-libvirt-guest-helpers | xargs shellcheck
-    shfmt -i 2 -d scripts deploy/remote-libvirt-guest-helpers
+    shfmt -f scripts deploy/remote-libvirt-guest-helpers deploy/ansible/tests | xargs shellcheck
+    shfmt -i 2 -d scripts deploy/remote-libvirt-guest-helpers deploy/ansible/tests
 
 # Lint and syntax-check the Ansible automation (deploy/ansible).
 lint-ansible:
@@ -153,6 +153,10 @@ lint-ansible:
     cd deploy/ansible && for p in site.yml playbooks/pki.yml playbooks/image.yml; do \
         uv run --with 'ansible-core==2.21.1' \
         ansible-playbook "$p" --syntax-check -i inventory/hosts.yml; done
+
+# Run the Ansible role regression harness (gdbstub_acl ufw prune, #616).
+test-ansible:
+    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
 
 # Lint and security-scan the GitHub Actions workflows.
 lint-workflows:
@@ -305,4 +309,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check resources-docs-check chart-version-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check resources-docs-check chart-version-check test
