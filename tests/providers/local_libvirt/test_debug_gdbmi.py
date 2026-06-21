@@ -733,11 +733,27 @@ def test_registry_register_get_reap(tmp_path: Path) -> None:
     assert registry.get("s1") is None
 
 
+def test_registry_reap_missing_returns_none() -> None:
+    assert GdbMiSessionRegistry().reap("never-registered") is None
+
+
+def test_registry_require_returns_registered_attachment(tmp_path: Path) -> None:
+    registry = GdbMiSessionRegistry()
+    attachment = _attachment(_FakeMiController(), tmp_path)
+    registry.register("s1", attachment)
+    assert registry.require("s1") is attachment
+
+
 def test_registry_require_raises_no_live_session() -> None:
     with pytest.raises(CategorizedError) as exc:
         GdbMiSessionRegistry().require("missing")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["code"] == "no_live_session"
+    assert exc.value.details["debug_session_id"] == "missing"
+    assert (
+        str(exc.value)
+        == "no live gdb/MI session; the engine is gone (server restarted or session reaped)"
+    )
 
 
 # --- attach seam (live_vm default) ---------------------------------------------------------
