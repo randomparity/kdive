@@ -22,6 +22,8 @@ All prerequisites from the [local live-stack runbook](live-stack.md), plus:
   [live-stack.md §3](live-stack.md#3-build-the-vm-fixtures)).
 - The remote provider configured with a base-OS qcow2 and TLS, if running against a remote
   `qemu+tls://` host (see [remote-live-stack.md §1–4](remote-live-stack.md)).
+- For **local-libvirt** `kdump` capture only: `libguestfs` (the `guestfs` Python binding) on
+  the worker host, alongside `drgn` (see §4b and [ADR-0203](../../adr/0203-local-libvirt-kdump-overlay-harvest.md)).
 
 ## 1. Verify the seed
 
@@ -171,6 +173,23 @@ introspect.from_vmcore(run_id=<B's run>)
 
 Confirm a non-empty `tasks` dict in the response's `report`. A missing `VMCOREINFO` is a
 `configuration_error` and is **not** a 4/4 pass — do not accept a missing-build-id skip as success.
+
+**local-libvirt kdump (ADR-0203).** On local-libvirt the capture is host-side, not an
+in-guest upload: the worker force-stops System B's domain (over `KDIVE_LIBVIRT_URI`) and reads
+the guest-written `/var/crash/<ts>/vmcore` directly out of the System's qcow2 overlay with a
+read-only libguestfs mount, then extracts build-id + redacted dmesg with drgn. There is no
+crash→reboot→upload window to wait out, but two prerequisites apply on the **worker host**:
+
+- `libguestfs` (the `guestfs` Python binding) must be installed alongside `drgn`; absence is a
+  `missing_dependency`, not a silent skip.
+- The provisioning profile must set `crashkernel` so `capture_method` selects `kdump` and the
+  boot cmdline reserves crash memory (the install preflight refuses a kdump boot whose
+  initramfs carries no capture hook).
+
+Fetching the core force-stops the domain. For a `crashed` System this is benign — kdive does
+not auto-recover a crashed System — but a guest that kdump-rebooted back to multi-user is
+stopped when its core is fetched. The core was written to the overlay before any reboot, so it
+survives the force-off.
 
 ### 4c. console
 

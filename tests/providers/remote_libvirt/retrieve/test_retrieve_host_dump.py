@@ -34,13 +34,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.retrieve.host_dump_capture import (
-    DMESG_UNAVAILABLE,
     HostDumpCapturer,
     HostDumpOptions,
     _SpoolSink,
     host_dump_volume_name,
     pool_type_and_target_strict,
 )
+from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error

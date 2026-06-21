@@ -18,13 +18,13 @@ from scripts.m2_portability_gate import (
 )
 
 
-def test_render_report_records_remote_at_four_of_four_capture_methods() -> None:
+def test_render_report_records_both_providers_at_four_of_four_capture_methods() -> None:
     md = render_report({"src/kdive/domain/catalog/resources.py": 4})
     assert "## Capture-method coverage" in md
-    # The capstone exit record (M2.5): remote reaches 4/4, local stays 3/4 (no KDUMP),
-    # and the two advertised sets are disjoint on KDUMP.
+    # Both providers reach 4/4: remote at the M2.5 exit, local once #115 (ADR-0203) added the
+    # host-side kdump overlay harvest.
     assert "| `remote-libvirt` | 4 / 4 |" in md
-    assert "| `local-libvirt` | 3 / 4 |" in md
+    assert "| `local-libvirt` | 4 / 4 |" in md
     assert "kdump" in md
 
 
@@ -40,9 +40,9 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     local = build_local_runtime(secret_registry=registry).supported_capture_methods
     assert CAPTURE_COVERAGE["remote-libvirt"] == frozenset(m.value for m in remote)
     assert CAPTURE_COVERAGE["local-libvirt"] == frozenset(m.value for m in local)
-    # AC4: the two advertised sets stay disjoint on KDUMP — remote has it, local does not.
+    # Both providers advertise all four methods; local KDUMP joined via #115 (ADR-0203).
     assert "kdump" in CAPTURE_COVERAGE["remote-libvirt"]
-    assert "kdump" not in CAPTURE_COVERAGE["local-libvirt"]
+    assert "kdump" in CAPTURE_COVERAGE["local-libvirt"]
 
 
 def test_render_report_lists_allowlisted_and_flags_violations() -> None:
