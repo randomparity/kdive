@@ -45,34 +45,77 @@ class GuestCoreReader(Protocol):
     def download_vmcore(self, overlay: str, path: str, dest: Path) -> None: ...
 ```
 
-`harvest_vmcore` becomes `Path | None`:
+`harvest_vmcore(reader, overlay, *, dest, max_bytes)` takes the destination path from its
+caller and returns `Path | None` (the populated `dest`, or `None` when no core exists):
 
 1. list cores, `select_newest` (unchanged, pure);
 2. `None` when none present (→ `READINESS_FAILURE` upstream, unchanged);
 3. `chosen.size_bytes > max_bytes` → `CONFIGURATION_ERROR` **before** any download
    (unchanged ordering — the size is read from `statns`, no bytes touched);
-4. allocate a caller-owned temp file and `reader.download_vmcore(overlay, chosen.path, dest)`;
-   return `dest`.
+4. `reader.download_vmcore(overlay, chosen.path, dest)`; return `dest`.
+
+`harvest_vmcore` does **not** own the temp file: it neither creates nor unlinks it — it
+only writes into the `dest` it is handed (see temp-file ownership below).
 
 The real `_LibguestfsCoreReader.download_vmcore` calls `self._guest.download(path, dest)`
 (constant-memory streaming through the appliance) instead of `read_file`. It stays
 `# pragma: no cover - live_vm`.
 
-`_real_wait_for_vmcore` returns the spooled `Path` (and no longer closes the reader before
-the caller has the file — the file is on the host, independent of the appliance handle).
+### Seam-type change and the two build-id callers
 
-`LocalLibvirtRetrieve.capture` KDUMP branch operates on the `Path`:
+Today a **single** injected seam `read_vmcore_build_id: Callable[[bytes], str]`
+(`_ReadBuildId`) is used by **both** `capture` (line 139) and `run_crash_postmortem`
+(passed as `read_build_id=`, line 198). `run_crash_postmortem` reads build-id from bytes it
+already `fetch_object`'d out of the object store, so it must keep a **bytes** seam. We
+therefore do **not** re-type the shared seam. Instead:
 
-- build-id via `read_core_build_id_from_file(path)` (already Path-based);
-- redacted dmesg via the Path-based extractor (already Path-based);
-- raw core persisted via `store.put_stream(ArtifactStreamRequest(path=..., sha256_b64=...))`
-  — streamed from disk, mirroring `host_dump_capture._store_core` (ADR-0094), with the same
-  post-put `head` checksum verification;
-- the spooled temp file is deleted in a `finally`, whether or not the put succeeds.
+- The KDUMP capture path computes the core's build-id directly from the spooled `Path` via
+  the existing Path-based helper `read_core_build_id_from_file` (the same function
+  `_real_read_build_id` already wraps), threaded into `LocalLibvirtRetrieve` as a new,
+  distinct `read_vmcore_build_id_from_file: Callable[[Path], str]` seam selected by
+  `from_env`.
+- `run_crash_postmortem` keeps the existing bytes-based `read_vmcore_build_id` seam
+  unchanged.
+- The redacted-dmesg seam (`extract_redacted: Callable[[bytes], bytes]`) is used **only**
+  by `capture`, so it is safe to re-type to `Callable[[Path], bytes]`.
 
-The injected build-id / extract-redacted seams that today take `bytes` become `Path`-typed
-for the capture path. `run_crash_postmortem`'s build-id check operates on bytes fetched from
-the object store and is a **separate** seam — it is not changed.
+### The KDUMP vs HOST_DUMP branch split
+
+`capture` dispatches both `KDUMP` and `HOST_DUMP` through one body today
+(`_host_dump_capture(system_id) -> bytes | None` vs `_wait_for_vmcore(system_id) -> bytes`).
+The local `HOST_DUMP` seam is a `MISSING_DEPENDENCY` stub, but its contract and its test
+(`test_capture_host_dump_uses_dump_seam`) must keep passing. The two methods therefore
+**diverge** after this change:
+
+- `KDUMP`: `_wait_for_vmcore(system_id) -> Path | None`; on a `Path`, compute build-id +
+  redacted dmesg from the `Path`, `put_stream` the raw core, `head`-verify, persist the
+  redacted derivative, and unlink the spool in a `finally` that wraps everything from the
+  seam call onward.
+- `HOST_DUMP`: unchanged bytes path — `_host_dump_capture(system_id) -> bytes | None`,
+  `read_vmcore_build_id(bytes)`, `_put(raw bytes)`, `_put(redacted bytes)`. (On local this
+  raises before returning bytes; the branch and its test stay intact.)
+
+`capture` selects the branch on `method` up front and shares only the `None →
+READINESS_FAILURE` guard and the `CaptureOutput` shape.
+
+### Temp-file ownership
+
+Ownership is split so there is no leak window, because the seam must **return** the path for
+`capture` to consume it (the seam cannot unlink a path it is about to hand back):
+
+- **On the seam's own failure**, `_real_wait_for_vmcore` cleans up: it creates a private
+  temp directory, passes `dest` into `harvest_vmcore`, and if it returns `None` or raises
+  before handing the path back, removes the file and directory in its own `try/except`.
+  Because the file is on the host filesystem (not inside the libguestfs appliance), it
+  outlives `reader.close()`.
+- **On a successfully returned path**, `capture` owns cleanup: its KDUMP branch wraps the
+  `_wait_for_vmcore` call and everything downstream (build-id, dmesg, `put_stream`,
+  `head`-verify) in a single `try/finally` that unlinks the spool file and its directory.
+  There is no window between the seam returning and `capture`'s `finally` arming, because the
+  seam call is the first statement inside the `try`.
+
+A unit test drives `capture` with a fake `_wait_for_vmcore` that returns a real temp `Path`
+and asserts the path is gone after both a successful capture and a store-failure capture.
 
 ## Acceptance criteria
 
