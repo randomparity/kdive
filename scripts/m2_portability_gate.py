@@ -25,16 +25,17 @@ BASELINE_TAG = "pre-M2"
 GIT_COMMAND_TIMEOUT_S = 120
 
 # Per-provider advertised capture-method coverage (M2.5 capstone, #304). The four-method
-# vocabulary is fixed (CaptureMethod: console/host_dump/gdbstub/kdump); the milestone exit
-# records remote at 4/4 and local at 3/4 (no kdump), with the two sets disjoint on kdump
-# (AC4 — local is not deprecated, only reframed default-vs-opt-in). This is a pinned constant
-# because the gate is stdlib-only (CI runs it without a synced env); a drift-guard unit test
-# (tests/scripts/test_m2_portability_gate.py) imports the real build_*_runtime builders and
-# fails if this table ever diverges from what composition.py advertises.
+# vocabulary is fixed (CaptureMethod: console/host_dump/gdbstub/kdump). Both providers now
+# advertise all four — remote at the M2.5 exit, local once #115 (ADR-0203) added the host-side
+# kdump overlay harvest; local stays the default and remote the opt-in provider (#198). This is
+# a pinned constant because the gate is stdlib-only (CI runs it without a synced env); a
+# drift-guard unit test (tests/scripts/test_m2_portability_gate.py) imports the real
+# build_*_runtime builders and fails if this table ever diverges from what composition.py
+# advertises.
 _CAPTURE_VOCABULARY = ("console", "host_dump", "gdbstub", "kdump")
 CAPTURE_COVERAGE: dict[str, frozenset[str]] = {
     "remote-libvirt": frozenset({"console", "host_dump", "gdbstub", "kdump"}),
-    "local-libvirt": frozenset({"console", "host_dump", "gdbstub"}),
+    "local-libvirt": frozenset({"console", "host_dump", "gdbstub", "kdump"}),
 }
 
 CORE_PREFIXES = (
@@ -231,18 +232,17 @@ def violations(touched: dict[str, int]) -> dict[str, int]:
 def render_capture_coverage() -> list[str]:
     """Render the per-provider capture-method coverage table (M2.5 capstone, #304).
 
-    Records remote at 4/4 and local at 3/4 from the pinned ``CAPTURE_COVERAGE`` table (kept
-    true by a drift-guard test). The methods column names each advertised method so the
-    disjoint-on-kdump framing (AC4) is visible in the committed record.
+    Renders each provider's coverage from the pinned ``CAPTURE_COVERAGE`` table (kept true by
+    a drift-guard test). The methods column names each advertised method.
     """
     total = len(_CAPTURE_VOCABULARY)
     lines = [
         "## Capture-method coverage",
         "",
         f"Advertised capture methods per provider, of the {total}-method vocabulary "
-        f"(`{'`, `'.join(_CAPTURE_VOCABULARY)}`). Remote reaches **4/4** at the M2.5 exit; "
-        "local stays 3/4 (no `kdump`) — the two sets are disjoint on `kdump`, so local is not "
-        "deprecated, only reframed as the default-vs-opt-in provider (#198).",
+        f"(`{'`, `'.join(_CAPTURE_VOCABULARY)}`). Both providers reach **4/4** — remote at the "
+        "M2.5 exit (ADR-0084), local with the host-side kdump overlay harvest (#115, ADR-0203). "
+        "Local stays the default and remote the opt-in provider (#198).",
         "",
         "| provider | coverage | advertised methods |",
         "|---|---:|---|",
