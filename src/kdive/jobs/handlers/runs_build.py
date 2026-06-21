@@ -268,5 +268,6 @@ async def _build_and_record(
         kernel_ref=output.kernel_ref,
         debuginfo_ref=output.debuginfo_ref,
         build_id=output.build_id,
+        modules_ref=output.modules_ref,
         cmdline=payload.cmdline,
     )
