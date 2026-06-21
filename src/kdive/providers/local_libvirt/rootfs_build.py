@@ -124,6 +124,8 @@ def _real_virt_builder(
         ]
         if packages:
             argv += ["--install", ",".join(packages)]
+        if "kdump-utils" in packages:
+            argv += ["--run-command", "systemctl enable kdump.service"]
         argv += [
             "--ssh-inject",
             f"root:file:{authorized_key}",

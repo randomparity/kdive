@@ -1,0 +1,23 @@
+from kdive.services.runs.steps import BuildStepResult
+
+
+def test_modules_ref_round_trips_through_dump_and_load() -> None:
+    result = BuildStepResult(
+        kernel_ref="k", debuginfo_ref="d", build_id="b", modules_ref="runs/r/modules"
+    )
+    dumped = result.dump()
+    assert dumped["modules_ref"] == "runs/r/modules"
+    assert BuildStepResult.load(dumped) == result
+
+
+def test_modules_ref_absent_is_omitted_and_loads_none() -> None:
+    result = BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b")
+    assert "modules_ref" not in result.dump()
+    loaded = BuildStepResult.load(result.dump())
+    assert loaded is not None
+    assert loaded.modules_ref is None
+
+
+def test_refs_exposes_modules_under_modules_key() -> None:
+    result = BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b", modules_ref="m")
+    assert result.refs()["modules"] == "m"

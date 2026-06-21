@@ -20,6 +20,8 @@ rejected at admission; the `_real_wait_for_vmcore` / `_real_extract_redacted` se
 `LocalLibvirtProfilePolicy.capture_method` selects `KDUMP` from a profile `crashkernel`,
 the cmdline gains `crashkernel=256M`, and the install preflight enforces a capture
 initramfs — so a local System can boot kdump-capable but cannot have its core captured.
+(That staged-`<initrd>` enforcement is broadened by ADR-0206, which enables a real in-guest kdump
+to drive the harvest this ADR implements.)
 
 The defining fact for the harvest mechanism: a local-libvirt domain runs on the **same
 host** as the kdive worker, and the guest's `/var/crash/vmcore` lands on the per-System

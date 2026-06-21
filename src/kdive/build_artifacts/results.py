@@ -13,6 +13,7 @@ class BuildOutput(NamedTuple):
     kernel_ref: str
     debuginfo_ref: str
     build_id: str
+    modules_ref: str | None = None
 
 
 class ValidatedUpload(NamedTuple):
