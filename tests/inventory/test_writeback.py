@@ -206,9 +206,17 @@ def test_serialize_image_staged_source_takes_precedence_over_object_key() -> Non
         state="staged",
     )
     body = _body(_empty_snapshot(images=(image,)))
+    # Exact source block: the staged kind key must be emitted verbatim (an off-by-one in
+    # the literal would still satisfy a substring check, so anchor on whole lines).
+    source_block = "\n".join(
+        [
+            "[image.source]",
+            'kind = "staged"',
+            'volume = "pool/vol-1"',
+        ]
+    )
+    assert source_block in body
     assert "[image.source]\n" in body
-    assert 'kind = "staged"' in body
-    assert 'volume = "pool/vol-1"' in body
     # the staged branch wins: neither the object_key nor digest leak through.
     assert "should-be-ignored" not in body
     assert "object_key = " not in body
