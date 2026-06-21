@@ -116,12 +116,24 @@ def test_success_factory_builds_non_failure_envelope() -> None:
     assert resp.data == {"k": "v"}
 
 
+def test_success_factory_preserves_refs() -> None:
+    # refs is "references, never log dumps" (ADR-0019); a passed mapping must reach the envelope.
+    resp = ToolResponse.success("alloc-1", "granted", refs={"result": "tenant/run/abc/kernel"})
+    assert resp.refs == {"result": "tenant/run/abc/kernel"}
+
+
 def test_collection_count_is_numeric_json() -> None:
     item = ToolResponse.success("item-1", "ok")
 
     resp = ToolResponse.collection("items", "ok", [item], data={"source": "test"})
 
     assert resp.data == {"source": "test", "count": 1}
+
+
+def test_collection_preserves_refs() -> None:
+    item = ToolResponse.success("item-1", "ok")
+    resp = ToolResponse.collection("items", "ok", [item], refs={"page": "cursor-2"})
+    assert resp.refs == {"page": "cursor-2"}
 
 
 def test_data_accepts_nested_json_values_and_rejects_other_objects() -> None:
@@ -150,6 +162,27 @@ def test_failure_factory_sets_error_status_and_category() -> None:
     assert resp.error_category == "allocation_denied"
     assert resp.data == {"reason": "at_capacity"}
     assert resp.suggested_next_actions == []
+
+
+def test_failure_factory_preserves_suggested_next_actions() -> None:
+    # A failure may still steer the agent (e.g. release then retry); a passed action list must
+    # reach the envelope rather than being dropped to the empty default.
+    resp = ToolResponse.failure(
+        "res-1",
+        ErrorCategory.ALLOCATION_DENIED,
+        suggested_next_actions=["allocations.release", "allocations.request"],
+    )
+    assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+
+
+def test_failure_from_error_forwards_suggested_next_actions() -> None:
+    # failure_from_error must forward the caller's action list through to failure(); dropping it
+    # would silently strip the agent's next steps on an error.
+    exc = CategorizedError("denied", category=ErrorCategory.ALLOCATION_DENIED)
+    resp = ToolResponse.failure_from_error(
+        "res-1", exc, suggested_next_actions=["allocations.release"]
+    )
+    assert resp.suggested_next_actions == ["allocations.release"]
 
 
 def test_common_detail_helpers_build_named_payloads() -> None:
