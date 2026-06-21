@@ -117,6 +117,36 @@ def test_map_over_fleet_skips_an_unreachable_host() -> None:
     assert result == ["qemu+tls://good.example/system"]
 
 
+def test_map_over_fleet_passes_each_hosts_connection_to_work() -> None:
+    # work must receive the host's open connection (not None), so the reaper can act on it.
+    a, b = _config("qemu+tls://a.example/system"), _config("qemu+tls://b.example/system")
+    conn_a, conn_b = object(), object()
+    fleet = _fleet([(a, conn_a), (b, conn_b)])
+    seen: list[object] = []
+
+    def work(conn: object, _config: RemoteLibvirtConfig) -> object:
+        seen.append(conn)
+        return conn
+
+    result = connections.map_over_fleet(fleet, work, operation="test list")
+    assert result == [conn_a, conn_b]
+    assert seen == [conn_a, conn_b]
+
+
+def test_find_over_fleet_passes_the_hosts_connection_to_work() -> None:
+    a = _config("qemu+tls://a.example/system")
+    conn_a = object()
+    fleet = _fleet([(a, conn_a)])
+    seen: list[object] = []
+
+    def work(conn: object, _config: RemoteLibvirtConfig) -> bool:
+        seen.append(conn)
+        return True
+
+    assert connections.find_over_fleet(fleet, work, operation="test delete") is True
+    assert seen == [conn_a]
+
+
 def test_map_over_fleet_propagates_a_work_failure_on_a_reachable_host() -> None:
     # Only an unreachable host is isolated; a genuine error from work() on a reachable host must
     # surface (the reaper's "preserve non-benign failures" contract), not be silently swallowed.
