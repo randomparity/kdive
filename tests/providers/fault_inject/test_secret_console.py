@@ -163,6 +163,54 @@ def test_concurrent_op_release_does_not_evict_this_ops_value(tmp_path: Path) -> 
     assert value_a not in registry.snapshot()
 
 
+def test_persisted_request_carries_owner_and_retention_metadata(tmp_path: Path) -> None:
+    # The write request must be keyed to the System (owner_kind "systems", owner_id the
+    # system UUID) and tagged with the "console" retention class, else the redacted
+    # transcript lands under the wrong owner or retention policy.
+    registry = SecretRegistry()
+    store = _SpyStore(registry)
+    system_id = uuid4()
+    scope = f"op-{uuid4()}"
+    ref = _sentinel_ref(tmp_path)
+    console = FaultInjectSecretConsole(
+        backend=_backend(tmp_path, registry, scope),
+        registry=registry,
+        store_factory=lambda: store,
+        secret_ref=ref,
+        scope=scope,
+    )
+
+    console.emit_and_persist(system_id=system_id)
+
+    request = store.requests[-1]
+    assert request.owner_kind == "systems"
+    assert request.owner_id == str(system_id)
+    assert request.retention_class == "console"
+
+
+def test_transcript_includes_the_console_scaffold_lines(tmp_path: Path) -> None:
+    # The non-secret scaffold lines frame the echoed credential; they must survive into the
+    # persisted/redacted transcript verbatim (only the credential is masked).
+    transcript = _synthetic_transcript(_SENTINEL)
+    assert transcript.startswith("fault-inject console boot\n")
+    assert transcript.endswith("fault-inject console ready\n")
+
+    registry = SecretRegistry()
+    store = _SpyStore(registry)
+    scope = f"op-{uuid4()}"
+    ref = _sentinel_ref(tmp_path)
+    console = FaultInjectSecretConsole(
+        backend=_backend(tmp_path, registry, scope),
+        registry=registry,
+        store_factory=lambda: store,
+        secret_ref=ref,
+        scope=scope,
+    )
+    output = console.emit_and_persist(system_id=uuid4())
+    assert "fault-inject console boot" in output.transcript_snippet
+    assert "fault-inject console ready" in output.transcript_snippet
+
+
 def test_for_op_binds_backend_to_the_op_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
