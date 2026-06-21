@@ -14,6 +14,33 @@ from kdive.services.runs.steps import StepProgress
 
 _PLANTED = "PLANTED-DO-NOT-LEAK"  # a benign marker; the test asserts it never leaks
 _DT = datetime(2026, 6, 18, tzinfo=UTC)
+_CREATED = datetime(2026, 6, 18, 1, tzinfo=UTC)
+_UPDATED = datetime(2026, 6, 18, 2, tzinfo=UTC)
+
+
+def _system(
+    *,
+    state: SystemState = SystemState.READY,
+    shape: str | None = "small",
+) -> System:
+    return System(
+        id=uuid4(),
+        created_at=_CREATED,
+        updated_at=_UPDATED,
+        principal="u",
+        project="proj",
+        allocation_id=uuid4(),
+        state=state,
+        shape=shape,
+        provisioning_profile={
+            "schema_version": 1,
+            "arch": "x86_64",
+            "boot_method": "direct-kernel",
+            "vcpu": 2,
+            "memory_mb": 4096,
+            "disk_gb": 20,
+        },
+    )
 
 
 def _run(
@@ -206,3 +233,69 @@ def test_envelope_surfaces_expected_boot_failure_kind() -> None:
 
     assert data["expected_boot_failure"] == "panic"
     assert data["expected_boot_failure_detail"] == {"kind": "panic"}
+
+
+# --- system_envelope: envelope shape -------------------------------------------------
+
+
+def test_system_envelope_ready_carries_identity_and_actions() -> None:
+    system = _system(state=SystemState.READY, shape="small")
+
+    resp = system_envelope(system)
+
+    assert resp.object_id == str(system.id)
+    assert resp.status == "ready"
+    assert resp.suggested_next_actions == ["systems.get", "systems.teardown"]
+    assert resp.data["project"] == "proj"
+    assert resp.data["allocation_id"] == str(system.allocation_id)
+    assert resp.data["shape"] == "small"
+    assert resp.data["created_at"] == _CREATED.isoformat()
+    assert resp.data["updated_at"] == _UPDATED.isoformat()
+    # Provisioning summary is folded into data.
+    assert resp.data["arch"] == "x86_64"
+
+
+def test_system_envelope_omits_get_only_fields_by_default() -> None:
+    system = _system()
+
+    data = system_envelope(system).data
+
+    assert "resource_kind" not in data
+    assert "resource_id" not in data
+    assert "active_debug_session_ids" not in data
+    assert "active_run" not in data
+
+
+def test_system_envelope_includes_placement_when_supplied() -> None:
+    system = _system()
+
+    data = system_envelope(system, resource_kind="local-libvirt", resource_id="res-1").data
+
+    assert data["resource_kind"] == "local-libvirt"
+    assert data["resource_id"] == "res-1"
+
+
+def test_system_envelope_includes_get_only_recovery_fields() -> None:
+    system = _system()
+    active_run = {"id": "run-1", "state": "running"}
+
+    data = system_envelope(
+        system,
+        active_debug_session_ids=["sess-1"],
+        active_run=active_run,
+    ).data
+
+    assert data["active_debug_session_ids"] == ["sess-1"]
+    assert data["active_run"] == active_run
+
+
+def test_system_envelope_failed_state_is_failure_envelope() -> None:
+    system = _system(state=SystemState.FAILED)
+
+    resp = system_envelope(system, resource_kind="local-libvirt", resource_id="res-1")
+
+    assert resp.status == "error"
+    assert resp.error_category == "infrastructure_failure"
+    assert resp.data["current_status"] == "failed"
+    # The success-only teardown action is not offered on a failure envelope.
+    assert resp.suggested_next_actions == []
