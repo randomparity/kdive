@@ -95,5 +95,11 @@ def test_parse_component_ref_surfaces_sha256_validator_message() -> None:
     with pytest.raises(CategorizedError) as caught:
         parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
 
-    messages = [error["msg"] for error in caught.value.details["errors"]]
-    assert "Value error, sha256 must be 'sha256:<64 lowercase hex chars>'" in messages
+    # Assert the validator's own message exactly, after stripping pydantic's "Value error, "
+    # framing prefix. Pinning the product message (not the pydantic prefix) keeps the test
+    # robust to a pydantic bump while still catching any change to the guidance text itself.
+    expected = "sha256 must be 'sha256:<64 lowercase hex chars>'"
+    product_messages = [
+        error["msg"].removeprefix("Value error, ") for error in caught.value.details["errors"]
+    ]
+    assert expected in product_messages
