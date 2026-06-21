@@ -49,6 +49,12 @@ def _config(uri: str = "qemu+tls://host.example/system") -> RemoteLibvirtConfig:
         # libvirt percent-unescapes parameter names before matching them.
         "qemu+tls://host.example/system?no%5Fverify=1",
         "qemu+tls://host.example/system?%70kipath=/operator/pki",
+        # An empty leading chunk (a stray '&') must be skipped, not stop the scan, so a
+        # forbidden param after it is still seen.
+        "qemu+tls://host.example/system?&no_verify=1",
+        # The name is everything before the FIRST '=': a value that itself contains '=' must
+        # not shift the parsed name (split, not rsplit; maxsplit=1).
+        "qemu+tls://host.example/system?no_verify=a=b",
     ],
 )
 def test_validate_rejects_unsafe_uris(uri: str) -> None:
@@ -59,6 +65,32 @@ def test_validate_rejects_unsafe_uris(uri: str) -> None:
 
 def test_validate_accepts_plain_tls_uri() -> None:
     validate_remote_uri("qemu+tls://host.example/system")
+
+
+def test_validate_scheme_error_names_the_uri_and_required_scheme() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_remote_uri("qemu+tcp://host.example/system")
+    assert str(excinfo.value) == (
+        "remote-libvirt URI 'qemu+tcp://host.example/system' must use the qemu+tls:// scheme"
+    )
+
+
+def test_validate_no_verify_error_message() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_remote_uri("qemu+tls://host.example/system?no_verify=1")
+    assert str(excinfo.value) == (
+        "no_verify is forbidden on the remote-libvirt URI: server-cert "
+        "verification is mandatory (ADR-0077)"
+    )
+
+
+def test_validate_pkipath_error_message() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_remote_uri("qemu+tls://host.example/system?pkipath=/operator/pki")
+    assert str(excinfo.value) == (
+        "pkipath must not be set on the remote-libvirt URI: each op "
+        "materializes its own private pkipath (ADR-0077)"
+    )
 
 
 def test_compose_appends_pkipath_preserving_query() -> None:
