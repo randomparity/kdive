@@ -1,0 +1,17 @@
+# Fixture: substring-collision. Mirrors `ufw status numbered` (ufw 0.36.x, Ubuntu 24.04).
+# KNOWN ROLE WEAKNESS (pinned, not fixed — see spec Limitations): worker_cidr=10.0.0.0/24 and
+# a stale allow from 110.0.0.0/24 (lines 6,7). "110.0.0.0/24" CONTAINS "10.0.0.0/24" as a
+# substring, so the role's `grep -vF "{{ worker_cidr }}"` wrongly excludes it and the stale
+# allow SURVIVES (expected deletions: none). This documents the under-prune; a future
+# address-aware exclusion would prune it and must flip this case's expectation.
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 16514/tcp                  ALLOW IN    10.0.0.0/24
+[ 3] 47000:47099/tcp            ALLOW IN    10.0.0.0/24
+[ 4] 16514/tcp                  DENY IN     Anywhere
+[ 5] 47000:47099/tcp            DENY IN     Anywhere
+[ 6] 16514/tcp                  ALLOW IN    110.0.0.0/24
+[ 7] 47000:47099/tcp            ALLOW IN    110.0.0.0/24
