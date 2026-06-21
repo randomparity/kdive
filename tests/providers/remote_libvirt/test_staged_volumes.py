@@ -135,13 +135,56 @@ def test_config_error_is_unknown_and_logs(tmp_path: Path, caplog: pytest.LogCapt
     with caplog.at_level(logging.WARNING, logger=staged_volumes.__name__):
         out = _probe(["a.qcow2"], config_exc=exc, tmp_path=tmp_path)
     assert out == {"a.qcow2": "unknown"}
-    assert any("could not resolve remote config" in r.message for r in caplog.records)
+    assert any(
+        r.message == "staged-volume probe could not resolve remote config" for r in caplog.records
+    )
 
 
-def test_timeout_is_unreachable(tmp_path: Path) -> None:
+def test_timeout_is_unreachable(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     # A blocking connect with a tiny injected timeout must degrade to unreachable, fast.
-    out = _probe(["a.qcow2", "b.qcow2"], block=True, timeout=0.05, tmp_path=tmp_path)
+    with caplog.at_level(logging.WARNING, logger=staged_volumes.__name__):
+        out = _probe(["a.qcow2", "b.qcow2"], block=True, timeout=0.05, tmp_path=tmp_path)
     assert out == {"a.qcow2": "unreachable", "b.qcow2": "unreachable"}
+    assert any(r.message == "staged-volume probe timed out after 0.05s" for r in caplog.records)
+
+
+class _PoolNameRecordingConn:
+    """A conn that records which storage pool name the probe looks up."""
+
+    def __init__(self, staged: set[str]) -> None:
+        self._staged = staged
+        self.looked_up: list[str] = []
+
+    def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
+        self.looked_up.append(name)
+        return _Pool(self._staged)
+
+    def close(self) -> None:
+        pass
+
+
+def test_lookup_uses_the_configured_storage_pool(tmp_path: Path) -> None:
+    conn = _PoolNameRecordingConn(staged={"a.qcow2"})
+
+    def config_factory() -> RemoteLibvirtConfig:
+        return _config(pool="distinct-pool")
+
+    def open_connection(uri: str) -> _PoolNameRecordingConn:
+        del uri
+        return conn
+
+    out = asyncio.run(
+        staged_volumes.probe_staged_volumes(
+            ["a.qcow2"],
+            config_factory=config_factory,
+            open_connection=open_connection,
+            secret_backend_factory=_backend,
+            pki_base_dir=tmp_path,
+        )
+    )
+
+    assert out == {"a.qcow2": "staged"}
+    assert conn.looked_up == ["distinct-pool"]
 
 
 def test_empty_volumes_opens_nothing() -> None:
