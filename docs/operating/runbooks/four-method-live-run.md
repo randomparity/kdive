@@ -22,8 +22,10 @@ All prerequisites from the [local live-stack runbook](live-stack.md), plus:
   [live-stack.md §3](live-stack.md#3-build-the-vm-fixtures)).
 - The remote provider configured with a base-OS qcow2 and TLS, if running against a remote
   `qemu+tls://` host (see [remote-live-stack.md §1–4](remote-live-stack.md)).
-- For **local-libvirt** `kdump` capture only: `libguestfs` (the `guestfs` Python binding) on
-  the worker host, alongside `drgn` (see §4b and [ADR-0203](../../adr/0203-local-libvirt-kdump-overlay-harvest.md)).
+- For **local-libvirt** `kdump` capture only: the worker venv must import `guestfs` (the
+  `libguestfs` Python binding) and `drgn`. Wiring both is a one-time step —
+  see [Wire the worker venv](#wire-the-worker-venv-drgn--libguestfs) in §4b and
+  [ADR-0203](../../adr/0203-local-libvirt-kdump-overlay-harvest.md).
 
 ## 1. Verify the seed
 
@@ -180,11 +182,66 @@ the guest-written `/var/crash/<ts>/vmcore` directly out of the System's qcow2 ov
 read-only libguestfs mount, then extracts build-id + redacted dmesg with drgn. There is no
 crash→reboot→upload window to wait out, but two prerequisites apply on the **worker host**:
 
-- `libguestfs` (the `guestfs` Python binding) must be installed alongside `drgn`; absence is a
-  `missing_dependency`, not a silent skip.
+- `libguestfs` (the `guestfs` Python binding) must be importable by the **worker venv**
+  alongside `drgn`; absence is a `missing_dependency`, not a silent skip. Wiring both into the
+  venv is a one-time step — see [Wire the worker venv](#wire-the-worker-venv-drgn--libguestfs)
+  below.
 - The provisioning profile must set `crashkernel` so `capture_method` selects `kdump` and the
   boot cmdline reserves crash memory (the install preflight refuses a kdump boot whose
   initramfs carries no capture hook).
+
+#### Wire the worker venv (drgn + libguestfs)
+
+The worker imports `drgn` and the `guestfs` binding from the project venv (`.venv`, the
+interpreter the host-process worker runs). `drgn` is in the optional `live` dependency-group and
+the `guestfs` binding is a **system** package (not pip-installable), so neither is wired by
+default. Do both once on the worker host:
+
+1. Pull `drgn` into the venv:
+
+   ```bash
+   uv sync --group live
+   ```
+
+2. Install the libguestfs Python binding as a system package:
+
+   ```bash
+   sudo apt-get install python3-libguestfs   # Debian/Ubuntu
+   sudo dnf install python3-libguestfs       # Fedora/RHEL
+   ```
+
+3. Make the system binding importable from the venv. `uv` creates the venv with
+   `include-system-site-packages = false`, so the system `guestfs.py` is invisible to it. Pick
+   one:
+
+   - **Symlink the binding into the venv** (keeps the venv isolated). The system and venv Python
+     **minor versions must match** (the `libguestfsmod` extension is built for a specific ABI):
+
+     ```bash
+     py=.venv/bin/python
+     site=$("$py" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+     sys_site=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+     ln -s "$sys_site"/guestfs.py "$site"/
+     ln -s "$sys_site"/libguestfsmod*.so "$site"/
+     ```
+
+   - **Recreate the venv with system site-packages** (simpler, but the venv then sees every
+     system package):
+
+     ```bash
+     uv venv --system-site-packages
+     uv sync --group live
+     ```
+
+4. Verify against the venv interpreter (the same probe `scripts/check-local-libvirt.sh` runs):
+
+   ```bash
+   .venv/bin/python -c "import guestfs, drgn"
+   ```
+
+   `scripts/check-local-libvirt.sh` fails with this exact fix hint when the import does not
+   resolve. On a host-services deployment where the worker runs a venv outside the checkout, set
+   `KDIVE_PYTHON=/opt/kdive/.venv/bin/python` so the preflight probes the worker's interpreter.
 
 Fetching the core force-stops the domain. For a `crashed` System this is benign — kdive does
 not auto-recover a crashed System — but a guest that kdump-rebooted back to multi-user is
