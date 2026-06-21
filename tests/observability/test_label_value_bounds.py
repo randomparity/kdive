@@ -178,6 +178,77 @@ def test_new_label_values_stay_within_their_bounded_enums() -> None:
             )
 
 
+def _build_host_metrics(reader: InMemoryMetricReader) -> dict[str, Any]:
+    by_name: dict[str, Any] = {}
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name.startswith("kdive.build_host."):
+                    by_name[metric.name] = metric
+    return by_name
+
+
+def test_build_host_gauges_emit_named_values_and_descriptions() -> None:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    telem = BuildHostTelemetry(meter=meter)
+    telem.refresh(
+        BuildHostSnapshot(
+            leases={"builder-01": 3},
+            capacity={"builder-01": 7},
+            reachable={"builder-01": 1.0},
+        )
+    )
+    metrics = _build_host_metrics(reader)
+    assert set(metrics) == {
+        "kdive.build_host.leases",
+        "kdive.build_host.capacity",
+        "kdive.build_host.reachable",
+    }
+
+    expected = {
+        "kdive.build_host.leases": (3, "Active build-host lease count per host."),
+        "kdive.build_host.capacity": (
+            7,
+            "Maximum concurrent build leases per host (max_concurrent).",
+        ),
+        "kdive.build_host.reachable": (
+            1.0,
+            "1.0 if the host is state=ready, 0.0 if state=unreachable.",
+        ),
+    }
+    for name, (value, description) in expected.items():
+        metric = metrics[name]
+        assert metric.unit == "1"
+        assert metric.description == description
+        points = list(metric.data.data_points)
+        assert len(points) == 1
+        assert points[0].value == value
+        assert dict(points[0].attributes) == {"build_host": "builder-01"}
+
+
+def test_build_host_callbacks_yield_empty_before_first_refresh() -> None:
+    meter = MeterProvider(metric_readers=[InMemoryMetricReader()]).get_meter("test")
+    telem = BuildHostTelemetry(meter=meter)
+    # The pre-first-pass empty snapshot makes every callback yield zero observations
+    # rather than crashing on a missing snapshot.
+    assert list(telem._leases_callback(None)) == []
+    assert list(telem._capacity_callback(None)) == []
+    assert list(telem._reachable_callback(None)) == []
+
+
+def test_build_host_telemetry_refresh_replaces_snapshot() -> None:
+    reader = InMemoryMetricReader()
+    meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+    telem = BuildHostTelemetry(meter=meter)
+    telem.refresh(BuildHostSnapshot(leases={"builder-02": 5}, capacity={}, reachable={}))
+    leases = _build_host_metrics(reader)["kdive.build_host.leases"]
+    points = list(leases.data.data_points)
+    assert [(p.value, dict(p.attributes)) for p in points] == [(5, {"build_host": "builder-02"})]
+
+
 def test_new_metric_families_render_to_prometheus_text() -> None:
     reader = InMemoryMetricReader()
     _emit_everything(reader)
