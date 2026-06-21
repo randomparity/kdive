@@ -11,8 +11,8 @@
 - **Builds on:** [ADR-0203](0203-local-libvirt-kdump-overlay-harvest.md) (the host-side
   overlay read/write seam and the same-host fact this reuses),
   [ADR-0081](0081-remote-build-kernel-bundle.md) /
-  [ADR-0082](0082-remote-install-boot-plane.md) (remote's modules-in-guest delivery this
-  converges with), [ADR-0169](0169-decouple-build-from-system.md) (the build is decoupled
+  [ADR-0082](0082-remote-install-in-guest-kernel.md) (remote's modules-in-guest delivery this
+  converges with), [ADR-0169](0169-decouple-build-system-binding.md) (the build is decoupled
   from the System, so the trigger cannot be the System's capture method).
 - **Spec:** [`../superpowers/specs/2026-06-21-local-kdump-modules-in-guest-654.md`](../superpowers/specs/2026-06-21-local-kdump-modules-in-guest-654.md)
 
@@ -84,23 +84,39 @@ shared `real_run_modules_install` seam) and publishes `modules_ref`. A config th
 overrode to drop crash-dump produces no modules artifact (today's behavior). This keeps the
 zero-config path kdump-capable end-to-end with no new build-profile field.
 
-### 3. `modules_ref` repurposes the dormant `initrd_ref` plumbing
+### 3. `modules_ref` is a new field; `initrd_ref` stays for the upload lane
 
-`BuildOutput` and `BuildStepResult` carry `modules_ref: str | None`. `steps.py` already has an
-`initrd_ref` field (refs map, `dump`/`load`) left from the superseded "separate initrd"
-mechanism; it is **renamed to `modules_ref`**, not kept alongside (replace, don't deprecate).
-Leaving dead `initrd_ref` plumbing would misrepresent a mechanism this ADR removes.
+`BuildOutput`, `BuildStepResult`, and `InstallRequest` gain a **new** `modules_ref: str | None`
+field. `initrd_ref` is **kept** — it is not dormant: the external/upload build lane
+(ADR-0048/0166) populates it (`complete_build.py`: `initrd_ref=finalization.keys.get("initrd")`),
+the install handler reads it (`installed_initrd_ref`), and `LocalLibvirtInstall.install` stages
+it as the domain `<initrd>` when an uploaded build ships one. A built `/lib/modules` tarball
+(`modules_ref`) and an optionally-uploaded boot initrd (`initrd_ref`) are distinct artifacts and
+stay distinct fields. Only the kdump *gate* over `initrd_ref` is removed (§5), not the field or
+its staging path.
 
 ### 4. Local install injects modules into the overlay; the guest builds the crash initramfs
 
 `LocalLibvirtInstall.install`, when the method is KDUMP and `modules_ref` is present: fetches
-the modules tarball, read-write-mounts the per-System overlay via libguestfs, writes
-`/lib/modules/<ver>`, runs `depmod`, and verifies the version dir. The domain is not running at
-install (so, unlike the ADR-0203 harvest, no force-off is needed). A `GuestModuleWriter` seam
-mirrors ADR-0203's `GuestCoreReader` split — the fetch→write→depmod→verify orchestration is
-pure and unit-tested with a fake; only the libguestfs/`depmod` calls are `live_vm`-gated. The
-crash initramfs is then built **in-guest by `kdumpctl`** — local hand-rolls no capture image,
-matching remote.
+the modules tarball, **force-offs the domain if active**, read-write-mounts the per-System
+overlay via libguestfs, **clobbers** any existing `/lib/modules/<ver>`, writes the tree, runs
+`depmod`, and verifies a `modules.dep` content sentinel. Two safety properties are explicit:
+
+- **Force-off first.** `runs.install` is admitted on any `succeeded` Run regardless of the
+  System's power state (ADR-0030 §1 gates on Run state), and recovery is a new Run on the same
+  System (ADR-0026 §7), so a re-install can target an already-booted System. A read-write
+  libguestfs mount of a live qcow2 corrupts it (the hazard ADR-0203 force-offs to avoid), so
+  install `destroy`s the domain if `isActive()` before the mount — idempotent, mirroring
+  `boot()`'s destroy-then-create; the later `boot()` re-creates it.
+- **Idempotent injection.** A failed install records no `run_steps` row (ADR-0030 §2), so a
+  retry re-runs injection. It must self-heal a partial prior write: clobber the version dir (or
+  temp-extract + atomic rename) before extracting, and verify `modules.dep` is present and
+  non-empty after `depmod` — not merely that the version dir exists.
+
+A `GuestModuleWriter` seam mirrors ADR-0203's `GuestCoreReader` split — the
+force-off→fetch→clobber→write→depmod→verify orchestration is pure and unit-tested with a fake;
+only the libguestfs/`depmod`/`domain.destroy()` calls are `live_vm`-gated. The crash initramfs is
+then built **in-guest by `kdumpctl`** — local hand-rolls no capture image, matching remote.
 
 ### 5. The kdump install gate is replaced (refines ADR-0055 §5)
 
@@ -156,8 +172,17 @@ the in-guest path works on kdive's own local image — a one-line image-spec cha
 - **Treat the guest rootfs as immutable after provisioning** (rebuild a fresh overlay per
   Run rather than mutate it). Rejected by the maintainer: a mutable guest fs lets an agent run
   multiple debugging tests and is the foundation for agent-driven guest contents.
-- **Keep both `initrd_ref` and add `modules_ref`.** Leaves dead `initrd_ref` plumbing that
-  misleads readers about a superseded mechanism. Rejected (replace, don't deprecate).
+- **Repurpose the existing `initrd_ref` field into `modules_ref` (one slot).** Rejected:
+  `initrd_ref` is live, not dormant — the external/upload build lane carries an uploaded boot
+  initrd through it (`complete_build.py`) and `install.py` stages it as `<initrd>`. Folding the
+  built modules tarball into that slot would break the upload lane and conflate two distinct
+  artifacts. `modules_ref` is a new field; `initrd_ref` stays.
+- **Mount the overlay read-write without checking the domain's power state.** Rejected: a
+  re-install onto an already-booted System (ADR-0026 §7 recovery) would rw-mount a live qcow2 —
+  the corruption hazard ADR-0203 force-offs to avoid. Install force-offs if active first.
+- **Verify injection by the `/lib/modules/<ver>` directory's existence.** Rejected: a retry
+  after a crashed prior attempt false-passes on a half-written tree; injection clobbers then
+  verifies a `modules.dep` content sentinel.
 - **Refactor remote's bundle into a separate `modules_ref` too, for byte-identical
   packaging.** Destabilizes shipped, verified remote code (ADR-0081/0082) for no behavioral
   gain; remote's in-guest install is delivery-correct as is. Rejected; the shared contract is

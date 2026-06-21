@@ -77,10 +77,14 @@ artifact, because local boots the raw `bzImage` as `<kernel>` and cannot fold mo
 it. When the operator overrides the config to a non-crash-dump kernel, no modules artifact is
 produced (today's behavior). No new build-profile field — the trigger is the resolved config.
 
-`BuildOutput` and `BuildStepResult` gain `modules_ref: str | None`. The dormant `initrd_ref`
-plumbing in `steps.py` (refs map, `dump`/`load`) — left from the superseded "separate initrd"
-mechanism — is **repurposed to `modules_ref`**, not kept alongside it (replace, don't
-deprecate). The build handler threads `modules_ref` into the ledger result.
+`BuildOutput`, `BuildStepResult`, and `InstallRequest` gain a **new** `modules_ref: str | None`
+field. `initrd_ref` is **kept as-is**: it is a live field, not dormant plumbing — the external
+upload lane populates it (`complete_build.py`: `initrd_ref=finalization.keys.get("initrd")`),
+the install handler reads it (`installed_initrd_ref`), and `install.py` stages it as the
+domain `<initrd>` for an uploaded build that ships one. `modules_ref` (a built `/lib/modules`
+tarball for host-side injection) and `initrd_ref` (an optionally-uploaded boot initrd) are
+distinct artifacts and stay distinct fields. The build handler threads `modules_ref` into the
+ledger result alongside the existing fields.
 
 The slow `make modules_install` + publish path stays `live_vm`-gated; the orchestration and
 publish contract (config-driven trigger fires/skips, `modules_ref` round-trips) are
@@ -89,15 +93,30 @@ unit-tested with fakes.
 ### 2. Install plane — libguestfs overlay injection
 
 `LocalLibvirtInstall.install`, when the method is KDUMP and a `modules_ref` is present:
-fetches the modules tarball, mounts the per-System overlay (`overlay_path`, the file ADR-0203
-reads) read-write via libguestfs, writes `/lib/modules/<ver>`, runs `depmod`, and verifies the
-version dir exists. The domain is not running at install time, so no force-off is needed
-(unlike the ADR-0203 harvest).
+fetches the modules tarball, **force-offs the domain if it is active**, mounts the per-System
+overlay (`overlay_path`, the file ADR-0203 reads) read-write via libguestfs, writes
+`/lib/modules/<ver>`, runs `depmod`, and verifies a real sentinel.
+
+- **Force-off before the rw mount.** A read-write libguestfs mount of a qcow2 a running guest
+  is mutating yields inconsistent/corrupt writes — the exact hazard ADR-0203 force-offs to
+  avoid. `runs.install` is admitted on any `succeeded` Run regardless of the System's power
+  state (ADR-0030 §1 gates on Run state, not System state), and recovery is a new Run on the
+  same System (ADR-0026 §7), so a re-install can target an already-booted, running System. So
+  install must `destroy` the domain if `isActive()` before mounting — idempotent, mirroring
+  `boot()`'s destroy-then-create power-cycle and ADR-0203's force-off. The subsequent `boot()`
+  re-creates the domain, so force-off at install is consistent with the existing boot path.
+- **Idempotent injection.** A failed install records no `run_steps` row (ADR-0030 §2), so a
+  retry re-runs the whole install body, including injection. Injection must therefore be
+  idempotent and self-healing of a partial prior write: clobber any existing
+  `/lib/modules/<ver>` (remove the version dir, or extract to a temp dir and atomically rename)
+  before extracting, and verify a **content sentinel** — `modules.dep` present and non-empty
+  after `depmod` — not merely that the version directory exists (a half-written tree from a
+  crashed prior attempt would false-pass a directory-presence check).
 
 A new injected `GuestModuleWriter`-style seam mirrors ADR-0203's `GuestCoreReader` split: the
-orchestration (fetch → mount → write → depmod → verify) is pure and unit-tested with a fake;
-only the real libguestfs / `depmod` calls are `# pragma: no cover - live_vm`, selected by
-`from_env`.
+orchestration (force-off → fetch → mount → clobber → write → depmod → verify-sentinel) is pure
+and unit-tested with a fake; only the real libguestfs / `depmod` / `domain.destroy()` calls are
+`# pragma: no cover - live_vm`, selected by `from_env`.
 
 Two mechanics deferred to the implementation plan (both `live_vm`-validated): exactly how
 `depmod` runs under libguestfs (appliance `command` against the guest's `kmod` vs. precomputed
@@ -134,10 +153,11 @@ Uses the existing `ErrorCategory` taxonomy:
 - Build: `modules_install` non-zero → `BUILD_FAILURE`; modules publish failure →
   `INFRASTRUCTURE_FAILURE`.
 - Install: KDUMP method but `modules_ref` absent → `CONFIGURATION_ERROR` (the replaced gate);
-  libguestfs/`depmod` failure during injection → `INFRASTRUCTURE_FAILURE` (retryable host
-  fault) with the overlay path in details; absent libguestfs binding → `MISSING_DEPENDENCY`
-  (mirrors ADR-0203); a vanished `modules_ref` object → `STALE_HANDLE` (mirrors the kernel
-  fetch seam).
+  libguestfs/`depmod`/force-off failure during injection → `INFRASTRUCTURE_FAILURE` (retryable
+  host fault) with the overlay path in details — and because injection is idempotent
+  (clobber-then-extract + sentinel verify), the retry the worker drives after such a failure is
+  safe; absent libguestfs binding → `MISSING_DEPENDENCY` (mirrors ADR-0203); a vanished
+  `modules_ref` object → `STALE_HANDLE` (mirrors the kernel fetch seam).
 - All injected guest output (`depmod`/libguestfs stderr) passes the redactor before any error
   snippet, per the cross-cutting invariant.
 
@@ -182,5 +202,14 @@ runbook update.
 - **Treat the guest rootfs as immutable after provisioning.** Rejected by the maintainer:
   a mutable guest fs lets an agent run multiple debugging tests and is the foundation for the
   agent eventually driving guest contents.
-- **Keep both `initrd_ref` and add `modules_ref`.** Leaves dead `initrd_ref` plumbing that
-  misleads readers about a superseded mechanism.
+- **Repurpose the `initrd_ref` field into `modules_ref` (one slot).** Rejected: `initrd_ref`
+  is live — the external upload lane carries an uploaded boot initrd through it
+  (`complete_build.py`) and `install.py` stages it as `<initrd>`. Folding the built modules
+  tarball into that slot would break the upload lane and conflate two distinct artifacts; the
+  two stay separate fields.
+- **Mount the overlay read-write without checking the domain's power state.** Rejected: a
+  re-install onto an already-booted System (ADR-0026 §7 recovery) would rw-mount a live qcow2 —
+  the corruption hazard ADR-0203 force-offs to avoid. Install force-offs if active first.
+- **Verify injection by the `/lib/modules/<ver>` directory's existence.** Rejected: a retry
+  after a crashed prior attempt would false-pass on a half-written tree. Injection clobbers then
+  verifies a `modules.dep` content sentinel.
