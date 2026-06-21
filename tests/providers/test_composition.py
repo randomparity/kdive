@@ -46,6 +46,7 @@ from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtP
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.retrieve.facade import RemoteLibvirtRetrieve
 from kdive.providers.remote_libvirt.rootfs_build import RemoteLibvirtRootfsBuildPlane
+from kdive.reconciler.console_telemetry import ConsoleTelemetry
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("22222222-2222-2222-2222-222222222222")
@@ -397,9 +398,8 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
     owner = composition.ProviderComposition()
     resolver = owner.build_provider_resolver(enable_fault_inject=True)
     # Inject a hermetic libvirt reaper so the composite never opens a live qemu:/// connection.
-    reaper = owner.build_reconciler_reaper(
-        enable_fault_inject=True, libvirt_reaper=_FakeLibvirtReaper()
-    )
+    fake_libvirt = _FakeLibvirtReaper()
+    reaper = owner.build_reconciler_reaper(enable_fault_inject=True, libvirt_reaper=fake_libvirt)
     system_id = UUID("44444444-4444-4444-4444-444444444444")
 
     domain = resolver.resolve(ResourceKind.FAULT_INJECT).provisioner.provision(
@@ -411,6 +411,9 @@ def test_configured_fault_inject_runtime_is_visible_to_reconciler_reaper() -> No
     owned = asyncio.run(reaper.list_owned())
     assert domain in [item.name for item in owned]
     asyncio.run(reaper.destroy(domain))
+    # The composite fans the *requested* name out to each member reaper verbatim, not a
+    # placeholder.
+    assert fake_libvirt.destroyed == [domain]
 
 
 def test_reconciler_reaper_is_null_when_local_libvirt_disabled() -> None:
@@ -461,6 +464,54 @@ def test_local_libvirt_enabled_by_default_and_opt_out_via_env(
 
     # An explicit flag wins over the environment.
     assert _local_libvirt_enabled(True) is True
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "TRUE", "yes", "YES", " yes "])
+def test_fault_inject_env_truthy_tokens_enable(
+    monkeypatch: pytest.MonkeyPatch, truthy: str
+) -> None:
+    # The env gate accepts 1/true/yes case-insensitively (whitespace stripped); each must
+    # turn the default-off fault-inject opt-in on.
+    from kdive.providers.assembly.composition import _fault_inject_enabled
+
+    monkeypatch.setenv("KDIVE_FAULT_INJECT", truthy)
+    config.reset()
+    assert _fault_inject_enabled(None) is True
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "no", "off", "anything"])
+def test_fault_inject_env_non_truthy_tokens_stay_disabled(
+    monkeypatch: pytest.MonkeyPatch, falsy: str
+) -> None:
+    from kdive.providers.assembly.composition import _fault_inject_enabled
+
+    monkeypatch.setenv("KDIVE_FAULT_INJECT", falsy)
+    config.reset()
+    assert _fault_inject_enabled(None) is False
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "FALSE", "no", "NO", " no "])
+def test_local_libvirt_env_falsy_tokens_disable(
+    monkeypatch: pytest.MonkeyPatch, falsy: str
+) -> None:
+    # local-libvirt is on by default; only the 0/false/no tokens (case-insensitive,
+    # whitespace stripped) turn it off.
+    from kdive.providers.assembly.composition import _local_libvirt_enabled
+
+    monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", falsy)
+    config.reset()
+    assert _local_libvirt_enabled(None) is False
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "yes", "on", "anything"])
+def test_local_libvirt_env_other_tokens_stay_enabled(
+    monkeypatch: pytest.MonkeyPatch, truthy: str
+) -> None:
+    from kdive.providers.assembly.composition import _local_libvirt_enabled
+
+    monkeypatch.setenv("KDIVE_LOCAL_LIBVIRT_ENABLED", truthy)
+    config.reset()
+    assert _local_libvirt_enabled(None) is True
 
 
 def test_resolver_excludes_local_libvirt_when_disabled(
@@ -576,10 +627,14 @@ def test_build_host_prober_is_wired_independent_of_remote(monkeypatch: pytest.Mo
     # Force remote-libvirt to read as unconfigured; the prober must still be returned.
     monkeypatch.setattr(remote_config, "is_remote_libvirt_configured", lambda: False)
 
-    comp = composition.ProviderComposition()
+    expected_registry = SecretRegistry()
+    comp = composition.ProviderComposition(secret_registry=expected_registry)
     prober = comp.build_reconciler_build_host_prober()
     assert isinstance(prober, SshBuildHostProber)
     assert isinstance(prober, BuildHostProber)
+    # The composition's shared registry is threaded into the prober (it redacts SSH
+    # credential refs); a null registry would break that redaction.
+    assert prober._secret_registry is expected_registry
 
 
 def test_console_hosting_delegates_to_remote_when_enabled(
@@ -607,13 +662,20 @@ def test_console_hosting_delegates_to_remote_when_enabled(
     )
 
     comp = composition.ProviderComposition(secret_registry=expected_registry)
+    expected_telemetry = cast(ConsoleTelemetry, object())
 
     assert (
-        asyncio.run(comp.build_reconciler_console_hosting(enable_remote_libvirt=True))
+        asyncio.run(
+            comp.build_reconciler_console_hosting(
+                enable_remote_libvirt=True, console_telemetry=expected_telemetry
+            )
+        )
         is expected_hosting
     )
     assert seen["secret_registry"] is expected_registry
     assert seen["running_systems_factory"] is composition.DbRunningRemoteSystems
+    # The caller's telemetry is threaded all the way through the factory, not dropped/Noned.
+    assert seen["console_telemetry"] is expected_telemetry
 
 
 def test_fault_inject_opt_in_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -711,6 +773,149 @@ def test_build_host_transport_factories_follow_remote_libvirt_opt_in() -> None:
     )
 
     assert set(factories) == {BuildHostKind.EPHEMERAL_LIBVIRT}
+
+
+def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The module-level build_*_runtime helpers must (a) pass the caller's registry to the
+    # provider runtime builder and (b) attach the provider's *real* discovery registration
+    # (not None) — a None registration crashes register_all_discovery at reconcile time.
+    captured: list[object] = []
+    real_with = composition._with_discovery_registration
+
+    def _spy_with(runtime: ProviderRuntime, registration: object) -> ProviderRuntime:
+        captured.append(registration)
+        assert registration is not None
+        return real_with(runtime, registration)
+
+    monkeypatch.setattr(composition, "_with_discovery_registration", _spy_with)
+
+    seen: dict[str, object] = {}
+    real_local = composition.local_composition.build_runtime
+    real_remote = composition.remote_composition.build_runtime
+
+    def _local(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+        seen["local"] = secret_registry
+        return real_local(secret_registry=secret_registry)
+
+    def _remote(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+        seen["remote"] = secret_registry
+        return real_remote(secret_registry=secret_registry)
+
+    real_remote_disc = composition.remote_composition.discovery_registration
+
+    def _remote_disc(*, secret_registry: SecretRegistry) -> object:
+        seen["remote_disc"] = secret_registry
+        return real_remote_disc(secret_registry=secret_registry)
+
+    monkeypatch.setattr(composition.local_composition, "build_runtime", _local)
+    monkeypatch.setattr(composition.remote_composition, "build_runtime", _remote)
+    monkeypatch.setattr(composition.remote_composition, "discovery_registration", _remote_disc)
+
+    local_registry = SecretRegistry()
+    remote_registry = SecretRegistry()
+    composition.build_local_runtime(secret_registry=local_registry)
+    composition.build_fault_inject_runtime()
+    composition.build_remote_runtime(secret_registry=remote_registry)
+
+    assert seen["local"] is local_registry
+    assert seen["remote"] is remote_registry
+    assert seen["remote_disc"] is remote_registry
+    # Each helper attached a real, non-None discovery registration (asserted in the spy).
+    assert len(captured) == 3
+    assert all(reg is not None for reg in captured)
+
+
+def test_resolver_threads_shared_registry_into_provider_runtimes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The resolver builds each provider runtime (and the remote discovery registration) with
+    # the composition's shared secret registry; a null registry would disable redaction in
+    # the constructed ports. Patch the underlying builders to capture the registry threaded.
+    seen: dict[str, object] = {}
+    real_local = composition.local_composition.build_runtime
+    real_remote = composition.remote_composition.build_runtime
+    real_remote_disc = composition.remote_composition.discovery_registration
+
+    def _local(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+        seen["local"] = secret_registry
+        return real_local(secret_registry=secret_registry)
+
+    def _remote(*, secret_registry: SecretRegistry) -> ProviderRuntime:
+        seen["remote"] = secret_registry
+        return real_remote(secret_registry=secret_registry)
+
+    def _remote_disc(*, secret_registry: SecretRegistry) -> object:
+        seen["remote_disc"] = secret_registry
+        return real_remote_disc(secret_registry=secret_registry)
+
+    monkeypatch.setattr(composition.local_composition, "build_runtime", _local)
+    monkeypatch.setattr(composition.remote_composition, "build_runtime", _remote)
+    monkeypatch.setattr(composition.remote_composition, "discovery_registration", _remote_disc)
+
+    _declare_remote(tmp_path, monkeypatch)
+    expected_registry = SecretRegistry()
+    composition.ProviderComposition(secret_registry=expected_registry).build_provider_resolver()
+
+    assert seen["local"] is expected_registry
+    assert seen["remote"] is expected_registry
+    assert seen["remote_disc"] is expected_registry
+
+
+def test_remote_factory_builders_thread_the_shared_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each remote-libvirt reconciler port is constructed with the composition's shared
+    # secret registry (it drives credential redaction); a null registry would silently
+    # disable that redaction. Patch the remote builders to capture the registry they receive.
+    seen: dict[str, object] = {}
+
+    def _capture(key: str, result: object):
+        def builder(*, secret_registry: SecretRegistry) -> object:
+            seen[key] = secret_registry
+            return result
+
+        return builder
+
+    resetter_obj = object()
+    dump_obj = object()
+    build_vm_obj = object()
+    transport_obj = object()
+    monkeypatch.setattr(
+        composition.remote_composition,
+        "build_transport_resetter",
+        _capture("resetter", resetter_obj),
+    )
+    monkeypatch.setattr(
+        composition.remote_composition,
+        "build_dump_volume_reaper",
+        _capture("dump", dump_obj),
+    )
+    monkeypatch.setattr(
+        composition.remote_composition,
+        "build_build_vm_reaper",
+        _capture("build_vm", build_vm_obj),
+    )
+    monkeypatch.setattr(
+        composition.remote_composition,
+        "build_ephemeral_build_transport_factory",
+        _capture("transport", transport_obj),
+    )
+
+    expected_registry = SecretRegistry()
+    comp = composition.ProviderComposition(secret_registry=expected_registry)
+
+    assert comp.build_reconciler_transport_resetter(enable_remote_libvirt=True) is resetter_obj
+    assert comp.build_reconciler_dump_volume_reaper(enable_remote_libvirt=True) is dump_obj
+    assert comp.build_reconciler_build_vm_reaper(enable_remote_libvirt=True) is build_vm_obj
+    factories = comp.build_build_host_transport_factories(enable_remote_libvirt=True)
+    assert factories[BuildHostKind.EPHEMERAL_LIBVIRT] is transport_obj
+
+    assert seen["resetter"] is expected_registry
+    assert seen["dump"] is expected_registry
+    assert seen["build_vm"] is expected_registry
+    assert seen["transport"] is expected_registry
 
 
 def test_remote_runtime_advertises_all_four_capture_methods() -> None:
