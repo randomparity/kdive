@@ -12,6 +12,10 @@ from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers import runs, runs_boot
 from kdive.jobs.models import HandlerRegistry
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.artifacts.artifact_search import (
+    ArtifactSearchInputError,
+    search_text,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
@@ -57,8 +61,27 @@ def test_expected_crash_false_when_pattern_is_not_a_string() -> None:
 
 
 def test_expected_crash_false_on_invalid_search_pattern() -> None:
-    # A malformed pattern must fail closed (no crash match), not raise out of the handler.
-    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "["}))
+    # A trailing '|' yields an empty term, so parse_literal_terms raises
+    # ArtifactSearchInputError inside search_text. The handler must catch it and
+    # fail closed (no crash match) rather than let it propagate out.
+    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at|"}))
+    # Guard: the pattern truly drives search_text into the raising path.
+    with pytest.raises(ArtifactSearchInputError):
+        search_text(_CONSOLE, pattern="BUG at|", max_matches=1)
+    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+
+
+def test_expected_crash_fails_closed_when_search_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Even if search_text raises for some other reason, the except branch must
+    # swallow it and return False — a mutant deleting the try/except or flipping
+    # its `return False` to `return True` is killed here.
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise ArtifactSearchInputError("forced")
+
+    monkeypatch.setattr(runs_boot, "search_text", _boom)
+    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
     assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
 
 
@@ -97,10 +120,14 @@ def test_register_handlers_binds_each_run_kind_to_its_handler(
     ports = _ports()
     runs.register_handlers(registry, ports=ports)
 
-    for kind in (JobKind.BUILD, JobKind.INSTALL, JobKind.BOOT):
+    claimed = {JobKind.BUILD, JobKind.INSTALL, JobKind.BOOT}
+    for kind in claimed:
         assert registry.get(kind) is not None
-    # Run kinds the facade must NOT claim.
-    assert registry.get(JobKind.PROVISION) is None
+    # Every other JobKind must remain unclaimed by this facade — a mutant that
+    # additionally registered some unrelated kind is caught here.
+    for kind in JobKind:
+        if kind not in claimed:
+            assert registry.get(kind) is None, f"facade should not claim {kind}"
 
     conn, job = object(), object()
     assert asyncio.run(registry.get(JobKind.BUILD)(conn, job)) == "build"  # type: ignore[misc]
