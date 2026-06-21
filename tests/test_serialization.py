@@ -28,6 +28,13 @@ def test_ensure_json_value_accepts_nested_json_tree() -> None:
     assert validated == value
 
 
+def test_ensure_json_value_validates_its_own_argument_and_reports_path() -> None:
+    # ensure_json_value must validate the very value it returns (not some other object) and
+    # the rejection message must name the caller's path.
+    with pytest.raises(ValueError, match=re.escape("payload contains non-JSON value set")):
+        ensure_json_value({1, 2}, path="payload")
+
+
 @pytest.mark.parametrize("number", [math.inf, -math.inf, math.nan])
 def test_validate_json_value_rejects_non_finite_numbers_with_path(number: float) -> None:
     with pytest.raises(ValueError, match=re.escape("payload.score must be finite JSON number")):
@@ -105,6 +112,21 @@ def test_safe_error_details_errors_loc_keeps_int_segments() -> None:
 def test_safe_error_details_drops_non_mapping_error_entries() -> None:
     out = safe_error_details({"errors": ["not-a-dict", {"loc": ("a",), "msg": "m", "type": "t"}]})
     assert out["errors"] == [{"loc": ["a"], "msg": "m", "type": "t"}]
+
+
+def test_safe_error_details_keeps_scalar_keys_that_follow_the_errors_key() -> None:
+    # The `errors` widening must not terminate the scan: scalar keys ordered after `errors`
+    # in the details mapping are still filtered and kept.
+    out = safe_error_details(
+        {
+            "errors": [{"loc": ("a",), "msg": "m", "type": "t"}],
+            "field": "rootfs",
+            "count": 7,
+        }
+    )
+    assert out["field"] == "rootfs"
+    assert out["count"] == 7
+    assert isinstance(out["errors"], list)
 
 
 def test_safe_error_details_non_list_errors_value_dropped_as_scalar() -> None:
