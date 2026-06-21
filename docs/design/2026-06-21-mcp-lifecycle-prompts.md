@@ -83,14 +83,24 @@ trivial (a no-argument prompt has no failure mode). A free-text `goal` argument 
 `start_investigation` is a deliberate non-goal here (see Alternatives).
 
 `register` is pure with respect to FastMCP internals: it takes an explicit
-`tool_maturity: Mapping[str, str]` (tool name → maturity), so it is unit-tested by
-passing a fabricated map. For each step it:
+`tool_maturity: Mapping[str, ToolMaturity]` (tool name → maturity record), so it is
+unit-tested by passing a fabricated map. `ToolMaturity` is a small frozen value carrying
+the `maturity` string and the optional `reason` (the `[partial: <reason>]` tag needs the
+reason, and the reason is *not* in a bare maturity string — it lives in
+`meta["maturity_detail"]["reason"]`, so the map must carry it):
+
+```
+ToolMaturity(maturity: str, reason: str | None)
+```
+
+For each step `register`:
 
 - raises `RuntimeError` if `step.tool` is absent from `tool_maturity` (a typo or a
   removed tool — fail fast, mirroring the doc-resources "missing snapshot" guard);
 - raises `RuntimeError` if the referenced tool is `planned` (steering into an
   unavailable tool);
-- renders the body, tagging any `partial` step.
+- renders the body, tagging any `partial` step with its `reason` (falling back to the
+  bare tag `[partial]` when a partial tool carries no reason).
 
 It registers one `FunctionPrompt` per spec via `app.add_prompt(...)` whose render
 function returns the pre-rendered body string (FastMCP wraps a returned `str` as a
@@ -102,8 +112,9 @@ single user-role text message — verified against fastmcp-slim 3.4.2). Returns 
 `_advertise_envelope_output_schema`, to sweep registered `Tool` instances. Extract a
 small `_registered_tools(app)` helper used by both that sweep and a new
 `_register_lifecycle_prompts(app, pool, assembly)` adapter. The adapter builds
-`tool_maturity` from the live `Tool` metas (`tool.meta["maturity"]`, defaulting to
-`implemented` when a tool carries no maturity key) and calls
+`tool_maturity` from the live `Tool` metas — `maturity` from `tool.meta["maturity"]`
+(defaulting to `implemented` when a tool carries no maturity key) and `reason` from
+`tool.meta.get("maturity_detail", {}).get("reason")` — and calls
 `prompts_registrar.register(app, tool_maturity=...)`.
 
 The adapter is appended to `_PLANE_REGISTRARS` **after every tool registrar** (after
@@ -144,7 +155,11 @@ The `[partial: <reason>]` tag is appended only to steps whose live maturity is
 4. `allocations.wait` — wait until the allocation is granted.
 5. `systems.define` — define the target system to build/boot on.
 
-`build_boot_debug` (build → boot → live debug):
+`build_boot_debug` (build → boot → live debug). Each downstream journey renders a
+one-line precondition in its summary so an agent that opens it cold knows what must
+already exist — these prompts begin mid-lifecycle by design.
+*Prerequisite: an open investigation and a defined, allocated system (see
+`start_investigation`).*
 
 1. `runs.create` — create a run against the system/build target.
 2. `runs.build` — build the kernel.
@@ -155,7 +170,8 @@ The `[partial: <reason>]` tag is appended only to steps whose live maturity is
 7. `introspect.run` — inspect kernel state in the live session.
 8. `debug.end_session` — detach when done.
 
-`triage_panic` (crash → vmcore → postmortem):
+`triage_panic` (crash → vmcore → postmortem).
+*Prerequisite: a booted system on a kdump-capable run (see `build_boot_debug`).*
 
 1. `control.force_crash` — induce a crash (or react to an observed panic).
 2. `vmcore.fetch` — capture the vmcore from the crashed system.
@@ -181,8 +197,14 @@ RBAC gate (same posture as the doc resources). A client that never calls
   and each `GetPrompt` renders a non-empty user message whose body names every step's
   tool.
 - **Maturity disclosure:** assert each `partial` step in the rendered body carries a
-  `[partial...]` tag and each `implemented` step does not; cross-check the tags against
-  the live registry (drift guard) so a promotion/demotion that isn't reflected fails.
+  `[partial...]` tag and each `implemented` step does not.
+- **Maturity drift guard (independent expectation):** the rendered tags are computed
+  *from* the live registry, so comparing rendered-vs-registry would be tautological
+  (the vacuous-guard trap, cf. #118). Instead the test holds an independent,
+  human-reviewed expected maturity per referenced step (a small table in the test) and
+  asserts the live registry matches it. A promotion/demotion of any referenced tool then
+  fails the test until the expectation is updated — making a journey's maturity shape a
+  reviewed event, which is the point of the guard.
 - **Unknown tool fails fast:** `register` with a `PromptSpec` referencing a missing tool
   raises `RuntimeError`.
 - **`planned` tool fails fast:** `register` with a `tool_maturity` marking a referenced

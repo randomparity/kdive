@@ -42,8 +42,9 @@ We will register a fixed, code-defined set of three canonical lifecycle prompts
    and `reason` — rather than removed, because removing `partial` steps would empty
    `build_boot_debug` and `triage_panic`.
 3. **Read maturity from the live registry at registration time.** The registrar adapter in
-   `build_app` builds a `tool name → maturity` map from the registered `Tool` metas and
-   passes it to the pure `register(app, *, tool_maturity=...)`. Maturity is
+   `build_app` builds a `tool name → (maturity, reason)` map from the registered `Tool`
+   metas (`meta["maturity"]` plus `meta["maturity_detail"]["reason"]` for partial tools)
+   and passes it to the pure `register(app, *, tool_maturity=...)`. Maturity is
    registration-time-immutable, so a snapshot taken when the app is built is runtime truth;
    a promotion automatically drops the `partial` tag on the next build. A drift-guard test
    pins prompt content and tags to the registry.
