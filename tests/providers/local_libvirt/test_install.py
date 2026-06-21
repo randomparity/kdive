@@ -608,20 +608,21 @@ def test_real_readiness_running_guest_stays_unanswered_with_probe_error(
     assert result.probe_error == "virsh hiccup"
 
 
-def test_real_readiness_reread_after_exit_honors_late_crash(
+def test_real_readiness_reread_after_exit_honors_late_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # First read is pending; the guest then exits and a re-read shows a crash signature that
-    # landed just before it stopped — that late verdict (exited=True) must be honored as an
-    # answered failure rather than the generic exited fallback.
-    reads = iter([b"booting...\n", b"Kernel panic - not syncing: boom\n"])
+    # First read is pending; the guest then exits and a re-read shows the readiness marker that
+    # landed just before it stopped — that late verdict (exited=True) must be honored. A success
+    # marker yields ok=True, which the generic exited fallback (answered=True, ok=False) can never
+    # produce, so this pins the reread call site: dropping the reread would surface ok=False.
+    reads = iter([b"booting...\n", b"kdive-ready\n"])
     monkeypatch.setattr(install, "read_console_log", lambda path: next(reads))
     monkeypatch.setattr(install, "_domain_exit_probe", lambda name: install._DomainExitProbe(True))
 
     result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
 
     assert result.answered is True
-    assert result.ok is False
+    assert result.ok is True
 
 
 def test_domain_exited_treats_missing_kdive_domain_as_terminal(
@@ -680,6 +681,7 @@ def _capture_domstate(
 def test_domain_exit_probe_builds_connection_qualified_domstate_argv(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu+tls://probe.example/system")
     recorded = _capture_domstate(monkeypatch, returncode=0, stdout="running")
 
     install._domain_exit_probe("kdive-abc")
@@ -687,9 +689,11 @@ def test_domain_exit_probe_builds_connection_qualified_domstate_argv(
     args = recorded["args"]
     assert isinstance(args, list)
     # The probe targets the configured connection URI and the `domstate` subcommand for
-    # the named domain; a wrong flag or subcommand would query the wrong thing.
+    # the named domain; a wrong flag or subcommand would query the wrong thing. Setting the
+    # URI explicitly pins that the configured value flows into the argv, independent of the
+    # Setting default.
     assert args[1] == "-c"
-    assert args[2] == "qemu:///system"
+    assert args[2] == "qemu+tls://probe.example/system"
     assert args[3] == "domstate"
     assert args[4] == "kdive-abc"
 
