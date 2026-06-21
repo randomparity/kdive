@@ -176,13 +176,23 @@ def test_search_text_before_window_starts_at_zero_not_one() -> None:
 
 
 def test_search_text_truncates_when_json_budget_exceeded() -> None:
-    # Wide lines plus full before/after context make each match's JSON window large enough that
-    # the cumulative budget is blown well before max_matches, exercising the size-budget break.
-    filler = "z" * 500
-    needle = "NEEDLE " + "z" * 500
-    block = [filler] * 10 + [needle] + [filler] * 20
-    data = ("\n".join(block * 10)).encode()
+    # The truncation cut-off is decided by re-serializing the running match list with the SAME
+    # compact, non-escaping json.dumps args the dataclass uses (separators=(",",":"),
+    # ensure_ascii=False). Pin the exact match_count at the budget boundary so that any change to
+    # those serializer args shifts the observed count and is caught:
+    #
+    #   * Every line is a match and each match carries the maximum before/after context window, so
+    #     the budget (not max_matches=50) is the limiter; the cut-off lands at exactly 42 matches.
+    #   * Any item- or key-separator change (e.g. compact ","/":" -> default ", "/": ", or the
+    #     key separator alone) inflates the per-match estimate enough to cut off one match earlier
+    #     -> 41, not 42.
+    #   * The non-ASCII "é" payload makes an ensure_ascii=True estimate escape each char to "é"
+    #     (six chars instead of one), blowing the estimate far earlier -> ~9 matches.
+    line = "NEEDLE" + "é" * 42
+    data = ("\n".join([line] * 6000)).encode("utf-8")
     result = search_text(data, pattern="NEEDLE", before_lines=10, after_lines=20, max_matches=50)
     assert result.truncated is True
-    assert result.match_count < 50
+    assert result.match_count == 42
+    # The compact serializer keeps the realized result under budget; the exact count above pins the
+    # cut-off so a wider serializer estimate (which would drop the 42nd match) cannot pass.
     assert len(result.matches_json()) <= MAX_MATCHES_JSON_CHARS
