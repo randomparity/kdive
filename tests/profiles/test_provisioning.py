@@ -470,6 +470,7 @@ def test_rootfs_upload_window_helpers_report_and_reject_upload_profiles() -> Non
     with pytest.raises(CategorizedError) as exc:
         reject_rootfs_upload_without_window(_LOCAL_POLICY, profile)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "upload-kind rootfs requires systems.define upload window"
 
 
 def test_rootfs_upload_window_helpers_allow_non_upload_profiles() -> None:
