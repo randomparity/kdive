@@ -51,12 +51,30 @@ Drive the live task hermetically:
    need no fake. The block `when: ansible_os_family == 'Debian'` is satisfied with a play
    var, `gather_facts: false`.
 2. **Fake `ufw`** on `PATH`:
-   - `ufw status numbered` → `cat "$FAKE_UFW_FIXTURE"`,
+   - `ufw status numbered` → touch `$FAKE_UFW_STATUS_MARKER`, then `cat "$FAKE_UFW_FIXTURE"`,
    - `ufw --force delete N` → `echo N >> "$FAKE_UFW_DELETE_LOG"`,
    - any other invocation → fail loudly (the prune task must make no other ufw call).
 3. **Assert** the delete log equals the case's expected stale line numbers, in descending
    order. Because `--force delete` is the prune's only mutation, this single assertion
-   proves the current-CIDR allow, the SSH allow, and the deny rules all survive.
+   proves the current-CIDR allow, the SSH allow, and the deny rules all survive the prune.
+
+### Verification contract (so a no-op case can't false-pass)
+
+A bare delete-log diff is insufficient: an empty log is also what an **errored** prune task
+(a `set -euo pipefail` regression, a broken `sed`) or a **skipped** task (a tag typo, so
+`--tags` matches nothing) produces — which would silently pass the zero-deletion cases
+(steady-state, ufw-inactive). The runner therefore requires three signals per case, all of
+which must hold:
+
+1. `ansible-playbook` exits `0`.
+2. The prune task **actually executed and reached the pipeline** — proven by the fake `ufw`
+   touching a `$FAKE_UFW_STATUS_MARKER` file when it serves `status numbered`. The runner
+   asserts the marker exists for every case (an empty delete log is then provably a real
+   no-op, not a crash or a skip).
+3. The delete log equals the expected line numbers, in the expected (descending) order.
+
+The runner sets `ANSIBLE_PYTHON_INTERPRETER` so the per-run interpreter-discovery warning
+does not pollute output (zero-warnings policy).
 
 ### Components
 
@@ -64,7 +82,7 @@ Drive the live task hermetically:
 |------|------|
 | `deploy/ansible/roles/gdbstub_acl/tasks/main.yml` | add `tags: [gdbstub_acl_prune]` to the prune task (only role change) |
 | `deploy/ansible/tests/gdbstub_acl_prune.yml` | minimal play that applies the role (`connection: local`, `gather_facts: false`, vars set per invocation) |
-| `deploy/ansible/tests/fixtures/*.numbered` | canned `ufw status numbered` outputs, one per case |
+| `deploy/ansible/tests/fixtures/*.numbered` | canned `ufw status numbered` outputs, one per case, mirroring real ufw output (each carries a comment header citing the ufw version the format represents) |
 | `deploy/ansible/tests/fake-ufw` | the fake `ufw` shim (shellcheck/shfmt-clean) |
 | `deploy/ansible/tests/run-gdbstub-acl-prune.sh` | runner: per case, set env + PATH, run `ansible-playbook`, diff the delete log against expected |
 | `deploy/ansible/tests/README.md` | how the harness works / how to add a case |
@@ -90,6 +108,26 @@ harness fails if the observed delete log differs (set or order).
 6. **non-protected-port** — an `ALLOW IN` on a non-protected port (e.g. `9090/tcp`) from a
    non-worker source, plus the protected deny rows → never deleted (port- and
    action-scoping: only `ALLOW IN` on exactly the TLS port or gdbstub range can match).
+7. **substring-collision** — current `10.0.0.0/24`, a stale allow from `110.0.0.0/24` (a
+   real routable range whose string *contains* the worker CIDR). Pins the role's **current**
+   behavior: the stale allow **survives** (is not pruned), because the exclusion is
+   `grep -vF "{{ worker_cidr }}"` (a substring match), so `110.0.0.0/24` matches and is
+   excluded. This is asserted as a *known limitation*, with a loud fixture comment — see
+   Limitations. The case exists so the behavior cannot silently get worse and so a future
+   address-aware fix has a failing assertion to flip.
+
+### Negative / mutation check (acceptance gate)
+
+Per the repo's "verify tests catch failures" standard, the implementer must demonstrate the
+harness goes **red** when the prune parse is deliberately broken — recorded in the PR body,
+not committed:
+
+- Narrow the port pattern (drop the TLS port) → the **stale-present** case must fail (stale
+  no longer pruned).
+- Break the exclusion (`grep -vF` of a non-matching literal) → the **steady-state** case
+  must fail (the current allow gets spuriously deleted).
+
+A harness that stays green under both mutations is inert and does not satisfy this spec.
 
 ## Non-goals
 
@@ -101,7 +139,16 @@ harness fails if the observed delete log differs (set or order).
 
 ## Limitations
 
-- New ufw output-format drift is caught only once a fixture reproducing it is added.
+- New ufw output-format drift is caught only once a fixture reproducing it is added. The
+  fixtures mirror real `ufw status numbered` output and record the ufw version they
+  represent, but they are static — they cannot anticipate a future ufw format change.
 - The fake `ufw` models only the two calls the prune task makes; a future prune edit that
   shells a third ufw subcommand will make the fake fail loudly (intended — surfaces the
   change), and the harness must then be taught that call.
+- **Known role weakness (substring exclusion, case 7):** the prune excludes the current
+  source with `grep -vF "{{ worker_cidr }}"`, a substring match, so a stale allow whose
+  source string *contains* the worker CIDR (e.g. `110.0.0.0/24` vs `10.0.0.0/24`) is wrongly
+  excluded and **survives** — exactly the "under-match → over-permission persists" failure
+  #616 names. This harness *documents* that behavior (case 7) rather than fixing it: an
+  address-aware exclusion changes the audited security pipeline and warrants its own
+  review + live re-verification. Tracked as a follow-up to #616.
