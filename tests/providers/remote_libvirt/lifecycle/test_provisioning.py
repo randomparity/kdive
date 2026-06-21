@@ -772,6 +772,29 @@ def test_provision_defines_starts_and_waits_for_agent(tmp_path: Path) -> None:
     assert domain.active
     # 47000 is reserved for the ACL probe; the first System gets the assignable floor (ADR-0184).
     assert recorded_gdb_port(domain.xml) == 47001
+    # The configured gdb listen address is rendered into the domain's -gdb arg (not None).
+    gdb_args = [
+        arg.get("value")
+        for arg in fromstring(domain.xml).findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert gdb_args == ["-gdb", "tcp:10.0.0.5:47001"]
+
+
+def test_provision_renders_configured_network_and_machine(tmp_path: Path) -> None:
+    # The per-instance network/machine config flows into the rendered domain XML; a dropped
+    # kwarg would silently fall back to the render defaults ("default"/"pc").
+    conn = _conn_with_base()
+    provisioner, _ = _provisioner(conn, tmp_path, config=_config(network="lab-net", machine="q35"))
+
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+
+    root = fromstring(conn.domains[DOMAIN_NAME].xml)
+    nic_source = root.find("./devices/interface[@type='network']/source")
+    assert nic_source is not None
+    assert nic_source.get("network") == "lab-net"
+    os_type = root.find("./os/type")
+    assert os_type is not None
+    assert os_type.get("machine") == "q35"
     overlay = overlay_volume_name(SYSTEM_ID)
     assert overlay in conn.pools["default"].volumes
     [volume_xml] = conn.pools["default"].created_xml
@@ -879,6 +902,11 @@ def test_provision_start_failures_exhaust_bounded_attempts(tmp_path: Path) -> No
     assert DOMAIN_NAME not in conn.domains  # transactional: undefined after failure
     # The overlay this attempt created is reclaimed.
     assert overlay_volume_name(SYSTEM_ID) not in conn.pools["default"].volumes
+    # The failure names the bounded attempt cap and carries the diagnostic details, and it
+    # chains the last libvirt error as the cause (not dropped to None).
+    assert str(excinfo.value) == "libvirt failed to start the domain after 3 attempts"
+    assert excinfo.value.details == {"system_id": str(SYSTEM_ID), "attempts": 3}
+    assert excinfo.value.__cause__ is not None
 
 
 def test_provision_overlay_create_failure_is_provisioning_failure(tmp_path: Path) -> None:
@@ -960,6 +988,7 @@ def test_provision_without_remote_section_opens_no_connection(tmp_path: Path) ->
         provisioner.provision(SYSTEM_ID, local)
 
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(excinfo.value) == "provisioning profile has no remote-libvirt provider section"
     assert opened == []
 
 
@@ -971,7 +1000,9 @@ def test_provision_without_gdb_addr_opens_no_connection(tmp_path: Path) -> None:
         provisioner.provision(SYSTEM_ID, _remote_profile())
 
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "gdb_addr" in str(excinfo.value)
+    assert str(excinfo.value).startswith(
+        "the remote-libvirt instance has no gdb_addr; the gdbstub listen address"
+    )
     assert opened == []
 
 
@@ -990,6 +1021,25 @@ def test_provision_agent_timeout_leaves_domain_running(tmp_path: Path) -> None:
     assert not domain.undefined
     # The overlay is left in place with the running domain.
     assert overlay_volume_name(SYSTEM_ID) in conn.pools["default"].volumes
+
+
+def test_provision_threads_agent_poll_interval_into_wait(tmp_path: Path) -> None:
+    # The configured poll interval is the one wait_for_agent sleeps on between polls; a
+    # dropped/None poll_s would record None (or burn a different cadence).
+    conn = _conn_with_base()
+    conn.agent_script[DOMAIN_NAME] = ["disconnected", "connected"]
+    sleeps: list[float] = []
+    provisioner, _ = _provisioner(
+        conn,
+        tmp_path,
+        sleep=sleeps.append,
+        agent_poll_s=0.75,
+        agent_timeout_s=180.0,
+    )
+
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+
+    assert sleeps == [0.75]
 
 
 def test_provision_domain_exit_during_agent_wait_fails_fast(tmp_path: Path) -> None:
@@ -1109,6 +1159,10 @@ def test_teardown_other_libvirt_error_is_infrastructure_failure(tmp_path: Path) 
         provisioner.teardown(DOMAIN_NAME)
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # The infra error names the failed verb and the affected domain.
+    assert str(excinfo.value) == "libvirt error destroying"
+    assert excinfo.value.details == {"domain": DOMAIN_NAME}
+    assert excinfo.value.__cause__ is not None
 
 
 def test_reprovision_wipes_then_provisions(tmp_path: Path) -> None:
