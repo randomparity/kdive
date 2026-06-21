@@ -61,6 +61,26 @@ def test_validate_absent_default_path_returns_zero(
     assert validate_systems(None) == 0
 
 
+def test_validate_default_path_loads_configured_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # path=None must resolve the *configured* KDIVE_SYSTEMS_TOML, not a hardcoded
+    # "./systems.toml": point it at an over-cap file and require the cap gate to fire.
+    monkeypatch.setenv("KDIVE_MAX_BUILD_CONFIG_BYTES", "10")
+    path = tmp_path / "systems.toml"
+    path.write_text(
+        "schema_version = 2\n"
+        '[[build_config]]\nname = "kdump"\ncontent = "CONFIG_KEXEC=y_way_too_long"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+    import kdive.config as config
+
+    config.load()
+    assert validate_systems(None) != 0
+    assert "kdump" in capsys.readouterr().err
+
+
 def test_validate_rejects_over_cap_build_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
