@@ -80,3 +80,27 @@ def test_error_does_not_leak_the_token() -> None:
     with pytest.raises(TokenExpiringError) as excinfo:
         ensure_token_valid(token, now=1000, margin_s=30)
     assert token not in str(excinfo.value)
+
+
+def test_error_message_directs_to_relogin() -> None:
+    with pytest.raises(TokenExpiringError) as excinfo:
+        ensure_token_valid(_jwt_with_exp(500), now=1000, margin_s=30)
+    assert str(excinfo.value) == (
+        "token missing exp or expiring soon; run `kdivectl login` and retry"
+    )
+
+
+def test_accepts_two_segment_token() -> None:
+    # A header.body token (no signature segment) is still parsable: the structural guard
+    # rejects only fewer than two segments, so a two-part token with headroom is accepted.
+    body = base64.urlsafe_b64encode(json.dumps({"exp": 10_000}).encode()).rstrip(b"=").decode()
+    two_segment = f"x.{body}"
+    ensure_token_valid(two_segment, now=1000, margin_s=30)
+
+
+def test_default_margin_is_thirty_seconds() -> None:
+    # Called without margin_s, the default 30s applies: exp-now == 30 is refused (<=),
+    # exp-now == 31 is accepted. This pins the default value, not just an explicit arg.
+    with pytest.raises(TokenExpiringError):
+        ensure_token_valid(_jwt_with_exp(1030), now=1000)
+    ensure_token_valid(_jwt_with_exp(1031), now=1000)
