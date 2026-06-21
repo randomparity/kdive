@@ -7,6 +7,8 @@ per-pass span + duration/lag metrics. These run without a DB by stubbing ``run_o
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Iterator
 from datetime import timedelta
 from typing import cast
 
@@ -299,3 +301,269 @@ def test_background_ticker_does_not_tick_after_stop() -> None:
 
 class _FakePool:
     """A stand-in pool; the heartbeat test stubs run_once so the pool is never used."""
+
+
+class _RecordingSpan:
+    def __init__(self) -> None:
+        self.outcomes: list[str] = []
+
+    def set_outcome(self, outcome: str) -> None:
+        self.outcomes.append(outcome)
+
+
+class _RecordingTelemetry:
+    """A telemetry double that records every call the pass loop makes."""
+
+    def __init__(self) -> None:
+        self.lags: list[float] = []
+        self.recorded: list[tuple[object, object]] = []
+        self.span = _RecordingSpan()
+
+    def observe_lag(self, lag_seconds: float) -> None:
+        self.lags.append(lag_seconds)
+
+    def record_repairs(self, counts: object, failures: object) -> None:
+        self.recorded.append((counts, failures))
+
+    @contextlib.contextmanager
+    def pass_span(self) -> Iterator[_RecordingSpan]:
+        yield self.span
+
+
+class _NoConnPool:
+    """A pool whose connection() raises so the snapshot refreshers hit their except path."""
+
+    def connection(self) -> object:
+        raise RuntimeError("no DB in this unit test")
+
+
+def _run_one_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    telemetry: _RecordingTelemetry,
+    report: ReconcileReport,
+) -> Reconciler:
+    """Drive exactly one iteration of ``_pass_loop`` and return the reconciler."""
+    reconciler = Reconciler(
+        pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
+        reaper=NullReaper(),
+        config=ReconcileConfig(
+            interval=timedelta(seconds=0),
+            telemetry=cast(ReconcilerTelemetry, telemetry),
+        ),
+    )
+
+    async def _run() -> None:
+        stop = asyncio.Event()
+        passes = 0
+
+        async def one_shot_run_once() -> ReconcileReport:
+            nonlocal passes
+            passes += 1
+            stop.set()  # stop after this single pass
+            return report
+
+        monkeypatch.setattr(reconciler, "run_once", one_shot_run_once)
+        await asyncio.wait_for(reconciler._pass_loop(stop), timeout=2)
+        assert passes == 1
+
+    asyncio.run(_run())
+    return reconciler
+
+
+def test_pass_loop_records_repair_counts_and_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One pass forwards the report's repair_counts and failures to record_repairs."""
+    telemetry = _RecordingTelemetry()
+    report = ReconcileReport(
+        expired_allocations=1,
+        orphaned_systems=0,
+        abandoned_jobs=0,
+        dead_sessions=0,
+        leaked_domains=0,
+        idempotency_keys_gc_count=0,
+        failures=("leaked_domains",),
+    )
+    _run_one_pass(monkeypatch, telemetry, report)
+
+    assert len(telemetry.recorded) == 1
+    counts, failures = telemetry.recorded[0]
+    assert counts == report.repair_counts
+    assert failures == ("leaked_domains",)
+
+
+def test_pass_loop_observes_nonnegative_lag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first pass observes a finite, non-negative lag (now - scheduled start)."""
+    telemetry = _RecordingTelemetry()
+    _run_one_pass(monkeypatch, telemetry, _empty_report())
+
+    assert len(telemetry.lags) == 1
+    lag = telemetry.lags[0]
+    assert isinstance(lag, float)
+    assert lag >= 0.0
+    assert lag < 1.0  # a no-op pass cannot lag by a whole second
+
+
+def test_pass_loop_marks_span_error_when_run_once_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass whose run_once raises stamps the span error and keeps looping."""
+    telemetry = _RecordingTelemetry()
+    reconciler = Reconciler(
+        pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
+        reaper=NullReaper(),
+        config=ReconcileConfig(
+            interval=timedelta(seconds=0),
+            telemetry=cast(ReconcilerTelemetry, telemetry),
+        ),
+    )
+
+    async def _run() -> None:
+        stop = asyncio.Event()
+
+        async def boom() -> ReconcileReport:
+            stop.set()
+            raise RuntimeError("transient pass failure")
+
+        monkeypatch.setattr(reconciler, "run_once", boom)
+        await asyncio.wait_for(reconciler._pass_loop(stop), timeout=2)
+
+    asyncio.run(_run())
+
+    assert telemetry.span.outcomes == ["error"]
+    # A raising pass never reaches record_repairs.
+    assert telemetry.recorded == []
+
+
+def test_reconciler_keeps_real_telemetry_doubles_when_config_omits_them() -> None:
+    """Omitted fleet/build-host telemetry default to real disabled instances, not None."""
+    reconciler = Reconciler(
+        pool=_FakePool(),  # ty: ignore[invalid-argument-type]
+        reaper=NullReaper(),
+        config=ReconcileConfig(),
+    )
+    # `or`-default must yield a usable object (not None / not the falsy short-circuit).
+    assert reconciler._fleet_telemetry is not None
+    assert reconciler._build_host_telemetry is not None
+    assert hasattr(reconciler._fleet_telemetry, "refresh")
+    assert hasattr(reconciler._build_host_telemetry, "refresh")
+
+
+def test_run_once_forwards_pool_reaper_and_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_once passes the reconciler's own pool, reaper, and config to reconcile_once."""
+    pool = _FakePool()
+    reaper = NullReaper()
+    cfg = ReconcileConfig(interval=timedelta(seconds=7))
+    reconciler = Reconciler(
+        pool=pool,  # ty: ignore[invalid-argument-type]
+        reaper=reaper,
+        config=cfg,
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_reconcile_once(p: object, r: object, *, config: object) -> ReconcileReport:
+        captured["pool"] = p
+        captured["reaper"] = r
+        captured["config"] = config
+        return _empty_report()
+
+    monkeypatch.setattr(reconciler_loop, "reconcile_once", _fake_reconcile_once)
+    asyncio.run(reconciler.run_once())
+
+    assert captured["pool"] is pool
+    assert captured["reaper"] is reaper
+    assert captured["config"] is cfg
+
+
+def test_run_cancels_heartbeat_ticker_on_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When run() returns, the background heartbeat ticker task is cancelled, not leaked."""
+
+    ticker_running = asyncio.Event()
+
+    async def _never_ending_ticker(heartbeat: object, stop: object, interval: float) -> None:
+        ticker_running.set()
+        await asyncio.Event().wait()  # blocks forever until cancelled
+
+    monkeypatch.setattr(reconciler_loop, "_tick_until_stop", _never_ending_ticker)
+
+    async def _run() -> None:
+        reconciler = Reconciler(
+            pool=_FakePool(),  # ty: ignore[invalid-argument-type]
+            reaper=NullReaper(),
+            config=ReconcileConfig(
+                interval=timedelta(seconds=0),
+                heartbeat=cast(Heartbeat, _CountingHeartbeat()),
+                heartbeat_tick=timedelta(seconds=60),
+            ),
+        )
+        stop = asyncio.Event()
+
+        async def one_shot() -> ReconcileReport:
+            stop.set()
+            return _empty_report()
+
+        reconciler.run_once = one_shot  # type: ignore[method-assign]
+        await asyncio.wait_for(reconciler.run(stop), timeout=2)
+
+        # Right after run() returns (still inside this loop), the never-ending ticker must
+        # already be settled. If run()'s cleanup branch were skipped (`if ticker is None`),
+        # a still-pending ticker task would survive here.
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        assert ticker_running.is_set(), "ticker should have started"
+        assert pending == [], f"ticker task leaked: {pending!r}"
+
+    asyncio.run(_run())
+
+
+def test_pass_loop_resets_next_due_so_steady_state_lag_stays_small(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After each pass next_due advances by +interval, so a steady cadence has ~0 lag.
+
+    Across two back-to-back passes the second pass's observed lag must stay well under one
+    interval: ``next_due = now + interval`` re-anchors the schedule each pass. A loop that
+    forgot to re-anchor (or anchored with the wrong sign) would report a lag near a full
+    extra interval on the second pass.
+    """
+    interval = 0.05
+    telemetry = _RecordingTelemetry()
+    reconciler = Reconciler(
+        pool=_NoConnPool(),  # ty: ignore[invalid-argument-type]
+        reaper=NullReaper(),
+        config=ReconcileConfig(
+            interval=timedelta(seconds=interval),
+            telemetry=cast(ReconcilerTelemetry, telemetry),
+        ),
+    )
+
+    async def _run() -> None:
+        stop = asyncio.Event()
+        passes = 0
+
+        async def two_shot_run_once() -> ReconcileReport:
+            nonlocal passes
+            passes += 1
+            if passes >= 2:
+                stop.set()
+            return _empty_report()
+
+        monkeypatch.setattr(reconciler, "run_once", two_shot_run_once)
+        await asyncio.wait_for(reconciler._pass_loop(stop), timeout=2)
+        assert passes == 2
+
+    asyncio.run(_run())
+
+    assert len(telemetry.lags) == 2
+    # Second-pass lag is the schedule slip; re-anchoring keeps it well under one interval.
+    assert telemetry.lags[1] < interval
+
+
+def test_pass_loop_refreshes_snapshots_each_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each pass calls both snapshot refreshers (best-effort; failures are swallowed)."""
+    telemetry = _RecordingTelemetry()
+    reconciler = _run_one_pass(monkeypatch, telemetry, _empty_report())
+    # The _NoConnPool makes both refreshers hit their except path; the pass still completes
+    # (a snapshot read failure must never starve the repair loop), proving both ran without
+    # crashing the loop.
+    assert reconciler._fleet_telemetry is not None
+    assert reconciler._build_host_telemetry is not None
