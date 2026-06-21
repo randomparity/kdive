@@ -173,13 +173,17 @@ class LocalLibvirtInstall:
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the kdump capture path is absent
-                (method=kdump only, checked before any redefine); ``INSTALL_FAILURE`` on a
-                libvirt redefine error; ``INFRASTRUCTURE_FAILURE`` if the per-Run staging
-                directory cannot be created; any fetch error category propagated from the seam.
+                (method=kdump only, checked before any redefine) or the configured staging
+                root is not writable by the run user (a ``PermissionError`` on the per-Run
+                ``mkdir``, naming ``KDIVE_INSTALL_STAGING`` + the path + a remedy, ADR-0204);
+                ``INSTALL_FAILURE`` on a libvirt redefine error; ``INFRASTRUCTURE_FAILURE`` on
+                any other staging-dir creation fault; any fetch error category from the seam.
         """
         staging_dir = self._staging_root / str(request.system_id) / str(request.run_id)
         try:
             staging_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError as exc:
+            raise self._unwritable_staging_error(staging_dir) from exc
         except OSError as exc:
             raise CategorizedError(
                 "failed to create the per-Run staging directory",
@@ -321,6 +325,31 @@ class LocalLibvirtInstall:
             f"libvirt error {verb} domain",
             category=ErrorCategory.INSTALL_FAILURE,
             details={"domain": domain_name},
+        )
+
+    def _unwritable_staging_error(self, staging_dir: Path) -> CategorizedError:
+        """A ``PermissionError`` on the per-Run mkdir is operator misconfiguration (ADR-0204).
+
+        The configured staging root is not writable by the run user (the default's parent
+        ``/var/lib/kdive`` is root-owned). That never becomes writable on retry, so it is a
+        ``CONFIGURATION_ERROR`` (not a retry-able infrastructure failure) whose details name
+        the env var, the configured root, the per-Run path tried, and an actionable remedy.
+        """
+        staging_root = str(self._staging_root)
+        remedy = (
+            f"pre-create {staging_root} (or repoint {INSTALL_STAGING.name}) so it is writable "
+            "by the run user; on SELinux hosts give it the virt_image_t label"
+        )
+        return CategorizedError(
+            f"install staging root {staging_root} is not writable by the run user",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "op": "mkdir",
+                "env_var": INSTALL_STAGING.name,
+                "staging_root": staging_root,
+                "dest": str(staging_dir),
+                "remedy": remedy,
+            },
         )
 
 

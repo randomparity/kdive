@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from kdive.providers.local_libvirt.retrieve_kdump import (
     GuestCoreReader,
     VmcoreEntry,
     extract_dmesg_or_sentinel,
+    file_sha256_b64,
     harvest_vmcore,
     read_via_tempfile,
     redact_dmesg,
@@ -27,14 +30,14 @@ _OVERLAY = "/var/lib/kdive/rootfs/sys-overlay.qcow2"
 class _FakeReader:
     entries: list[VmcoreEntry]
     blobs: dict[str, bytes] = field(default_factory=dict)
-    reads: list[str] = field(default_factory=list)
+    downloads: list[str] = field(default_factory=list)
 
     def list_vmcores(self, overlay: str) -> list[VmcoreEntry]:
         return list(self.entries)
 
-    def read_vmcore(self, overlay: str, path: str) -> bytes:
-        self.reads.append(path)
-        return self.blobs[path]
+    def download_vmcore(self, overlay: str, path: str, dest: Path) -> None:
+        self.downloads.append(path)
+        dest.write_bytes(self.blobs[path])
 
 
 def test_select_newest_picks_highest_mtime() -> None:
@@ -50,7 +53,7 @@ def test_select_newest_empty_is_none() -> None:
     assert select_newest([]) is None
 
 
-def test_harvest_reads_newest_core_bytes() -> None:
+def test_harvest_downloads_newest_core_to_dest(tmp_path: Path) -> None:
     reader = _FakeReader(
         entries=[
             VmcoreEntry("/var/crash/old/vmcore", 100.0, 3),
@@ -58,29 +61,42 @@ def test_harvest_reads_newest_core_bytes() -> None:
         ],
         blobs={"/var/crash/new/vmcore": b"NEWER"},
     )
-    out = harvest_vmcore(reader, _OVERLAY, max_bytes=1024)
-    assert out == b"NEWER"
-    assert reader.reads == ["/var/crash/new/vmcore"]
+    dest = tmp_path / "core.vmcore"
+    out = harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024)
+    assert out == dest
+    assert dest.read_bytes() == b"NEWER"
+    assert reader.downloads == ["/var/crash/new/vmcore"]
 
 
-def test_harvest_absent_core_returns_none() -> None:
+def test_harvest_absent_core_returns_none(tmp_path: Path) -> None:
     reader = _FakeReader(entries=[])
-    assert harvest_vmcore(reader, _OVERLAY, max_bytes=1024) is None
+    dest = tmp_path / "core.vmcore"
+    assert harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024) is None
+    assert not dest.exists()
 
 
-def test_harvest_oversize_core_is_configuration_error() -> None:
+def test_harvest_oversize_core_is_configuration_error(tmp_path: Path) -> None:
     reader = _FakeReader(
         entries=[VmcoreEntry("/var/crash/big/vmcore", 100.0, 4096)],
         blobs={"/var/crash/big/vmcore": b"X"},
     )
+    dest = tmp_path / "core.vmcore"
     with pytest.raises(CategorizedError) as exc:
-        harvest_vmcore(reader, _OVERLAY, max_bytes=1024)
+        harvest_vmcore(reader, _OVERLAY, dest=dest, max_bytes=1024)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert reader.reads == []  # rejected before reading the bytes
+    assert reader.downloads == []  # rejected before downloading the bytes
+    assert not dest.exists()
 
 
 def test_guest_core_reader_protocol_is_runtime_checkable() -> None:
     assert isinstance(_FakeReader(entries=[]), GuestCoreReader)
+
+
+def test_file_sha256_b64_matches_hashlib(tmp_path: Path) -> None:
+    core = tmp_path / "core.bin"
+    core.write_bytes(b"COREBYTES")
+    expected = base64.b64encode(hashlib.sha256(b"COREBYTES").digest()).decode("ascii")
+    assert file_sha256_b64(core) == expected
 
 
 def test_read_via_tempfile_passes_a_path_holding_the_bytes() -> None:
@@ -105,29 +121,39 @@ def test_read_via_tempfile_removes_the_temp_file() -> None:
     assert not captured[0].exists()
 
 
-def test_extract_dmesg_success_returns_bytes() -> None:
-    assert extract_dmesg_or_sentinel(b"core", lambda _p: b"kernel log") == b"kernel log"
+def test_extract_dmesg_success_returns_bytes(tmp_path: Path) -> None:
+    core = tmp_path / "core"
+    core.write_bytes(b"core")
+    assert extract_dmesg_or_sentinel(core, lambda _p: b"kernel log") == b"kernel log"
 
 
-def test_extract_dmesg_degrades_infrastructure_failure_to_sentinel() -> None:
+def test_extract_dmesg_degrades_infrastructure_failure_to_sentinel(tmp_path: Path) -> None:
+    core = tmp_path / "core"
+    core.write_bytes(b"core")
+
     def boom(_p: Path) -> bytes:
         raise CategorizedError("no debuginfo", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
-    assert extract_dmesg_or_sentinel(b"core", boom) == DMESG_UNAVAILABLE
+    assert extract_dmesg_or_sentinel(core, boom) == DMESG_UNAVAILABLE
 
 
-def test_extract_dmesg_reraises_missing_dependency() -> None:
+def test_extract_dmesg_reraises_missing_dependency(tmp_path: Path) -> None:
+    core = tmp_path / "core"
+    core.write_bytes(b"core")
+
     def no_drgn(_p: Path) -> bytes:
         raise CategorizedError("drgn missing", category=ErrorCategory.MISSING_DEPENDENCY)
 
     with pytest.raises(CategorizedError) as exc:
-        extract_dmesg_or_sentinel(b"core", no_drgn)
+        extract_dmesg_or_sentinel(core, no_drgn)
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
 
 
-def test_redact_dmesg_scrubs_a_registered_secret() -> None:
+def test_redact_dmesg_scrubs_a_registered_secret(tmp_path: Path) -> None:
+    core = tmp_path / "core"
+    core.write_bytes(b"core")
     registry = SecretRegistry()
     registry.register("hunter2", scope=None)
-    out = redact_dmesg(b"core", lambda _p: b"login password=hunter2 done", registry)
+    out = redact_dmesg(core, lambda _p: b"login password=hunter2 done", registry)
     assert b"hunter2" not in out
     assert b"password=" in out

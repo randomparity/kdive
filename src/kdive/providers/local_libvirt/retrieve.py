@@ -14,6 +14,8 @@ sanitized and allowlist-checked before any `crash` invocation.
 from __future__ import annotations
 
 import logging
+import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -22,13 +24,19 @@ from uuid import UUID
 import libvirt
 
 import kdive.config as config
-from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
+from kdive.artifacts.storage import (
+    ArtifactStreamRequest,
+    ArtifactWriteRequest,
+    HeadResult,
+    StoredArtifact,
+)
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.retrieve_kdump import (
     VmcoreEntry,
+    file_sha256_b64,
     harvest_vmcore,
     read_via_tempfile,
     redact_dmesg,
@@ -62,12 +70,16 @@ _RETENTION_CLASS = "vmcore"
 
 class _StorePort(Protocol):
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact: ...
+    def put_stream(self, request: ArtifactStreamRequest) -> StoredArtifact: ...
+    def head(self, key: str) -> HeadResult | None: ...
 
 
-type _WaitForVmcore = Callable[[UUID], bytes | None]
+type _WaitForVmcore = Callable[[UUID], Path | None]
 type _HostDumpCapture = Callable[[UUID], bytes | None]
 type _ReadBuildId = Callable[[bytes], str]
+type _ReadBuildIdFromFile = Callable[[Path], str]
 type _ExtractRedacted = Callable[[bytes], bytes]
+type _ExtractRedactedFromFile = Callable[[Path], bytes]
 type _FetchObject = Callable[[str], bytes]
 type _RunCrash = Callable[[Path, Path, str], CrashResult]
 
@@ -82,7 +94,9 @@ class LocalLibvirtRetrieve:
         store_factory: Callable[[], _StorePort],
         wait_for_vmcore: _WaitForVmcore,
         read_vmcore_build_id: _ReadBuildId,
+        read_vmcore_build_id_from_file: _ReadBuildIdFromFile,
         extract_redacted: _ExtractRedacted,
+        extract_redacted_from_file: _ExtractRedactedFromFile,
         host_dump_capture: _HostDumpCapture,
         secret_registry: SecretRegistry,
         fetch_object: _FetchObject | None = None,
@@ -93,7 +107,9 @@ class LocalLibvirtRetrieve:
         self._store: _StorePort | None = None
         self._wait_for_vmcore = wait_for_vmcore
         self._read_vmcore_build_id = read_vmcore_build_id
+        self._read_vmcore_build_id_from_file = read_vmcore_build_id_from_file
         self._extract_redacted = extract_redacted
+        self._extract_redacted_from_file = extract_redacted_from_file
         self._host_dump_capture = host_dump_capture
         self._fetch_object = fetch_object
         self._run_crash = run_crash
@@ -107,8 +123,10 @@ class LocalLibvirtRetrieve:
             store_factory=object_store_from_env,
             wait_for_vmcore=_real_wait_for_vmcore,
             read_vmcore_build_id=_real_read_build_id,
-            extract_redacted=lambda data: redact_dmesg(
-                data, read_core_dmesg_from_file, secret_registry
+            read_vmcore_build_id_from_file=read_core_build_id_from_file,
+            extract_redacted=_real_extract_redacted_bytes,
+            extract_redacted_from_file=lambda core: redact_dmesg(
+                core, read_core_dmesg_from_file, secret_registry
             ),
             host_dump_capture=_real_host_dump_capture,
             fetch_object=default_fetch_object,
@@ -119,6 +137,10 @@ class LocalLibvirtRetrieve:
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
         """Capture a core via ``method``; store raw + redacted; return refs + build-id.
 
+        ``KDUMP`` streams the harvested core from a worker temp file straight to the object
+        store, never holding the whole core in one in-memory buffer (#657); ``HOST_DUMP``
+        keeps the bytes path.
+
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for capture/build-id provenance or
                 input failures propagated by injected seams; ``MISSING_DEPENDENCY`` when a
@@ -127,15 +149,35 @@ class LocalLibvirtRetrieve:
                 propagated from a failed artifact store.
         """
         if method is CaptureMethod.HOST_DUMP:
-            data = self._host_dump_capture(system_id)
-        else:  # CaptureMethod.KDUMP
-            data = self._wait_for_vmcore(system_id)
-        if data is None:
-            raise CategorizedError(
-                "no complete core appeared within the capture window",
-                category=ErrorCategory.READINESS_FAILURE,
-                details={"system_id": str(system_id)},
+            return self._capture_host_dump(system_id, method)
+        return self._capture_kdump(system_id, method)
+
+    def _capture_kdump(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
+        core = self._wait_for_vmcore(system_id)
+        if core is None:
+            raise self._no_core(system_id)
+        try:
+            build_id = self._read_vmcore_build_id_from_file(core)
+            raw = self._put_stream(system_id, f"vmcore-{method.value}", core)
+            redacted = self._put(
+                system_id,
+                f"vmcore-{method.value}-redacted",
+                self._extract_redacted_from_file(core),
+                Sensitivity.REDACTED,
             )
+            return CaptureOutput(
+                raw=raw,
+                redacted=redacted,
+                vmcore_build_id=build_id,
+                raw_size_bytes=core.stat().st_size,
+            )
+        finally:
+            _remove_spool(core)
+
+    def _capture_host_dump(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
+        data = self._host_dump_capture(system_id)
+        if data is None:
+            raise self._no_core(system_id)
         build_id = self._read_vmcore_build_id(data)
         raw = self._put(system_id, f"vmcore-{method.value}", data, Sensitivity.SENSITIVE)
         redacted = self._put(
@@ -148,10 +190,55 @@ class LocalLibvirtRetrieve:
             raw=raw, redacted=redacted, vmcore_build_id=build_id, raw_size_bytes=len(data)
         )
 
-    def _put(self, system_id: UUID, name: str, data: bytes, sens: Sensitivity) -> StoredArtifact:
+    @staticmethod
+    def _no_core(system_id: UUID) -> CategorizedError:
+        return CategorizedError(
+            "no complete core appeared within the capture window",
+            category=ErrorCategory.READINESS_FAILURE,
+            details={"system_id": str(system_id)},
+        )
+
+    def _put_stream(self, system_id: UUID, name: str, core: Path) -> StoredArtifact:
+        """Stream ``core`` to the object store and verify the stored checksum (ADR-0094)."""
+        sha256_b64 = file_sha256_b64(core)
+        store = self._ensure_store()
+        stored = store.put_stream(
+            ArtifactStreamRequest(
+                tenant=self._tenant,
+                owner_kind="systems",
+                owner_id=str(system_id),
+                name=name,
+                path=core,
+                sha256_b64=sha256_b64,
+                sensitivity=Sensitivity.SENSITIVE,
+                retention_class=_RETENTION_CLASS,
+            )
+        )
+        self._verify_stored(stored.key, sha256_b64, system_id)
+        return stored
+
+    def _verify_stored(self, key: str, sha256_b64: str, system_id: UUID) -> None:
+        head = self._ensure_store().head(key)
+        if head is None:
+            raise CategorizedError(
+                "stored kdump core is absent after a success-reporting put",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id), "key": key},
+            )
+        if head.checksum_sha256 is not None and head.checksum_sha256 != sha256_b64:
+            raise CategorizedError(
+                "stored kdump core checksum does not match the streamed core",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id), "key": key},
+            )
+
+    def _ensure_store(self) -> _StorePort:
         if self._store is None:
             self._store = self._store_factory()
-        return self._store.put_artifact(
+        return self._store
+
+    def _put(self, system_id: UUID, name: str, data: bytes, sens: Sensitivity) -> StoredArtifact:
+        return self._ensure_store().put_artifact(
             ArtifactWriteRequest(
                 tenant=self._tenant,
                 owner_kind="systems",
@@ -234,11 +321,12 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
         except Exception as exc:
             raise self._io_failure("listing /var/crash cores", exc) from exc
 
-    def read_vmcore(self, overlay: str, path: str) -> bytes:
+    def download_vmcore(self, overlay: str, path: str, dest: Path) -> None:
+        """Stream the core at ``path`` to ``dest`` (constant memory), not into RAM (#657)."""
         try:
-            return self._guest.read_file(path)
+            self._guest.download(path, str(dest))
         except Exception as exc:
-            raise self._io_failure("reading the kdump core", exc) from exc
+            raise self._io_failure("downloading the kdump core", exc) from exc
 
     def close(self) -> None:
         try:
@@ -305,18 +393,44 @@ def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (l
         conn.close()
 
 
-def _real_wait_for_vmcore(system_id: UUID) -> bytes | None:  # pragma: no cover - live_vm
+def _real_wait_for_vmcore(system_id: UUID) -> Path | None:  # pragma: no cover - live_vm
+    """Harvest the newest overlay core to a worker temp file; ``None`` when none exists.
+
+    Owns the spool's lifecycle only up to a successful return: it creates a private temp
+    directory, streams the chosen core into it, and removes the directory if no core is found
+    or the harvest raises. On a successfully returned path the caller (``capture``) owns
+    cleanup, so the file survives this function's ``finally`` (it is on the host filesystem,
+    independent of the libguestfs appliance handle).
+    """
     _force_off_domain(system_id)
     overlay = overlay_path(system_id)
+    spool_dir = Path(tempfile.mkdtemp(prefix="kdive-kdump-"))
+    dest = spool_dir / "vmcore"
     reader = _LibguestfsCoreReader(overlay)
+    core: Path | None = None
     try:
-        return harvest_vmcore(reader, overlay, max_bytes=MAX_CORE_BYTES)
+        core = harvest_vmcore(reader, overlay, dest=dest, max_bytes=MAX_CORE_BYTES)
+        return core
     finally:
         reader.close()
+        if core is None:
+            _remove_spool(dest)
+
+
+def _remove_spool(core: Path) -> None:
+    """Remove the spooled core and the private temp directory holding it (best effort)."""
+    shutil.rmtree(core.parent, ignore_errors=True)
 
 
 def _real_read_build_id(data: bytes) -> str:  # pragma: no cover - live_vm (drgn)
     return read_via_tempfile(data, read_core_build_id_from_file)
+
+
+def _real_extract_redacted_bytes(data: bytes) -> bytes:  # pragma: no cover - live_vm
+    raise CategorizedError(
+        "local host_dump redaction runs only under the live_vm gate",
+        category=ErrorCategory.MISSING_DEPENDENCY,
+    )
 
 
 def _real_host_dump_capture(system_id: UUID) -> bytes | None:  # pragma: no cover - live_vm
