@@ -12,6 +12,27 @@ from kdive.security.authz.context import (
 from kdive.security.authz.errors import AuthError, ProjectMembershipDenied
 
 
+def test_context_from_claims_rejects_empty_subject() -> None:
+    with pytest.raises(AuthError, match="no usable subject"):
+        context_from_claims({"sub": ""})
+
+
+def test_context_from_claims_preserves_agent_session() -> None:
+    ctx = context_from_claims({"sub": "alice", "agent_session": "sess-1"})
+    assert ctx.agent_session == "sess-1"
+
+
+def test_context_from_claims_accepts_string_agent_session() -> None:
+    # A string agent_session must not trip the type guard.
+    ctx = context_from_claims({"sub": "alice", "agent_session": "sess-1"})
+    assert ctx.principal == "alice"
+
+
+def test_context_from_claims_preserves_valid_projects() -> None:
+    ctx = context_from_claims({"sub": "alice", "projects": ["proj-a", "proj-b"]})
+    assert ctx.projects == ("proj-a", "proj-b")
+
+
 def test_context_from_claims_rejects_non_string_projects() -> None:
     with pytest.raises(AuthError, match="projects claim entries must be non-empty strings"):
         context_from_claims({"sub": "alice", "projects": ["proj", 7]})
