@@ -175,6 +175,18 @@ def test_search_text_before_window_starts_at_zero_not_one() -> None:
     assert result.matches[0]["before"] == ["first", "second"]
 
 
+def test_search_text_before_window_clamps_negative_start_to_zero() -> None:
+    # Match near the top of a file longer than before_lines. start = max(0, idx - before_lines)
+    # must clamp to 0 so the single preceding line is captured. Dropping the max() yields a
+    # negative start (idx - before_lines = 1 - 10 = -9), and lines[-9:1] on a 20-line file is
+    # [] rather than ["l0"] — the negative index wraps to the tail, past the stop index.
+    lines = [f"l{i}" for i in range(20)]
+    lines[1] = "NEEDLE here"
+    data = ("\n".join(lines)).encode()
+    result = search_text(data, pattern="NEEDLE", before_lines=10, after_lines=0)
+    assert result.matches[0]["before"] == ["l0"]
+
+
 def test_search_text_truncates_when_json_budget_exceeded() -> None:
     # The truncation cut-off is decided by re-serializing the running match list with the SAME
     # compact, non-escaping json.dumps args the dataclass uses (separators=(",",":"),
