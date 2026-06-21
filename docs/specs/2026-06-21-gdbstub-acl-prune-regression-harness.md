@@ -109,12 +109,19 @@ harness fails if the observed delete log differs (set or order).
    non-worker source, plus the protected deny rows → never deleted (port- and
    action-scoping: only `ALLOW IN` on exactly the TLS port or gdbstub range can match).
 7. **substring-collision** — current `10.0.0.0/24`, a stale allow from `110.0.0.0/24` (a
-   real routable range whose string *contains* the worker CIDR). Pins the role's **current**
-   behavior: the stale allow **survives** (is not pruned), because the exclusion is
-   `grep -vF "{{ worker_cidr }}"` (a substring match), so `110.0.0.0/24` matches and is
-   excluded. This is asserted as a *known limitation*, with a loud fixture comment — see
-   Limitations. The case exists so the behavior cannot silently get worse and so a future
-   address-aware fix has a failing assertion to flip.
+   real routable range whose string *contains* the worker CIDR). Originally pinned the
+   substring-exclusion bug (the stale allow survived). Since [ADR-0201](../adr/0201-gdbstub-acl-prune-exact-source-match.md)
+   (#648) replaced the substring filter with an exact source-field match, this case now
+   asserts the stale lines are **deleted**, highest-first — the matching now keys on the
+   `From` column, so a substring collision is no longer mistaken for the current source.
+8. **prefix-collision** (ADR-0201) — current `10.0.0.0/24`, a stale allow from `10.0.0.0/2`
+   (a source string that is a substring *of* the worker CIDR). The exact-equality matcher
+   prunes it; pins the symmetric substring direction.
+9. **comment-column** (ADR-0201) — protected-port `ALLOW IN` rows carry a trailing ufw
+   `# comment`. The current `10.0.0.0/24` allow (with a comment) survives and the stale
+   `192.168.99.0/24` allow (with a comment) is pruned, proving the matcher reads the source
+   column (the field after `IN`), not the last whitespace token (`$NF`), which a comment
+   would shift off the source.
 
 ### Negative / mutation check (acceptance gate)
 
@@ -145,10 +152,15 @@ A harness that stays green under both mutations is inert and does not satisfy th
 - The fake `ufw` models only the two calls the prune task makes; a future prune edit that
   shells a third ufw subcommand will make the fake fail loudly (intended — surfaces the
   change), and the harness must then be taught that call.
-- **Known role weakness (substring exclusion, case 7):** the prune excludes the current
+- ~~**Known role weakness (substring exclusion, case 7):** the prune excludes the current
   source with `grep -vF "{{ worker_cidr }}"`, a substring match, so a stale allow whose
   source string *contains* the worker CIDR (e.g. `110.0.0.0/24` vs `10.0.0.0/24`) is wrongly
   excluded and **survives** — exactly the "under-match → over-permission persists" failure
-  #616 names. This harness *documents* that behavior (case 7) rather than fixing it: an
-  address-aware exclusion changes the audited security pipeline and warrants its own
-  review + live re-verification. Tracked as a follow-up to #616.
+  #616 names.~~ *Resolved by [ADR-0201](../adr/0201-gdbstub-acl-prune-exact-source-match.md)
+  (#648): the exclusion is now an exact equality on the ufw `From` column, read as the field
+  after the `IN` direction token, so a substring-colliding stale allow is pruned. The
+  `substring_collision` case now expects the stale lines deleted, and two regression fixtures
+  were added — `prefix_collision` (a source that is a substring *of* the worker CIDR, pruned)
+  and `comment_column` (a trailing ufw comment does not shift the matched source off the
+  current allow). Re-verified per the gdbstub_acl runbook, as that ADR changes the audited
+  security pipeline.*
