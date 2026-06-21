@@ -26,6 +26,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from fastmcp import FastMCP
+from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
@@ -197,7 +198,7 @@ async def _host_enabled(url: str, name: str) -> bool:
 
 async def _build_host_override(url: str, name: str) -> dict[str, object] | None:
     conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
-    async with conn, conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+    async with conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT disposition, reason, actor FROM inventory_overrides "
             "WHERE source_kind = 'build_host' AND resource_kind = 'build-host' AND name = %s",
