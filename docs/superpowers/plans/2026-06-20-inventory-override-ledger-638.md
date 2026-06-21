@@ -138,10 +138,10 @@ skip upsert, cordon-if-live (`enabled=false`) / delete-once-idle via `prune_or_c
 `detached` → leave the live row, GC if the row is gone; no entry → unchanged.
 
 **Design note — minimal blast radius.** The `detached` "skip field overwrite" is implemented by
-*not calling* the upsert's field-update branch when the identity is `detached` and a row exists; the
-existence/adoption branch still runs so a `managed_by` flip or a hand-deleted row is still repaired
-into existence (then, for a hand-deleted row, GC'd per the note above). Keep the no-entry path
-untouched so the regression test holds.
+*not calling* `_update_config_resource` when the identity is `detached` and a row exists; the
+adoption branch (`_adopt_config_resource`) still runs so a `managed_by`/lease-ownership flip on a
+**present** row is still repaired. A `detached` identity with **no** row is skipped entirely (no
+insert) and left to the A4 GC. Keep the no-entry path untouched so the regression test holds.
 
 **TDD (each its own failing-first test, in `tests/inventory/`):**
 1. `removed` entry + declared host → host **not (re)created** across two passes.
