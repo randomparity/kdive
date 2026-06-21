@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from kdive.diagnostics.checks import Check, CheckResult, CheckStatus, Vantage
 from kdive.diagnostics.service import (
     FEATURE_NOT_ENABLED_DETAIL,
@@ -99,6 +101,37 @@ def test_overall_deadline_unset_runs_every_check() -> None:
     )
     report = asyncio.run(service.run())
     assert all(r.status is CheckStatus.PASS for r in report.results)
+
+
+def test_checks_run_while_overall_budget_is_positive() -> None:
+    # A check with budget still remaining (sub-second, but > 0) must RUN, not be reported as
+    # deadline-exceeded. Guards the exhaustion boundary against widening to "<= 1s remaining".
+    service = DiagnosticsService(
+        checks=[_Fixed(_ok("a")), _Fixed(_ok("b"))],
+        per_check_timeout=1.0,
+        overall_timeout=0.5,
+    )
+    report = asyncio.run(service.run())
+    by_id = {r.check_id: r for r in report.results}
+    assert by_id["a"].status is CheckStatus.PASS
+    assert by_id["b"].status is CheckStatus.PASS
+    assert all("deadline" not in r.detail for r in report.results)
+
+
+def test_per_check_timeout_bounds_a_slow_check_even_without_overall_deadline() -> None:
+    # The per-check timeout must be threaded into run_check: a check slower than it is reported
+    # `error` (timed out), not run to completion. overall_timeout=None isolates the per-check
+    # bound as the only cap, so a check that ignores it would (wrongly) pass.
+    service = DiagnosticsService(
+        checks=[_Slow(_ok("slow"), delay=1.0)],
+        per_check_timeout=0.01,
+        overall_timeout=None,
+    )
+    report = asyncio.run(service.run())
+    result = report.results[0]
+    assert result.check_id == "slow"
+    assert result.status is CheckStatus.ERROR
+    assert "did not respond" in result.detail
 
 
 def test_worker_unavailable_yields_error_pointing_at_health() -> None:
@@ -267,3 +300,141 @@ def test_server_and_real_worker_results_compose_into_one_verdict() -> None:
     assert set(by_id) == {SECRET_REF_ID, PROVIDER_TLS_ID, GDBSTUB_ACL_ID}
     assert by_id[GDBSTUB_ACL_ID].status is CheckStatus.FAIL  # real result, not a substitution
     assert report.has_failure
+
+
+# ---- default_service_factory opt-in flags + fail-fast messages -----------------------
+
+
+def _load_minimal_config(monkeypatch, tmp_path) -> None:
+    import kdive.config as config
+
+    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(tmp_path))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "absent.toml"))
+    config.load()
+
+
+def test_factory_defaults_do_not_opt_into_egress_or_buildhost_agent(monkeypatch, tmp_path) -> None:
+    # The opt-in flags default OFF: a bare factory call builds a service rather than raising the
+    # egress fail-fast (with_egress defaulting True) or the no-pool buildhost-agent fail-fast
+    # (with_buildhost_agent defaulting True, which needs a pool).
+    from kdive.diagnostics.service import default_service_factory
+
+    _load_minimal_config(monkeypatch, tmp_path)
+    service = default_service_factory(None)
+    assert isinstance(service, DiagnosticsService)
+    # The default (no buildhost-agent) keeps the tight per-check timeout, not the generous one.
+    assert service._timeout < 180.0  # noqa: SLF001
+
+
+def test_factory_with_egress_fail_fast_names_the_egress_flag(monkeypatch, tmp_path) -> None:
+    from kdive.diagnostics.service import default_service_factory
+    from kdive.domain.errors import CategorizedError, ErrorCategory
+
+    _load_minimal_config(monkeypatch, tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        default_service_factory(None, with_egress=True)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value).startswith("guest_egress (--with-egress)")
+
+
+def test_factory_buildhost_agent_without_pool_fail_fast_names_the_flag(
+    monkeypatch, tmp_path
+) -> None:
+    from kdive.diagnostics.service import default_service_factory
+    from kdive.domain.errors import CategorizedError, ErrorCategory
+
+    _load_minimal_config(monkeypatch, tmp_path)
+    with pytest.raises(CategorizedError) as exc:
+        default_service_factory(None, with_buildhost_agent=True)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value).startswith("ephemeral_libvirt_buildhost_agent (--with-buildhost-agent)")
+
+
+def test_build_host_check_with_pool_runs_its_warm_tree_and_enabled_probes(
+    monkeypatch, tmp_path
+) -> None:
+    # With a pool, _build_host_checks wires BOTH a warm-tree source probe and an enabled probe
+    # into the assembled local_kernel_src check. A dropped/None probe would raise at run time and
+    # surface as an error; here KDIVE_KERNEL_SRC points at an existing tree so the check PASSes.
+    from typing import cast
+
+    from psycopg_pool import AsyncConnectionPool
+
+    from kdive.diagnostics.checks import LOCAL_KERNEL_SRC_ID, run_check
+    from kdive.diagnostics.service import _build_host_checks
+
+    _load_minimal_config(monkeypatch, tmp_path)
+    # KDIVE_KERNEL_SRC is set to tmp_path (an existing absolute tree) by _load_minimal_config, so
+    # the warm-tree probe resolves USABLE. The fake pool fails open to "enabled" at probe time.
+    checks = _build_host_checks(cast(AsyncConnectionPool, object()))
+    assert [c.id for c in checks] == [LOCAL_KERNEL_SRC_ID]
+    result = asyncio.run(run_check(checks[0], timeout=5.0))
+    assert result.status is CheckStatus.PASS
+
+
+_REMOTE_SYSTEMS = """\
+schema_version = 2
+
+[[image]]
+provider = "remote-libvirt"
+name = "fedora-kdive-remote-base-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "fedora-kdive-remote-base-43.qcow2"
+
+[[remote_libvirt]]
+name = "ub24-big"
+uri = "qemu+tls://host.example/system"
+gdb_addr = "192.168.10.20"
+gdbstub_range = "47000:47099"
+client_cert_ref = "remote/clientcert.pem"
+client_key_ref = "remote/clientkey.pem"  # pragma: allowlist secret
+ca_cert_ref = "remote/cacert.pem"
+base_image = "fedora-kdive-remote-base-43"
+cost_class = "remote"
+vcpus = 16
+memory_mb = 65536
+"""
+
+
+def _load_remote_config(monkeypatch, tmp_path) -> None:
+    import kdive.config as config
+
+    path = tmp_path / "systems.toml"
+    path.write_text(_REMOTE_SYSTEMS)
+    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(tmp_path))
+    monkeypatch.setenv("KDIVE_KERNEL_SRC", str(tmp_path))
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+    config.load()
+
+
+def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
+    monkeypatch, tmp_path
+) -> None:
+    # With a pool AND remote-libvirt configured, worker-vantage outcomes are delegated to a
+    # JobWorkerCheckDispatcher built with the supplied pool, the contribution's provider, and
+    # the unavailable worker-check ids (provider_tls + gdbstub_acl) — ADR-0164. A misrouted pool,
+    # provider, or id tuple would leave the dispatcher unable to enqueue against the right job.
+    from typing import cast
+
+    from psycopg_pool import AsyncConnectionPool
+
+    from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID
+    from kdive.diagnostics.service import default_service_factory
+    from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
+
+    _load_remote_config(monkeypatch, tmp_path)
+    pool = cast(AsyncConnectionPool, object())
+    service = default_service_factory(
+        None, pool=pool, provider_contributions=diagnostic_provider_contributions()
+    )
+    assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
+    dispatcher = service._worker_mode.dispatcher  # noqa: SLF001
+    assert dispatcher._pool is pool  # noqa: SLF001
+    assert dispatcher._provider == "remote-libvirt"  # noqa: SLF001
+    assert set(dispatcher._worker_check_ids) == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}  # noqa: SLF001
