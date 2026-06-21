@@ -149,6 +149,8 @@ def test_warm_tree_on_remote_host_still_rejected(monkeypatch: pytest.MonkeyPatch
             )
 
         assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+        # The resolved host name flows through to the compatibility check's details.
+        assert exc.value.details == {"build_host": "builder", "host_kind": "ssh"}
 
     asyncio.run(_run())
 
@@ -165,7 +167,90 @@ def test_missing_host_is_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
             )
 
         assert exc.value.category is ErrorCategory.NOT_FOUND
+        assert str(exc.value) == "build host 'missing' not found"
         assert exc.value.details == {"build_host": "missing"}
+
+    asyncio.run(_run())
+
+
+def test_resolve_forwards_caller_connection_to_lookup_and_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's open-transaction connection must reach both the lookup and the lease.
+
+    Passing anything else (e.g. ``None``) would run the lease outside the caller's
+    RUN-locked transaction, so the resolver must forward the exact connection object it
+    was given.
+    """
+
+    async def _run() -> None:
+        conn = cast(AsyncConnection, object())
+        host = _host(name="builder", kind=BuildHostKind.SSH)
+        lookup_conns: list[object] = []
+        lease_conns: list[object] = []
+
+        async def get_by_name(conn_arg: AsyncConnection, name: str) -> BuildHost:
+            lookup_conns.append(conn_arg)
+            return host
+
+        async def acquire(conn_arg: AsyncConnection, _host: BuildHost, _run_id: UUID) -> bool:
+            lease_conns.append(conn_arg)
+            return True
+
+        monkeypatch.setattr(build_host_selection, "get_by_name", get_by_name)
+        monkeypatch.setattr(build_host_selection, "try_acquire_lease", acquire)
+
+        await build_host_selection.resolve_and_admit(
+            conn, _profile(build_host="builder", git=True), _RUN_ID
+        )
+
+        assert lookup_conns == [conn]
+        assert lease_conns == [conn]
+
+    asyncio.run(_run())
+
+
+def test_disabled_host_is_not_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        host = _host(name="builder", kind=BuildHostKind.SSH, enabled=False)
+        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
+
+        with pytest.raises(CategorizedError) as exc:
+            await build_host_selection.resolve_and_admit(
+                cast(AsyncConnection, object()),
+                _profile(build_host="builder", git=True),
+                _RUN_ID,
+            )
+
+        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert str(exc.value) == "build host 'builder' is not available"
+
+    asyncio.run(_run())
+
+
+def test_unreachable_but_enabled_host_is_not_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An enabled host in the UNREACHABLE state is rejected (the ``or`` branch)."""
+
+    async def _run() -> None:
+        host = _host(
+            name="builder",
+            kind=BuildHostKind.SSH,
+            enabled=True,
+            state=BuildHostState.UNREACHABLE,
+        )
+        monkeypatch.setattr(build_host_selection, "get_by_name", lambda _conn, name: _async(host))
+
+        with pytest.raises(CategorizedError) as exc:
+            await build_host_selection.resolve_and_admit(
+                cast(AsyncConnection, object()),
+                _profile(build_host="builder", git=True),
+                _RUN_ID,
+            )
+
+        assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert str(exc.value) == "build host 'builder' is not available"
 
     asyncio.run(_run())
 
@@ -190,6 +275,8 @@ def test_remote_host_at_capacity_is_capacity_exhausted(
             )
 
         assert exc.value.category is ErrorCategory.CAPACITY_EXHAUSTED
+        assert str(exc.value) == "build host 'builder' is at capacity"
+        assert exc.value.details == {"build_host": "builder"}
 
     asyncio.run(_run())
 
