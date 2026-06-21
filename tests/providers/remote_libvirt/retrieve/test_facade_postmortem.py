@@ -61,6 +61,43 @@ def test_facade_rejects_unsupported_capture_method() -> None:
         retrieve.capture(UUID("00000000-0000-0000-0000-00000000facb"), CaptureMethod.CONSOLE)
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "remote-libvirt capture supports only the kdump and host_dump methods"
+    # The details name the offending method under a stable key so the caller can act.
+    assert exc.value.details == {"method": "console"}
+
+
+def test_facade_run_crash_postmortem_forwards_refs_and_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run_crash_postmortem(**kwargs: object) -> CrashOutput:
+        calls.append(kwargs)
+        return CrashOutput(results={"ok": True}, transcript="done", truncated=False)
+
+    monkeypatch.setattr(postmortem, "_run_crash_postmortem", fake_run_crash_postmortem)
+    retrieve = RemoteLibvirtRetrieve(
+        secret_registry=SecretRegistry(),
+        kdump_capturer=cast(KdumpCapturer, _Capturer("kdump")),
+        host_dump_capturer=cast(HostDumpCapturer, _Capturer("host")),
+        fetch_object=lambda _ref: b"object",
+        read_build_id=lambda _data: "build-id",
+        run_crash=lambda _vmlinux, _vmcore, _script: CrashResult(0, b"", b""),
+    )
+
+    output = retrieve.run_crash_postmortem(
+        vmcore_ref="the-vmcore",
+        debuginfo_ref="the-vmlinux",
+        expected_build_id="build-id",
+        commands=["bt", "ps"],
+    )
+
+    assert output.results == {"ok": True}
+    # The facade forwards each ref and the command list verbatim (no None/empty swaps).
+    assert calls[0]["vmcore_ref"] == "the-vmcore"
+    assert calls[0]["debuginfo_ref"] == "the-vmlinux"
+    assert calls[0]["expected_build_id"] == "build-id"
+    assert calls[0]["commands"] == ["bt", "ps"]
 
 
 def test_crash_postmortem_adapter_passes_injected_seams(
@@ -74,11 +111,21 @@ def test_crash_postmortem_adapter_passes_injected_seams(
         return CrashOutput(results={"ok": True}, transcript="done", truncated=False)
 
     monkeypatch.setattr(postmortem, "_run_crash_postmortem", fake_run_crash_postmortem)
+
+    def fetch_object(ref: str) -> bytes:
+        return b"object"
+
+    def read_build_id(data: bytes) -> str:
+        return "build-id"
+
+    def run_crash(_vmlinux: object, _vmcore: object, _script: object) -> CrashResult:
+        return CrashResult(0, b"stdout", b"stderr")
+
     adapter = postmortem.CrashPostmortemAdapter(
         secret_registry=registry,
-        fetch_object=lambda ref: b"object",
-        read_build_id=lambda data: "build-id",
-        run_crash=lambda _vmlinux, _vmcore, _script: CrashResult(0, b"stdout", b"stderr"),
+        fetch_object=fetch_object,
+        read_build_id=read_build_id,
+        run_crash=run_crash,
     )
 
     output = adapter.run(
@@ -94,3 +141,8 @@ def test_crash_postmortem_adapter_passes_injected_seams(
     assert calls[0]["expected_build_id"] == "build-id"
     assert calls[0]["commands"] == ["bt"]
     assert calls[0]["secret_registry"] is registry
+    # Each role-specific seam is threaded through by identity — a swap to None or a
+    # dropped kwarg (so the shared helper defaults it) would fail these.
+    assert calls[0]["fetch_object"] is fetch_object
+    assert calls[0]["read_build_id"] is read_build_id
+    assert calls[0]["run_crash"] is run_crash
