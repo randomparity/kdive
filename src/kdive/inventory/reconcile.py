@@ -47,6 +47,7 @@ __all__ = [
     "resource_identity_lock_key",
     "prune_or_cordon_image",
     "prune_or_cordon_resource",
+    "prune_or_cordon_removed_resource",
     "prune_or_cordon_build_host",
 ]
 
@@ -212,6 +213,60 @@ async def _resource_has_live_allocation(cur: AsyncCursor[dict[str, Any]], row_id
     await cur.execute(
         "SELECT 1 FROM allocations WHERE resource_id = %s AND state = ANY(%s) LIMIT 1",
         (row_id, list(NON_TERMINAL_ALLOCATION_STATE_VALUES)),
+    )
+    return await cur.fetchone() is not None
+
+
+async def prune_or_cordon_removed_resource(
+    conn: AsyncConnection, row_id: UUID, name: str, *, kind: ResourceKind
+) -> PruneOutcome:
+    """Apply the ledger-``removed`` disposition to one config resource row (ADR-0199).
+
+    Unlike :func:`prune_or_cordon_resource` (the file-departure path, which deletes a row with no
+    **live** allocation), the ``removed`` path is FK-safe against retained terminal allocations:
+    ``allocations.resource_id`` is ``NOT NULL REFERENCES resources(id)`` with no ``ON DELETE``, and
+    allocation rows are kept for accounting even after they go terminal, so a resource that **ever**
+    held an allocation cannot be row-deleted. This mirrors the imperative
+    ``resources.deregister`` contract: cordon (stop new placement, clear the lease) a row with any
+    allocation row — live or terminal — and hard-delete only a never-allocated row. ADR-0199's
+    "delete the cordoned row once idle" is realized as "delete once it has no allocation history";
+    a resource that hosted a System stays cordoned (the accounting rows pin it) rather than being
+    deleted out from under its ledger.
+
+    Takes the per-identity :func:`resource_identity_lock` so it serializes against a concurrent
+    ``resources.register_*`` of the same ``(kind, name)``. Runs in its own transaction.
+
+    Returns:
+        A :class:`PruneOutcome`: ``pruned`` when the never-allocated row was deleted, ``cordoned``
+        when an allocation-bearing row was cordoned this pass.
+    """
+    async with (
+        conn.transaction(),
+        resource_identity_lock(conn, kind, name),
+        conn.cursor(row_factory=dict_row) as cur,
+    ):
+        await cur.execute(
+            "SELECT id FROM resources WHERE id = %s AND managed_by = %s FOR UPDATE",
+            (row_id, CONFIG_MANAGED_BY),
+        )
+        if await cur.fetchone() is None:
+            return PruneOutcome(pruned=False, cordoned=False)
+        if await _resource_has_any_allocation(cur, row_id):
+            await cur.execute(
+                "UPDATE resources SET cordoned = true, lease_expires_at = NULL "
+                "WHERE id = %s AND NOT cordoned",
+                (row_id,),
+            )
+            return PruneOutcome(pruned=False, cordoned=cur.rowcount == 1)
+        await cur.execute("DELETE FROM resources WHERE id = %s", (row_id,))
+    return PruneOutcome(pruned=True, cordoned=False)
+
+
+async def _resource_has_any_allocation(cur: AsyncCursor[dict[str, Any]], row_id: UUID) -> bool:
+    """True when any allocation row (any state) FK-references the resource (the FK-delete guard)."""
+    await cur.execute(
+        "SELECT 1 FROM allocations WHERE resource_id = %s LIMIT 1",
+        (row_id,),
     )
     return await cur.fetchone() is not None
 
