@@ -30,6 +30,48 @@ def _run(coro: Awaitable[None]) -> None:
 # ---- skeleton guard -------------------------------------------------------------------
 
 
+def _defined_image() -> serialize.ImageRow:
+    return serialize.ImageRow(
+        provider="remote_libvirt",
+        name="img-a",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=[],
+        object_key=None,
+        digest=None,
+        volume=None,
+        state="defined",
+    )
+
+
+def _remote_row() -> serialize.ResourceRow:
+    return serialize.ResourceRow(
+        name="host-a",
+        cost_class="remote",
+        pool="remote",
+        host_uri="qemu+tls://host/system",
+        vcpus=8,
+        memory_mb=16384,
+        concurrent_allocation_cap=2,
+        seed=None,
+    )
+
+
+def _empty_snapshot(**rows: object) -> serialize.InventorySnapshot:
+    base: dict[str, object] = {
+        "images": (),
+        "remote_libvirt": (),
+        "local_libvirt": (),
+        "fault_inject": (),
+        "build_hosts": (),
+        "cost_classes": (),
+    }
+    base.update(rows)
+    return serialize.InventorySnapshot(**base)  # type: ignore[arg-type]
+
+
 def test_assert_persistable_passes_clean_document() -> None:
     writeback.assert_persistable('name = "host-a"\nuri = "qemu+tls://h/system"\n')
 
@@ -47,44 +89,32 @@ def test_guard_marker_matches_a_freshly_serialized_skeleton() -> None:
     # Drift guard: serialize a real skeleton (a remote host AND a defined image, the two
     # placeholder sites) and assert the guard's marker is present in the output, so changing
     # either placeholder prefix without the guard would fail this test.
-    snapshot = serialize.InventorySnapshot(
-        images=(
-            serialize.ImageRow(
-                provider="remote_libvirt",
-                name="img-a",
-                arch="x86_64",
-                format="qcow2",
-                root_device="/dev/vda",
-                visibility="public",
-                capabilities=[],
-                object_key=None,
-                digest=None,
-                volume=None,
-                state="defined",
-            ),
-        ),
-        remote_libvirt=(
-            serialize.ResourceRow(
-                name="host-a",
-                cost_class="remote",
-                pool="remote",
-                host_uri="qemu+tls://host/system",
-                vcpus=8,
-                memory_mb=16384,
-                concurrent_allocation_cap=2,
-                seed=None,
-            ),
-        ),
-        local_libvirt=(),
-        fault_inject=(),
-        build_hosts=(),
-        cost_classes=(),
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(images=(_defined_image(),), remote_libvirt=(_remote_row(),))
     )
-    rendered = serialize.serialize_inventory(snapshot)
     assert writeback.WRITEBACK_PLACEHOLDER_MARKER in rendered
-    # And the guard refuses to persist that skeleton.
     with pytest.raises(CategorizedError):
         writeback.assert_persistable(rendered)
+
+
+def test_guard_does_not_flag_a_clean_export() -> None:
+    # The export header explains REPLACE_ME_* in prose; a clean inventory (no remote host, no
+    # defined image) must NOT trip the guard even though the header mentions the marker.
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(
+            build_hosts=(
+                serialize.BuildHostRow(
+                    name="bh-local",
+                    kind="local",
+                    base_image_volume=None,
+                    workspace_root="/var/lib/kdive/build",
+                    max_concurrent=4,
+                ),
+            )
+        )
+    )
+    assert "REPLACE_ME_" in rendered  # the header prose mentions it
+    writeback.assert_persistable(rendered)  # but the guard does not fire
 
 
 # ---- fake adapter ---------------------------------------------------------------------

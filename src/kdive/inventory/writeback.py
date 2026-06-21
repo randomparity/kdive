@@ -53,9 +53,12 @@ __all__ = [
     "resolve_writeback_target",
 ]
 
-# The shared marker an incomplete export carries; identical to the serializer's prefix so the
-# guard and the serializer cannot diverge (a drift test asserts it appears in a real skeleton).
-WRITEBACK_PLACEHOLDER_MARKER = REMOTE_PLACEHOLDER_PREFIX
+# The marker an incomplete export carries: a quote immediately followed by the serializer's
+# placeholder prefix, i.e. the *emitted value* form (``key = "REPLACE_ME_..."``). The leading quote
+# is load-bearing — the export header explains the placeholders in prose ("Replace every
+# REPLACE_ME_* value"), so matching the bare prefix would wrongly flag every clean export. A drift
+# test asserts this marker appears in a freshly-serialized skeleton but not in a clean one.
+WRITEBACK_PLACEHOLDER_MARKER = f'"{REMOTE_PLACEHOLDER_PREFIX}'
 
 # The inventory ConfigMap key is the file name the reconciler reads; it matches the chart's
 # `systems.fileName` default.
