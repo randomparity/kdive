@@ -1,0 +1,14 @@
+# Fixture: prefix-collision (ADR-0201). Mirrors `ufw status numbered` (ufw 0.36.x, Ubuntu 24.04).
+# worker_cidr=10.0.0.0/24; stale 10.0.0.0/2 (lines 6,7) is a substring *of* the worker CIDR.
+# Exact source-field equality prunes it (10.0.0.0/2 != 10.0.0.0/24); pins the symmetric direction.
+Status: active
+
+     To                         Action      From
+     --                         ------      ----
+[ 1] 22/tcp                     ALLOW IN    Anywhere
+[ 2] 16514/tcp                  ALLOW IN    10.0.0.0/24
+[ 3] 47000:47099/tcp            ALLOW IN    10.0.0.0/24
+[ 4] 16514/tcp                  DENY IN     Anywhere
+[ 5] 47000:47099/tcp            DENY IN     Anywhere
+[ 6] 16514/tcp                  ALLOW IN    10.0.0.0/2
+[ 7] 47000:47099/tcp            ALLOW IN    10.0.0.0/2
