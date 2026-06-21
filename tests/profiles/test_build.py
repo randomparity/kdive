@@ -152,6 +152,53 @@ def test_error_details_do_not_leak_submitted_values() -> None:
     assert "S3CRET-LOOKING-VALUE" not in str(caught.value.details)
 
 
+def test_unknown_source_raises_with_exact_message_and_details() -> None:
+    # An unrecognized build source is rejected before Pydantic with a fixed, value-free
+    # error: the message and the synthetic details locate the offending field by name.
+    data = _valid()
+    data["source"] = "wormhole"
+
+    with pytest.raises(CategorizedError) as caught:
+        BuildProfile.parse(data)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "invalid build profile"
+    assert caught.value.details == {"errors": [{"loc": ["source"], "msg": "unknown build source"}]}
+
+
+def test_validation_error_message_is_fixed_and_details_carry_errors() -> None:
+    # A structural failure maps onto the fixed wire message, and the details carry the
+    # field-located Pydantic errors under the "errors" key.
+    data = _valid()
+    del data["kernel_source_ref"]
+
+    with pytest.raises(CategorizedError) as caught:
+        BuildProfile.parse(data)
+
+    assert str(caught.value) == "invalid build profile"
+    errors = caught.value.details["errors"]
+    assert isinstance(errors, list) and errors
+    assert any(tuple(entry.get("loc", ())) == ("kernel_source_ref",) for entry in errors)
+
+
+def test_validation_error_details_omit_input_url_and_context() -> None:
+    # The wire taxonomy errors must be value-free and link-free: no submitted input, no
+    # pydantic docs url, and no validator context (which can echo the input) survives.
+    data = _valid()
+    data["schema_version"] = "S3CRET-LOOKING-VALUE"
+
+    with pytest.raises(CategorizedError) as caught:
+        BuildProfile.parse(data)
+
+    errors = caught.value.details["errors"]
+    assert errors
+    for entry in errors:
+        assert "input" not in entry
+        assert "url" not in entry
+        assert "ctx" not in entry
+    assert "S3CRET-LOOKING-VALUE" not in str(caught.value.details)
+
+
 def test_profile_is_frozen() -> None:
     profile = BuildProfile.parse(_valid())
     assert isinstance(profile, ServerBuildProfile)
