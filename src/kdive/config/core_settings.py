@@ -402,6 +402,36 @@ SYSTEMS_TOML = Setting(
     suggest="a path to a systems.toml, e.g. ./systems.toml or /etc/kdive/systems.toml",
 )
 
+INVENTORY_WRITEBACK = Setting(
+    name="KDIVE_INVENTORY_WRITEBACK",
+    parse=_str,
+    group="inventory",
+    processes=_SERVER,
+    help=(
+        "Opt-in target for ops.export_systems_toml(persist=true), which persists the exported "
+        "inventory back to the live source the reconciler re-reads (ADR-0199, M2.7). Unset or "
+        "'off' disables writeback (the export tool returns text only). 'configmap' patches the "
+        "kdive-systems ConfigMap via the Kubernetes API (needs an RBAC Role granting patch on "
+        "that one ConfigMap). 'file' writes the KDIVE_SYSTEMS_TOML path directly (only for a "
+        "deployment whose inventory file is a writable volume shared with the reconciler)."
+    ),
+    suggest="one of: off, configmap, file",
+)
+
+INVENTORY_WRITEBACK_CONFIGMAP = Setting(
+    name="KDIVE_INVENTORY_WRITEBACK_CONFIGMAP",
+    parse=_str,
+    default="kdive-systems",
+    group="inventory",
+    processes=_SERVER,
+    help=(
+        "Name of the ConfigMap ops.export_systems_toml(persist=true) patches when "
+        "KDIVE_INVENTORY_WRITEBACK=configmap. The patched key is the inventory file name "
+        "(systems.toml). The required RBAC Role must scope patch to this name only."
+    ),
+    suggest="the ConfigMap name, e.g. kdive-systems",
+)
+
 RESOURCE_LEASE_TTL_SECONDS = Setting(
     name="KDIVE_RESOURCE_LEASE_TTL_SECONDS",
     parse=_int,
@@ -524,6 +554,8 @@ SETTINGS = [
     IMAGE_PRIVATE_MAX_COUNT,
     IMAGE_PRIVATE_MAX_BYTES,
     SYSTEMS_TOML,
+    INVENTORY_WRITEBACK,
+    INVENTORY_WRITEBACK_CONFIGMAP,
     RESOURCE_LEASE_TTL_SECONDS,
     FAULT_INJECT,
     LOCAL_LIBVIRT_ENABLED,
