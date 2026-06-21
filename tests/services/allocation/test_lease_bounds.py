@@ -33,6 +33,7 @@ def test_malformed_default_env_is_config_error(monkeypatch: pytest.MonkeyPatch) 
         configured_lease_bounds()
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "KDIVE_LEASE_DEFAULT='nope' must be a finite number of hours > 0"
     assert exc.value.details == {"env": "KDIVE_LEASE_DEFAULT", "value": "nope"}
 
 
