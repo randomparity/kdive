@@ -42,20 +42,30 @@ def _ssh_host(
 def test_probe_returns_true_when_reachable() -> None:
     """probe → True when the underlying check_reachable returns True."""
     registry = SecretRegistry()
-    prober = SshBuildHostProber(secret_registry=registry)
+    prober = SshBuildHostProber(secret_registry=registry, probe_timeout_s=42)
 
     fake_transport = MagicMock()
     fake_transport.check_reachable.return_value = True
+    identity = Path("/tmp/id.pem")  # noqa: S108
 
     with (
         patch(f"{_MODULE}.materialized_ssh_identity") as mat,
-        patch(f"{_MODULE}.SshBuildTransport", return_value=fake_transport),
+        patch(f"{_MODULE}.SshBuildTransport", return_value=fake_transport) as transport_cls,
     ):
-        mat.return_value.__enter__.return_value = Path("/tmp/id.pem")  # noqa: S108
+        mat.return_value.__enter__.return_value = identity
         result = asyncio.run(prober.probe(_ssh_host()))
 
     assert result is True
-    fake_transport.check_reachable.assert_called_once()
+    # The probe materializes the host's own credential ref under the long-lived registry.
+    mat_args, mat_kwargs = mat.call_args
+    assert mat_args[0] == "cred-ref"
+    assert mat_args[1] is registry
+    # The transport is built from the materialized identity and the shared registry.
+    assert transport_cls.call_args.kwargs["address"] == "10.0.0.1"
+    assert transport_cls.call_args.kwargs["identity_path"] == identity
+    assert transport_cls.call_args.kwargs["secret_registry"] is registry
+    # check_reachable is bounded by the configured probe timeout, not a None/blocking call.
+    fake_transport.check_reachable.assert_called_once_with(timeout_s=42)
 
 
 def test_probe_returns_false_when_unreachable() -> None:
