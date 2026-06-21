@@ -472,6 +472,80 @@ def test_resolve_config_bytes_rejects_artifact_kind() -> None:
         )
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "config component ref must be local or catalog for builds"
+    assert caught.value.details == {"kind": "config"}  # field name, not the value
+
+
+@pytest.mark.parametrize(
+    ("ref", "message"),
+    [
+        ("file://host/etc/x.config", "config/patch ref must be a local file:// URL (no host)"),
+        ("http://example/x.config", "config/patch ref scheme is not a local reference"),
+        ("relative/x.config", "config/patch ref must be an absolute path"),
+        ("/no/such/file.config", "config/patch ref does not resolve to a readable file"),
+    ],
+)
+def test_resolve_local_ref_rejects_bad_refs(ref: str, message: str) -> None:
+    # Each rejection branch raises CONFIGURATION_ERROR with the branch-specific message and the
+    # forwarded ``kind`` field in details (guards both the message text and the kind argument).
+    with pytest.raises(CategorizedError) as caught:
+        build_host_config.resolve_local_ref(ref, kind="config")
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == message
+    assert caught.value.details == {"kind": "config"}
+
+
+def test_resolve_local_ref_returns_existing_absolute_file(tmp_path: Path) -> None:
+    target = tmp_path / "x.config"
+    target.write_text("CONFIG_X=y\n")
+
+    assert build_host_config.resolve_local_ref(str(target), kind="config") == target
+    assert (
+        build_host_config.resolve_local_ref(f"file://{target}", kind="config") == target
+    )  # file:// scheme with no host
+
+
+def test_missing_config_groups_detects_unsatisfied_and_ignores_comments() -> None:
+    # An OR-group is satisfied only by an enabled (``=y``) option on a non-comment line; a
+    # commented-out option does not count, and trailing whitespace does not hide ``=y``.
+    config_text = "\n".join(
+        [
+            "CONFIG_A=y",
+            "# CONFIG_B=y",  # commented: B is NOT enabled
+            "CONFIG_C=y   ",  # trailing whitespace: still enabled
+            "",  # blank line ignored
+            "CONFIG_D=m",  # module, not =y: not enabled
+        ]
+    )
+    required = (("CONFIG_A",), ("CONFIG_B",), ("CONFIG_C", "CONFIG_X"), ("CONFIG_D",))
+
+    missing = build_host_config.missing_config_groups(config_text, required)
+
+    assert missing == [("CONFIG_B",), ("CONFIG_D",)]
+
+
+def test_missing_config_groups_empty_when_all_satisfied() -> None:
+    config_text = "CONFIG_A=y\nCONFIG_B=y\n"
+    assert build_host_config.missing_config_groups(config_text, (("CONFIG_A", "CONFIG_B"),)) == []
+
+
+def test_validate_config_ref_enforces_declared_sha256(tmp_path: Path) -> None:
+    # A local ref that declares a sha256 must have that digest verified; a wrong digest is a
+    # CONFIGURATION_ERROR (guards dropping ``sha256=ref.sha256`` from the validation call).
+    root = tmp_path / "components"
+    root.mkdir()
+    target = root / "x.config"
+    target.write_text("CONFIG_X=y\n")
+    wrong = "sha256:" + "0" * 64
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_config.validate_config_ref(
+            LocalComponentRef(kind="local", path=str(target), sha256=wrong),
+            allowed_component_roots=[root],
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_build_with_no_config_resolves_kdump_default_via_catalog_fetch(tmp_path: Path) -> None:
