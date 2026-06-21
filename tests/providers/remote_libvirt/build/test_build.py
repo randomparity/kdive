@@ -70,6 +70,7 @@ class _FakeStore:
     """Records puts; returns a StoredArtifact echoing the key (no real S3)."""
 
     puts: list[tuple[str, str, str, Sensitivity, bytes]] = field(default_factory=list)
+    retention_by_name: dict[str, str] = field(default_factory=dict)
     fail_on: str | None = None
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
@@ -79,6 +80,7 @@ class _FakeStore:
             )
         key = request.key()
         self.puts.append((key, request.name, request.owner_kind, request.sensitivity, request.data))
+        self.retention_by_name[request.name] = request.retention_class
         return StoredArtifact(
             key, "etag-" + request.name, request.sensitivity, request.retention_class
         )
@@ -105,12 +107,20 @@ class _Seams:
     staging_roots: list[Path] = field(default_factory=list)
     workspace_cleanups: list[Path] = field(default_factory=list)
     merged_fragments: list[bytes] = field(default_factory=list)
+    # Workspaces/mod_roots each post-make seam was handed (None-substitution survivors).
+    modules_install_workspaces: list[Path] = field(default_factory=list)
+    build_id_workspaces: list[Path] = field(default_factory=list)
+    bundle_args: list[tuple[Path, Path]] = field(default_factory=list)
+    vmlinux_workspaces: list[Path] = field(default_factory=list)
+
+    checkout_run_ids: list[UUID] = field(default_factory=list)
 
     def checkout(
         self, run_id: UUID, profile: ServerBuildProfile, workspace: Path, fragment_bytes: bytes
     ) -> None:
         self.call_order.append("checkout")
         self.merged_fragments.append(fragment_bytes)
+        self.checkout_run_ids.append(run_id)
 
     def run_olddefconfig(self, workspace: Path) -> int:
         self.call_order.append("olddefconfig")
@@ -128,18 +138,41 @@ class _Seams:
     def run_modules_install(self, workspace: Path, mod_root: Path) -> int:
         self.modules_install_calls += 1
         self.staging_roots.append(mod_root)
+        self.modules_install_workspaces.append(workspace)
         self.call_order.append("modules_install")
         return self.modules_install_returncode
 
     def make_bundle(self, workspace: Path, mod_root: Path) -> build_module.ArtifactSource:
         self.call_order.append("bundle")
+        self.bundle_args.append((workspace, mod_root))
         return build_module.ArtifactBytes(self.bundle_bytes)
 
     def read_vmlinux_source(self, workspace: Path) -> build_module.ArtifactSource:
+        self.vmlinux_workspaces.append(workspace)
         return build_module.ArtifactBytes(b"vmlinux-bytes")
 
     def read_build_id(self, workspace: Path) -> str:
+        self.build_id_workspaces.append(workspace)
         return self.build_id_hex
+
+
+@dataclass
+class _RecordingRecorder:
+    """A BuildPhaseRecorder that records ``(phase, provider)`` per ``phase()`` context."""
+
+    phases: list[tuple[Any, str]] = field(default_factory=list)
+
+    def phase(self, phase: Any, provider: str) -> Any:
+        from contextlib import contextmanager
+
+        recorded = self.phases
+
+        @contextmanager
+        def _ctx() -> Any:
+            recorded.append((phase, provider))
+            yield
+
+        return _ctx()
 
 
 def _builder(
@@ -259,6 +292,8 @@ def test_build_nonzero_modules_install_is_build_failure_nothing_stored(tmp_path:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make modules_install exited non-zero"
+    assert caught.value.details == {"run_id": str(_RUN)}  # the real run id, not None
     assert seams.make_calls == 1
     assert store.puts == []  # bundle never built/stored
 
@@ -368,6 +403,33 @@ def test_validate_config_ref_rejects_file_outside_roots(tmp_path: Path) -> None:
         builder.validate_config_ref(LocalComponentRef(kind="local", path=str(outside)))
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_validate_config_ref_accepts_file_inside_roots(tmp_path: Path) -> None:
+    # A local ref resolving inside an allowed root validates without error — proves the *given*
+    # ref is forwarded to the orchestrator (guards ``validate_config_ref(None)``, which would
+    # reject every ref regardless of its contents).
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    inside = allowed / "kdump.config"
+    inside.write_text("CONFIG_CRASH_DUMP=y\n")
+    builder = RemoteLibvirtBuild(
+        workspace_root=tmp_path / "ws",
+        store_factory=lambda: _FakeStore(),
+        checkout=lambda _r, _p, _w, _f: None,
+        run_olddefconfig=lambda _w: 0,
+        read_config=lambda _w: _GOOD_CONFIG,
+        run_make=lambda _w: 0,
+        run_modules_install=lambda _w, _m: 0,
+        make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
+        read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
+        read_build_id=lambda _w: "deadbeef",
+        staging_factory=lambda: _make_staging(tmp_path),
+        catalog_fetch=lambda _name: _FRAGMENT_BYTES,
+        allowed_component_roots=[allowed],
+    )
+
+    builder.validate_config_ref(LocalComponentRef(kind="local", path=str(inside)))  # no raise
 
 
 # --- config-ref resolution (local + catalog) -----------------------------------------
@@ -553,7 +615,136 @@ def test_real_build_bundle_missing_bzimage_is_build_failure(tmp_path: Path) -> N
         build_module._real_build_bundle(workspace, mod_root)
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "kernel bundle could not be packaged"
     assert caught.value.details == {"output": "bzImage"}
+
+
+def test_real_build_bundle_module_oserror_is_build_failure_module_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A module file that vanishes mid-pack must surface as a typed BUILD_FAILURE whose details
+    # name the *module bundle* output (distinct from the bzImage face), not a bare OSError.
+    workspace = tmp_path / "ws"
+    mod_root = tmp_path / "stage"
+    _write_fake_build_tree(workspace, mod_root)
+
+    real_add = tarfile.TarFile.add
+
+    def _add(self: tarfile.TarFile, name: Any, *args: Any, **kwargs: Any) -> None:
+        if str(name).endswith(".ko"):
+            raise OSError("module file vanished")
+        return real_add(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarFile, "add", _add)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_module._real_build_bundle(workspace, mod_root)
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert caught.value.details == {"output": "module bundle"}
+
+
+def test_build_bundle_member_dirs_keeps_non_backref_symlinks(tmp_path: Path) -> None:
+    # Only the absolute back-reference symlinks (``build``/``source``) are dropped; a regular
+    # symlink that is *not* a back-ref stays in the member list (guards ``and`` -> ``or``).
+    modules_root = tmp_path / "lib" / "modules" / "6.9.0"
+    (modules_root / "kernel").mkdir(parents=True)
+    real_ko = modules_root / "kernel" / "virtio_blk.ko"
+    real_ko.write_bytes(b"module-bytes")
+    (modules_root / "build").symlink_to(tmp_path)  # dropped back-ref
+    (modules_root / "source").symlink_to(tmp_path)  # dropped back-ref
+    (modules_root / "vmlinuz.link").symlink_to(real_ko)  # kept: not a back-ref name
+
+    members = build_module._build_bundle_member_dirs(modules_root)
+    names = {p.name for p in members}
+
+    assert "vmlinuz.link" in names  # non-backref symlink survives
+    assert "virtio_blk.ko" in names
+    assert "build" not in names
+    assert "source" not in names
+
+
+def test_local_staging_cleanup_ignores_missing_dir(tmp_path: Path) -> None:
+    # ``shutil.rmtree(..., ignore_errors=True)`` must swallow a missing path so the build's
+    # ``finally`` cleanup never masks the real error with a FileNotFoundError.
+    missing = tmp_path / "never-created"
+    assert not missing.exists()
+
+    build_module._local_staging_cleanup(missing)  # must not raise
+
+
+# --- build() seam-argument propagation + phase recording -----------------------------
+
+
+def test_build_passes_per_run_workspace_and_staging_to_post_make_seams(tmp_path: Path) -> None:
+    # The post-make seams must each receive the real per-run workspace (not None) and the
+    # staging root from staging_factory (guards None-substitution in build()).
+    store, seams = _FakeStore(), _Seams()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    workspace = tmp_path / "ws" / str(_RUN)
+    staging = seams.staging_roots[0]
+    assert seams.modules_install_workspaces == [workspace]
+    assert seams.build_id_workspaces == [workspace]
+    assert seams.vmlinux_workspaces == [workspace]
+    assert seams.bundle_args == [(workspace, staging)]
+
+
+def test_build_records_modules_then_artifact_phase_with_provider(tmp_path: Path) -> None:
+    # The MODULES and ARTIFACT phases are recorded in order, tagged with the provider label
+    # (guards phase-arg None-substitution and the empty-string provider default).
+    from kdive.domain.build_phase import BuildPhase
+
+    store, seams = _FakeStore(), _Seams()
+    recorder = _RecordingRecorder()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile(), recorder=recorder, provider="rl")
+
+    # The recorder threaded into build_workspace records the source/configure/compile phases;
+    # build() then records MODULES and ARTIFACT. The full ordered sequence proves both that the
+    # recorder reaches build_workspace and that build() records its own two phases, all labeled
+    # with the provider.
+    assert recorder.phases == [
+        (BuildPhase.SOURCE_SYNC, "rl"),
+        (BuildPhase.CONFIGURE, "rl"),
+        (BuildPhase.COMPILE, "rl"),
+        (BuildPhase.MODULES, "rl"),
+        (BuildPhase.ARTIFACT, "rl"),
+    ]
+
+
+def test_build_threads_run_id_into_checkout(tmp_path: Path) -> None:
+    # build() must hand the real run_id (not None) to the workspace build/checkout.
+    store, seams = _FakeStore(), _Seams()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert seams.checkout_run_ids == [_RUN]
+
+
+def test_build_publishes_with_build_retention_class(tmp_path: Path) -> None:
+    # Both artifacts are published under the ``build`` retention class.
+    store, seams = _FakeStore(), _Seams()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert store.retention_by_name == {"kernel": "build", "vmlinux": "build"}
+
+
+def test_build_default_provider_label_is_empty_string(tmp_path: Path) -> None:
+    # The default ``provider`` is the empty string, threaded into the recorder phase label.
+    from kdive.domain.build_phase import BuildPhase
+
+    store, seams = _FakeStore(), _Seams()
+    recorder = _RecordingRecorder()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile(), recorder=recorder)
+
+    post_make = [p for p in recorder.phases if p[0] in (BuildPhase.MODULES, BuildPhase.ARTIFACT)]
+    assert post_make == [(BuildPhase.MODULES, ""), (BuildPhase.ARTIFACT, "")]
+    # every recorded phase (source/compile included) carries the empty-string default label.
+    assert all(provider == "" for _, provider in recorder.phases)
 
 
 # --- live_vm real make ---------------------------------------------------------------
