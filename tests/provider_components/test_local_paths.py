@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,42 @@ def test_rejects_symlink_escape(tmp_path: Path) -> None:
         validate_local_component_path(str(root / "link.qcow2"), allowed_roots=[root])
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_rejects_directory_under_allowed_root(tmp_path: Path) -> None:
+    # A directory inside an allowed root passes the roots check but is not a regular file:
+    # the is_file gate must reject it so a directory never masquerades as a component image.
+    root = tmp_path / "root"
+    subdir = root / "nested"
+    subdir.mkdir(parents=True)
+
+    with pytest.raises(CategorizedError) as caught:
+        validate_local_component_path(str(subdir), allowed_roots=[root])
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "local component path is not a regular file"
+
+
+def test_rejects_unreadable_file(tmp_path: Path) -> None:
+    # A regular file with no read permission must be rejected by the R_OK gate, not returned
+    # as a usable path that a later open() would fail on.
+    root = tmp_path / "root"
+    root.mkdir()
+    image = root / "base.qcow2"
+    image.write_bytes(b"data")
+    image.chmod(0o000)
+    if os.access(image, os.R_OK):  # pragma: no cover - root/CI can bypass file modes
+        image.chmod(0o644)
+        pytest.skip("filesystem or privileges ignore read permission bits")
+
+    try:
+        with pytest.raises(CategorizedError) as caught:
+            validate_local_component_path(str(image), allowed_roots=[root])
+    finally:
+        image.chmod(0o644)
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "local component path is not readable"
 
 
 def test_accepts_matching_sha256_with_prefix(tmp_path: Path) -> None:

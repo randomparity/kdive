@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Callable
 from uuid import UUID
 
 import pytest
@@ -259,6 +261,144 @@ def test_asyncio_pump_runner_tracks_and_cancels_task() -> None:
             await asyncio.sleep(0)
         assert collector.pump_calls == settled
         assert settled >= pumped_before_cancel
+
+    asyncio.run(_run())
+
+
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
+    async def _spin() -> None:
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(_spin(), timeout=timeout)
+
+
+def test_asyncio_pump_runner_throttles_idle_collector(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        # An idle collector (pump_once -> False) must back off between pumps, not busy-loop.
+        # Pin a measurable backoff and run for a few backoff windows: the pump count stays
+        # small (throttled) yet nonzero (the loop keeps running). This kills both the
+        # `if not got` -> `if got` inversion (which would make an idle collector spin with no
+        # sleep, exploding the count) and the loop/sleep-removal mutants (count would be zero
+        # or unbounded).
+        backoff = 0.05
+        monkeypatch.setattr(console_hosting, "_IDLE_PUMP_BACKOFF_SECONDS", backoff)
+        runner = console_hosting.AsyncioPumpRunner()
+        idle = _FakeCollector(_SYSTEM_ID)
+
+        def _idle_pump() -> bool:
+            idle.pump_calls += 1
+            return False  # "no data": forces the idle-backoff branch every iteration
+
+        idle.pump_once = _idle_pump  # type: ignore[method-assign]
+
+        runner.start(idle)  # ty: ignore[invalid-argument-type]
+        task = runner._tasks[_SYSTEM_ID]
+        try:
+            await _wait_until(lambda: idle.pump_calls >= 1)
+            await asyncio.sleep(backoff * 6)
+            # ~6 backoff windows elapsed: a throttled loop pumps a handful of times. A
+            # busy-loop (no sleep on idle) would rack up hundreds in the same wall time.
+            assert 1 <= idle.pump_calls <= 30
+            assert task.done() is False
+        finally:
+            runner.cancel_all()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(_run())
+
+
+def test_asyncio_pump_runner_isolates_pump_exception_and_continues() -> None:
+    async def _run() -> None:
+        # A pump_once that raises once must not kill the task: the except branch logs, backs
+        # off, and continues. A mutant dropping the continue/sleep or the handler would let the
+        # exception escape and the task would finish with an error instead of pumping again.
+        runner = console_hosting.AsyncioPumpRunner()
+        collector = _FakeCollector(_SYSTEM_ID)
+
+        def _pump() -> bool:
+            collector.pump_calls += 1
+            if collector.pump_calls == 1:
+                raise RuntimeError("transient pump failure")
+            return True
+
+        collector.pump_once = _pump  # type: ignore[method-assign]
+
+        runner.start(collector)  # ty: ignore[invalid-argument-type]
+        task = runner._tasks[_SYSTEM_ID]
+        try:
+            # The first call raises; the loop must recover and pump again. The error path
+            # backs off 1s, so allow a generous bound before the recovery pump lands.
+            await _wait_until(lambda: collector.pump_calls >= 2, timeout=4.0)
+            assert collector.pump_calls >= 2
+            assert task.done() is False
+        finally:
+            runner.cancel_all()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(_run())
+
+
+def test_console_hosting_loop_drops_streams_when_leadership_lost() -> None:
+    async def _run() -> None:
+        # Once leader, a tick that finds the lock no longer held must close every stream:
+        # stop the pumps, drain the registry, and step down. A mutant inverting is_held or
+        # skipping drop_all would leave orphaned collectors streaming without leadership.
+        lock = _FakeLeaderLock(acquire=True, held=True)
+        collector = _FakeCollector(_SYSTEM_ID)
+        pump_runner = _RecordingPumpRunner()
+        registry = console_hosting.CollectorRegistry(pump_runner)  # ty: ignore[invalid-argument-type]
+        loop = _make_loop(
+            leader_lock=lock,
+            running={_SYSTEM_ID},
+            collectors={_SYSTEM_ID: collector},
+            registry=registry,
+            pump_runner=pump_runner,
+        )
+        await loop.tick()
+        assert loop.is_leader is True
+        assert registry.has(_SYSTEM_ID) is True
+
+        lock._held = False
+        await loop.tick()
+
+        assert loop.is_leader is False
+        assert registry.has(_SYSTEM_ID) is False  # drop_all drained the registry
+        assert pump_runner.cancel_all_calls >= 1
+        assert lock.released is False  # leadership loss is not a clean release
+
+    asyncio.run(_run())
+
+
+def test_console_hosting_loop_fails_closed_when_lock_check_raises() -> None:
+    async def _run() -> None:
+        # If the lock-held check raises, the loop must fail closed: treat it as a loss and
+        # step down. A mutant swallowing the error as "still held" would keep streaming after
+        # leadership is no longer verifiable.
+        lock = _FakeLeaderLock(acquire=True, held=True)
+        collector = _FakeCollector(_SYSTEM_ID)
+        pump_runner = _RecordingPumpRunner()
+        registry = console_hosting.CollectorRegistry(pump_runner)  # ty: ignore[invalid-argument-type]
+        loop = _make_loop(
+            leader_lock=lock,
+            running={_SYSTEM_ID},
+            collectors={_SYSTEM_ID: collector},
+            registry=registry,
+            pump_runner=pump_runner,
+        )
+        await loop.tick()
+        assert loop.is_leader is True
+
+        async def _boom() -> bool:
+            raise RuntimeError("lock backend unreachable")
+
+        lock.is_held = _boom  # type: ignore[method-assign]
+        await loop.tick()
+
+        assert loop.is_leader is False
+        assert registry.has(_SYSTEM_ID) is False
 
     asyncio.run(_run())
 

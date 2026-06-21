@@ -222,8 +222,9 @@ def test_ensure_creates_lock_file_in_key_dir(tmp_path: Path) -> None:
     priv = ensure_managed_keypair(env=env)
     lock = priv.parent / ".keygen.lock"
     assert lock.exists()
-    # The lock must live alongside the keys, never as a stray file in the cwd.
-    assert not Path("None").exists()
+    # The lock must live inside the resolved key dir, not under the cwd: a path-construction
+    # mutant that dropped the key-dir prefix would land the lock somewhere else and break this.
+    assert lock.parent == managed_key_dir(env=env)
 
 
 @needs_keygen
