@@ -433,3 +433,312 @@ def test_introspect_live_non_object_json_is_infrastructure_failure():
         live.introspect_live(transport_handle="kdive-sys", helper="tasks")
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(exc.value) == "in-guest drgn helper output was not a JSON object"
+
+
+# ---------------------------------------------------------------------------
+# Shared drgn report helpers + assemble_report (debug_common.introspect)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTask:
+    def __init__(self, *, pid, tgid, comm, state, stack):
+        self._pid = pid
+        self._tgid = tgid
+        self._comm = comm
+        self._state = state
+        self._stack = stack
+
+    def pid(self):
+        return self._pid
+
+    def tgid(self):
+        return self._tgid
+
+    def comm(self):
+        return self._comm
+
+    def state(self):
+        return self._state
+
+    def kernel_stack(self):
+        if isinstance(self._stack, Exception):
+            raise self._stack
+        return self._stack
+
+
+class _FakeModule:
+    def __init__(self, *, name, size, refcount, used_by, state, fail=False):
+        self._name = name
+        self._size = size
+        self._refcount = refcount
+        self._used_by = used_by
+        self._state = state
+        self._fail = fail
+
+    def name(self):
+        if self._fail:
+            raise RuntimeError("decode skew")
+        return self._name
+
+    def size(self):
+        return self._size
+
+    def refcount(self):
+        return self._refcount
+
+    def used_by(self):
+        return self._used_by
+
+    def state(self):
+        return self._state
+
+
+class _ProgramFromLists:
+    def __init__(self, *, tasks=(), modules=(), uts=None):
+        self._tasks = list(tasks)
+        self._modules = list(modules)
+        self._uts = uts if uts is not None else {}
+
+    def iter_tasks(self):
+        return self._tasks
+
+    def iter_modules(self):
+        return self._modules
+
+    def uts(self):
+        return self._uts
+
+    def boot_cmdline(self):
+        return "ro quiet"
+
+    def cpus_online(self):
+        return 8
+
+    def mem_total_pages(self):
+        return 4096
+
+
+def test_helper_tasks_returns_only_blocked_tasks_with_all_fields():
+    from kdive.providers.shared.debug_common.introspect import helper_tasks
+
+    prog = _ProgramFromLists(
+        tasks=[
+            _FakeTask(pid=1, tgid=1, comm="init", state="R", stack=["a"]),
+            _FakeTask(pid=42, tgid=40, comm="stuck", state="D", stack=["f1", "f2"]),
+        ]
+    )
+    out = helper_tasks(prog)
+    assert out == {
+        "tasks": [
+            {
+                "pid": 42,
+                "tgid": 40,
+                "comm": "stuck",
+                "state": "D",
+                "kernel_stack": ["f1", "f2"],
+            }
+        ],
+        "truncated": False,
+    }
+
+
+def test_helper_tasks_truncates_beyond_the_task_limit():
+    from kdive.providers.shared.debug_common.introspect import _TASK_LIMIT, helper_tasks
+
+    tasks = [
+        _FakeTask(pid=i, tgid=i, comm="d", state="D", stack=[]) for i in range(_TASK_LIMIT + 5)
+    ]
+    out = helper_tasks(_ProgramFromLists(tasks=tasks))
+    assert len(out["tasks"]) == _TASK_LIMIT
+    assert out["truncated"] is True
+
+
+def test_helper_tasks_degrades_unwind_failure_to_marker():
+    from kdive.providers.shared.debug_common.introspect import helper_tasks
+
+    prog = _ProgramFromLists(
+        tasks=[_FakeTask(pid=7, tgid=7, comm="x", state="D", stack=RuntimeError("boom"))]
+    )
+    out = helper_tasks(prog)
+    assert out["tasks"][0]["kernel_stack"] == ["<stack unavailable: RuntimeError>"]
+    assert out["truncated"] is False
+
+
+def test_helper_modules_returns_rows_with_all_fields():
+    from kdive.providers.shared.debug_common.introspect import helper_modules
+
+    prog = _ProgramFromLists(
+        modules=[_FakeModule(name="ext4", size=900, refcount=3, used_by=["jbd2"], state="Live")]
+    )
+    out = helper_modules(prog)
+    assert out == {
+        "modules": [
+            {
+                "name": "ext4",
+                "size": 900,
+                "refcount": 3,
+                "used_by": ["jbd2"],
+                "state": "Live",
+            }
+        ],
+        "decode_errors": 0,
+        "all_failed": False,
+    }
+
+
+def test_helper_modules_counts_decode_errors_without_failing():
+    from kdive.providers.shared.debug_common.introspect import helper_modules
+
+    prog = _ProgramFromLists(
+        modules=[
+            _FakeModule(name="ok", size=1, refcount=0, used_by=[], state="Live"),
+            _FakeModule(name="bad", size=0, refcount=0, used_by=[], state="x", fail=True),
+        ]
+    )
+    out = helper_modules(prog)
+    assert [m["name"] for m in out["modules"]] == ["ok"]
+    assert out["decode_errors"] == 1
+    assert out["all_failed"] is False
+
+
+def test_helper_modules_all_failed_when_every_module_errors():
+    from kdive.providers.shared.debug_common.introspect import helper_modules
+
+    prog = _ProgramFromLists(
+        modules=[_FakeModule(name="x", size=0, refcount=0, used_by=[], state="x", fail=True)]
+    )
+    out = helper_modules(prog)
+    assert out["modules"] == []
+    assert out["decode_errors"] == 1
+    assert out["all_failed"] is True
+
+
+def test_helper_modules_no_modules_is_not_all_failed():
+    from kdive.providers.shared.debug_common.introspect import helper_modules
+
+    out = helper_modules(_ProgramFromLists(modules=[]))
+    assert out == {"modules": [], "decode_errors": 0, "all_failed": False}
+
+
+def test_helper_sysinfo_maps_uts_and_counters():
+    from kdive.providers.shared.debug_common.introspect import helper_sysinfo
+
+    prog = _ProgramFromLists(
+        uts={
+            "release": "6.1.0",
+            "version": "#1 SMP",
+            "machine": "x86_64",
+            "nodename": "host-a",
+        }
+    )
+    out = helper_sysinfo(prog)
+    assert out == {
+        "release": "6.1.0",
+        "version": "#1 SMP",
+        "machine": "x86_64",
+        "nodename": "host-a",
+        "boot_cmdline": "ro quiet",
+        "cpus_online": 8,
+        "mem_total_pages": 4096,
+    }
+
+
+def test_helper_sysinfo_defaults_missing_uts_fields_to_empty_string():
+    from kdive.providers.shared.debug_common.introspect import helper_sysinfo
+
+    out = helper_sysinfo(_ProgramFromLists(uts={}))
+    assert out["release"] == ""
+    assert out["version"] == ""
+    assert out["machine"] == ""
+    assert out["nodename"] == ""
+
+
+def test_assemble_report_propagates_helper_truncated_flag():
+    from kdive.providers.shared.debug_common.introspect import assemble_report
+
+    out = assemble_report(
+        {"tasks": [], "truncated": True},
+        {"modules": []},
+        {"release": "6.1.0"},
+        byte_cap=1 << 20,
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is True
+
+
+def test_assemble_report_not_truncated_when_helper_flag_false_and_within_cap():
+    from kdive.providers.shared.debug_common.introspect import assemble_report
+
+    out = assemble_report(
+        {"tasks": [{"pid": 1}], "truncated": False},
+        {"modules": []},
+        {"release": "6.1.0"},
+        byte_cap=1 << 20,
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is False
+
+
+def test_assemble_report_byte_cap_trims_tasks_and_sets_truncated():
+    from kdive.providers.shared.debug_common.introspect import assemble_report
+
+    rows = [{"pid": i, "comm": "x" * 100} for i in range(50)]
+    out = assemble_report(
+        {"tasks": rows, "truncated": False},
+        {"modules": []},
+        {"release": "6.1.0"},
+        byte_cap=200,  # far smaller than the serialized rows
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is True
+    assert len(out.tasks["tasks"]) < len(rows)
+
+
+def test_assemble_report_byte_cap_counts_modules_toward_the_budget():
+    # The byte budget must account for the modules section: a large modules payload pushes the
+    # report over a small cap, so tasks are trimmed even though the rows alone would fit.
+    from kdive.providers.shared.debug_common.introspect import assemble_report
+
+    rows = [{"pid": i} for i in range(4)]
+    out = assemble_report(
+        {"tasks": rows, "truncated": False},
+        {"modules": [{"name": "m" * 500}]},
+        {"release": "6.1.0"},
+        byte_cap=300,  # rows alone fit; rows + modules do not
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is True
+    assert out.tasks["tasks"] == []
+
+
+def test_assemble_report_byte_cap_counts_sysinfo_toward_the_budget():
+    # The byte budget must also account for the sysinfo section.
+    from kdive.providers.shared.debug_common.introspect import assemble_report
+
+    rows = [{"pid": i} for i in range(4)]
+    out = assemble_report(
+        {"tasks": rows, "truncated": False},
+        {"modules": []},
+        {"release": "r" * 500},
+        byte_cap=300,
+        secret_registry=SecretRegistry(),
+    )
+    assert out.truncated is True
+    assert out.tasks["tasks"] == []
+
+
+def test_assemble_report_redacts_each_section():
+    from kdive.providers.shared.debug_common.introspect import assemble_report
+
+    registry = SecretRegistry()
+    registry.register("leaked-secret", scope=None)  # pragma: allowlist secret
+    out = assemble_report(
+        {"tasks": [{"comm": "leaked-secret"}], "truncated": False},
+        {"modules": [{"name": "leaked-secret"}]},
+        {"release": "leaked-secret"},
+        byte_cap=1 << 20,
+        secret_registry=registry,
+    )
+    assert "leaked-secret" not in str(out.tasks)
+    assert "leaked-secret" not in str(out.modules)
+    assert "leaked-secret" not in str(out.sysinfo)
