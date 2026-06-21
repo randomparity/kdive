@@ -765,3 +765,5 @@ def test_debuginfo_resolver_default_raises_missing_dependency() -> None:
     with pytest.raises(CategorizedError) as exc:
         debug_gdbmi._resolve_debuginfo_ref("run-1")
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert exc.value.details == {"run_id": "run-1"}
+    assert str(exc.value) == "resolving a Run's debuginfo object runs only under the live_vm gate"
