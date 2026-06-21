@@ -98,4 +98,64 @@ def test_handler_rejects_unregistered_provider() -> None:
         asyncio.run(_run())
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "no diagnostics worker checks are registered for provider"
     assert caught.value.details == {"provider": "other-provider"}
+
+
+def test_handler_uses_injected_builders_over_the_real_registry() -> None:
+    # The handler runs the *injected* builders when they are supplied (the ``or`` default only
+    # falls back to the real registry when none are given). A synthetic provider absent from the
+    # real registry must still resolve through the injected map.
+    result = CheckResult(PROVIDER_TLS_ID, CheckStatus.PASS, "ok", provider="synthetic-provider")
+
+    async def _run() -> str | None:
+        return await diagnostics_worker_check_handler(
+            conn=None,
+            job=_job("synthetic-provider"),
+            worker_check_builders={"synthetic-provider": lambda: [_FakeCheck(result)]},
+        )
+
+    raw = asyncio.run(_run())
+    assert {r.check_id for r in deserialize_results(raw)} == {PROVIDER_TLS_ID}
+
+
+class _SlowCheck(Check):
+    def __init__(self, check_id: str, delay_s: float) -> None:
+        self._check_id = check_id
+        self._delay_s = delay_s
+
+    @property
+    def id(self) -> str:
+        return self._check_id
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.WORKER
+
+    async def run(self) -> CheckResult:
+        await asyncio.sleep(self._delay_s)
+        return CheckResult(self._check_id, CheckStatus.PASS, "ok", provider="remote-libvirt")
+
+
+def test_handler_bounds_each_check_by_the_per_check_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each check is run under the per-check timeout: a check slower than the bound is reported
+    # ERROR ("did not respond"), not its eventual PASS. An unbounded run would let it pass.
+    import kdive.jobs.handlers.diagnostics as diagnostics_module
+
+    monkeypatch.setattr(diagnostics_module, "_PER_CHECK_TIMEOUT_S", 0.01)
+
+    async def _run() -> str | None:
+        return await diagnostics_worker_check_handler(
+            conn=None,
+            job=_job(),
+            worker_check_builders={
+                "remote-libvirt": lambda: [_SlowCheck(PROVIDER_TLS_ID, delay_s=0.2)]
+            },
+        )
+
+    raw = asyncio.run(_run())
+    results = deserialize_results(raw)
+    assert [r.status for r in results] == [CheckStatus.ERROR]
+    assert "did not respond" in results[0].detail
