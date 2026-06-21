@@ -535,6 +535,11 @@ libguestfs/drgn seams, wire a real bytes→build-id reader, and add `KDUMP` to l
 `live_vm`-gated code; everything testable is exercised through the Task 2-3 helpers and the
 composition test.
 
+> Note: `g.read_file(path)` loads the whole core into RAM, bounded by the `MAX_CORE_BYTES`
+> ceiling enforced in `harvest_vmcore`. This matches the existing bytes-based `capture()`
+> pipeline (which already holds the core bytes in memory). If a future change needs to lift
+> the ceiling, switch the reader to `g.download(path, tmpfile)` and stream — out of scope here.
+
 **Files:**
 - Modify: `src/kdive/providers/local_libvirt/retrieve.py` (seams + `from_env` wiring)
 - Modify: `src/kdive/providers/local_libvirt/composition.py:114-116` (advertise KDUMP)
@@ -546,26 +551,36 @@ composition test.
 **Interfaces:**
 - Consumes: `harvest_vmcore`, `redact_dmesg`, `read_via_tempfile`, `GuestCoreReader`, `VmcoreEntry` (Tasks 2-3); `MAX_CORE_BYTES`, `read_core_build_id_from_file`, `read_core_dmesg_from_file` (Task 1); `overlay_path` (`local_libvirt/lifecycle/storage.py`); `domain_name_for` (`providers/shared/runtime_paths.py`).
 
-- [ ] **Step 1: Write the failing composition test**
+- [ ] **Step 1: Update the existing exact-frozenset assertion to include KDUMP**
 
-Add to `tests/providers/local_libvirt/test_composition.py` (match the file's existing build
-pattern; if a `supported_capture_methods` assertion already exists, extend it):
+`tests/providers/local_libvirt/test_composition.py:66-67` already pins the exact set in
+`test_build_runtime_wires_local_ports_and_capabilities`:
 
 ```python
-def test_local_runtime_advertises_kdump_capture() -> None:
-    from kdive.domain.capture import CaptureMethod
-    from kdive.providers.local_libvirt.composition import build_runtime
-    from kdive.security.secrets.secret_registry import SecretRegistry
-
-    runtime = build_runtime(secret_registry=SecretRegistry())
-    assert CaptureMethod.KDUMP in runtime.supported_capture_methods
-    assert CaptureMethod.HOST_DUMP in runtime.supported_capture_methods  # unchanged
+    assert runtime.supported_capture_methods == frozenset(
+        {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
 ```
+
+Change it to add `CaptureMethod.KDUMP`:
+
+```python
+    assert runtime.supported_capture_methods == frozenset(
+        {
+            CaptureMethod.CONSOLE,
+            CaptureMethod.HOST_DUMP,
+            CaptureMethod.GDBSTUB,
+            CaptureMethod.KDUMP,
+        }
+    )
+```
+
+Do not add a separate KDUMP test — this exact-match assertion is the single source of truth
+for the advertised set; a second partial-membership test would duplicate it.
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `uv run python -m pytest tests/providers/local_libvirt/test_composition.py::test_local_runtime_advertises_kdump_capture -q`
-Expected: FAIL (`KDUMP not in supported_capture_methods`).
+Run: `uv run python -m pytest "tests/providers/local_libvirt/test_composition.py::test_build_runtime_wires_local_ports_and_capabilities" -q`
+Expected: FAIL (set mismatch — production still omits KDUMP, the test now expects it).
 
 - [ ] **Step 3: Advertise KDUMP in composition**
 
@@ -593,6 +608,7 @@ import logging
 
 import libvirt  # ty: ignore[unresolved-import]  # operator-provided C extension
 
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI  # KDIVE_LIBVIRT_URI (default qemu:///system)
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.retrieve_kdump import (
     GuestCoreReader,
@@ -608,6 +624,12 @@ from kdive.providers.shared.debug_common.core_file import (
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 ```
+
+Confirm the exact import path of the `LIBVIRT_URI` config key (`control.py`/`discovery.py`
+import it — match their source) and how they read it (`config.require(LIBVIRT_URI)` with the
+provider's settings/config object). Use the **same** URI source as `control.py:66-70` and
+`discovery.py:133` — do **not** use `libvirt.open(None)`, which honors `LIBVIRT_DEFAULT_URI`
+and can resolve to a different hypervisor than the provider's configured `KDIVE_LIBVIRT_URI`.
 
 (b) Replace the placeholder bodies (lines 186-206) with the real seams. The build-id reader
 must replace the wired `default_read_vmcore_build_id` placeholder, and redaction must use the
@@ -663,8 +685,12 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
 
 
 def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (libvirt)
-    """Force the System's domain off (idempotent) so its overlay is safe to read offline."""
-    conn = libvirt.open(None)
+    """Force the System's domain off (idempotent) so its overlay is safe to read offline.
+
+    Opens the provider's configured URI (``KDIVE_LIBVIRT_URI``, default ``qemu:///system``),
+    the same source as ``control.py``/``discovery.py`` — never ``libvirt.open(None)``.
+    """
+    conn = libvirt.open(_libvirt_uri())  # _libvirt_uri reads LIBVIRT_URI via the provider config
     try:
         try:
             domain = conn.lookupByName(domain_name_for(system_id))
@@ -674,6 +700,13 @@ def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (l
             domain.destroy()
     finally:
         conn.close()
+```
+
+Add a small `_libvirt_uri()` helper that reads `LIBVIRT_URI` exactly as `control.py.from_env`
+does (resolve the provider config/settings object and call `.require(LIBVIRT_URI)`); reuse
+the existing settings import rather than re-deriving the default string.
+
+```python
 
 
 def _real_wait_for_vmcore(system_id: UUID) -> bytes | None:  # pragma: no cover - live_vm
