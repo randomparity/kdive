@@ -78,10 +78,31 @@ def test_seed_and_cap_are_read_from_the_environment() -> None:
         secret_ref="fault-inject/sentinel",  # pragma: allowlist secret - ref, not a value
     )
 
+    assert discovery.host_uri == "fault-inject://test"
     (record,) = discovery.list_resources()
+    assert record["resource_id"] == "fault-inject://test"
     capabilities = record["capabilities"]
 
     assert capabilities[SEED_KEY] == 12345
     assert capabilities[CONCURRENT_ALLOCATION_CAP_KEY] == 4
     assert capabilities[FAULT_RATE_KEY] == {"provision": 0.5}
     assert capabilities[MAX_LATENCY_S_KEY] == {"provision": 9.0}
+
+
+def test_from_env_populates_fields_from_setting_defaults() -> None:
+    discovery = FaultInjectDiscovery.from_env()
+
+    assert discovery.host_uri == "fault-inject://local"
+    assert discovery.concurrent_allocation_cap == 1
+    assert discovery.seed == 0
+    assert discovery.secret_ref == "fault-inject/console-sentinel"  # pragma: allowlist secret
+
+
+def test_capabilities_describe_the_synthetic_gdbstub_engine() -> None:
+    discovery = FaultInjectDiscovery.from_env()
+
+    (record,) = discovery.list_resources()
+    capabilities = record["capabilities"]
+
+    assert capabilities["arch"] == "synthetic"
+    assert capabilities["transports"] == ["gdbstub"]
