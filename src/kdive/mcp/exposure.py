@@ -126,6 +126,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "introspect.run": _VIEWER,
     # inventory (platform auditor)
     "inventory.list": _PLAT_AUDITOR,
+    "inventory.clear_override": _PLAT_ADMIN,
     # investigations
     "investigations.get": _VIEWER,
     "investigations.list": _VIEWER,

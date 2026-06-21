@@ -92,6 +92,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "images.prune_expired": ("tests/mcp/ops/test_images_tools.py",),
     "images.publish": ("tests/mcp/ops/test_images_tools.py",),
     "images.upload": ("tests/mcp/ops/test_images_tools.py",),
+    "inventory.clear_override": ("tests/mcp/ops/test_inventory_clear_override.py",),
     "inventory.list": ("tests/mcp/ops/test_inventory_list.py",),
     "investigations.close": ("tests/mcp/catalog/test_investigations_tools.py",),
     "investigations.get": ("tests/mcp/catalog/test_investigations_tools.py",),
