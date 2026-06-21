@@ -63,6 +63,29 @@ def test_power_on_already_running_swallowed(tmp_path: Path) -> None:
     _control(domain, tmp_path).power(domain_name_for(_SYSTEM_ID), PowerAction.ON)  # no raise
 
 
+@pytest.mark.parametrize(
+    ("action", "call", "verb"),
+    [
+        (PowerAction.ON, "create", "starting"),
+        (PowerAction.OFF, "destroy", "stopping"),
+    ],
+)
+def test_idempotent_non_operation_invalid_error_is_control_failure(
+    action: PowerAction, call: str, verb: str, tmp_path: Path
+) -> None:
+    # The idempotent on/off path swallows ONLY VIR_ERR_OPERATION_INVALID; any other libvirt
+    # error (e.g. the domain genuinely failed to start/stop) must surface as a CONTROL_FAILURE
+    # rather than being misreported as success.
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name, raise_on={call: libvirt.VIR_ERR_INTERNAL_ERROR})
+    with pytest.raises(CategorizedError) as exc:
+        _control(domain, tmp_path).power(name, action)
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert str(exc.value) == f"libvirt error {action.value}-ing domain"
+    assert exc.value.details == {"domain": name}
+    assert domain.calls == [call]
+
+
 def test_power_absent_domain_is_control_failure(tmp_path: Path) -> None:
     name = domain_name_for(_SYSTEM_ID)
     with pytest.raises(CategorizedError) as exc:
