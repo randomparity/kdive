@@ -16,6 +16,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind, StatusCode
 
 from kdive.health.heartbeat import Heartbeat
 from kdive.providers.infra.reaping import NullReaper
@@ -83,6 +84,123 @@ def _counter_points(
                     key = tuple(sorted((str(k), str(v)) for k, v in attrs.items()))
                     points[key] = value
     return points
+
+
+def _hist_points(reader: InMemoryMetricReader, name: str) -> dict[tuple[tuple[str, str], ...], int]:
+    """Return {sorted-attr-tuple: data-point count} for histogram metric ``name``."""
+    data = reader.get_metrics_data()
+    points: dict[tuple[tuple[str, str], ...], int] = {}
+    if data is None:
+        return points
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name != name:
+                    continue
+                for point in metric.data.data_points:
+                    count = getattr(point, "count", None)  # HistogramDataPoint only
+                    if count is None:
+                        continue
+                    attrs = point.attributes or {}
+                    key = tuple(sorted((str(k), str(v)) for k, v in attrs.items()))
+                    points[key] = count
+    return points
+
+
+def _metric_meta(reader: InMemoryMetricReader, name: str) -> tuple[str, str]:
+    """Return ``(unit, description)`` for metric ``name`` (asserts it exists)."""
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == name:
+                    return metric.unit, metric.description
+    raise AssertionError(f"metric {name!r} not found")
+
+
+def test_instrument_names_and_units() -> None:
+    """The four instruments use their documented names + units (ADR-0090 §5)."""
+    telemetry, reader, _ = _telemetry()
+    # Touch every instrument so each series is exported.
+    with telemetry.pass_span() as span:
+        span.set_outcome("ok")
+    telemetry.observe_lag(0.0)
+    telemetry.record_repairs({"orphaned_systems": 0}, failures=["orphaned_systems"])
+
+    names = _metric_names(reader)
+    assert {
+        "kdive.reconcile.duration",
+        "kdive.reconcile.lag",
+        "kdive.reconciler.repairs",
+        "kdive.errors",
+    } <= names
+
+    assert _metric_meta(reader, "kdive.reconcile.duration")[0] == "s"
+    assert _metric_meta(reader, "kdive.reconcile.lag")[0] == "s"
+    assert _metric_meta(reader, "kdive.reconciler.repairs")[0] == "1"
+    assert _metric_meta(reader, "kdive.errors")[0] == "1"
+
+
+def test_observe_lag_records_zero_gap() -> None:
+    """A lag of exactly 0.0 is a valid on-time pass and must be recorded (>= 0.0)."""
+    telemetry, reader, _ = _telemetry()
+    telemetry.observe_lag(0.0)
+    points = _hist_points(reader, "kdive.reconcile.lag")
+    assert points == {(): 1}
+
+
+def test_observe_lag_drops_negative_gap() -> None:
+    """A negative lag is nonsensical (clock skew) and must be dropped, not recorded."""
+    telemetry, reader, _ = _telemetry()
+    telemetry.observe_lag(-1.0)
+    assert _hist_points(reader, "kdive.reconcile.lag") == {}
+
+
+def test_pass_span_ok_outcome_labels_duration_and_span() -> None:
+    """An ok pass stamps the span outcome=ok, leaves status unset, labels duration ok."""
+    telemetry, reader, exporter = _telemetry()
+    with telemetry.pass_span() as span:
+        span.set_outcome("ok")
+
+    finished = exporter.get_finished_spans()
+    assert finished[0].attributes is not None
+    assert finished[0].attributes["outcome"] == "ok"
+    assert finished[0].status.status_code is not StatusCode.ERROR
+
+    points = _hist_points(reader, "kdive.reconcile.duration")
+    assert points == {(("outcome", "ok"),): 1}
+
+
+def test_pass_span_default_outcome_is_ok() -> None:
+    """Without set_outcome the span defaults to outcome=ok on both span and duration."""
+    telemetry, reader, exporter = _telemetry()
+    with telemetry.pass_span():
+        pass
+    assert exporter.get_finished_spans()[0].attributes["outcome"] == "ok"
+    assert _hist_points(reader, "kdive.reconcile.duration") == {(("outcome", "ok"),): 1}
+
+
+def test_pass_span_error_outcome_sets_error_status() -> None:
+    """An error outcome stamps outcome=error, sets ERROR status, labels duration error."""
+    telemetry, reader, exporter = _telemetry()
+    with telemetry.pass_span() as span:
+        span.set_outcome("error")
+
+    finished = exporter.get_finished_spans()
+    assert finished[0].attributes["outcome"] == "error"
+    assert finished[0].status.status_code is StatusCode.ERROR
+
+    points = _hist_points(reader, "kdive.reconcile.duration")
+    assert points == {(("outcome", "error"),): 1}
+
+
+def test_pass_span_is_internal_kind() -> None:
+    """The per-pass span is an INTERNAL span (ADR-0090 §5)."""
+    telemetry, _, exporter = _telemetry()
+    with telemetry.pass_span():
+        pass
+    assert exporter.get_finished_spans()[0].kind is SpanKind.INTERNAL
 
 
 def test_record_repairs_emits_per_kind_counts() -> None:
