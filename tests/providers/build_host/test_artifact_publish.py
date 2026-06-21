@@ -48,6 +48,7 @@ class _SizedStub:
 class _FakeStore:
     puts: list[ArtifactWriteRequest] = field(default_factory=list)
     presigns: list[PresignPutRequest] = field(default_factory=list)
+    issued: list[PresignedUpload] = field(default_factory=list)
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
         self.puts.append(request)
@@ -57,18 +58,22 @@ class _FakeStore:
 
     def presign_put(self, request: PresignPutRequest) -> PresignedUpload:
         self.presigns.append(request)
-        return PresignedUpload(
+        upload = PresignedUpload(
             url=f"https://s3.example/{request.key}",
             required_headers={"x-amz-checksum-sha256": request.sha256},
         )
+        self.issued.append(upload)
+        return upload
 
 
 @dataclass
 class _FakeTransport:
     files: dict[str, bytes] = field(default_factory=dict)
-    uploaded: list[str] = field(default_factory=list)
+    uploaded: list[tuple[str, PresignedUpload]] = field(default_factory=list)
+    calls: list[tuple[list[str], str, int]] = field(default_factory=list)
 
     def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
+        self.calls.append((argv, cwd, timeout_s))
         if argv[0] == "sha256sum":
             digest = hashlib.sha256(self.files[argv[1]]).hexdigest()
             return CommandResult(returncode=0, stdout=f"{digest}  {argv[1]}\n", stderr="")
@@ -77,7 +82,7 @@ class _FakeTransport:
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def upload_file(self, path: str, presigned: PresignedUpload) -> str:
-        self.uploaded.append(path)
+        self.uploaded.append((path, presigned))
         return f"etag-{Path(path).name}"
 
     # unused protocol members — real bodies keep the strict whole-tree ty gate happy.
@@ -136,8 +141,32 @@ def test_bytes_source_over_5gib_is_configuration_error_before_put() -> None:
             retention_class="build",
         )
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "5 GiB" in str(caught.value)
+    assert str(caught.value) == "build artifact exceeds the single-PUT 5 GiB ceiling"
+    assert caught.value.details == {
+        "run_id": str(_RUN),
+        "name": "kernel",
+        "size_bytes": 5 * 1024**3 + 1,
+    }
     assert store.puts == []
+
+
+def test_bytes_source_exactly_at_ceiling_is_put() -> None:
+    store = _FakeStore()
+    atlimit = cast("bytes", _SizedStub(5 * 1024**3))
+    stored = publish_artifact_source(
+        store,
+        _RUN,
+        "kernel",
+        ArtifactBytes(atlimit),
+        tenant="local",
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="build",
+    )
+    [req] = store.puts
+    assert req.sensitivity is Sensitivity.SENSITIVE
+    assert req.retention_class == "build"
+    assert stored.sensitivity is Sensitivity.SENSITIVE
+    assert stored.retention_class == "build"
 
 
 def test_remote_file_presigns_base64_sha256_and_uploads() -> None:
@@ -161,8 +190,20 @@ def test_remote_file_presigns_base64_sha256_and_uploads() -> None:
     assert presign.key == f"remote-libvirt/runs/{_RUN}/kernel"
     assert presign.sha256 == base64.b64encode(hashlib.sha256(content).digest()).decode("ascii")
     assert presign.size_bytes == len(content)
-    assert transport.uploaded == [path]
+    assert presign.sensitivity is Sensitivity.SENSITIVE
+    assert presign.retention_class == "build"
+    assert presign.expires_in == 3600
+    [(uploaded_path, uploaded_presign)] = transport.uploaded
+    assert uploaded_path == path
+    [issued] = store.issued
+    assert uploaded_presign is issued
     assert stored.key == presign.key
+    assert stored.etag == f"etag-{Path(path).name}"
+    assert stored.sensitivity is Sensitivity.SENSITIVE
+    assert stored.retention_class == "build"
+    sha_call, stat_call = transport.calls
+    assert sha_call == (["sha256sum", path], str(Path(path).parent), 300)
+    assert stat_call == (["stat", "-c", "%s", path], str(Path(path).parent), 60)
 
 
 def test_remote_file_over_5gib_is_configuration_error_before_presign() -> None:
@@ -186,9 +227,42 @@ def test_remote_file_over_5gib_is_configuration_error_before_presign() -> None:
             retention_class="build",
         )
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "5 GiB" in str(caught.value)
+    assert str(caught.value) == "build artifact exceeds the single-PUT 5 GiB ceiling"
+    assert caught.value.details == {
+        "run_id": str(_RUN),
+        "name": "kernel",
+        "size_bytes": 5 * 1024**3 + 1,
+    }
     assert store.presigns == []
     assert transport.uploaded == []
+
+
+def test_remote_file_exactly_at_ceiling_presigns() -> None:
+    @dataclass
+    class _AtLimitStat(_FakeTransport):
+        def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
+            if argv[0] == "stat":
+                return CommandResult(returncode=0, stdout=f"{5 * 1024**3}\n", stderr="")
+            return super().run(argv, cwd=cwd, timeout_s=timeout_s)
+
+    store, transport = _FakeStore(), _AtLimitStat()
+    transport.files["/build/at-limit.tar.gz"] = b"\x1f\x8bbundle"
+    stored = _publish_remote(store, transport, "/build/at-limit.tar.gz")
+    [presign] = store.presigns
+    assert presign.size_bytes == 5 * 1024**3
+    assert stored.key == presign.key
+
+
+def _publish_remote(store: _FakeStore, transport: _FakeTransport, path: str) -> StoredArtifact:
+    return publish_artifact_source(
+        store,
+        _RUN,
+        "kernel",
+        ArtifactRemoteFile(path=path, transport=transport),
+        tenant="local",
+        sensitivity=Sensitivity.SENSITIVE,
+        retention_class="build",
+    )
 
 
 def test_remote_file_sha256sum_nonzero_is_build_failure() -> None:
@@ -196,19 +270,109 @@ def test_remote_file_sha256sum_nonzero_is_build_failure() -> None:
     class _FailHash(_FakeTransport):
         def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
             if argv[0] == "sha256sum":
-                return CommandResult(returncode=1, stdout="", stderr="No such file")
+                return CommandResult(returncode=1, stdout="", stderr="head" + "x" * 600 + "TAIL")
             return super().run(argv, cwd=cwd, timeout_s=timeout_s)
 
     store, transport = _FakeStore(), _FailHash()
     transport.files["/p"] = b"x"
     with pytest.raises(CategorizedError) as caught:
-        publish_artifact_source(
-            store,
-            _RUN,
-            "kernel",
-            ArtifactRemoteFile(path="/p", transport=transport),
-            tenant="local",
-            sensitivity=Sensitivity.SENSITIVE,
-            retention_class="build",
-        )
+        _publish_remote(store, transport, "/p")
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "sha256sum of a build artifact exited non-zero"
+    assert caught.value.details is not None
+    assert caught.value.details["path"] == "/p"
+    # last 512 chars only — keeps the tail, drops the head.
+    stderr = caught.value.details["stderr"]
+    assert stderr.endswith("TAIL")
+    assert len(stderr) == 512
+    assert not stderr.startswith("head")
+    assert store.presigns == []
+
+
+def test_remote_file_sha256sum_unparseable_digest_is_build_failure() -> None:
+    @dataclass
+    class _BadHex(_FakeTransport):
+        def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
+            if argv[0] == "sha256sum":
+                return CommandResult(returncode=0, stdout="nothex  /p\n", stderr="")
+            return super().run(argv, cwd=cwd, timeout_s=timeout_s)
+
+    store, transport = _FakeStore(), _BadHex()
+    transport.files["/p"] = b"x"
+    with pytest.raises(CategorizedError) as caught:
+        _publish_remote(store, transport, "/p")
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert "unparseable" in str(caught.value)
+    assert store.presigns == []
+
+
+def test_remote_file_sha256sum_wrong_length_digest_is_build_failure() -> None:
+    @dataclass
+    class _ShortHex(_FakeTransport):
+        def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
+            if argv[0] == "sha256sum":
+                return CommandResult(returncode=0, stdout="abcd  /p\n", stderr="")
+            return super().run(argv, cwd=cwd, timeout_s=timeout_s)
+
+    store, transport = _FakeStore(), _ShortHex()
+    transport.files["/p"] = b"x"
+    with pytest.raises(CategorizedError) as caught:
+        _publish_remote(store, transport, "/p")
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert caught.value.details is not None
+    assert caught.value.details["len"] == 2
+    assert store.presigns == []
+
+
+def test_remote_file_sha256sum_empty_stdout_is_build_failure() -> None:
+    @dataclass
+    class _EmptyHash(_FakeTransport):
+        def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
+            if argv[0] == "sha256sum":
+                return CommandResult(returncode=0, stdout="   \n", stderr="")
+            return super().run(argv, cwd=cwd, timeout_s=timeout_s)
+
+    store, transport = _FakeStore(), _EmptyHash()
+    transport.files["/p"] = b"x"
+    with pytest.raises(CategorizedError) as caught:
+        _publish_remote(store, transport, "/p")
+    # empty stdout -> "" hex -> zero-length raw digest -> wrong-length failure,
+    # never a presign.
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert caught.value.details is not None
+    assert caught.value.details["len"] == 0
+    assert store.presigns == []
+
+
+def test_remote_file_stat_nonzero_is_build_failure() -> None:
+    @dataclass
+    class _FailStat(_FakeTransport):
+        def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
+            if argv[0] == "stat":
+                return CommandResult(returncode=2, stdout="", stderr="no stat")
+            return super().run(argv, cwd=cwd, timeout_s=timeout_s)
+
+    store, transport = _FakeStore(), _FailStat()
+    transport.files["/p"] = b"x"
+    with pytest.raises(CategorizedError) as caught:
+        _publish_remote(store, transport, "/p")
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert "stat" in str(caught.value)
+    assert store.presigns == []
+
+
+def test_remote_file_stat_non_integer_is_build_failure() -> None:
+    @dataclass
+    class _GarbageStat(_FakeTransport):
+        def run(self, argv: list[str], *, cwd: str, timeout_s: int) -> CommandResult:
+            if argv[0] == "stat":
+                return CommandResult(returncode=0, stdout="not-a-number\n", stderr="")
+            return super().run(argv, cwd=cwd, timeout_s=timeout_s)
+
+    store, transport = _FakeStore(), _GarbageStat()
+    transport.files["/p"] = b"x"
+    with pytest.raises(CategorizedError) as caught:
+        _publish_remote(store, transport, "/p")
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert "non-integer" in str(caught.value)
+    assert store.presigns == []
