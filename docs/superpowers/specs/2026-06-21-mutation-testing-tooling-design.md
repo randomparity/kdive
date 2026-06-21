@@ -5,10 +5,15 @@
 ## Goal
 
 Give developers a `just mutate <source-module> <test-path>` recipe that runs mutation testing
-against one module at a time, reports surviving mutants (places where a behavioral change to the
-code would not make any test fail), and is fast enough to use iteratively while strengthening a
-test file. This validates that the ~4,859-test suite actually catches regressions in the code it
-covers, not merely that lines execute.
+against one module at a time and reports surviving mutants (places where a behavioral change to the
+code would not make any test fail). This validates that the ~4,859-test suite actually catches
+regressions in the code it covers, not merely that lines execute.
+
+Runtime depends entirely on the target's tests. Against **container-free** targets (the tests don't
+touch Postgres) a run is fast enough to use iteratively while strengthening a test file. Against
+**Postgres-backed** targets each run pays disposable-container cost (once for mutmut's stats pass,
+then per mutant's covering tests), so those are a deliberate "run sparingly" case, not the fast
+inner loop. The doc labels each default target accordingly.
 
 Both arguments are **required**. The test path is not inferred from the source path: this repo's
 test tree does **not** mirror the source tree (e.g. `tests/domain/` holds flat `test_*.py` files,
@@ -59,15 +64,17 @@ runs. Static `[tool.mutmut]` config (edit-to-retarget) was rejected because it c
 The recipe accepts any module under `src/kdive/`. The documented starting targets are chosen for
 high blast radius, with the **covering test path stated explicitly** (no inference):
 
-| target module | covering tests (explicit arg) |
-|---|---|
-| `src/kdive/domain/capacity/state.py` | `tests/services/allocation tests/services/systems` |
-| `src/kdive/security/authz/` | `tests/security/authz` |
-| `src/kdive/security/secrets/redaction.py` | `tests/security` |
-| `src/kdive/domain/` | `tests/domain` |
+| target module | covering tests (explicit arg) | cost |
+|---|---|---|
+| `src/kdive/domain/errors.py` | `tests/domain/test_errors.py` | container-free (fast loop) |
+| `src/kdive/domain/capacity/state.py` | `tests/services/allocation tests/services/systems` | Postgres-backed |
+| `src/kdive/security/authz/` | `tests/security/authz` | Postgres-backed |
+| `src/kdive/security/secrets/redaction.py` | `tests/security` | Postgres-backed |
 
-These paths are illustrative and **must be confirmed during implementation** by locating the tests
-that actually exercise each module (the suite layout does not mirror `src/`).
+These paths and cost labels are illustrative and **must be confirmed during implementation** by
+locating the tests that actually exercise each module (the suite layout does not mirror `src/`) and
+checking whether they request the Postgres fixtures. `domain/errors.py` is the verified
+container-free starting point; the broader `src/kdive/domain/` set is mixed.
 
 **Postgres caveat — these targets are not all Postgres-free.** `tests/domain/conftest.py` and
 `tests/security/conftest.py` import `migrated_url`/`pg_conn`/`postgres_url` from
@@ -78,18 +85,26 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
 
 ## Components
 
-- **`scripts/mutate.py`** (~120 lines) — the wrapper, following the existing `scripts/*.py`
+- **`scripts/mutate.py`** (~150 lines) — the wrapper, following the existing `scripts/*.py`
   guard-script convention. Responsibilities:
   1. Require both args; validate the source path exists and is under `src/kdive/`, and that the
      test path(s) exist.
   2. Write a transient `setup.cfg` `[mutmut]` section.
-  3. **Green-baseline pre-flight:** run the scoped test selection once on unmutated code and abort
-     with a clear error if it errors, fails, or collects zero tests. Mutation results are only
-     meaningful when the baseline suite passes; a broken import or a wrong test path otherwise
-     surfaces as bogus "killed" mutants.
-  4. Invoke mutmut via `uv run --with 'mutmut==3.6.0'`.
-  5. Parse `mutmut results` and print a survivor summary.
-  6. Always remove the transient config (`finally`).
+  3. **Validity guard, two layers** (mutation results are meaningless unless the unmutated suite
+     passes):
+     - *Repo-root pre-flight* — run the scoped selection once at repo root; abort on failure or
+       zero tests collected. This catches a wrong/empty test path and genuinely failing tests
+       quickly. It runs in the real tree, so it does **not** prove mutmut's isolated copy is
+       importable.
+     - *In-copy baseline* — mutmut's own first pass runs the unmutated suite inside the `mutants/`
+       copy. The wrapper parses mutmut's output and aborts if that baseline fails or finds no tests.
+       This is the layer that catches `also_copy`/copy-scope breakage (the failure mode the
+       repo-root check cannot see). Copy-scope correctness is also pinned by spike 2.
+  4. **Isolate the result store per target** — see step 6; clean or namespace `mutants/` when the
+     target differs from the last run so summaries never conflate targets.
+  5. Invoke mutmut via `uv run --with 'mutmut==3.6.0'`.
+  6. Parse `mutmut results`, filtered to the current `source_paths`, and print a survivor summary.
+  7. Always remove the transient config (`finally`).
 - **`just mutate` recipe** — thin pass-through: `uv run python scripts/mutate.py "$@"`.
 - **`.gitignore` additions** — `mutants/` (mutmut's working/cache directory) and the transient
   `setup.cfg`.
@@ -99,9 +114,9 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
 
 ## Data flow (one invocation)
 
-1. Developer runs e.g.
-   `just mutate src/kdive/domain/capacity/state.py "tests/services/allocation tests/services/systems"`.
-   Both args are required; the test path is taken verbatim (no inference, no full-suite fallback).
+1. Developer runs e.g. `just mutate src/kdive/domain/errors.py tests/domain/test_errors.py`
+   (container-free, fast). Both args are required; the test path is taken verbatim (no inference, no
+   full-suite fallback). Multiple test paths are passed space-separated and split by the wrapper.
 2. Wrapper writes a transient `setup.cfg` `[mutmut]` with:
    - `source_paths` = the target module;
    - `pytest_add_cli_args_test_selection` = `-m "not live_vm and not live_stack"` plus the given
@@ -118,15 +133,19 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
      `raise IllegalTransition(...)` / denial raises, and "removed/weakened raise" (deny→allow,
      illegal-edge-allowed) is exactly the mutation those tests must catch.
    - `max_stack_depth = 8` (keep relevant tests localized).
-3. **Green-baseline pre-flight** (see Components step 3): run the scoped selection unmutated; abort
-   if it errors, fails, or collects zero tests.
-4. mutmut: one coverage stats pass over the scoped tests → mutant→test map → run each mutant
+3. **Validity guard** (Components step 3): repo-root pre-flight aborts on a bad test path or failing
+   tests; mutmut's in-copy baseline pass is parsed to abort on copy-scope breakage or zero tests.
+4. **Store isolation** (Components step 4): if the target differs from the last run, clean/namespace
+   `mutants/` so this run's `mutmut results` reflects only this target.
+5. mutmut: one coverage stats pass over the scoped tests → mutant→test map → run each mutant
    against only its covering tests.
-5. Wrapper runs `mutmut results` and prints counts (killed / survived / timeout / suspicious) plus
-   the survivor list with `file:line`, and the hint to inspect via `mutmut show <id>` /
-   `mutmut browse`. The summary states that the score is **relative to the test path supplied** —
-   a narrow path can flatter the result.
-6. `finally`: remove the transient `setup.cfg`.
+6. Wrapper runs `mutmut results` (filtered to the current `source_paths`) and prints counts
+   (killed / survived / timeout / suspicious), the survivor list with `file:line`, and the hint to
+   inspect via `mutmut show <id>` / `mutmut browse`. The summary also reports **coverage context**:
+   how many source lines were covered (and thus mutated) versus skipped as uncovered under
+   `mutate_only_covered_lines` — so a low survivor count on a poorly-covered module can't be misread
+   as strong testing. It states the result is **relative to the test path supplied**.
+7. `finally`: remove the transient `setup.cfg`.
 
 ## Error handling
 
@@ -134,8 +153,9 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
   with a clear message rather than overwrite it.
 - **Validate both paths.** Source exists and is under `src/kdive/`; every test path exists. Missing
   test path → clear error, not a silent broadening to the full suite.
-- **Broken baseline / zero tests collected** → abort before mutating (Components step 3), so invalid
-  runs can never masquerade as a clean result.
+- **Broken baseline / zero tests collected** → abort, via both validity layers (Components step 3):
+  the repo-root pre-flight for a bad path or failing tests, and the parsed in-copy mutmut baseline
+  for copy-scope breakage. Invalid runs can never masquerade as a clean result.
 - **In-flight / stale transient config.** The generated `setup.cfg` carries a marker header. If a
   marked config already exists on start, the wrapper **refuses to run** and tells the user another
   run is in flight (or to delete the stale file if none is). It never auto-deletes — that would nuke
@@ -147,11 +167,14 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
 ## Testing
 
 - `tests/test_mutate_script.py` — fast, Postgres-free unit tests of the wrapper's decision logic:
-  required-argument enforcement, source-path validation (must exist, under `src/kdive/`), test-path
-  validation (must exist), transient-config rendering (correct `source_paths`, test selection,
-  `also_copy`, `do_not_mutate_patterns` *without* `raise`), and the in-flight-config refusal. The
-  green-baseline pre-flight is tested by stubbing the subprocess to simulate pass / fail / zero-
-  collected and asserting the wrapper aborts on the latter two. Tests behavior, not implementation.
+  required-argument enforcement, source-path validation (must exist, under `src/kdive/`), multi
+  test-path splitting and validation (each must exist), transient-config rendering (correct
+  `source_paths`, test selection, `also_copy`, `do_not_mutate_patterns` *without* `raise`), the
+  in-flight-config refusal, and the store-isolation decision (target-changed vs. same-target). The
+  two validity layers are tested by stubbing the subprocess to simulate pass / fail / zero-collected
+  for both the repo-root pre-flight and a parsed in-copy mutmut baseline, asserting the wrapper
+  aborts in each failure case. Summary formatting is tested against canned `mutmut results` output,
+  including the covered-vs-uncovered coverage line. Tests behavior, not implementation.
 - mutmut itself is **not** run inside the test suite (too slow, needs the full environment). The
   wrapper's decisions are unit-tested; mutmut is exercised manually against the documented targets.
 
@@ -181,3 +204,8 @@ design:
 3. **`libcst` install on the dev arch.** Confirm `uv run --with 'mutmut==3.6.0'` resolves without a
    Rust toolchain on the target darwin arch; if not, document the `rustc`/`cargo` prerequisite in
    `check-setup-deps.sh`.
+4. **Result-store behavior across targets.** Confirm how mutmut keys/invalidates the `mutants/`
+   store when `source_paths` changes between runs, and whether `mutmut results` can be filtered to
+   one `source_paths`. This decides the store-isolation mechanism in Components step 4 (clean vs.
+   namespace vs. filter). Also confirm mutmut surfaces a failing/empty in-copy baseline in a
+   parseable way (needed for the validity guard).
