@@ -19,8 +19,10 @@ class FakeStream:
         self._drop_after = drop_after
         self._served = 0
         self.closed = False
+        self.recv_sizes: list[int] = []
 
     def recv(self, nbytes: int) -> bytes:
+        self.recv_sizes.append(nbytes)
         if self._drop_after is not None and self._served >= self._drop_after:
             raise ConnectionResetError("stream dropped")
         if not self._chunks:
@@ -54,9 +56,11 @@ class FakeOpenConsole:
     def __init__(self, streams: list[ConsoleStream]) -> None:
         self._streams = list(streams)
         self.opens = 0
+        self.system_ids: list[object] = []
 
     def __call__(self, system_id):  # noqa: ANN001, ANN204 - duck-typed test seam
         self.opens += 1
+        self.system_ids.append(system_id)
         if self._streams:
             return self._streams.pop(0)
         return FakeStream([])
@@ -68,20 +72,26 @@ class FakePartStore:
     def __init__(self) -> None:
         self.parts: dict[int, bytes] = {}
         self.artifact: bytes | None = None
+        self.system_ids: list[object] = []
 
     def put_part(self, system_id, index: int, data: bytes) -> None:  # noqa: ANN001
+        self.system_ids.append(system_id)
         self.parts[index] = data
 
     def list_part_indices(self, system_id) -> list[int]:  # noqa: ANN001
+        self.system_ids.append(system_id)
         return sorted(self.parts)
 
     def read_part(self, system_id, index: int) -> bytes:  # noqa: ANN001
+        self.system_ids.append(system_id)
         return self.parts[index]
 
     def write_console_artifact(self, system_id, data: bytes) -> None:  # noqa: ANN001
+        self.system_ids.append(system_id)
         self.artifact = data
 
     def delete_part(self, system_id, index: int) -> None:  # noqa: ANN001
+        self.system_ids.append(system_id)
         self.parts.pop(index, None)
 
 
@@ -362,3 +372,77 @@ def test_finalize_idempotent_does_not_double_report_telemetry() -> None:
     collector.finalize()
     collector.finalize()  # second call is a no-op
     assert len(telem.recorded) == 1
+
+
+def test_collector_exposes_its_system_id_and_starts_unfinalized() -> None:
+    store = FakePartStore()
+    collector = _collector(FakeOpenConsole([FakeStream([])]), store)
+    assert collector.system_id == _SYSTEM
+    assert collector.finalized is False
+
+
+def test_every_store_and_console_seam_is_keyed_by_the_system_id() -> None:
+    # Every store/opener call must carry this collector's system_id, never a wrong/None key —
+    # parts and the assembled artifact would otherwise land under the wrong System.
+    store = FakePartStore()
+    opener = FakeOpenConsole([FakeStream([b"a" * 50])])
+    collector = _collector(opener, store, rotation_threshold=10, seam_overlap=0)
+    collector.pump_once()  # opens the stream, rotates a part (take_index -> list_part_indices)
+    collector.finalize()  # read_part + write_console_artifact
+    assert opener.system_ids == [_SYSTEM]
+    assert store.system_ids  # the store was exercised
+    assert all(sid == _SYSTEM for sid in store.system_ids)
+
+
+def test_recv_is_called_with_the_configured_read_chunk() -> None:
+    stream = FakeStream([b"data\n"])
+    store = FakePartStore()
+    collector = _collector(
+        FakeOpenConsole([stream]), store, rotation_threshold=1024, read_chunk=4096
+    )
+    collector.pump_once()
+    assert stream.recv_sizes == [4096]
+
+
+def test_non_utf8_console_bytes_are_redacted_without_raising() -> None:
+    # Console bytes are untrusted guest output; an invalid UTF-8 byte must decode with
+    # replacement (errors="replace"), never raise on the worker.
+    store = FakePartStore()
+    stream = FakeStream([b"before \xff after\n"])
+    collector = _collector(FakeOpenConsole([stream]), store, rotation_threshold=1, seam_overlap=0)
+    collector.pump_once()  # must not raise on the invalid byte
+    collector.finalize()
+    assert store.artifact is not None
+    assert b"before " in store.artifact
+    assert b" after\n" in store.artifact
+    assert "�".encode() in store.artifact  # the replacement char for the bad byte
+
+
+def test_rotation_with_data_at_or_below_overlap_uploads_nothing() -> None:
+    # When the rotated data is no larger than the seam overlap, the whole run is held back as
+    # carry and NO part is uploaded this rotation (it is not yet safe to redact across the seam).
+    store = FakePartStore()
+    stream = FakeStream([b"abc"])  # 3 bytes, well under the overlap
+    collector = _collector(FakeOpenConsole([stream]), store, rotation_threshold=1, seam_overlap=64)
+    collector.pump_once()  # crosses the (tiny) threshold but data <= overlap
+    assert store.parts == {}  # nothing uploaded; bytes are carried
+    collector.finalize()  # the carried bytes flush out exactly once at finalize
+    assert store.artifact == b"abc"
+
+
+def test_crash_flush_then_more_output_carries_nothing_stale() -> None:
+    # A crash marker forces an immediate full flush with no overlap held back. Continuing to
+    # pump afterwards must not prepend any stale/garbage carry to the next part: the second
+    # part is exactly the post-crash bytes, and the assembled artifact has no duplication.
+    store = FakePartStore()
+    stream = FakeStream([b"Kernel panic - boom\n", b"post crash line\n"])
+    collector = _collector(
+        FakeOpenConsole([stream]), store, rotation_threshold=1_000_000, seam_overlap=8
+    )
+    collector.pump_once()  # crash marker -> flush_tail uploads part 0, resets carry
+    assert store.parts[0] == b"Kernel panic - boom\n"
+    # The crash-path flush_tail upload is keyed by this collector's system_id, never None.
+    assert all(sid == _SYSTEM for sid in store.system_ids)
+    collector.pump_once()  # more output after the crash flush
+    collector.finalize()
+    assert store.artifact == b"Kernel panic - boom\npost crash line\n"
