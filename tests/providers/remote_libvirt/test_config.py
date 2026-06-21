@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import libvirt
 import pytest
 
 import kdive.config as config
@@ -25,7 +26,11 @@ from kdive.providers.remote_libvirt.config import (
     remote_config_for_resource,
     resolve_base_image_staged_volume_for,
 )
-from kdive.providers.remote_libvirt.lifecycle.gdb import allocate_gdb_port
+from kdive.providers.remote_libvirt.lifecycle.gdb import (
+    DOMAIN_PREFIX,
+    allocate_gdb_port,
+    used_gdb_ports,
+)
 
 _RESOURCE = "ub24-big"
 
@@ -472,3 +477,147 @@ def test_probe_target_is_the_reserved_never_allocated_port() -> None:
         port_max=cfg.gdb_port_max,
     )
     assert allocated != cfg.acl_probe_port
+
+
+def _gdb_domain_xml(port: int) -> str:
+    return (
+        "<domain><qemu:commandline "
+        'xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">'
+        '<qemu:arg value="-gdb"/>'
+        f'<qemu:arg value="tcp:10.0.0.5:{port}"/>'
+        "</qemu:commandline></domain>"
+    )
+
+
+class _FakeDomain:
+    def __init__(self, name: str, port: int) -> None:
+        self._name = name
+        self._port = port
+
+    def name(self) -> str:
+        return self._name
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
+        return _gdb_domain_xml(self._port)
+
+
+class _FakeConn:
+    def __init__(self, domains: list[_FakeDomain]) -> None:
+        self._domains = domains
+
+    def listAllDomains(self, flags: int = 0):  # noqa: N802 - libvirt API name
+        return self._domains
+
+
+def test_allocate_gdb_port_reuses_own_recorded_in_range_port() -> None:
+    # A System's own recorded in-range port is returned (stable across retries), not a fresh one.
+    assert (
+        allocate_gdb_port({"kdive-x": 47005}, own_name="kdive-x", port_min=47001, port_max=47099)
+        == 47005
+    )
+
+
+def test_allocate_gdb_port_reuses_own_port_at_min_boundary() -> None:
+    # own == port_min is inclusive: it is reused even though another domain holds the next
+    # port (so a fall-through to lowest-free would return a different port, exposing a
+    # `<=` -> `<` boundary mutation).
+    used = {"kdive-x": 47001, "kdive-y": 47002}
+    assert allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47099) == 47001
+
+
+def test_allocate_gdb_port_reuses_own_port_at_max_boundary() -> None:
+    # own == port_max is inclusive: it is reused even though every lower port is taken (so a
+    # fall-through would otherwise raise exhaustion or pick a lower port).
+    used = {"kdive-x": 47002, "kdive-y": 47001}
+    assert allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47002) == 47002
+
+
+def test_allocate_gdb_port_picks_lowest_free_when_no_own_port() -> None:
+    # 47001 is taken by another domain, so the lowest free port is 47002.
+    assert (
+        allocate_gdb_port({"kdive-y": 47001}, own_name="kdive-x", port_min=47001, port_max=47099)
+        == 47002
+    )
+
+
+def test_allocate_gdb_port_exhausted_range_is_provisioning_failure() -> None:
+    used = {"kdive-y": 47001, "kdive-z": 47002}
+    with pytest.raises(CategorizedError) as excinfo:
+        allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47002)
+    assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(excinfo.value) == "gdbstub port range is exhausted on the remote host"
+    assert excinfo.value.details == {"port_min": 47001, "port_max": 47002, "in_use": 2}
+
+
+def test_used_gdb_ports_maps_kdive_domains_to_recorded_ports() -> None:
+    conn = _FakeConn(
+        [
+            _FakeDomain(f"{DOMAIN_PREFIX}a", 47010),
+            _FakeDomain(f"{DOMAIN_PREFIX}b", 47011),
+            _FakeDomain("other-vm", 47012),  # non-kdive domains are skipped
+        ]
+    )
+    assert used_gdb_ports(conn) == {f"{DOMAIN_PREFIX}a": 47010, f"{DOMAIN_PREFIX}b": 47011}
+
+
+def test_used_gdb_ports_continues_past_a_skipped_domain() -> None:
+    # The non-kdive domain in the middle is skipped via `continue`, not a `break` that would
+    # drop the trailing kdive domain.
+    conn = _FakeConn(
+        [
+            _FakeDomain(f"{DOMAIN_PREFIX}a", 47010),
+            _FakeDomain("other-vm", 47012),
+            _FakeDomain(f"{DOMAIN_PREFIX}b", 47011),
+        ]
+    )
+    assert used_gdb_ports(conn) == {f"{DOMAIN_PREFIX}a": 47010, f"{DOMAIN_PREFIX}b": 47011}
+
+
+def test_used_gdb_ports_listing_failure_is_infrastructure_failure() -> None:
+    class _BoomConn:
+        def listAllDomains(self, flags: int = 0):  # noqa: N802 - libvirt API name
+            raise libvirt.libvirtError("boom")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        used_gdb_ports(_BoomConn())
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "libvirt error listing domains for gdbstub port enumeration"
+    assert excinfo.value.details == {}
+
+
+class _ErrDomain:
+    def __init__(self, name: str, code: int) -> None:
+        self._name = name
+        self._code = code
+
+    def name(self) -> str:
+        return self._name
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
+        exc = libvirt.libvirtError("boom")
+        exc.get_error_code = lambda: self._code  # type: ignore[method-assign]
+        raise exc
+
+
+def test_used_gdb_ports_skips_a_domain_that_vanishes_mid_walk() -> None:
+    # A domain disappearing mid-walk (VIR_ERR_NO_DOMAIN) is skipped, not fatal; the surviving
+    # kdive domain is still enumerated.
+    conn = _FakeConn(
+        [
+            _ErrDomain(f"{DOMAIN_PREFIX}gone", libvirt.VIR_ERR_NO_DOMAIN),  # type: ignore[list-item]
+            _FakeDomain(f"{DOMAIN_PREFIX}b", 47011),
+        ]
+    )
+    assert used_gdb_ports(conn) == {f"{DOMAIN_PREFIX}b": 47011}
+
+
+def test_used_gdb_ports_per_domain_error_is_infrastructure_failure() -> None:
+    # A non-NO_DOMAIN libvirt error reading a domain's XML is an infrastructure fault.
+    conn = _FakeConn(
+        [_ErrDomain(f"{DOMAIN_PREFIX}a", libvirt.VIR_ERR_INTERNAL_ERROR)]  # type: ignore[list-item]
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        used_gdb_ports(conn)
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "libvirt error enumerating gdbstub ports"
+    assert excinfo.value.details == {}
