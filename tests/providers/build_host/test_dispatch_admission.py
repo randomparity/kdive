@@ -26,6 +26,10 @@ from kdive.providers.ports.build_transport import BuildTransport
 from kdive.providers.shared.build_host.dispatch import (
     BuildHostTransportFactory,
     _build_over_transport_session,
+    _git_coords,
+    _git_source,
+    _require_transport_capable,
+    bind_over_transport,
     run_build_on_host,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -310,11 +314,14 @@ def test_provision_phase_point_emitted_on_happy_path() -> None:
         source=None,
         secret_registry=SecretRegistry(),
         recorder=recorder,
+        provider="remotevirt",
     )
 
     pts = _provision_points(reader)
     assert pts, "No provision phase point recorded"
     assert pts[0].attributes["outcome"] == "ok"
+    # The provider label must reach recorder.phase, not be dropped.
+    assert pts[0].attributes["provider"] == "remotevirt"
     assert ctx.entered is True
     assert ctx.exited is True
 
@@ -358,3 +365,367 @@ def test_provision_phase_point_recorded_and_exit_called_when_build_body_raises()
     assert pts[0].attributes["outcome"] == "ok"
     # Transport teardown must have been called even though the build raised.
     assert ctx.exited is True
+
+
+# ---------------------------------------------------------------------------
+# Argument forwarding: each helper must pass the real values, not None/defaults.
+# ---------------------------------------------------------------------------
+
+
+def test_git_source_returns_remote_for_git_profile_and_none_for_warm() -> None:
+    git_source = _git_source(_git_parsed())
+    assert git_source is not None
+    assert git_source.remote == "https://git.example/linux.git"
+    assert git_source.ref == "v6.9"
+    # A warm-tree profile has no remote to preflight.
+    assert _git_source(_parsed()) is None
+
+
+def test_git_coords_returns_remote_and_ref_for_git_profile() -> None:
+    remote, ref = _git_coords(_git_parsed(), _RUN_ID)
+    assert remote == "https://git.example/linux.git"
+    assert ref == "v6.9"
+
+
+def test_git_coords_rejects_warm_tree_with_run_id_in_details() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        _git_coords(_parsed(), _RUN_ID)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["run_id"] == str(_RUN_ID)
+
+
+class _BindRecordingBuilder:
+    """Records every keyword + positional ``over_transport`` received."""
+
+    def __init__(self) -> None:
+        self.transport: object = "unset"
+        self.kwargs: dict[str, object] = {}
+
+    def over_transport(self, transport: object, **kwargs: object) -> _BindRecordingBuilder:
+        self.transport = transport
+        self.kwargs = kwargs
+        return self
+
+
+def test_bind_over_transport_forwards_every_coordinate() -> None:
+    builder = _BindRecordingBuilder()
+    transport = _FakeTransport()
+    registry = SecretRegistry()
+    result = bind_over_transport(
+        cast(TransportCapableBuilder, builder),
+        cast(BuildTransport, transport),
+        host_workspace_root="/build",
+        git_remote="https://git.example/linux.git",
+        git_ref="v6.9",
+        secret_registry=registry,
+    )
+    assert result is builder
+    assert builder.transport is transport
+    assert builder.kwargs == {
+        "host_workspace_root": "/build",
+        "git_remote": "https://git.example/linux.git",
+        "git_ref": "v6.9",
+        "secret_registry": registry,
+    }
+
+
+def test_require_transport_capable_rejects_plain_builder_with_host_and_run_id() -> None:
+    plain = _RecordingBuilder()  # no over_transport → not transport-capable
+    with pytest.raises(CategorizedError) as excinfo:
+        _require_transport_capable(plain, _ephemeral_host(), _RUN_ID)
+    assert excinfo.value.category is ErrorCategory.NOT_IMPLEMENTED
+    assert excinfo.value.details["build_host"] == "eph"
+    assert excinfo.value.details["run_id"] == str(_RUN_ID)
+
+
+def test_require_transport_capable_returns_capable_builder() -> None:
+    builder = _ThreadRecordingBuilder()
+    assert _require_transport_capable(builder, _ephemeral_host(), _RUN_ID) is builder
+
+
+class _ArgRecordingBuilder:
+    """Transport-capable builder recording the args its ``over_transport``/``build`` receive."""
+
+    def __init__(self) -> None:
+        self.over_transport_args: tuple[object, ...] = ()
+        self.over_transport_kwargs: dict[str, object] = {}
+        self.build_args: tuple[object, ...] = ()
+        self.build_kwargs: dict[str, object] = {}
+
+    def over_transport(self, *args: object, **kwargs: object) -> _ArgRecordingBuilder:
+        self.over_transport_args = args
+        self.over_transport_kwargs = kwargs
+        return self
+
+    def build(self, *args: object, **kwargs: object) -> BuildOutput:
+        self.build_args = args
+        self.build_kwargs = kwargs
+        return BuildOutput(kernel_ref="k", debuginfo_ref="d", build_id="b")
+
+
+def test_local_build_forwards_run_id_parsed_recorder_provider(tmp_path: object) -> None:
+    builder = _ArgRecordingBuilder()
+    recorder = BuildPhaseRecorder.disabled()
+    parsed = _parsed()
+    asyncio.run(
+        run_build_on_host(
+            cast(TransportCapableBuilder, builder),
+            _local_host(),
+            _RUN_ID,
+            parsed,
+            secret_registry=SecretRegistry(),
+            kernel_src=str(tmp_path),
+            recorder=recorder,
+            provider="localvirt",
+        )
+    )
+    assert builder.build_args == (_RUN_ID, parsed)
+    assert builder.build_kwargs == {"recorder": recorder, "provider": "localvirt"}
+
+
+def test_transport_session_forwards_factory_args_and_build_args() -> None:
+    factory_args: dict[str, object] = {}
+    registry = SecretRegistry()
+    git_source = _git_source(_git_parsed())
+    ctx = _FakeTransportCtx()
+
+    def _factory(
+        host: BuildHost, reg: SecretRegistry, run_id: UUID, source: object
+    ) -> _FakeTransportCtx:
+        factory_args.update(host=host, reg=reg, run_id=run_id, source=source)
+        return ctx
+
+    builder = _ArgRecordingBuilder()
+    host = _ephemeral_host()
+    parsed = _git_profile()
+    recorder = BuildPhaseRecorder.disabled()
+    _build_over_transport_session(
+        cast(TransportCapableBuilder, builder),
+        cast(BuildHostTransportFactory, _factory),
+        host=host,
+        run_id=_RUN_ID,
+        parsed=parsed,
+        source=git_source,
+        secret_registry=registry,
+        recorder=recorder,
+        provider="remotevirt",
+    )
+    assert factory_args == {
+        "host": host,
+        "reg": registry,
+        "run_id": _RUN_ID,
+        "source": git_source,
+    }
+    assert builder.build_args == (_RUN_ID, parsed)
+    assert builder.build_kwargs == {"recorder": recorder, "provider": "remotevirt"}
+    # The transport (the ctx's __enter__ return) + workspace + git coords reach over_transport.
+    assert builder.over_transport_args == (ctx.transport,)
+    assert builder.over_transport_kwargs == {
+        "host_workspace_root": host.workspace_root,
+        "git_remote": "https://git.example/linux.git",
+        "git_ref": "v6.9",
+        "secret_registry": registry,
+    }
+
+
+def test_transport_session_default_provider_is_empty_string() -> None:
+    # Calling the session without ``provider`` must label the provision point "", not a sentinel.
+    reader = InMemoryMetricReader()
+    recorder = BuildPhaseRecorder(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+
+    def _factory(
+        _host: BuildHost, _reg: SecretRegistry, _run_id: UUID, _source: object
+    ) -> _FakeTransportCtx:
+        return _FakeTransportCtx()
+
+    _build_over_transport_session(
+        cast(TransportCapableBuilder, _ThreadRecordingBuilder()),
+        cast(BuildHostTransportFactory, _factory),
+        host=_ephemeral_host(),
+        run_id=_RUN_ID,
+        parsed=_git_profile(),
+        source=None,
+        secret_registry=SecretRegistry(),
+        recorder=recorder,
+    )
+    pts = _provision_points(reader)
+    assert pts
+    assert pts[0].attributes["provider"] == ""
+
+
+def test_transport_session_rejects_warm_profile_with_run_id_in_details() -> None:
+    # A non-git profile reaching the session must fail _git_coords carrying the run_id.
+    def _factory(
+        _host: BuildHost, _reg: SecretRegistry, _run_id: UUID, _source: object
+    ) -> _FakeTransportCtx:
+        return _FakeTransportCtx()
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _build_over_transport_session(
+            cast(TransportCapableBuilder, _ThreadRecordingBuilder()),
+            cast(BuildHostTransportFactory, _factory),
+            host=_ephemeral_host(),
+            run_id=_RUN_ID,
+            parsed=_parsed(),  # warm-tree profile, no git remote
+            source=None,
+            secret_registry=SecretRegistry(),
+            recorder=BuildPhaseRecorder.disabled(),
+        )
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["run_id"] == str(_RUN_ID)
+
+
+def test_remote_build_wires_session_args_through_run_build_on_host() -> None:
+    factory_args: dict[str, object] = {}
+    registry = SecretRegistry()
+
+    def _factory(
+        host: BuildHost, reg: SecretRegistry, run_id: UUID, source: object
+    ) -> _FakeTransportCtx:
+        factory_args.update(host=host, reg=reg, run_id=run_id, source=source)
+        return _FakeTransportCtx()
+
+    builder = _ArgRecordingBuilder()
+    parsed = _git_parsed()
+    recorder = BuildPhaseRecorder.disabled()
+    asyncio.run(
+        run_build_on_host(
+            cast(TransportCapableBuilder, builder),
+            _ephemeral_host(),
+            _RUN_ID,
+            parsed,
+            secret_registry=registry,
+            kernel_src="",
+            transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
+            recorder=recorder,
+            provider="remotevirt",
+        )
+    )
+    # run_id, source (the git ref), secret_registry all flow to the factory.
+    assert factory_args["run_id"] == _RUN_ID
+    assert factory_args["reg"] is registry
+    git_source = factory_args["source"]
+    assert git_source is not None and git_source.remote == "https://git.example/linux.git"
+    # recorder + provider flow to the build call.
+    assert builder.build_args == (_RUN_ID, parsed)
+    assert builder.build_kwargs == {"recorder": recorder, "provider": "remotevirt"}
+
+
+def test_remote_build_default_provider_is_empty_string() -> None:
+    reader = InMemoryMetricReader()
+    recorder = BuildPhaseRecorder(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+
+    def _factory(
+        _host: BuildHost, _reg: SecretRegistry, _run_id: UUID, _source: object
+    ) -> _FakeTransportCtx:
+        return _FakeTransportCtx()
+
+    asyncio.run(
+        run_build_on_host(
+            cast(TransportCapableBuilder, _ArgRecordingBuilder()),
+            _ephemeral_host(),
+            _RUN_ID,
+            _git_parsed(),
+            secret_registry=SecretRegistry(),
+            kernel_src="",
+            transport_factories={BuildHostKind.EPHEMERAL_LIBVIRT: _factory},
+            recorder=recorder,
+        )
+    )
+    pts = _provision_points(reader)
+    assert pts
+    # The omitted provider defaults to "" (not a sentinel), reaching the provision label.
+    assert pts[0].attributes["provider"] == ""
+
+
+def test_remote_build_rejects_non_transport_capable_builder() -> None:
+    # A plain builder on a remote host must fail with host name + run_id in the error details.
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(
+            run_build_on_host(
+                _RecordingBuilder(),
+                _ephemeral_host(),
+                _RUN_ID,
+                _git_parsed(),
+                secret_registry=SecretRegistry(),
+                kernel_src="",
+                transport_factories={
+                    BuildHostKind.EPHEMERAL_LIBVIRT: cast(
+                        BuildHostTransportFactory, lambda *a, **k: _FakeTransportCtx()
+                    )
+                },
+            )
+        )
+    assert excinfo.value.category is ErrorCategory.NOT_IMPLEMENTED
+    assert excinfo.value.details["build_host"] == "eph"
+    assert excinfo.value.details["run_id"] == str(_RUN_ID)
+
+
+class _ExitRecordingCtx:
+    """Transport ctx recording the exact ``__exit__`` triple it receives."""
+
+    def __init__(self) -> None:
+        self.exit_args: tuple[object, object, object] | None = None
+
+    def __enter__(self) -> _FakeTransport:
+        return _FakeTransport()
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self.exit_args = (exc_type, exc_val, exc_tb)
+
+
+def test_transport_session_propagates_exc_triple_to_exit_on_failure() -> None:
+    ctx = _ExitRecordingCtx()
+
+    def _factory(
+        _host: BuildHost, _reg: SecretRegistry, _run_id: UUID, _source: object
+    ) -> _ExitRecordingCtx:
+        return ctx
+
+    boom = RuntimeError("build body exploded")
+
+    class _FailingBuilder:
+        def over_transport(self, transport: object, **_kw: object) -> _FailingBuilder:
+            return self
+
+        def build(self, run_id: UUID, profile: object, **_: object) -> BuildOutput:
+            raise boom
+
+    with pytest.raises(RuntimeError, match="build body exploded"):
+        _build_over_transport_session(
+            cast(TransportCapableBuilder, _FailingBuilder()),
+            cast(BuildHostTransportFactory, _factory),
+            host=_ephemeral_host(),
+            run_id=_RUN_ID,
+            parsed=_git_profile(),
+            source=None,
+            secret_registry=SecretRegistry(),
+            recorder=BuildPhaseRecorder.disabled(),
+        )
+
+    assert ctx.exit_args is not None
+    exc_type, exc_val, exc_tb = ctx.exit_args
+    assert exc_type is RuntimeError  # kills type(exc)->None and type(None)
+    assert exc_val is boom  # the exact exception instance is forwarded
+    assert exc_tb is not None  # the traceback is forwarded, not dropped
+
+
+def test_transport_session_passes_clean_triple_to_exit_on_success() -> None:
+    ctx = _ExitRecordingCtx()
+
+    def _factory(
+        _host: BuildHost, _reg: SecretRegistry, _run_id: UUID, _source: object
+    ) -> _ExitRecordingCtx:
+        return ctx
+
+    _build_over_transport_session(
+        cast(TransportCapableBuilder, _ThreadRecordingBuilder()),
+        cast(BuildHostTransportFactory, _factory),
+        host=_ephemeral_host(),
+        run_id=_RUN_ID,
+        parsed=_git_profile(),
+        source=None,
+        secret_registry=SecretRegistry(),
+        recorder=BuildPhaseRecorder.disabled(),
+    )
+    assert ctx.exit_args == (None, None, None)
