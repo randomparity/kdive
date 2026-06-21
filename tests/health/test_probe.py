@@ -92,6 +92,31 @@ def test_flip_then_recover() -> None:
     asyncio.run(_run())
 
 
+def test_subsecond_ttl_still_caches_a_healthy_result() -> None:
+    # A small positive TTL (0 < ttl < 1s) must still cache: two checks inside the window probe
+    # the backend only once. Guards the caching gate against an off-by-one threshold.
+    async def _run() -> None:
+        calls: list[str] = []
+        probe = HealthProbe(checks=[_ok_check("pg", calls)], healthy_ttl=0.5)
+        assert (await probe.check()).ready is True
+        assert (await probe.check()).ready is True
+        assert calls == ["pg"], "a sub-second TTL must still cache the healthy result"
+
+    asyncio.run(_run())
+
+
+def test_failing_result_clears_the_cache_to_none() -> None:
+    # A non-ready result must reset the cache slot to None (not a falsy stand-in), so a stale,
+    # non-ReadyResult value can never be returned from the cache on a later call.
+    async def _run() -> None:
+        calls: list[str] = []
+        probe = HealthProbe(checks=[_failing_check("pg", calls)], healthy_ttl=60.0)
+        await probe.check()
+        assert probe._cached is None
+
+    asyncio.run(_run())
+
+
 def test_per_check_timeout_reads_as_down() -> None:
     async def _run() -> None:
         calls: list[str] = []
