@@ -16,8 +16,11 @@ See docs/development/mutation-testing.md.
 
 from __future__ import annotations
 
+import argparse
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -165,3 +168,81 @@ def write_signature(sig: str, mutants_dir: Path) -> None:
     """Record the current target in the store so the next run can detect a change."""
     if mutants_dir.exists():
         (mutants_dir / ".kdive-target").write_text(sig)
+
+
+_CONFIG_PATH = _ROOT / "setup.cfg"
+_MUTANTS_DIR = _ROOT / "mutants"
+
+
+def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=_ROOT, text=True, capture_output=True, check=False)
+
+
+def preflight_collect(test_paths: list[str], runner=_run_subprocess) -> None:
+    """Cheap repo-root check: collect-only the scoped tests; abort on bad/empty path."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "--co",
+        "-q",
+        "-m",
+        "not live_vm and not live_stack",
+        *test_paths,
+    ]
+    result = runner(cmd)
+    if result.returncode == 5:
+        raise MutateError(f"no tests collected for: {' '.join(test_paths)}")
+    if result.returncode != 0:
+        raise MutateError(f"test collection failed: {result.stderr.strip()}")
+
+
+def run_mutmut(runner=_run_subprocess) -> str:
+    """Run ``mutmut run``; non-zero means a broken in-copy baseline/copy — abort."""
+    result = runner([sys.executable, "-m", "mutmut", "run"])
+    if result.returncode != 0:
+        raise MutateError(
+            "mutmut baseline failed (failing tests or copy-scope breakage):\n"
+            + result.stderr.strip()
+        )
+    return result.stdout
+
+
+def collect_results(runner=_run_subprocess) -> str:
+    """Return ``mutmut results`` stdout (the non-killed mutants)."""
+    return runner([sys.executable, "-m", "mutmut", "results"]).stdout
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="mutate",
+        description="Run mutmut against one module and report surviving mutants.",
+    )
+    parser.add_argument("source", help="source .py file under src/kdive")
+    parser.add_argument("tests", nargs="+", help="explicit covering test path(s)")
+    args = parser.parse_args(argv)
+
+    try:
+        source_rel = resolve_source(args.source)
+        test_paths = resolve_test_paths(args.tests)
+        guard_no_existing_config(_CONFIG_PATH)
+        preflight_collect(test_paths)
+        sig = signature(source_rel, test_paths)
+        prepare_store(sig, _MUTANTS_DIR)
+        _CONFIG_PATH.write_text(render_config(source_rel, test_paths))
+        try:
+            run_stdout = run_mutmut()
+            survivors = parse_survivors(collect_results())
+            total = parse_total_mutants(run_stdout)
+            write_signature(sig, _MUTANTS_DIR)
+            print(format_summary(total, survivors, source_rel, test_paths))
+        finally:
+            _CONFIG_PATH.unlink(missing_ok=True)
+    except MutateError as exc:
+        print(f"mutate: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

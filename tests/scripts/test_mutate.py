@@ -5,6 +5,7 @@ mutmut itself is never run here; these test the wrapper's pure decision logic.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,14 +13,17 @@ import pytest
 from scripts.mutate import (
     MARKER,
     MutateError,
+    collect_results,
     format_summary,
     guard_no_existing_config,
     parse_survivors,
     parse_total_mutants,
+    preflight_collect,
     prepare_store,
     render_config,
     resolve_source,
     resolve_test_paths,
+    run_mutmut,
     signature,
     write_signature,
 )
@@ -203,3 +207,39 @@ def test_write_signature_records_target(tmp_path: Path) -> None:
     mutants.mkdir()
     write_signature("sig", mutants)
     assert (mutants / ".kdive-target").read_text() == "sig"
+
+
+def _fake_runner(returncode: int, stdout: str = "", stderr: str = ""):
+    def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    return run
+
+
+def test_preflight_passes_when_tests_collected() -> None:
+    preflight_collect(["tests/domain/test_errors.py"], runner=_fake_runner(0, "35 tests"))
+
+
+def test_preflight_aborts_on_no_tests_collected() -> None:
+    # pytest exit code 5 == "no tests collected"
+    with pytest.raises(MutateError, match="no tests collected"):
+        preflight_collect(["tests/x"], runner=_fake_runner(5))
+
+
+def test_preflight_aborts_on_collection_error() -> None:
+    with pytest.raises(MutateError, match="collection failed"):
+        preflight_collect(["tests/x"], runner=_fake_runner(2, stderr="bad import"))
+
+
+def test_run_mutmut_returns_stdout_on_success() -> None:
+    out = run_mutmut(runner=_fake_runner(0, "10/10 done"))
+    assert out == "10/10 done"
+
+
+def test_run_mutmut_aborts_on_broken_baseline() -> None:
+    with pytest.raises(MutateError, match="baseline"):
+        run_mutmut(runner=_fake_runner(1, stderr="ModuleNotFoundError: kdive.config"))
+
+
+def test_collect_results_returns_stdout() -> None:
+    assert collect_results(runner=_fake_runner(0, "a: survived\n")) == "a: survived\n"
