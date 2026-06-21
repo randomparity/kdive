@@ -182,6 +182,23 @@ def test_snapshot_pcie_missing_device_fails() -> None:
     assert snapshot_satisfies(sizing, [_CLAIM], req) is False
 
 
+def test_snapshot_pcie_same_vendor_different_device_fails() -> None:
+    # A claim that shares the vendor but not the device must NOT count as a match:
+    # containment requires both vendor_id AND device_id to match the same claim.
+    sizing = AllocationSizing(vcpu=4, memory_mb=8192, disk_gb=40)
+    req = ReuseRequirement(pcie=["8086:9999"])  # vendor 8086 matches _CLAIM, device differs
+
+    assert snapshot_satisfies(sizing, [_CLAIM], req) is False
+
+
+def test_snapshot_pcie_same_device_different_vendor_fails() -> None:
+    # A claim that shares the device but not the vendor must NOT count as a match.
+    sizing = AllocationSizing(vcpu=4, memory_mb=8192, disk_gb=40)
+    req = ReuseRequirement(pcie=["9999:1572"])  # device 1572 matches _CLAIM, vendor differs
+
+    assert snapshot_satisfies(sizing, [_CLAIM], req) is False
+
+
 def test_snapshot_pcie_class_spec_is_configuration_error() -> None:
     sizing = AllocationSizing(vcpu=4, memory_mb=8192, disk_gb=40)
     req = ReuseRequirement(pcie=["class=02"])
@@ -189,6 +206,11 @@ def test_snapshot_pcie_class_spec_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         snapshot_satisfies(sizing, [_CLAIM], req)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # The error names the offending spec and carries it in structured details so a caller
+    # can surface which assertion failed.
+    assert "class=02" in str(exc.value)
+    assert "not a vendor:device spec" in str(exc.value)
+    assert exc.value.details == {"spec": "class=02"}
 
 
 def test_snapshot_malformed_pcie_spec_is_configuration_error() -> None:
