@@ -16,16 +16,21 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.build import _local_modules_bundle
 from kdive.providers.local_libvirt.lifecycle import install
 from kdive.providers.local_libvirt.lifecycle.install import (
     ConsoleVerdict,
+    Fetch,
+    GuestModuleWriter,
     LocalLibvirtInstall,
     ReadinessResult,
+    _RealGuestModuleWriter,
     _stage_object,
     _verdict_to_result,
     classify_console,
 )
 from kdive.providers.ports import InstallRequest
+from kdive.providers.shared.build_host.publishing.artifact_publish import ArtifactBytes
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
@@ -63,13 +68,63 @@ class _Readiness:
         return ReadinessResult(answered=self.answered, ok=self.ok, probe_error=self.probe_error)
 
 
-def _existing_domain() -> FakeDomain:
-    """The domain provisioning already defined (no <os> direct-kernel section yet)."""
-    return FakeDomain(domain_name=f"kdive-{_SYS}", system_id=str(_SYS))
+@dataclass
+class _FakeModuleWriter:
+    """Records an "inject" into the shared events list; ``fail`` raises INFRASTRUCTURE_FAILURE."""
+
+    events: list[str]
+    injected: bool = False
+    fail: bool = False
+
+    def inject(self, overlay: str, modules_tar: Path) -> None:
+        self.events.append("inject")
+        if self.fail:
+            raise CategorizedError(
+                "synthetic inject failure", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+        self.injected = True
 
 
-def _conn_with_existing(*, define_error: int | None = None) -> FakeLibvirtConn:
-    domain = _existing_domain()
+@dataclass
+class _RecordingFetch:
+    """Records a "fetch" into the shared events list and captures the fetched refs."""
+
+    events: list[str]
+    refs: list[str] = field(default_factory=list)
+
+    def __call__(self, ref: str, dest: Path) -> None:
+        self.events.append("fetch")
+        self.refs.append(ref)
+
+
+@dataclass
+class _EventDomain(FakeDomain):
+    """A FakeDomain that records ``destroy`` into a shared events list (force-off ordering)."""
+
+    events: list[str] = field(default_factory=list)
+
+    def destroy(self) -> int:
+        self.events.append("destroy")
+        return super().destroy()
+
+
+def _existing_domain(events: list[str] | None = None) -> FakeDomain:
+    """The domain provisioning already defined (no <os> direct-kernel section yet).
+
+    When ``events`` is supplied the domain reports ``isActive() == 1`` and records its
+    ``destroy`` into the shared list so the install force-off ordering is observable.
+    """
+    if events is None:
+        return FakeDomain(domain_name=f"kdive-{_SYS}", system_id=str(_SYS))
+    return _EventDomain(
+        domain_name=f"kdive-{_SYS}", system_id=str(_SYS), active=True, events=events
+    )
+
+
+def _conn_with_existing(
+    *, define_error: int | None = None, events: list[str] | None = None
+) -> FakeLibvirtConn:
+    domain = _existing_domain(events)
     return FakeLibvirtConn(lookup={domain.domain_name: domain}, define_error=define_error)
 
 
@@ -79,6 +134,8 @@ def _install(
     fetch: _Fetch | None = None,
     seam: _Readiness | None = None,
     staging_root: Path,
+    module_writer: GuestModuleWriter | None = None,
+    fetch_modules: Fetch | None = None,
 ) -> LocalLibvirtInstall:
     fetch = fetch or _Fetch()
     seam = seam or _Readiness()
@@ -89,6 +146,8 @@ def _install(
         readiness=seam.readiness,
         staging_root=staging_root,
         boot_window_polls=3,
+        fetch_modules=fetch_modules or fetch,
+        module_writer=module_writer,
     )
 
 
@@ -97,6 +156,7 @@ def _request(
     cmdline: str = _CMDLINE,
     method: CaptureMethod = CaptureMethod.HOST_DUMP,
     initrd_ref: str | None = None,
+    modules_ref: str | None = None,
 ) -> InstallRequest:
     return InstallRequest(
         system_id=_SYS,
@@ -105,6 +165,7 @@ def _request(
         cmdline=cmdline,
         method=method,
         initrd_ref=initrd_ref,
+        modules_ref=modules_ref,
     )
 
 
@@ -176,6 +237,76 @@ def test_install_kdump_with_initrd_proceeds(tmp_path: Path) -> None:
     inst = _install(conn=conn, staging_root=tmp_path)
     inst.install(_request(method=CaptureMethod.KDUMP, initrd_ref=_INITRD_REF))
     assert len(conn.defined_xml) == 1  # redefined once, no CONFIGURATION_ERROR raised
+
+
+# --- install: module injection (from-source kdump lane) ------------------------------
+
+
+def test_install_kdump_with_modules_ref_injects_and_no_initrd_rendered(tmp_path: Path) -> None:
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)  # its domain is active
+    writer = _FakeModuleWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer, fetch_modules=fetch)
+
+    inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
+
+    assert writer.injected
+    assert fetch.refs == ["runs/r/modules"]  # the modules tarball was fetched
+    # force-off precedes the fetch which precedes the inject.
+    assert events.index("destroy") < events.index("fetch") < events.index("inject")
+    assert len(conn.defined_xml) == 1
+    assert "<initrd>" not in conn.defined_xml[0]  # production boot has no separate initrd
+
+
+def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(
+    tmp_path: Path,
+) -> None:
+    # The corruption guard must fire before the writer touches the overlay, regardless of outcome.
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeModuleWriter(events, fail=True)
+    inst = _install(
+        conn=conn,
+        staging_root=tmp_path,
+        module_writer=writer,
+        fetch_modules=_RecordingFetch(events),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert events[0] == "destroy"  # force-off happened before the failed inject
+    assert conn.defined_xml == []  # nothing redefined
+
+
+def test_install_kdump_with_neither_modules_nor_initrd_is_config_error(tmp_path: Path) -> None:
+    conn = _conn_with_existing()
+    inst = _install(conn=conn, staging_root=tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        inst.install(_request(method=CaptureMethod.KDUMP))
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.defined_xml == []
+
+
+def test_modules_bundle_read_release_matches_build_layout(tmp_path: Path) -> None:
+    # The build seam tars members as ``lib/modules/<ver>/...``; _read_release must recover
+    # ``<ver>`` from that exact layout (the build↔install bundle contract, #654). A regression
+    # here is the double-nesting / depmod-"lib" bug the live path would otherwise hit.
+    version = "7.0.0-kdive"
+    mod_root = tmp_path / "modroot"
+    ver_dir = mod_root / "lib" / "modules" / version
+    (ver_dir / "kernel").mkdir(parents=True)
+    (ver_dir / "kernel" / "foo.ko").write_bytes(b"\x7fELF stub")
+    (ver_dir / "modules.order").write_bytes(b"kernel/foo.ko\n")
+
+    bundle = _local_modules_bundle(tmp_path / "workspace", mod_root)
+    assert isinstance(bundle, ArtifactBytes)  # the worker-local seam holds the bytes in memory
+    tar_path = tmp_path / "modules.tar.gz"
+    tar_path.write_bytes(bundle.data)
+
+    assert _RealGuestModuleWriter._read_release(tar_path, "ov") == version
 
 
 # --- install: failures ---------------------------------------------------------------

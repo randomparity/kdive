@@ -326,9 +326,7 @@ def _local_vmlinux_source(workspace: Path) -> ArtifactSource:  # pragma: no cove
     return ArtifactBytes(_build_exec.real_read_vmlinux(workspace))
 
 
-def _local_modules_bundle(  # pragma: no cover - live_vm
-    workspace: Path, mod_root: Path
-) -> ArtifactSource:
+def _local_modules_bundle(workspace: Path, mod_root: Path) -> ArtifactSource:
     """Worker-local modules seam: tar ``<mod_root>/lib/modules`` to gzip bytes.
 
     Drops the absolute back-reference symlinks ``make modules_install`` plants (``build`` and

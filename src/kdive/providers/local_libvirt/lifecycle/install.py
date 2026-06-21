@@ -29,6 +29,7 @@ import logging
 import re
 import shutil
 import subprocess  # noqa: S404 - virsh domstate is invoked with a fixed argv, no shell
+import tarfile
 import time
 import xml.etree.ElementTree as ET  # noqa: S405 - constructs/edits self-owned domain XML only
 from collections.abc import Callable
@@ -46,6 +47,7 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.config.core_settings import INSTALL_STAGING
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports import InstallRequest
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
@@ -110,6 +112,12 @@ class _LibvirtConn(Protocol):
     def close(self) -> int: ...
 
 
+class GuestModuleWriter(Protocol):
+    """Inject a kernel ``modules.tar.gz`` into a System's overlay at ``/lib/modules/<ver>``."""
+
+    def inject(self, overlay: str, modules_tar: Path) -> None: ...
+
+
 type Connect = Callable[[], _LibvirtConn]
 type Fetch = Callable[[str, Path], None]
 type Readiness = Callable[[UUID], ReadinessResult]
@@ -135,6 +143,8 @@ class LocalLibvirtInstall:
         readiness: Readiness,
         staging_root: Path,
         boot_window_polls: int = _DEFAULT_BOOT_WINDOW_POLLS,
+        fetch_modules: Fetch | None = None,
+        module_writer: GuestModuleWriter | None = None,
     ) -> None:
         self._connect = connect
         self._fetch_kernel = fetch_kernel
@@ -142,6 +152,8 @@ class LocalLibvirtInstall:
         self._readiness = readiness
         self._staging_root = staging_root
         self._boot_window_polls = boot_window_polls
+        self._fetch_modules = fetch_modules or fetch_kernel
+        self._module_writer = module_writer
 
     @classmethod
     def from_env(cls) -> LocalLibvirtInstall:
@@ -162,6 +174,8 @@ class LocalLibvirtInstall:
             fetch_initrd=_real_fetch,
             readiness=_real_readiness,
             staging_root=staging_root,
+            fetch_modules=_real_fetch,
+            module_writer=_RealGuestModuleWriter(),
         )
 
     def install(self, request: InstallRequest) -> None:
@@ -196,9 +210,13 @@ class LocalLibvirtInstall:
         if request.initrd_ref is not None:
             initrd_path = staging_dir / "initrd"
             self._fetch_initrd(request.initrd_ref, initrd_path)
-        if request.method is CaptureMethod.KDUMP and not _kdump_capture_present(initrd_path):
+        if request.modules_ref is not None:
+            self._inject_built_modules(request.system_id, request.modules_ref, staging_dir)
+        if request.method is CaptureMethod.KDUMP and not (
+            request.modules_ref is not None or initrd_path is not None
+        ):
             raise CategorizedError(
-                "kdump capture initramfs not staged (a separate initrd is required for kdump)",
+                "kdump capture environment absent (need injected modules or a staged initrd)",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"system_id": str(request.system_id)},
             )
@@ -212,6 +230,56 @@ class LocalLibvirtInstall:
                 conn.defineXML(xml)
             except libvirt.libvirtError as exc:
                 raise self._install_failure("redefining", domain_name) from exc
+        finally:
+            _close(conn)
+
+    def _inject_built_modules(self, system_id: UUID, modules_ref: str, staging_dir: Path) -> None:
+        """Force-off the domain, then inject ``/lib/modules/<ver>`` into its overlay (ADR-0203).
+
+        Ordered force-off → fetch → inject: a rw libguestfs mount of a live qcow2 corrupts it,
+        and ``runs.install`` can target an already-booted System (ADR-0026 §7 recovery), so the
+        domain is destroyed (idempotent) before the writer touches the overlay. Injection itself
+        is idempotent (clobber + re-extract), so a retried install self-heals a partial write.
+
+        Raises:
+            CategorizedError: ``MISSING_DEPENDENCY`` if libguestfs is absent or no writer is
+                configured; ``INFRASTRUCTURE_FAILURE`` on a force-off or libguestfs fault; any
+                fetch error category from the modules-fetch seam.
+        """
+        if self._module_writer is None:
+            raise CategorizedError(
+                "module injection requested but no GuestModuleWriter is configured",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+                details={"system_id": str(system_id)},
+            )
+        self._force_off_if_active(system_id)
+        modules_tar = staging_dir / "modules.tar.gz"
+        self._fetch_modules(modules_ref, modules_tar)
+        self._module_writer.inject(overlay_path(system_id), modules_tar)
+
+    def _force_off_if_active(self, system_id: UUID) -> None:
+        """Destroy the System's domain if it is running (idempotent), mirroring ``_power_cycle``.
+
+        A rw libguestfs mount of a live overlay corrupts it, so the domain must be off before
+        the module writer opens the overlay read-write (ADR-0203). An absent domain is the
+        achieved post-state (nothing running to quiesce).
+        """
+        domain_name = domain_name_for(system_id)
+        conn = self._open("to force-off before module injection")
+        try:
+            try:
+                domain = conn.lookupByName(domain_name)
+            except libvirt.libvirtError:
+                return  # already gone — nothing running to quiesce
+            try:
+                if domain.isActive():
+                    domain.destroy()
+            except libvirt.libvirtError as exc:
+                raise CategorizedError(
+                    "failed to force-off the System domain before module injection",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"domain": domain_name},
+                ) from exc
         finally:
             _close(conn)
 
@@ -421,15 +489,130 @@ def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
     _stage_object(object_store_from_env(), ref, dest)
 
 
-def _kdump_capture_present(initrd_path: Path | None) -> bool:
-    """Host-observable kdump prerequisite: a separate capture initramfs was staged.
+_MODULES_ROOT = "/lib/modules"
 
-    A ``crashkernel=`` reservation is inert without a capture initramfs (ADR-0030 §4).
-    This is necessary, not sufficient — it does not prove the initrd is kdump-capable;
-    an embedded-initramfs kernel (``initrd_ref=None`` → ``initrd_path is None``) is rejected
-    for kdump (ADR-0055 §5).
+
+class _GuestFS(Protocol):  # pragma: no cover - live_vm (libguestfs binding surface)
+    """The subset of the libguestfs handle the module writer drives (typing only)."""
+
+    def add_drive_opts(self, filename: str, *, format: str, readonly: int) -> None: ...
+    def launch(self) -> None: ...
+    def inspect_os(self) -> list[str]: ...
+    def mount(self, device: str, mountpoint: str) -> None: ...
+    def rm_rf(self, path: str) -> None: ...
+    def tar_in(self, tarfile: str, directory: str, *, compress: str) -> None: ...
+    def command(self, arguments: list[str]) -> str: ...
+    def is_file(self, path: str) -> int: ...
+    def shutdown(self) -> None: ...
+    def close(self) -> None: ...
+
+
+class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
+    """Inject ``/lib/modules/<ver>`` into a System overlay rw via libguestfs (ADR-0203).
+
+    Mirrors ``retrieve.py``'s ``_LibguestfsCoreReader`` idioms but mounts read-WRITE
+    (``readonly=0``). Injection is idempotent: the module version directory is clobbered
+    before the tarball is extracted, then ``depmod`` is run and a completion sentinel
+    (``depmod`` exit 0 + a ``modules.dep`` file present) is verified — an all-builtin kdump
+    kernel leaves a valid *empty* ``modules.dep``, so the sentinel checks existence, not size.
+    A missing ``guestfs`` binding is a ``MISSING_DEPENDENCY``; any libguestfs/depmod fault is an
+    ``INFRASTRUCTURE_FAILURE`` carrying the overlay path.
     """
-    return initrd_path is not None and initrd_path.exists()
+
+    def inject(self, overlay: str, modules_tar: Path) -> None:
+        version = self._read_release(modules_tar, overlay)
+        guest = self._mount_rw(overlay)
+        try:
+            self._extract_and_index(guest, overlay, str(modules_tar), version)
+        finally:
+            with contextlib.suppress(Exception):
+                guest.shutdown()
+            with contextlib.suppress(Exception):
+                guest.close()
+
+    @staticmethod
+    def _mount_rw(overlay: str) -> _GuestFS:
+        try:
+            import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
+        except ImportError as exc:
+            raise CategorizedError(
+                "libguestfs (the guestfs Python binding) is required to inject kernel modules",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+            ) from exc
+        guest = guestfs.GuestFS(python_return_dict=True)
+        try:
+            guest.add_drive_opts(overlay, format="qcow2", readonly=0)
+            guest.launch()
+            roots = guest.inspect_os()
+        except Exception as exc:
+            guest.close()
+            raise _RealGuestModuleWriter._io_failure(
+                "opening the System overlay read-write", overlay, exc
+            ) from exc
+        if not roots:
+            guest.close()
+            raise CategorizedError(
+                "could not inspect the System overlay to inject kernel modules",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"overlay": overlay},
+            )
+        guest.mount(roots[0], "/")
+        return guest
+
+    @staticmethod
+    def _extract_and_index(guest: _GuestFS, overlay: str, tar: str, version: str) -> None:
+        version_dir = f"{_MODULES_ROOT}/{version}"
+        try:
+            guest.rm_rf(version_dir)  # clobber any partial prior write (idempotent re-extract)
+            guest.tar_in(tar, "/", compress="gzip")  # members are lib/modules/<ver>/...
+            guest.command(["depmod", "-a", version])
+        except Exception as exc:
+            raise _RealGuestModuleWriter._io_failure(
+                "extracting and indexing the kernel modules", overlay, exc
+            ) from exc
+        if not guest.is_file(f"{version_dir}/modules.dep"):
+            raise CategorizedError(
+                "module injection completed but modules.dep is absent after depmod",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"overlay": overlay, "version_dir": version_dir},
+            )
+
+    @staticmethod
+    def _read_release(modules_tar: Path, overlay: str) -> str:
+        """The injected modules version: the dir name under ``lib/modules/`` in the host tarball.
+
+        The build seam stages members as ``lib/modules/<ver>/...`` (the remote-consistent layout),
+        so the version is the first path component after the ``lib/modules/`` prefix. It is read
+        from the host-side archive (the tarball is on the worker filesystem, not yet in the
+        appliance), avoiding a brittle appliance shell-out; the version drives both the clobber
+        target and the ``depmod`` argument.
+        """
+        prefix = _MODULES_ROOT.strip("/") + "/"
+        try:
+            with tarfile.open(modules_tar, "r:gz") as archive:
+                for name in archive.getnames():
+                    normalized = name.strip("/")
+                    if normalized.startswith(prefix):
+                        version = normalized[len(prefix) :].split("/", 1)[0]
+                        if version:
+                            return version
+        except (OSError, tarfile.TarError) as exc:
+            raise _RealGuestModuleWriter._io_failure(
+                "reading the modules tarball version", overlay, exc
+            ) from exc
+        raise CategorizedError(
+            "the modules tarball is empty; cannot determine the kernel version",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"overlay": overlay},
+        )
+
+    @staticmethod
+    def _io_failure(op: str, overlay: str, exc: Exception) -> CategorizedError:
+        return CategorizedError(
+            f"libguestfs failed {op} for module injection",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"overlay": overlay, "error": type(exc).__name__},
+        )
 
 
 def _bounded_probe_error(message: str) -> str:
