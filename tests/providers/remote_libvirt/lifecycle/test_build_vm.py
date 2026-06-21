@@ -215,6 +215,103 @@ def test_render_build_domain_xml_has_agent_channel_and_no_gdbstub() -> None:
     assert recorded_gdb_port(xml) is None
 
 
+def test_render_build_domain_xml_full_structure() -> None:
+    # Distinct, non-default values for every parameter so a wrong attribute name or a swapped
+    # value cannot pass by coinciding with a default.
+    from defusedxml.ElementTree import fromstring as _fromstring
+
+    xml = render_build_domain_xml(
+        RUN_ID,
+        pool="build-pool",
+        volume="overlay.qcow2",
+        network="isolated-net",
+        machine="q35",
+        vcpus=6,
+        memory_mib=4096,
+        arch="aarch64",
+    )
+    root = _fromstring(xml)
+
+    assert root.tag == "domain"
+    assert root.get("type") == "kvm"
+    assert root.findtext("name") == DOMAIN_NAME
+    assert root.findtext("uuid") == str(RUN_ID)
+
+    memory = root.find("memory")
+    assert memory is not None
+    assert memory.get("unit") == "MiB"
+    assert memory.text == "4096"
+    assert root.findtext("vcpu") == "6"
+
+    os_type = root.find("os/type")
+    assert os_type is not None
+    assert os_type.get("arch") == "aarch64"
+    assert os_type.get("machine") == "q35"
+    assert os_type.text == "hvm"
+    boot = root.find("os/boot")
+    assert boot is not None
+    assert boot.get("dev") == "hd"
+
+    assert root.find("features/acpi") is not None
+
+    disk = root.find("devices/disk")
+    assert disk is not None
+    assert disk.get("type") == "volume"
+    assert disk.get("device") == "disk"
+    driver = disk.find("driver")
+    assert driver is not None
+    assert driver.get("name") == "qemu"
+    assert driver.get("type") == "qcow2"
+    source = disk.find("source")
+    assert source is not None
+    assert source.get("pool") == "build-pool"
+    assert source.get("volume") == "overlay.qcow2"
+    target = disk.find("target")
+    assert target is not None
+    assert target.get("dev") == "vda"
+    assert target.get("bus") == "virtio"
+
+    interface = root.find("devices/interface")
+    assert interface is not None
+    assert interface.get("type") == "network"
+    iface_source = interface.find("source")
+    assert iface_source is not None
+    assert iface_source.get("network") == "isolated-net"
+    iface_model = interface.find("model")
+    assert iface_model is not None
+    assert iface_model.get("type") == "virtio"
+
+    channel = root.find("devices/channel")
+    assert channel is not None
+    assert channel.get("type") == "unix"
+    chan_target = channel.find("target")
+    assert chan_target is not None
+    assert chan_target.get("type") == "virtio"
+    assert chan_target.get("name") == "org.qemu.guest_agent.0"
+
+    # The kdive metadata build marker carries the run id (the reaper key).
+    from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS
+
+    build_marker = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}build")
+    assert build_marker is not None
+    assert build_marker.text == str(RUN_ID)
+
+
+def test_render_build_domain_xml_uses_default_sizing() -> None:
+    from defusedxml.ElementTree import fromstring as _fromstring
+
+    xml = render_build_domain_xml(
+        RUN_ID, pool="default", volume=OVERLAY, network="default", machine="pc"
+    )
+    root = _fromstring(xml)
+    # Defaults: 4 vCPUs, 8192 MiB, x86_64 (a builder wants headroom; ADR-0100).
+    assert root.findtext("vcpu") == "4"
+    assert root.findtext("memory") == "8192"
+    os_type = root.find("os/type")
+    assert os_type is not None
+    assert os_type.get("arch") == "x86_64"
+
+
 # --- session lifecycle --------------------------------------------------------------
 
 
