@@ -39,6 +39,11 @@ deployment (the production-shaped path), see
   documented in the
   [four-method runbook §4b](four-method-live-run.md#wire-the-worker-venv-drgn--libguestfs).
   `scripts/check-local-libvirt.sh` flags the gap with the fix.
+- The install-staging directory (`KDIVE_INSTALL_STAGING`, default `/var/lib/kdive/install`) and the
+  console-log directory (`/var/lib/kdive/console`) must be prepared for the worker user (and the
+  `qemu` user under `qemu:///system`) — a one-time host step needed for **every** local install/boot.
+  See [four-method runbook §4b](four-method-live-run.md#prepare-the-worker-host-directories-install-staging--console);
+  `scripts/check-local-libvirt.sh` flags an unwritable staging directory with the fix.
 - The VM fixtures built (below).
 - If you run a **published** kdive image from `ghcr.io/randomparity/kdive` rather than a
   locally built one, verify its signature first. The release workflow cosign-signs each

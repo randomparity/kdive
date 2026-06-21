@@ -50,15 +50,44 @@ def test_all_healthy_exits_zero(tmp_path: Path) -> None:
     py = _stub_python(bindir, "venv-python", imports_ok=True)
     kvm = tmp_path / "kvm"
     kvm.write_text("")
+    staging = tmp_path / "install-staging"
+    staging.mkdir()
     env = {
         "PATH": str(bindir),
         "HOME": str(tmp_path),
         "KDIVE_KVM_NODE": str(kvm),
         "KDIVE_PYTHON": str(py),
+        "KDIVE_INSTALL_STAGING": str(staging),
     }
     result = _run(env)
     assert result.returncode == 0, result.stderr
     assert "ready" in result.stdout.lower()
+
+
+def test_unwritable_install_staging_fails_with_hint(tmp_path: Path) -> None:
+    """A missing/unwritable install-staging dir fails with an actionable fix (boot-blocking)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "virsh", 'case "$*" in *net-info*) echo "Active: yes";; esac\nexit 0')
+    _stub(bindir, "id", "echo kvm libvirt")
+    _stub(bindir, "qemu-system-x86_64", "exit 0")
+    _stub(bindir, "qemu-img", "exit 0")
+    py = _stub_python(bindir, "venv-python", imports_ok=True)
+    kvm = tmp_path / "kvm"
+    kvm.write_text("")
+    env = {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(kvm),
+        "KDIVE_PYTHON": str(py),
+        # Points at a path that does not exist -> not a writable directory.
+        "KDIVE_INSTALL_STAGING": str(tmp_path / "absent-staging"),
+    }
+    result = _run(env)
+    assert result.returncode == 1
+    assert "install staging" in result.stderr.lower()
+    assert "KDIVE_INSTALL_STAGING" in result.stderr
+    assert "$HOME" in result.stderr  # the hint must name the qemu-traversability trap
 
 
 def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
