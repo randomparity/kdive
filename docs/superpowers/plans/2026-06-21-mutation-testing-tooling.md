@@ -26,6 +26,8 @@ These were confirmed by running mutmut 3.6.0 against the container-free target o
 - **`pytest_add_cli_args_test_selection`** in `setup.cfg` is newline-token form: each token on its own indented line, so `not live_vm and not live_stack` stays one token.
 - **`mutmut run` exits 0 even when mutants survive**; it exits non-zero (with a traceback) when the in-copy baseline/copy is broken. So: non-zero → abort and show stderr; survivors → parse from `mutmut results`.
 - **`mutmut results`** prints non-killed mutants as `    <name>: <status>` (e.g. `kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1: survived`); it exits 0. **`mutmut show <name>`** prints a unified diff of the mutation.
+- **Streams:** both `mutmut run`'s final `N/N` progress line and `mutmut results`' survivor lines go to **stdout** (verified by splitting stdout/stderr), so reading `result.stdout` is correct.
+- **Re-run freshness:** mutmut re-copies the `also_copy` files into `mutants/` on every run, so keeping the store across a same-target re-run still picks up an edited test (verified — a marker appended to the real test appeared in the kept copy after re-run). The per-target keep is safe.
 - **The `mutants/` store** holds `mutmut-stats.json` and the copied tree; the stats file has no covered/total line counts, so the summary uses the **mutant count** (from the run's final `N/N` line) as the coverage proxy, not a ratio.
 - **arm64-darwin** installs `libcst` from a prebuilt wheel (no Rust). x86_64-darwin needs `rustc`/`cargo` — documented in the user doc.
 - **Spike 5 (testcontainers leak on Postgres targets)** is NOT yet verified and is deferred to Task 8.
@@ -58,10 +60,13 @@ Append to `.gitignore`:
 
 ```gitignore
 
-# mutation testing (scripts/mutate.py, mutmut working dir + transient config)
+# mutation testing (scripts/mutate.py): mutmut's working/cache dir
 /mutants/
-/setup.cfg
 ```
+
+(The transient `setup.cfg` is not ignored: the wrapper removes it in a `finally` and refuses to
+overwrite a foreign one, so a hard-kill leftover stays visible in `git status` rather than being
+hidden — and a future legitimate `setup.cfg` would still be tracked.)
 
 - [ ] **Step 2: Write the failing test**
 
@@ -169,7 +174,9 @@ def resolve_source(source_arg: str) -> str:
     if not path.exists():
         raise MutateError(f"source does not exist: {source_arg}")
     if path.suffix != ".py" or not path.is_file():
-        raise MutateError(f"source must be a .py file (directory targets unsupported): {source_arg}")
+        raise MutateError(
+            f"source must be a .py file (directory targets unsupported): {source_arg}"
+        )
     return path.relative_to(_ROOT).as_posix()
 
 
@@ -712,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="mutate",
         description="Run mutmut against one module and report surviving mutants.",
     )
-    parser.add_argument("source", help="source module under src/kdive (file or dir)")
+    parser.add_argument("source", help="source .py file under src/kdive")
     parser.add_argument("tests", nargs="+", help="explicit covering test path(s)")
     args = parser.parse_args(argv)
 
@@ -779,10 +786,11 @@ mutate source *tests:
     uv run --with 'mutmut==3.6.0' python scripts/mutate.py {{source}} {{tests}}
 ```
 
-- [ ] **Step 2: Verify the recipe lists and rejects bad input**
+- [ ] **Step 2: Verify the recipe rejects bad input**
 
-Run: `just mutate 2>&1 | head -3`
-Expected: usage/error text (argparse complains about the missing test path), non-zero exit.
+Run: `just mutate src/kdive/domain/errors.py 2>&1 | tail -3`
+Expected: argparse error — the `tests` argument is required (source given, no test path); non-zero exit.
+(Note: `just mutate` with NO args fails earlier inside `just` itself, on the missing required `source`.)
 
 Run: `just mutate src/kdive/domain/errors.py tests/domain/test_nope.py; echo "EXIT=$?"`
 Expected: `mutate: test path does not exist: tests/domain/test_nope.py` and `EXIT=1`
