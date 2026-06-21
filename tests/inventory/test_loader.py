@@ -40,6 +40,13 @@ url = "x"
 """
 
 
+def test_inventory_error_records_entry_field_and_message() -> None:
+    err = InventoryError("image[base]", "base_image", "missing volume")
+    assert err.entry == "image[base]"
+    assert err.field == "base_image"
+    assert str(err) == "image[base].base_image: missing volume"
+
+
 def test_load_good(tmp_path: Path) -> None:
     p = tmp_path / "systems.toml"
     p.write_text(GOOD)
