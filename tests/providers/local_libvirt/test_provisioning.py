@@ -111,6 +111,60 @@ def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
     assert source.get("file") == "/var/lib/kdive/rootfs/fedora-40.qcow2"
 
 
+def test_render_returns_a_unicode_string() -> None:
+    # encoding="unicode" yields a str; a byte-string would break the defineXML seam that expects
+    # text and the test parsers that call _safe_fromstring on a str.
+    assert isinstance(_render(), str)
+
+
+def test_render_root_is_a_kvm_domain() -> None:
+    # The root must be <domain type="kvm">; a wrong tag or hypervisor type makes libvirt reject
+    # the XML or run the guest under the wrong driver.
+    root = _safe_fromstring(_render())
+    assert root.tag == "domain"
+    assert root.get("type") == "kvm"
+
+
+def test_render_memory_uses_mib_unit() -> None:
+    # libvirt reads <memory unit="MiB"> case-sensitively; a wrong-case unit makes it fall back to
+    # KiB and the guest boots with ~1024x too little RAM.
+    root = _safe_fromstring(_render())
+    memory = root.find("memory")
+    assert memory is not None
+    assert memory.get("unit") == "MiB"
+    assert memory.text == "4096"
+
+
+def test_render_os_type_is_hvm() -> None:
+    root = _safe_fromstring(_render())
+    os_type = root.find("os/type")
+    assert os_type is not None
+    assert os_type.text == "hvm"
+
+
+def test_render_disk_is_file_backed_disk_device() -> None:
+    root = _safe_fromstring(_render())
+    disk = root.find("devices/disk")
+    assert disk is not None
+    assert disk.get("type") == "file"
+    assert disk.get("device") == "disk"
+
+
+def test_render_disk_target_uses_virtio_bus() -> None:
+    root = _safe_fromstring(_render())
+    target = root.find("devices/disk/target")
+    assert target is not None
+    assert target.get("dev") == "vda"
+    assert target.get("bus") == "virtio"
+
+
+def test_render_serial_target_is_port_zero() -> None:
+    root = _safe_fromstring(_render())
+    target = root.find("devices/serial/target")
+    assert target is not None
+    assert target.get("port") == "0"
+
+
 def test_render_declares_qcow2_disk_driver() -> None:
     # The rootfs images are qcow2; a driver-less disk makes libvirt default to raw, so the guest
     # reads the qcow2 header instead of the ext4 filesystem and panics unable to mount root.
