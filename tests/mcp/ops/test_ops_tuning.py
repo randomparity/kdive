@@ -629,6 +629,10 @@ def test_persist_without_writeback_target_is_configuration_error(migrated_url: s
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
             assert "KDIVE_INVENTORY_WRITEBACK" in str(resp.detail)
+        # writeback off is a config rejection before any target exists — not a writeback attempt,
+        # so it is not audited under the writeback scope.
+        rows = await _platform_audit_rows(migrated_url)
+        assert not [r for r in rows if r[3] == "all-inventory-writeback"]
 
     asyncio.run(_run())
     assert fake.written is None
@@ -671,6 +675,9 @@ def test_persist_skeleton_is_refused_and_writes_nothing(migrated_url: str) -> No
             )
             assert resp.status == "error"
             assert resp.error_category == "configuration_error"
+        # a refused writeback attempt against a configured target is still audited.
+        rows = await _platform_audit_rows(migrated_url)
+        assert any(r[3] == "all-inventory-writeback" for r in rows)
 
     asyncio.run(_run())
     assert fake.written is None
@@ -779,6 +786,10 @@ def test_persist_write_failure_is_surfaced(migrated_url: str) -> None:
             assert resp.status == "error"
             assert resp.error_category == "infrastructure_failure"
             assert resp.data.get("persisted") is not True
+        # the failed writeback attempt is recorded under the writeback scope (the outcome rides
+        # in the hashed args_digest; the scope is the observable forensic signal here).
+        rows = await _platform_audit_rows(migrated_url)
+        assert [r for r in rows if r[3] == "all-inventory-writeback"]
 
     asyncio.run(_run())
 

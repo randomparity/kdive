@@ -179,23 +179,30 @@ async def _persist_export(
     document: str | None,
     resolve_target: Callable[[], WritebackTarget | None],
 ) -> ToolResponse:
-    """Validate, write, and audit a ``persist=True`` export; return the outcome envelope."""
+    """Validate, write, and audit a ``persist=True`` export; return the outcome envelope.
+
+    Every writeback *attempt* against a configured target is audited with its outcome
+    (``applied`` or ``failed``), so a refused skeleton or an RBAC/transport failure leaves a
+    forensic trail — not only the success path. A persist with writeback off is a config-error
+    rejection before any target exists, so it is not a writeback attempt and is not audited here.
+    """
     to_write = document if document is not None else toml
+    target = resolve_target()
+    if target is None:
+        return _export_config_error(
+            f"writeback is disabled; set {INVENTORY_WRITEBACK.name} to one of "
+            f"configmap/file to persist (off by default)"
+        )
     try:
-        target = resolve_target()
-        if target is None:
-            return _export_config_error(
-                f"writeback is disabled; set {INVENTORY_WRITEBACK.name} to one of "
-                f"configmap/file to persist (off by default)"
-            )
         _bound_document(to_write)
         assert_persistable(to_write)
         await target.write(to_write)
     except CategorizedError as exc:
+        await _audit_inventory_write(conn, ctx, target.target_kind, outcome="failed")
         return ToolResponse.failure_from_error(
             _EXPORT_SYSTEMS_OBJECT_ID, exc, suggested_next_actions=[_EXPORT_SYSTEMS_TOOL]
         )
-    await _audit_inventory_write(conn, ctx, target.target_kind)
+    await _audit_inventory_write(conn, ctx, target.target_kind, outcome="applied")
     return _export_ok(toml, persisted=True, target=target.target_kind)
 
 
@@ -428,8 +435,15 @@ async def _audit_inventory_read(conn: AsyncConnection, ctx: RequestContext) -> N
         )
 
 
-async def _audit_inventory_write(conn: AsyncConnection, ctx: RequestContext, target: str) -> None:
-    """Audit a writeback (the persist path) to ``platform_audit_log`` (distinct from the read)."""
+async def _audit_inventory_write(
+    conn: AsyncConnection, ctx: RequestContext, target: str, *, outcome: str
+) -> None:
+    """Audit a writeback attempt (applied or failed) to ``platform_audit_log``.
+
+    Distinct scope from the read so the audit trail separates "exported" from "persisted"; the
+    ``outcome`` arg records a refused/failed attempt as well as a successful one, so an RBAC or
+    transport failure is not silently absent from the platform audit log.
+    """
     async with conn.transaction():
         await audit.record_platform(
             conn,
@@ -438,7 +452,12 @@ async def _audit_inventory_write(conn: AsyncConnection, ctx: RequestContext, tar
             event=audit.PlatformAuditEvent(
                 tool=_EXPORT_SYSTEMS_TOOL,
                 scope=_WRITEBACK_SYSTEMS_SCOPE,
-                args={"tool": _EXPORT_SYSTEMS_TOOL, "persist": "true", "target": target},
+                args={
+                    "tool": _EXPORT_SYSTEMS_TOOL,
+                    "persist": "true",
+                    "target": target,
+                    "outcome": outcome,
+                },
                 platform_role=held_platform_roles(ctx),
                 actor=actor_for(ctx),
             ),
