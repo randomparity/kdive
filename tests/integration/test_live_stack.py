@@ -32,6 +32,9 @@ from pathlib import Path
 
 import pytest
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.sizing import AllocationSizing
+from kdive.profiles.provisioning import reconcile_profile_sizing
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import (
     LiveStackClient,
@@ -39,6 +42,7 @@ from tests.integration.live_stack.harness import (
     OidcIssuer,
 )
 from tests.integration.live_stack.spine import (
+    LOCAL_ALLOCATION_DISK_GB,
     SpinePhaseError,
     assert_audit,
     assert_report,
@@ -119,7 +123,7 @@ def _provision_profile() -> dict[str, object]:
         "arch": "x86_64",
         "vcpu": 2,
         "memory_mb": 2048,
-        "disk_gb": 20,
+        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
         "boot_method": "direct-kernel",
         "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
         "provider": {
@@ -138,6 +142,41 @@ def _build_profile() -> dict[str, object]:
         "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
         "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
     }
+
+
+# --- non-gated unit tests (CI-runnable; pin the equality invariant, ADR-0205) ----------------
+
+
+def test_provision_profile_disk_gb_equals_allocation_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spine's provision profile disk_gb equals the allocate request's (ADR-0205, #656).
+
+    ``reconcile_profile_sizing`` rejects a profile whose ``disk_gb`` differs from the
+    allocation's resolved size, so the spine's ``_provision_profile()`` and the
+    ``allocations.request`` it provisions against must declare the *same* disk. Both read one
+    constant; this pins them so a future edit to either site can't silently re-introduce the
+    self-conflict #656 named (provision profile ``disk_gb=20`` vs request ``disk_gb=10``).
+
+    The passing case: reconciling the real spine profile against a snapshot built from the same
+    constant succeeds and yields that disk. The conflicting case: a profile that over-asks is
+    rejected as ``CONFIGURATION_ERROR``. The factory reads the kernel-tree / guest-image paths
+    from the environment (real values gate the live spine); stub them so this stays CI-runnable.
+    """
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
+    monkeypatch.setenv(_GUEST_IMAGE_ENV, "/nonexistent/guest-image.qcow2")
+    profile = _provision_profile()
+    assert profile["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
+
+    snapshot = AllocationSizing(vcpu=2, memory_mb=2048, disk_gb=LOCAL_ALLOCATION_DISK_GB)
+    reconciled = reconcile_profile_sizing(profile, snapshot)
+    assert reconciled["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
+
+    over_asking = dict(profile, disk_gb=LOCAL_ALLOCATION_DISK_GB + 1)
+    with pytest.raises(CategorizedError) as caught:
+        reconcile_profile_sizing(over_asking, snapshot)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.details["field"] == "disk_gb"
 
 
 # --- RBAC negative: the raised path (no real system needed) ----------------------------------
@@ -218,7 +257,7 @@ def test_spine_over_the_wire() -> None:
                         request={
                             "vcpus": 2,
                             "memory_gb": 2,
-                            "disk_gb": 10,
+                            "disk_gb": LOCAL_ALLOCATION_DISK_GB,
                             "resource": {"mode": "kind"},
                         },
                     ),
