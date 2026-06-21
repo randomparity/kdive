@@ -75,6 +75,29 @@ image catalog, the database schema, or any other provider.
 - Build-id and dmesg extraction are shared with remote host_dump, so a fix to either
   benefits both providers.
 
+### Streaming the harvested core (#657, implemented 2026-06-21)
+
+The original harvest read the whole core into RAM via libguestfs `read_file` and carried
+those bytes to the object store as a single `put_artifact(data=bytes)`. This was acceptable
+for the first cut but is a multi-GB transient allocation at the 5 GiB ceiling. The
+follow-up flagged here ("switch the reader to `g.download(path, tmpfile)` and stream") is
+now implemented:
+
+- `GuestCoreReader.read_vmcore` (bytes) is replaced by `download_vmcore(overlay, path,
+  dest)`, which streams the chosen core to a caller-owned temp file via libguestfs
+  `download`. `harvest_vmcore` returns a `Path | None`.
+- The 5 GiB `MAX_CORE_BYTES` ceiling is unchanged and still checked from the `statns`
+  size **before** any download — no bytes are touched for an oversize core.
+- `LocalLibvirtRetrieve.capture` operates on the spooled `Path`: build-id and redacted
+  dmesg come from the Path-based drgn helpers (already in use), and the raw core is
+  persisted via `put_stream(ArtifactStreamRequest)` with a post-put `head` checksum check,
+  mirroring remote host_dump's streaming store (ADR-0094). The temp file is unlinked in a
+  `finally`.
+- The unit-tested seam stays pure: the fake reader writes bytes to the destination path,
+  so newest-selection, the size cap (rejecting before download), and absent →
+  `READINESS_FAILURE` remain covered with fakes; only the libguestfs `download` call is
+  `live_vm`-gated.
+
 ## Alternatives considered
 
 - **Live shared filesystem (virtiofs / 9p) into the guest.** Expose a host directory in the
