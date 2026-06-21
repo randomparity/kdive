@@ -83,9 +83,14 @@ run_case multiple_stale "multiple_stale.numbered" "10.0.0.0/24" "9 8 7 6"
 run_case broader_mask "broader_mask.numbered" "10.0.0.0/24" "7 6"
 run_case ufw_inactive "ufw_inactive.numbered" "10.0.0.0/24" ""
 run_case non_protected_port "non_protected_port.numbered" "10.0.0.0/24" ""
-# Known role weakness (substring grep -vF): 110.0.0.0/24 contains 10.0.0.0/24, so it is
-# wrongly excluded and SURVIVES. Pinned as current behavior — see the harness README.
-run_case substring_collision "substring_collision.numbered" "10.0.0.0/24" ""
+# ADR-0201 (#648): the exclusion is now an exact source-field match, so a stale 110.0.0.0/24
+# (which CONTAINS 10.0.0.0/24 as a substring) is pruned instead of surviving the old grep -vF.
+run_case substring_collision "substring_collision.numbered" "10.0.0.0/24" "7 6"
+# ADR-0201 regression guards. prefix_collision: 10.0.0.0/2 is a substring *of* the worker CIDR
+# (symmetric direction). comment_column: a trailing ufw comment must not shift the matched
+# source off the current allow — keys the matcher on the From column, not the last token.
+run_case prefix_collision "prefix_collision.numbered" "10.0.0.0/24" "7 6"
+run_case comment_column "comment_column.numbered" "10.0.0.0/24" "7 6"
 
 if [ "$fail" -ne 0 ]; then
   echo "gdbstub_acl prune harness: FAILED"
