@@ -67,6 +67,18 @@ def test_dir_refuses_control_character() -> None:
         managed_key_dir(env={"HOME": "/home/u", "KDIVE_SSH_KEY_DIR": "/keys/a\nb"})
 
 
+def test_dir_refuses_del_control_character() -> None:
+    # 0x7F (DEL) is a control character even though it sits above the 0x20 band.
+    with pytest.raises(ManagedKeyError, match="control character"):
+        managed_key_dir(env={"HOME": "/home/u", "KDIVE_SSH_KEY_DIR": "/keys/a\x7fb"})
+
+
+def test_dir_allows_space_in_path() -> None:
+    # A space (0x20) is printable, not a control character: it must be accepted.
+    env = {"HOME": "/home/u", "KDIVE_SSH_KEY_DIR": "/keys/a b"}
+    assert managed_key_dir(env=env) == Path("/keys/a b")
+
+
 def test_key_paths_are_under_dir() -> None:
     env = {"HOME": "/home/u"}
     assert managed_private_key_path(env=env) == Path(
@@ -142,8 +154,13 @@ def test_refuses_group_or_other_accessible_dir(tmp_path: Path) -> None:
 
 def test_missing_ssh_keygen_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "")  # no ssh-keygen resolvable
-    with pytest.raises(ManagedKeyError, match="ssh-keygen"):
+    with pytest.raises(ManagedKeyError) as caught:
         ensure_managed_keypair(env={"HOME": str(tmp_path)})
+    # The remediation message is operator-facing: keep its exact wording (PATH casing,
+    # OpenSSH client, and the env-var escape hatch) intact.
+    message = str(caught.value)
+    assert "ssh-keygen not found on PATH; install the OpenSSH client, or set" in message
+    assert "KDIVE_ROOTFS_AUTHORIZED_KEY to a public key file" in message
 
 
 def test_run_keygen_wraps_non_filenotfound_oserror(
@@ -171,8 +188,60 @@ def test_run_keygen_timeout_is_bounded_failure(
         raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
 
     monkeypatch.setattr("kdive.prereqs.managed_ssh_key.subprocess.run", _timeout)
-    with pytest.raises(ManagedKeyError, match=f"timed out after {SSH_KEYGEN_TIMEOUT_SEC}s"):
+    with pytest.raises(ManagedKeyError) as caught:
         ensure_managed_keypair(env={"HOME": str(tmp_path)})
+    message = str(caught.value)
+    # The failure names the operation in flight so build logs are diagnosable.
+    assert message == (
+        f"ssh-keygen timed out after {SSH_KEYGEN_TIMEOUT_SEC}s while generating managed SSH keypair"
+    )
+
+
+def test_keygen_nonzero_exit_is_managed_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-zero ssh-keygen exit must surface as a ManagedKeyError carrying the exit code
+    # and stderr — not as the raw CalledProcessError that check=True would raise.
+    monkeypatch.setattr("kdive.prereqs.managed_ssh_key._keygen_executable", lambda: "ssh-keygen")
+
+    def _fail(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode=3, stdout="", stderr="boom")
+
+    monkeypatch.setattr("kdive.prereqs.managed_ssh_key.subprocess.run", _fail)
+    with pytest.raises(ManagedKeyError) as caught:
+        ensure_managed_keypair(env={"HOME": str(tmp_path)})
+    message = str(caught.value)
+    assert "ssh-keygen failed (exit 3)" in message
+    assert "boom" in message
+
+
+@needs_keygen
+def test_ensure_creates_lock_file_in_key_dir(tmp_path: Path) -> None:
+    # The flock is taken on a sibling ".keygen.lock" inside the (private) key dir.
+    env = {"HOME": str(tmp_path)}
+    priv = ensure_managed_keypair(env=env)
+    lock = priv.parent / ".keygen.lock"
+    assert lock.exists()
+    # The lock must live alongside the keys, never as a stray file in the cwd.
+    assert not Path("None").exists()
+
+
+@needs_keygen
+def test_rederive_failure_names_operation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env = {"HOME": str(tmp_path)}
+    priv = ensure_managed_keypair(env=env)
+    managed_public_key_path(env=env).unlink()  # force the re-derive branch
+
+    def _timeout(argv: list[str], **kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr("kdive.prereqs.managed_ssh_key.subprocess.run", _timeout)
+    with pytest.raises(ManagedKeyError) as caught:
+        ensure_managed_keypair(env=env)
+    assert str(caught.value) == (
+        f"ssh-keygen timed out after {SSH_KEYGEN_TIMEOUT_SEC}s while re-deriving managed public key"
+    )
+    assert priv.exists()  # private key untouched by the failed re-derive
 
 
 # --- CLI -------------------------------------------------------------------------------
@@ -213,7 +282,22 @@ def test_cli_default_prints_private_path(
 def test_cli_rejects_unknown_args(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["--bogus"])
     assert rc == 2
-    assert "Usage" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.strip() == "Usage: python -m kdive.prereqs.managed_ssh_key [--ensure-public-key]"
+
+
+@needs_keygen
+def test_cli_reads_process_argv_when_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # main(None) parses sys.argv[1:]; the program name at argv[0] must not be consumed
+    # as a flag, and the real CLI flag must still select the public-key path.
+    _hermetic_home(monkeypatch, tmp_path)
+    monkeypatch.setattr("sys.argv", ["managed_ssh_key", "--ensure-public-key"])
+    rc = main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == f"{tmp_path}/.local/share/kdive/ssh/id_kdive_ed25519.pub\n"
 
 
 def test_cli_reports_generation_failure(
