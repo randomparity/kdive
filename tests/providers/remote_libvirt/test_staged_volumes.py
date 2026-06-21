@@ -148,6 +148,63 @@ def test_timeout_is_unreachable(tmp_path: Path, caplog: pytest.LogCaptureFixture
     assert any(r.message == "staged-volume probe timed out after 0.05s" for r in caplog.records)
 
 
+class _PostOpenLibvirtErrorConn:
+    """A conn whose storage lookup raises a libvirtError the staged map does not handle."""
+
+    def __init__(self, code: int) -> None:
+        self._code = code
+
+    def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
+        del name
+        return _PostOpenLibvirtErrorPool(self._code)
+
+    def close(self) -> None:
+        pass
+
+
+class _PostOpenLibvirtErrorPool:
+    def __init__(self, code: int) -> None:
+        self._code = code
+
+    def storageVolLookupByName(self, name: str) -> _Vol:  # noqa: N802
+        del name
+        raise libvirt_error(self._code)
+
+
+def test_post_open_libvirt_error_is_unreachable_and_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A post-open libvirtError that is NOT NO_STORAGE_POOL/NO_STORAGE_VOL is re-raised by
+    # lookup_volume_staged; the probe degrades the verdict to "unreachable" and warns.
+    conn = _PostOpenLibvirtErrorConn(libvirt.VIR_ERR_INTERNAL_ERROR)
+    with caplog.at_level(logging.WARNING, logger=staged_volumes.__name__):
+        out = _probe(["a.qcow2", "b.qcow2"], conn=conn, tmp_path=tmp_path)
+    assert out == {"a.qcow2": "unreachable", "b.qcow2": "unreachable"}
+    assert any(r.message == "staged-volume probe storage lookup failed" for r in caplog.records)
+
+
+class _PostOpenCategorizedErrorConn:
+    """A conn whose storage lookup raises a non-transport CategorizedError after open."""
+
+    def __init__(self, category: ErrorCategory) -> None:
+        self._category = category
+
+    def storagePoolLookupByName(self, name: str) -> _Pool:  # noqa: N802
+        del name
+        raise CategorizedError("post-open failure", category=self._category)
+
+    def close(self) -> None:
+        pass
+
+
+def test_post_open_non_transport_categorized_error_is_unknown(tmp_path: Path) -> None:
+    # A CategorizedError surfacing inside the open connection with a category other than
+    # TRANSPORT_FAILURE must take the verdict-"unknown" fallthrough, not "unreachable".
+    conn = _PostOpenCategorizedErrorConn(ErrorCategory.CONFIGURATION_ERROR)
+    out = _probe(["a.qcow2", "b.qcow2"], conn=conn, tmp_path=tmp_path)
+    assert out == {"a.qcow2": "unknown", "b.qcow2": "unknown"}
+
+
 class _PoolNameRecordingConn:
     """A conn that records which storage pool name the probe looks up."""
 

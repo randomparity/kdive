@@ -100,6 +100,12 @@ def test_invalid_item_message() -> None:
         deserialize_results(payload)
 
 
+def test_non_dict_item_message() -> None:
+    with pytest.raises(ResultCodecError) as excinfo:
+        deserialize_results('{"results": [3]}')
+    assert str(excinfo.value) == "diagnostics result item is not an object"
+
+
 @pytest.mark.parametrize("raw", [None, "", "not json", "{}", '{"results": 3}', "[]"])
 def test_malformed_raises(raw: str | None) -> None:
     with pytest.raises(ResultCodecError):

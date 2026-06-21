@@ -520,17 +520,24 @@ def test_check_reachable_non_zero_returns_false_and_logs_redacted(
     )
 
 
-def test_check_reachable_timeout_returns_false(caplog: pytest.LogCaptureFixture) -> None:
-    """A subprocess timeout → False (not raised), logged with host and timeout."""
+@pytest.mark.parametrize("timeout_s", [15, 42])
+def test_check_reachable_timeout_returns_false(
+    timeout_s: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A subprocess timeout → False (not raised), logged with host and the actual timeout.
+
+    Driving two distinct timeouts pins the timeout to the ``timeout_s`` argument so a mutant
+    that hardcodes a literal in the log message cannot survive.
+    """
     with (
-        patch(_RUN_TARGET, side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=15)),
+        patch(_RUN_TARGET, side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=timeout_s)),
         caplog.at_level("WARNING"),
     ):
-        ok = _transport().check_reachable(timeout_s=15)
+        ok = _transport().check_reachable(timeout_s=timeout_s)
 
     assert ok is False
     assert any(
-        r.getMessage() == f"ssh reachability probe to {_FAKE_ADDRESS} timed out after 15s"
+        r.getMessage() == f"ssh reachability probe to {_FAKE_ADDRESS} timed out after {timeout_s}s"
         for r in caplog.records
     )
 
