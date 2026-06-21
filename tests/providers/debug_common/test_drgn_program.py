@@ -23,6 +23,9 @@ def test_read_vmcoreinfo_build_id_missing_is_configuration_error() -> None:
     with pytest.raises(CategorizedError) as exc:
         read_vmcoreinfo_build_id(b"no notes here")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == (
+        "vmcore carries no VMCOREINFO BUILD-ID line; cannot verify provenance"
+    )
 
 
 def test_read_vmcoreinfo_build_id_rejects_short_hex() -> None:
@@ -63,3 +66,4 @@ def test_run_introspection_helper_rejects_unknown_name() -> None:
     with pytest.raises(CategorizedError) as exc:
         run_introspection_helper(_FakeProgram(), "files")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == "unknown introspection helper: files"
