@@ -388,6 +388,12 @@ Bind the server Deployment's pod to that ServiceAccount (`spec.template.spec.ser
 kdive-writeback`) so the in-cluster token the adapter reads carries the grant. Apply with
 `kubectl apply -f rbac-writeback.yaml -n <ns>`.
 
+The ConfigMap name (`kdive-systems` above, and `KDIVE_INVENTORY_WRITEBACK_CONFIGMAP`'s default)
+must match the inventory ConfigMap you created and pointed `systems.configMapName` at — set
+`KDIVE_INVENTORY_WRITEBACK_CONFIGMAP` and the Role's `resourceNames` to that name if you named it
+something else. This inventory ConfigMap is operator-created (the chart only mounts it; it is not
+templated by Helm), so a writeback patch does not drift from the Helm release.
+
 ### The `remote_libvirt` skeleton: complete it before persisting
 
 A `[[remote_libvirt]]` block is exported as a **skeleton** — the provider reads `gdb_addr`,
