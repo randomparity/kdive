@@ -73,3 +73,19 @@ def test_session_from_env_without_token_exits(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(SystemExit) as excinfo:
         transport.Session.from_env()
     assert "KDIVE_TOKEN" in str(excinfo.value)
+
+
+def test_tool_envelope_on_result_missing_attrs_raises_runtime_error() -> None:
+    # A result object that carries neither `structured_content` nor `data` must surface a
+    # clean RuntimeError about the missing envelope, not an AttributeError leaking the probe
+    # mechanics — i.e. the getattr defaults are load-bearing.
+    with pytest.raises(RuntimeError, match="no structured envelope"):
+        transport.tool_envelope(object())
+
+
+def test_tool_envelope_no_mapping_error_message() -> None:
+    # The diagnostic message is the operator-visible explanation for an unexpected tool
+    # result, so pin its wording.
+    with pytest.raises(RuntimeError) as excinfo:
+        transport.tool_envelope(object())
+    assert str(excinfo.value) == "tool result carried no structured envelope"
