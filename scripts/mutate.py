@@ -16,6 +16,7 @@ See docs/development/mutation-testing.md.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -82,3 +83,47 @@ def render_config(only_mutate_rel: str, test_paths: list[str]) -> str:
         "    pyproject.toml\n"
         "    tests\n"
     )
+
+
+_RESULT_LINE = re.compile(r"^\s*(\S+):\s*(survived|timeout|suspicious)\s*$")
+_PROGRESS = re.compile(r"(\d+)/(\d+)")
+
+
+def parse_survivors(results_stdout: str) -> list[str]:
+    """Return names of mutants that were not killed (survived/timeout/suspicious)."""
+    names: list[str] = []
+    for line in results_stdout.splitlines():
+        match = _RESULT_LINE.match(line)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def parse_total_mutants(run_stdout: str) -> int | None:
+    """Return the total mutant count from the last ``N/N`` progress token, if any."""
+    matches = _PROGRESS.findall(run_stdout)
+    if not matches:
+        return None
+    return int(matches[-1][1])
+
+
+def format_summary(
+    total: int | None,
+    survivors: list[str],
+    source_rel: str,
+    test_paths: list[str],
+) -> str:
+    """Build the human-facing summary printed at the end of a run."""
+    total_text = "unknown" if total is None else str(total)
+    lines = [
+        f"Mutation testing: {source_rel}",
+        f"  tests: {' '.join(test_paths)}",
+        f"  {total_text} mutants generated, {len(survivors)} surviving",
+    ]
+    for name in survivors:
+        lines.append(f"    survived: {name}")
+    if survivors:
+        lines.append("  inspect a survivor: mutmut show <name>  (or: mutmut browse)")
+        lines.append("  each survivor is a code change no test caught — add an assertion.")
+    lines.append("  note: result is relative to the test path supplied.")
+    return "\n".join(lines) + "\n"

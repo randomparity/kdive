@@ -10,10 +10,19 @@ import pytest
 from scripts.mutate import (
     MARKER,
     MutateError,
+    format_summary,
+    parse_survivors,
+    parse_total_mutants,
     render_config,
     resolve_source,
     resolve_test_paths,
 )
+
+_RESULTS = (
+    "    kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1: survived\n"
+    "    kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_6: survived\n"
+)
+_RUN_TAIL = "⠇ 10/10  🎉 8 🫥 0  ⏰ 0  🤔 0  🙁 2  🔇 0  🧙 0\n200.09 mutations/second\n"
 
 
 def test_resolve_source_returns_repo_relative_posix_path() -> None:
@@ -82,3 +91,46 @@ def test_render_config_suppresses_logger_but_not_raise() -> None:
 def test_render_config_copies_pyproject_and_tests() -> None:
     text = render_config("src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
     assert "also_copy=\n    pyproject.toml\n    tests\n" in text
+
+
+def test_parse_survivors_extracts_non_killed_names() -> None:
+    assert parse_survivors(_RESULTS) == [
+        "kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1",
+        "kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_6",
+    ]
+
+
+def test_parse_survivors_includes_timeout_and_suspicious() -> None:
+    text = "    a.b_mutmut_1: timeout\n    a.b_mutmut_2: suspicious\n"
+    assert parse_survivors(text) == ["a.b_mutmut_1", "a.b_mutmut_2"]
+
+
+def test_parse_survivors_empty_when_all_killed() -> None:
+    assert parse_survivors("") == []
+
+
+def test_parse_total_mutants_reads_last_progress_token() -> None:
+    assert parse_total_mutants(_RUN_TAIL) == 10
+
+
+def test_parse_total_mutants_none_when_absent() -> None:
+    assert parse_total_mutants("no progress here\n") is None
+
+
+def test_format_summary_lists_survivors_and_count() -> None:
+    out = format_summary(
+        10,
+        ["kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1"],
+        "src/kdive/domain/errors.py",
+        ["tests/domain/test_errors.py"],
+    )
+    assert "10 mutants" in out
+    assert "1 surviving" in out
+    assert "kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1" in out
+    assert "mutmut show" in out  # tells the dev how to inspect
+    assert "relative to the test path" in out
+
+
+def test_format_summary_celebrates_zero_survivors() -> None:
+    out = format_summary(10, [], "src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
+    assert "0 surviving" in out
