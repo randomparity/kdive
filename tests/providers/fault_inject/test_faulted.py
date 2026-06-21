@@ -194,6 +194,22 @@ def test_teardown_and_reprovision_delegate_unchanged() -> None:
         wrapper.reprovision(_SYSTEM, _PROFILE)
 
 
+def test_inner_reprovision_reaps_existing_domain_and_re_mints_same_name() -> None:
+    inventory = FaultInjectInventory()
+    inner = FaultInjectProvisioning(inventory)
+    expected = f"fault-inject-{_SYSTEM}"
+    inner.provision(_SYSTEM, _PROFILE)
+    # A mid-op cancel left the prior domain orphan-flagged; reprovision must clear it by
+    # forgetting the existing domain keyed on this system before re-minting.
+    inventory.flag_orphan(expected)
+    assert inventory.is_orphaned(expected) is True
+
+    domain = inner.reprovision(_SYSTEM, _PROFILE)
+
+    assert domain == expected
+    assert inventory.is_orphaned(expected) is False
+
+
 def test_install_fail_draw_raises_categorized_error() -> None:
     engine = _seed_that_fails(FaultPlane.INSTALL)
     wrapper = FaultedInstall(FaultInjectInstall(), engine, sleep_s=lambda _s: None)
