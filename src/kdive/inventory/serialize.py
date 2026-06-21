@@ -51,21 +51,27 @@ __all__ = [
     "ResourceRow",
     "BuildHostRow",
     "InventorySnapshot",
+    "REMOTE_PLACEHOLDER_PREFIX",
     "read_inventory_snapshot",
     "serialize_inventory",
 ]
 
 _CONFIG_MANAGED_BY = "config"
 
+# The shared marker every export placeholder starts with. The writeback skeleton guard (#641)
+# imports this so it and the serializer cannot drift: a document containing this marker is an
+# incomplete skeleton that must not be persisted as a live source.
+REMOTE_PLACEHOLDER_PREFIX = "REPLACE_ME_"
+
 # The fixed placeholder sentinels for the remote-libvirt file-only fields. Deliberately obvious
 # (not realistic secrets) so a secret scanner does not trip and an operator cannot miss them.
 _REMOTE_PLACEHOLDERS: dict[str, str] = {
-    "gdb_addr": "REPLACE_ME_gdb_addr",
-    "gdbstub_range": "REPLACE_ME_gdbstub_range",
-    "client_cert_ref": "REPLACE_ME_client_cert_ref",  # pragma: allowlist secret
-    "client_key_ref": "REPLACE_ME_client_key_ref",  # pragma: allowlist secret
-    "ca_cert_ref": "REPLACE_ME_ca_cert_ref",  # pragma: allowlist secret
-    "base_image": "REPLACE_ME_base_image",
+    "gdb_addr": f"{REMOTE_PLACEHOLDER_PREFIX}gdb_addr",
+    "gdbstub_range": f"{REMOTE_PLACEHOLDER_PREFIX}gdbstub_range",
+    "client_cert_ref": f"{REMOTE_PLACEHOLDER_PREFIX}client_cert_ref",  # pragma: allowlist secret
+    "client_key_ref": f"{REMOTE_PLACEHOLDER_PREFIX}client_key_ref",  # pragma: allowlist secret
+    "ca_cert_ref": f"{REMOTE_PLACEHOLDER_PREFIX}ca_cert_ref",  # pragma: allowlist secret
+    "base_image": f"{REMOTE_PLACEHOLDER_PREFIX}base_image",
 }
 
 _HEADER = (
@@ -250,7 +256,11 @@ def _emit_image_source(image: ImageRow) -> list[str]:
         if image.digest is not None:
             lines.append(f"digest = {_toml_str(image.digest)}")
         return lines
-    return ["[image.source]", 'kind = "s3"', 'object_key = "REPLACE_ME_object_key"']
+    return [
+        "[image.source]",
+        'kind = "s3"',
+        f"object_key = {_toml_str(f'{REMOTE_PLACEHOLDER_PREFIX}object_key')}",
+    ]
 
 
 def _emit_remote(host: ResourceRow) -> str:
