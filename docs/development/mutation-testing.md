@@ -30,7 +30,7 @@ each survivor. Inspect one with `mutmut show <name>` (or browse interactively wi
 | `src/kdive/domain/errors.py` | `tests/domain/test_errors.py` | container-free (fast) |
 | `src/kdive/domain/capacity/state.py` | `tests/services/allocation tests/services/systems` | Postgres-backed |
 | `src/kdive/security/authz/gate.py` | `tests/security/authz` | Postgres-backed |
-| `src/kdive/security/secrets/redaction.py` | `tests/security` | Postgres-backed |
+| `src/kdive/security/secrets/redaction.py` | `tests/security/secrets` | container-free (fast) |
 
 v1 targets one `.py` file at a time (directory targets are not yet supported). Confirm the
 covering tests for any new target yourself — the layout does not mirror `src/`.
@@ -43,7 +43,9 @@ container, so each run is slower — prefer container-free targets for tight ite
 
 Container leak warning: mutmut kills slow mutants on timeout, and a killed process may not run
 testcontainers cleanup, so a Postgres-backed run can leave orphaned containers. After such a
-run, check `docker ps` and remove any leftovers with `docker rm -f <id>`.
+run, check `docker ps` and remove any leftovers with `docker rm -f <id>`. (Note: an empirical
+run against `redaction.py` started no containers — that target's tests are pure-logic — so the
+leak path remains untested in practice.)
 
 ## Host prerequisite
 
