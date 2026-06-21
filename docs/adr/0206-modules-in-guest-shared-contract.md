@@ -122,11 +122,14 @@ then built **in-guest by `kdumpctl`** — local hand-rolls no capture image, mat
 
 ### 5. The kdump install gate is replaced (refines ADR-0055 §5)
 
-`_kdump_capture_present(initrd_path)` is replaced. The host-observable proxy for "capture path
-armable" becomes **"modules for the run's kernel version were injected into the overlay."** A
-KDUMP install with no `modules_ref` is the `configuration_error`. The production boot stays
-direct-kernel with **no `<initrd>` element** — modules live in the rootfs, drivers are builtin,
-`kdumpctl` arms kexec in-guest.
+`_kdump_capture_present(initrd_path)` is **broadened**, not removed, because the gate is
+local-only and must keep admitting the upload lane. A local KDUMP install is satisfied when a
+capture environment is provided either way: **`modules_ref` present** (from-source build →
+inject modules into the overlay; production boot stays direct-kernel with **no `<initrd>`**,
+`kdumpctl` arms kexec in-guest) **or `initrd_ref` present** (external/upload lane → stage it as
+`<initrd>`, the behavior the old gate accepted). Only a kdump System with **neither** is the
+`configuration_error`. The build preflight already requires `CONFIG_CRASH_DUMP`, so every
+from-source kernel yields a `modules_ref`; the upload lane supplies its own initrd.
 
 ### 6. The guest filesystem is mutable after provisioning
 

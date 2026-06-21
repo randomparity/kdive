@@ -128,12 +128,21 @@ Two mechanics deferred to the implementation plan (both `live_vm`-validated): ex
 
 ### 3. Gate replacement (refines ADR-0055 §5)
 
-`_kdump_capture_present(initrd_path)` — the staged-`<initrd>` proxy — is replaced. The new
-host-observable proxy for "capture path armable" is **"modules for the run's kernel version
-were injected into the overlay."** A KDUMP install with no `modules_ref` (e.g. a non-crash-dump
-build) is the `configuration_error`. The production boot stays direct-kernel with **no
-`<initrd>` element** — modules live in the rootfs, drivers are builtin, and `kdumpctl` builds
-the crash initramfs in-guest.
+`_kdump_capture_present(initrd_path)` — the staged-`<initrd>`-only proxy — is **broadened**, not
+simply removed, because the gate is local-only and must keep admitting the upload lane. A local
+KDUMP install is satisfied when a capture environment is provided **either way**:
+
+- **`modules_ref` present** (the from-source build): inject modules into the overlay (below);
+  the production boot stays direct-kernel with **no `<initrd>` element** — modules live in the
+  rootfs, drivers are builtin, and `kdumpctl` builds the crash initramfs in-guest.
+- **`initrd_ref` present** (the external/upload lane, which carries an uploaded boot initrd but
+  no `modules_ref`): stage it as `<initrd>` exactly as today — the existing behavior the old
+  gate accepted, preserved.
+- **neither present:** `configuration_error` (a kdump System with no capture environment).
+
+Both the build preflight already requires `CONFIG_CRASH_DUMP` (so every from-source kernel is
+crash-dump-capable and yields a `modules_ref`) and the upload lane supplies its own initrd, so
+the only path that hits the `configuration_error` is a genuinely capture-less kdump System.
 
 ### 4. Guest image — add `kdump-utils`
 
@@ -155,7 +164,8 @@ Uses the existing `ErrorCategory` taxonomy:
 
 - Build: `modules_install` non-zero → `BUILD_FAILURE`; modules publish failure →
   `INFRASTRUCTURE_FAILURE`.
-- Install: KDUMP method but `modules_ref` absent → `CONFIGURATION_ERROR` (the replaced gate);
+- Install: KDUMP method with neither `modules_ref` nor `initrd_ref` → `CONFIGURATION_ERROR`
+  (the broadened gate — a kdump System with no capture environment);
   libguestfs/`depmod`/force-off failure during injection → `INFRASTRUCTURE_FAILURE` (retryable
   host fault) with the overlay path in details — and because injection is idempotent
   (clobber-then-extract + sentinel verify), the retry the worker drives after such a failure is
