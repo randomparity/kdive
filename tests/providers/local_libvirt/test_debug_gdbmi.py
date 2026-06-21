@@ -16,7 +16,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.tools.debug.session_registry import GdbMiSessionRegistry
 from kdive.providers.local_libvirt.debug import gdbmi as debug_gdbmi
-from kdive.providers.ports import GdbMiAttachment, GdbStopRecord
+from kdive.providers.ports import GdbFrame, GdbMiAttachment, GdbStopRecord
 from kdive.providers.shared.debug_common import gdbmi
 from kdive.providers.shared.debug_common.execution import ExecutionControl
 from kdive.providers.shared.debug_common.gdbmi import (
@@ -193,7 +193,10 @@ def test_set_breakpoint_rejects_non_identifier(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _engine().set_breakpoint(_attachment(controller, tmp_path), "panic; rm -rf /")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details["code"] == "bad_location"
+    assert exc.value.details == {"code": "bad_location", "location": "panic; rm -rf /"}
+    assert (
+        str(exc.value) == "breakpoint location must be a bare C identifier, got 'panic; rm -rf /'"
+    )
     assert controller.written == []
 
 
@@ -201,7 +204,8 @@ def test_clear_breakpoint_requires_numeric_id(tmp_path: Path) -> None:
     controller = _FakeMiController()
     with pytest.raises(CategorizedError) as exc:
         _engine().clear_breakpoint(_attachment(controller, tmp_path), "abc")
-    assert exc.value.details["code"] == "bad_breakpoint_id"
+    assert exc.value.details == {"code": "bad_breakpoint_id", "number": "abc"}
+    assert str(exc.value) == "breakpoint id must be numeric, got 'abc'"
     assert controller.written == []
 
 
@@ -221,7 +225,15 @@ def test_list_breakpoints_parses_table_body(tmp_path: Path) -> None:
                     "payload": {
                         "BreakpointTable": {
                             "body": [
-                                {"bkpt": {"number": "1", "func": "panic"}},
+                                {
+                                    "bkpt": {
+                                        "number": "1",
+                                        "type": "hw breakpoint",
+                                        "addr": "0xffffffff81000000",
+                                        "func": "panic",
+                                        "what": "in panic",
+                                    }
+                                },
                                 {"bkpt": {"number": "2", "func": "oops"}},
                             ]
                         }
@@ -232,6 +244,11 @@ def test_list_breakpoints_parses_table_body(tmp_path: Path) -> None:
     )
     refs = _engine().list_breakpoints(_attachment(controller, tmp_path))
     assert [r.number for r in refs] == ["1", "2"]
+    first = refs[0]
+    assert first.type == "hw breakpoint"
+    assert first.addr == "0xffffffff81000000"
+    assert first.func == "panic"
+    assert first.what == "in panic"
 
 
 # --- registers -----------------------------------------------------------------------------
@@ -273,12 +290,14 @@ def test_read_registers_rejects_empty_list(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _engine().read_registers(_attachment(_FakeMiController(), tmp_path), [])
     assert exc.value.details["code"] == "bad_register"
+    assert str(exc.value) == "registers must be a non-empty list"
 
 
 def test_read_registers_rejects_bad_name(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _engine().read_registers(_attachment(_FakeMiController(), tmp_path), ["rax; drop"])
     assert exc.value.details["code"] == "bad_register"
+    assert str(exc.value) == "invalid register name 'rax; drop'"
 
 
 def test_read_registers_rejects_empty_gdb_payload(tmp_path: Path) -> None:
@@ -300,6 +319,7 @@ def test_read_registers_rejects_empty_gdb_payload(tmp_path: Path) -> None:
         "requested": ["rax"],
         "missing": ["rax"],
     }
+    assert str(exc.value) == "gdb/MI omitted requested register data"
 
 
 def test_read_registers_rejects_partial_gdb_payload(tmp_path: Path) -> None:
@@ -373,8 +393,80 @@ def test_read_memory_rejects_over_4096_without_command(tmp_path: Path) -> None:
             _attachment(controller, tmp_path), address=0x3000, byte_count=MAX_MEMORY_READ_BYTES + 1
         )
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details["code"] == "bad_read_range"
+    assert exc.value.details == {
+        "code": "bad_read_range",
+        "byte_count": MAX_MEMORY_READ_BYTES + 1,
+    }
+    assert str(exc.value) == f"byte_count must be between 1 and {MAX_MEMORY_READ_BYTES}"
     assert controller.written == []  # no MI command was issued
+
+
+def test_read_memory_rejects_non_int_address(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_memory(
+            _attachment(_FakeMiController(), tmp_path),
+            address="0x10",  # type: ignore[arg-type]
+            byte_count=4,
+        )
+    assert exc.value.details["code"] == "bad_read_range"
+    assert str(exc.value) == "address and byte_count must be integers"
+
+
+def test_read_memory_rejects_non_int_byte_count(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _engine().read_memory(
+            _attachment(_FakeMiController(), tmp_path),
+            address=0x10,
+            byte_count="4",  # type: ignore[arg-type]
+        )
+    assert exc.value.details["code"] == "bad_read_range"
+    assert str(exc.value) == "address and byte_count must be integers"
+
+
+def test_read_memory_concatenates_multiple_segments_without_separator(
+    tmp_path: Path,
+) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-read-memory-bytes 0x4000 4": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"memory": [{"contents": "dead"}, {"contents": "beef"}]},
+                }
+            ]
+        }
+    )
+    blob = _engine().read_memory(_attachment(controller, tmp_path), address=0x4000, byte_count=4)
+    assert blob == bytes.fromhex("deadbeef")
+
+
+def test_read_memory_treats_segment_without_contents_as_empty(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-data-read-memory-bytes 0x4100 2": [
+                {
+                    "type": "result",
+                    "message": "done",
+                    "payload": {"memory": [{"contents": "abcd"}, {"addr": "0x4102"}]},
+                }
+            ]
+        }
+    )
+    blob = _engine().read_memory(_attachment(controller, tmp_path), address=0x4100, byte_count=2)
+    assert blob == bytes.fromhex("abcd")
+
+
+def test_read_memory_accepts_address_zero(tmp_path: Path) -> None:
+    controller = _memory_controller(0x0, 1, "ff")
+    blob = _engine().read_memory(_attachment(controller, tmp_path), address=0x0, byte_count=1)
+    assert blob == b"\xff"
+
+
+def test_read_memory_accepts_single_byte(tmp_path: Path) -> None:
+    controller = _memory_controller(0x10, 1, "aa")
+    blob = _engine().read_memory(_attachment(controller, tmp_path), address=0x10, byte_count=1)
+    assert blob == b"\xaa"
 
 
 def test_read_memory_rejects_zero_byte_count(tmp_path: Path) -> None:
@@ -382,7 +474,8 @@ def test_read_memory_rejects_zero_byte_count(tmp_path: Path) -> None:
         _engine().read_memory(
             _attachment(_FakeMiController(), tmp_path), address=0x10, byte_count=0
         )
-    assert exc.value.details["code"] == "bad_read_range"
+    assert exc.value.details == {"code": "bad_read_range", "byte_count": 0}
+    assert str(exc.value) == f"byte_count must be between 1 and {MAX_MEMORY_READ_BYTES}"
 
 
 def test_read_memory_rejects_non_hex_contents(tmp_path: Path) -> None:
@@ -391,6 +484,7 @@ def test_read_memory_rejects_non_hex_contents(tmp_path: Path) -> None:
         _engine().read_memory(_attachment(controller, tmp_path), address=0x6000, byte_count=4)
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
     assert exc.value.details["code"] == "bad_memory_contents"
+    assert str(exc.value) == "gdb/MI returned non-hex memory contents"
 
 
 def test_read_memory_rejects_short_contents(tmp_path: Path) -> None:
@@ -404,6 +498,7 @@ def test_read_memory_rejects_short_contents(tmp_path: Path) -> None:
         "requested": 4,
         "actual": 2,
     }
+    assert str(exc.value) == "gdb/MI returned fewer memory bytes than requested"
 
 
 def test_read_memory_rejects_missing_memory_payload(tmp_path: Path) -> None:
@@ -429,7 +524,19 @@ def test_read_memory_rejects_out_of_range_address(tmp_path: Path) -> None:
             address=0x1_0000_0000_0000_0000,
             byte_count=4,
         )
-    assert exc.value.details["code"] == "bad_read_range"
+    assert exc.value.details == {
+        "code": "bad_read_range",
+        "address": 0x1_0000_0000_0000_0000,
+    }
+    assert str(exc.value) == "address out of range"
+
+
+def test_read_memory_accepts_max_address(tmp_path: Path) -> None:
+    controller = _memory_controller(0xFFFFFFFFFFFFFFFF, 1, "5a")
+    blob = _engine().read_memory(
+        _attachment(controller, tmp_path), address=0xFFFFFFFFFFFFFFFF, byte_count=1
+    )
+    assert blob == b"\x5a"
 
 
 def test_read_memory_bytes_are_verbatim_not_redacted(tmp_path: Path) -> None:
@@ -695,9 +802,12 @@ def test_interrupt_returns_stop(tmp_path: Path) -> None:
             [{"type": "notify", "message": "stopped", "payload": {"reason": "signal-received"}}]
         ],
     )
-    stop = _engine().interrupt(_attachment(controller, tmp_path))
+    controller_attachment = _attachment(controller, tmp_path)
+    stop = _engine().interrupt(controller_attachment)
     assert stop is not None
     assert stop.reason == "signal-received"
+    # interrupt drives its write through ExecutionControl at the engine's command timeout.
+    assert controller.write_timeouts == [10.0]
 
 
 def test_interrupt_returns_none_when_no_stop(tmp_path: Path) -> None:
@@ -722,6 +832,23 @@ def test_run_maps_mi_error_to_debug_attach_failure(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _engine().set_breakpoint(_attachment(controller, tmp_path), "panic")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert exc.value.details["command"] == "-break-insert -h panic"
+    assert exc.value.details["payload"] == {"msg": "no symbol"}
+    assert str(exc.value) == "gdb/MI command failed: -break-insert -h panic"
+
+
+def test_execute_mi_command_passes_command_timeout_to_write(tmp_path: Path) -> None:
+    controller = _FakeMiController()
+    _engine().execute_mi_command(_attachment(controller, tmp_path), "-break-list")
+    assert controller.write_timeouts == [10.0]
+
+
+def test_execute_mi_command_returns_records_when_no_error(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={"-break-list": [{"type": "result", "message": "done", "payload": None}]}
+    )
+    records = _engine().execute_mi_command(_attachment(controller, tmp_path), "-break-list")
+    assert [r.message for r in records] == ["done"]
 
 
 def test_continue_raises_session_exited_on_terminal_stop(tmp_path: Path) -> None:
@@ -734,7 +861,56 @@ def test_continue_raises_session_exited_on_terminal_stop(tmp_path: Path) -> None
     with pytest.raises(CategorizedError) as exc:
         _engine().continue_(_attachment(controller, tmp_path), timeout_sec=1)
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
-    assert exc.value.details["code"] == "session_exited"
+    assert exc.value.details == {"code": "session_exited", "reason": "exited-normally"}
+    assert str(exc.value) == "gdb/MI inferior exited (exited-normally); the debug session is dead"
+
+
+def test_stop_record_from_extracts_frame_thread_and_bkptno(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={"-exec-continue": [{"type": "result", "message": "running", "payload": None}]},
+        reads=[
+            [
+                {
+                    "type": "notify",
+                    "message": "stopped",
+                    "payload": {
+                        "reason": "breakpoint-hit",
+                        "bkptno": "1",
+                        "stopped-threads": "all",
+                        "frame": {
+                            "level": "0",
+                            "func": "panic",
+                            "addr": "0xffffffff81000000",
+                            "file": "kernel/panic.c",
+                            "line": "42",
+                        },
+                    },
+                }
+            ]
+        ],
+    )
+    stop = _engine().continue_(_attachment(controller, tmp_path), timeout_sec=1)
+    assert stop.reason == "breakpoint-hit"
+    assert stop.bkptno == "1"
+    assert stop.stopped_thread == "all"
+    assert stop.frame is not None
+    assert stop.frame.func == "panic"
+    assert stop.frame.line == 42
+
+
+def test_redact_stop_masks_registered_secret_in_frame() -> None:
+    registry = SecretRegistry()
+    registry.register("topsecretfunc", scope=object())
+    engine = _engine(Redactor(registry=registry))
+    stop = GdbStopRecord(
+        reason="breakpoint-hit",
+        frame=GdbFrame(level=0, func="topsecretfunc", addr=None, file=None, line=1),
+    )
+    redacted = engine.redact_stop(stop)
+    assert redacted.frame is not None
+    assert redacted.frame.func is not None
+    assert "topsecretfunc" not in redacted.frame.func
+    assert redacted.reason == "breakpoint-hit"
 
 
 # --- transcript ----------------------------------------------------------------------------
