@@ -83,24 +83,28 @@ def render_config(only_mutate_rel: str, test_paths: list[str]) -> str:
         "mutate_only_covered_lines=true\n"
         "max_stack_depth=8\n"
         "do_not_mutate_patterns=logger.\\w+\n"
-        "also_copy=\n"
-        "    pyproject.toml\n"
-        "    tests\n"
     )
 
 
-_RESULT_LINE = re.compile(r"^\s*(\S+):\s*(survived|timeout|suspicious)\s*$")
+_RESULT_LINE = re.compile(r"^\s*(\S+):\s*(.+?)\s*$")
 _PROGRESS = re.compile(r"(\d+)/(\d+)")
 
 
-def parse_survivors(results_stdout: str) -> list[str]:
-    """Return names of mutants that were not killed (survived/timeout/suspicious)."""
-    names: list[str] = []
+def parse_survivors(results_stdout: str) -> list[tuple[str, str]]:
+    """Return ``(name, status)`` for every mutant mutmut did not kill.
+
+    ``mutmut results`` prints one ``<name>: <status>`` line per non-killed mutant,
+    where status is any of mutmut's exit-code labels (survived, no tests, skipped,
+    suspicious, timeout, segfault, caught by type check, not checked). We match the
+    status open-endedly and exclude only ``killed`` so a status the wrapper never
+    anticipated can never be silently dropped from the count.
+    """
+    survivors: list[tuple[str, str]] = []
     for line in results_stdout.splitlines():
         match = _RESULT_LINE.match(line)
-        if match:
-            names.append(match.group(1))
-    return names
+        if match and match.group(2) != "killed":
+            survivors.append((match.group(1), match.group(2)))
+    return survivors
 
 
 def parse_total_mutants(run_stdout: str) -> int | None:
@@ -113,7 +117,7 @@ def parse_total_mutants(run_stdout: str) -> int | None:
 
 def format_summary(
     total: int | None,
-    survivors: list[str],
+    survivors: list[tuple[str, str]],
     source_rel: str,
     test_paths: list[str],
 ) -> str:
@@ -124,11 +128,14 @@ def format_summary(
         f"  tests: {' '.join(test_paths)}",
         f"  {total_text} mutants generated, {len(survivors)} surviving",
     ]
-    for name in survivors:
-        lines.append(f"    survived: {name}")
+    for name, status in survivors:
+        lines.append(f"    survived: {name} [{status}]")
     if survivors:
         lines.append("  inspect a survivor: mutmut show <name>  (or: mutmut browse)")
-        lines.append("  each survivor is a code change no test caught — add an assertion.")
+        lines.append(
+            "  each surviving mutant is a code change the tests did not catch"
+            " — add or strengthen a test."
+        )
     lines.append("  note: result is relative to the test path supplied.")
     return "\n".join(lines) + "\n"
 

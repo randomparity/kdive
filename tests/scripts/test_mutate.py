@@ -98,21 +98,42 @@ def test_render_config_suppresses_logger_but_not_raise() -> None:
     assert "raise" not in text  # removed/weakened guard raises must stay mutable
 
 
-def test_render_config_copies_pyproject_and_tests() -> None:
+def test_render_config_omits_redundant_also_copy() -> None:
+    # mutmut force-appends tests/ and pyproject.toml to also_copy, so the wrapper
+    # must not duplicate them; the also_copy block is dropped entirely.
     text = render_config("src/kdive/domain/errors.py", ["tests/domain/test_errors.py"])
-    assert "also_copy=\n    pyproject.toml\n    tests\n" in text
+    assert "also_copy" not in text
 
 
 def test_parse_survivors_extracts_non_killed_names() -> None:
     assert parse_survivors(_RESULTS) == [
-        "kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1",
-        "kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_6",
+        ("kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1", "survived"),
+        ("kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_6", "survived"),
     ]
 
 
 def test_parse_survivors_includes_timeout_and_suspicious() -> None:
     text = "    a.b_mutmut_1: timeout\n    a.b_mutmut_2: suspicious\n"
-    assert parse_survivors(text) == ["a.b_mutmut_1", "a.b_mutmut_2"]
+    assert parse_survivors(text) == [
+        ("a.b_mutmut_1", "timeout"),
+        ("a.b_mutmut_2", "suspicious"),
+    ]
+
+
+def test_parse_survivors_includes_no_tests_skipped_segfault() -> None:
+    # regression guard: these non-killed statuses were silently dropped by the old
+    # allow-list regex, under-reporting (in the worst case to "0 surviving").
+    text = "    a: no tests\n    b: skipped\n    c: segfault\n"
+    assert parse_survivors(text) == [
+        ("a", "no tests"),
+        ("b", "skipped"),
+        ("c", "segfault"),
+    ]
+
+
+def test_parse_survivors_excludes_killed() -> None:
+    text = "    a.b_mutmut_1: survived\n    a.b_mutmut_2: killed\n"
+    assert parse_survivors(text) == [("a.b_mutmut_1", "survived")]
 
 
 def test_parse_survivors_empty_when_all_killed() -> None:
@@ -130,13 +151,14 @@ def test_parse_total_mutants_none_when_absent() -> None:
 def test_format_summary_lists_survivors_and_count() -> None:
     out = format_summary(
         10,
-        ["kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1"],
+        [("kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1", "no tests")],
         "src/kdive/domain/errors.py",
         ["tests/domain/test_errors.py"],
     )
     assert "10 mutants" in out
     assert "1 surviving" in out
     assert "kdive.domain.errors.xǁCategorizedErrorǁ__init____mutmut_1" in out
+    assert "[no tests]" in out  # status label so the dev knows why it survived
     assert "mutmut show" in out  # tells the dev how to inspect
     assert "relative to the test path" in out
 

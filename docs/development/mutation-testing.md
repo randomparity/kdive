@@ -20,8 +20,9 @@ Example (fast, no Postgres):
     just mutate src/kdive/domain/errors.py tests/domain/test_errors.py
 
 Reading the output: it prints how many mutants were generated and how many survived, then lists
-each survivor. Inspect one with `mutmut show <name>` (or browse interactively with
-`mutmut browse`), then add or tighten an assertion until it is killed, and re-run.
+each non-killed mutant with its mutmut status in brackets (e.g. `[survived]`, `[no tests]`,
+`[timeout]`). Inspect one with `mutmut show <name>` (or browse interactively with
+`mutmut browse`), then add or strengthen a test until it is killed, and re-run.
 
 ## Starting targets
 
@@ -50,9 +51,7 @@ leak path remains untested in practice.)
 ## Host prerequisite
 
 mutmut runs ephemerally via `uv run --with 'mutmut==3.6.0'` — nothing to install into the
-project. mutmut needs `os.fork` (macOS/Linux; Windows needs WSL). Its `libcst` dependency ships
-prebuilt wheels for arm64-darwin and Linux; on **x86_64-darwin** there is no wheel, so install
-the Rust toolchain (`rustc`/`cargo`) first or the ephemeral install will fail.
+project. mutmut needs `os.fork`, so it runs on macOS/Linux only (Windows needs WSL).
 
 ## How it works
 
