@@ -205,6 +205,20 @@ def test_adapter_staged_when_volume_present(tmp_path) -> None:
     assert conn.closed is True
 
 
+def test_adapter_materializes_tls_under_pki_base_dir(tmp_path) -> None:
+    # pki_base_dir flows through to the per-op pkipath; the composed URI handed to the opener
+    # carries pkipath=<dir under tmp_path>, proving the base dir is not dropped.
+    seen_uris: list[str] = []
+
+    def open_connection(uri: str) -> _FakeConn:
+        seen_uris.append(uri)
+        return _FakeConn()
+
+    assert _run_probe(_build(open_connection, tmp_path)) is BaseImageStagingOutcome.STAGED
+    assert len(seen_uris) == 1
+    assert f"pkipath={tmp_path}" in seen_uris[0]
+
+
 def test_adapter_not_staged_when_volume_absent(tmp_path) -> None:
     conn = _FakeConn(pools={_POOL: _FakePool(volumes=set())})
     assert _run_probe(_build(lambda uri: conn, tmp_path)) is BaseImageStagingOutcome.NOT_STAGED
