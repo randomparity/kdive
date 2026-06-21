@@ -21,7 +21,7 @@ from kdive.components.references import (
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject import composition
 from kdive.providers.fault_inject._common import SYNTHETIC_BUILD_ID, TENANT
@@ -43,6 +43,7 @@ from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
 from kdive.providers.ports import DebugTransportKind, InstallRequest, SystemHandle
 from kdive.providers.ports.lifecycle import TransportHandleData
+from kdive.security.artifacts.crash_commands import validate_crash_commands
 
 
 def test_discovery_registration_is_bind_only_and_targets_synthetic_host() -> None:
@@ -314,3 +315,60 @@ def test_clear_breakpoint_is_a_noop_for_an_unknown_number(tmp_path) -> None:
 
     remaining = engine.list_breakpoints(attachment)
     assert [ref.number for ref in remaining] == [kept.number]
+
+
+def test_capture_writes_sensitive_and_redacted_vmcore_artifacts() -> None:
+    store = _RecordingStore()
+    retrieve = FaultInjectRetrieve(store_factory=lambda: store)
+    system_id = uuid4()
+
+    output = retrieve.capture(system_id, CaptureMethod.HOST_DUMP)
+
+    raw_req, redacted_req = store.requests
+    assert raw_req.name == "vmcore-host_dump"
+    assert raw_req.sensitivity is Sensitivity.SENSITIVE
+    assert redacted_req.name == "vmcore-host_dump-redacted"
+    assert redacted_req.sensitivity is Sensitivity.REDACTED
+
+    for req in store.requests:
+        assert req.tenant == TENANT
+        assert req.owner_kind == "systems"
+        assert req.owner_id == str(system_id)
+        assert req.data == b"fault-inject-vmcore"
+        assert req.retention_class == "vmcore"
+
+    assert output.raw.key == raw_req.key()
+    assert output.raw.sensitivity is Sensitivity.SENSITIVE
+    assert output.redacted.key == redacted_req.key()
+    assert output.redacted.sensitivity is Sensitivity.REDACTED
+    assert output.vmcore_build_id == SYNTHETIC_BUILD_ID
+    assert output.raw_size_bytes == len(b"fault-inject-vmcore")
+
+
+def test_crash_postmortem_maps_each_command_to_a_synthetic_result() -> None:
+    retrieve = FaultInjectRetrieve(store_factory=_RecordingStore)
+
+    output = retrieve.run_crash_postmortem(
+        vmcore_ref="v", debuginfo_ref="d", expected_build_id="b", commands=["bt", "ps"]
+    )
+
+    assert output.results == {"bt": "synthetic", "ps": "synthetic"}
+    assert output.transcript == "fault-inject postmortem"
+    assert output.truncated is False
+
+
+def test_crash_postmortem_rejection_carries_the_reason_in_details() -> None:
+    retrieve = FaultInjectRetrieve(store_factory=_RecordingStore)
+    bad_command = "bt | sh"
+    reason = validate_crash_commands([bad_command])
+    assert reason is not None
+
+    with pytest.raises(CategorizedError) as excinfo:
+        retrieve.run_crash_postmortem(
+            vmcore_ref="v", debuginfo_ref="d", expected_build_id="b", commands=[bad_command]
+        )
+
+    error = excinfo.value
+    assert str(error) == "crash command batch rejected"
+    assert error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert error.details == {"reason": reason}
