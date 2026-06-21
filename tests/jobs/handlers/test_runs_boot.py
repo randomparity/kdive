@@ -7,6 +7,7 @@ from typing import cast
 
 import pytest
 
+from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs.handlers import runs, runs_boot
 from kdive.jobs.models import HandlerRegistry
@@ -18,6 +19,47 @@ def test_boot_handler_facade_and_leaf_console_patch_surface() -> None:
     assert runs.boot_handler is runs_boot.boot_handler
     assert runs_boot.console_log_path is not None
     assert runs_boot.read_console_log is not None
+
+
+class _FakeRun:
+    """Stand-in carrying only the field _expected_crash_matches reads."""
+
+    def __init__(self, expected_boot_failure: object) -> None:
+        self.expected_boot_failure = expected_boot_failure
+
+
+_CONSOLE = b"line1\nkernel BUG at mm/slub.c:1\nline3\n"
+
+
+def test_expected_crash_matches_when_pattern_is_found_in_console() -> None:
+    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "BUG at"}))
+    assert runs_boot._expected_crash_matches(run, _CONSOLE) is True
+
+
+def test_expected_crash_no_match_when_pattern_absent() -> None:
+    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "no-such-marker"}))
+    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+
+
+def test_expected_crash_false_when_no_expected_failure_declared() -> None:
+    run = cast(Run, _FakeRun(None))
+    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+
+
+def test_expected_crash_false_for_non_console_crash_kind() -> None:
+    run = cast(Run, _FakeRun({"kind": "exit_code", "pattern": "BUG at"}))
+    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+
+
+def test_expected_crash_false_when_pattern_is_not_a_string() -> None:
+    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": 123}))
+    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
+
+
+def test_expected_crash_false_on_invalid_search_pattern() -> None:
+    # A malformed pattern must fail closed (no crash match), not raise out of the handler.
+    run = cast(Run, _FakeRun({"kind": "console_crash", "pattern": "["}))
+    assert runs_boot._expected_crash_matches(run, _CONSOLE) is False
 
 
 def _ports() -> runs.RunHandlerPorts:
