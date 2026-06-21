@@ -66,6 +66,18 @@ def test_not_ready_when_pg_down() -> None:
     asyncio.run(_run())
 
 
+def test_minio_ping_failure_reads_as_not_ready() -> None:
+    async def _run() -> None:
+        checks = build_worker_checks(
+            postgres_ping=_pg_ok, object_store_factory=lambda: _FakeStore(ok=False)
+        )
+        result = await HealthProbe(checks=checks).check()
+        assert result.ready is False
+        assert result.checks["minio"] is False
+
+    asyncio.run(_run())
+
+
 def test_minio_factory_failure_reads_as_not_ready() -> None:
     async def _run() -> None:
         def boom() -> _FakeStore:
