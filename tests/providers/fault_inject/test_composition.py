@@ -34,14 +34,15 @@ from kdive.providers.fault_inject.debug.introspect import FaultInjectIntrospect
 from kdive.providers.fault_inject.discovery import FaultInjectDiscovery
 from kdive.providers.fault_inject.faulting.engine import FaultEngine, FaultPlane
 from kdive.providers.fault_inject.inventory import FaultInjectInventory, FaultInjectReaper
-from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect
+from kdive.providers.fault_inject.lifecycle.connect import FaultInjectConnect, synthetic_port
 from kdive.providers.fault_inject.lifecycle.control import FaultInjectControl
 from kdive.providers.fault_inject.lifecycle.faulted import FaultedInstall, FaultedProvisioning
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.fault_inject.retrieve import FaultInjectRetrieve
-from kdive.providers.ports import InstallRequest
+from kdive.providers.ports import DebugTransportKind, InstallRequest, SystemHandle
+from kdive.providers.ports.lifecycle import TransportHandleData
 
 
 def test_discovery_registration_is_bind_only_and_targets_synthetic_host() -> None:
@@ -213,3 +214,103 @@ def test_build_stores_redacted_kernel_and_debuginfo_and_returns_their_refs() -> 
     assert output.debuginfo_ref == debuginfo_req.key()
     assert output.kernel_ref != output.debuginfo_ref
     assert output.build_id == SYNTHETIC_BUILD_ID
+
+
+def test_introspect_outputs_are_empty_but_non_null_collections() -> None:
+    introspect = FaultInjectIntrospect()
+
+    offline = introspect.from_vmcore(vmcore_ref="v", debuginfo_ref="d", expected_build_id="b")
+    live = introspect.introspect_live(transport_handle="gdbstub://127.0.0.1:1234", helper="drgn")
+
+    for output in (offline, live):
+        assert output.tasks == {}
+        assert output.modules == {}
+        assert output.sysinfo == {}
+        assert output.truncated is False
+
+
+def test_synthetic_port_is_stable_and_within_the_documented_range() -> None:
+    # "fi-38" hashes to a digest above the 64512-wide modulus and is byte-order
+    # sensitive, so its exact port pins the modulus bounds and the big-endian read.
+    port = synthetic_port("fi-38")
+
+    assert port == 1089
+    assert 1024 <= port <= 65535
+    assert synthetic_port("fi-38") == port
+    assert synthetic_port("fault-inject-other") != port
+
+
+def test_open_transport_encodes_the_handle_derived_loopback_port() -> None:
+    connect = FaultInjectConnect()
+    system = SystemHandle("fault-inject-domain")
+
+    handle = connect.open_transport(system, "gdbstub")
+
+    decoded = TransportHandleData.decode(handle)
+    assert decoded.kind == "gdbstub"
+    assert decoded.host == "127.0.0.1"
+    assert decoded.port == synthetic_port(str(system))
+
+
+def test_open_transport_error_names_the_rejected_kind() -> None:
+    connect = FaultInjectConnect()
+
+    with pytest.raises(CategorizedError) as excinfo:
+        connect.open_transport(
+            SystemHandle("fault-inject-domain"), cast(DebugTransportKind, "bogus")
+        )
+
+    assert "bogus" in str(excinfo.value)
+
+
+def test_attach_seam_attachment_carries_a_live_controller(tmp_path) -> None:
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id="run", transcript_path=tmp_path / "s.log"
+    )
+
+    assert attachment.controller is not None
+    assert attachment.rsp_host == "127.0.0.1"
+    assert attachment.rsp_port == 1234
+
+
+def test_debug_engine_breakpoints_number_sequentially_with_full_fields(tmp_path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id="run", transcript_path=tmp_path / "s.log"
+    )
+
+    first = engine.set_breakpoint(attachment, "vfs_read")
+    second = engine.set_breakpoint(attachment, "do_exit")
+
+    assert first.number == "1"
+    assert second.number == "2"
+    assert first.type == "breakpoint"
+    assert first.func == "vfs_read"
+    assert first.enabled is True
+
+
+def test_clear_breakpoint_removes_only_the_named_one(tmp_path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id="run", transcript_path=tmp_path / "s.log"
+    )
+    first = engine.set_breakpoint(attachment, "vfs_read")
+    second = engine.set_breakpoint(attachment, "do_exit")
+
+    engine.clear_breakpoint(attachment, first.number)
+
+    remaining = engine.list_breakpoints(attachment)
+    assert [ref.number for ref in remaining] == [second.number]
+
+
+def test_clear_breakpoint_is_a_noop_for_an_unknown_number(tmp_path) -> None:
+    engine = FaultInjectDebugEngine()
+    attachment = fault_inject_attach_seam(
+        host="127.0.0.1", port=1234, run_id="run", transcript_path=tmp_path / "s.log"
+    )
+    kept = engine.set_breakpoint(attachment, "vfs_read")
+
+    engine.clear_breakpoint(attachment, "999")
+
+    remaining = engine.list_breakpoints(attachment)
+    assert [ref.number for ref in remaining] == [kept.number]
