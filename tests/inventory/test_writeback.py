@@ -637,6 +637,26 @@ def test_file_adapter_writes_atomically(tmp_path: Path) -> None:
     assert sorted(p.name for p in tmp_path.iterdir()) == ["systems.toml"]
 
 
+def test_file_adapter_creates_temp_in_target_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Atomic replace requires the temp file to live on the same filesystem as the target,
+    # which the adapter guarantees by passing dir=<target parent> to mkstemp. Pin that
+    # contract directly so a `dir=None` mutant (temp in the system temp dir) is killed even
+    # when tmp_path and the system temp share a filesystem.
+    target = tmp_path / "systems.toml"
+    captured: dict[str, object] = {}
+    real_mkstemp = writeback.tempfile.mkstemp
+
+    def spy_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        captured["dir"] = kwargs.get("dir")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(writeback.tempfile, "mkstemp", spy_mkstemp)
+    _run(writeback.MountedFileWriteback(target).write("x = 1\n"))
+    assert captured["dir"] == target.parent
+
+
 def test_file_adapter_overwrites_existing(tmp_path: Path) -> None:
     target = tmp_path / "systems.toml"
     target.write_text("old = 1\n")
@@ -754,10 +774,13 @@ def test_configmap_300_is_not_treated_as_success() -> None:
     assert exc.value.details == {"target": "configmap", "status": 300}
 
 
-def test_configmap_2xx_other_than_200_succeeds() -> None:
-    # 201/204 are still success; the lower bound of the window is 200, not 201.
+@pytest.mark.parametrize("status", [201, 204, 299])
+def test_configmap_2xx_other_than_200_succeeds(status: int) -> None:
+    # Every code in the interior/upper part of the 2xx window is success, not just 200.
+    # 201/204 exercise the interior (kills `status == 200`, `< 201`); 299 pins the upper
+    # bound just below 300 (kills `< 300` -> `<= 200`/`< 201`).
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"kind": "ConfigMap"})
+        return httpx.Response(status, json={"kind": "ConfigMap"})
 
     _run(_configmap_adapter(handler).write("x = 1\n"))
 
