@@ -6,6 +6,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.endpoint_preflight import (
+    _host_of,
     validate_guest_routable_endpoint,
 )
 
@@ -35,6 +36,28 @@ def test_loopback_endpoint_is_configuration_error(
     assert err.details["configured_endpoint"] == endpoint
     # The remediation names the exact env var as a literal identifier, not just prose.
     assert "KDIVE_S3_ENDPOINT_URL" in str(err.details["next_action"])
+    # The error message explains *why* (loopback unreachable from a remote guest) and
+    # echoes the offending endpoint, so the operator sees the cause without the details map.
+    message = str(err)
+    assert "loopback" in message
+    assert "remote" in message
+    assert endpoint in message
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected_host"),
+    [
+        ("http://minio.internal:9000", "minio.internal"),
+        ("minio.internal:9000", "minio.internal"),
+        ("http://127.0.0.1:9000", "127.0.0.1"),
+        ("http://", ""),
+        ("", ""),
+    ],
+)
+def test_host_of_extracts_host_or_empty(endpoint: str, expected_host: str) -> None:
+    # A hostless endpoint yields the empty string (no sentinel), so the loopback check
+    # treats it as "no host to reject" rather than matching a stray placeholder.
+    assert _host_of(endpoint) == expected_host
 
 
 @pytest.mark.parametrize(
