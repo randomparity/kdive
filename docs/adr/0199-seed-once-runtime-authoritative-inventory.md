@@ -1,6 +1,6 @@
 # ADR 0199 — Seed-once, runtime-authoritative inventory via an override ledger
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-20
 - **Deciders:** Platform / core-platform
 
