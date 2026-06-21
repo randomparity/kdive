@@ -9,9 +9,15 @@ helpers here select the newest core and enforce the single-object ceiling over a
 
 from __future__ import annotations
 
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
 from typing import NamedTuple, Protocol, runtime_checkable
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
+from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 class VmcoreEntry(NamedTuple):
@@ -49,3 +55,35 @@ def harvest_vmcore(reader: GuestCoreReader, overlay: str, *, max_bytes: int) -> 
             details={"size_bytes": chosen.size_bytes, "max_bytes": max_bytes},
         )
     return reader.read_vmcore(overlay, chosen.path)
+
+
+def read_via_tempfile[T](data: bytes, path_reader: Callable[[Path], T]) -> T:
+    """Spool ``data`` to a temp file so a Path-based drgn reader can open it; clean up after."""
+    with tempfile.NamedTemporaryFile(prefix="kdive-kdump-", suffix=".vmcore") as handle:
+        handle.write(data)
+        handle.flush()
+        return path_reader(Path(handle.name))
+
+
+def extract_dmesg_or_sentinel(data: bytes, extractor: Callable[[Path], bytes]) -> bytes:
+    """Extract dmesg from the core bytes; degrade to the sentinel, but never hide a missing drgn.
+
+    Mirrors remote host_dump: a ``MISSING_DEPENDENCY`` (drgn absent) is an operator fault that
+    must surface; any other failure (printk needs debuginfo) degrades to ``DMESG_UNAVAILABLE``
+    so the core + build-id still get captured.
+    """
+    try:
+        return read_via_tempfile(data, extractor)
+    except CategorizedError as exc:
+        if exc.category is ErrorCategory.MISSING_DEPENDENCY:
+            raise
+        return DMESG_UNAVAILABLE
+
+
+def redact_dmesg(
+    data: bytes, extractor: Callable[[Path], bytes], registry: SecretRegistry
+) -> bytes:
+    """Extract dmesg (degrading on failure) and scrub registered secrets before persistence."""
+    dmesg = extract_dmesg_or_sentinel(data, extractor)
+    redacted = Redactor(registry=registry).redact_text(dmesg.decode("utf-8", "replace"))
+    return redacted.encode("utf-8")

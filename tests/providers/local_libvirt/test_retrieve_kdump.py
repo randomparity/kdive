@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
@@ -10,9 +11,14 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.retrieve_kdump import (
     GuestCoreReader,
     VmcoreEntry,
+    extract_dmesg_or_sentinel,
     harvest_vmcore,
+    read_via_tempfile,
+    redact_dmesg,
     select_newest,
 )
+from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 _OVERLAY = "/var/lib/kdive/rootfs/sys-overlay.qcow2"
 
@@ -75,3 +81,53 @@ def test_harvest_oversize_core_is_configuration_error() -> None:
 
 def test_guest_core_reader_protocol_is_runtime_checkable() -> None:
     assert isinstance(_FakeReader(entries=[]), GuestCoreReader)
+
+
+def test_read_via_tempfile_passes_a_path_holding_the_bytes() -> None:
+    seen: dict[str, bytes] = {}
+
+    def reader(path: Path) -> str:
+        seen["bytes"] = path.read_bytes()
+        return "deadbeef"
+
+    assert read_via_tempfile(b"COREBYTES", reader) == "deadbeef"
+    assert seen["bytes"] == b"COREBYTES"
+
+
+def test_read_via_tempfile_removes_the_temp_file() -> None:
+    captured: list[Path] = []
+
+    def reader(path: Path) -> str:
+        captured.append(path)
+        return "x"
+
+    read_via_tempfile(b"X", reader)
+    assert not captured[0].exists()
+
+
+def test_extract_dmesg_success_returns_bytes() -> None:
+    assert extract_dmesg_or_sentinel(b"core", lambda _p: b"kernel log") == b"kernel log"
+
+
+def test_extract_dmesg_degrades_infrastructure_failure_to_sentinel() -> None:
+    def boom(_p: Path) -> bytes:
+        raise CategorizedError("no debuginfo", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    assert extract_dmesg_or_sentinel(b"core", boom) == DMESG_UNAVAILABLE
+
+
+def test_extract_dmesg_reraises_missing_dependency() -> None:
+    def no_drgn(_p: Path) -> bytes:
+        raise CategorizedError("drgn missing", category=ErrorCategory.MISSING_DEPENDENCY)
+
+    with pytest.raises(CategorizedError) as exc:
+        extract_dmesg_or_sentinel(b"core", no_drgn)
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+
+
+def test_redact_dmesg_scrubs_a_registered_secret() -> None:
+    registry = SecretRegistry()
+    registry.register("hunter2", scope=None)
+    out = redact_dmesg(b"core", lambda _p: b"login password=hunter2 done", registry)
+    assert b"hunter2" not in out
+    assert b"password=" in out
