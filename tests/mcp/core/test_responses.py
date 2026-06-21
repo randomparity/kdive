@@ -185,6 +185,29 @@ def test_failure_from_error_forwards_suggested_next_actions() -> None:
     assert resp.suggested_next_actions == ["allocations.release"]
 
 
+def test_failure_from_error_category_override_wins_over_exc_category() -> None:
+    # failure_from_error accepts an explicit category= that overrides the exc's own category
+    # (used in production by debug ops). The `category or exc.category` selection must prefer the
+    # override: error_category reflects it, and retryable is derived from the override — not the
+    # exc category. Pick categories whose retryable classification differs so both are pinned.
+    exc = CategorizedError("boom", category=ErrorCategory.QUEUE_TIMEOUT)  # retryable=True
+    resp = ToolResponse.failure_from_error(
+        "res-1",
+        exc,
+        category=ErrorCategory.CONFIGURATION_ERROR,  # retryable=False
+    )
+    assert resp.error_category == "configuration_error"
+    assert resp.retryable is False
+
+
+def test_failure_from_error_falls_back_to_exc_category_when_no_override() -> None:
+    # With no override, the exc's own category and its derived retryable flow through.
+    exc = CategorizedError("boom", category=ErrorCategory.QUEUE_TIMEOUT)  # retryable=True
+    resp = ToolResponse.failure_from_error("res-1", exc)
+    assert resp.error_category == "queue_timeout"
+    assert resp.retryable is True
+
+
 def test_common_detail_helpers_build_named_payloads() -> None:
     assert reason_data("bad_id") == {"reason": "bad_id"}
     assert current_status_data("released") == {"current_status": "released"}

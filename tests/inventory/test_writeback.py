@@ -781,21 +781,6 @@ def test_configmap_sends_canonical_header_names_verbatim() -> None:
     assert "Accept" in names
 
 
-def test_configmap_stores_the_injected_transport() -> None:
-    # The injected transport must be retained on the instance; dropping it (storing None) would
-    # make `write` build a real-network client instead of routing through the mock.
-    transport = httpx.MockTransport(lambda request: httpx.Response(200))
-    adapter = writeback.ConfigMapWriteback(
-        namespace="kdive",
-        name="kdive-systems",
-        key="systems.toml",
-        token="tok",  # noqa: S106
-        api_base="https://10.0.0.1:443",
-        transport=transport,
-    )
-    assert adapter._transport is transport
-
-
 def test_configmap_client_routes_through_the_injected_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
