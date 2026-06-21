@@ -60,7 +60,7 @@ class WritebackTarget(Protocol):
 
 `write` is the whole contract: persist `toml_text` to the live source, or raise a
 `CategorizedError` (`CONFIGURATION_ERROR` for a misconfiguration the operator can fix, e.g. missing
-token/path; `PROVIDER_ERROR` for a transport/API failure). It is **not** idempotent-by-content
+token/path; `INFRASTRUCTURE_FAILURE` for a transport/API failure). It is **not** idempotent-by-content
 beyond what the underlying store gives (a ConfigMap patch is last-writer-wins; a file replace is
 atomic).
 
@@ -95,7 +95,7 @@ A strategic-merge `PATCH` to
 `/api/v1/namespaces/{ns}/configmaps/{name}` with body `{"data": {"<key>": "<toml>"}}`,
 `Content-Type: application/strategic-merge-patch+json`, `Authorization: Bearer <token>`, TLS pinned
 to the service-account CA. `httpx` (already a dependency) is the transport — **no new dependency**.
-A non-2xx response raises `PROVIDER_ERROR` with the status code (body redacted: it can echo cluster
+A non-2xx response raises `INFRASTRUCTURE_FAILURE` with the status code (body redacted: it can echo cluster
 detail). 403 specifically maps to `CONFIGURATION_ERROR` ("the RBAC Role is missing or does not grant
 `patch` on `kdive-systems`") so the operator gets the actionable fix.
 
@@ -165,7 +165,7 @@ so the common images/build_hosts/cost_classes round-trip still persists cleanly.
   its accepted values. Not a silent success.
 - **Not in a pod, `configmap` selected** → `CONFIGURATION_ERROR` at write (missing token/CA mount).
 - **403 from the API** → `CONFIGURATION_ERROR` naming the missing RBAC grant.
-- **5xx / network error from the API** → `PROVIDER_ERROR`, status/exception class only (body
+- **5xx / network error from the API** → `INFRASTRUCTURE_FAILURE`, status/exception class only (body
   redacted).
 - **File path not writable / parent missing (`file` selected)** → `CONFIGURATION_ERROR` naming the
   path.
@@ -196,7 +196,7 @@ CI-covered (no cluster, no real file-system dependency beyond a tmp dir):
 - **Factory**: `resolve_writeback_target` returns the right adapter per setting value, `None` when
   off, and a `CONFIGURATION_ERROR` on an unknown value.
 - **ConfigMap adapter, transport mocked**: a 200 issues the expected `PATCH` (URL, headers,
-  strategic-merge body, key); a 403 → `CONFIGURATION_ERROR`; a 500 → `PROVIDER_ERROR` with the body
+  strategic-merge body, key); a 403 → `CONFIGURATION_ERROR`; a 500 → `INFRASTRUCTURE_FAILURE` with the body
   redacted; a missing in-cluster token → `CONFIGURATION_ERROR`. The HTTP boundary is mocked (it is
   the external service); the adapter logic is exercised directly.
 - **Mounted-file adapter**: writes to a tmp path, asserts the file content equals the toml and the
