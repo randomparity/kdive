@@ -247,6 +247,17 @@ def test_serialize_defined_image_emits_object_key_placeholder() -> None:
         ]
     )
     assert expected_source in body
+    # the table header is the lowercase TOML key the reconciler parses, never uppercased.
+    assert "[image.source]" in body
+    assert "[IMAGE.SOURCE]" not in body
+
+
+def test_serialize_defined_image_table_header_is_lowercase() -> None:
+    # A defined image (no object_key, no volume) takes the placeholder branch; its
+    # [image.source] header must be emitted verbatim so the document parses.
+    rendered = serialize.serialize_inventory(_empty_snapshot(images=(_defined_image(),)))
+    source_lines = [line for line in rendered.splitlines() if line == "[image.source]"]
+    assert source_lines == ["[image.source]"]
 
 
 def test_serialize_images_sorted_by_provider_then_name_then_arch() -> None:
@@ -348,12 +359,24 @@ def test_serialize_local_block_exact() -> None:
     assert expected_block in rendered
 
 
-def test_serialize_fault_block_emits_seed_default_zero() -> None:
+def test_serialize_fault_block_exact_with_seed_default_zero() -> None:
     rendered = serialize.serialize_inventory(
         _empty_snapshot(fault_inject=(_resource_row("f-1", seed=None),))
     )
-    assert "[[fault_inject]]" in rendered
-    assert "seed = 0" in rendered
+    expected_block = "\n".join(
+        [
+            "[[fault_inject]]",
+            'name = "f-1"',
+            'cost_class = "cc"',
+            'pool = "pool"',
+            "concurrent_allocation_cap = 1",
+            "vcpus = 4",
+            "memory_mb = 2048",
+            "seed = 0",
+            "",
+        ]
+    )
+    assert expected_block in rendered
 
 
 def test_serialize_fault_block_emits_explicit_seed() -> None:
@@ -362,6 +385,24 @@ def test_serialize_fault_block_emits_explicit_seed() -> None:
     )
     assert "seed = 7" in rendered
     assert "seed = 0" not in rendered
+
+
+def test_serialize_fault_missing_vcpus_raises_named_error() -> None:
+    with pytest.raises(ValueError) as exc:
+        serialize.serialize_inventory(
+            _empty_snapshot(fault_inject=(_resource_row("f-1", vcpus=None),))
+        )
+    assert "the required vcpus capability" in str(exc.value)
+    assert "'f-1'" in str(exc.value)
+
+
+def test_serialize_fault_missing_memory_raises_named_error() -> None:
+    with pytest.raises(ValueError) as exc:
+        serialize.serialize_inventory(
+            _empty_snapshot(fault_inject=(_resource_row("f-1", memory_mb=None),))
+        )
+    assert "the required memory_mb capability" in str(exc.value)
+    assert "'f-1'" in str(exc.value)
 
 
 def test_serialize_build_host_with_base_image_volume_exact() -> None:
