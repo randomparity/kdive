@@ -23,6 +23,37 @@ def _points(reader: InMemoryMetricReader, name: str) -> list[Any]:
     return out
 
 
+def _metric(reader: InMemoryMetricReader, name: str) -> Any:
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                if m.name == name:
+                    return m
+    raise AssertionError(f"no metric named {name!r} emitted")
+
+
+def test_histogram_metadata_matches_the_instrument_contract() -> None:
+    # Name/unit/description/buckets are the instrument's wire contract: a collector
+    # aggregates by exactly this name, charts the unit, and pre-sizes the advisory buckets.
+    reader = InMemoryMetricReader()
+    tel = DebugSessionTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    tel.record("gdbstub", "ok", 12.0)
+    metric = _metric(reader, "kdive.debug.session.duration")
+    assert metric.unit == "s"
+    assert metric.description == "Debug-session wall-clock duration, by transport and outcome."
+    assert metric.data.data_points[0].explicit_bounds == (
+        1.0,
+        10.0,
+        60.0,
+        300.0,
+        1800.0,
+        3600.0,
+        14400.0,
+    )
+
+
 def test_record_emits_duration_point_with_transport_and_outcome() -> None:
     reader = InMemoryMetricReader()
     tel = DebugSessionTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
@@ -56,3 +87,14 @@ def test_negative_seconds_are_not_recorded() -> None:
     tel = DebugSessionTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
     tel.record("gdbstub", "ok", -0.001)
     assert not _points(reader, "kdive.debug.session.duration"), "negative duration must not emit"
+
+
+def test_zero_and_subsecond_durations_are_recorded() -> None:
+    """The drop guard rejects only negative durations: a 0s or sub-1s session still counts."""
+    reader = InMemoryMetricReader()
+    tel = DebugSessionTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    tel.record("gdbstub", "ok", 0.0)
+    tel.record("drgn-live", "error", 0.5)
+    pts = _points(reader, "kdive.debug.session.duration")
+    assert pts, "zero / sub-second durations must be recorded, not dropped"
+    assert sum(p.count for p in pts) == 2
