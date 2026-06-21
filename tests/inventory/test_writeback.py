@@ -117,6 +117,450 @@ def test_guard_does_not_flag_a_clean_export() -> None:
     writeback.assert_persistable(rendered)  # but the guard does not fire
 
 
+# ---- serialize_inventory (exact output) -----------------------------------------------
+
+
+def _body(snapshot: serialize.InventorySnapshot) -> str:
+    """Serialized output with the explanatory ``_HEADER`` prose stripped.
+
+    The header documents the REPLACE_ME_* placeholders and section names in comments, so
+    substring assertions about the emitted blocks must look only at the rendered body.
+    """
+    rendered = serialize.serialize_inventory(snapshot)
+    assert rendered.startswith(serialize._HEADER)
+    return rendered[len(serialize._HEADER) :]
+
+
+def _resource_row(name: str, **over: object) -> serialize.ResourceRow:
+    base: dict[str, object] = {
+        "name": name,
+        "cost_class": "cc",
+        "pool": "pool",
+        "host_uri": "qemu:///system",
+        "vcpus": 4,
+        "memory_mb": 2048,
+        "concurrent_allocation_cap": 1,
+        "seed": None,
+    }
+    base.update(over)
+    return serialize.ResourceRow(**base)  # type: ignore[arg-type]
+
+
+def test_serialize_empty_snapshot_emits_header_and_schema_only() -> None:
+    rendered = serialize.serialize_inventory(_empty_snapshot())
+    assert rendered == serialize._HEADER + "\nschema_version = 2\n"
+    assert "schema_version = 2" in rendered
+
+
+def test_serialize_image_s3_source_with_digest_exact() -> None:
+    image = serialize.ImageRow(
+        provider="remote_libvirt",
+        name="img-a",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=["a", "b"],
+        object_key="objects/img-a.qcow2",
+        digest="sha256:deadbeef",
+        volume=None,
+        state="built",
+    )
+    rendered = serialize.serialize_inventory(_empty_snapshot(images=(image,)))
+    assert rendered == serialize._HEADER + "\n".join(
+        [
+            "",
+            "schema_version = 2",
+            "",
+            "[[image]]",
+            'provider = "remote_libvirt"',
+            'name = "img-a"',
+            'arch = "x86_64"',
+            'format = "qcow2"',
+            'root_device = "/dev/vda"',
+            'visibility = "public"',
+            'capabilities = ["a", "b"]',
+            "[image.source]",
+            'kind = "s3"',
+            'object_key = "objects/img-a.qcow2"',
+            'digest = "sha256:deadbeef"',
+            "",
+        ]
+    )
+
+
+def test_serialize_image_staged_source_takes_precedence_over_object_key() -> None:
+    image = serialize.ImageRow(
+        provider="local_libvirt",
+        name="img-staged",
+        arch="aarch64",
+        format="raw",
+        root_device="/dev/vda",
+        visibility="private",
+        capabilities=[],
+        object_key="should-be-ignored",
+        digest="should-be-ignored",
+        volume="pool/vol-1",
+        state="staged",
+    )
+    body = _body(_empty_snapshot(images=(image,)))
+    assert "[image.source]\n" in body
+    assert 'kind = "staged"' in body
+    assert 'volume = "pool/vol-1"' in body
+    # the staged branch wins: neither the object_key nor digest leak through.
+    assert "should-be-ignored" not in body
+    assert "object_key = " not in body
+    assert "digest = " not in body
+    assert "capabilities = []" in body
+
+
+def test_serialize_image_s3_source_without_digest_omits_digest() -> None:
+    image = serialize.ImageRow(
+        provider="local_libvirt",
+        name="img-nodigest",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=[],
+        object_key="objects/x",
+        digest=None,
+        volume=None,
+        state="built",
+    )
+    body = _body(_empty_snapshot(images=(image,)))
+    assert 'object_key = "objects/x"' in body
+    assert "digest = " not in body
+
+
+def test_serialize_defined_image_emits_object_key_placeholder() -> None:
+    body = _body(_empty_snapshot(images=(_defined_image(),)))
+    placeholder = f"{serialize.REMOTE_PLACEHOLDER_PREFIX}object_key"
+    expected_source = "\n".join(
+        [
+            "[image.source]",
+            'kind = "s3"',
+            f'object_key = "{placeholder}"',
+            "",
+        ]
+    )
+    assert expected_source in body
+
+
+def test_serialize_images_sorted_by_provider_then_name_then_arch() -> None:
+    def img(provider: str, name: str, arch: str) -> serialize.ImageRow:
+        return serialize.ImageRow(
+            provider=provider,
+            name=name,
+            arch=arch,
+            format="qcow2",
+            root_device="/dev/vda",
+            visibility="public",
+            capabilities=[],
+            object_key="k",
+            digest=None,
+            volume=None,
+            state="built",
+        )
+
+    # Supplied deliberately out of order so a dropped/constant sort key reorders the output.
+    snapshot = _empty_snapshot(
+        images=(
+            img("zeta", "b", "x86_64"),
+            img("alpha", "b", "x86_64"),
+            img("alpha", "a", "x86_64"),
+            img("alpha", "a", "aarch64"),
+        )
+    )
+    rendered = serialize.serialize_inventory(snapshot)
+    order = [
+        rendered.index('provider = "alpha"\nname = "a"\narch = "aarch64"'),
+        rendered.index('provider = "alpha"\nname = "a"\narch = "x86_64"'),
+        rendered.index('provider = "alpha"\nname = "b"'),
+        rendered.index('provider = "zeta"'),
+    ]
+    assert order == sorted(order)
+
+
+def test_serialize_remote_block_exact_with_placeholders() -> None:
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(remote_libvirt=(_resource_row("host-a", host_uri="qemu+tls://h/system"),))
+    )
+    expected_block = "\n".join(
+        [
+            "[[remote_libvirt]]",
+            'name = "host-a"',
+            'cost_class = "cc"',
+            'pool = "pool"',
+            "concurrent_allocation_cap = 1",
+            'uri = "qemu+tls://h/system"',
+            "vcpus = 4",
+            "memory_mb = 2048",
+            f'gdb_addr = "{serialize.REMOTE_PLACEHOLDER_PREFIX}gdb_addr"',
+            f'gdbstub_range = "{serialize.REMOTE_PLACEHOLDER_PREFIX}gdbstub_range"',
+            f'client_cert_ref = "{serialize.REMOTE_PLACEHOLDER_PREFIX}client_cert_ref"',
+            f'client_key_ref = "{serialize.REMOTE_PLACEHOLDER_PREFIX}client_key_ref"',
+            f'ca_cert_ref = "{serialize.REMOTE_PLACEHOLDER_PREFIX}ca_cert_ref"',
+            f'base_image = "{serialize.REMOTE_PLACEHOLDER_PREFIX}base_image"',
+            "shapes = []",
+            "",
+        ]
+    )
+    assert expected_block in rendered
+
+
+def test_serialize_remote_missing_vcpus_raises() -> None:
+    with pytest.raises(ValueError) as exc:
+        serialize.serialize_inventory(
+            _empty_snapshot(remote_libvirt=(_resource_row("host-a", vcpus=None),))
+        )
+    # the message names the exact missing capability so the operator can fix the row.
+    assert "the required vcpus capability" in str(exc.value)
+    assert "'host-a'" in str(exc.value)
+
+
+def test_serialize_remote_missing_memory_raises() -> None:
+    with pytest.raises(ValueError) as exc:
+        serialize.serialize_inventory(
+            _empty_snapshot(remote_libvirt=(_resource_row("host-a", memory_mb=None),))
+        )
+    assert "the required memory_mb capability" in str(exc.value)
+    assert "'host-a'" in str(exc.value)
+
+
+def test_serialize_local_block_exact() -> None:
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(local_libvirt=(_resource_row("local-1", host_uri="qemu:///system"),))
+    )
+    expected_block = "\n".join(
+        [
+            "[[local_libvirt]]",
+            'name = "local-1"',
+            'cost_class = "cc"',
+            'pool = "pool"',
+            "concurrent_allocation_cap = 1",
+            'host_uri = "qemu:///system"',
+            "",
+        ]
+    )
+    assert expected_block in rendered
+
+
+def test_serialize_fault_block_emits_seed_default_zero() -> None:
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(fault_inject=(_resource_row("f-1", seed=None),))
+    )
+    assert "[[fault_inject]]" in rendered
+    assert "seed = 0" in rendered
+
+
+def test_serialize_fault_block_emits_explicit_seed() -> None:
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(fault_inject=(_resource_row("f-1", seed=7),))
+    )
+    assert "seed = 7" in rendered
+    assert "seed = 0" not in rendered
+
+
+def test_serialize_build_host_with_base_image_volume_exact() -> None:
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(
+            build_hosts=(
+                serialize.BuildHostRow(
+                    name="bh-1",
+                    kind="remote",
+                    base_image_volume="pool/base",
+                    workspace_root="/var/lib/kdive/build",
+                    max_concurrent=4,
+                ),
+            )
+        )
+    )
+    expected_block = "\n".join(
+        [
+            "[[build_host]]",
+            'name = "bh-1"',
+            'kind = "remote"',
+            'workspace_root = "/var/lib/kdive/build"',
+            "max_concurrent = 4",
+            'base_image_volume = "pool/base"',
+            "",
+        ]
+    )
+    assert expected_block in rendered
+
+
+def test_serialize_build_host_without_volume_omits_field() -> None:
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(
+            build_hosts=(
+                serialize.BuildHostRow(
+                    name="bh-1",
+                    kind="local",
+                    base_image_volume=None,
+                    workspace_root="/ws",
+                    max_concurrent=2,
+                ),
+            )
+        )
+    )
+    assert "[[build_host]]" in rendered
+    assert "base_image_volume" not in rendered
+    assert "max_concurrent = 2" in rendered
+
+
+def test_serialize_cost_class_emits_coeff_as_quoted_string() -> None:
+    from decimal import Decimal
+
+    rendered = serialize.serialize_inventory(
+        _empty_snapshot(cost_classes=(("standard", Decimal("1.50")),))
+    )
+    expected_block = "\n".join(["[[cost_class]]", 'name = "standard"', 'coeff = "1.50"', ""])
+    assert expected_block in rendered
+
+
+def test_serialize_resources_and_build_hosts_sorted_by_name() -> None:
+    # Each collection gets two rows in reverse-name order so a dropped/constant sort key
+    # (insertion order) or a key=None sort (ResourceRow is unorderable → TypeError) is caught.
+    snapshot = _empty_snapshot(
+        remote_libvirt=(_resource_row("r-zzz"), _resource_row("r-aaa")),
+        local_libvirt=(_resource_row("zzz"), _resource_row("aaa")),
+        fault_inject=(_resource_row("fi-zzz"), _resource_row("fi-aaa")),
+        build_hosts=(
+            serialize.BuildHostRow(
+                name="bh-z", kind="k", base_image_volume=None, workspace_root="/w", max_concurrent=1
+            ),
+            serialize.BuildHostRow(
+                name="bh-a", kind="k", base_image_volume=None, workspace_root="/w", max_concurrent=1
+            ),
+        ),
+    )
+    rendered = serialize.serialize_inventory(snapshot)
+    assert rendered.index('name = "r-aaa"') < rendered.index('name = "r-zzz"')
+    assert rendered.index('name = "aaa"') < rendered.index('name = "zzz"')
+    assert rendered.index('name = "fi-aaa"') < rendered.index('name = "fi-zzz"')
+    assert rendered.index('name = "bh-a"') < rendered.index('name = "bh-z"')
+
+
+def test_serialize_cost_classes_sorted_by_name_not_coeff() -> None:
+    from decimal import Decimal
+
+    # name order (alpha, zeta) is the OPPOSITE of coeff order (zeta=1 < alpha=9), so a sort
+    # keyed on the coefficient instead of the name produces a different order.
+    snapshot = _empty_snapshot(cost_classes=(("zeta", Decimal("1")), ("alpha", Decimal("9"))))
+    rendered = serialize.serialize_inventory(snapshot)
+    assert rendered.index('name = "alpha"') < rendered.index('name = "zeta"')
+
+
+def test_serialize_section_order_is_fixed() -> None:
+    from decimal import Decimal
+
+    snapshot = _empty_snapshot(
+        images=(_defined_image(),),
+        remote_libvirt=(_resource_row("r1"),),
+        local_libvirt=(_resource_row("l1"),),
+        fault_inject=(_resource_row("fi1"),),
+        build_hosts=(
+            serialize.BuildHostRow(
+                name="bh1", kind="k", base_image_volume=None, workspace_root="/w", max_concurrent=1
+            ),
+        ),
+        cost_classes=(("cc1", Decimal("1")),),
+    )
+    body = _body(snapshot)
+    positions = [
+        body.index("[[image]]"),
+        body.index("[[remote_libvirt]]"),
+        body.index("[[local_libvirt]]"),
+        body.index("[[fault_inject]]"),
+        body.index("[[build_host]]"),
+        body.index("[[cost_class]]"),
+    ]
+    assert positions == sorted(positions)
+
+
+# ---- TOML emitter primitives ----------------------------------------------------------
+
+
+def test_toml_str_escapes_special_characters() -> None:
+    # A value with a quote, backslash, and newline must be escaped so it cannot break out.
+    image = serialize.ImageRow(
+        provider="p",
+        name='a"b\\c\nd\te',
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=[],
+        object_key="k",
+        digest=None,
+        volume=None,
+        state="built",
+    )
+    rendered = serialize.serialize_inventory(_empty_snapshot(images=(image,)))
+    assert r'name = "a\"b\\c\nd\te"' in rendered
+    # the raw control characters never appear inside the emitted value line.
+    name_line = next(line for line in rendered.splitlines() if line.startswith("name = "))
+    assert "\t" not in name_line
+
+
+def test_toml_str_escapes_low_control_char_as_unicode() -> None:
+    image = serialize.ImageRow(
+        provider="p",
+        name="x\x01y",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=[],
+        object_key="k",
+        digest=None,
+        volume=None,
+        state="built",
+    )
+    rendered = serialize.serialize_inventory(_empty_snapshot(images=(image,)))
+    assert 'name = "x\\u0001y"' in rendered
+    assert "\x01" not in rendered
+
+
+def test_toml_str_does_not_escape_space() -> None:
+    # 0x20 (space) is the boundary: it must NOT be escaped (the `< 0x20` guard, not `<=`).
+    image = serialize.ImageRow(
+        provider="p",
+        name="a b",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=[],
+        object_key="k",
+        digest=None,
+        volume=None,
+        state="built",
+    )
+    rendered = serialize.serialize_inventory(_empty_snapshot(images=(image,)))
+    assert 'name = "a b"' in rendered
+    assert "\\u0020" not in rendered
+
+
+def test_toml_array_escapes_each_element() -> None:
+    image = serialize.ImageRow(
+        provider="p",
+        name="img",
+        arch="x86_64",
+        format="qcow2",
+        root_device="/dev/vda",
+        visibility="public",
+        capabilities=['has"quote', "plain"],
+        object_key="k",
+        digest=None,
+        volume=None,
+        state="built",
+    )
+    rendered = serialize.serialize_inventory(_empty_snapshot(images=(image,)))
+    assert r'capabilities = ["has\"quote", "plain"]' in rendered
+
+
 # ---- fake adapter ---------------------------------------------------------------------
 
 
