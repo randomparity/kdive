@@ -81,7 +81,14 @@ container-free starting point; the broader `src/kdive/domain/` set is mixed.
 `tests/db/conftest.py`, so any selected test that requests those fixtures starts a disposable
 Postgres container per run. The earlier "pure logic, no Postgres" framing was wrong. The doc states
 the real per-target cost; truly container-free targets are a narrower set (e.g. `domain/errors.py`,
-`domain/` cost math) that the implementation identifies and labels.
+`domain/` cost math) that the implementation identifies and labels. **Prefer container-free targets
+for iterative use.**
+
+**Container-leak warning (Postgres targets).** mutmut kills slow mutants on timeout, and
+testcontainers relies on normal process exit to stop the container it started. A mutant killed
+mid-test will not run that cleanup, so a Postgres-backed run can orphan containers that accumulate
+over many mutants. The doc warns about this and gives a cleanup hint (`docker ps` / `docker rm`);
+the exact testcontainers-under-mutmut lifecycle is pinned by spike 5.
 
 ## Components
 
@@ -92,14 +99,16 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
   2. Write a transient `setup.cfg` `[mutmut]` section.
   3. **Validity guard, two layers** (mutation results are meaningless unless the unmutated suite
      passes):
-     - *Repo-root pre-flight* — run the scoped selection once at repo root; abort on failure or
-       zero tests collected. This catches a wrong/empty test path and genuinely failing tests
-       quickly. It runs in the real tree, so it does **not** prove mutmut's isolated copy is
-       importable.
+     - *Repo-root collection check* — `pytest --co -q` over the scoped selection at repo root;
+       abort on a collection error or zero tests collected. This catches a wrong/empty test path
+       **cheaply** (no test execution, no Postgres), failing fast before the copy. It deliberately
+       does **not** run the tests — "do they pass" is left to the authoritative in-copy baseline,
+       so a Postgres target isn't billed a full extra suite run here.
      - *In-copy baseline* — mutmut's own first pass runs the unmutated suite inside the `mutants/`
        copy. The wrapper parses mutmut's output and aborts if that baseline fails or finds no tests.
-       This is the layer that catches `also_copy`/copy-scope breakage (the failure mode the
-       repo-root check cannot see). Copy-scope correctness is also pinned by spike 2.
+       This is the layer that catches both genuinely failing tests and `also_copy`/copy-scope
+       breakage (the failure mode the repo-root check cannot see). Copy-scope correctness is also
+       pinned by spike 2.
   4. **Isolate the result store per target** — see step 6; clean or namespace `mutants/` when the
      target differs from the last run so summaries never conflate targets.
   5. Invoke mutmut via `uv run --with 'mutmut==3.6.0'`.
@@ -133,18 +142,22 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
      `raise IllegalTransition(...)` / denial raises, and "removed/weakened raise" (deny→allow,
      illegal-edge-allowed) is exactly the mutation those tests must catch.
    - `max_stack_depth = 8` (keep relevant tests localized).
-3. **Validity guard** (Components step 3): repo-root pre-flight aborts on a bad test path or failing
-   tests; mutmut's in-copy baseline pass is parsed to abort on copy-scope breakage or zero tests.
+3. **Validity guard** (Components step 3): repo-root `pytest --co` aborts on a bad/empty test path
+   cheaply; mutmut's in-copy baseline pass is parsed to abort on failing tests or copy-scope
+   breakage.
 4. **Store isolation** (Components step 4): if the target differs from the last run, clean/namespace
    `mutants/` so this run's `mutmut results` reflects only this target.
 5. mutmut: one coverage stats pass over the scoped tests → mutant→test map → run each mutant
    against only its covering tests.
 6. Wrapper runs `mutmut results` (filtered to the current `source_paths`) and prints counts
    (killed / survived / timeout / suspicious), the survivor list with `file:line`, and the hint to
-   inspect via `mutmut show <id>` / `mutmut browse`. The summary also reports **coverage context**:
-   how many source lines were covered (and thus mutated) versus skipped as uncovered under
-   `mutate_only_covered_lines` — so a low survivor count on a poorly-covered module can't be misread
-   as strong testing. It states the result is **relative to the test path supplied**.
+   inspect via `mutmut show <id>` / `mutmut browse`. The summary also reports **coverage context** so
+   a low survivor count on a poorly-covered module can't be misread as strong testing. Its source
+   depends on spike 4: if mutmut exposes covered/total lines parseably, use that; otherwise the
+   summary prints the **mutated-line count** from `mutmut results` (always available) and the wrapper
+   does not run a separate `coverage` pass solely for the ratio — the extra cost (and, for Postgres
+   targets, extra container time) isn't worth it. It states the result is **relative to the test
+   path supplied**.
 7. `finally`: remove the transient `setup.cfg`.
 
 ## Error handling
@@ -154,8 +167,8 @@ the real per-target cost; truly container-free targets are a narrower set (e.g. 
 - **Validate both paths.** Source exists and is under `src/kdive/`; every test path exists. Missing
   test path → clear error, not a silent broadening to the full suite.
 - **Broken baseline / zero tests collected** → abort, via both validity layers (Components step 3):
-  the repo-root pre-flight for a bad path or failing tests, and the parsed in-copy mutmut baseline
-  for copy-scope breakage. Invalid runs can never masquerade as a clean result.
+  the repo-root `pytest --co` for a bad/empty path, and the parsed in-copy mutmut baseline for
+  failing tests or copy-scope breakage. Invalid runs can never masquerade as a clean result.
 - **In-flight / stale transient config.** The generated `setup.cfg` carries a marker header. If a
   marked config already exists on start, the wrapper **refuses to run** and tells the user another
   run is in flight (or to delete the stale file if none is). It never auto-deletes — that would nuke
@@ -204,8 +217,13 @@ design:
 3. **`libcst` install on the dev arch.** Confirm `uv run --with 'mutmut==3.6.0'` resolves without a
    Rust toolchain on the target darwin arch; if not, document the `rustc`/`cargo` prerequisite in
    `check-setup-deps.sh`.
-4. **Result-store behavior across targets.** Confirm how mutmut keys/invalidates the `mutants/`
-   store when `source_paths` changes between runs, and whether `mutmut results` can be filtered to
-   one `source_paths`. This decides the store-isolation mechanism in Components step 4 (clean vs.
-   namespace vs. filter). Also confirm mutmut surfaces a failing/empty in-copy baseline in a
-   parseable way (needed for the validity guard).
+4. **Result-store and output behavior.** Confirm how mutmut keys/invalidates the `mutants/` store
+   when `source_paths` changes between runs, and whether `mutmut results` can be filtered to one
+   `source_paths` (decides the store-isolation mechanism in Components step 4: clean vs. namespace
+   vs. filter). Confirm mutmut surfaces a failing/empty in-copy baseline in a parseable way (needed
+   for the validity guard). Confirm whether mutmut exposes covered/total line counts parseably; if
+   not, the summary falls back to the mutated-line count (Data-flow step 6).
+5. **testcontainers lifecycle under mutmut.** For a Postgres-backed target, confirm whether a
+   timed-out/killed mutant orphans a Postgres container, and whether containers start per fork or
+   once per run. This decides how strong the container-leak warning must be and whether the wrapper
+   should attempt post-run cleanup.
