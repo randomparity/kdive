@@ -707,6 +707,95 @@ def test_from_env_does_not_connect(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(prov, LocalLibvirtProvisioning)
 
 
+def test_from_env_connect_callable_opens_the_configured_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # from_env wires the configured URI into a lazy connect callable; invoking it must call
+    # libvirt.open with that exact URI (not None and not a different value).
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu+ssh://host/system")
+    opened: list[object] = []
+
+    def fake_open(uri: object) -> _ProvConn:
+        opened.append(uri)
+        return _ProvConn()
+
+    monkeypatch.setattr(provisioning_module.libvirt, "open", fake_open)
+
+    prov = LocalLibvirtProvisioning.from_env()
+    conn = prov._connect()
+
+    assert opened == ["qemu+ssh://host/system"]
+    assert isinstance(conn, _ProvConn)
+
+
+def test_provision_failure_message_and_details_carry_system_id() -> None:
+    # A define/start failure surfaces a PROVISIONING_FAILURE whose human message names the
+    # operation and whose details carry the System id for triage.
+    conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn).provision(_SYS, _profile())
+
+    assert str(caught.value) == "libvirt failed to define/start the domain"
+    assert caught.value.details == {"system_id": str(_SYS)}
+
+
+def test_provision_passes_real_system_id_to_materialize_and_define() -> None:
+    # provision threads the caller's system_id (not None or a placeholder) through both the
+    # rootfs materialization seam and the define/start failure details.
+    seen: list[UUID] = []
+    conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=ProvisioningFiles(
+            make_overlay=lambda _base, _overlay: None,
+            remove_overlay=lambda _overlay: None,
+            overlay_exists=lambda _overlay: False,
+            prepare_console_log=lambda _path: None,
+        ),
+        materialize_rootfs=lambda rootfs, system_id: (
+            seen.append(system_id) or rootfs.path  # type: ignore[func-returns-value]
+        ),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        prov.provision(_SYS, _profile())
+
+    assert seen == [_SYS]
+    assert caught.value.details == {"system_id": str(_SYS)}
+
+
+def test_teardown_lookup_error_message_and_details_name_the_domain() -> None:
+    # A non-NO_DOMAIN lookup failure is an INFRASTRUCTURE_FAILURE whose message names the
+    # "looking up" verb and whose details carry the domain name.
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(lookup_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        _prov(conn).teardown(name)
+
+    assert str(caught.value) == "libvirt error looking up domain"
+    assert caught.value.details == {"domain": name}
+
+
+def test_validate_rootfs_ref_local_uses_default_allowed_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A provisioning built without explicit allowed_roots validates a local rootfs against the
+    # default ROOTFS_DIR root; the default must be a usable list, not None.
+    seen_roots: list[list[Path]] = []
+
+    def fake_materialize(rootfs: object, *, context: object) -> Path:
+        del rootfs
+        seen_roots.append(list(context.allowed_roots))  # type: ignore[attr-defined]
+        return Path("/var/lib/kdive/rootfs/fedora-40.qcow2")
+
+    monkeypatch.setattr(provisioning_module, "materialize_rootfs_base", fake_materialize)
+
+    prov = LocalLibvirtProvisioning(connect=lambda: _ProvConn())
+    prov.validate_rootfs_ref(_profile().provider.local_libvirt.rootfs)
+
+    assert seen_roots == [[Path(provisioning_module.ROOTFS_DIR)]]
+
+
 def test_domain_xml_has_serial_console_with_log() -> None:
     # Parse with defusedxml (XXE-safe), matching install.py's _safe_fromstring; stdlib ET
     # parsing is vulnerable to XXE/billion-laughs even on self-rendered strings in tests.
