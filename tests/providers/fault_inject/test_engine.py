@@ -298,15 +298,42 @@ def test_from_capabilities_rejects_a_non_integer_seed() -> None:
     with pytest.raises(CategorizedError) as exc:
         FaultEngine.from_capabilities({SEED_KEY: "not-a-number"})
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    message = str(exc.value)
+    assert "seed must be an integer" in message
+    # The message names the offending type, not a hard-coded "NoneType".
+    assert "str" in message
+    assert "NoneType" not in message
 
 
 def test_from_capabilities_rejects_a_non_numeric_fault_rate_value() -> None:
     with pytest.raises(CategorizedError) as exc:
         FaultEngine.from_capabilities({FAULT_RATE_KEY: {"provision": "high"}})
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    message = str(exc.value)
+    assert "per-plane value" in message
+    # The message names the offending plane and the offending type.
+    assert "provision" in message
+    assert "str" in message
+    assert "NoneType" not in message
 
 
 def test_from_capabilities_rejects_a_non_map_fault_rate() -> None:
     with pytest.raises(CategorizedError) as exc:
         FaultEngine.from_capabilities({FAULT_RATE_KEY: 0.5})
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    message = str(exc.value)
+    assert "expected a per-plane map" in message
+    # The message names the offending type (float), not a hard-coded "NoneType".
+    assert "float" in message
+    assert "NoneType" not in message
+
+
+def test_from_capabilities_preserves_plane_keys_in_the_rate_map() -> None:
+    engine = FaultEngine.from_capabilities({FAULT_RATE_KEY: {"provision": 0.3, "connect": 0.7}})
+    # Each input plane key survives into the engine's map (not collapsed to "None").
+    decision_p = engine.decide(system_id=_SYSTEM, plane=FaultPlane.PROVISION, attempt=1)
+    decision_c = engine.decide(system_id=_SYSTEM, plane=FaultPlane.CONNECT, attempt=1)
+    assert engine.fault_rate == {"provision": 0.3, "connect": 0.7}
+    # The per-plane rate is actually applied per plane (keys are not conflated).
+    assert isinstance(decision_p.fail, bool)
+    assert isinstance(decision_c.fail, bool)

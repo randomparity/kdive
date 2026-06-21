@@ -107,6 +107,7 @@ def test_read_console_log_other_oserror_is_infrastructure_failure(
         read_console_log(path)
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to read console log"
     assert caught.value.details == {
         "operation": "read_console_log",
         "path": str(path),

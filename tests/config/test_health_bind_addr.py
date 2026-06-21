@@ -7,8 +7,11 @@ explicit, reviewed config act rather than implementation memory.
 
 from __future__ import annotations
 
+import pytest
+
 import kdive.config as config
 from kdive.config.core_settings import HEALTH_BIND_ADDR
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.health.aux_bind import resolve_health_bind
 
 
@@ -58,3 +61,27 @@ def test_explicit_override_wins_for_every_process() -> None:
 def test_default_process_is_server() -> None:
     config.load({})
     assert resolve_health_bind() == resolve_health_bind("server")
+
+
+def test_ipv6_host_splits_on_last_colon() -> None:
+    """An IPv6 host keeps its colons; only the final colon separates host from port."""
+    config.load({"KDIVE_HEALTH_BIND_ADDR": "[::1]:9700"})
+    host, port = resolve_health_bind()
+    assert host == "[::1]"
+    assert port == 9700
+
+
+def test_missing_host_is_rejected() -> None:
+    """A bare ``:port`` has a separator but no host and must be rejected."""
+    config.load({"KDIVE_HEALTH_BIND_ADDR": ":9464"})
+    with pytest.raises(CategorizedError) as excinfo:
+        resolve_health_bind()
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_unknown_process_falls_back_to_parsed_port() -> None:
+    """An unrecognized process keeps the parsed default port, not ``None`` (ADR-0090 §5)."""
+    config.load({})
+    host, port = resolve_health_bind("unknown-process")
+    assert host == "127.0.0.1"
+    assert port == 9464

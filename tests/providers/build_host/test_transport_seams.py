@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -26,14 +26,20 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
 from kdive.providers.ports.build_transport import CommandResult
+from kdive.providers.shared.build_host.execution import MAKE_TIMEOUT_S, OBJCOPY_TIMEOUT_S
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator
 from kdive.providers.shared.build_host.transports.transport_seams import (
+    _transport_apply_patch,
+    _transport_merge_config,
     transport_git_checkout,
+    transport_read_build_id,
     transport_read_config,
     transport_run_make,
+    transport_run_modules_install,
     transport_run_olddefconfig,
     transport_run_step,
 )
+from kdive.providers.shared.build_host.workspaces.workspace import GIT_APPLY_TIMEOUT_S
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
@@ -224,6 +230,9 @@ def test_build_workspace_clone_receives_correct_remote_and_ref(tmp_path: Path) -
     clone_call = next(c for c in transport.calls if c.method == "clone")
     assert clone_call.args[0] == _GIT_REMOTE
     assert clone_call.args[1] == _GIT_REF
+    # The clone destination is the run's workspace directory (not None/empty).
+    workspace_root = tmp_path / "workspace"
+    assert clone_call.args[2].startswith(str(workspace_root))
 
 
 def test_build_workspace_fragment_bytes_are_written(tmp_path: Path) -> None:
@@ -589,3 +598,341 @@ def test_build_workspace_nonzero_olddefconfig_raises_build_failure(tmp_path: Pat
     assert any("olddefconfig" in argv for argv in argvs)
     assert "read_text" not in transport.method_names()
     assert not any(any(tok.startswith("-j") for tok in argv) for argv in argvs)
+
+
+# ---------------------------------------------------------------------------
+# 6. Direct seam-factory argv/kwargs (cwd, timeout) precision
+# ---------------------------------------------------------------------------
+
+
+def _run_calls(transport: FakeBuildTransport) -> list[_Call]:
+    return [c for c in transport.calls if c.method == "run"]
+
+
+def test_transport_run_step_passes_cwd_and_timeout(tmp_path: Path) -> None:
+    transport = FakeBuildTransport()
+    ws = tmp_path / "ws"
+    transport_run_step(transport, ["targets"], timeout_s=123)(ws)
+
+    call = _run_calls(transport)[0]
+    assert call.args[0] == ["make", "-C", str(ws), "targets"]
+    assert call.kwargs == {"cwd": str(ws), "timeout_s": 123}
+
+
+def test_transport_run_step_defaults_timeout_to_make_timeout(tmp_path: Path) -> None:
+    transport = FakeBuildTransport()
+    ws = tmp_path / "ws"
+    transport_run_step(transport, ["x"])(ws)
+
+    assert _run_calls(transport)[0].kwargs["timeout_s"] == MAKE_TIMEOUT_S
+
+
+def test_transport_run_modules_install_argv_and_kwargs(tmp_path: Path) -> None:
+    transport = FakeBuildTransport(run_returncode=7)
+    ws = tmp_path / "ws"
+    mod_root = tmp_path / "mods"
+    step = transport_run_modules_install(transport)
+
+    rc = step(ws, mod_root)
+
+    assert rc == 7
+    call = _run_calls(transport)[0]
+    assert call.args[0] == [
+        "make",
+        "-C",
+        str(ws),
+        f"INSTALL_MOD_PATH={mod_root}",
+        "modules_install",
+    ]
+    assert call.kwargs == {"cwd": str(ws), "timeout_s": MAKE_TIMEOUT_S}
+
+
+def test_transport_read_build_id_argv_and_parse(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+
+    captured: dict[str, Any] = {}
+
+    class _BuildIdTransport(FakeBuildTransport):
+        def read_bytes(self, path: str) -> bytes:
+            captured["note_path"] = path
+            return b"note-blob"
+
+    transport = _BuildIdTransport()
+    sentinel = "abc123"
+
+    import kdive.providers.shared.build_host.transports.transport_seams as seams
+
+    original = seams.parse_gnu_build_id
+    seams.parse_gnu_build_id = lambda _blob: sentinel  # ty: ignore[invalid-assignment]
+    try:
+        result = transport_read_build_id(transport)(ws)
+    finally:
+        seams.parse_gnu_build_id = original
+
+    assert result == sentinel
+    call = _run_calls(transport)[0]
+    assert call.args[0] == [
+        "objcopy",
+        "-O",
+        "binary",
+        "--only-section=.notes",
+        str(ws / "vmlinux"),
+        str(ws / "vmlinux.note"),
+    ]
+    assert call.kwargs == {"cwd": str(ws), "timeout_s": OBJCOPY_TIMEOUT_S}
+    assert captured["note_path"] == str(ws / "vmlinux.note")
+
+
+def test_transport_read_build_id_nonzero_objcopy_raises_build_failure(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    transport = FakeBuildTransport(
+        run_results=[CommandResult(returncode=1, stdout="", stderr="boom-stderr")]
+    )
+
+    with pytest.raises(CategorizedError) as exc_info:
+        transport_read_build_id(transport)(ws)
+
+    assert exc_info.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(exc_info.value) == "objcopy failed to extract vmlinux notes"
+    assert exc_info.value.details == {"stderr": "boom-stderr"}
+
+
+# ---------------------------------------------------------------------------
+# 7. _transport_merge_config direct: exact argv, cwd, timeout, paths, errors
+# ---------------------------------------------------------------------------
+
+
+def test_merge_config_emits_exact_defconfig_and_merge_calls(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    transport = FakeBuildTransport()
+
+    _transport_merge_config(transport, b"FRAG=y\n", ws, _RUN)
+
+    runs = _run_calls(transport)
+    # defconfig run
+    assert runs[0].args[0] == ["make", "-C", str(ws), "defconfig"]
+    assert runs[0].kwargs == {"cwd": str(ws), "timeout_s": MAKE_TIMEOUT_S}
+    # fragment shipped to the exact path with the exact bytes
+    write = next(c for c in transport.calls if c.method == "write_bytes")
+    assert write.args[0] == str(ws / "kdump.config.fragment")
+    assert write.kwargs["data"] == b"FRAG=y\n"
+    # merge_config.sh run
+    assert runs[1].args[0] == [
+        "scripts/kconfig/merge_config.sh",
+        "-m",
+        ".config",
+        str(ws / "kdump.config.fragment"),
+    ]
+    assert runs[1].kwargs == {"cwd": str(ws), "timeout_s": MAKE_TIMEOUT_S}
+
+
+def test_merge_config_nonzero_defconfig_raises_build_failure_with_run_id(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    transport = FakeBuildTransport(run_returncode=1)
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _transport_merge_config(transport, b"x", ws, _RUN)
+
+    assert exc_info.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(exc_info.value) == "make defconfig exited non-zero"
+    assert exc_info.value.details == {"run_id": str(_RUN)}
+
+
+def test_merge_config_nonzero_merge_raises_build_failure_with_run_id(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    transport = FakeBuildTransport(
+        run_results=[
+            CommandResult(returncode=0, stdout="", stderr=""),  # defconfig ok
+            CommandResult(returncode=1, stdout="", stderr=""),  # merge fails
+        ]
+    )
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _transport_merge_config(transport, b"x", ws, _RUN)
+
+    assert str(exc_info.value) == "merge_config.sh -m exited non-zero"
+    assert exc_info.value.details == {"run_id": str(_RUN)}
+
+
+# ---------------------------------------------------------------------------
+# 8. _transport_apply_patch direct: exact argv, paths, error messages/details
+# ---------------------------------------------------------------------------
+
+
+def test_apply_patch_ships_bytes_and_runs_exact_git_apply(tmp_path: Path) -> None:
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(_GOOD_PATCH)
+    ws = tmp_path / "ws"
+    transport = FakeBuildTransport(apply_changes_file=True)
+
+    _transport_apply_patch(transport, str(patch_file), ws, SecretRegistry())
+
+    # The patch is shipped to <ws>/<patch name> with the exact bytes.
+    write = next(c for c in transport.calls if c.method == "write_bytes")
+    assert write.args[0] == str(ws / "fix.patch")
+    assert write.kwargs["data"] == patch_file.read_bytes()
+    # git apply argv is exact, with the shipped remote path.
+    apply_run = next(c for c in _run_calls(transport) if c.args[0][:2] == ["git", "apply"])
+    assert apply_run.args[0] == [
+        "git",
+        "apply",
+        "-p1",
+        "-v",
+        "--",
+        str(ws / "fix.patch"),
+    ]
+    assert apply_run.kwargs == {"cwd": str(ws), "timeout_s": GIT_APPLY_TIMEOUT_S}
+    # before/after target reads use the strip=1 target path under the workspace.
+    read_paths = [c.args[0] for c in transport.calls if c.method == "read_bytes"]
+    assert all(p == str(ws / "init" / "main.c") for p in read_paths)
+
+
+def test_apply_patch_unreadable_patch_raises_with_path_and_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(_GOOD_PATCH)
+    ws = tmp_path / "ws"
+
+    def _boom(_path: Path) -> bytes:
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _transport_apply_patch(FakeBuildTransport(), str(patch_file), ws, SecretRegistry())
+
+    assert str(exc_info.value) == "patch_ref could not be read"
+    assert exc_info.value.details == {
+        "kind": "patch_ref",
+        "path": str(patch_file),
+        "error": "PermissionError",
+    }
+
+
+def test_apply_patch_nonzero_git_apply_redacts_stderr_with_registry(tmp_path: Path) -> None:
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(_GOOD_PATCH)
+    ws = tmp_path / "ws"
+    registry = SecretRegistry()
+    registry.register("TOPSECRET", scope="patch-test")
+    transport = FakeBuildTransport(
+        run_results=[
+            CommandResult(returncode=1, stdout="", stderr="apply failed near TOPSECRET token"),
+        ]
+    )
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _transport_apply_patch(transport, str(patch_file), ws, registry)
+
+    assert str(exc_info.value) == "patch_ref does not apply against the kernel tree"
+    stderr = cast(str, exc_info.value.details["stderr"])
+    # The registered secret is redacted (so passing a None registry would NOT redact it).
+    assert "TOPSECRET" not in stderr
+    assert "[REDACTED]" in stderr
+
+
+def test_apply_patch_skipped_stderr_raises_with_redacted_details(tmp_path: Path) -> None:
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(_GOOD_PATCH)
+    ws = tmp_path / "ws"
+    registry = SecretRegistry()
+    registry.register("HUSH", scope="patch-test")
+    transport = FakeBuildTransport(
+        apply_changes_file=True,
+        run_results=[
+            CommandResult(returncode=0, stdout="", stderr="Skipped patch 'init/main.c'. HUSH\n"),
+        ],
+    )
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _transport_apply_patch(transport, str(patch_file), ws, registry)
+
+    message = str(exc_info.value)
+    assert message.startswith("patch_ref was silently skipped")
+    assert "skipped one or" in message
+    stderr = cast(str, exc_info.value.details["stderr"])
+    assert "HUSH" not in stderr
+
+
+def test_apply_patch_unchanged_targets_raises_with_sorted_target_details(tmp_path: Path) -> None:
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(_GOOD_PATCH)
+    ws = tmp_path / "ws"
+    # apply_changes_file=False → before == after → unchanged-target guard fires.
+    transport = FakeBuildTransport(apply_changes_file=False)
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _transport_apply_patch(transport, str(patch_file), ws, SecretRegistry())
+
+    message = str(exc_info.value)
+    assert message.startswith("patch_ref was silently skipped")
+    assert "left the kernel" in message
+    assert exc_info.value.details == {"targets": ["init/main.c"]}
+
+
+def test_build_workspace_defconfig_failure_details_carry_run_id(tmp_path: Path) -> None:
+    """The checkout's merge_config receives the run's id, surfaced in the failure details."""
+    transport = FakeBuildTransport(run_returncode=1)  # defconfig fails
+    orch = _orchestrator(transport, tmp_path)
+
+    with pytest.raises(CategorizedError) as exc_info:
+        orch.build_workspace(_RUN, _profile())
+
+    assert exc_info.value.category is ErrorCategory.BUILD_FAILURE
+    assert exc_info.value.details == {"run_id": str(_RUN)}
+
+
+def test_build_workspace_patch_failure_redacts_with_run_secret_registry(tmp_path: Path) -> None:
+    """The checkout threads the run's SecretRegistry into the patch failure redaction."""
+    patch_file = tmp_path / "fix.patch"
+    patch_file.write_text(_GOOD_PATCH)
+    registry = SecretRegistry()
+    registry.register("CHECKOUTSECRET", scope="orch-test")
+    transport = FakeBuildTransport(
+        run_results=[
+            CommandResult(returncode=0, stdout="", stderr=""),  # defconfig
+            CommandResult(returncode=0, stdout="", stderr=""),  # merge_config.sh
+            CommandResult(returncode=1, stdout="", stderr="fail near CHECKOUTSECRET"),  # apply
+        ]
+    )
+    orch = BuildHostOrchestrator.create(
+        workspace_root=tmp_path / "workspace",
+        catalog_fetch=lambda _name: _FRAGMENT_BYTES,
+        checkout=transport_git_checkout(transport, _GIT_REMOTE, _GIT_REF, registry),
+        run_olddefconfig=transport_run_olddefconfig(transport),
+        read_config=transport_read_config(transport),
+        run_make=transport_run_make(transport),
+    )
+
+    with pytest.raises(CategorizedError) as exc_info:
+        orch.build_workspace(_RUN, _profile({"patch_ref": str(patch_file)}))
+
+    assert "CHECKOUTSECRET" not in cast(str, exc_info.value.details["stderr"])
+
+
+def test_apply_patch_invalid_ref_names_patch_ref_kind(tmp_path: Path) -> None:
+    """A non-absolute patch_ref fails resolution with the patch_ref kind in details."""
+    with pytest.raises(CategorizedError) as exc_info:
+        _transport_apply_patch(
+            FakeBuildTransport(), "relative/not-absolute.patch", tmp_path / "ws", SecretRegistry()
+        )
+
+    assert exc_info.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc_info.value.details == {"kind": "patch_ref"}
+
+
+def test_apply_patch_decodes_non_utf8_bytes_leniently(tmp_path: Path) -> None:
+    """Patch bytes that are not valid UTF-8 decode with errors='replace' (no crash)."""
+    patch_file = tmp_path / "weird.patch"
+    # A valid unified-diff header followed by an invalid UTF-8 byte (0xff).
+    patch_file.write_bytes(
+        b"--- a/init/main.c\n+++ b/init/main.c\n@@ -1,2 +1,2 @@\n line1\n-line2\xff\n+line2-ok\n"
+    )
+    ws = tmp_path / "ws"
+    transport = FakeBuildTransport(apply_changes_file=True)
+
+    # Must not raise UnicodeDecodeError/LookupError; the patch still ships and applies.
+    _transport_apply_patch(transport, str(patch_file), ws, SecretRegistry())
+
+    assert any(c.method == "write_bytes" for c in transport.calls)

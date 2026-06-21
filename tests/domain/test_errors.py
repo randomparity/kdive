@@ -111,6 +111,20 @@ def test_categorized_error_defaults_details_to_empty_dict() -> None:
     assert error.details == {}
 
 
+def test_categorized_error_defaults_terminal_to_false() -> None:
+    error = CategorizedError("requeue is safe", category=ErrorCategory.TRANSPORT_FAILURE)
+    assert error.terminal is False
+
+
+def test_categorized_error_carries_terminal_when_set() -> None:
+    error = CategorizedError(
+        "system already failed; do not requeue",
+        category=ErrorCategory.PROVISIONING_FAILURE,
+        terminal=True,
+    )
+    assert error.terminal is True
+
+
 # ---------------------------------------------------------------------------
 # No-leak seam rule (#450, ADR-0123)
 # ---------------------------------------------------------------------------

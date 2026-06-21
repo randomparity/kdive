@@ -246,3 +246,226 @@ def test_examples_carry_sizing_note_and_concrete_size() -> None:
         sizing_note = data["sizing_note"]
         assert "omit" in sizing_note.lower()
         assert "shape" in sizing_note.lower()
+
+
+def test_collection_and_item_status_are_ok() -> None:
+    # The collection and each item report the literal "ok" status (a read-only discovery success).
+    resp = build_profile_examples(None)
+    assert resp.status == "ok"
+    assert resp.object_id == "profile-examples"
+    assert [item.status for item in resp.items] == ["ok", "ok", "ok"]
+
+
+def test_each_item_carries_the_exact_data_keys_and_object_id() -> None:
+    resp = build_profile_examples(None)
+    for item in resp.items:
+        # The item object_id is the provider name, and its data carries exactly these keys.
+        assert item.object_id in {"local-libvirt", "remote-libvirt", "fault-inject"}
+        assert set(cast(dict[str, Any], item.data)) == {
+            "provider",
+            "profile",
+            "note",
+            "sizing_note",
+            "uses_real_reference",
+        }
+        assert cast(dict[str, Any], item.data)["provider"] == item.object_id
+
+
+def test_uses_real_reference_reflects_placeholder_use_with_no_inventory() -> None:
+    # With no inventory the local + remote examples fall back to placeholders (uses_real_reference
+    # False), while fault-inject owns no rootfs/base image to resolve, so it is never a placeholder
+    # (uses_real_reference True). Guards the flag, its `not placeholder` derivation, and the
+    # fault-inject placeholder=False constant against inversion.
+    examples = _examples(None)
+    assert examples["local-libvirt"]["uses_real_reference"] is False
+    assert examples["remote-libvirt"]["uses_real_reference"] is False
+    assert examples["fault-inject"]["uses_real_reference"] is True
+
+
+def test_uses_real_reference_tracks_real_vs_placeholder_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # local + remote with real public images -> uses_real_reference True; fault-inject owns no
+    # rootfs/base image so it is always a placeholder example (False).
+    path = _write_inventory(tmp_path, _FULL_INVENTORY)
+    monkeypatch.setenv(SYSTEMS_TOML.name, str(path))
+    config.reset()
+    doc = load_inventory_optional(path)
+    examples = _examples(doc)
+    assert examples["local-libvirt"]["uses_real_reference"] is True
+    assert examples["remote-libvirt"]["uses_real_reference"] is True
+    # fault-inject owns no rootfs/base image, so it is never a placeholder example.
+    assert examples["fault-inject"]["uses_real_reference"] is True
+
+
+def test_local_without_public_image_is_marked_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = """
+schema_version = 2
+[[local_libvirt]]
+name = "local-host"
+cost_class = "local"
+host_uri = "qemu:///system"
+"""
+    path = _write_inventory(tmp_path, body)
+    monkeypatch.setenv(SYSTEMS_TOML.name, str(path))
+    config.reset()
+    doc = load_inventory_optional(path)
+    examples = _examples(doc)
+    assert examples["local-libvirt"]["uses_real_reference"] is False
+
+
+def test_only_configured_providers_get_examples(tmp_path: Path) -> None:
+    # A doc that configures ONLY local-libvirt emits exactly one example for it — the builder must
+    # project the supplied doc, not fall back to the full default set.
+    doc = InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "local_libvirt": [
+                {"name": "local-host", "cost_class": "local", "host_uri": "qemu:///system"}
+            ],
+        }
+    )
+    examples = _examples(doc)
+    assert set(examples) == {"local-libvirt"}
+
+
+def test_remote_base_volume_is_placeholder_when_base_image_is_private(tmp_path: Path) -> None:
+    # remote-libvirt configured with a base_image that is declared but PRIVATE: the base-volume
+    # lookup must return None (a private image's volume must never be surfaced), so the example
+    # falls back to the placeholder volume.
+    doc = InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "image": [
+                {
+                    "provider": "remote-libvirt",
+                    "name": "remote-base",
+                    "arch": "x86_64",
+                    "format": "qcow2",
+                    "root_device": "/dev/vda1",
+                    "visibility": "private",
+                    "source": {"kind": "staged", "volume": "remote-base.qcow2"},
+                }
+            ],
+            "remote_libvirt": [
+                {
+                    "name": "remote-host",
+                    "cost_class": "remote",
+                    "uri": "qemu+tls://h/system",
+                    "gdb_addr": "10.0.0.5",
+                    "gdbstub_range": "1234-1240",
+                    "client_cert_ref": "secret://c",  # pragma: allowlist secret
+                    "client_key_ref": "secret://k",  # pragma: allowlist secret
+                    "ca_cert_ref": "secret://a",  # pragma: allowlist secret
+                    "base_image": "remote-base",
+                    "vcpus": 4,
+                    "memory_mb": 8192,
+                }
+            ],
+        }
+    )
+    examples = _examples(doc)
+    remote = examples["remote-libvirt"]
+    assert remote["uses_real_reference"] is False
+    volume = _profile_of(remote)["provider"]["remote-libvirt"]["base_image_volume"]
+    assert volume == "REPLACE_ME-base-image-volume"
+    assert "remote-base.qcow2" not in json.dumps(examples)
+
+
+def test_remote_base_volume_requires_name_match_and_staged_source(
+    tmp_path: Path,
+) -> None:
+    # A public remote image exists but its name does NOT match the instance's base_image (which is
+    # a different, declared image): the lookup must NOT surface that image's volume (guards the
+    # `and` joins from widening to `or`).
+    doc = InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "image": [
+                {
+                    "provider": "remote-libvirt",
+                    "name": "some-other-image",
+                    "arch": "x86_64",
+                    "format": "qcow2",
+                    "root_device": "/dev/vda1",
+                    "visibility": "public",
+                    "source": {"kind": "staged", "volume": "some-other-image.qcow2"},
+                },
+                {
+                    "provider": "remote-libvirt",
+                    "name": "remote-base",
+                    "arch": "x86_64",
+                    "format": "qcow2",
+                    "root_device": "/dev/vda1",
+                    "visibility": "private",
+                    "source": {"kind": "staged", "volume": "remote-base.qcow2"},
+                },
+            ],
+            "remote_libvirt": [
+                {
+                    "name": "remote-host",
+                    "cost_class": "remote",
+                    "uri": "qemu+tls://h/system",
+                    "gdb_addr": "10.0.0.5",
+                    "gdbstub_range": "1234-1240",
+                    "client_cert_ref": "secret://c",  # pragma: allowlist secret
+                    "client_key_ref": "secret://k",  # pragma: allowlist secret
+                    "ca_cert_ref": "secret://a",  # pragma: allowlist secret
+                    "base_image": "remote-base",
+                    "vcpus": 4,
+                    "memory_mb": 8192,
+                }
+            ],
+        }
+    )
+    examples = _examples(doc)
+    remote = examples["remote-libvirt"]
+    assert remote["uses_real_reference"] is False
+    volume = _profile_of(remote)["provider"]["remote-libvirt"]["base_image_volume"]
+    assert volume == "REPLACE_ME-base-image-volume"
+    assert "some-other-image" not in json.dumps(examples)
+
+
+def test_remote_base_volume_requires_staged_source_kind(tmp_path: Path) -> None:
+    # The matching PUBLIC remote image exists and its name equals the instance base_image, but its
+    # source kind is s3 (not staged) — there is no host volume to provision from. The lookup must
+    # return None and fall back to the placeholder. Isolates the `isinstance(..., StagedSource)`
+    # conjunct: a mutant dropping it (or widening the `and` to `or`) would surface a real reference.
+    doc = InventoryDoc.parse(
+        {
+            "schema_version": 2,
+            "image": [
+                {
+                    "provider": "remote-libvirt",
+                    "name": "remote-base",
+                    "arch": "x86_64",
+                    "format": "qcow2",
+                    "root_device": "/dev/vda1",
+                    "visibility": "public",
+                    "source": {"kind": "s3", "object_key": "images/remote-base.qcow2"},
+                }
+            ],
+            "remote_libvirt": [
+                {
+                    "name": "remote-host",
+                    "cost_class": "remote",
+                    "uri": "qemu+tls://h/system",
+                    "gdb_addr": "10.0.0.5",
+                    "gdbstub_range": "1234-1240",
+                    "client_cert_ref": "secret://c",  # pragma: allowlist secret
+                    "client_key_ref": "secret://k",  # pragma: allowlist secret
+                    "ca_cert_ref": "secret://a",  # pragma: allowlist secret
+                    "base_image": "remote-base",
+                    "vcpus": 4,
+                    "memory_mb": 8192,
+                }
+            ],
+        }
+    )
+    examples = _examples(doc)
+    remote = examples["remote-libvirt"]
+    assert remote["uses_real_reference"] is False
+    volume = _profile_of(remote)["provider"]["remote-libvirt"]["base_image_volume"]
+    assert volume == "REPLACE_ME-base-image-volume"

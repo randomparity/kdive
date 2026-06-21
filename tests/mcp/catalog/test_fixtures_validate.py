@@ -28,6 +28,48 @@ rootfs: []
 profiles: []
 """
 
+_PROFILE_TEMPLATE = """provider: {provider}
+name: {name}
+arch: {arch}
+requires:
+  config:
+    required:
+      CONFIG_VIRTIO_BLK: y
+  cmdline:
+    required_tokens:
+      - root=/dev/vda
+    protected_prefixes:
+      - root=
+  rootfs:
+    format: qcow2
+    root_device: /dev/vda
+    capabilities:
+      - kdive-ready-console
+"""
+
+
+def _write_catalog(root: Path, triples: list[tuple[str, str, str]]) -> None:
+    """Write a manifest plus one profile yaml per ``(provider, name, arch)`` triple."""
+    profiles_dir = root / "profiles"
+    profiles_dir.mkdir(parents=True)
+    rel_paths = []
+    for index, (provider, name, arch) in enumerate(triples):
+        rel = f"profiles/p{index}.yaml"
+        (root / rel).write_text(_PROFILE_TEMPLATE.format(provider=provider, name=name, arch=arch))
+        rel_paths.append(rel)
+    listed = "\n".join(f"  - {rel}" for rel in rel_paths)
+    (root / "manifest.yaml").write_text(
+        "schema_version: 1\n"
+        "provider: local-libvirt\n"
+        "storage:\n"
+        "  allowed_component_roots:\n"
+        "    - /var/lib/kdive/rootfs\n"
+        "  cache_dir: /var/lib/kdive/rootfs/cache\n"
+        "  overlay_dir: /var/lib/kdive/rootfs/overlays\n"
+        "rootfs: []\n"
+        f"profiles:\n{listed}\n"
+    )
+
 
 def test_valid_catalog_reports_profiles(tmp_path: Path) -> None:
     # install_fixtures refuses a pre-existing dest (force=False), and tmp_path already
@@ -41,6 +83,31 @@ def test_valid_catalog_reports_profiles(tmp_path: Path) -> None:
     triples = {(r["provider"], r["name"], r["arch"]) for r in rows}
     assert ("local-libvirt", "console-ready_x86_64", "x86_64") in triples
     assert data_str(resp, "path") == str(dest)
+    # On success the verb points the operator at the listing of the same catalog.
+    assert resp.suggested_next_actions == ["fixtures.list"]
+
+
+def test_profiles_are_sorted_by_provider_name_arch(tmp_path: Path) -> None:
+    # Manifest lists profiles out of sorted order; the response must sort them by the
+    # (provider, name, arch) triple, not echo manifest order.
+    dest = tmp_path / "catalog"
+    _write_catalog(
+        dest,
+        [
+            ("local-libvirt", "zeta", "x86_64"),
+            ("local-libvirt", "alpha", "x86_64"),
+            ("local-libvirt", "alpha", "aarch64"),
+        ],
+    )
+    resp = asyncio.run(fixtures.validate_fixtures_tool(dest))
+    assert resp.status == "valid", resp
+    rows = [json_mapping(r) for r in data_sequence(resp, "profiles")]
+    triples = [(r["provider"], r["name"], r["arch"]) for r in rows]
+    assert triples == [
+        ("local-libvirt", "alpha", "aarch64"),
+        ("local-libvirt", "alpha", "x86_64"),
+        ("local-libvirt", "zeta", "x86_64"),
+    ]
 
 
 def test_absent_path_is_configuration_error(tmp_path: Path) -> None:
@@ -49,6 +116,11 @@ def test_absent_path_is_configuration_error(tmp_path: Path) -> None:
     assert resp.status != "valid"
     assert resp.error_category == "configuration_error"
     assert data_str(resp, "path") == str(missing)
+    # The bounded reason is the chained cause's type name (the loader chains the OSError),
+    # not the wrapper CategorizedError nor a "NoneType" placeholder.
+    assert data_str(resp, "reason") == "FileNotFoundError"
+    # A failure steers the operator back to re-run this validation after fixing the path.
+    assert resp.suggested_next_actions == ["fixtures.validate"]
 
 
 def test_malformed_manifest_is_configuration_error_without_content(tmp_path: Path) -> None:

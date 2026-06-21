@@ -124,6 +124,8 @@ def test_delete_build_vm_preserves_non_absence_lookup_failures(tmp_path) -> None
         asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
 
     assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(raised.value) == "libvirt error looking up build VM domain"
+    assert raised.value.details == {"domain": build_domain_name(_RID)}
     assert conn.pool.lookups == []
     assert conn.closed
 
@@ -146,16 +148,25 @@ def test_delete_build_vm_tolerates_already_inactive_or_undefined_domain(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("destroy_error", "undefine_error"),
+    ("destroy_error", "undefine_error", "expected_message"),
     [
-        (libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR), None),
-        (None, libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)),
+        (
+            libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR),
+            None,
+            "libvirt error destroying build VM domain",
+        ),
+        (
+            None,
+            libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR),
+            "libvirt error undefining build VM domain",
+        ),
     ],
 )
 def test_delete_build_vm_preserves_non_benign_destroy_or_undefine_failures(
     tmp_path,
     destroy_error: libvirt.libvirtError | None,
     undefine_error: libvirt.libvirtError | None,
+    expected_message: str,
 ) -> None:
     domain = _FakeDomain(
         build_domain_name(_RID),
@@ -169,6 +180,8 @@ def test_delete_build_vm_preserves_non_benign_destroy_or_undefine_failures(
         asyncio.run(reaper.delete_build_vm(build_domain_name(_RID)))
 
     assert raised.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(raised.value) == expected_message
+    assert raised.value.details == {"domain": build_domain_name(_RID)}
     assert isinstance(raised.value.__cause__, libvirt.libvirtError)
     assert conn.pool.lookups == []
     assert conn.closed

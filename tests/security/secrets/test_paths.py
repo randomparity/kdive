@@ -52,13 +52,32 @@ def test_symlink_to_nonexistent_outside_path_rejected(tmp_path: Path) -> None:
 
 
 def test_shell_metachar_rejected(tmp_path: Path) -> None:
-    with pytest.raises(PathSafetyError):
+    with pytest.raises(PathSafetyError) as exc:
         confine_to_root(tmp_path / "a;b", allowed_root=tmp_path)
+    assert str(exc.value) == "secret file reference contains unsafe characters"
 
 
 def test_control_char_rejected(tmp_path: Path) -> None:
-    with pytest.raises(PathSafetyError):
+    with pytest.raises(PathSafetyError) as exc:
         confine_to_root(Path(f"{tmp_path}/a\x01b"), allowed_root=tmp_path)
+    assert str(exc.value) == "secret file reference contains unsafe characters"
+
+
+def test_space_in_path_is_admitted(tmp_path: Path) -> None:
+    # A space (ord 32) is a legal, common filesystem character: the control-character
+    # guard rejects ord < 32, so a space must pass through and resolve under the root.
+    target = tmp_path / "my secret.txt"
+    target.write_text("x")
+    assert confine_to_root(target, allowed_root=tmp_path) == target.resolve()
+
+
+def test_escape_error_message_names_the_path(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "other" / "secret"
+    with pytest.raises(PathSafetyError) as exc:
+        confine_to_root(outside, allowed_root=root)
+    assert str(exc.value) == f"secret file reference escapes the allowed root: {outside!r}"
 
 
 def test_not_yet_existing_tail_under_root_admitted(tmp_path: Path) -> None:

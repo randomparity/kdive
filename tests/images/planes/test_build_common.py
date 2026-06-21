@@ -68,6 +68,7 @@ def test_run_guestfs_tool_maps_missing_tool_to_missing_dependency(
         )
 
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "virt-builder is not installed"
     assert caught.value.details == {"stage": "build", "tool": "virt-builder"}
 
 
@@ -88,6 +89,7 @@ def test_run_guestfs_tool_maps_timeout_to_provisioning_failure(
         )
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(caught.value) == "customize exceeded its timeout"
     assert caught.value.details == {
         "stage": "customize",
         "tool": "virt-builder",
@@ -112,6 +114,7 @@ def test_run_guestfs_tool_maps_launch_oserror_to_infrastructure_failure(
         )
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to launch guestfish for normalize"
     assert caught.value.details == {
         "stage": "normalize",
         "tool": "guestfish",
@@ -147,6 +150,27 @@ def test_run_guestfs_tool_maps_nonzero_exit_with_truncated_stderr(
     }
 
 
+def test_run_guestfs_tool_nonzero_without_failure_message_uses_stage_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When no failure_message is supplied, the error message falls back to "<stage> failed"
+    # (the ``or`` default), not an empty/None message.
+    def _failed(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode=3, stdout="", stderr="bad")
+
+    monkeypatch.setattr(_build_common.subprocess, "run", _failed)
+
+    with pytest.raises(CategorizedError) as caught:
+        run_guestfs_tool(
+            ["guestfish"],
+            stage="normalize",
+            timeout_s=10,
+            missing_message="guestfish is not installed",
+        )
+
+    assert str(caught.value) == "normalize failed"
+
+
 @pytest.mark.parametrize("name", ["fedora", "Fedora_43", "kdive.ready-43", "image.1"])
 def test_validate_image_name_accepts_filename_safe_names(name: str) -> None:
     validate_image_name(name)
@@ -158,6 +182,10 @@ def test_validate_image_name_rejects_unsafe_names(name: str) -> None:
         validate_image_name(name)
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert (
+        str(caught.value)
+        == "image name must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ (it becomes a filename)"
+    )
     assert caught.value.details == {"name": name}
 
 
@@ -176,6 +204,7 @@ def test_digest_file_maps_read_failure_to_infrastructure_failure(tmp_path: Path)
         digest_file(path)
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to read artifact for digest"
     assert caught.value.details == {
         "path": str(path),
         "error": "FileNotFoundError",

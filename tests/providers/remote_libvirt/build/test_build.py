@@ -10,12 +10,13 @@ debuginfo as ``debuginfo_ref``. Fakes are local to this file — nothing imports
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import subprocess
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -33,7 +34,7 @@ from kdive.components.references import (
 )
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.profiles.build import BuildProfile, GitSourceRef, ServerBuildProfile
 from kdive.providers.remote_libvirt import build as build_module
 from kdive.providers.remote_libvirt.build import RemoteLibvirtBuild
 from kdive.providers.shared.build_host import execution as build_host_execution
@@ -70,6 +71,7 @@ class _FakeStore:
     """Records puts; returns a StoredArtifact echoing the key (no real S3)."""
 
     puts: list[tuple[str, str, str, Sensitivity, bytes]] = field(default_factory=list)
+    retention_by_name: dict[str, str] = field(default_factory=dict)
     fail_on: str | None = None
 
     def put_artifact(self, request: ArtifactWriteRequest) -> StoredArtifact:
@@ -79,6 +81,7 @@ class _FakeStore:
             )
         key = request.key()
         self.puts.append((key, request.name, request.owner_kind, request.sensitivity, request.data))
+        self.retention_by_name[request.name] = request.retention_class
         return StoredArtifact(
             key, "etag-" + request.name, request.sensitivity, request.retention_class
         )
@@ -105,12 +108,20 @@ class _Seams:
     staging_roots: list[Path] = field(default_factory=list)
     workspace_cleanups: list[Path] = field(default_factory=list)
     merged_fragments: list[bytes] = field(default_factory=list)
+    # Workspaces/mod_roots each post-make seam was handed (None-substitution survivors).
+    modules_install_workspaces: list[Path] = field(default_factory=list)
+    build_id_workspaces: list[Path] = field(default_factory=list)
+    bundle_args: list[tuple[Path, Path]] = field(default_factory=list)
+    vmlinux_workspaces: list[Path] = field(default_factory=list)
+
+    checkout_run_ids: list[UUID] = field(default_factory=list)
 
     def checkout(
         self, run_id: UUID, profile: ServerBuildProfile, workspace: Path, fragment_bytes: bytes
     ) -> None:
         self.call_order.append("checkout")
         self.merged_fragments.append(fragment_bytes)
+        self.checkout_run_ids.append(run_id)
 
     def run_olddefconfig(self, workspace: Path) -> int:
         self.call_order.append("olddefconfig")
@@ -128,18 +139,41 @@ class _Seams:
     def run_modules_install(self, workspace: Path, mod_root: Path) -> int:
         self.modules_install_calls += 1
         self.staging_roots.append(mod_root)
+        self.modules_install_workspaces.append(workspace)
         self.call_order.append("modules_install")
         return self.modules_install_returncode
 
     def make_bundle(self, workspace: Path, mod_root: Path) -> build_module.ArtifactSource:
         self.call_order.append("bundle")
+        self.bundle_args.append((workspace, mod_root))
         return build_module.ArtifactBytes(self.bundle_bytes)
 
     def read_vmlinux_source(self, workspace: Path) -> build_module.ArtifactSource:
+        self.vmlinux_workspaces.append(workspace)
         return build_module.ArtifactBytes(b"vmlinux-bytes")
 
     def read_build_id(self, workspace: Path) -> str:
+        self.build_id_workspaces.append(workspace)
         return self.build_id_hex
+
+
+@dataclass
+class _RecordingRecorder:
+    """A BuildPhaseRecorder that records ``(phase, provider)`` per ``phase()`` context."""
+
+    phases: list[tuple[Any, str]] = field(default_factory=list)
+
+    def phase(self, phase: Any, provider: str) -> Any:
+        from contextlib import contextmanager
+
+        recorded = self.phases
+
+        @contextmanager
+        def _ctx() -> Any:
+            recorded.append((phase, provider))
+            yield
+
+        return _ctx()
 
 
 def _builder(
@@ -259,6 +293,8 @@ def test_build_nonzero_modules_install_is_build_failure_nothing_stored(tmp_path:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make modules_install exited non-zero"
+    assert caught.value.details == {"run_id": str(_RUN)}  # the real run id, not None
     assert seams.make_calls == 1
     assert store.puts == []  # bundle never built/stored
 
@@ -370,6 +406,33 @@ def test_validate_config_ref_rejects_file_outside_roots(tmp_path: Path) -> None:
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_validate_config_ref_accepts_file_inside_roots(tmp_path: Path) -> None:
+    # A local ref resolving inside an allowed root validates without error — proves the *given*
+    # ref is forwarded to the orchestrator (guards ``validate_config_ref(None)``, which would
+    # reject every ref regardless of its contents).
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    inside = allowed / "kdump.config"
+    inside.write_text("CONFIG_CRASH_DUMP=y\n")
+    builder = RemoteLibvirtBuild(
+        workspace_root=tmp_path / "ws",
+        store_factory=lambda: _FakeStore(),
+        checkout=lambda _r, _p, _w, _f: None,
+        run_olddefconfig=lambda _w: 0,
+        read_config=lambda _w: _GOOD_CONFIG,
+        run_make=lambda _w: 0,
+        run_modules_install=lambda _w, _m: 0,
+        make_bundle=lambda _w, _m: build_module.ArtifactBytes(b"b"),
+        read_vmlinux_source=lambda _w: build_module.ArtifactBytes(b"v"),
+        read_build_id=lambda _w: "deadbeef",
+        staging_factory=lambda: _make_staging(tmp_path),
+        catalog_fetch=lambda _name: _FRAGMENT_BYTES,
+        allowed_component_roots=[allowed],
+    )
+
+    builder.validate_config_ref(LocalComponentRef(kind="local", path=str(inside)))  # no raise
+
+
 # --- config-ref resolution (local + catalog) -----------------------------------------
 
 
@@ -407,6 +470,80 @@ def test_resolve_config_bytes_rejects_artifact_kind() -> None:
             ),
             allowed_component_roots=[Path("/unused")],
             catalog_fetch=lambda _name: b"unused",
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "config component ref must be local or catalog for builds"
+    assert caught.value.details == {"kind": "config"}  # field name, not the value
+
+
+@pytest.mark.parametrize(
+    ("ref", "message"),
+    [
+        ("file://host/etc/x.config", "config/patch ref must be a local file:// URL (no host)"),
+        ("http://example/x.config", "config/patch ref scheme is not a local reference"),
+        ("relative/x.config", "config/patch ref must be an absolute path"),
+        ("/no/such/file.config", "config/patch ref does not resolve to a readable file"),
+    ],
+)
+def test_resolve_local_ref_rejects_bad_refs(ref: str, message: str) -> None:
+    # Each rejection branch raises CONFIGURATION_ERROR with the branch-specific message and the
+    # forwarded ``kind`` field in details (guards both the message text and the kind argument).
+    with pytest.raises(CategorizedError) as caught:
+        build_host_config.resolve_local_ref(ref, kind="config")
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == message
+    assert caught.value.details == {"kind": "config"}
+
+
+def test_resolve_local_ref_returns_existing_absolute_file(tmp_path: Path) -> None:
+    target = tmp_path / "x.config"
+    target.write_text("CONFIG_X=y\n")
+
+    assert build_host_config.resolve_local_ref(str(target), kind="config") == target
+    assert (
+        build_host_config.resolve_local_ref(f"file://{target}", kind="config") == target
+    )  # file:// scheme with no host
+
+
+def test_missing_config_groups_detects_unsatisfied_and_ignores_comments() -> None:
+    # An OR-group is satisfied only by an enabled (``=y``) option on a non-comment line; a
+    # commented-out option does not count, and trailing whitespace does not hide ``=y``.
+    config_text = "\n".join(
+        [
+            "CONFIG_A=y",
+            "# CONFIG_B=y",  # commented: B is NOT enabled
+            "CONFIG_C=y   ",  # trailing whitespace: still enabled
+            "",  # blank line ignored
+            "CONFIG_D=m",  # module, not =y: not enabled
+        ]
+    )
+    required = (("CONFIG_A",), ("CONFIG_B",), ("CONFIG_C", "CONFIG_X"), ("CONFIG_D",))
+
+    missing = build_host_config.missing_config_groups(config_text, required)
+
+    assert missing == [("CONFIG_B",), ("CONFIG_D",)]
+
+
+def test_missing_config_groups_empty_when_all_satisfied() -> None:
+    config_text = "CONFIG_A=y\nCONFIG_B=y\n"
+    assert build_host_config.missing_config_groups(config_text, (("CONFIG_A", "CONFIG_B"),)) == []
+
+
+def test_validate_config_ref_enforces_declared_sha256(tmp_path: Path) -> None:
+    # A local ref that declares a sha256 must have that digest verified; a wrong digest is a
+    # CONFIGURATION_ERROR (guards dropping ``sha256=ref.sha256`` from the validation call).
+    root = tmp_path / "components"
+    root.mkdir()
+    target = root / "x.config"
+    target.write_text("CONFIG_X=y\n")
+    wrong = "sha256:" + "0" * 64
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_config.validate_config_ref(
+            LocalComponentRef(kind="local", path=str(target), sha256=wrong),
+            allowed_component_roots=[root],
         )
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -459,17 +596,24 @@ def test_build_fails_when_fragment_symbol_dropped(tmp_path: Path) -> None:
 
 def test_real_run_modules_install_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[str]] = []
+    captured_kwargs: list[dict[str, object]] = []
 
-    def _capture(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+    def _capture(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         captured.append(argv)
-        return subprocess.CompletedProcess(argv, 0)
+        captured_kwargs.append(kwargs)
+        return subprocess.CompletedProcess(argv, 7)
 
     monkeypatch.setattr(subprocess, "run", _capture)
-    assert build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage")) == 0
+    # The make returncode is passed through unchanged (not normalized).
+    assert build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage")) == 7
     argv = captured[0]
     assert argv[:3] == ["make", "-C", "/ws"]
     assert "modules_install" in argv
     assert "INSTALL_MOD_PATH=/stage" in argv
+    # A bounded, non-checking run: the long build timeout and check=False (return the code,
+    # do not raise on non-zero) — guards timeout/check kwarg mutations.
+    assert captured_kwargs[0]["timeout"] == build_host_execution.MAKE_TIMEOUT_S
+    assert captured_kwargs[0]["check"] is False
 
 
 def test_real_run_modules_install_timeout_is_build_failure(
@@ -484,6 +628,8 @@ def test_real_run_modules_install_timeout_is_build_failure(
         build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make modules_install exceeded the build timeout"
+    assert caught.value.details == {"timeout_s": build_host_execution.MAKE_TIMEOUT_S}
 
 
 def test_real_run_modules_install_missing_make_is_missing_dependency(
@@ -498,6 +644,247 @@ def test_real_run_modules_install_missing_make_is_missing_dependency(
         build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
 
     assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "make is required for kernel builds"
+    assert caught.value.details == {"tool": "make"}  # the launching tool, named for the operator
+
+
+def test_real_run_modules_install_launch_oserror_is_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-FileNotFound OSError on launch is an infrastructure fault, not a missing dependency
+    # (guards the launch_failure category argument in run_make_target).
+    def _oserror(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise PermissionError("cannot exec make")
+
+    monkeypatch.setattr(subprocess, "run", _oserror)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_run_modules_install(Path("/ws"), Path("/stage"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"tool": "make", "op": "launch"}
+
+
+def test_real_run_make_falls_back_to_one_job_without_cpu_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the platform reports no cpu count, the build still runs at -j1 (guards the
+    # ``os.cpu_count() or 1`` fallback).
+    captured: list[list[str]] = []
+
+    def _capture(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(build_host_execution.os, "cpu_count", lambda: None)
+    monkeypatch.setattr(subprocess, "run", _capture)
+
+    build_host_execution.real_run_make(Path("/ws"))
+
+    assert captured[0][3] == "-j1"
+
+
+def test_real_run_make_argv_and_returncode(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+    captured_kwargs: list[dict[str, object]] = []
+
+    def _capture(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        captured_kwargs.append(kwargs)
+        return subprocess.CompletedProcess(argv, 3)
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+
+    assert build_host_execution.real_run_make(Path("/ws")) == 3
+    argv = captured[0]
+    assert argv[:3] == ["make", "-C", "/ws"]
+    expected_jobs = os.cpu_count() or 1
+    assert argv[3] == f"-j{expected_jobs}"  # parallel build at cpu_count (>=1)
+    assert captured_kwargs[0]["timeout"] == build_host_execution.MAKE_TIMEOUT_S
+    assert captured_kwargs[0]["check"] is False
+
+
+def test_real_run_make_timeout_is_build_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(["make"], timeout=build_host_execution.MAKE_TIMEOUT_S)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_run_make(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make exceeded the build timeout"
+    assert caught.value.details == {"timeout_s": build_host_execution.MAKE_TIMEOUT_S}
+
+
+def test_real_run_make_launch_oserror_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-FileNotFound OSError on launch maps to INFRASTRUCTURE_FAILURE (a launch fault), not
+    # MISSING_DEPENDENCY — guards the launch_failure category/op branch.
+    def _oserror(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise PermissionError("cannot exec make")
+
+    monkeypatch.setattr(subprocess, "run", _oserror)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_run_make(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "make failed to launch"
+    assert caught.value.details == {"tool": "make", "op": "launch"}
+
+
+def _build_gnu_note(build_id_hex: str) -> bytes:
+    desc = bytes.fromhex(build_id_hex)
+    header = (
+        (4).to_bytes(4, "little")  # namesz for "GNU\0"
+        + len(desc).to_bytes(4, "little")  # descsz
+        + (3).to_bytes(4, "little")  # NT_GNU_BUILD_ID
+    )
+    return header + b"GNU\x00" + desc
+
+
+def test_real_read_build_id_objcopy_argv_and_parsed_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+    captured_kwargs: list[dict[str, object]] = []
+    build_id = "abcdef0123456789"
+
+    def _objcopy(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(argv)
+        captured_kwargs.append(kwargs)
+        Path(argv[-1]).write_bytes(_build_gnu_note(build_id))  # the note output file
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", _objcopy)
+
+    assert build_host_execution.real_read_build_id(Path("/ws")) == build_id
+    argv = captured[0]
+    assert argv[:5] == ["objcopy", "-O", "binary", "--only-section=.notes", "/ws/vmlinux"]
+    assert captured_kwargs[0]["timeout"] == build_host_execution.OBJCOPY_TIMEOUT_S
+    assert captured_kwargs[0]["check"] is True  # a non-zero objcopy must raise CalledProcessError
+
+
+def test_real_read_build_id_objcopy_failure_is_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail(argv: list[str], **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(subprocess, "run", _fail)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "objcopy failed to extract vmlinux notes"
+
+
+def test_real_read_build_id_objcopy_timeout_is_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise subprocess.TimeoutExpired(["objcopy"], timeout=build_host_execution.OBJCOPY_TIMEOUT_S)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "objcopy exceeded the build-id extraction timeout"
+    assert caught.value.details == {"timeout_s": build_host_execution.OBJCOPY_TIMEOUT_S}
+
+
+def test_real_read_build_id_missing_objcopy_is_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError("objcopy")
+
+    monkeypatch.setattr(subprocess, "run", _missing)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert caught.value.details == {"tool": "objcopy"}
+
+
+def test_real_read_build_id_launch_oserror_is_infrastructure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-FileNotFound OSError launching objcopy is an infrastructure fault (guards the
+    # launch_failure category argument).
+    def _oserror(*_: object, **__: object) -> subprocess.CompletedProcess[bytes]:
+        raise PermissionError("cannot exec objcopy")
+
+    monkeypatch.setattr(subprocess, "run", _oserror)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.real_read_build_id(Path("/ws"))
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"tool": "objcopy", "op": "launch"}
+
+
+def test_read_text_file_missing_is_categorized(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.read_text_file(
+            tmp_path / "nope.config",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            file_label=".config",
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == ".config is missing or unreadable"
+    assert caught.value.details == {"file": ".config"}
+
+
+def test_read_text_file_reads_existing(tmp_path: Path) -> None:
+    target = tmp_path / "ok.config"
+    target.write_text("CONFIG_X=y\n")
+    assert (
+        build_host_execution.read_text_file(
+            target, category=ErrorCategory.CONFIGURATION_ERROR, file_label=".config"
+        )
+        == "CONFIG_X=y\n"
+    )
+
+
+def test_read_bytes_file_missing_is_categorized(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as caught:
+        build_host_execution.read_bytes_file(
+            tmp_path / "absent", category=ErrorCategory.BUILD_FAILURE, output="vmlinux"
+        )
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "vmlinux is missing or unreadable"
+    assert caught.value.details == {"output": "vmlinux"}
+
+
+def test_launch_failure_missing_vs_other_oserror() -> None:
+    missing = build_host_execution.launch_failure(
+        "objcopy", FileNotFoundError(), category=ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    assert missing.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(missing) == "objcopy is required for kernel builds"
+    assert missing.details == {"tool": "objcopy"}
+
+    other = build_host_execution.launch_failure(
+        "objcopy", PermissionError(), category=ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    assert other.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(other) == "objcopy failed to launch"
+    assert other.details == {"tool": "objcopy", "op": "launch"}
+
+
+def test_workspace_failure_is_infrastructure_with_op_and_path() -> None:
+    err = build_host_execution.workspace_failure("rmtree", "/ws/123", OSError("boom"))
+    assert err.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(err) == "build workspace rmtree failed"
+    assert err.details == {"op": "rmtree", "path": "/ws/123"}
 
 
 def _write_fake_build_tree(workspace: Path, mod_root: Path, version: str = "6.9.0") -> None:
@@ -553,7 +940,145 @@ def test_real_build_bundle_missing_bzimage_is_build_failure(tmp_path: Path) -> N
         build_module._real_build_bundle(workspace, mod_root)
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "kernel bundle could not be packaged"
     assert caught.value.details == {"output": "bzImage"}
+
+
+def test_real_build_bundle_module_oserror_is_build_failure_module_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A module file that vanishes mid-pack must surface as a typed BUILD_FAILURE whose details
+    # name the *module bundle* output (distinct from the bzImage face), not a bare OSError.
+    workspace = tmp_path / "ws"
+    mod_root = tmp_path / "stage"
+    _write_fake_build_tree(workspace, mod_root)
+
+    real_add = tarfile.TarFile.add
+
+    def _add(self: tarfile.TarFile, name: Any, *args: Any, **kwargs: Any) -> None:
+        if str(name).endswith(".ko"):
+            raise OSError("module file vanished")
+        return real_add(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarFile, "add", _add)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_module._real_build_bundle(workspace, mod_root)
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert caught.value.details == {"output": "module bundle"}
+
+
+def test_build_bundle_member_dirs_keeps_non_backref_symlinks(tmp_path: Path) -> None:
+    # Only the absolute back-reference symlinks (``build``/``source``) are dropped; a regular
+    # symlink that is *not* a back-ref stays in the member list (guards ``and`` -> ``or``).
+    modules_root = tmp_path / "lib" / "modules" / "6.9.0"
+    (modules_root / "kernel").mkdir(parents=True)
+    real_ko = modules_root / "kernel" / "virtio_blk.ko"
+    real_ko.write_bytes(b"module-bytes")
+    (modules_root / "build").symlink_to(tmp_path)  # dropped back-ref
+    (modules_root / "source").symlink_to(tmp_path)  # dropped back-ref
+    (modules_root / "vmlinuz.link").symlink_to(real_ko)  # kept: not a back-ref name
+
+    members = build_module._build_bundle_member_dirs(modules_root)
+    names = {p.name for p in members}
+
+    assert "vmlinuz.link" in names  # non-backref symlink survives
+    assert "virtio_blk.ko" in names
+    assert "build" not in names
+    assert "source" not in names
+
+
+def test_local_staging_cleanup_ignores_missing_dir(tmp_path: Path) -> None:
+    # ``shutil.rmtree(..., ignore_errors=True)`` must swallow a missing path so the build's
+    # ``finally`` cleanup never masks the real error with a FileNotFoundError.
+    missing = tmp_path / "never-created"
+    assert not missing.exists()
+
+    build_module._local_staging_cleanup(missing)  # must not raise
+
+
+# --- build() seam-argument propagation + phase recording -----------------------------
+
+
+def test_build_passes_per_run_workspace_and_staging_to_post_make_seams(tmp_path: Path) -> None:
+    # The post-make seams must each receive the real per-run workspace (not None) and the
+    # staging root from staging_factory (guards None-substitution in build()).
+    store, seams = _FakeStore(), _Seams()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    workspace = tmp_path / "ws" / str(_RUN)
+    staging = seams.staging_roots[0]
+    assert seams.modules_install_workspaces == [workspace]
+    assert seams.build_id_workspaces == [workspace]
+    assert seams.vmlinux_workspaces == [workspace]
+    assert seams.bundle_args == [(workspace, staging)]
+
+
+def test_build_records_modules_then_artifact_phase_with_provider(tmp_path: Path) -> None:
+    # The MODULES and ARTIFACT phases are recorded in order, tagged with the provider label
+    # (guards phase-arg None-substitution and the empty-string provider default).
+    from kdive.domain.build_phase import BuildPhase
+
+    store, seams = _FakeStore(), _Seams()
+    recorder = _RecordingRecorder()
+
+    _builder(store, seams, tmp_path).build(
+        _RUN,
+        _profile(),
+        recorder=recorder,  # ty: ignore[invalid-argument-type]
+        provider="rl",
+    )
+
+    # The recorder threaded into build_workspace records the source/configure/compile phases;
+    # build() then records MODULES and ARTIFACT. The full ordered sequence proves both that the
+    # recorder reaches build_workspace and that build() records its own two phases, all labeled
+    # with the provider.
+    assert recorder.phases == [
+        (BuildPhase.SOURCE_SYNC, "rl"),
+        (BuildPhase.CONFIGURE, "rl"),
+        (BuildPhase.COMPILE, "rl"),
+        (BuildPhase.MODULES, "rl"),
+        (BuildPhase.ARTIFACT, "rl"),
+    ]
+
+
+def test_build_threads_run_id_into_checkout(tmp_path: Path) -> None:
+    # build() must hand the real run_id (not None) to the workspace build/checkout.
+    store, seams = _FakeStore(), _Seams()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert seams.checkout_run_ids == [_RUN]
+
+
+def test_build_publishes_with_build_retention_class(tmp_path: Path) -> None:
+    # Both artifacts are published under the ``build`` retention class.
+    store, seams = _FakeStore(), _Seams()
+
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+
+    assert store.retention_by_name == {"kernel": "build", "vmlinux": "build"}
+
+
+def test_build_default_provider_label_is_empty_string(tmp_path: Path) -> None:
+    # The default ``provider`` is the empty string, threaded into the recorder phase label.
+    from kdive.domain.build_phase import BuildPhase
+
+    store, seams = _FakeStore(), _Seams()
+    recorder = _RecordingRecorder()
+
+    _builder(store, seams, tmp_path).build(
+        _RUN,
+        _profile(),
+        recorder=recorder,  # ty: ignore[invalid-argument-type]
+    )
+
+    post_make = [p for p in recorder.phases if p[0] in (BuildPhase.MODULES, BuildPhase.ARTIFACT)]
+    assert post_make == [(BuildPhase.MODULES, ""), (BuildPhase.ARTIFACT, "")]
+    # every recorded phase (source/compile included) carries the empty-string default label.
+    assert all(provider == "" for _, provider in recorder.phases)
 
 
 # --- live_vm real make ---------------------------------------------------------------
@@ -625,6 +1150,100 @@ def _workspace_with_target(tmp_path: Path) -> Path:
     return workspace
 
 
+def test_apply_patch_missing_git_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: None)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "git is required to apply a build patch"
+
+
+def test_apply_patch_git_apply_failure_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-zero ``git apply`` means the patch does not apply; the redacted stderr tail is kept
+    # and the hardened argv (``git apply -p1 -v -- <patch>``) is asserted.
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    captured: list[list[str]] = []
+
+    def _apply(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="patch does not apply")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _apply)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "patch_ref does not apply against the kernel tree"
+    assert "does not apply" in cast(str, caught.value.details["stderr"])
+    assert captured[0][:5] == ["git", "apply", "-p1", "-v", "--"]
+    assert captured[0][-1] == str(patch)
+
+
+def test_apply_patch_unreadable_patch_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The patch resolves to a real file but reading it raises OSError (e.g. EACCES): a
+    # CONFIGURATION_ERROR whose details name the kind, the resolved path, and the error type.
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    real_read_text = Path.read_text
+
+    def _read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self == patch:
+            raise PermissionError("denied")
+        return real_read_text(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+
+    monkeypatch.setattr(Path, "read_text", _read_text)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "patch_ref could not be read"
+    assert caught.value.details == {
+        "kind": "patch_ref",
+        "path": str(patch),
+        "error": "PermissionError",
+    }
+
+
+def test_apply_patch_timeout_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(["git"], timeout=build_host_workspace.GIT_APPLY_TIMEOUT_S)
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "patch_ref does not apply within the timeout"
+    assert caught.value.details == {"timeout_s": build_host_workspace.GIT_APPLY_TIMEOUT_S}
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
 def test_apply_patch_applies_clean_diff(tmp_path: Path) -> None:
     workspace = _workspace_with_target(tmp_path)
@@ -659,6 +1278,8 @@ def test_apply_patch_silent_skip_no_tree_change_is_configuration_error(
         build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "silently skipped" in str(caught.value)
+    assert "Skipped patch 'init/main.c'." in cast(str, caught.value.details["stderr"])
     assert (workspace / "init" / "main.c").read_text() == original
 
 
@@ -683,3 +1304,445 @@ def test_exit_criterion_noop_patch_fails_patch_applied_verification(tmp_path: Pa
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert workspace_main.read_text() == original
+
+
+def test_apply_patch_no_tree_change_reports_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git apply exits 0 with no "Skipped" line but the tree is unchanged: the no-op guard fires
+    # and the error names the patch targets (guards the message and the targets detail).
+    workspace = _workspace_with_target(tmp_path)
+    patch = tmp_path / "fix.patch"
+    patch.write_text(_GOOD_PATCH)
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    monkeypatch.setattr(
+        build_host_workspace.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.apply_patch(str(patch), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "silently skipped" in str(caught.value)
+    assert caught.value.details == {"targets": ["init/main.c"]}
+
+
+# --- workspace: redacted_tail / real_checkout dispatch / sync / merge / clone ---------
+
+
+def test_redacted_tail_returns_only_trailing_slice() -> None:
+    # The returned slice is the *trailing* STDERR_TAIL characters (guards a sign flip on the
+    # slice bound).
+    text = "A" * 1000 + "B" * 2500
+    tail = build_host_workspace.redacted_tail(text)
+    assert len(tail) == build_host_workspace.STDERR_TAIL
+    assert set(tail) == {"B"}
+
+
+def test_redacted_tail_masks_registered_secret() -> None:
+    # A registered secret in the stderr is masked (guards dropping the registry).
+    registry = SecretRegistry()
+    registry.register("topsecret-token-value", scope=None)
+    tail = build_host_workspace.redacted_tail("git failed: topsecret-token-value\n", registry)
+    assert "topsecret-token-value" not in tail
+
+
+def _git_profile() -> ServerBuildProfile:
+    profile = BuildProfile.parse(
+        {
+            "schema_version": 1,
+            "kernel_source_ref": {
+                "git": {"remote": "https://git.kernel.org/pub/scm/linux.git", "ref": "v6.9"}
+            },
+            "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+            "patch_ref": "/tmp/some.patch",
+        }
+    )
+    assert isinstance(profile, ServerBuildProfile)
+    return profile
+
+
+def test_real_checkout_git_lane_clones_with_run_id_and_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A git source dispatches to clone_tree (not sync_tree) and forwards the workspace, run_id,
+    # and secret_registry; merge_config and apply_patch then run against the same workspace.
+    calls: dict[str, Any] = {}
+    monkeypatch.setattr(
+        build_host_workspace,
+        "clone_tree",
+        lambda src, ws, allow, *, run_id, secret_registry: calls.update(
+            clone=(ws, run_id, secret_registry)
+        ),
+    )
+    monkeypatch.setattr(build_host_workspace, "sync_tree", lambda *a, **k: calls.update(sync=True))
+    monkeypatch.setattr(
+        build_host_workspace,
+        "merge_config",
+        lambda frag, ws, run_id: calls.update(merge=(ws, run_id)),
+    )
+    monkeypatch.setattr(
+        build_host_workspace,
+        "apply_patch",
+        lambda ref, ws, reg: calls.update(patch=(ref, ws, reg)),
+    )
+    registry = SecretRegistry()
+    workspace = tmp_path / "ws"
+
+    build_host_workspace.real_checkout(
+        "/warm/src",
+        _git_profile(),
+        workspace,
+        b"frag",
+        run_id=_RUN,
+        secret_registry=registry,
+    )
+
+    assert "sync" not in calls  # the git lane, not the warm-tree lane
+    assert calls["clone"] == (workspace, _RUN, registry)
+    assert calls["merge"] == (workspace, _RUN)
+    assert calls["patch"][0] == "/tmp/some.patch"
+    assert calls["patch"][1] == workspace
+    assert calls["patch"][2] is registry
+
+
+def test_real_checkout_warm_lane_syncs_and_skips_patch_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: dict[str, Any] = {}
+    monkeypatch.setattr(
+        build_host_workspace, "clone_tree", lambda *a, **k: calls.update(clone=True)
+    )
+    monkeypatch.setattr(
+        build_host_workspace,
+        "sync_tree",
+        lambda src, ws, reg: calls.update(sync=(src, ws, reg)),
+    )
+    monkeypatch.setattr(
+        build_host_workspace, "merge_config", lambda *a, **k: calls.update(merge=True)
+    )
+    monkeypatch.setattr(
+        build_host_workspace, "apply_patch", lambda *a, **k: calls.update(patch=True)
+    )
+    registry = SecretRegistry()
+    workspace = tmp_path / "ws"
+    profile = BuildProfile.parse(
+        {
+            "schema_version": 1,
+            "kernel_source_ref": "file:///warm/src",
+            "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+            "patch_ref": None,  # no patch -> apply_patch must not be called
+        }
+    )
+    assert isinstance(profile, ServerBuildProfile)
+
+    build_host_workspace.real_checkout(
+        "/warm/src", profile, workspace, b"frag", run_id=_RUN, secret_registry=registry
+    )
+
+    assert "clone" not in calls  # the warm-tree lane, not the git lane
+    assert calls["sync"] == ("/warm/src", workspace, registry)
+    assert calls["merge"] is True
+    assert "patch" not in calls
+
+
+def test_clone_tree_empty_allowlist_is_configuration_error(tmp_path: Path) -> None:
+    # An empty allowlist means the operator has not enabled local git builds -> rejected before
+    # any git runs (guards the allowlist gate).
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source, tmp_path / "ws", (), run_id=_RUN, secret_registry=SecretRegistry()
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "allowlist" in str(caught.value).lower()
+
+
+def test_clone_tree_remote_off_allowlist_is_configuration_error(tmp_path: Path) -> None:
+    source = GitSourceRef(remote="https://evil.example/x.git", ref="v6.9")
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),  # non-empty allowlist, but the remote host is not on it
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_clone_tree_missing_git_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The remote is allowlisted, so the gate passes and the missing-git check fires.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: None)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "git is required to clone a kernel source"
+
+
+def test_clone_tree_git_init_failure_is_infrastructure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-zero ``git init`` is an infrastructure failure with the redacted stderr tail; the
+    # hardened git argv (no ambient config, vetted protocols) is asserted on the first call.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+    captured: list[list[str]] = []
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="init: boom")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "git init failed"
+    assert "boom" in cast(str, caught.value.details["stderr"])
+    # The first git invocation is hardened: it disables redirect-following and ambient config.
+    first = captured[0]
+    assert first[0] == "git"
+    assert "http.followRedirects=false" in first
+    assert "protocol.allow=never" in first
+    assert "init" in first
+
+
+def test_clone_tree_git_fetch_failure_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # init succeeds, fetch fails -> CONFIGURATION_ERROR (a bad remote/ref), not infrastructure.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        rc = 1 if "fetch" in argv else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="fetch denied")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "git fetch failed"
+
+
+def test_clone_tree_fetch_head_missing_is_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # init+fetch succeed but rev-parse --verify FETCH_HEAD reports non-zero: the fetch claimed
+    # success yet left no FETCH_HEAD, which is a TRANSPORT_FAILURE (not a config/checkout error).
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        rc = 1 if "rev-parse" in argv else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(caught.value) == "git fetch produced no FETCH_HEAD (the fetch did not complete)"
+
+
+def test_clone_tree_checkout_failure_is_configuration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # init+fetch+verify succeed but ``git checkout FETCH_HEAD`` fails (e.g. a corrupt fetched
+    # ref): CONFIGURATION_ERROR with the redacted checkout stderr tail.
+    source = GitSourceRef(remote="https://git.kernel.org/x.git", ref="v6.9")
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def _git(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        rc = 1 if "checkout" in argv else 0
+        return subprocess.CompletedProcess(argv, rc, stdout="", stderr="checkout: boom")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _git)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.clone_tree(
+            source,
+            tmp_path / "ws",
+            ("git.kernel.org",),
+            run_id=_RUN,
+            secret_registry=SecretRegistry(),
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(caught.value) == "git checkout FETCH_HEAD failed"
+    assert "boom" in cast(str, caught.value.details["stderr"])
+
+
+def test_sync_tree_missing_rsync_is_missing_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "warm"
+    source.mkdir()
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: None)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), tmp_path / "ws", SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert str(caught.value) == "rsync is required to materialize the warm kernel tree"
+
+
+def test_sync_tree_unset_source_is_configuration_error(tmp_path: Path) -> None:
+    # A blank warm-tree source is rejected as CONFIGURATION_ERROR before any rsync runs.
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree("   ", tmp_path / "ws", SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_sync_tree_mkdir_failure_is_infrastructure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rsync is present and the source is valid, but creating the workspace dir raises OSError:
+    # mapped to workspace_failure("mkdir", "build_workspace", ...) -> INFRASTRUCTURE_FAILURE.
+    source = tmp_path / "warm"
+    source.mkdir()
+    workspace = tmp_path / "ws"
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/rsync")
+
+    def _mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        if self == workspace:
+            raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "build workspace mkdir failed"
+    assert caught.value.details == {"op": "mkdir", "path": "build_workspace"}
+
+
+def test_sync_tree_rsync_argv_and_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "warm"
+    source.mkdir()
+    workspace = tmp_path / "ws"
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/rsync")
+    captured: list[list[str]] = []
+
+    def _rsync(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 23, stdout="", stderr="rsync: link failed")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _rsync)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), workspace, SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "rsync failed to materialize the workspace tree"
+    # the redacted rsync stderr tail
+    assert "link failed" in cast(str, caught.value.details["stderr"])
+    # rsync archive+delete with a trailing slash on both src and dst (an in-place mirror).
+    argv = captured[0]
+    assert argv[:4] == ["rsync", "-a", "--delete", "--"]
+    assert argv[-2] == f"{source}/"
+    assert argv[-1] == f"{workspace}/"
+
+
+def test_sync_tree_rsync_timeout_is_infrastructure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "warm"
+    source.mkdir()
+    monkeypatch.setattr(build_host_workspace.shutil, "which", lambda _name: "/usr/bin/rsync")
+
+    def _timeout(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(["rsync"], timeout=build_host_workspace.RSYNC_TIMEOUT_S)
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _timeout)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.sync_tree(str(source), tmp_path / "ws", SecretRegistry())
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"timeout_s": build_host_workspace.RSYNC_TIMEOUT_S}
+
+
+def test_merge_config_defconfig_failure_is_build_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-zero ``make defconfig`` short-circuits before the fragment is written/merged.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *a, **k: 2)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.merge_config(b"CONFIG_X=y\n", workspace, _RUN)
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "make defconfig exited non-zero"
+    assert not (workspace / "kdump.config.fragment").exists()  # never written
+
+
+def test_merge_config_runs_merge_script_and_propagates_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *a, **k: 0)
+    captured: list[list[str]] = []
+
+    def _merge(argv: list[str], **__: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="merge boom")
+
+    monkeypatch.setattr(build_host_workspace.subprocess, "run", _merge)
+
+    with pytest.raises(CategorizedError) as caught:
+        build_host_workspace.merge_config(b"CONFIG_X=y\n", workspace, _RUN)
+
+    assert caught.value.category is ErrorCategory.BUILD_FAILURE
+    assert str(caught.value) == "merge_config.sh -m exited non-zero"
+    # the fragment is written and handed to merge_config.sh -m against .config
+    fragment = workspace / "kdump.config.fragment"
+    assert fragment.read_bytes() == b"CONFIG_X=y\n"
+    argv = captured[0]
+    assert argv[:3] == ["scripts/kconfig/merge_config.sh", "-m", ".config"]
+    assert argv[-1] == str(fragment)

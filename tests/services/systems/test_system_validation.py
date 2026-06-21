@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -91,6 +92,56 @@ def test_validate_profile_for_provider_runs_static_profile_validation_first() ->
         "supported": ["machine"],
         "unsupported": ["unsupported"],
     }
+    # The message names the offending key so an operator can find the typo in the profile.
+    assert str(error) == "unsupported domain_xml_params: unsupported"
+
+
+def test_unsupported_domain_xml_params_message_lists_all_sorted_comma_joined() -> None:
+    profile = _profile()
+    data = profile.model_dump(mode="json", by_alias=True)
+    # Two unknown keys: the message must list both, sorted, comma-and-space joined.
+    data["provider"]["local-libvirt"]["domain_xml_params"] = {"zeta": "1", "alpha": "2"}
+    invalid_profile = ProvisioningProfile.parse(data)
+
+    with pytest.raises(CategorizedError) as exc_info:
+        validate_profile_for_provider(invalid_profile, _LOCAL_POLICY, _capabilities("local"))
+
+    error = exc_info.value
+    assert error.details["unsupported"] == ["alpha", "zeta"]
+    assert str(error) == "unsupported domain_xml_params: alpha, zeta"
+
+
+def test_validate_profile_validates_the_profiles_own_catalog_rootfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A systems.toml declares one image; the profile's catalog rootfs names a different,
+    # undeclared image. validate_profile must validate the profile's OWN rootfs reference,
+    # so the undeclared name is rejected.
+    inventory = tmp_path / "systems.toml"
+    inventory.write_text(
+        "schema_version = 2\n\n"
+        "[[image]]\n"
+        'provider = "local-libvirt"\n'
+        'name = "declared-image"\n'
+        'arch = "x86_64"\n'
+        'format = "qcow2"\n'
+        'root_device = "/dev/vda"\n'
+        'visibility = "public"\n'
+        'capabilities = ["kdive-ready-console"]\n'
+        "[image.source]\n"
+        'kind = "s3"\n'
+        'object_key = "rootfs/local/declared.qcow2"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(inventory))
+    profile = _profile({"kind": "catalog", "provider": "local-libvirt", "name": "undeclared-name"})
+
+    with pytest.raises(CategorizedError) as exc_info:
+        _LOCAL_POLICY.validate_profile(profile)
+
+    error = exc_info.value
+    assert error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert error.details == {"provider": "local-libvirt", "name": "undeclared-name"}
 
 
 def test_validate_rootfs_for_provider_invokes_validator_for_regular_rootfs() -> None:
@@ -125,6 +176,15 @@ def test_reject_unknown_destructive_ops_flags_typo_directly() -> None:
         _reject_unknown_destructive_ops(_profile_with_ops(["force-crash"]))  # hyphen typo
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert exc.value.details["unknown_destructive_ops"] == ["force-crash"]
+    # The message names the offending field so an operator can find the typo, and the
+    # details advertise the exact closed set of accepted tokens under a stable key.
+    assert str(exc.value) == "provisioning profile declares unknown destructive_ops tokens"
+    assert exc.value.details["valid_destructive_ops"] == [
+        "force_crash",
+        "power",
+        "reprovision",
+        "teardown",
+    ]
 
 
 def test_reject_unknown_destructive_ops_accepts_known_directly() -> None:

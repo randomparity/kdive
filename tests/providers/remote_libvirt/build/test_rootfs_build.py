@@ -79,21 +79,61 @@ def test_build_produces_qcow2_with_content_digest(tmp_path: Path) -> None:
 
     assert isinstance(out, RootfsBuildOutput)
     assert out.qcow2_path.exists()
+    # The published artifact is named for the spec image (publish_qcow2 receives spec.name).
+    assert out.qcow2_path.name == f"{_REMOTE_BASE_IMAGE_NAME}.qcow2"
     assert out.qcow2_path.read_bytes() == b"the-base-image-bytes"
     expected = "sha256:" + hashlib.sha256(b"the-base-image-bytes").hexdigest()
     assert out.digest == expected, "image identity is the qcow2 content digest"
 
 
 def test_build_records_pinned_provenance(tmp_path: Path) -> None:
-    tools = _RecordingTools()
-    out = _plane(tmp_path, tools).build(_spec(releasever="42", packages=("qemu-guest-agent",)))
+    plane = RemoteLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        size="20G",
+        tools=RemoteRootfsBuildTools(virt_builder=_RecordingTools().virt_builder),
+    )
+    out = plane.build(
+        _spec(
+            releasever="42",
+            packages=("qemu-guest-agent",),
+            capabilities=("agent", "kdump"),
+            arch="aarch64",
+        )
+    )
 
-    prov = out.provenance
-    assert prov["plane"] == "remote-libvirt"
-    assert prov["releasever"] == "42"
-    assert prov["packages"] == ["qemu-guest-agent"]
-    assert prov["source_image_digest"] == "sha256:fedora-43-template"
-    assert prov["boot_method"] == "disk-image", "remote rides disk-image boot, not direct-kernel"
+    # The provenance is the full falsifiable contract — assert the whole recorded payload so a
+    # dropped/renamed key or a stale value cannot slip through.
+    assert out.provenance == {
+        "plane": "remote-libvirt",
+        "boot_method": "disk-image",
+        "releasever": "42",
+        "packages": ["qemu-guest-agent"],
+        "source_image_digest": "sha256:fedora-43-template",
+        "capabilities": ["agent", "kdump"],
+        "arch": "aarch64",
+        "image_size": "20G",
+        "guest_access_seam": "qemu-guest-agent",
+    }
+
+
+def test_build_passes_configured_size_and_releasever_to_builder(tmp_path: Path) -> None:
+    tools = _RecordingTools()
+    plane = RemoteLibvirtRootfsBuildPlane(
+        workspace=tmp_path / "work",
+        size="30G",
+        tools=RemoteRootfsBuildTools(virt_builder=tools.virt_builder),
+    )
+    out = plane.build(_spec(releasever="41"))
+
+    assert tools.builder_calls == [
+        {
+            "releasever": "41",
+            "packages": ("qemu-guest-agent", "drgn", "kexec-tools"),
+            "size": "30G",
+        }
+    ]
+    # The configured size is recorded in provenance too (not a defaulted/None value).
+    assert out.provenance["image_size"] == "30G"
 
 
 def test_build_installs_and_enables_the_guest_agent(tmp_path: Path) -> None:
@@ -142,3 +182,5 @@ def test_build_fails_when_no_image_is_produced(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         plane.build(_spec())
     assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(exc.value) == "virt-builder reported success but produced no image"
+    assert exc.value.details == {"stage": "virt-builder"}

@@ -22,6 +22,14 @@ def test_invalid_names_raise(name: str) -> None:
         validate_build_config_name(name)
 
 
+def test_invalid_name_message_quotes_offender_and_pattern() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        validate_build_config_name("Kdump")
+    message = str(excinfo.value)
+    assert repr("Kdump") in message
+    assert "^[a-z0-9][a-z0-9_-]{0,63}$" in message
+
+
 def test_nonempty_content_passes() -> None:
     assert validate_build_config_content("CONFIG_KEXEC=y\n") == "CONFIG_KEXEC=y\n"
 
@@ -29,6 +37,12 @@ def test_nonempty_content_passes() -> None:
 def test_empty_content_raises() -> None:
     with pytest.raises(ValueError):
         validate_build_config_content("")
+
+
+def test_empty_content_message_is_exact() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        validate_build_config_content("")
+    assert str(excinfo.value) == "build-config content must be non-empty"
 
 
 def test_cap_predicate() -> None:

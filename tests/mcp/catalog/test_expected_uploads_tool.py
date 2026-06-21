@@ -40,15 +40,24 @@ def test_expected_uploads_projects_both_owner_vocabularies() -> None:
     assert set(items) == {"run", "system"}
 
     run = items["run"]
+    assert run["owner_kind"] == "run"
     assert run["accepted_names"] == sorted(RUN_ARTIFACT_NAMES)
     assert run["create_tool"] == CREATE_RUN_UPLOAD_TOOL
     assert "kernel" in run["descriptions"]
     assert set(run["descriptions"]) == set(run["accepted_names"])
 
     system = items["system"]
+    assert system["owner_kind"] == "system"
     assert system["accepted_names"] == sorted(SYSTEM_ARTIFACT_NAMES)
     assert system["create_tool"] == CREATE_SYSTEM_UPLOAD_TOOL
     assert system["accepted_names"] == ["rootfs"]
+
+
+def test_expected_uploads_items_carry_ok_status() -> None:
+    resp = expected_uploads()
+    by_id = {item.object_id: item for item in resp.items}
+    assert by_id["run"].status == "ok"
+    assert by_id["system"].status == "ok"
 
 
 def test_expected_uploads_chains_to_the_create_tools() -> None:

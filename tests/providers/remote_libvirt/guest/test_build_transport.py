@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any
+from typing import Any, cast
 
 import libvirt
 import pytest
@@ -38,6 +38,7 @@ class _FakeAgent:
         never_exits: bool = False,
     ) -> None:
         self.spawned: list[dict[str, Any]] = []
+        self.domains: list[Any] = []
         self._exitcode = exitcode
         self._stdout = stdout
         self._stderr = stderr
@@ -47,6 +48,7 @@ class _FakeAgent:
         msg = json.loads(command)
         if msg["execute"] == "guest-exec":
             self.spawned.append(msg["arguments"])
+            self.domains.append(domain)
             return json.dumps({"return": {"pid": 4321}})
         # guest-exec-status
         if self._never_exits:
@@ -84,12 +86,35 @@ def _clock() -> Any:
 
 def test_run_composes_single_sh_c_hop() -> None:
     agent = _FakeAgent(exitcode=0, stdout=b"ok")
-    result = _transport(agent).run(["make", "-C", "/ws", "x"], cwd="/ws", timeout_s=60)
+    domain = FakeDomain("build-vm")
+    transport = GuestExecBuildTransport(
+        domain=domain,
+        agent_command=agent,
+        secret_registry=SecretRegistry(),
+        poll_s=0.0,
+        sleep=lambda _s: None,
+        monotonic=_clock(),
+    )
+    result = transport.run(["make", "-C", "/ws", "x"], cwd="/ws", timeout_s=60)
     assert result.returncode == 0
     assert result.stdout == "ok"
     args = agent.spawned[0]
     assert args["path"] == "/bin/sh"
     assert args["arg"] == ["-c", "cd /ws && exec make -C /ws x"]
+    # The command runs against the transport's own domain handle, not some other.
+    assert agent.domains == [domain]
+
+
+def test_run_decodes_non_utf8_output_with_replacement_not_raising() -> None:
+    # guest stdout/stderr are decoded with errors="replace": a build tool can emit non-UTF-8
+    # bytes (a localized libc message), and the transport must surface a lossy string rather
+    # than crash the whole build on a decode error.
+    bad = b"warn: \xff\xfe done"
+    agent = _FakeAgent(exitcode=0, stdout=bad, stderr=bad)
+    result = _transport(agent).run(["make"], cwd="/ws", timeout_s=10)
+    assert result.stdout == bad.decode("utf-8", "replace")
+    assert result.stderr == bad.decode("utf-8", "replace")
+    assert "�" in result.stdout  # the invalid bytes became the replacement char
 
 
 def test_run_quotes_cwd_and_argv() -> None:
@@ -164,6 +189,22 @@ def test_write_bytes_non_zero_is_infrastructure_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         _transport(agent).write_bytes("/build/dest.bin", b"x")
     assert exc.value.category == ErrorCategory.INFRASTRUCTURE_FAILURE
+    # The error names the failed path in both the message and the structured details.
+    assert "/build/dest.bin" in str(exc.value)
+    assert exc.value.details["path"] == "/build/dest.bin"
+    assert exc.value.details["stderr"] == "No space left"
+
+
+def test_write_bytes_failure_redacts_registered_secret_in_stderr() -> None:
+    # write_bytes runs stderr through redacted_tail with the transport's registry; a registered
+    # secret appearing in the in-guest stderr must be masked in the error detail.
+    registry = SecretRegistry()
+    registry.register("tok-supersecret", scope=None)  # pragma: allowlist secret
+    agent = _FakeAgent(exitcode=1, stderr=b"auth failed for tok-supersecret")
+    with pytest.raises(CategorizedError) as exc:
+        _transport(agent, registry=registry).write_bytes("/build/dest.bin", b"x")
+    assert "tok-supersecret" not in str(exc.value.details)
+    assert "[REDACTED]" in cast(str, exc.value.details["stderr"])
 
 
 def test_clone_runs_init_fetch_verify_checkout_via_agent() -> None:
@@ -200,3 +241,5 @@ def test_upload_file_success_parses_etag() -> None:
         "/build/bzImage", PresignedUpload(url="https://s3/p", required_headers={})
     )
     assert etag == _EMPTY_MD5
+    # The local file path is forwarded into the in-guest curl upload command.
+    assert "--upload-file /build/bzImage" in agent.spawned[0]["arg"][1]

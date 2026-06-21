@@ -345,6 +345,42 @@ def test_dispatch_routes_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen and seen[0].command == "doctor"
 
 
+def test_payload_omits_flags_when_attributes_are_absent() -> None:
+    # A Namespace that never set the opt-in attributes must still send the empty payload:
+    # _payload must read each opt-in with a falsy default, never assume the attribute exists.
+    payload = doctor._payload(argparse.Namespace())
+    assert payload == {}
+
+
+def test_payload_does_not_force_flags_on_when_attributes_default() -> None:
+    # When the opt-ins are present but False, neither flag is forwarded; a default of True
+    # (instead of False) would wrongly opt every run into the heavy probes.
+    payload = doctor._payload(
+        argparse.Namespace(provider=None, with_egress=False, with_buildhost_agent=False)
+    )
+    assert "with_egress" not in payload
+    assert "with_buildhost_agent" not in payload
+
+
+def test_payload_forwards_only_the_opt_ins_that_are_set() -> None:
+    payload = doctor._payload(
+        argparse.Namespace(provider="remote-libvirt", with_egress=True, with_buildhost_agent=False)
+    )
+    assert payload == {"provider": "remote-libvirt", "with_egress": True}
+
+
+def test_sanitize_replaces_newline_carriage_return_and_tab_with_spaces() -> None:
+    # Every row-forging whitespace control must collapse to a single space so untrusted tool
+    # output cannot forge an extra row (\n), overwrite a line (\r), or shift a column (\t).
+    assert doctor._sanitize("a\nb\rc\td") == "a b c d"
+
+
+def test_sanitize_passes_non_strings_through_unchanged() -> None:
+    sentinel = object()
+    assert doctor._sanitize(sentinel) is sentinel
+    assert doctor._sanitize(None) is None
+
+
 def test_untrusted_detail_is_rendered_on_one_logical_row(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

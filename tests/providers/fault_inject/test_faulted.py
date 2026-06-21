@@ -42,6 +42,47 @@ def _noop_sleep(_delay: float) -> None:
     return None
 
 
+class _SpyEngine:
+    """Records ``decide`` kwargs and returns a no-op decision."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def decide(self, *, system_id: UUID, plane: FaultPlane, attempt: int) -> FaultDecision:
+        self.calls.append({"system_id": system_id, "plane": plane, "attempt": attempt})
+        return FaultDecision(fail=False, category=None, latency_s=0.0)
+
+
+class _SpyProvisioningInner:
+    def __init__(self) -> None:
+        self.provision_calls: list[tuple[UUID, object]] = []
+        self.reprovision_calls: list[tuple[UUID, object]] = []
+        self.teardown_calls: list[str] = []
+
+    def provision(self, system_id: UUID, profile: object) -> str:
+        self.provision_calls.append((system_id, profile))
+        return "spy-domain"
+
+    def reprovision(self, system_id: UUID, profile: object) -> str:
+        self.reprovision_calls.append((system_id, profile))
+        return "spy-domain"
+
+    def teardown(self, domain_name: str) -> None:
+        self.teardown_calls.append(domain_name)
+
+
+class _SpyInstallInner:
+    def __init__(self) -> None:
+        self.install_calls: list[InstallRequest] = []
+        self.boot_calls: list[UUID] = []
+
+    def install(self, request: InstallRequest) -> None:
+        self.install_calls.append(request)
+
+    def boot(self, system_id: UUID) -> None:
+        self.boot_calls.append(system_id)
+
+
 def _provision(
     engine: FaultEngine,
     *,
@@ -153,6 +194,22 @@ def test_teardown_and_reprovision_delegate_unchanged() -> None:
         wrapper.reprovision(_SYSTEM, _PROFILE)
 
 
+def test_inner_reprovision_reaps_existing_domain_and_re_mints_same_name() -> None:
+    inventory = FaultInjectInventory()
+    inner = FaultInjectProvisioning(inventory)
+    expected = f"fault-inject-{_SYSTEM}"
+    inner.provision(_SYSTEM, _PROFILE)
+    # A mid-op cancel left the prior domain orphan-flagged; reprovision must clear it by
+    # forgetting the existing domain keyed on this system before re-minting.
+    inventory.flag_orphan(expected)
+    assert inventory.is_orphaned(expected) is True
+
+    domain = inner.reprovision(_SYSTEM, _PROFILE)
+
+    assert domain == expected
+    assert inventory.is_orphaned(expected) is False
+
+
 def test_install_fail_draw_raises_categorized_error() -> None:
     engine = _seed_that_fails(FaultPlane.INSTALL)
     wrapper = FaultedInstall(FaultInjectInstall(), engine, sleep_s=lambda _s: None)
@@ -187,3 +244,105 @@ def test_fresh_system_id_each_call_is_independent() -> None:
     _provision(engine, sleep_s=a.append).provision(sid_a, _PROFILE)
     _provision(engine, sleep_s=b.append).provision(sid_b, _PROFILE)
     assert a != b  # the draw is keyed on system_id
+
+
+def test_apply_sleeps_for_sub_second_latency() -> None:
+    recorded: list[float] = []
+    _apply(FaultDecision(fail=False, category=None, latency_s=0.5), recorded.append)
+    assert recorded == [0.5]
+
+
+def test_apply_fail_message_names_the_drawn_category() -> None:
+    decision = FaultDecision(fail=True, category=ErrorCategory.PROVISIONING_FAILURE, latency_s=0.0)
+    with pytest.raises(CategorizedError) as exc:
+        _apply(decision, _noop_sleep)
+    assert str(exc.value) == "fault-inject drew a provisioning_failure failure"
+
+
+def test_fail_without_category_message_is_exact() -> None:
+    decision = FaultDecision(fail=True, category=None, latency_s=0.0)
+    with pytest.raises(RuntimeError) as exc:
+        _apply(decision, _noop_sleep)
+    assert str(exc.value) == "fault engine returned a failing decision without a category"
+
+
+def test_provision_threads_exact_args_to_engine_and_inner() -> None:
+    engine = _SpyEngine()
+    inner = _SpyProvisioningInner()
+    attempt_seen: list[UUID] = []
+    wrapper = FaultedProvisioning(
+        cast(FaultInjectProvisioning, inner),
+        cast(FaultEngine, engine),
+        attempt_for=lambda sid: attempt_seen.append(sid) or 4,
+        sleep_s=_noop_sleep,
+    )
+
+    result = wrapper.provision(_SYSTEM, _PROFILE)
+
+    assert result == "spy-domain"
+    assert inner.provision_calls == [(_SYSTEM, _PROFILE)]
+    assert attempt_seen == [_SYSTEM]
+    assert engine.calls == [{"system_id": _SYSTEM, "plane": FaultPlane.PROVISION, "attempt": 4}]
+
+
+def test_reprovision_threads_exact_args_to_engine_and_inner() -> None:
+    engine = _SpyEngine()
+    inner = _SpyProvisioningInner()
+    wrapper = FaultedProvisioning(
+        cast(FaultInjectProvisioning, inner),
+        cast(FaultEngine, engine),
+        attempt_for=lambda _sid: 4,
+        sleep_s=_noop_sleep,
+    )
+
+    wrapper.reprovision(_SYSTEM, _PROFILE)
+
+    assert inner.reprovision_calls == [(_SYSTEM, _PROFILE)]
+    assert engine.calls == [{"system_id": _SYSTEM, "plane": FaultPlane.PROVISION, "attempt": 4}]
+
+
+def test_teardown_passes_domain_name_through_unchanged() -> None:
+    engine = _SpyEngine()
+    inner = _SpyProvisioningInner()
+    wrapper = FaultedProvisioning(
+        cast(FaultInjectProvisioning, inner), cast(FaultEngine, engine), sleep_s=_noop_sleep
+    )
+
+    wrapper.teardown("fault-inject-host")
+
+    assert inner.teardown_calls == ["fault-inject-host"]
+    assert engine.calls == []  # teardown never draws
+
+
+def test_install_threads_exact_args_to_engine_and_inner() -> None:
+    engine = _SpyEngine()
+    inner = _SpyInstallInner()
+    attempt_seen: list[UUID] = []
+    wrapper = FaultedInstall(
+        cast(FaultInjectInstall, inner),
+        cast(FaultEngine, engine),
+        attempt_for=lambda sid: attempt_seen.append(sid) or 9,
+        sleep_s=_noop_sleep,
+    )
+
+    wrapper.install(_INSTALL_REQUEST)
+
+    assert inner.install_calls == [_INSTALL_REQUEST]
+    assert attempt_seen == [_SYSTEM]
+    assert engine.calls == [{"system_id": _SYSTEM, "plane": FaultPlane.INSTALL, "attempt": 9}]
+
+
+def test_boot_threads_exact_args_to_engine_and_inner() -> None:
+    engine = _SpyEngine()
+    inner = _SpyInstallInner()
+    wrapper = FaultedInstall(
+        cast(FaultInjectInstall, inner),
+        cast(FaultEngine, engine),
+        attempt_for=lambda _sid: 9,
+        sleep_s=_noop_sleep,
+    )
+
+    wrapper.boot(_SYSTEM)
+
+    assert inner.boot_calls == [_SYSTEM]
+    assert engine.calls == [{"system_id": _SYSTEM, "plane": FaultPlane.BOOT, "attempt": 9}]

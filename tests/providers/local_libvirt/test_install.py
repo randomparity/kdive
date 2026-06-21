@@ -7,6 +7,7 @@ import subprocess
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import libvirt
@@ -379,6 +380,9 @@ def test_boot_never_answered_is_boot_timeout(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as caught:
         inst.boot(_SYS)
     assert caught.value.category is ErrorCategory.BOOT_TIMEOUT
+    # The failure carries the System id under the documented detail key so an operator can
+    # tie the timeout to a specific System.
+    assert caught.value.details["system_id"] == str(_SYS)
 
 
 def test_boot_timeout_includes_first_readiness_probe_error(tmp_path: Path) -> None:
@@ -417,12 +421,33 @@ def test_boot_create_error_is_install_failure(tmp_path: Path) -> None:
     assert caught.value.category is ErrorCategory.INSTALL_FAILURE
 
 
+def test_boot_powercycle_error_is_install_failure_naming_the_verb(tmp_path: Path) -> None:
+    # A running domain whose destroy fails surfaces a power-cycling install failure naming the
+    # verb and the offending domain, so the message distinguishes it from a lookup/create fault.
+    domain = FakeDomain(
+        domain_name=f"kdive-{_SYS}",
+        system_id=str(_SYS),
+        active=True,
+        raise_on={"destroy": libvirt.VIR_ERR_INTERNAL_ERROR},
+    )
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    inst = _install(conn=conn, staging_root=tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        inst.boot(_SYS)
+    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert str(caught.value) == "libvirt error power-cycling domain"
+    assert caught.value.details["domain"] == f"kdive-{_SYS}"
+
+
 def test_boot_absent_domain_is_install_failure(tmp_path: Path) -> None:
     conn = FakeLibvirtConn(lookup={})
     inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
         inst.boot(_SYS)
     assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    # The lookup failure names the verb and carries the domain under the documented key.
+    assert str(caught.value) == "libvirt error looking up domain"
+    assert caught.value.details["domain"] == f"kdive-{_SYS}"
 
 
 # --- from_env does not connect/spawn -------------------------------------------------
@@ -547,8 +572,11 @@ def test_stage_object_categorizes_local_write_failure(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as excinfo:
         _stage_object(store, _KERNEL_REF, dest)
 
-    # The local write fault is a categorized infrastructure failure, not a raw OSError.
+    # The local write fault is a categorized infrastructure failure, not a raw OSError,
+    # and carries the staging op label, the destination, and the operator-facing message.
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value).startswith("failed to write the staged object to the per-Run path")
+    assert excinfo.value.details["op"] == "stage"
     assert excinfo.value.details["dest"] == str(dest)
     assert not dest.exists()
 
@@ -721,6 +749,63 @@ def test_real_readiness_treats_missing_domain_as_terminal(
     assert result.ok is False
 
 
+def test_real_readiness_ready_marker_answers_without_probing_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A console that already shows the readiness marker answers ok immediately — the domain
+    # exit probe must NOT be consulted (it would be a wasted live-host call), guarding the
+    # early-return on a non-None first verdict.
+    monkeypatch.setattr(install, "read_console_log", lambda path: b"kdive-ready\n")
+
+    def fail_probe(name: str) -> install._DomainExitProbe:
+        raise AssertionError("exit probe must not run once the console already answered")
+
+    monkeypatch.setattr(install, "_domain_exit_probe", fail_probe)
+
+    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+
+    assert result.answered is True
+    assert result.ok is True
+
+
+def test_real_readiness_running_guest_stays_unanswered_with_probe_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pending console + a still-running guest: no answer yet, the loop must keep polling, and
+    # the probe diagnostic is carried so a later boot timeout can explain itself. ok must be
+    # False (not True) for an unanswered probe.
+    monkeypatch.setattr(install, "read_console_log", lambda path: b"booting...\n")
+    monkeypatch.setattr(install.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        install,
+        "_domain_exit_probe",
+        lambda name: install._DomainExitProbe(False, "virsh hiccup"),
+    )
+
+    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+
+    assert result.answered is False
+    assert result.ok is False
+    assert result.probe_error == "virsh hiccup"
+
+
+def test_real_readiness_reread_after_exit_honors_late_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # First read is pending; the guest then exits and a re-read shows the readiness marker that
+    # landed just before it stopped — that late verdict (exited=True) must be honored. A success
+    # marker yields ok=True, which the generic exited fallback (answered=True, ok=False) can never
+    # produce, so this pins the reread call site: dropping the reread would surface ok=False.
+    reads = iter([b"booting...\n", b"kdive-ready\n"])
+    monkeypatch.setattr(install, "read_console_log", lambda path: next(reads))
+    monkeypatch.setattr(install, "_domain_exit_probe", lambda name: install._DomainExitProbe(True))
+
+    result = install._real_readiness(UUID("22222222-2222-2222-2222-222222222222"))
+
+    assert result.answered is True
+    assert result.ok is True
+
+
 def test_domain_exited_treats_missing_kdive_domain_as_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -750,6 +835,143 @@ def test_domain_exit_probe_uses_resolved_virsh_path(monkeypatch: pytest.MonkeyPa
 
     assert install._domain_exited("kdive-22222222-2222-2222-2222-222222222222") is False
     assert calls[0][0] == "/usr/bin/virsh"
+
+
+def _capture_domstate(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int,
+    stdout: str,
+    stderr: str = "",
+) -> dict[str, object]:
+    """Stub virsh + subprocess.run; return the recorded args/kwargs of the one call."""
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(install.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        recorded["args"] = args
+        recorded["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            args=args, returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
+    monkeypatch.setattr(install.subprocess, "run", fake_run)
+    return recorded
+
+
+def test_domain_exit_probe_builds_connection_qualified_domstate_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu+tls://probe.example/system")
+    recorded = _capture_domstate(monkeypatch, returncode=0, stdout="running")
+
+    install._domain_exit_probe("kdive-abc")
+
+    args = recorded["args"]
+    assert isinstance(args, list)
+    # The probe targets the configured connection URI and the `domstate` subcommand for
+    # the named domain; a wrong flag or subcommand would query the wrong thing. Setting the
+    # URI explicitly pins that the configured value flows into the argv, independent of the
+    # Setting default.
+    assert args[1] == "-c"
+    assert args[2] == "qemu+tls://probe.example/system"
+    assert args[3] == "domstate"
+    assert args[4] == "kdive-abc"
+
+
+def test_domain_exit_probe_runs_bounded_captured_no_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _capture_domstate(monkeypatch, returncode=0, stdout="running")
+
+    install._domain_exit_probe("kdive-abc")
+
+    kwargs = cast("dict[str, object]", recorded["kwargs"])
+    assert isinstance(kwargs, dict)
+    # Output must be captured and decoded so stdout/stderr parsing works, the probe must be
+    # time-bounded so a wedged host cannot hang the boot loop, and check=False so a nonzero
+    # exit is inspected here rather than raising.
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    assert kwargs["timeout"] == install._DOMSTATE_PROBE_TIMEOUT
+    assert kwargs["check"] is False
+
+
+def test_domain_exit_probe_terminal_domstate_is_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _capture_domstate(monkeypatch, returncode=0, stdout="shut off")
+
+    probe = install._domain_exit_probe("kdive-abc")
+
+    # A terminal domstate (case-insensitive) means the guest stopped; nothing kept it alive.
+    assert probe.exited is True
+    assert probe.error is None
+
+
+def test_domain_exit_probe_running_is_not_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    _capture_domstate(monkeypatch, returncode=0, stdout="running")
+
+    probe = install._domain_exit_probe("kdive-abc")
+
+    assert probe.exited is False
+    assert probe.error is None
+
+
+def test_domain_exit_probe_missing_domain_needs_both_prefix_and_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A nonzero exit whose stderr is the libvirt "failed to get domain" signature counts as
+    # exited ONLY for a kdive- domain (the names this plane owns).
+    _capture_domstate(
+        monkeypatch,
+        returncode=1,
+        stdout="",
+        stderr="error: failed to get domain 'kdive-abc'",
+    )
+    assert install._domain_exit_probe("kdive-abc").exited is True
+
+
+def test_domain_exit_probe_missing_signature_for_foreign_name_is_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same "failed to get domain" stderr but a non-kdive domain name: NOT treated as exited
+    # (guards the AND between the name prefix and the stderr signature). The probe instead
+    # reports the stderr as a bounded probe error.
+    _capture_domstate(
+        monkeypatch,
+        returncode=1,
+        stdout="",
+        stderr="error: failed to get domain 'other-vm'",
+    )
+    probe = install._domain_exit_probe("other-vm")
+    assert probe.exited is False
+    assert probe.error is not None
+
+
+def test_domain_exit_probe_kdive_prefix_without_signature_is_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A kdive- domain with a nonzero exit but a DIFFERENT stderr is not proof of exit; it is
+    # a probe error to keep polling on (guards the AND with the stderr signature).
+    _capture_domstate(
+        monkeypatch,
+        returncode=1,
+        stdout="",
+        stderr="error: connection refused",
+    )
+    probe = install._domain_exit_probe("kdive-abc")
+    assert probe.exited is False
+    assert probe.error == "error: connection refused"
+
+
+def test_domain_exit_probe_zero_exit_unknown_state_is_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # returncode 0 with a non-terminal, non-running state (e.g. "paused") is not an exit and
+    # carries no probe error (guards the returncode != 0 branch from firing on success).
+    _capture_domstate(monkeypatch, returncode=0, stdout="paused")
+    probe = install._domain_exit_probe("kdive-abc")
+    assert probe.exited is False
+    assert probe.error is None
 
 
 def test_real_readiness_reports_domstate_probe_timeout(

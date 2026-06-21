@@ -57,8 +57,17 @@ def test_build_fs_subcommand_parses_with_defaults() -> None:
     assert args.distro == "fedora"
     assert args.workspace == "/var/lib/kdive/build/images"
     assert args.name == "fedora-kdive-ready-43"
+    assert args.arch == "x86_64"
     assert args.releasever == "43"
+    assert args.dest == "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
     assert args.packages is None  # falls back to the --kind's package set in the handler
+
+
+def test_build_fs_subcommand_rejects_an_unknown_kind() -> None:
+    # --kind is constrained to the registered fs kinds; an unknown value is rejected at
+    # parse time rather than passed through to a KeyError in the handler.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["build-fs", "--kind", "bogus"])
 
 
 def test_build_fs_subcommand_collects_repeated_packages() -> None:
@@ -77,20 +86,31 @@ def test_run_build_fs_moves_plane_output_to_dest(
     produced.parent.mkdir(parents=True)
     produced.write_bytes(b"image-bytes")
     seen_specs = []
+    seen_workspaces = []
 
     class _FakePlane:
         def build(self, spec: object) -> RootfsBuildOutput:
             seen_specs.append(spec)
             return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
 
-    _patch_plane(monkeypatch, _FakePlane())
+    # Capture the workspace the factory receives so a dropped/None argument is caught.
+    monkeypatch.setattr(
+        "kdive.images.rootfs_command._build_local_rootfs_plane",
+        lambda workspace: seen_workspaces.append(workspace) or _FakePlane(),
+    )
 
-    dest = tmp_path / "rootfs" / "out.qcow2"
+    # A nested, not-yet-existing workspace and dest exercise the parents=True mkdir.
+    workspace = tmp_path / "ws" / "nested"
+    dest = tmp_path / "rootfs" / "deep" / "out.qcow2"
     args = build_parser().parse_args(
         [
             "build-fs",
+            "--name",
+            "custom-name",
+            "--arch",
+            "aarch64",
             "--workspace",
-            str(tmp_path / "ws"),
+            str(workspace),
             "--dest",
             str(dest),
             "--releasever",
@@ -103,8 +123,13 @@ def test_run_build_fs_moves_plane_output_to_dest(
 
     assert dest.read_bytes() == b"image-bytes"
     assert not produced.exists(), "the plane output is moved, not copied"
+    assert oct(dest.stat().st_mode & 0o777) == "0o644"
+    assert seen_workspaces == [workspace.resolve()]
     assert seen_specs and seen_specs[0].releasever == "42"
     assert seen_specs[0].packages == ("drgn",)
+    assert seen_specs[0].provider == "local-libvirt"
+    assert seen_specs[0].name == "custom-name"
+    assert seen_specs[0].arch == "aarch64"
 
 
 def test_run_build_fs_debug_kind_sets_debug_packages_and_capabilities(
@@ -208,19 +233,49 @@ def test_run_build_fs_unwritable_workspace_is_actionable(
             raise AssertionError("build must not run when the workspace is unwritable")
 
     _patch_plane(monkeypatch, _UnusedPlane())
-    readonly = tmp_path / "readonly"
-    readonly.mkdir()
-    readonly.chmod(0o500)
+    # The workspace dir already exists (so mkdir succeeds) but is read-only, so the write
+    # probe inside it fails — this exercises the in-workspace probe, not just the mkdir.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    workspace.chmod(0o500)
     try:
         args = build_parser().parse_args(
-            ["build-fs", "--workspace", str(readonly / "ws"), "--dest", str(tmp_path / "out.qcow2")]
+            ["build-fs", "--workspace", str(workspace), "--dest", str(tmp_path / "out.qcow2")]
         )
         with pytest.raises(CategorizedError) as caught:
             run_build_fs(args)
     finally:
-        readonly.chmod(0o700)
+        workspace.chmod(0o700)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "writable" in str(caught.value)
+    assert caught.value.details == {
+        "workspace": str(workspace.resolve()),
+        "error": "PermissionError",
+    }
+
+
+def test_run_build_fs_reuses_an_existing_writable_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An already-present writable workspace is reused (exist_ok), not rejected."""
+    produced = tmp_path / "plane-workspace" / "img.qcow2"
+    produced.parent.mkdir(parents=True)
+    produced.write_bytes(b"image-bytes")
+
+    class _FakePlane:
+        def build(self, spec: object) -> RootfsBuildOutput:
+            del spec
+            return RootfsBuildOutput(qcow2_path=produced, digest="sha256:abc", provenance={})
+
+    _patch_plane(monkeypatch, _FakePlane())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()  # pre-existing and writable
+    dest = tmp_path / "out.qcow2"
+    args = build_parser().parse_args(
+        ["build-fs", "--workspace", str(workspace), "--dest", str(dest)]
+    )
+    run_build_fs(args)
+    assert dest.read_bytes() == b"image-bytes"
 
 
 def test_run_build_fs_prints_eval_safe_export_line(

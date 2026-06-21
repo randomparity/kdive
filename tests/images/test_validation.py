@@ -46,7 +46,21 @@ def test_names_the_missing_element(tmp_path: Path) -> None:
     assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
     # The error names the missing element (the first one), not a generic failure.
     assert "agent" in str(err.value)
-    assert err.value.details.get("missing") == "agent"
+    assert err.value.details == {"missing": "agent", "path": GUEST_CONTRACT_PATHS["agent"]}
+
+
+def test_probe_receives_the_image_path(tmp_path: Path) -> None:
+    # The inspection seam is handed the image under test, not some other path.
+    image = tmp_path / "img.qcow2"
+    image.write_bytes(b"")
+    seen: list[Path] = []
+
+    def _probe(qcow2_path: Path, candidates: Sequence[str]) -> set[str]:
+        seen.append(qcow2_path)
+        return set(candidates)
+
+    validate_guest_contract(image, required=["agent"], inspect=_probe)
+    assert seen == [image]
 
 
 def test_unknown_required_element_is_a_configuration_error(tmp_path: Path) -> None:
@@ -58,6 +72,10 @@ def test_unknown_required_element_is_a_configuration_error(tmp_path: Path) -> No
 
     assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "nonsense" in str(err.value)
+    assert err.value.details == {
+        "missing": "nonsense",
+        "known": sorted(GUEST_CONTRACT_PATHS),
+    }
 
 
 def test_empty_required_is_a_no_op(tmp_path: Path) -> None:

@@ -56,6 +56,23 @@ def test_materialize_catalog_rootfs_uses_injected_fetch(tmp_path: Path) -> None:
     assert seen == [ref]
 
 
+def test_materialize_local_rootfs_enforces_sha256(tmp_path: Path) -> None:
+    # A LocalComponentRef sha256 must be threaded into the path validator: a digest that does not
+    # match the file's contents is a configuration error, not a silently accepted path.
+    root = tmp_path / "rootfs"
+    root.mkdir()
+    image = root / "base.qcow2"
+    image.write_bytes(b"data")
+
+    with pytest.raises(CategorizedError) as error:
+        materialize_rootfs_base(
+            LocalComponentRef(kind="local", path=str(image), sha256="sha256:" + "0" * 64),
+            context=RootfsMaterializationContext(allowed_roots=[root]),
+        )
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "sha256" in str(error.value)
+
+
 def test_materialize_catalog_rootfs_unwired_lane_is_config_error(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as error:
         materialize_rootfs_base(
@@ -64,6 +81,8 @@ def test_materialize_catalog_rootfs_unwired_lane_is_config_error(tmp_path: Path)
         )
 
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(error.value) == "catalog rootfs materialization is not wired for this lane"
+    assert error.value.details == {"provider": "local-libvirt", "name": "base"}
 
 
 def test_materialize_uploaded_rootfs_uses_system_keyed_path(tmp_path: Path) -> None:
@@ -88,6 +107,7 @@ def test_materialize_uploaded_rootfs_requires_system_context(tmp_path: Path) -> 
         )
 
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(error.value) == "uploaded rootfs materialization requires upload context"
 
 
 def test_provider_rejects_artifact_rootfs_before_materializer(tmp_path: Path) -> None:

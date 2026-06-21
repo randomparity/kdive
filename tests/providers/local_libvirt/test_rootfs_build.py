@@ -72,9 +72,12 @@ class _RecordingTools:
             }
         )
 
+    repack_sizes: list[str] = field(default_factory=list)
+
     def repack_whole_disk_ext4(self, *, scratch: Path, qcow2: Path, size: str) -> None:
         qcow2.write_bytes(self.payload)
         self.repack_calls.append((scratch, qcow2))
+        self.repack_sizes.append(size)
 
     def normalize_guest(self, qcow2: Path) -> None:
         self.normalize_calls.append(qcow2)
@@ -90,6 +93,13 @@ def _plane(tmp_path: Path, tools: _RecordingTools) -> LocalLibvirtRootfsBuildPla
             normalize_guest=tools.normalize_guest,
         ),
     )
+
+
+def test_default_workspace_is_the_managed_build_path() -> None:
+    # With no workspace override the plane defaults to the managed images path, not a
+    # null/derived location; from_env carries that same default through.
+    assert LocalLibvirtRootfsBuildPlane()._workspace == Path("/var/lib/kdive/build/images")
+    assert LocalLibvirtRootfsBuildPlane.from_env()._workspace == Path("/var/lib/kdive/build/images")
 
 
 def test_build_produces_qcow2_with_content_digest(tmp_path: Path) -> None:
@@ -111,11 +121,22 @@ def test_build_records_pinned_provenance(tmp_path: Path) -> None:
     tools = _RecordingTools(authorized_key=key)
     out = _plane(tmp_path, tools).build(_spec(releasever="42", packages=("openssh-server",)))
 
-    prov = out.provenance
-    assert prov["distro"] == "fedora"
-    assert prov["releasever"] == "42"
-    assert prov["packages"] == ["openssh-server"]
-    assert prov["source_image_digest"] == "sha256:fedora-43-template"
+    # The provenance record is the plane's falsifiable contract (ADR-0092): pin every
+    # key and value so a dropped/renamed field or a swapped-in default is caught.
+    assert out.provenance == {
+        "plane": "local-libvirt",
+        "distro": "fedora",
+        "releasever": "42",
+        "packages": ["openssh-server"],
+        "source_image_digest": "sha256:fedora-43-template",
+        "capabilities": ["agent", "kdump", "drgn"],
+        "arch": "x86_64",
+        "image_size": "6G",
+        "authorized_key_name": "id.pub",
+        "readiness_marker": "kdive-ready",
+        "layout": "whole-disk-ext4-qcow2",
+        "guest_selinux": "disabled",
+    }
 
 
 def test_build_drives_the_layout_stages_in_order(tmp_path: Path) -> None:
@@ -126,10 +147,14 @@ def test_build_drives_the_layout_stages_in_order(tmp_path: Path) -> None:
 
     assert len(tools.builder_calls) == 1, "virt-builder customizes the scratch image once"
     assert tools.builder_calls[0]["distro"] == "fedora"
+    assert tools.builder_calls[0]["releasever"] == "43"
     assert tools.builder_calls[0]["packages"] == ("openssh-server", "drgn")
     assert tools.builder_calls[0]["authorized_key"] == key
+    assert tools.builder_calls[0]["size"] == "6G", "configured size flows to virt-builder"
     assert len(tools.repack_calls) == 1, "repacked to a whole-disk ext4 qcow2 once"
-    staged_qcow2 = tools.repack_calls[0][1]
+    scratch_path, staged_qcow2 = tools.repack_calls[0]
+    assert scratch_path.name == "scratch.qcow2", "the customized scratch image is repacked"
+    assert tools.repack_sizes == ["6G"], "the configured size flows to the repack stage"
     assert tools.normalize_calls == [staged_qcow2], (
         "fstab/crypttab/SELinux normalized before publish"
     )
@@ -142,6 +167,10 @@ def test_build_fails_fast_when_authorized_key_unresolved(tmp_path: Path) -> None
     with pytest.raises(CategorizedError) as exc:
         _plane(tmp_path, tools).build(_spec())
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == (
+        "resolved SSH public key is not a readable file; cannot build the rootfs image"
+    )
+    assert exc.value.details == {"authorized_key": str(key)}
     assert not tools.builder_calls, "no libguestfs stage runs without a resolvable key"
 
 

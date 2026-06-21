@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from kdive.components.references import (
@@ -66,3 +68,40 @@ def test_parse_component_ref_maps_invalid_payloads_to_config_error(
         parse_component_ref(payload)
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_parse_component_ref_error_carries_message_and_pydantic_errors() -> None:
+    # The wrapped error keeps a stable human message and surfaces the pydantic validation errors
+    # under a "errors" details key for the caller to relay.
+    with pytest.raises(CategorizedError) as caught:
+        parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
+
+    assert str(caught.value) == "invalid component reference"
+    errors = caught.value.details["errors"]
+    assert isinstance(errors, list) and errors
+
+
+def test_parse_component_ref_errors_omit_url_and_input_noise() -> None:
+    # The relayed error dicts must not leak the documentation URL or the (potentially sensitive)
+    # raw input value; include_url/include_input are pinned off.
+    with pytest.raises(CategorizedError) as caught:
+        parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
+
+    errors = cast("list[dict[str, object]]", caught.value.details["errors"])
+    for error in errors:
+        assert "url" not in error
+        assert "input" not in error
+
+
+def test_parse_component_ref_surfaces_sha256_validator_message() -> None:
+    # A malformed sha256 must produce the validator's specific guidance, not a generic message.
+    with pytest.raises(CategorizedError) as caught:
+        parse_component_ref({"kind": "local", "path": "/x", "sha256": "deadbeef"})
+
+    # Assert the validator's own message exactly, after stripping pydantic's "Value error, "
+    # framing prefix. Pinning the product message (not the pydantic prefix) keeps the test
+    # robust to a pydantic bump while still catching any change to the guidance text itself.
+    expected = "sha256 must be 'sha256:<64 lowercase hex chars>'"
+    errors = cast("list[dict[str, str]]", caught.value.details["errors"])
+    product_messages = [error["msg"].removeprefix("Value error, ") for error in errors]
+    assert expected in product_messages

@@ -25,5 +25,6 @@ def test_get_unregistered_returns_none() -> None:
 def test_register_duplicate_raises() -> None:
     reg = HandlerRegistry()
     reg.register(JobKind.BUILD, _noop)
-    with pytest.raises(DuplicateHandler):
+    with pytest.raises(DuplicateHandler) as exc:
         reg.register(JobKind.BUILD, _noop)
+    assert str(exc.value) == f"a handler is already registered for {JobKind.BUILD}"

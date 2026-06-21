@@ -12,6 +12,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import (
     MatchOutcome,
+    MatchSpec,
     PCIeClaim,
     PCIeDescriptor,
     descriptor_matches,
@@ -53,8 +54,46 @@ def test_parse_vendor_device_exact() -> None:
 
 def test_parse_class_high_byte_two_hex() -> None:
     spec = parse_match_spec("class=02")
+    assert spec.kind == "class"
+    assert spec.class_prefix == "02"
     assert descriptor_matches(spec, X710_A)  # 020000 high byte 02
     assert not descriptor_matches(spec, NVME)  # 010802 high byte 01
+
+
+def test_parse_vendor_device_sets_fields() -> None:
+    spec = parse_match_spec("8086:1572")
+    assert spec.kind == "vendor_device"
+    assert spec.vendor_id == "8086"
+    assert spec.device_id == "1572"
+    assert spec.class_prefix is None
+
+
+def test_malformed_spec_carries_message_and_details() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        parse_match_spec("nope")
+
+    error = exc.value
+    assert str(error) == (
+        "malformed PCIe match spec 'nope': expected '<4hex>:<4hex>' or 'class=<2|4 hex>'"
+    )
+    assert error.category is ErrorCategory.CONFIGURATION_ERROR
+    assert error.details == {"spec": "nope"}
+
+
+def test_descriptor_matches_requires_both_vendor_and_device() -> None:
+    spec = parse_match_spec("8086:1572")
+    vendor_only = _desc("0:0:0.0", "8086", "9999", "020000")
+    device_only = _desc("0:0:0.1", "1234", "1572", "020000")
+
+    assert not descriptor_matches(spec, vendor_only)
+    assert not descriptor_matches(spec, device_only)
+
+
+def test_descriptor_matches_empty_class_prefix_matches_any_class() -> None:
+    spec = MatchSpec(kind="class", class_prefix=None)
+
+    assert descriptor_matches(spec, X710_A)
+    assert descriptor_matches(spec, NVME)
 
 
 def test_parse_class_four_hex_exact_subclass() -> None:
@@ -164,11 +203,13 @@ def test_resolve_multiset_out_of_distinct_cards_is_capacity() -> None:
     # Two X710 specs but one already claimed → only one free card for two specs.
     result = resolve_multiset(["8086:1572", "8086:1572"], FLEET, claims=[_claim(X710_A["bdf"])])
     assert result.outcome is MatchOutcome.CAPACITY
+    assert result.devices == []
 
 
 def test_resolve_multiset_missing_model_is_config() -> None:
     result = resolve_multiset(["8086:1572", "dead:beef"], FLEET, claims=[])
     assert result.outcome is MatchOutcome.CONFIG
+    assert result.devices == []
 
 
 def test_resolve_multiset_config_wins_over_capacity() -> None:

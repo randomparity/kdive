@@ -21,6 +21,26 @@ def _points(reader: InMemoryMetricReader, name: str) -> list:
     return out
 
 
+def _metric(reader: InMemoryMetricReader, name: str):
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                if m.name == name:
+                    return m
+    raise AssertionError(f"metric {name!r} not found")
+
+
+def test_counter_declares_byte_unit_and_outcome_description() -> None:
+    reader = InMemoryMetricReader()
+    telem = ConsoleTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    telem.record(5)
+    metric = _metric(reader, "kdive.console.bytes")
+    assert metric.unit == "By"
+    assert metric.description == ("Console bytes finalized (remote-libvirt), by content outcome.")
+
+
 def test_record_nonzero_adds_under_success() -> None:
     reader = InMemoryMetricReader()
     telem = ConsoleTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
@@ -29,6 +49,17 @@ def test_record_nonzero_adds_under_success() -> None:
     assert len(pts) == 1
     assert pts[0].attributes["outcome"] == "success"
     assert pts[0].value == 5
+
+
+def test_record_one_byte_still_counts_as_success() -> None:
+    # The success/empty split is strictly at zero: a single byte is content-bearing.
+    reader = InMemoryMetricReader()
+    telem = ConsoleTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    telem.record(1)
+    pts = _points(reader, "kdive.console.bytes")
+    assert len(pts) == 1
+    assert pts[0].attributes["outcome"] == "success"
+    assert pts[0].value == 1
 
 
 def test_record_zero_adds_under_empty() -> None:

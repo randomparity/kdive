@@ -103,8 +103,9 @@ def test_absolute_escape_rejected(tmp_path: Path) -> None:
 def test_nonexistent_file_rejected(tmp_path: Path) -> None:
     registry = SecretRegistry()
     backend = FileRefBackend(tmp_path, registry)
-    with pytest.raises(PathSafetyError):
+    with pytest.raises(PathSafetyError) as exc:
         backend.resolve(str(tmp_path / "missing"))
+    assert str(exc.value) == "secret file does not exist"
     assert registry.snapshot() == frozenset()
 
 
@@ -133,9 +134,18 @@ def test_oversized_file_rejected(tmp_path: Path) -> None:
     registry = SecretRegistry()
     _write(tmp_path, "huge", "x" * (64 * 1024 + 1))
     backend = FileRefBackend(tmp_path, registry)
-    with pytest.raises(PathSafetyError):
+    with pytest.raises(PathSafetyError) as exc:
         backend.resolve(str(tmp_path / "huge"))
+    assert str(exc.value) == "secret file exceeds the maximum secret size"
     assert registry.snapshot() == frozenset()
+
+
+def test_file_exactly_at_the_size_cap_is_accepted(tmp_path: Path) -> None:
+    # The cap is exclusive (> not >=): a file of exactly the maximum size is read, not rejected.
+    registry = SecretRegistry()
+    _write(tmp_path, "at-cap", "x" * (64 * 1024))
+    backend = FileRefBackend(tmp_path, registry)
+    assert backend.resolve(str(tmp_path / "at-cap")) == "x" * (64 * 1024)
 
 
 def test_backend_can_explicitly_register_into_process_global(tmp_path: Path) -> None:
@@ -175,3 +185,20 @@ def test_secret_backend_from_env_confines_to_configured_root(
     with pytest.raises(PathSafetyError):
         backend.resolve(str(tmp_path / "escape"))
     assert backend.resolve(str(root / "guest-key")) == "env-rooted-secret"
+
+
+def test_secret_backend_from_env_plumbs_the_scope_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The factory forwards the caller's scope so releasing it drops the registered value.
+    root = tmp_path / "secrets"
+    root.mkdir()
+    _write(root, "guest-key", "scoped-env-secret\n")
+    monkeypatch.setenv("KDIVE_SECRETS_ROOT", str(root))
+    registry = SecretRegistry()
+    scope = object()
+    backend = secret_backend_from_env(registry=registry, scope=scope)
+    value = backend.resolve(str(root / "guest-key"))
+    assert value in registry.snapshot()
+    registry.release(scope)
+    assert value not in registry.snapshot()

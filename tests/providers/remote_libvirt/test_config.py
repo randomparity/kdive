@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import libvirt
 import pytest
 
 import kdive.config as config
@@ -25,7 +26,12 @@ from kdive.providers.remote_libvirt.config import (
     remote_config_for_resource,
     resolve_base_image_staged_volume_for,
 )
-from kdive.providers.remote_libvirt.lifecycle.gdb import allocate_gdb_port
+from kdive.providers.remote_libvirt.lifecycle.gdb import (
+    DOMAIN_PREFIX,
+    Domain,
+    allocate_gdb_port,
+    used_gdb_ports,
+)
 
 _RESOURCE = "ub24-big"
 
@@ -85,6 +91,19 @@ def test_singleton_resolver_is_gone() -> None:
     assert not hasattr(config_module, "_require_single_instance")
     assert not hasattr(config_module, "_resolve_instance")
     assert not hasattr(config_module, "resolve_base_image_staged_volume")
+
+
+def test_systems_toml_path_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
+    config.load()
+    assert config_module._systems_toml_path() == Path("./systems.toml")
+
+
+def test_systems_toml_path_honours_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "custom.toml"
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(target))
+    config.load()
+    assert config_module._systems_toml_path() == target
 
 
 def test_by_name_builds_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,6 +171,7 @@ def test_malformed_inventory_is_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(excinfo.value).startswith("systems.toml is present but invalid:")
 
 
 def _instance(name: str, uri: str) -> RemoteLibvirtInstance:
@@ -190,7 +210,10 @@ def test_remote_config_for_resource_unknown_name_is_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_for_resource("nope")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "nope" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "nope" in message
+    # The error lists the sorted declared instance names so an operator sees the valid set.
+    assert "(declared: ['host-a', 'host-b'])" in message
 
 
 def test_all_remote_configs_returns_every_instance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -261,6 +284,17 @@ def test_resolve_base_image_staged_volume_unknown_resource_is_configuration_erro
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_resolve_base_image_unknown_instance_lists_declared_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_inventory(tmp_path, monkeypatch)
+    with pytest.raises(CategorizedError) as excinfo:
+        resolve_base_image_staged_volume_for("no-such-host")
+    message = str(excinfo.value)
+    assert "no-such-host" in message
+    assert "(declared: ['ub24-big'])" in message
+
+
 def test_resolve_base_image_staged_volume_each_instance_resolves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -323,6 +357,58 @@ def test_bad_gdbstub_range_is_configuration_error(
     with pytest.raises(CategorizedError) as excinfo:
         remote_config_for_resource(_RESOURCE)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_staged_volume_absent_image_raises_categorized_not_stopiteration() -> None:
+    # Directly exercise the absent-image branch: with no matching [[image]], the lookup must
+    # surface a CONFIGURATION_ERROR, not leak a bare StopIteration from next().
+    instance = _instance("host-a", "qemu+tls://a.example/system")
+    with pytest.raises(CategorizedError) as excinfo:
+        config_module._staged_volume_for_instance(instance, [])
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "names no" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("rng", "expected"),
+    [
+        ("1:65535", (1, 65535)),  # extreme-but-valid bounds (ports 1 and 65535 are in range)
+        ("47000:47001", (47000, 47001)),
+    ],
+)
+def test_valid_gdbstub_range_bounds_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rng: str,
+    expected: tuple[int, int],
+) -> None:
+    instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', f'gdbstub_range = "{rng}"')
+    _write_inventory(tmp_path, monkeypatch, instances=instance)
+    cfg = remote_config_for_resource(_RESOURCE)
+    assert (cfg.gdb_port_min, cfg.gdb_port_max) == expected
+
+
+@pytest.mark.parametrize(
+    ("bad", "needle"),
+    [
+        ("47000:65536", "outside 1..65535"),  # upper bound: 65536 is rejected
+        ("notint:47099", "non-integer ports"),
+        ("47000", "is not 'min:max'"),
+        ("47099:47000", "is inverted"),
+    ],
+)
+def test_bad_gdbstub_range_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad: str,
+    needle: str,
+) -> None:
+    instance = _INSTANCE.replace('gdbstub_range = "47000:47099"', f'gdbstub_range = "{bad}"')
+    _write_inventory(tmp_path, monkeypatch, instances=instance)
+    with pytest.raises(CategorizedError) as excinfo:
+        remote_config_for_resource(_RESOURCE)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert needle in str(excinfo.value)
 
 
 def test_single_port_range_names_the_reserved_probe_port(
@@ -392,3 +478,145 @@ def test_probe_target_is_the_reserved_never_allocated_port() -> None:
         port_max=cfg.gdb_port_max,
     )
     assert allocated != cfg.acl_probe_port
+
+
+def _gdb_domain_xml(port: int) -> str:
+    return (
+        "<domain><qemu:commandline "
+        'xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">'
+        '<qemu:arg value="-gdb"/>'
+        f'<qemu:arg value="tcp:10.0.0.5:{port}"/>'
+        "</qemu:commandline></domain>"
+    )
+
+
+class _FakeDomain:
+    def __init__(self, name: str, port: int) -> None:
+        self._name = name
+        self._port = port
+
+    def name(self) -> str:
+        return self._name
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
+        return _gdb_domain_xml(self._port)
+
+
+class _FakeConn:
+    def __init__(self, domains: list[Domain]) -> None:
+        self._domains = domains
+
+    def listAllDomains(self, flags: int = 0):  # noqa: N802 - libvirt API name
+        return self._domains
+
+
+def test_allocate_gdb_port_reuses_own_recorded_in_range_port() -> None:
+    # A System's own recorded in-range port is returned (stable across retries), not a fresh one.
+    assert (
+        allocate_gdb_port({"kdive-x": 47005}, own_name="kdive-x", port_min=47001, port_max=47099)
+        == 47005
+    )
+
+
+def test_allocate_gdb_port_reuses_own_port_at_min_boundary() -> None:
+    # own == port_min is inclusive: it is reused even though another domain holds the next
+    # port (so a fall-through to lowest-free would return a different port, exposing a
+    # `<=` -> `<` boundary mutation).
+    used = {"kdive-x": 47001, "kdive-y": 47002}
+    assert allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47099) == 47001
+
+
+def test_allocate_gdb_port_reuses_own_port_at_max_boundary() -> None:
+    # own == port_max is inclusive: it is reused even though every lower port is taken (so a
+    # fall-through would otherwise raise exhaustion or pick a lower port).
+    used = {"kdive-x": 47002, "kdive-y": 47001}
+    assert allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47002) == 47002
+
+
+def test_allocate_gdb_port_picks_lowest_free_when_no_own_port() -> None:
+    # 47001 is taken by another domain, so the lowest free port is 47002.
+    assert (
+        allocate_gdb_port({"kdive-y": 47001}, own_name="kdive-x", port_min=47001, port_max=47099)
+        == 47002
+    )
+
+
+def test_allocate_gdb_port_exhausted_range_is_provisioning_failure() -> None:
+    used = {"kdive-y": 47001, "kdive-z": 47002}
+    with pytest.raises(CategorizedError) as excinfo:
+        allocate_gdb_port(used, own_name="kdive-x", port_min=47001, port_max=47002)
+    assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(excinfo.value) == "gdbstub port range is exhausted on the remote host"
+    assert excinfo.value.details == {"port_min": 47001, "port_max": 47002, "in_use": 2}
+
+
+def test_used_gdb_ports_maps_kdive_domains_to_recorded_ports() -> None:
+    conn = _FakeConn(
+        [
+            _FakeDomain(f"{DOMAIN_PREFIX}a", 47010),
+            _FakeDomain(f"{DOMAIN_PREFIX}b", 47011),
+            _FakeDomain("other-vm", 47012),  # non-kdive domains are skipped
+        ]
+    )
+    assert used_gdb_ports(conn) == {f"{DOMAIN_PREFIX}a": 47010, f"{DOMAIN_PREFIX}b": 47011}
+
+
+def test_used_gdb_ports_continues_past_a_skipped_domain() -> None:
+    # The non-kdive domain in the middle is skipped via `continue`, not a `break` that would
+    # drop the trailing kdive domain.
+    conn = _FakeConn(
+        [
+            _FakeDomain(f"{DOMAIN_PREFIX}a", 47010),
+            _FakeDomain("other-vm", 47012),
+            _FakeDomain(f"{DOMAIN_PREFIX}b", 47011),
+        ]
+    )
+    assert used_gdb_ports(conn) == {f"{DOMAIN_PREFIX}a": 47010, f"{DOMAIN_PREFIX}b": 47011}
+
+
+def test_used_gdb_ports_listing_failure_is_infrastructure_failure() -> None:
+    class _BoomConn:
+        def listAllDomains(self, flags: int = 0):  # noqa: N802 - libvirt API name
+            raise libvirt.libvirtError("boom")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        used_gdb_ports(_BoomConn())
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "libvirt error listing domains for gdbstub port enumeration"
+    assert excinfo.value.details == {}
+
+
+class _ErrDomain:
+    def __init__(self, name: str, code: int) -> None:
+        self._name = name
+        self._code = code
+
+    def name(self) -> str:
+        return self._name
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - libvirt API name
+        exc = libvirt.libvirtError("boom")
+        exc.get_error_code = lambda: self._code  # ty: ignore[invalid-assignment]
+        raise exc
+
+
+def test_used_gdb_ports_skips_a_domain_that_vanishes_mid_walk() -> None:
+    # A domain disappearing mid-walk (VIR_ERR_NO_DOMAIN) is skipped, not fatal; the surviving
+    # kdive domain is still enumerated.
+    conn = _FakeConn(
+        [
+            _ErrDomain(f"{DOMAIN_PREFIX}gone", libvirt.VIR_ERR_NO_DOMAIN),
+            _FakeDomain(f"{DOMAIN_PREFIX}b", 47011),
+        ]
+    )
+    assert used_gdb_ports(conn) == {f"{DOMAIN_PREFIX}b": 47011}
+
+
+def test_used_gdb_ports_per_domain_error_is_infrastructure_failure() -> None:
+    # A non-NO_DOMAIN libvirt error reading a domain's XML is an infrastructure fault.
+    conn = _FakeConn([_ErrDomain(f"{DOMAIN_PREFIX}a", libvirt.VIR_ERR_INTERNAL_ERROR)])
+    with pytest.raises(CategorizedError) as excinfo:
+        used_gdb_ports(conn)
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "libvirt error enumerating gdbstub ports"
+    assert excinfo.value.details == {}

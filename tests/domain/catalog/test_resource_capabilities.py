@@ -63,6 +63,39 @@ def test_resource_capabilities_reject_invalid_size_ceiling(bad: object) -> None:
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+def test_resource_capabilities_accepts_zero_size_ceiling() -> None:
+    caps = ResourceCapabilities.from_mapping({VCPUS_KEY: 0, MEMORY_MB_KEY: 0})
+
+    assert caps.size_ceiling() == (0, 0)
+    assert caps.require_size_ceiling(resource_id=uuid4(), resource_name=None) == (0, 0)
+
+
+def test_resource_capabilities_accepts_zero_allocation_cap() -> None:
+    caps = ResourceCapabilities.from_mapping({CONCURRENT_ALLOCATION_CAP_KEY: 0})
+
+    assert caps.allocation_cap() == 0
+    assert caps.require_allocation_cap(resource_id=uuid4()) == 0
+
+
+def test_require_size_ceiling_reports_memory_when_only_memory_invalid() -> None:
+    caps = ResourceCapabilities.from_mapping({VCPUS_KEY: 8, MEMORY_MB_KEY: None})
+
+    with pytest.raises(CategorizedError) as exc:
+        caps.require_size_ceiling(resource_id=uuid4(), resource_name="host-a")
+
+    assert exc.value.details["key"] == MEMORY_MB_KEY
+    assert MEMORY_MB_KEY in str(exc.value)
+
+
+def test_require_size_ceiling_reports_vcpus_when_only_vcpus_invalid() -> None:
+    caps = ResourceCapabilities.from_mapping({VCPUS_KEY: -1, MEMORY_MB_KEY: 4096})
+
+    with pytest.raises(CategorizedError) as exc:
+        caps.require_size_ceiling(resource_id=uuid4(), resource_name="host-b")
+
+    assert exc.value.details["key"] == VCPUS_KEY
+
+
 def test_resource_capabilities_filters_malformed_pcie_descriptors() -> None:
     caps = ResourceCapabilities.from_mapping(
         {

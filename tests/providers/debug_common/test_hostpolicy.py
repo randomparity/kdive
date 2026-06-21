@@ -18,6 +18,7 @@ def test_require_loopback_rejects_non_loopback(host):
     with pytest.raises(CategorizedError) as exc:
         require_loopback(host)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == f"RSP host must be a loopback IP literal, got {host!r}"
 
 
 def test_allow_acl_remote_accepts_routable_literal_and_hostname():
@@ -25,8 +26,14 @@ def test_allow_acl_remote_accepts_routable_literal_and_hostname():
     allow_acl_remote("gdbhost.internal")  # no raise — hostname is allowed for remote
 
 
+def test_allow_acl_remote_accepts_host_with_uppercase_letters():
+    # A non-whitespace host with letters (including X) is valid — only blank/whitespace is rejected.
+    allow_acl_remote("HOSTX01.internal")  # no raise
+
+
 @pytest.mark.parametrize("host", ["", "   ", "has space", "a\tb"])
 def test_allow_acl_remote_rejects_empty_or_malformed(host):
     with pytest.raises(CategorizedError) as exc:
         allow_acl_remote(host)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(exc.value) == f"remote gdbstub host must be a non-blank address, got {host!r}"

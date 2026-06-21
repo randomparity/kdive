@@ -40,6 +40,13 @@ url = "x"
 """
 
 
+def test_inventory_error_records_entry_field_and_message() -> None:
+    err = InventoryError("image[base]", "base_image", "missing volume")
+    assert err.entry == "image[base]"
+    assert err.field == "base_image"
+    assert str(err) == "image[base].base_image: missing volume"
+
+
 def test_load_good(tmp_path: Path) -> None:
     p = tmp_path / "systems.toml"
     p.write_text(GOOD)
@@ -50,8 +57,12 @@ def test_load_good(tmp_path: Path) -> None:
 def test_malformed_toml_raises_inventory_error(tmp_path: Path) -> None:
     p = tmp_path / "systems.toml"
     p.write_text(BAD_TOML)
-    with pytest.raises(InventoryError):
+    with pytest.raises(InventoryError) as excinfo:
         load_inventory(p)
+    err = excinfo.value
+    assert err.entry == str(p)
+    assert err.field == "toml"
+    assert str(err).startswith(f"{p}.toml: malformed:")
 
 
 def test_schema_failure_raises_inventory_error(tmp_path: Path) -> None:
@@ -63,8 +74,13 @@ def test_schema_failure_raises_inventory_error(tmp_path: Path) -> None:
 
 def test_missing_file_raises_inventory_error(tmp_path: Path) -> None:
     # An explicitly-named path that is absent IS an error.
-    with pytest.raises(InventoryError):
-        load_inventory(tmp_path / "absent.toml")
+    absent = tmp_path / "absent.toml"
+    with pytest.raises(InventoryError) as excinfo:
+        load_inventory(absent)
+    err = excinfo.value
+    assert err.entry == str(absent)
+    assert err.field == "file"
+    assert str(err).startswith(f"{absent}.file: cannot read:")
 
 
 def test_non_utf8_file_raises_inventory_error(tmp_path: Path) -> None:

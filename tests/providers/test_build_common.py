@@ -39,6 +39,16 @@ def test_fragment_symbols_keeps_y_and_m_drops_comments_and_unset() -> None:
     assert _fragment_symbols(fragment) == ["CONFIG_CRASH_DUMP", "CONFIG_FOO"]
 
 
+def test_fragment_symbols_skips_commented_assignments_and_uses_first_equals() -> None:
+    fragment = (
+        "# CONFIG_HEADER comment\nCONFIG_CRASH_DUMP=y\n# CONFIG_HID=y\nFOO=BAR=y\nCONFIG_FOO=m\n"
+    )
+    # A leading comment must not stop the scan (continue, not break), a commented
+    # assignment is dropped even though it contains '=', and the symbol name is taken
+    # from the first '=' so a value containing '=' is not treated as y/m.
+    assert _fragment_symbols(fragment) == ["CONFIG_CRASH_DUMP", "CONFIG_FOO"]
+
+
 def test_dropped_fragment_symbols_reports_a_dropped_option() -> None:
     fragment = "CONFIG_CRASH_DUMP=y\nCONFIG_PROC_VMCORE=y\n# a comment\n"
     final = "CONFIG_CRASH_DUMP=y\n# CONFIG_PROC_VMCORE is not set\n"
@@ -54,6 +64,31 @@ def test_dropped_fragment_symbols_empty_when_all_survive() -> None:
 def test_dropped_fragment_symbols_accepts_module_survivor() -> None:
     fragment = "CONFIG_FOO=m\n"
     final = "CONFIG_FOO=m\n"
+    assert _dropped_fragment_symbols(fragment, final) == []
+
+
+def test_dropped_fragment_symbols_only_counts_enabled_non_comment_lines() -> None:
+    # A symbol requested =y but written =n in the final config is dropped: the enabled
+    # set is built only from lines that genuinely end in =y/=m and are not comments,
+    # so a disabled (=n) final line must NOT be treated as enabling the symbol.
+    fragment = "CONFIG_C=y\n"
+    final = "CONFIG_C=n\n"
+    assert _dropped_fragment_symbols(fragment, final) == ["CONFIG_C"]
+
+
+def test_dropped_fragment_symbols_uses_first_equals_for_enabled_names() -> None:
+    # The enabled name comes from the text before the FIRST '=', so a final line whose
+    # value contains '=' still yields the bare symbol name.
+    fragment = "FOO=y\n"
+    final = "FOO=BAR=y\n"
+    assert _dropped_fragment_symbols(fragment, final) == []
+
+
+def test_dropped_fragment_symbols_ignores_trailing_whitespace_on_final_lines() -> None:
+    # The =y/=m suffix check strips trailing whitespace (rstrip), so a final line with
+    # trailing spaces still counts as enabling the symbol.
+    fragment = "CONFIG_E=y\n"
+    final = "CONFIG_E=y   \n"
     assert _dropped_fragment_symbols(fragment, final) == []
 
 
@@ -132,17 +167,38 @@ class _FakeConn:
         self.closed = True
 
 
+class _FetchCalls:
+    """Records the arguments the fetch wrapper passed to its injected seams."""
+
+    def __init__(self) -> None:
+        self.connect_url: object = "<unset>"
+        self.lookup_conn: object = "<unset>"
+        self.lookup_name: object = "<unset>"
+
+
 def _patch_fetch_env(
     monkeypatch: pytest.MonkeyPatch,
     *,
     conn: _FakeConn,
     entry: BuildConfigEntry | None,
     store: object,
-) -> None:
+) -> _FetchCalls:
+    calls = _FetchCalls()
     monkeypatch.setenv("KDIVE_DATABASE_URL", "postgresql://stub/stub")
-    monkeypatch.setattr(build_defaults.psycopg, "connect", lambda _url: conn)
-    monkeypatch.setattr(build_defaults, "get_build_config_sync", lambda _conn, _name: entry)
+
+    def _connect(url: object) -> _FakeConn:
+        calls.connect_url = url
+        return conn
+
+    def _lookup(lookup_conn: object, name: object) -> BuildConfigEntry | None:
+        calls.lookup_conn = lookup_conn
+        calls.lookup_name = name
+        return entry
+
+    monkeypatch.setattr(build_defaults.psycopg, "connect", _connect)
+    monkeypatch.setattr(build_defaults, "get_build_config_sync", _lookup)
     monkeypatch.setattr(build_defaults, "object_store_from_env", lambda: store)
+    return calls
 
 
 def test_build_config_seed_remediation_command_is_the_migrate_command() -> None:
@@ -159,13 +215,18 @@ def test_build_config_fetch_unknown_name_is_configuration_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conn = _FakeConn()
-    _patch_fetch_env(monkeypatch, conn=conn, entry=None, store=object())
+    calls = _patch_fetch_env(monkeypatch, conn=conn, entry=None, store=object())
 
     with pytest.raises(CategorizedError) as caught:
         build_config_fetch_from_env()("nope")
 
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert conn.closed  # the connection is released even on the not-found branch
+    # The fetch resolves the connection string from config (not a hardcoded/None URL)
+    # and looks the catalog up by the open connection and the requested name.
+    assert calls.connect_url == "postgresql://stub/stub"
+    assert calls.lookup_conn is conn
+    assert calls.lookup_name == "nope"
     # The error carries an actionable affordance (ADR-0105): the missing name plus a
     # literal seed command in `details["remediation"]` (the worker copies details into
     # the job response's `failure_detail_*` fields), and the message names the command.
@@ -193,7 +254,10 @@ def test_build_config_fetch_returns_verified_bytes_and_closes_conn(
             return FetchedArtifact(data, Sensitivity.REDACTED, "build-config")
 
     conn = _FakeConn()
-    _patch_fetch_env(monkeypatch, conn=conn, entry=entry, store=_FakeStore())
+    calls = _patch_fetch_env(monkeypatch, conn=conn, entry=entry, store=_FakeStore())
 
     assert build_config_fetch_from_env()("kdump") == data
     assert conn.closed  # the sync connection is released after the fetch (leak guard)
+    # The catalog lookup receives the open connection and the requested name verbatim.
+    assert calls.lookup_conn is conn
+    assert calls.lookup_name == "kdump"

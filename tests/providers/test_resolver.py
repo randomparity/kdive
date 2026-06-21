@@ -14,7 +14,13 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resolver import (
+    _KIND_FOR_ALLOCATION,
+    _KIND_FOR_RUN,
+    _KIND_FOR_SESSION,
+    _KIND_FOR_SYSTEM,
+    ProviderResolver,
+)
 
 
 class _Runtime:
@@ -47,6 +53,12 @@ def test_resolve_unknown_kind_fails_closed_with_configuration_error() -> None:
         resolver.resolve(ResourceKind.FAULT_INJECT)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "fault-inject" in str(exc.value)
+    # The fail-closed error carries the offending kind and the set that *is* registered, so an
+    # operator can see which provider was missing from this deployment.
+    assert exc.value.details == {
+        "kind": "fault-inject",
+        "registered": ["local-libvirt"],
+    }
 
 
 def test_registered_kinds_reflects_the_map() -> None:
@@ -134,6 +146,16 @@ class _Conn:
 _ABSENT_OBJECT_ID = UUID("11111111-1111-1111-1111-111111111111")
 type _RuntimeLookup = Callable[[ProviderResolver, _Conn, UUID], Coroutine[Any, Any, Any]]
 
+# The exact query each lookup must issue. A method wiring the wrong (or a None) SQL constant
+# would resolve the wrong object graph in production; the fake conn returns the same row
+# regardless, so the SQL identity is asserted directly.
+_SQL_FOR_KIND = {
+    "allocation": _KIND_FOR_ALLOCATION,
+    "system": _KIND_FOR_SYSTEM,
+    "run": _KIND_FOR_RUN,
+    "session": _KIND_FOR_SESSION,
+}
+
 
 @pytest.mark.parametrize(
     ("object_kind", "resolve"),
@@ -156,10 +178,16 @@ def test_runtime_lookup_absent_object_fails_with_not_found(
         asyncio.run(resolve(resolver, conn, _ABSENT_OBJECT_ID))
 
     assert exc.value.category is ErrorCategory.NOT_FOUND
+    assert str(exc.value) == f"{object_kind} {_ABSENT_OBJECT_ID} was not found"
     assert exc.value.details == {
         "object_kind": object_kind,
         "object_id": str(_ABSENT_OBJECT_ID),
     }
+    # The lookup must issue its own kind's query, parameterized by the object id.
+    assert conn.cursor_context.executed == (
+        _SQL_FOR_KIND[object_kind],
+        (_ABSENT_OBJECT_ID,),
+    )
 
 
 def test_runtime_for_system_binds_to_resource_name() -> None:
@@ -212,3 +240,7 @@ def test_binding_lookup_absent_object_fails_with_not_found(
         "object_kind": object_kind,
         "object_id": str(_ABSENT_OBJECT_ID),
     }
+    assert conn.cursor_context.executed == (
+        _SQL_FOR_KIND[object_kind],
+        (_ABSENT_OBJECT_ID,),
+    )

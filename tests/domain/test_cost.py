@@ -33,7 +33,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _resource(capabilities: dict[str, Any]) -> Resource:
+def _resource(capabilities: dict[str, Any], *, name: str | None = None) -> Resource:
     return Resource(
         id=uuid4(),
         created_at=_DT,
@@ -44,6 +44,7 @@ def _resource(capabilities: dict[str, Any]) -> Resource:
         cost_class="local",
         status=ResourceStatus.AVAILABLE,
         host_uri="qemu:///system",
+        name=name,
     )
 
 
@@ -90,6 +91,10 @@ def test_quantize_too_large_fails_closed() -> None:
     with pytest.raises(CategorizedError) as exc:
         quantize_kcu(Decimal("1e30"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # The offending value is echoed verbatim into the message and the structured details so
+    # the caller can see which kcu product overflowed.
+    assert exc.value.details == {"value": "1E+30"}
+    assert str(exc.value) == "kcu value 1E+30 is too large to price"
 
 
 def test_validate_size_accepts_minimum() -> None:
@@ -100,18 +105,34 @@ def test_validate_size_rejects_zero_vcpus() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_size(Selector(vcpus=0, memory_gb=1))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # The error names the offending field and value so an operator sees which input was
+    # rejected; the message states the requirement.
+    assert exc.value.details["field"] == "vcpus"
+    assert exc.value.details["value"] == "0"
+    assert str(exc.value) == "selector vcpus=0 must be ≥ 1"
 
 
 def test_validate_size_rejects_negative_vcpus() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_size(Selector(vcpus=-1, memory_gb=1))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"field": "vcpus", "value": "-1"}
 
 
 def test_validate_size_rejects_negative_memory() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_size(Selector(vcpus=1, memory_gb=-1))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # memory_gb is the offending field, carried verbatim with its value into details and
+    # message — not the vcpus guard above it.
+    assert exc.value.details == {"field": "memory_gb", "value": "-1"}
+    assert str(exc.value) == "selector memory_gb=-1 must be ≥ 0"
+
+
+def test_validate_size_accepts_int32_max_boundary() -> None:
+    # The column-domain guard is a strict `>`: a selector exactly at INT32_MAX is the
+    # largest admission could store, so it must be accepted (a `>=` guard would reject it).
+    validate_size(Selector(vcpus=2_147_483_647, memory_gb=2_147_483_647))
 
 
 def test_validate_size_rejects_over_column_domain() -> None:
@@ -121,6 +142,18 @@ def test_validate_size_rejects_over_column_domain() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_size(Selector(vcpus=2_147_483_648, memory_gb=1))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"field": "vcpus", "value": "2147483648"}
+    assert "must be ≤ 2147483647" in str(exc.value)
+
+
+def test_validate_size_rejects_over_column_domain_memory() -> None:
+    # The memory_gb upper-bound guard mirrors the vcpus one: a value past the integer
+    # column ceiling names memory_gb (not vcpus) as the rejected field.
+    with pytest.raises(CategorizedError) as exc:
+        validate_size(Selector(vcpus=1, memory_gb=2_147_483_648))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"field": "memory_gb", "value": "2147483648"}
+    assert "must be ≤ 2147483647" in str(exc.value)
 
 
 def test_validate_window_accepts_positive() -> None:
@@ -131,12 +164,18 @@ def test_validate_window_rejects_zero() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_window(Decimal("0"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # A non-positive (but finite) window fails the `> 0` guard, not the finiteness guard:
+    # the rejected value and the positivity requirement are reported.
+    assert exc.value.details == {"window": "0"}
+    assert str(exc.value) == "window=0 must be > 0"
 
 
 def test_validate_window_rejects_negative() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_window(Decimal("-1"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"window": "-1"}
+    assert "must be > 0" in str(exc.value)
 
 
 def test_validate_window_rejects_nan() -> None:
@@ -145,12 +184,18 @@ def test_validate_window_rejects_nan() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_window(Decimal("NaN"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # NaN is caught by the finiteness guard (which runs first), so the message states the
+    # finite-number requirement and echoes the offending value.
+    assert exc.value.details == {"window": "NaN"}
+    assert str(exc.value) == "window=NaN must be a finite number"
 
 
 def test_validate_window_rejects_infinity() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_window(Decimal("Infinity"))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"window": "Infinity"}
+    assert "must be a finite number" in str(exc.value)
 
 
 def test_validate_against_resource_accepts_within_caps() -> None:
@@ -163,6 +208,10 @@ def test_validate_against_resource_rejects_excess_vcpus() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_against_resource(Selector(vcpus=3, memory_gb=1), res)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # The caps error names vcpus, the requested count, and the host ceiling so the operator
+    # can see exactly what was over-asked.
+    assert exc.value.details == {"field": "vcpus", "requested": "3", "ceiling": "2"}
+    assert f"resource {res.id} ceiling 2" in str(exc.value)
 
 
 def test_validate_against_resource_rejects_excess_memory() -> None:
@@ -170,6 +219,13 @@ def test_validate_against_resource_rejects_excess_memory() -> None:
     with pytest.raises(CategorizedError) as exc:
         validate_against_resource(Selector(vcpus=1, memory_gb=5), res)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # memory is reported in MB (5 GB → 5120 MB) against the 4096 MB ceiling.
+    assert exc.value.details == {
+        "field": "memory_mb",
+        "requested": "5120",
+        "ceiling": "4096",
+    }
+    assert "memory_mb=5120" in str(exc.value)
 
 
 def test_validate_against_resource_memory_uses_1024_mb_per_gb() -> None:
@@ -185,6 +241,19 @@ def test_validate_against_resource_missing_cap_fails_closed(caps: dict[str, Any]
     with pytest.raises(CategorizedError) as exc:
         validate_against_resource(Selector(vcpus=1, memory_gb=1), res)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # An unnamed host labels the missing-ceiling error by its id so the operator can find
+    # the unregistered host.
+    assert str(res.id) in str(exc.value)
+
+
+def test_validate_against_resource_missing_cap_labels_named_host() -> None:
+    # A registered host name is preferred over the id in the missing-ceiling message so the
+    # operator sees the human label, not just a UUID.
+    res = _resource({}, name="builder-01")
+    with pytest.raises(CategorizedError) as exc:
+        validate_against_resource(Selector(vcpus=1, memory_gb=1), res)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "builder-01" in str(exc.value)
 
 
 @pytest.mark.parametrize("bad", [None, "4", -1, True])

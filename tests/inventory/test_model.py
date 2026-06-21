@@ -227,16 +227,46 @@ def test_unsupported_image_format_rejected() -> None:
 
 def test_wrong_schema_version_rejected() -> None:
     d = _doc(schema_version=1)
-    with pytest.raises(InventoryError):
+    with pytest.raises(InventoryError) as excinfo:
         InventoryDoc.parse(d)
+    # A pydantic structural failure is re-raised under the generic ('inventory', 'schema')
+    # locator with the underlying ValidationError text preserved in the message.
+    assert excinfo.value.entry == "inventory"
+    assert excinfo.value.field == "schema"
+    assert "schema_version" in str(excinfo.value)
 
 
 def test_duplicate_remote_instance_name_rejected() -> None:
     d = _doc()
     second = dict(d["remote_libvirt"][0])
     d["remote_libvirt"] = [d["remote_libvirt"][0], second]
-    with pytest.raises(InventoryError):
+    with pytest.raises(InventoryError) as excinfo:
         InventoryDoc.parse(d)
+    # The duplicate is reported under the offending provider kind, with the colliding name
+    # listed in the message so the operator can find it.
+    assert excinfo.value.entry == "remote_libvirt"
+    assert excinfo.value.field == "name"
+    assert "h1" in str(excinfo.value)
+
+
+def test_duplicate_local_libvirt_name_rejected() -> None:
+    inst = {"name": "loc", "cost_class": "local", "host_uri": "qemu:///system"}
+    d = _doc(remote_libvirt=[], local_libvirt=[inst, dict(inst)])
+    with pytest.raises(InventoryError) as excinfo:
+        InventoryDoc.parse(d)
+    assert excinfo.value.entry == "local_libvirt"
+    assert excinfo.value.field == "name"
+    assert "loc" in str(excinfo.value)
+
+
+def test_duplicate_build_host_name_rejected() -> None:
+    inst = {"name": "bh", "kind": "ssh", "workspace_root": "/srv/build"}
+    d = _doc(remote_libvirt=[], build_host=[inst, dict(inst)])
+    with pytest.raises(InventoryError) as excinfo:
+        InventoryDoc.parse(d)
+    assert excinfo.value.entry == "build_host"
+    assert excinfo.value.field == "name"
+    assert "bh" in str(excinfo.value)
 
 
 def test_multiple_distinct_remote_instances_parse() -> None:
@@ -393,6 +423,8 @@ def test_duplicate_identity_error_preserves_precise_entry_and_field() -> None:
     except InventoryError as exc:
         assert exc.entry == "image[dup]"
         assert exc.field == "identity"
+        # The colliding identity tuple is named in the message.
+        assert "('local-libvirt', 'dup', 'x86_64')" in str(exc)
     else:  # pragma: no cover - parse must raise
         pytest.fail("expected InventoryError")
 
@@ -404,6 +436,8 @@ def test_duplicate_instance_name_error_preserves_kind_and_field() -> None:
     except InventoryError as exc:
         assert exc.entry == "fault_inject"
         assert exc.field == "name"
+        # The colliding name(s) are listed in the message, not dropped.
+        assert "fi" in str(exc)
     else:  # pragma: no cover - parse must raise
         pytest.fail("expected InventoryError")
 
@@ -449,6 +483,7 @@ def test_duplicate_cost_class_name_rejected() -> None:
         InventoryDoc.parse(d)
     assert excinfo.value.entry == "cost_class"
     assert excinfo.value.field == "name"
+    assert "dup" in str(excinfo.value)
 
 
 def test_build_config_valid() -> None:
@@ -472,7 +507,7 @@ def test_build_config_absent_is_empty_list() -> None:
 
 
 def test_build_config_duplicate_name_raises() -> None:
-    with pytest.raises(InventoryError):
+    with pytest.raises(InventoryError) as excinfo:
         InventoryDoc.parse(
             {
                 "schema_version": 2,
@@ -482,6 +517,11 @@ def test_build_config_duplicate_name_raises() -> None:
                 ],
             }
         )
+    # The duplicate is located under ('build_config', 'name') with the colliding name in
+    # the message.
+    assert excinfo.value.entry == "build_config"
+    assert excinfo.value.field == "name"
+    assert "kdump" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("name", ["", "Kdump", "kd/ump"])

@@ -67,6 +67,61 @@ def test_build_payload_requires_build_host_id() -> None:
         dump_payload(JobKind.BUILD, {"run_id": str(uuid4())})
 
 
+def test_dump_payload_omits_unset_optional_fields() -> None:
+    run_id = uuid4()
+    payload = dump_payload(
+        JobKind.BUILD,
+        {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID), "cmdline": None},
+    )
+    assert "cmdline" not in payload
+    assert payload == {"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)}
+
+
+def test_load_payload_rejects_unrelated_model_class_for_kind() -> None:
+    now = datetime.now(UTC)
+    run_id = uuid4()
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.BUILD,
+        payload={"run_id": str(run_id), "build_host_id": str(WORKER_LOCAL_ID)},
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key="build",
+    )
+    with pytest.raises(
+        PayloadValidationError, match="PowerPayload does not match build payload contract"
+    ):
+        load_payload(job, PowerPayload)
+
+
+def test_validation_error_joins_nested_loc_with_dots() -> None:
+    with pytest.raises(PayloadValidationError, match=r"packages\.0:") as exc:
+        dump_payload(
+            JobKind.IMAGE_BUILD,
+            {
+                "provider": "local-libvirt",
+                "name": "base",
+                "arch": "x86_64",
+                "releasever": "43",
+                "source_image_digest": "sha256:" + "0" * 64,
+                "format": "qcow2",
+                "root_device": "/dev/vda",
+                "packages": [123],
+            },
+        )
+    assert "packages.0" in str(exc.value)
+
+
+def test_dump_authorizing_accepts_plain_mapping() -> None:
+    auth = dump_authorizing(
+        cast(Any, {"principal": "alice", "agent_session": None, "project": "kernel-team"})
+    )
+    assert auth == {"principal": "alice", "agent_session": None, "project": "kernel-team"}
+
+
 def test_payload_validation_rejects_wrong_shape_for_kind() -> None:
     with pytest.raises(PayloadValidationError, match="invalid build payload"):
         dump_payload(JobKind.BUILD, {"system_id": str(uuid4())})

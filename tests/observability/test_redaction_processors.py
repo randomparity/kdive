@@ -8,7 +8,9 @@ guards against is "logs are clean so we assumed traces were too."
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 
+import pytest
 from opentelemetry.instrumentation.logging.handler import LoggingHandler
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import (
@@ -23,7 +25,7 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from kdive.observability import redaction as orx
@@ -129,3 +131,194 @@ def test_secret_in_metric_label_is_redacted_before_export() -> None:
     assert capture.captured, "expected an exported metric batch"
     assert _SECRET not in rendered
     assert REDACTION in rendered
+
+
+def test_registry_redactor_rebuilds_when_registry_version_changes() -> None:
+    registry = SecretRegistry()
+    cached = orx._RegistryRedactor(registry)
+
+    later_secret = "sk-added-after-build"  # pragma: allowlist secret - test fixture
+    registry.register(later_secret, scope=None)
+
+    redacted = cached.current().redact_value(f"value {later_secret}")
+    assert later_secret not in redacted
+    assert REDACTION in redacted
+
+
+def test_registry_redactor_picks_up_each_new_secret() -> None:
+    registry = SecretRegistry()
+    cached = orx._RegistryRedactor(registry)
+
+    first = "sk-first-secret"  # pragma: allowlist secret - test fixture
+    registry.register(first, scope=None)
+    assert REDACTION in cached.current().redact_value(first)
+
+    second = "sk-second-secret"  # pragma: allowlist secret - test fixture
+    registry.register(second, scope=None)
+    second_redacted = cached.current().redact_value(second)
+    assert second not in second_redacted
+    assert REDACTION in second_redacted
+
+
+def test_registry_redactor_does_not_rebuild_when_version_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _registry()
+    cached = orx._RegistryRedactor(registry)
+    warmed = cached.current()  # one rebuild to sync cached_version with the registry
+
+    builds = 0
+    real_redactor = orx.Redactor
+
+    def _counting(*args: Any, **kwargs: Any) -> Any:
+        nonlocal builds
+        builds += 1
+        return real_redactor(*args, **kwargs)
+
+    monkeypatch.setattr(orx, "Redactor", _counting)
+
+    first = cached.current()
+    second = cached.current()
+    assert first is second is warmed
+    assert builds == 0  # version did not change, so no rebuild occurred
+
+
+class _RecordingMetricExporter(MetricExporter):
+    def __init__(self, *, preferred_temporality: Any = None) -> None:
+        super().__init__(preferred_temporality=preferred_temporality or {})
+        self.export_calls: list[tuple[float, dict[str, Any]]] = []
+        self.force_flush_calls: list[float] = []
+        self.shutdown_calls: list[float] = []
+
+    def export(
+        self, metrics_data: MetricsData, timeout_millis: float = 10000, **kwargs: Any
+    ) -> MetricExportResult:
+        self.export_calls.append((timeout_millis, dict(kwargs)))
+        return MetricExportResult.SUCCESS
+
+    def force_flush(self, timeout_millis: float = 10000) -> bool:
+        self.force_flush_calls.append(timeout_millis)
+        return True
+
+    def shutdown(self, timeout_millis: float = 30000, **kwargs: Any) -> None:
+        self.shutdown_calls.append(timeout_millis)
+
+
+def _empty_metrics_data() -> MetricsData:
+    return MetricsData(resource_metrics=[])
+
+
+def test_metric_exporter_delegates_export_arguments() -> None:
+    inner = _RecordingMetricExporter()
+    exporter = orx.RedactingMetricExporter(inner, _registry())
+
+    result = exporter.export(_empty_metrics_data(), 1234, extra="kw")
+
+    assert result is MetricExportResult.SUCCESS
+    assert inner.export_calls == [(1234, {"extra": "kw"})]
+
+
+def test_metric_exporter_force_flush_delegates_with_default() -> None:
+    inner = _RecordingMetricExporter()
+    exporter = orx.RedactingMetricExporter(inner, _registry())
+
+    assert exporter.force_flush() is True
+    assert inner.force_flush_calls == [10000]
+
+
+def test_metric_exporter_shutdown_delegates_with_default() -> None:
+    inner = _RecordingMetricExporter()
+    exporter = orx.RedactingMetricExporter(inner, _registry())
+
+    exporter.shutdown()
+    assert inner.shutdown_calls == [30000]
+
+
+def test_metric_exporter_copies_inner_preferred_temporality() -> None:
+    from opentelemetry.sdk.metrics import Counter
+    from opentelemetry.sdk.metrics.export import AggregationTemporality
+
+    preferred = {Counter: AggregationTemporality.DELTA}
+    inner = _RecordingMetricExporter(preferred_temporality=preferred)
+    exporter = orx.RedactingMetricExporter(inner, _registry())
+
+    temporality = cast("dict[type, AggregationTemporality]", exporter._preferred_temporality)
+    assert temporality[Counter] is AggregationTemporality.DELTA
+
+
+def test_metric_exporter_copies_inner_preferred_aggregation() -> None:
+    from opentelemetry.sdk.metrics import Counter
+    from opentelemetry.sdk.metrics.export import MetricExportResult
+    from opentelemetry.sdk.metrics.view import LastValueAggregation
+
+    aggregation = LastValueAggregation()
+
+    class _AggExporter(MetricExporter):
+        def __init__(self) -> None:
+            super().__init__(preferred_aggregation={Counter: aggregation})
+
+        def export(
+            self, metrics_data: MetricsData, timeout_millis: float = 10000, **kwargs: Any
+        ) -> MetricExportResult:
+            return MetricExportResult.SUCCESS
+
+        def force_flush(self, timeout_millis: float = 10000) -> bool:
+            return True
+
+        def shutdown(self, timeout_millis: float = 30000, **kwargs: Any) -> None:
+            return None
+
+    exporter = orx.RedactingMetricExporter(_AggExporter(), _registry())
+    preferred_aggregation = cast("dict[type, object]", exporter._preferred_aggregation)
+    assert preferred_aggregation[Counter] is aggregation
+
+
+def test_metric_exporter_skips_metric_without_data_points() -> None:
+    from kdive.security.secrets.redaction import Redactor
+
+    class _NoPoints:
+        pass
+
+    class _Metric:
+        data = _NoPoints()
+
+    class _Scope:
+        metrics = [_Metric()]
+
+    class _Resource:
+        scope_metrics = [_Scope()]
+
+    class _Data:
+        resource_metrics = [_Resource()]
+
+    # _Data duck-types MetricsData for the no-data-points path.
+    orx._redact_metrics_data(
+        Redactor(registry=_registry()),
+        cast("MetricsData", _Data()),  # must not raise
+    )
+
+
+def test_log_processor_force_flush_returns_true() -> None:
+    processor = orx.RedactingLogProcessor(_registry())
+    assert processor.force_flush() is True
+    assert processor.force_flush(5000) is True
+
+
+def test_span_exporter_force_flush_delegates() -> None:
+    calls: list[int] = []
+
+    class _Inner:
+        def export(self, spans: Any) -> Any:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+        def force_flush(self, timeout_millis: int = 30000) -> bool:
+            calls.append(timeout_millis)
+            return True
+
+    # _Inner duck-types SpanExporter to record force_flush delegation.
+    exporter = orx.RedactingSpanExporter(cast("SpanExporter", _Inner()), _registry())
+    assert exporter.force_flush() is True
+    assert calls == [30000]

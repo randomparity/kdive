@@ -55,10 +55,12 @@ class _RecordingExec:
         self._result = result
         self.seen_registered: frozenset[str] | None = None
         self.argv: list[str] | None = None
+        self.domain: object | None = None
 
     def run(self, domain: object, argv: list[str]) -> AgentExecResult:
         self.seen_registered = self._registry.snapshot()
         self.argv = argv
+        self.domain = domain
         return self._result
 
 
@@ -143,6 +145,69 @@ def test_exit_status_and_raw_stdout_are_surfaced_to_the_caller() -> None:
     output = _run(_channel(registry, store, agent, object()))
     assert output.result.exit_status == 7
     assert output.result.stdout == b"install output"
+
+
+def test_domain_artifact_and_retention_class_are_threaded_through() -> None:
+    registry = SecretRegistry()
+    store = _FakeStore()
+    domain = FakeDomain("build-vm")
+    agent = _RecordingExec(registry, AgentExecResult(0, b"ok", b""))
+    channel = _channel(registry, store, agent, object())
+    output = channel.exec_with_capability(
+        domain,
+        capability_url=_CAPABILITY_URL,
+        argv=["/usr/bin/curl", "-fsS", _CAPABILITY_URL],
+        owner_kind="systems",
+        owner_id="sys-1",
+    )
+    # The exec runs against the domain handle the caller passed, not a placeholder.
+    assert agent.domain is domain
+    # The returned artifact is the one the store persisted (not a dropped/None value).
+    assert output.artifact is not None
+    [write] = store.writes
+    assert output.artifact.key == write.key()
+    assert write.retention_class == "console"
+    assert write.tenant == "remote-libvirt"
+    assert write.name == "in-target-exec-redacted"
+
+
+def test_transcript_renders_command_line_streams_and_exit_status() -> None:
+    registry = SecretRegistry()
+    store = _FakeStore()
+    agent = _RecordingExec(registry, AgentExecResult(3, b"out-line", b"err-line"))
+    channel = _channel(registry, store, agent, object())
+    channel.exec_with_capability(
+        FakeDomain("build-vm"),
+        capability_url=_CAPABILITY_URL,
+        argv=["/usr/bin/curl", "-fsS", _CAPABILITY_URL],
+        owner_kind="systems",
+        owner_id="sys-1",
+    )
+    transcript = store.writes[0].data.decode("utf-8")
+    lines = transcript.split("\n")
+    assert lines[0] == "$ /usr/bin/curl -fsS " + REDACTION
+    assert lines[1] == "out-line"
+    assert lines[2] == "err-line"
+    assert lines[3] == "exit status: 3"
+
+
+def test_transcript_replaces_invalid_utf8_in_streams() -> None:
+    registry = SecretRegistry()
+    store = _FakeStore()
+    # 0xff is not valid UTF-8; errors="replace" must turn it into U+FFFD, never raise.
+    agent = _RecordingExec(registry, AgentExecResult(0, b"head\xfftail", b"e\xff"))
+    channel = _channel(registry, store, agent, object())
+    output = channel.exec_with_capability(
+        FakeDomain("build-vm"),
+        capability_url=_CAPABILITY_URL,
+        argv=["/usr/bin/curl", _CAPABILITY_URL],
+        owner_kind="systems",
+        owner_id="sys-1",
+    )
+    transcript = store.writes[0].data.decode("utf-8")
+    assert "head�tail" in transcript
+    assert "e�" in transcript
+    assert output.result.stdout == b"head\xfftail"
 
 
 def test_scope_released_after_persist() -> None:
