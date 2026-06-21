@@ -17,6 +17,7 @@ from kdive.domain import errors
 from kdive.domain.capacity import state
 from kdive.domain.catalog import images, resources
 from kdive.domain.operations import jobs
+from kdive.inventory.overrides import InventoryOverrideDisposition
 
 # Each lifecycle/category CHECK constraint and the enum it must mirror (ADR-0015).
 CHECK_ENUMS = [
@@ -38,6 +39,7 @@ CHECK_ENUMS = [
     ("build_hosts_managed_by_check", resources.ManagedBy),
     ("run_steps_state_check", idempotency._RunStepState),
     ("component_uploads_state_check", ComponentUploadState),
+    ("inventory_overrides_disposition_check", InventoryOverrideDisposition),
 ]
 
 OBJECT_TABLES = {
@@ -147,6 +149,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0043",
         "0044",
         "0045",
+        "0046",
     ]
     assert second == []
 
@@ -264,6 +267,92 @@ def test_component_uploads_state_check_rejects_removed_failed_value(
             "VALUES ('t', 'local-libvirt', 'rootfs', %s, 1, 'project', 'proj', 'alice', "
             "'failed', now() + interval '1 hour')",
             ("sha256:" + "a" * 64,),
+        )
+
+
+# Migration 0046 adds the inventory-override ledger (ADR-0199, #638): the per-identity
+# detached/removed record the reconcile inventory pass consults so a runtime mutation wins over
+# systems.toml without losing drift repair for identities that carry no entry.
+
+
+def test_migration_0046_creates_inventory_overrides_table(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    assert "inventory_overrides" in _tables(pg_conn)
+    cols = _columns(pg_conn, "inventory_overrides")
+    assert cols.get("source_kind") == "text"
+    assert cols.get("resource_kind") == "text"
+    assert cols.get("name") == "text"
+    assert cols.get("disposition") == "text"
+    assert cols.get("reason") == "text"
+    assert cols.get("actor") == "text"
+    assert cols.get("created_at") == "timestamp with time zone"
+    nullable = _nullable(pg_conn, "inventory_overrides")
+    for col in ("source_kind", "resource_kind", "name", "disposition", "reason", "actor"):
+        assert nullable.get(col) == "NO", col
+
+
+def test_inventory_overrides_primary_key_is_full_identity(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    rows = pg_conn.execute(
+        """
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema = 'public' AND tc.table_name = 'inventory_overrides'
+        ORDER BY kcu.ordinal_position
+        """
+    ).fetchall()
+    assert [r[0] for r in rows] == ["source_kind", "resource_kind", "name"]
+
+
+def test_inventory_overrides_disposition_check_admits_exactly_the_enum(
+    pg_conn: psycopg.Connection,
+) -> None:
+    """The CHECK's admitted set equals InventoryOverrideDisposition exactly — no SQL-only extras.
+
+    Closes the direction CHECK_ENUMS cannot check: a value present in SQL but absent from the enum.
+    """
+    migrate.apply_migrations(pg_conn)
+    row = pg_conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'inventory_overrides_disposition_check'"
+    ).fetchone()
+    assert row is not None, "inventory_overrides_disposition_check constraint is missing"
+    admitted = set(re.findall(r"'([^']+)'", row[0]))
+    assert admitted == {d.value for d in InventoryOverrideDisposition}
+
+
+def test_inventory_overrides_disposition_check_rejects_unknown(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    pg_conn.execute(
+        "INSERT INTO inventory_overrides (source_kind, resource_kind, name, disposition, "
+        "reason, actor) VALUES ('resource', 'remote-libvirt', 'h1', 'removed', 'r', 'alice')"
+    )
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg_conn.execute(
+            "INSERT INTO inventory_overrides (source_kind, resource_kind, name, disposition, "
+            "reason, actor) VALUES ('resource', 'remote-libvirt', 'h2', 'bogus', 'r', 'alice')"
+        )
+
+
+def test_inventory_overrides_pk_allows_same_name_across_kinds(pg_conn: psycopg.Connection) -> None:
+    # The PK includes resource_kind, so a name may repeat across resource kinds (resources is
+    # unique on (kind, name)); a duplicate full identity is rejected.
+    migrate.apply_migrations(pg_conn)
+    pg_conn.execute(
+        "INSERT INTO inventory_overrides (source_kind, resource_kind, name, disposition, "
+        "reason, actor) VALUES ('resource', 'remote-libvirt', 'shared', 'removed', 'r', 'a')"
+    )
+    pg_conn.execute(
+        "INSERT INTO inventory_overrides (source_kind, resource_kind, name, disposition, "
+        "reason, actor) VALUES ('resource', 'fault-inject', 'shared', 'removed', 'r', 'a')"
+    )
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        pg_conn.execute(
+            "INSERT INTO inventory_overrides (source_kind, resource_kind, name, disposition, "
+            "reason, actor) VALUES ('resource', 'remote-libvirt', 'shared', 'detached', 'r', 'a')"
         )
 
 
@@ -474,7 +563,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
 
     monkeypatch.setattr(migrate, "discover_migrations", lambda: full)
     applied = migrate.apply_migrations(pg_conn)
-    assert applied == ["0042", "0043", "0044", "0045"]
+    assert applied == ["0042", "0043", "0044", "0045", "0046"]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
 
@@ -798,6 +887,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0043",
         "0044",
         "0045",
+        "0046",
     ]
 
 
