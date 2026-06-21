@@ -125,13 +125,31 @@ attempt to reach another pod.
 
 ### Tool wiring
 
-`export_systems_toml(pool, ctx, *, persist=False)`:
+`export_systems_toml(pool, ctx, *, persist=False, document=None)`:
 
-- `persist=False`: unchanged — serialize, audit the read, return text.
-- `persist=True`: resolve the adapter; if `None`, return `CONFIGURATION_ERROR`. Otherwise serialize,
-  `await target.write(toml)`, audit the **write** (a distinct audit event/scope from the read so the
-  audit trail distinguishes "exported" from "persisted"), and return the text plus
-  `data["persisted"] = true` and `data["target"] = target.target_kind`.
+- `persist=False`: unchanged — serialize, audit the read, return text. (`document` is ignored when
+  not persisting; passing it without `persist=True` is a `CONFIGURATION_ERROR` so the operator is
+  not misled into thinking a document was stored.)
+- `persist=True`, `document=None`: resolve the adapter; if `None`, return `CONFIGURATION_ERROR`.
+  Serialize the live snapshot, run the **skeleton guard** on it, `await target.write(toml)`, audit
+  the **write**, return the text plus `data["persisted"]=true` and `data["target"]=target_kind`.
+- `persist=True`, `document=<text>`: persist an operator-completed document instead of the live
+  serialization. This is the path for a fleet with `remote_libvirt` hosts: the operator exports
+  (`persist=false`), completes every `REPLACE_ME_*` placeholder in the returned text, and re-invokes
+  with that completed text as `document`. The skeleton guard runs on `document` (a still-incomplete
+  document is refused), then `await target.write(document)`. The document is bounded by
+  `KDIVE_MAX_BUILD_CONFIG_BYTES` (the existing systems.toml size cap) and is **never** parsed or
+  trusted for content beyond the guard — it is written verbatim; the reconciler validates it on its
+  next read, exactly as it validates a hand-edited file.
+
+**Why `document` is required, not optional polish.** Every `remote_libvirt` block the serializer
+emits carries `REPLACE_ME_*` placeholders (the file-only connection/debug fields are not in the DB —
+ADR-0199). So a *live re-serialization* of any fleet containing a `remote_libvirt` host **always**
+trips the skeleton guard and can never be persisted. Without the `document` path, `persist=True`
+would be usable only for the degenerate zero-remote-host inventory — useless for the actual M2 fleet.
+The `document` path is what makes "persist the running inventory for a reproducible restart"
+(ADR-0199's stated benefit) achievable for a real fleet: export → complete → persist the completed
+text.
 
 `persist=True` is the mutating shape, but the role gate is unchanged (`PLATFORM_OPERATOR`): an
 operator who can export can persist. No new RBAC role inside kdive; the *Kubernetes* RBAC is the
@@ -151,13 +169,17 @@ contract fails the inventory pass quietly (a malformed file is logged and skippe
 i.e. the running inventory silently stops being reconciled, the exact failure the operator was
 trying to avoid.
 
-So `persist=True` refuses when the serialized document contains the placeholder marker
-(`REPLACE_ME_`): it returns a `CONFIGURATION_ERROR` whose detail tells the operator the export
-contains skeleton placeholders that must be completed before the document can be a usable source,
-and that they can still take the returned `data["toml"]` text and complete it by hand. The marker
-is a single shared constant so the serializer and the guard cannot drift. This guard does not fire
-for an inventory with no `remote_libvirt` hosts (or one whose images are all built, not `defined`),
-so the common images/build_hosts/cost_classes round-trip still persists cleanly.
+So `persist=True` refuses when the document about to be written (the live serialization, or the
+operator-supplied `document`) contains the placeholder marker (`REPLACE_ME_`): it returns a
+`CONFIGURATION_ERROR` whose detail tells the operator the document still contains skeleton
+placeholders that must be completed before it can be a usable source, and that they can complete the
+returned `data["toml"]` text and re-invoke with it as `document`. The marker is a single shared
+constant (`REPLACE_ME_`) that both the serializer's `_REMOTE_PLACEHOLDERS` values **and** the
+defined-image `object_key` placeholder use, so the serializer and the guard cannot drift; a drift
+test asserts the marker is present in a freshly-serialized skeleton (not merely iterates the
+placeholder dict, which would miss the defined-image literal). This guard does not fire for an
+inventory with no `remote_libvirt` hosts and no `defined` images, so the common
+images/build_hosts/cost_classes round-trip persists cleanly with `persist=true` and no `document`.
 
 ## Failure modes & edges
 
@@ -172,8 +194,13 @@ so the common images/build_hosts/cost_classes round-trip still persists cleanly.
 - **Serializer raises** (e.g. a resource missing a required sizing capability — `_require_int`) →
   the existing serializer `ValueError` surfaces; the write never runs (serialize-then-write order),
   so a bad snapshot never half-persists.
-- **Persist of an unedited skeleton** (`REPLACE_ME_*` present) → `CONFIGURATION_ERROR`, refused
-  before any write (the skeleton guard); the returned text is still available to complete by hand.
+- **Persist of an unedited skeleton** (`REPLACE_ME_*` present in the live serialization or in
+  `document`) → `CONFIGURATION_ERROR`, refused before any write (the skeleton guard); the returned
+  text is still available to complete by hand and re-submit as `document`.
+- **`document` without `persist=True`** → `CONFIGURATION_ERROR` (the operator passed a document but
+  nothing would store it — fail loudly, not silently).
+- **`document` over the size cap** (`KDIVE_MAX_BUILD_CONFIG_BYTES`) → `CONFIGURATION_ERROR` naming
+  the cap (bounds an oversized write the same way the file loader bounds the file).
 - **Concurrent writeback** → last-writer-wins at the store; acceptable (the operator drives this
   explicitly and serially).
 - **ConfigMap mount propagation lag** → after a successful patch, a *running* reconciler in another
@@ -191,8 +218,12 @@ CI-covered (no cluster, no real file-system dependency beyond a tmp dir):
   nothing.
 - **Skeleton guard**: `persist=True` on a snapshot containing a `remote_libvirt` host (whose export
   carries `REPLACE_ME_*`) returns `CONFIGURATION_ERROR` and writes nothing; a snapshot with no
-  placeholders (images/build_hosts/cost_classes only) persists. The guard constant is the same one
-  the serializer emits (a drift test asserts they match).
+  placeholders (images/build_hosts/cost_classes only) persists. The drift test asserts the marker is
+  present in a freshly-serialized skeleton (covering both `_REMOTE_PLACEHOLDERS` and the
+  defined-image `object_key` literal), not merely that the dict values share a prefix.
+- **`document` path**: `persist=True, document=<completed text>` (no `REPLACE_ME_`) writes exactly
+  `document` through the fake and reports `persisted=true`; `document=<still has REPLACE_ME_>` is
+  refused; `document` set with `persist=False` is refused; `document` over the size cap is refused.
 - **Factory**: `resolve_writeback_target` returns the right adapter per setting value, `None` when
   off, and a `CONFIGURATION_ERROR` on an unknown value.
 - **ConfigMap adapter, transport mocked**: a 200 issues the expected `PATCH` (URL, headers,

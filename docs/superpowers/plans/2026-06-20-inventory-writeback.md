@@ -88,12 +88,16 @@ def assert_persistable(toml_text: str) -> None:
 1. Test `assert_persistable` passes for text with no marker and raises `CategorizedError`
    (`CONFIGURATION_ERROR`, detail names the placeholder + that the operator must complete it) when
    `WRITEBACK_PLACEHOLDER_MARKER` is present. Implement.
-2. **Drift test:** import `serialize._REMOTE_PLACEHOLDERS` (or its public re-export) and assert every
-   value starts with `WRITEBACK_PLACEHOLDER_MARKER`, so the serializer's placeholders and the guard
-   marker cannot diverge. If `_REMOTE_PLACEHOLDERS` is private, add a minimal public re-export in
-   `serialize.py` (`REMOTE_PLACEHOLDER_PREFIX = "REPLACE_ME_"`) and have BOTH the serializer dict and
-   the guard reference it — this is the only allowed touch of `serialize.py` (a constant, not the
-   serializer logic; note it in the commit).
+2. **Drift test:** assert the marker is present in a **freshly-serialized skeleton**, not merely
+   that the placeholder-dict values share a prefix. The serializer emits placeholders from two
+   places: `_REMOTE_PLACEHOLDERS` (remote_libvirt) **and** a standalone `REPLACE_ME_object_key`
+   literal in `_emit_image_source` for a `defined` image (`serialize.py:253`). Build a tiny snapshot
+   with one remote_libvirt host and one defined image, call `serialize_inventory`, and assert
+   `WRITEBACK_PLACEHOLDER_MARKER in serialize_inventory(snapshot)` — this fails if either placeholder
+   site changes its prefix. Make `WRITEBACK_PLACEHOLDER_MARKER` the single source: add
+   `REMOTE_PLACEHOLDER_PREFIX = "REPLACE_ME_"` to `serialize.py` and have `_REMOTE_PLACEHOLDERS`,
+   the `_emit_image_source` literal, and the guard all reference it. This is the only allowed touch
+   of `serialize.py` (constants + one f-string, not the serializer logic; call it out in the commit).
 3. Test `FakeWriteback.write` records `toml_text`; with `fail=` set, it raises that error and does
    not record.
 4. Define `WritebackTarget` Protocol (`runtime_checkable` not required). `target_kind` is a plain
@@ -136,11 +140,15 @@ the file adapter writes a tmp path).
   other non-2xx → `INFRASTRUCTURE_FAILURE` (status code only, **body redacted**); `httpx`
   transport/timeout exception → `INFRASTRUCTURE_FAILURE` (exception class name only).
 
-**`resolve_writeback_target(config_module) -> WritebackTarget | None`:**
-- Read `INVENTORY_WRITEBACK`. `None`/empty/`"off"` → `None`. `"configmap"` →
-  `ConfigMapWriteback.from_in_cluster(name=config.get(INVENTORY_WRITEBACK_CONFIGMAP), key=...)`.
-  `"file"` → `MountedFileWriteback(Path(config.get(SYSTEMS_TOML)))`. Any other value →
-  `CategorizedError(CONFIGURATION_ERROR, accepted_values=["off","configmap","file"])`.
+**`resolve_writeback_target() -> WritebackTarget | None`:**
+- Closes over `kdive.config` directly (`import kdive.config as config`; the established idiom, e.g.
+  `process_health/server.py`). Read `config.get(INVENTORY_WRITEBACK)`. `None`/empty/`"off"` →
+  `None`. `"configmap"` → `ConfigMapWriteback.from_in_cluster(name=config.get(
+  INVENTORY_WRITEBACK_CONFIGMAP), key=_CONFIGMAP_KEY)`. `"file"` →
+  `MountedFileWriteback(Path(config.require(SYSTEMS_TOML)))`. Any other value →
+  `CategorizedError(CONFIGURATION_ERROR, accepted_values=["off","configmap","file"])`. Zero-arg so
+  the tool handler's `resolve_target` seam default is exactly this callable; tests drive it via the
+  registry snapshot (`monkeypatch.setenv` + `config.load(...)`).
 
 **Steps (TDD):** one failing test per behavior first:
 1. File adapter: writes content equal to the toml; temp file gone after; atomic (mock or assert no
@@ -197,42 +205,54 @@ sequence, and the response fields. Not a new tool (no new registration set).
 `tests/` for tuning; regenerated `docs/guide/reference/` (tool reference).
 
 **Steps (TDD), in order, each a failing test first:**
-1. `export_systems_toml(pool, ctx, *, persist=False)` — default path unchanged (existing test still
-   green; assert no write, no persist fields in `data`).
-2. `persist=True`, writeback **off** → `CONFIGURATION_ERROR` naming `KDIVE_INVENTORY_WRITEBACK` and
-   accepted values; writes nothing. (Resolve the target via `resolve_writeback_target`; `None` →
-   failure.)
-3. `persist=True`, adapter present, snapshot has **no** placeholders → serialize, `assert_persistable`
-   passes, `await target.write(toml)`, audit the write, success with `data["persisted"]=True`,
-   `data["target"]=target.target_kind`, `data["toml"]=toml`. Use `FakeWriteback` injected via a
-   monkeypatched `resolve_writeback_target` (or a seam param) and assert it captured the toml.
-4. `persist=True`, snapshot **with** a `remote_libvirt` host (placeholders present) → the skeleton
-   guard fires → `CONFIGURATION_ERROR`, **no** write (assert the fake recorded nothing).
-5. `persist=True`, adapter `.write` raises `INFRASTRUCTURE_FAILURE` (use `FakeWriteback(fail=...)`)
-   → the tool returns that category via `failure_from_error`; partial-failure honesty (no
+Handler signature: `export_systems_toml(pool, ctx, *, persist=False, document=None,
+resolve_target=resolve_writeback_target)`. The seam param `resolve_target` is a zero-arg-ish callable
+the handler invokes as `resolve_target()` (the factory closes over `kdive.config` internally — see
+the factory note below); the public tool wrapper calls the handler with the default factory and the
+test passes a lambda returning a `FakeWriteback`. This avoids monkeypatching a module global.
+
+1. `persist=False, document=None` — default path unchanged (existing test still green; assert no
+   write, no persist fields in `data`).
+2. `document` set with `persist=False` → `CONFIGURATION_ERROR` (a document was supplied but nothing
+   would store it); writes nothing.
+3. `persist=True`, writeback **off** → `CONFIGURATION_ERROR` naming `KDIVE_INVENTORY_WRITEBACK` and
+   accepted values; writes nothing. (`resolve_target()` returns `None` → failure.)
+4. `persist=True, document=None`, adapter present, snapshot has **no** placeholders → serialize, run
+   `assert_persistable` (passes), `await target.write(toml)`, audit the write, success with
+   `data["persisted"]=True`, `data["target"]=target.target_kind`, `data["toml"]=toml`. Inject a
+   `FakeWriteback` via `resolve_target` and assert it captured the toml.
+5. `persist=True, document=None`, snapshot **with** a `remote_libvirt` host (placeholders present) →
+   the skeleton guard fires → `CONFIGURATION_ERROR`, **no** write (assert the fake recorded nothing).
+6. `persist=True, document=<completed text, no REPLACE_ME_>` → the guard passes, `target.write` gets
+   exactly `document` (not the live serialization), success; the fake captured `document`.
+7. `persist=True, document=<text still containing REPLACE_ME_>` → guard fires → `CONFIGURATION_ERROR`,
+   no write.
+8. `persist=True, document=<text over KDIVE_MAX_BUILD_CONFIG_BYTES>` → `CONFIGURATION_ERROR` naming
+   the cap, no write. (Read the cap via `config.require(MAX_BUILD_CONFIG_BYTES)`, mirroring
+   `inventory/reconcile_cli.py`.)
+9. `persist=True`, adapter `.write` raises `INFRASTRUCTURE_FAILURE` (use `FakeWriteback(fail=...)`) →
+   the tool returns that category via `failure_from_error`; partial-failure honesty (no
    `persisted=True`).
-6. Auth: a non-operator caller with `persist=True` gets `authorization_denied` (the role gate runs
-   first, before any writeback resolution — assert the fake saw nothing).
-7. Update the `@app.tool` wrapper `ops_export_systems_toml` to accept
-   `persist: Annotated[bool, Field(description="When true, also persist the serialized inventory to
-   the configured writeback target (KDIVE_INVENTORY_WRITEBACK). Default false.")] = False` and pass
-   it through. Keep the maturity/read_only annotation honest: the tool is now conditionally mutating
-   — change `_docmeta.read_only()` to `_docmeta.mutating()` IF the repo's annotation contract treats
-   a conditional write as mutating (check how other conditionally-writing tools annotate; default to
-   `mutating()` since `persist=True` writes). Confirm `test_tool_docs` still passes (no new tool, but
-   the annotation/param changed).
-8. Regenerate the tool reference: `just docs`; confirm `just docs-check` green.
+10. Auth: a non-operator caller with `persist=True` gets `authorization_denied` (the role gate runs
+    first, before any writeback resolution — assert the fake saw nothing).
+11. Update the `@app.tool` wrapper `ops_export_systems_toml` to accept
+    `persist: Annotated[bool, Field(description="When true, also persist the inventory to the
+    configured writeback target (KDIVE_INVENTORY_WRITEBACK). Default false.")] = False` and
+    `document: Annotated[str | None, Field(description="A completed systems.toml to persist verbatim
+    instead of the live serialization; required for a fleet with remote_libvirt hosts whose export
+    is a skeleton.")] = None`, and pass both through. Change `_docmeta.read_only()` to
+    `_docmeta.mutating()` — `persist=True` writes, so read-only is dishonest. `mutating()` sets
+    `destructiveHint=False`, so the tool does **not** join `DESTRUCTIVE_TOOLS` and
+    `test_destructive_hint_matches_reviewed_set` stays green (verified against
+    `tests/mcp/core/test_tool_docs.py:436`). No new tool → no new registration.
+12. Regenerate the tool reference: `just docs`; confirm `just docs-check` green.
 
-**Seam for testability:** prefer passing the resolved target (or the resolver) so the test injects
-`FakeWriteback` without monkeypatching a module global. E.g. `export_systems_toml(pool, ctx, *,
-persist=False, resolve_target=resolve_writeback_target)` with the default wired to the real factory.
-Keep the public tool wrapper calling the default.
+**Acceptance:** all behavior tests green; `just docs-check`, `just type`, `just lint`, `just test`
+(focused) green; the existing `export_systems_toml` read test unchanged and green; secret material
+never appears in any response/log.
 
-**Acceptance:** all seven behavior tests green; `just docs-check`, `just type`, `just lint`,
-`just test` (focused) green; the existing `export_systems_toml` read test unchanged and green.
-
-**Rollback:** revert the handler to the read-only signature; remove the `persist` param from the
-wrapper; regenerate docs.
+**Rollback:** revert the handler to the read-only signature; remove `persist`/`document` from the
+wrapper; restore `_docmeta.read_only()`; regenerate docs.
 
 ---
 
@@ -254,11 +274,12 @@ it a documented operator step rather than a chart default (the chart stays opt-i
    `kdive-systems` ConfigMap only (`resourceNames: [kdive-systems]`), a `RoleBinding`, and binding
    the server Deployment's pod to that ServiceAccount. Use placeholder names; add
    `# pragma: allowlist secret` only if detect-secrets flags a token/cert ref.
-3. The skeleton caveat: an export containing a `remote_libvirt` host emits `REPLACE_ME_*`
-   placeholders and is **refused** by `persist=true`; the operator completes the placeholders in the
-   returned text, then either re-applies the file by hand (existing flow) or persists a completed
-   document. State that persisting a fleet of images/build_hosts/cost_classes (no remote_libvirt)
-   works directly.
+3. The skeleton caveat + the `document` flow: an export containing a `remote_libvirt` host emits
+   `REPLACE_ME_*` placeholders, so a bare `persist=true` (live serialization) is **refused**. The
+   operator flow for a real fleet is: `ops.export_systems_toml()` (read), complete every
+   `REPLACE_ME_*` in the returned `data["toml"]`, then `ops.export_systems_toml(persist=true,
+   document="<completed text>")`. State that persisting a fleet of images/build_hosts/cost_classes
+   with no remote_libvirt host works directly via `persist=true` with no `document`.
 4. The propagation caveat: after a successful patch, a running reconciler re-reads on the next
    kubelet ConfigMap sync or a pod restart; the verification step is a pod restart reproducing the
    live inventory.
