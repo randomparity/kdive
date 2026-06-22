@@ -1212,10 +1212,10 @@ def test_merge_config_fragment_write_failure_is_infrastructure_failure(
     workspace.mkdir()
     monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *_args, **_kw: 0)
 
-    def _write_bytes(_path: Path, _data: bytes) -> int:
+    def _open(*_args: object, **_kwargs: object) -> int:
         raise PermissionError("workspace is unwritable")
 
-    monkeypatch.setattr(Path, "write_bytes", _write_bytes)
+    monkeypatch.setattr(build_host_workspace.os, "open", _open)
 
     with pytest.raises(CategorizedError) as caught:
         build_host_workspace.merge_config(b"CONFIG_CRASH_DUMP=y\n", workspace, _RUN)

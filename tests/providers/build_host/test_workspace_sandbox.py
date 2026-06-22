@@ -39,6 +39,22 @@ def test_write_fragment_no_chown_without_sandbox(tmp_path: Path) -> None:
     assert (tmp_path / "kdump.config.fragment").read_bytes() == b"X"
 
 
+def test_write_fragment_does_not_follow_planted_symlink(tmp_path: Path) -> None:
+    # A malicious source tree can plant kdump.config.fragment as a symlink to a root-owned target
+    # (git checkout runs demoted, so the build user controls the workspace). The root-privileged
+    # write must NOT follow it off the workspace (ADR-0214 — else the privilege drop is defeated).
+    target = tmp_path / "victim"
+    target.write_bytes(b"original")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "kdump.config.fragment").symlink_to(target)
+    ws._write_fragment(b"CONFIG_X=y\n", workspace, None)
+    frag = workspace / "kdump.config.fragment"
+    assert not frag.is_symlink()  # the decoy symlink was removed, not followed
+    assert frag.read_bytes() == b"CONFIG_X=y\n"  # a real file was written in its place
+    assert target.read_bytes() == b"original"  # the victim was never touched
+
+
 def test_sync_tree_adds_chown_under_sandbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

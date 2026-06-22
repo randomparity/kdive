@@ -247,14 +247,23 @@ def clone_tree(
 def _write_fragment(fragment_bytes: bytes, workspace: Path, sandbox: BuildSandbox | None) -> None:
     """Write the kdump fragment file, then hand it to the build user (ADR-0214).
 
-    ``write_bytes`` honors the worker umask, so a root worker with a hardened umask would leave the
-    fragment ``0600 root:root`` and the demoted ``merge_config.sh`` could not read it. ``chown`` it
-    to the build user so any file the root worker drops into the build-user-owned workspace that a
-    demoted step must read stays readable.
+    Under a sandbox the workspace is owned by the unprivileged build user before this
+    root-privileged write, so a malicious source tree (or the demoted ``defconfig`` step) could
+    pre-plant ``kdump.config.fragment`` as a symlink that a naive ``write_bytes`` would follow off
+    the workspace, letting root create/truncate an arbitrary target — defeating the privilege drop.
+    Remove any pre-existing entry without following it, then create the file exclusively with
+    ``O_NOFOLLOW``/``O_EXCL`` so the write can never traverse a symlink. ``chown`` it to the build
+    user afterward so the demoted ``merge_config.sh`` can read it (the create mode follows the
+    worker umask, which a hardened root worker sets to ``0o077`` — a ``0600 root:root`` fragment
+    would otherwise be unreadable by the build user).
     """
     fragment_path = workspace / "kdump.config.fragment"
     try:
-        fragment_path.write_bytes(fragment_bytes)
+        if fragment_path.is_symlink() or fragment_path.exists():
+            fragment_path.unlink()  # drop a planted decoy by name; never follows the link
+        fd = os.open(fragment_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(fragment_bytes)
     except OSError as exc:
         raise workspace_failure("write", "kdump.config.fragment", exc) from exc
     if sandbox is not None:
