@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One-command local-libvirt developer bring-up. Idempotent; safe to re-run.
 #
-# Brings up the backends, applies the schema, seeds the project's budget/quota, starts the
-# server/worker/reconciler as root on qemu:///system, blocks until the server reports ready,
-# and merges the MCP client config into the kernel tree. Run it from anywhere — every path
+# Brings up the backends, applies the schema, seeds the project's budget/quota, merges the
+# MCP client config into the kernel tree, starts the server/worker/reconciler as root on
+# qemu:///system, and blocks until all three report ready. Run it from anywhere — every path
 # resolves from the repo.
 #
 #   examples/local-libvirt/up.sh
@@ -19,34 +19,48 @@ source "${example_dir}/env.sh"
 
 pid_file="${KDIVE_STACK_PID_FILE}"
 log_dir="${KDIVE_STACK_LOG_DIR}"
-# The server's aux listener serves /readyz. Honour an explicit KDIVE_HEALTH_BIND_ADDR (the
-# user owns the collision risk then — see README); otherwise the server's per-process
-# default is 127.0.0.1:9464.
-readyz_url="http://${KDIVE_HEALTH_BIND_ADDR:-127.0.0.1:9464}/readyz"
+
+# All three processes serve /readyz on the aux listener. With KDIVE_HEALTH_BIND_ADDR unset
+# (the normal case) each process gets its own default port (server 9464, worker 9465,
+# reconciler 9466), so the gate verifies the whole trio's dependency sets — not just the
+# server's. If the user pins KDIVE_HEALTH_BIND_ADDR, all three would collide on that one port
+# (see README); we then poll only it and rely on the per-pid exit check below to surface the
+# worker/reconciler bind failure.
+if [[ -n "${KDIVE_HEALTH_BIND_ADDR:-}" ]]; then
+  readyz_urls=("http://${KDIVE_HEALTH_BIND_ADDR}/readyz")
+else
+  readyz_urls=(
+    "http://127.0.0.1:9464/readyz"
+    "http://127.0.0.1:9465/readyz"
+    "http://127.0.0.1:9466/readyz"
+  )
+fi
 
 step() { printf '\n=== %s ===\n' "$1"; }
 
-# Probe /readyz once; return 0 only on HTTP 200. Uses the venv interpreter's stdlib so the
-# example needs neither curl nor jq.
-probe_readyz() {
-  "${KDIVE_PYTHON}" - "$1" <<'PY'
+# Probe every readyz URL once; return 0 only when ALL return HTTP 200. One interpreter
+# invocation per poll (the venv's stdlib — no curl/jq dependency).
+probe_all_ready() {
+  "${KDIVE_PYTHON}" - "$@" <<'PY'
 import sys
 import urllib.request
 
-try:
-    with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
-        sys.exit(0 if response.status == 200 else 1)
-except Exception:
-    sys.exit(1)
+for url in sys.argv[1:]:
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            if response.status != 200:
+                sys.exit(1)
+    except Exception:
+        sys.exit(1)
+sys.exit(0)
 PY
 }
 
-# Block until the server's /readyz is green, bailing early if any launched process has
-# exited. `[[ -d /proc/$pid ]]` works regardless of process owner — `kill -0` on a root pid
-# from a non-root shell returns EPERM and cannot tell "alive" from "gone".
+# Block until every readyz URL is green, bailing early if any launched process has exited.
+# `[[ -d /proc/$pid ]]` works regardless of process owner — `kill -0` on a root pid from a
+# non-root shell returns EPERM and cannot tell "alive" from "gone". Reads the module-level
+# `readyz_urls`.
 wait_ready() {
-  local url="$1"
-  shift
   local pids=("$@") pid deadline
   deadline=$((SECONDS + 90))
   while ((SECONDS < deadline)); do
@@ -56,12 +70,12 @@ wait_ready() {
         return 1
       fi
     done
-    if probe_readyz "${url}"; then
+    if probe_all_ready "${readyz_urls[@]}"; then
       return 0
     fi
     sleep 1
   done
-  echo "timed out after 90s waiting for ${url} to return 200" >&2
+  echo "timed out after 90s waiting for readiness (${readyz_urls[*]})" >&2
   return 1
 }
 
@@ -112,7 +126,53 @@ step "seed project '${KDIVE_PROJECT}'"
   --max-concurrent-allocations "${KDIVE_MAX_ALLOC}" \
   --max-concurrent-systems "${KDIVE_MAX_SYS}")
 
-# 7. Start the three processes AS ROOT on qemu:///system. Root is the representative
+# 7. Merge the MCP client config into the kernel tree (the directory you open your MCP client
+#    in) BEFORE starting the trio, so a failure here (missing/unwritable kernel tree, malformed
+#    existing .mcp.json) stops the run cleanly instead of leaving the trio up and the run
+#    blocked by the duplicate-run guard. It references the token via ${KDIVE_TOKEN}, so the
+#    file holds no secret. An existing .mcp.json is preserved: its first version is backed up
+#    to .mcp.json.bak (never overwritten on re-run) and only the `kdive` server entry is
+#    replaced — any other servers the user configured are kept.
+step "install MCP config into ${KDIVE_KERNEL_SRC}/.mcp.json"
+"${KDIVE_PYTHON}" - "${example_dir}/mcp.json" "${KDIVE_KERNEL_SRC}/.mcp.json" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+template_path, target_path = Path(sys.argv[1]), Path(sys.argv[2])
+entry = json.loads(template_path.read_text())["mcpServers"]["kdive"]
+
+if not target_path.parent.is_dir():
+    raise SystemExit(
+        f"kernel tree {target_path.parent} does not exist; set KDIVE_KERNEL_SRC to your "
+        "checkout (see README)"
+    )
+
+if target_path.exists():
+    backup = target_path.parent / (target_path.name + ".bak")
+    try:
+        doc = json.loads(target_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"{target_path} is not valid JSON ({exc}); fix or remove it, then re-run"
+        ) from exc
+    if not isinstance(doc, dict):
+        raise SystemExit(f"{target_path} is not a JSON object; fix or remove it, then re-run")
+    # First original wins: never clobber an existing backup with an already-merged file.
+    if not backup.exists():
+        shutil.copy2(target_path, backup)
+        print(f"backed up existing {target_path} to {backup}")
+    doc.setdefault("mcpServers", {})["kdive"] = entry
+    print(f"merged kdive entry into {target_path}")
+else:
+    doc = {"mcpServers": {"kdive": entry}}
+    print(f"created {target_path}")
+
+target_path.write_text(json.dumps(doc, indent=2) + "\n")
+PY
+
+# 8. Start the three processes AS ROOT on qemu:///system. Root is the representative
 #    identity: it manages system-scope domains, runs libguestfs/kexec, and reads the
 #    root:0600 console log virtlogd writes.
 #
@@ -132,48 +192,26 @@ mapfile -t pids < <(sudo -E bash -c '
   done
 ')
 printf '%s\n' "${pids[@]}" >"${pid_file}"
+# A short count means the inner root shell never echoed three pids — almost always sudo
+# unable to preserve KDIVE_* (sudoers env_reset / missing env_keep), or a process that could
+# not exec. Fail loudly here rather than time out opaquely on readiness below.
+if ((${#pids[@]} != 3)); then
+  echo "expected 3 pids from the start step, got ${#pids[@]}; sudo may be unable to preserve" \
+    "the environment (need 'sudo -E' / env_keep for KDIVE_*). Check ${log_dir}/*.log" >&2
+  exit 1
+fi
 
-# 8. Block until the server is actually ready (pg + minio + oidc reachable). Only then is the
-#    stack usable — a bare "it's up" banner after a fixed sleep would be a false green.
-step "wait for /readyz (${readyz_url})"
-if ! wait_ready "${readyz_url}" "${pids[@]}"; then
+# 9. Block until all three processes are actually ready (each process's dependency set
+#    reachable). Only then is the stack usable — a bare "it's up" banner after a fixed sleep
+#    would be a false green.
+step "wait for readiness (${readyz_urls[*]})"
+if ! wait_ready "${pids[@]}"; then
   echo "stack did not become ready; inspect the per-process logs:" >&2
   for proc in server worker reconciler; do
     echo "  ${log_dir}/${proc}.log" >&2
   done
   exit 1
 fi
-
-# 9. Merge the MCP client config into the kernel tree (the directory you open your MCP client
-#    in). It references the token via ${KDIVE_TOKEN}, so the file holds no secret. An existing
-#    .mcp.json is backed up to .mcp.json.bak and only its `kdive` server entry is replaced —
-#    any other servers the user configured are preserved.
-step "install MCP config into ${KDIVE_KERNEL_SRC}/.mcp.json"
-"${KDIVE_PYTHON}" - "${example_dir}/mcp.json" "${KDIVE_KERNEL_SRC}/.mcp.json" <<'PY'
-import json
-import shutil
-import sys
-from pathlib import Path
-
-template_path, target_path = Path(sys.argv[1]), Path(sys.argv[2])
-entry = json.loads(template_path.read_text())["mcpServers"]["kdive"]
-
-if target_path.exists():
-    backup = target_path.parent / (target_path.name + ".bak")
-    shutil.copy2(target_path, backup)
-    doc = json.loads(target_path.read_text())
-    if not isinstance(doc, dict):
-        raise SystemExit(
-            f"{target_path} is not a JSON object; refusing to overwrite (backup at {backup})"
-        )
-    doc.setdefault("mcpServers", {})["kdive"] = entry
-    print(f"merged kdive entry into existing {target_path} (backup at {backup})")
-else:
-    doc = {"mcpServers": {"kdive": entry}}
-    print(f"created {target_path}")
-
-target_path.write_text(json.dumps(doc, indent=2) + "\n")
-PY
 
 cat <<EOF
 
