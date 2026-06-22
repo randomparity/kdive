@@ -106,6 +106,40 @@ def test_mint_local_token_rejects_nonpositive_ttl(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.oidc_issuer
+def test_mint_local_token_ttl_is_honored_by_the_live_issuer() -> None:
+    """The injected ``exp`` overrides the issuer default end-to-end (the real round trip).
+
+    The four stubbed unit tests above prove ``mint_local_token`` *injects* ``exp`` into the
+    claims, but never that the issuer *honors* it — every one of them mocks the HTTP round
+    trip. This is the gate for the documented per-request TTL: it mints against the live
+    mock-OIDC server and decodes the issued JWT. If ``exp`` is ~3600 the issuer ignored the
+    override and the documented 12h behavior is fiction (capped at the issuer's 1h default).
+    """
+    import time
+
+    import jwt  # PyJWT: decode the issued token's claims without verifying the signature
+
+    require_issuer()
+    config.load()
+    ttl = 120
+    before = time.time()
+    token = login.mint_local_token(project="local", ttl_seconds=ttl)
+    after = time.time()
+
+    decoded = jwt.decode(token, options={"verify_signature": False})
+    exp = decoded["exp"]
+    leeway = 30
+    assert before + ttl - leeway <= exp <= after + ttl + leeway, (
+        f"issued exp {exp} is not now+{ttl}s; the issuer ignored the injected expiry"
+    )
+    # The issuer's own default is 3600s — proving exp is near now+120 (not now+3600) is what
+    # catches a silently-ignored override.
+    assert abs(exp - (before + 3600)) > leeway, (
+        f"issued exp {exp} is ~1h out: the issuer applied its default, not the requested TTL"
+    )
+
+
+@pytest.mark.oidc_issuer
 def test_login_mints_platform_admin_and_caches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
