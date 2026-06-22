@@ -822,14 +822,16 @@ git commit -m "feat(reports): add CSV and XLSX report rendering"
 - Test: `tests/mcp/tools/reports/test_generate.py`
 
 **Interfaces:**
-- Consumes: Task 2 `generate_report`, `REGISTRY`, `ReportScope`; Task 4 `render_csv`/`render_xlsx`; `ToolResponse`; `parse_timestamptz_window`; `_resolve_granted_set`-equivalent logic (copy the shape from `accounting/reports.py`, do not import its private helper); `require_platform_role`, `require_role`, `audit_platform_denial`, `ALL_PROJECTS_SCOPE`, `actor_for`, `held_platform_roles`; object store (`object_store_from_env`, `put_artifact`, `register_artifact_row`, `presign_get`, `delete`); config `REPORT_INLINE_MAX_BYTES`, `ARTIFACT_DOWNLOAD_TTL_SECONDS`; `Sensitivity`, `ArtifactWriteRequest`.
+- Consumes: Task 2 `generate_report`, `REGISTRY`, `ReportScope`; Task 4 `render_csv`/`render_xlsx`; `ToolResponse`; `parse_timestamptz_window`; `_resolve_granted_set`-equivalent logic (copy the shape from `accounting/reports.py`, do not import its private helper); `require_platform_role`, `require_role`, `audit_platform_denial`, `ALL_PROJECTS_SCOPE`, `actor_for`, `held_platform_roles`; object store (`object_store_from_env`, `put_artifact`, `register_artifact_row`, `presign_get`, `delete`); `ARTIFACTS` row repository (`from kdive.db.repositories import ARTIFACTS`; `await ARTIFACTS.insert(conn, row)`); the redactor (`from kdive.security.secrets.redaction import Redactor`); config `REPORT_INLINE_MAX_BYTES`, `ARTIFACT_DOWNLOAD_TTL_SECONDS`; `Sensitivity`, `ArtifactWriteRequest`.
 - Produces: `register(app, pool)`; `async generate_granted_set(pool, ctx, *, projects, window, formats)`; `async generate_all_projects(pool, ctx, *, window, formats)`.
 
 **Notes:**
 - `as_of`: `SELECT now()` on the same connection that runs the sections, before gathering.
-- Redaction: pass each free-text cell through the redaction registry before it enters the inline envelope or a rendered artifact. Locate the redactor used elsewhere (`security/` redaction registry — grep `redact` in `mcp/tools` and `services`) and apply it to string cells in the gathered rows (a small `_redact_rows(report)` step). If the report contains no secret-bearing free text in v1 (inventory/lease/cost columns are ids/enums/numbers), still route string cells through the redactor so the invariant holds structurally.
+- **Artifact persistence (load-bearing):** `register_artifact_row` only *builds* the row — "no database access ... the caller inserts and commits it after the object write" (objectstore.py:482). The helper MUST take `conn` and, per object, in this order (ADR-0005 write-before-commit): `stored = await asyncio.to_thread(store.put_artifact, request)` → `row = register_artifact_row(stored, owner_kind="reports", owner_id=report_id)` → `await ARTIFACTS.insert(conn, row)` → `url = await asyncio.to_thread(store.presign_get, stored.key, expires_in=ttl)`. Without the `ARTIFACTS.insert`, no `artifacts` row exists, the object is untracked, and Task 7's GC never reaps it (the object leaks). This is exactly the pattern `jobs/handlers/vmcore.py:86-89` uses.
+- **Artifact request fields:** `ArtifactWriteRequest(tenant="local", owner_kind="reports", owner_id=str(report_id), name="<section>.csv" | "report.xlsx", data=<bytes>, sensitivity=Sensitivity.REDACTED, retention_class="report")`. Note `ArtifactWriteRequest.owner_id` is `str` but `register_artifact_row(owner_id=...)` is `UUID` — pass `str(report_id)` to the request and `report_id` (UUID) to `register_artifact_row`. Tenant is the fixed single-tenant `"local"` (the value `jobs/handlers/vmcore.py` uses); if a tenant accessor exists on `RequestContext`, prefer it — confirm at implementation, default `"local"`.
+- Redaction: build one fresh `Redactor()` per response (it snapshots `PROCESS_SECRET_REGISTRY` at construction; ADR-0027 §3) and apply `redactor.redact_mapping(row)` to every gathered row before it enters the inline envelope or a rendered artifact, via a `_redact_rows(report, redactor) -> Report` step. v1 report columns (ids/enums/numbers/project+principal names) carry no resolved secrets, so this is a structural pass that upholds the mandatory-redaction invariant; the seam is injectable (`redactor: Redactor = None` → default `Redactor()`) so Task 8 can inject a `Redactor(secret_values=[planted])` and prove the pass works.
 - Inline byte budget: serialize each section's rows to `rows_json`; track cumulative bytes against `REPORT_INLINE_MAX_BYTES`; when a section would exceed the remaining budget, emit a bounded preview (first K rows that fit) plus `inline_truncated="true"`.
-- Spreadsheet: for each requested format render bytes, `put_artifact` (`Sensitivity.REDACTED`, retention class `"report"`, `owner_kind="reports"`, a fresh report UUID as `owner_id`), `register_artifact_row`, then `presign_get` via `asyncio.to_thread`. A store/`CategorizedError` outage sets `data["spreadsheet_unavailable"]` and drops the refs; the inline report still returns.
+- Spreadsheet: for each requested format render bytes, then run the put → register → insert → presign sequence above. A store/`CategorizedError` outage sets `data["spreadsheet_unavailable"]` and drops the refs; the inline report still returns.
 - Store I/O is synchronous boto3 — wrap `put_artifact`/`presign_get`/`delete` in `await asyncio.to_thread(...)` (the `artifacts/reads.py` pattern).
 
 - [ ] **Step 1: Write the failing handler tests (injected store seam)**
@@ -908,7 +910,7 @@ Expected: FAIL — module missing.
 
 - [ ] **Step 3: Implement the artifact helper + handlers**
 
-Write `src/kdive/services/reports/artifacts.py` with a `write_report_artifacts(report, formats, *, store, tenant, report_id, ttl) -> dict[str, str]` that renders, puts, registers, and presigns — returning `{ref_key: presigned_url}` — and raises `CategorizedError` on store failure (caller degrades). Define a `ReportArtifactStore(Protocol)` with `put_artifact`, `presign_get`, `delete` so tests inject a fake.
+Write `src/kdive/services/reports/artifacts.py` with `async write_report_artifacts(conn, report, formats, *, store, report_id, ttl, tenant="local") -> dict[str, str]` that renders, puts the object, builds the row with `register_artifact_row`, persists it with `await ARTIFACTS.insert(conn, row)`, then presigns — returning `{ref_key: presigned_url}` — and raises `CategorizedError` on store failure (caller degrades). It must accept `conn` (the insert needs it). Define a `ReportArtifactStore(Protocol)` with `put_artifact`, `presign_get`, `delete` so tests inject a fake. ref keys: `csv:<section>` per CSV file, `xlsx` for the workbook.
 
 Write `src/kdive/mcp/tools/reports/generate.py`:
 - `generate_granted_set(pool, ctx, *, projects, window, formats, store_factory=object_store_from_env)`:
@@ -1143,13 +1145,45 @@ git commit -m "feat(reports): reap report artifacts via reconciler GC sweep"
 
 ```python
 # tests/mcp/tools/reports/test_redaction.py
-# Seed a row whose free-text field carries a registered secret value; generate the report;
-# assert the secret does not appear in any inline rows_json nor in the rendered CSV/XLSX bytes.
+from __future__ import annotations
+
+import pytest
+
+from kdive.security.secrets.redaction import REDACTION, Redactor
+from kdive.services.reports import Report, Section
+from kdive.services.reports.render import render_csv, render_xlsx
+
+_SECRET = "sup3r-s3cret-token-value"
+
+
+def test_redact_rows_scrubs_secret_in_inline_and_render() -> None:
+    # The handler's _redact_rows(report, redactor) must scrub a registered secret from
+    # every cell before inline serialization and rendering. Drive it through the seam.
+    from kdive.mcp.tools.reports.generate import _redact_rows  # the Task 5 helper
+
+    report = Report(
+        sections=(
+            Section(
+                key="inventory",
+                columns=("system_id", "note"),
+                rows=({"system_id": "s1", "note": f"prefix {_SECRET} suffix"},),
+                truncated=False,
+            ),
+        ),
+        as_of=__import__("datetime").datetime(2026, 6, 22, tzinfo=__import__("datetime").timezone.utc),
+    )
+    redactor = Redactor(secret_values=[_SECRET])
+    redacted = _redact_rows(report, redactor)
+    cell = redacted.sections[0].rows[0]["note"]
+    assert _SECRET not in cell and REDACTION in cell
+    # and it never reaches the rendered artifacts
+    assert _SECRET.encode() not in render_csv(redacted)["inventory"]
+    assert _SECRET.encode() not in render_xlsx(redacted)
 ```
 
-Locate the redaction registry seam used by other tools (grep `redact` under `src/kdive/security`); register a secret in the test the same way the redaction unit tests do, then assert absence in inline + artifact bytes.
+> `Redactor` (built per response, snapshots `PROCESS_SECRET_REGISTRY`) exposes `redact_mapping(row) -> dict`. `_redact_rows` applies it to every section row and returns a new `Report`. Inject the `Redactor` into the handler via its `redactor` seam (default `Redactor()`).
 
-- [ ] **Step 2: Run to verify it fails (if redaction not yet wired in Task 5), then wire + pass**
+- [ ] **Step 2: Run to verify it fails (if `_redact_rows` not yet added in Task 5), then wire + pass**
 
 Run: `uv run python -m pytest tests/mcp/tools/reports/test_redaction.py -q`
 If FAIL because redaction is not applied, add `_redact_rows` in the Task 5 handler path and re-run to PASS.
