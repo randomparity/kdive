@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import cast
 
+import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -17,6 +18,7 @@ from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.ports import DebugTransportKind, SystemHandle, TransportHandleData
 from kdive.providers.shared.debug_common import rsp as rsp_mod
 from kdive.providers.shared.debug_common.rsp import rsp_frame, valid_rsp_frame
+from tests.providers.local_libvirt.fakes import libvirt_error
 
 # --- RSP framing codec ---------------------------------------------------------------------
 
@@ -251,15 +253,87 @@ def test_open_transport_reachable_stub_returns_decodable_handle() -> None:
     assert decoded == TransportHandleData(kind="gdbstub", host="127.0.0.1", port=1234)
 
 
-def test_from_env_resolver_raises_missing_dependency() -> None:
-    connector = LocalLibvirtConnect.from_env()
-    with pytest.raises(CategorizedError) as exc:
-        connector.open_transport(_SYSTEM, "gdbstub")
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
-    assert str(exc.value) == (
-        "resolving a libvirt domain's gdbstub endpoint runs only under the live_vm gate"
+class _FakeGdbDomain:
+    """A libvirt domain whose XMLDesc records (or omits) a gdbstub port."""
+
+    def __init__(self, xml: str) -> None:
+        self._xml = xml
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - mirrors the libvirt binding name
+        return self._xml
+
+
+class _FakeGdbConn:
+    """A libvirt connection that resolves one domain by name (or raises a libvirtError)."""
+
+    def __init__(
+        self, *, domain: _FakeGdbDomain | None = None, error_code: int | None = None
+    ) -> None:
+        self._domain = domain
+        self._error_code = error_code
+        self.closed = 0
+
+    def lookupByName(self, name: str) -> _FakeGdbDomain:  # noqa: N802 - libvirt binding name
+        if self._error_code is not None:
+            raise libvirt_error(self._error_code)
+        assert self._domain is not None
+        return self._domain
+
+    def close(self) -> int:
+        self.closed += 1
+        return 0
+
+
+def _gdb_xml(port: int) -> str:
+    from kdive.providers.shared.libvirt_xml import QEMU_NS
+
+    return (
+        f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-gdb'/>"
+        f"<qemu:arg value='tcp:127.0.0.1:{port}'/>"
+        "</qemu:commandline></domain>"
     )
-    assert exc.value.details == {"system": str(_SYSTEM)}
+
+
+def test_resolve_endpoint_reads_the_recorded_port_from_the_live_domain() -> None:
+    conn = _FakeGdbConn(domain=_FakeGdbDomain(_gdb_xml(4444)))
+    resolver = connect_mod._resolve_endpoint_via(lambda: conn)
+    assert resolver(_SYSTEM) == ("127.0.0.1", 4444)
+    assert conn.closed == 1  # the connection is always closed
+
+
+def test_resolve_endpoint_absent_domain_is_configuration_error() -> None:
+    conn = _FakeGdbConn(error_code=libvirt.VIR_ERR_NO_DOMAIN)
+    resolver = connect_mod._resolve_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.closed == 1
+
+
+def test_resolve_endpoint_without_a_recorded_port_is_configuration_error() -> None:
+    # A System provisioned without debug.gdbstub records no port — actionable, not a missing dep.
+    conn = _FakeGdbConn(domain=_FakeGdbDomain("<domain/>"))
+    resolver = connect_mod._resolve_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_resolve_endpoint_malformed_xml_is_infrastructure_failure() -> None:
+    conn = _FakeGdbConn(domain=_FakeGdbDomain("<domain"))
+    resolver = connect_mod._resolve_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_resolve_endpoint_other_libvirt_error_is_infrastructure_failure() -> None:
+    conn = _FakeGdbConn(error_code=libvirt.VIR_ERR_INTERNAL_ERROR)
+    resolver = connect_mod._resolve_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_close_transport_is_noop_and_never_raises() -> None:

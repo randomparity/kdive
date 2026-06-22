@@ -5,10 +5,10 @@
 network IO** (the ported v1 "F2" SSRF control), probes RSP reachability over an injected
 seam, and returns an opaque `TransportHandle` (an encoded `TransportHandleData`) the session
 row persists; `close_transport(handle)` validates the handle and then no-ops (gdbstub is
-connectionless RSP). The slow/host-bound steps — resolving the libvirt domain's gdbstub
-host:port and the real socket probe — are **injected, `live_vm`-gated seams** that default
-to implementations raising `MISSING_DEPENDENCY` (resolver) / `# pragma: no cover - live_vm`
-(prober), so the orchestration and the full error contract are unit-tested with fakes.
+connectionless RSP). The gdbstub endpoint resolver reads the port the provisioner recorded
+in the **live** libvirt domain XML over an injected `connect` seam (ADR-0210 §1); only the
+`libvirt.open`/`XMLDesc` calls and the real socket probe are `# pragma: no cover - live_vm`,
+so the resolver's lookup/parse/error branches and the orchestration are unit-tested with fakes.
 
 The RSP-framing codec (`rsp_frame`/`valid_rsp_frame`) and the bounded probe are ported from
 v1 `transport/core/rsp_probe.py` + `bounded.py`: the probe exchanges one **read-only** `?`
@@ -18,10 +18,19 @@ non-RSP listener is rejected rather than mistaken for a healthy stub.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from typing import Protocol
 
+import libvirt
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as _safe_fromstring
+
+import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports import (
     DebugTransportKind,
     SystemHandle,
@@ -29,14 +38,28 @@ from kdive.providers.ports import (
     TransportHandleData,
 )
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
+from kdive.providers.shared.libvirt_xml import recorded_gdb_port_from_root
 
 _GDBSTUB: DebugTransportKind = "gdbstub"
 _DRGN_LIVE: DebugTransportKind = "drgn-live"  # the agent-facing transport kind (ADR-0085)
 _SSH_SCHEME = "ssh"  # the handle scheme local emits — its SSH realization (ADR-0039)
+_GDBSTUB_HOST = "127.0.0.1"  # loopback-only: the local gdbstub never listens off-host (ADR-0210)
 
 type _ResolveEndpoint = Callable[[SystemHandle], tuple[str, int]]
 type _Probe = Callable[[str, int], bool]
 type _SshConnect = Callable[[str, int], bool]
+
+
+class _Domain(Protocol):
+    def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - mirrors the libvirt binding name
+
+
+class _Conn(Protocol):
+    def lookupByName(self, name: str) -> _Domain: ...  # noqa: N802 - libvirt binding name
+    def close(self) -> int: ...
+
+
+type _Connect = Callable[[], _Conn]
 
 
 def _config_error(message: str) -> CategorizedError:
@@ -78,9 +101,9 @@ class LocalLibvirtConnect:
 
     @classmethod
     def from_env(cls) -> LocalLibvirtConnect:
-        """Build with the real, ``live_vm``-gated resolvers + probers; opens no connection."""
+        """Build with the real resolvers + probers; opens no connection until a transport opens."""
         return cls(
-            resolve_endpoint=_real_resolve_endpoint,
+            resolve_endpoint=_resolve_endpoint_via(_default_connect),
             probe=_real_probe,
             resolve_ssh_endpoint=_real_resolve_ssh_endpoint,
             ssh_connect=_real_ssh_connect,
@@ -94,10 +117,11 @@ class LocalLibvirtConnect:
         lock (the probe deliberately runs lock-free, ADR-0032 §6a).
 
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for an unknown kind or a non-loopback
-                resolved host (no IO); ``DEBUG_ATTACH_FAILURE`` if the peer does not answer;
-                ``TRANSPORT_FAILURE`` on a socket fault; ``MISSING_DEPENDENCY`` propagated
-                from a real resolver outside ``live_vm``.
+            CategorizedError: ``CONFIGURATION_ERROR`` for an unknown kind, a non-loopback
+                resolved host (no IO), an absent domain, or a System not provisioned with a
+                gdbstub; ``DEBUG_ATTACH_FAILURE`` if the peer does not answer;
+                ``TRANSPORT_FAILURE`` on a socket fault; ``INFRASTRUCTURE_FAILURE`` for a
+                libvirt read fault.
         """
         if kind == _GDBSTUB:
             return self._open_gdbstub(system)
@@ -150,12 +174,74 @@ class LocalLibvirtConnect:
         TransportHandleData.decode(handle)
 
 
-def _real_resolve_endpoint(system: SystemHandle) -> tuple[str, int]:  # pragma: no cover - live_vm
-    raise CategorizedError(
-        "resolving a libvirt domain's gdbstub endpoint runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-        details={"system": str(system)},
-    )
+def _default_connect() -> _Conn:  # pragma: no cover - live_vm
+    """Open the host libvirt connection the resolver reads the domain XML through.
+
+    ``virConnect`` structurally satisfies the narrow ``_Conn`` Protocol (``lookupByName``/
+    ``close``); the lookup'd ``virDomain`` satisfies ``_Domain`` (``XMLDesc``).
+    """
+    return libvirt.open(config.require(LIBVIRT_URI))
+
+
+def _resolve_endpoint_via(connect: _Connect) -> _ResolveEndpoint:
+    """Build the gdbstub endpoint resolver over ``connect`` (ADR-0210 §1).
+
+    The returned resolver reads the System's recorded gdbstub port from its **live** libvirt
+    domain XML (the port provisioning recorded, the one QEMU actually listens on) and returns the
+    loopback endpoint. The libvirt ``open``/``XMLDesc`` calls live behind ``connect``, so every
+    branch below is exercised with a fake connection.
+    """
+
+    def resolve(system: SystemHandle) -> tuple[str, int]:
+        domain_name = str(system)
+        conn = connect()
+        try:
+            domain = conn.lookupByName(domain_name)
+            xml = domain.XMLDesc(0)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                raise _config_error(
+                    f"System {domain_name!r} has no running libvirt domain to attach a gdbstub to"
+                ) from exc
+            raise CategorizedError(
+                "libvirt error reading the gdbstub domain XML",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"domain": domain_name},
+            ) from exc
+        finally:
+            _close(conn)
+        return (_GDBSTUB_HOST, _resolved_port(xml, domain_name))
+
+    return resolve
+
+
+def _resolved_port(xml: str, domain_name: str) -> int:
+    """The gdbstub port the domain XML records; raise an actionable error otherwise.
+
+    Malformed XML is an infrastructure read fault (libvirt handed back a broken document); a
+    well-formed domain that records no ``-gdb`` port is a configuration error (the System was not
+    provisioned with a gdbstub).
+    """
+    try:
+        root = _safe_fromstring(xml)
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise CategorizedError(
+            "malformed libvirt domain XML reading the gdbstub port",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"domain": domain_name},
+        ) from exc
+    port = recorded_gdb_port_from_root(root)
+    if port is None:
+        raise _config_error(
+            f"System {domain_name!r} was not provisioned with a gdbstub; reprovision with "
+            "the profile's debug.gdbstub set"
+        )
+    return port
+
+
+def _close(conn: _Conn) -> None:
+    with contextlib.suppress(libvirt.libvirtError):
+        conn.close()
 
 
 def _real_probe(host: str, port: int) -> bool:  # pragma: no cover - live_vm
