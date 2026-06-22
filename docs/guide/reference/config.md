@@ -14,6 +14,7 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_BUILD_COMPONENT_ROOTS` | worker | — | no | Colon-separated extra component roots merged into a build. |
+| `KDIVE_BUILD_USER` | worker | — | no | Name of an unprivileged passwd account the worker drops to for local kernel builds (git clone + make) when it runs as root (ADR-0214). Empty/unset: a root worker refuses the local build lane (deny by default); a non-root worker ignores it. |
 | `KDIVE_BUILD_WORKSPACE` | worker | `/var/lib/kdive/build` | no | Worker scratch root for kernel builds. |
 | `KDIVE_KERNEL_SRC` | worker | `` | no | Kernel source tree the worker builds from. |
 | `KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST` | worker | — | no | Comma-separated allowlist of git remotes the local (worker-local) build host may clone for a git kernel_source_ref. Each entry is a host (github.com) or host/path prefix (github.com/myorg). Empty/unset disables local git builds (deny by default). |

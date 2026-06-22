@@ -330,6 +330,17 @@ LOCAL_BUILD_REMOTE_ALLOWLIST = Setting(
         "prefix (github.com/myorg). Empty/unset disables local git builds (deny by default)."
     ),
 )
+BUILD_USER = Setting(
+    name="KDIVE_BUILD_USER",
+    parse=_str,
+    group="build",
+    processes=_WORKER,
+    help=(
+        "Name of an unprivileged passwd account the worker drops to for local kernel "
+        "builds (git clone + make) when it runs as root (ADR-0214). Empty/unset: a root "
+        "worker refuses the local build lane (deny by default); a non-root worker ignores it."
+    ),
+)
 INSTALL_STAGING = Setting(
     name="KDIVE_INSTALL_STAGING",
     parse=_str,
@@ -586,6 +597,7 @@ SETTINGS = [
     KERNEL_SRC,
     BUILD_COMPONENT_ROOTS,
     LOCAL_BUILD_REMOTE_ALLOWLIST,
+    BUILD_USER,
     INSTALL_STAGING,
     FIXTURE_CATALOG_PATH,
     IMAGE_PUBLISH_GRACE,

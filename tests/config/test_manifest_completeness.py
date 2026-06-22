@@ -44,3 +44,13 @@ def test_local_build_remote_allowlist_setting_registered() -> None:
     assert LOCAL_BUILD_REMOTE_ALLOWLIST.name == "KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST"
     assert LOCAL_BUILD_REMOTE_ALLOWLIST.processes == frozenset({"worker"})
     assert LOCAL_BUILD_REMOTE_ALLOWLIST.group == "build"
+
+
+def test_build_user_setting_registered() -> None:
+    # Root-worker build privilege drop (#689, ADR-0214): worker-scoped, build group.
+    from kdive.config.core_settings import BUILD_USER, SETTINGS
+
+    assert BUILD_USER in SETTINGS
+    assert BUILD_USER.name == "KDIVE_BUILD_USER"
+    assert BUILD_USER.processes == frozenset({"worker"})
+    assert BUILD_USER.group == "build"
