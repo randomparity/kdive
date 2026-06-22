@@ -14,6 +14,7 @@ orchestration.
 from __future__ import annotations
 
 import logging
+import socket
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -47,6 +48,7 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.shared.libvirt_xml import recorded_gdb_port
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
 
 __all__ = [
@@ -66,6 +68,7 @@ class _LibvirtDomain(Protocol):
     def create(self) -> int: ...
     def destroy(self) -> int: ...
     def undefine(self) -> int: ...
+    def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - mirrors the libvirt binding name
 
 
 class _LibvirtConn(Protocol):
@@ -75,6 +78,19 @@ class _LibvirtConn(Protocol):
 
 
 type Connect = Callable[[], _LibvirtConn]
+type FreePort = Callable[[], int]
+
+
+def _bind_probe_free_port() -> int:  # pragma: no cover - live_vm
+    """Bind a loopback socket to port 0 and return the OS-assigned port (then release it).
+
+    The brief release-then-rebind window is accepted (loopback, single-host, single-attach): a
+    collision surfaces as a clean domain-start failure the transactional ``provision`` already
+    handles (ADR-0210 §2).
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def _close(conn: _LibvirtConn) -> None:
@@ -133,11 +149,13 @@ class LocalLibvirtProvisioning:
         files: ProvisioningFiles | None = None,
         allowed_roots: list[Path] | None = None,
         materialize_rootfs: MaterializeRootfs | None = None,
+        free_port: FreePort | None = None,
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
         self._allowed_roots = allowed_roots or [Path(ROOTFS_DIR)]
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
+        self._free_port = free_port or _bind_probe_free_port
 
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
@@ -165,7 +183,12 @@ class LocalLibvirtProvisioning:
         """
         base = self._materialize_rootfs(profile.provider.local_libvirt.rootfs, system_id)
         overlay = self._files.prepare_overlay(system_id, base=base)
-        xml = render_domain_xml(system_id, profile, disk_path=overlay.path)  # validates the profile
+        gdb_port = (
+            self._gdb_port_for(system_id) if profile.provider.local_libvirt.debug.gdbstub else None
+        )
+        xml = render_domain_xml(  # validates the profile
+            system_id, profile, disk_path=overlay.path, gdb_port=gdb_port
+        )
         try:
             self._files.prepare_console(system_id)
             self._define_and_start(xml, system_id)
@@ -173,6 +196,37 @@ class LocalLibvirtProvisioning:
             self._files.cleanup_overlay_if_created(overlay)
             raise
         return domain_name_for(system_id)
+
+    def _gdb_port_for(self, system_id: UUID) -> int:
+        """Reuse the System's recorded gdbstub port if its domain already records one; else a
+        fresh loopback port (ADR-0210 §2).
+
+        Reuse keeps an idempotent provision retry stable — the live QEMU still listens on the
+        port the first define recorded — so the resolver and the running stub never diverge.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a libvirt fault that is not the
+                domain simply being absent (``VIR_ERR_NO_DOMAIN``).
+        """
+        existing = self._recorded_gdb_port(system_id)
+        return existing if existing is not None else self._free_port()
+
+    def _recorded_gdb_port(self, system_id: UUID) -> int | None:
+        """The gdbstub port the System's already-defined domain records, or ``None`` if absent."""
+        try:
+            conn = self._connect()
+        except libvirt.libvirtError as exc:
+            raise self._infra("connecting to libvirt to read the gdbstub port", "") from exc
+        try:
+            domain = conn.lookupByName(domain_name_for(system_id))
+            return recorded_gdb_port(domain.XMLDesc(0))
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return None
+            name = domain_name_for(system_id)
+            raise self._infra("reading the recorded gdbstub port", name) from exc
+        finally:
+            _close(conn)
 
     def _define_and_start(self, xml: str, system_id: UUID) -> None:
         try:

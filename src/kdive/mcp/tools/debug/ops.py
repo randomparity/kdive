@@ -70,7 +70,8 @@ def _gdbmi_maturity(detail: str) -> dict[str, object]:
             "attached DebugSession."
         ),
         providers=(
-            "local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a."
+            "local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); "
+            "remote-libvirt: implemented; fault-inject: n/a."
         ),
     )
 

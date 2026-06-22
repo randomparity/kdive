@@ -6,9 +6,20 @@ import xml.etree.ElementTree as ET
 
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
+    QEMU_NS,
     parse_capabilities_arch,
     parse_metadata_system_id,
+    recorded_gdb_port,
     register_kdive_namespace,
+)
+
+_GDB_DOMAIN = (
+    f"<domain xmlns:qemu='{QEMU_NS}'>"
+    "<qemu:commandline>"
+    "<qemu:arg value='-gdb'/>"
+    "<qemu:arg value='tcp:127.0.0.1:4444'/>"
+    "</qemu:commandline>"
+    "</domain>"
 )
 
 
@@ -26,6 +37,29 @@ def test_parse_metadata_system_id_trims_text_and_rejects_empty_or_malformed() ->
     assert parse_metadata_system_id(f"<system xmlns='{KDIVE_METADATA_NS}'> sid </system>") == "sid"
     assert parse_metadata_system_id(f"<system xmlns='{KDIVE_METADATA_NS}' />") is None
     assert parse_metadata_system_id("<system") is None
+
+
+def test_recorded_gdb_port_reads_the_loopback_gdb_arg() -> None:
+    assert recorded_gdb_port(_GDB_DOMAIN) == 4444
+
+
+def test_recorded_gdb_port_is_none_without_a_gdb_arg() -> None:
+    no_gdb = f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline></qemu:commandline></domain>"
+    assert recorded_gdb_port(no_gdb) is None
+    assert recorded_gdb_port("<domain/>") is None
+
+
+def test_recorded_gdb_port_is_none_for_non_integer_port() -> None:
+    bad = (
+        f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-gdb'/><qemu:arg value='tcp:127.0.0.1:notaport'/>"
+        "</qemu:commandline></domain>"
+    )
+    assert recorded_gdb_port(bad) is None
+
+
+def test_recorded_gdb_port_is_none_for_malformed_xml() -> None:
+    assert recorded_gdb_port("<domain") is None
 
 
 def test_register_kdive_namespace_is_idempotent(monkeypatch) -> None:

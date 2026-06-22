@@ -13,8 +13,12 @@ from kdive.profiles.provisioning import ProvisioningProfile, require_concrete_si
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
+    recorded_gdb_port_from_root,
     register_kdive_namespace,
     register_qemu_namespace,
+)
+from kdive.providers.shared.libvirt_xml import (
+    recorded_gdb_port as recorded_gdb_port,  # re-exported facade for remote provisioning + tests
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 
@@ -110,34 +114,10 @@ def _parse_domain_xml_strict(domain_xml: str, *, operation: str, domain: str) ->
         ) from exc
 
 
-def _recorded_gdb_port(root: ET.Element) -> int | None:
-    args = [
-        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
-    ]
-    for previous, current in zip(args, args[1:], strict=False):
-        if previous != "-gdb" or current is None:
-            continue
-        _, _, port_text = current.rpartition(":")
-        try:
-            return int(port_text)
-        except ValueError:
-            return None
-    return None
-
-
-def recorded_gdb_port(domain_xml: str) -> int | None:
-    """The gdbstub port a domain's XML records, or ``None`` if absent/malformed."""
-    try:
-        root: ET.Element = _safe_fromstring(domain_xml)
-    except ET.ParseError, DefusedXmlException:
-        return None
-    return _recorded_gdb_port(root)
-
-
 def recorded_gdb_port_strict(domain_xml: str, *, operation: str, domain: str) -> int | None:
     """The gdbstub port a domain's XML records; malformed XML is an infrastructure fault."""
     root = _parse_domain_xml_strict(domain_xml, operation=operation, domain=domain)
-    return _recorded_gdb_port(root)
+    return recorded_gdb_port_from_root(root)
 
 
 def _agent_channel_connected(root: ET.Element) -> bool:

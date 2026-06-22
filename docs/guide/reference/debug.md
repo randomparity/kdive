@@ -10,7 +10,7 @@
 
 **Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Clear a breakpoint by number on a live DebugSession. Requires operator.
 
@@ -27,7 +27,7 @@ Clear a breakpoint by number on a live DebugSession. Requires operator.
 
 **Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Resume execution on a live DebugSession and wait for a stop event. Operator only.
 
@@ -44,7 +44,7 @@ Resume execution on a live DebugSession and wait for a stop event. Operator only
 
 **Promotion:** A non-gated test or recorded live_stack run ends a debug session attached to a real booted Run.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Drive a live/attach DebugSession to detached; close its transport. Requires operator.
 
@@ -70,7 +70,7 @@ Return one visible debug session for recovery. Requires viewer.
 
 **Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Send an interrupt to halt a running live DebugSession. Requires operator.
 
@@ -86,7 +86,7 @@ Send an interrupt to halt a running live DebugSession. Requires operator.
 
 **Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 List all breakpoints on a live DebugSession. Requires operator.
 
@@ -116,7 +116,7 @@ List the caller's debug sessions, filterable by run/system/project/state. Viewer
 
 **Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires operator.
 
@@ -134,7 +134,7 @@ Read raw memory bytes from a live DebugSession (up to 4096 bytes). Requires oper
 
 **Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Read named registers from a live DebugSession. Requires operator.
 
@@ -151,7 +151,7 @@ Read named registers from a live DebugSession. Requires operator.
 
 **Promotion:** A non-gated test or recorded live_stack run drives this gdb-MI op against a real attached DebugSession.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Set a breakpoint on a live DebugSession via gdb-MI. Requires operator.
 
@@ -168,7 +168,7 @@ Set a breakpoint on a live DebugSession via gdb-MI. Requires operator.
 
 **Promotion:** A non-gated test or recorded live_stack run attaches a debug session to a real booted Run.
 
-**Provider support:** local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a.
+**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
 
 Open a single-attach transport and insert a live DebugSession. Requires operator.
 

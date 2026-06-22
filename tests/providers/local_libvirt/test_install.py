@@ -228,6 +228,32 @@ def test_install_does_not_inject_xml_from_cmdline(tmp_path: Path) -> None:
     assert cmdline is not None and cmdline.text == hostile  # carried verbatim
 
 
+def test_install_preserves_the_gdbstub_qemu_commandline(tmp_path: Path) -> None:
+    # A gdbstub-provisioned domain's <qemu:commandline> must survive the install os-edit
+    # round-trip with its qemu: prefix — otherwise ElementTree re-prefixes it (ns0:) and libvirt
+    # drops the gdbstub, breaking the live debug attach. Guards the namespace registration in
+    # install._render_os_section.
+    from kdive.providers.shared.libvirt_xml import QEMU_NS, recorded_gdb_port
+
+    provisioned = (
+        f'<domain type="kvm" xmlns:qemu="{QEMU_NS}">'
+        f"<name>kdive-{_SYS}</name>"
+        '<metadata><kdive:system xmlns:kdive="https://kdive.dev/libvirt/1">'
+        f"{_SYS}</kdive:system></metadata>"
+        "<qemu:commandline><qemu:arg value='-gdb'/>"
+        "<qemu:arg value='tcp:127.0.0.1:4444'/></qemu:commandline>"
+        "</domain>"
+    )
+    domain = FakeDomain(domain_name=f"kdive-{_SYS}", system_id=str(_SYS), xml_desc=provisioned)
+    conn = FakeLibvirtConn(lookup={domain.domain_name: domain})
+    inst = _install(conn=conn, staging_root=tmp_path)
+    inst.install(_request(initrd_ref=_INITRD_REF))
+
+    redefined = conn.defined_xml[0]
+    assert "qemu:commandline" in redefined  # prefix preserved, not ns0:
+    assert recorded_gdb_port(redefined) == 4444
+
+
 # --- install: kdump prerequisite -----------------------------------------------------
 
 

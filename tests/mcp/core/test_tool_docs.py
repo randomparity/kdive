@@ -421,14 +421,24 @@ def test_non_partial_tools_have_no_maturity_detail() -> None:
     assert not offenders, f"non-partial tools carrying a stale maturity_detail: {offenders}"
 
 
-# The debug/introspect/host-dump planes whose local-libvirt seam is an Epic-B stub
-# (M2.8 honesty, #673). Their `providers` pointer must say the local-libvirt path is
-# *planned* and the remote-libvirt path *implemented* — not the pre-honesty "wired"
-# half-truth. A promotion to `implemented` for a plane is the diff that flips its
-# pointer here. `vmcore.fetch` is the mixed case: local KDUMP is already implemented
-# (#654), only its HOST_DUMP path is the planned Epic-B (B4) stub, so its pointer
-# legitimately reads per-method rather than a bare "local-libvirt: planned".
+# The introspect planes whose local-libvirt seam is still an Epic-B stub (M2.8 honesty,
+# #673). Their `providers` pointer must say the local-libvirt path is *planned* and the
+# remote-libvirt path *implemented* — not the pre-honesty "wired" half-truth. A promotion to
+# `implemented` for a plane is the diff that flips its pointer here. The `debug.*` planes moved
+# to _LOCAL_WIRED_PROVIDER_TOOLS once B1 (#675) wired the gdbstub transport they run over;
+# `introspect.from_vmcore` got its own wired-pending guard once B2 (#676) wired it, leaving only
+# `introspect.run` (B3, live drgn) still planned here.
 _LOCAL_PLANNED_PROVIDER_TOOLS = frozenset(
+    {
+        "introspect.run",
+    }
+)
+
+# The `debug.*` planes B1 (#675) wired: the production gdbstub transport resolves from the live
+# domain XML, so the interactive debug surface runs on local — but the live KVM proof is the
+# orchestrator's post-merge job (ADR-0208 invariant 5), so maturity stays `partial` with a
+# "wired, pending live KVM proof" pointer rather than promoting to `implemented`.
+_LOCAL_WIRED_PROVIDER_TOOLS = frozenset(
     {
         "debug.set_breakpoint",
         "debug.clear_breakpoint",
@@ -439,7 +449,6 @@ _LOCAL_PLANNED_PROVIDER_TOOLS = frozenset(
         "debug.interrupt",
         "debug.start_session",
         "debug.end_session",
-        "introspect.run",
     }
 )
 
@@ -482,6 +491,32 @@ def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
         if "remote-libvirt: implemented" not in providers:
             offenders.append(f"{name}: remote-libvirt not marked implemented ({providers!r})")
     assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
+
+
+def test_local_wired_debug_planes_advertise_wired_pending_proof_pointer() -> None:
+    # B1 (#675): the gdbstub transport is wired, so debug.* must NOT still say "planned"; it
+    # stays `partial` (ADR-0208 invariant 5 holds the live proof) with a "wired, pending live
+    # KVM proof" pointer. Guards against both a stale "planned" pointer and a premature
+    # promotion to `implemented`.
+    by_name = {t.name: t for t in TOOLS}
+    offenders: list[str] = []
+    for name in sorted(_LOCAL_WIRED_PROVIDER_TOOLS):
+        tool = by_name.get(name)
+        if tool is None:
+            offenders.append(f"{name}: tool not registered")
+            continue
+        meta = tool.meta or {}
+        if meta.get("maturity") != "partial":
+            offenders.append(f"{name}: maturity is not partial ({meta.get('maturity')!r})")
+        providers = (meta.get("maturity_detail") or {}).get("providers")
+        if not isinstance(providers, str):
+            offenders.append(f"{name}: missing providers pointer")
+            continue
+        if "local-libvirt: wired, pending live KVM proof" not in providers:
+            offenders.append(f"{name}: local-libvirt not marked wired-pending ({providers!r})")
+        if "local-libvirt: planned" in providers:
+            offenders.append(f"{name}: still marked planned ({providers!r})")
+    assert not offenders, f"wired local debug planes with a dishonest pointer: {offenders}"
 
 
 def test_vmcore_fetch_host_dump_path_marked_wired_pending_proof_on_local() -> None:
