@@ -211,6 +211,47 @@ def _exchange_code(issuer: OidcIssuer, code: str) -> str:
     return access_token
 
 
+def mint_local_token(
+    *,
+    project: str,
+    role: str = "admin",
+    platform_roles: Sequence[str] | None = None,
+    subject: str = "local-dev",
+) -> str:
+    """Mint a *project-role* bearer token from the mock-OIDC issuer and return it.
+
+    Unlike :func:`login` (platform-role axis, caches 0600), this mints a token whose
+    ``roles`` claim grants ``role`` on ``project`` — the axis a developer needs to reach
+    project-scoped tools. It is the public entry point the ``local-libvirt`` example's
+    ``mint-token.sh`` imports, so the private auth-code helpers stay encapsulated.
+
+    DEV ONLY: only the bundled mock issuer accepts these literal claims; a real OIDC
+    provider ignores them. Never point this at a production deployment.
+
+    Args:
+        project: The project the token is scoped to (becomes the sole ``projects`` entry
+            and the key of the ``roles`` claim).
+        role: The project ``Role`` to grant on ``project`` (default ``admin``).
+        platform_roles: Platform roles to encode, or ``None`` to omit the claim entirely
+            (distinct from an empty list).
+        subject: The token ``sub`` (default ``local-dev``).
+
+    Returns:
+        The minted access token.
+    """
+    issuer = OidcIssuer.from_config()
+    claims = _build_claims(
+        subject=subject,
+        audience=issuer.audience,
+        projects=[project],
+        roles={project: role},
+        platform_roles=list(platform_roles) if platform_roles is not None else None,
+        agent_session=None,
+    )
+    code = _authorization_code(issuer, claims)
+    return _exchange_code(issuer, code)
+
+
 def login(platform_role: str | None) -> str:
     """Mint a bearer token on the platform-role axis and cache it 0600.
 
