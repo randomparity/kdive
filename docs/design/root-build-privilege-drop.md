@@ -35,8 +35,16 @@ Non-goals: dropping privileges of the worker process itself; sandboxing remote/S
 A new worker setting:
 
 ```
-KDIVE_BUILD_USER     # string (name or numeric uid); group "build"; processes={worker}
+KDIVE_BUILD_USER     # string: a passwd account NAME; group "build"; processes={worker}
 ```
+
+`KDIVE_BUILD_USER` must name a **real passwd account** (resolved via `pwd.getpwnam`), not a bare
+numeric uid. The account is the single source of the uid, the primary gid, the supplementary
+groups (`os.getgrouplist`), and the home directory (for the demoted child's `HOME`); a bare uid
+with no passwd entry has none of those, and admitting it would both contradict the
+"unknown account → fail closed" rule below and leave `getgrouplist`/`HOME` undefined. Requiring an
+account is the simplest unambiguous contract (an operator running builds as an "unnamed uid" is
+not a case we support; create an account).
 
 The local build resolves a **build sandbox** once per build, lazily (at the first build step,
 inside `LocalLibvirtBuild.build()` — not at `from_env`, so a root worker without the setting still
@@ -44,12 +52,19 @@ starts and only a build *attempt* fails):
 
 | `os.geteuid()` | `KDIVE_BUILD_USER` | Result |
 |---|---|---|
-| ≠ 0 | (ignored) | **No demotion.** Build runs as the current user, unchanged from today. |
+| ≠ 0 | (ignored) | **No demotion.** Build runs as the current user, unchanged from today. A `debug` log records that demotion is skipped because the worker is not root. |
 | 0 | unset / empty | **Fail closed.** `CONFIGURATION_ERROR` naming the setting; the `BUILD` job fails. |
-| 0 | unknown account / resolves to uid 0 | **Fail closed.** `CONFIGURATION_ERROR`. |
-| 0 | resolvable non-root account | **Demote.** `BuildSandbox(uid, gid, extra_groups, umask=0o077)`. |
+| 0 | unknown account (no `pwd.getpwnam`) / resolves to uid 0 | **Fail closed.** `CONFIGURATION_ERROR`. |
+| 0 | resolvable non-root account | **Demote.** `BuildSandbox(uid, gid, extra_groups, home, umask=0o077)`. An `info` log records the demotion target (`user_name`, uid, gid) at build start. |
 
-`extra_groups` comes from `os.getgrouplist(name, gid)`; `gid` is the account's primary group.
+`uid`, `gid` (primary group), and `home` come from the passwd entry; `extra_groups` from
+`os.getgrouplist(name, gid)`.
+
+**Observability.** A privilege-drop control is invisible from the outside unless it is logged:
+"demotion applied to uid N" and "demotion skipped (worker not root)" are otherwise
+indistinguishable from a silent bypass. The build therefore logs the demotion target when it
+demotes and logs the skip when euid ≠ 0, so an operator can confirm from the worker log that
+builds run unprivileged (the fail-closed path is already observable as a failed `BUILD` job).
 
 ### `BuildSandbox` — a single value object, demotion only when root
 
@@ -60,21 +75,38 @@ class BuildSandbox:
     gid: int
     extra_groups: tuple[int, ...]
     user_name: str
+    home: str
     umask: int = 0o077
 
-    def run(self, argv, **kwargs) -> CompletedProcess:
+    def run(self, argv, *, env=None, **kwargs) -> CompletedProcess:
         return subprocess.run(
             argv, user=self.uid, group=self.gid,
-            extra_groups=list(self.extra_groups), umask=self.umask, **kwargs,
+            extra_groups=list(self.extra_groups), umask=self.umask,
+            env=self._child_env(env), **kwargs,
         )
+
+    def _child_env(self, env):
+        # subprocess user=/group= change the uid/gid but NOT the environment. Without this the
+        # demoted child inherits the root worker's HOME=/root, USER=root, etc., which breaks any
+        # build tool that writes under $HOME and is an incomplete sandbox. Rebase the identity
+        # env onto the build user. Callers that already pass a custom env (the hardened git env)
+        # are layered on top of this base, not discarded.
+        base = dict(env if env is not None else os.environ)
+        base.update(HOME=self.home, USER=self.user_name, LOGNAME=self.user_name)
+        base.pop("XDG_RUNTIME_DIR", None)
+        base.pop("XDG_CACHE_HOME", None)
+        return base
 ```
 
 A module-level `sandbox_run(sandbox: BuildSandbox | None, argv, **kwargs)` is the single chokepoint
 every demotable call site uses: `subprocess.run(argv, **kwargs)` when `sandbox is None`, else
 `sandbox.run(...)`. The `user=/group=` kwargs are passed **only** when a sandbox exists — and a
 sandbox only exists when euid == 0 — so a non-root process never asks the kernel to setuid (which
-would raise). The real demotion is therefore exercised only on the root KVM host (`live_vm`); unit
-tests assert the resolution table and that the kwargs are assembled, via a fake runner.
+would raise). Call sites that build their own `env` (the hardened git invocations in `_run_git` /
+`apply_patch`) pass it through `sandbox_run`, which layers the build-user identity onto it. The
+real demotion is therefore exercised only on the root KVM host (`live_vm`); unit tests assert the
+resolution table, that the kwargs are assembled, and that the child `env` carries the build user's
+`HOME`/`USER` (not `/root`/`root`), via a fake runner.
 
 A `SandboxProvider` memoizes the resolution (and re-raises the cached fail-closed error) so the
 several seams that call `.get()` during one build resolve identically and fail-closed exactly once.
@@ -101,8 +133,15 @@ The two source-trust tiers (ADR-0214 §4) drive the handoff:
   tree's read permissions) with `rsync --chown`, handing the materialized tree to the build user
   for the demoted `make`.
 
-`merge_config` writes the kdump fragment file as root into the build-user-owned workspace (root may
-write anywhere); the demoted `merge_config.sh`/`make` only read it, so ownership is irrelevant.
+`merge_config` writes the kdump fragment file as root into the build-user-owned workspace, then the
+demoted `merge_config.sh` reads it. **Ownership is not irrelevant here:** `Path.write_bytes` honors
+the worker's umask, so on a hardened root worker (umask `0o077`) the fragment lands `0600
+root:root` and the demoted `merge_config.sh` cannot read it — the build would break on exactly the
+deployment this feature targets. So after writing the fragment, `merge_config` **`chown`s it to the
+build user** (when a sandbox is active), the same handoff the workspace tree gets. The general rule:
+any file the root worker writes into the build-user-owned workspace that a demoted step must read is
+`chown`ed (or written demoted); the fragment is the one such file today, and a test asserts it is
+build-user-readable.
 
 ### Code organization
 
@@ -113,7 +152,7 @@ write anywhere); the demoted `merge_config.sh`/`make` only read it, so ownership
   `subprocess.run` through `sandbox_run`. `real_read_build_id` (objcopy) is unchanged.
 - `workspace.py`: `real_checkout`, `make_checkout`, `clone_tree`, `sync_tree`, `merge_config`,
   `apply_patch`, `_run_git` gain the optional `sandbox`; `clone_tree`/`sync_tree`/modules-staging
-  do the `chown` handoff.
+  do the `chown` handoff, and `merge_config` `chown`s the written fragment file to the build user.
 - `local_libvirt/build.py`: `from_env` builds the `SandboxProvider` and threads it into
   `make_checkout` and the run-step seam closures; `_maybe_publish_modules` `chown`s the staging
   root when sandboxed. `over_transport` passes no sandbox (remote host).
@@ -136,14 +175,18 @@ TDD; the real setuid demotion stays `live_vm` (needs root on the KVM host). Unit
 resolution + kwarg-assembly boundary with `os.geteuid`/`pwd` patched and a fake subprocess runner:
 
 - **Resolution table:** euid ≠ 0 → `None`; euid == 0 + unset → `CONFIGURATION_ERROR` naming the
-  setting; euid == 0 + unknown account → `CONFIGURATION_ERROR`; euid == 0 + uid-0 account →
-  `CONFIGURATION_ERROR`; euid == 0 + valid account → a `BuildSandbox` with the resolved
-  uid/gid/groups.
+  setting; euid == 0 + unknown account (`getpwnam` `KeyError`) → `CONFIGURATION_ERROR`;
+  euid == 0 + uid-0 account → `CONFIGURATION_ERROR`; euid == 0 + valid account → a `BuildSandbox`
+  with the resolved uid/gid/groups/home.
 - **`SandboxProvider` memoization:** one resolution across repeated `.get()`; the fail-closed error
   re-raises on every call (so a later seam fails closed too, not silently None).
-- **`sandbox_run` kwarg assembly:** with a sandbox, the captured `subprocess.run` call carries
-  `user=/group=/extra_groups=/umask=`; with `None`, none of those kwargs are present (a non-root
-  run must not request a setuid).
+- **`sandbox_run` kwarg + env assembly:** with a sandbox, the captured `subprocess.run` call
+  carries `user=/group=/extra_groups=/umask=` and a child `env` whose `HOME`/`USER`/`LOGNAME` are
+  the build user's (not `/root`/`root`), even when the caller passes its own hardened `env`; with
+  `None`, none of those kwargs are present and `env` is untouched (a non-root run must not request a
+  setuid).
+- **Fragment readability:** under a sandbox, `merge_config` leaves the kdump fragment file
+  owned by / readable by the resolved build uid (regression test for the umask-0o077 break).
 - **Demotion wiring:** each run-step / checkout seam routes through `sandbox_run` with the resolved
   sandbox (fake runner captures the sandbox it was handed); the warm-tree `rsync` argv gains
   `--chown=uid:gid` under a sandbox and omits it without; `clone_tree` `chown`s the empty dir before

@@ -6,7 +6,7 @@
 - **Builds on (does not supersede):** [ADR-0162](0162-local-git-build-lane.md) (the
   worker-local git-clone lane this fences), [ADR-0101](0101-local-libvirt-remote-build-host.md)
   (the worker-local builder/checkout seam), [ADR-0029](0029-build-plane-local-make.md) (the
-  `make` build), [ADR-0204](0204-install-staging-writable.md) (the operator-prereq /
+  `make` build), [ADR-0204](0204-install-staging-unwritable-config-error.md) (the operator-prereq /
   `CONFIGURATION_ERROR`-at-build-time pattern for a root-owned staging parent),
   [ADR-0019](0019-tool-response-envelope.md) (error taxonomy).
 - **Spec:** [`../design/root-build-privilege-drop.md`](../design/root-build-privilege-drop.md)
@@ -32,8 +32,10 @@ at all. Spawning a root-context build of untrusted source should not be implicit
 source as root.** The worker keeps root only for the libvirt/libguestfs/`kexec`/console
 operations that require it.
 
-1. **New worker setting `KDIVE_BUILD_USER`** (group `build`, processes `{worker}`): the
-   unprivileged account (name or numeric uid) the local build lane drops to. Empty/unset is the
+1. **New worker setting `KDIVE_BUILD_USER`** (group `build`, processes `{worker}`): the name of an
+   unprivileged **passwd account** the local build lane drops to. It must be a real account (a bare
+   numeric uid is not accepted — the account is the one source of uid, primary gid, supplementary
+   groups via `os.getgrouplist`, and the home directory the demoted child needs). Empty/unset is the
    deny-by-default posture.
 
 2. **Resolve a build sandbox once per build, lazily, fail-closed.** At build time the worker
@@ -56,7 +58,11 @@ operations that require it.
 3. **Demote the subprocesses that execute untrusted code, by spawning them with
    `user=/group=/extra_groups=/umask=`** (Python's child-side setuid/setgid; passed only when a
    sandbox is active, i.e. only when root): the git clone (init/fetch/checkout), `make defconfig`,
-   `merge_config.sh`, `make olddefconfig`, `make`, `make modules_install`, and `git apply`.
+   `merge_config.sh`, `make olddefconfig`, `make`, `make modules_install`, and `git apply`. Because
+   `user=/group=` change the uid/gid but **not** the environment, the demoted child's `env` is
+   rebased onto the build user (`HOME`, `USER`, `LOGNAME`, dropped `XDG_*`) so no demoted tool
+   resolves `$HOME` to `/root`; a call site's own hardened `env` (the git invocations) is layered on
+   top, not discarded.
 
 4. **Hand the workspace to the build user before demoted writes**, per the two source-trust tiers:
    - **git lane (untrusted remote):** the empty per-run workspace dir is created by the worker
@@ -68,6 +74,11 @@ operations that require it.
      `make` that follows.
    - **modules staging:** the `mkdtemp` `INSTALL_MOD_PATH` root is `chown`ed to the build user
      before the demoted `make modules_install`.
+   - **the kdump fragment file:** `merge_config` writes it as root (its mode follows the worker
+     umask, so a hardened `0o077` worker would leave it `0600 root:root`, unreadable by the demoted
+     `merge_config.sh`), then `chown`s it to the build user. The general rule is that any file the
+     root worker writes into the build-user-owned workspace that a demoted step must read is
+     `chown`ed.
 
 5. **`objcopy` (build-id extraction) stays root.** It is a trusted binutils invocation doing a
    bounded read of the build-user-owned `vmlinux` into a worker-private temp file — not an
@@ -87,6 +98,9 @@ operations that require it.
   (`o+x`) by the build user, and the warm tree / patch refs must be readable by it. A missing
   prerequisite surfaces as a categorized build failure, not a silent root build.
 - A non-root worker (developer laptop, CI) sees no behavior change and needs no new configuration.
+- The control is observable: the build logs the demotion target (`user_name`/uid/gid) when it
+  demotes and logs the skip when euid ≠ 0, so "ran unprivileged" and "silently bypassed" are
+  distinguishable from the worker log; the fail-closed path is already a visible failed `BUILD` job.
 - The sandbox is a single value object threaded through the worker-local checkout + run-step
   seams; the demotion kwargs are passed only when root, so a non-root unit run never hits the
   setuid path (the real demotion is exercised under the `live_vm` gate on the KVM host).
