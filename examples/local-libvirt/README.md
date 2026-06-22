@@ -128,6 +128,7 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
 | `KDIVE_TOKEN_TTL` | `43200` (12h) | Lifetime in seconds of the token `mint-token.sh` issues. Minimum `1`; no enforced maximum. |
 | `KDIVE_STACK_PID_FILE` / `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack.pid` / `…/local-stack-logs` | Where `up.sh` records the process pids and writes per-process logs. |
+| `KDIVE_SYSTEMS_TOML` | `~/.config/kdive/systems.toml` | Optional declarative inventory the reconciler loads. Absent by default (a quiet no-op) — see [Optional inventory](#optional-inventory-systemstoml). The default is CWD-independent; set this to point at a file elsewhere. |
 
 The pid file and logs live under the XDG state dir (`$XDG_STATE_HOME`, default
 `~/.local/state/kdive`) — the same place the `kdive login` token cache lives — not inside
@@ -135,6 +136,72 @@ the repo. Set `XDG_STATE_HOME`, or the two `KDIVE_STACK_*` variables, to relocat
 
 If you change `KDIVE_HTTP_HOST`/`KDIVE_HTTP_PORT` from `127.0.0.1:8000`, edit the `url` in
 the installed `~/src/linux/.mcp.json` to match.
+
+## Optional inventory (`systems.toml`)
+
+This example needs **no** inventory file: host discovery alone makes your local libvirt
+host allocatable, and `KDIVE_GUEST_IMAGE` is enough to boot a System. By default
+`KDIVE_SYSTEMS_TOML` is unset, so the reconciler looks for
+`~/.config/kdive/systems.toml`; when that file is absent it is a quiet no-op. The path is
+resolved independently of the working directory — there is no repo-relative
+`./systems.toml` fallback — so the stack behaves the same no matter where you launch it.
+
+If you want to declaratively pin host config, prices, or build fragments, create
+`~/.config/kdive/systems.toml`. The file must start with `schema_version = 2`. The
+sections relevant to this **local-libvirt** example are below; the repo-root
+[`systems.toml.example`](../../systems.toml.example) is the full annotated reference.
+
+```toml
+schema_version = 2
+
+# Optional overlay onto the discovered local host. Discovery already registers the host
+# and probes its size, so this block is optional — it only overlays config (name,
+# cost_class, optional pool / concurrent_allocation_cap). It never overrides the
+# discovered vcpus / memory_mb / PCIe fields.
+[[local_libvirt]]
+name = "workstation"
+host_uri = "qemu:///system"
+cost_class = "local"
+# concurrent_allocation_cap = 1   # optional; how many allocations this host serves at once
+# pool = "default"                # optional; group interchangeable hosts for by-pool allocation
+
+# Catalog a local-libvirt rootfs declaratively. This is the alternative to the
+# KDIVE_GUEST_IMAGE test-convenience env (the two are orthogonal — the env still works).
+# `source` is exactly one of s3 | build | staged; an `s3` image is shown here.
+[[image]]
+provider = "local-libvirt"
+name = "fedora-kdive-ready-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
+# digest = "sha256:…"   # uncomment once published to mark the row `registered`
+
+# Price the `local` cost class (provider-agnostic). A host whose cost_class has no
+# coefficient is admitted but denied every allocation (configuration_error).
+[[cost_class]]
+name = "local"
+coeff = "1.0"
+
+# Provider-agnostic kernel-config fragment, applied to local builds. The file is
+# authoritative — a declared fragment overrides a live `buildconfig.set`.
+[[build_config]]
+name = "kdump"
+description = "kdump/debuginfo kernel-config fragment"
+content = """
+CONFIG_KEXEC=y
+CONFIG_CRASH_DUMP=y
+CONFIG_DEBUG_INFO=y
+"""
+```
+
+Place the file at the XDG default `~/.config/kdive/systems.toml` (or set
+`KDIVE_SYSTEMS_TOML` to another path). With no `[[remote_libvirt]]` blocks, the stack
+stays local-only.
 
 ## Security notes
 
