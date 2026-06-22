@@ -219,11 +219,21 @@ def sandbox_run(
 
 - [ ] **Step 5: Run the tests.** Run: `uv run python -m pytest tests/providers/shared/build_host/test_sandbox.py tests/config/test_manifest_completeness.py -q` → Expected: PASS.
 
-- [ ] **Step 6: Guardrails + commit.** Run `just lint && just type`. Then:
+- [ ] **Step 6: Regenerate the config reference.** Registering a setting makes the committed config reference stale (the `just config-docs-check` CI gate), so regenerate it in the same commit that adds the setting (keeps every commit config-doc-consistent — do NOT defer this to Task 6). Run:
+
+```bash
+just config-docs            # regenerate docs/reference/config.md (or wherever it writes) from the registry
+just config-docs-check && just env-docs-check && just config-guard   # all must pass
+```
+
+`git status` shows the regenerated reference file; stage exactly that path in Step 7.
+
+- [ ] **Step 7: Guardrails + commit.** Run `just lint && just type`. Then (stage the regenerated config-reference path `just config-docs` produced, shown by `git status`):
 
 ```bash
 git add src/kdive/config/core_settings.py src/kdive/providers/shared/build_host/sandbox.py \
-  tests/providers/shared/build_host/test_sandbox.py tests/config/test_manifest_completeness.py
+  tests/providers/shared/build_host/test_sandbox.py tests/config/test_manifest_completeness.py \
+  docs/reference/config.md   # adjust to the actual regenerated path from Step 6
 git commit -m "feat(build): add KDIVE_BUILD_USER + BuildSandbox demotion primitive"
 ```
 
@@ -856,6 +866,8 @@ def make_checkout(
     return _checkout
 ```
 
+> **Other `make_checkout` caller — leave it alone.** `src/kdive/providers/remote_libvirt/build.py:160` also calls `make_checkout(kernel_src, secret_registry)`. The new `sandbox_provider` is keyword-only with a `None` default, so that call is unaffected and correctly gets no demotion — remote builds run on an isolated host (ADR-0101), out of scope. Do **not** thread a provider into the remote caller. (The existing direct callers of `clone_tree`/`sync_tree`/`merge_config`/`apply_patch` in `tests/providers/build_host/test_transport_seams.py` and `test_build.py` are likewise unaffected by the `sandbox=None` defaults.)
+
 - [ ] **Step 4: Run the tests + existing workspace tests.** Run: `uv run python -m pytest tests/providers/shared/build_host/test_workspace_sandbox.py "tests/providers/shared" -q` → Expected: PASS (new) and all pre-existing workspace/clone tests stay green (default `sandbox=None` → unchanged behavior).
 
 - [ ] **Step 5: Guardrails + commit.** `just lint && just type`. Then:
@@ -879,28 +891,29 @@ git commit -m "feat(build): demote checkout + hand workspace to the build user"
 
 - [ ] **Step 1: Write the failing test.** In `tests/providers/local_libvirt/test_build.py` add:
 
+This test drives the real `make_checkout` checkout closure (which Task 4 gave a `sandbox_provider`) and asserts it fails closed before any subprocess. It reuses the test module's existing helpers — `_profile()` (line 81) and `SecretRegistry` (already imported, used at line 198); `tmp_path` is the pytest fixture; `pytest` is already imported in the module.
+
 ```python
-def test_fail_closed_checkout_when_root_without_build_user(monkeypatch) -> None:
+def test_fail_closed_checkout_when_root_without_build_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # A root worker with no KDIVE_BUILD_USER must refuse the local build lane before any subprocess.
+    import uuid
+
+    from kdive.domain.errors import CategorizedError, ErrorCategory
     from kdive.providers.shared.build_host import sandbox as sb
     from kdive.providers.shared.build_host.workspaces import workspace as ws
 
     monkeypatch.setattr(sb.os, "geteuid", lambda: 0)
     monkeypatch.setattr(sb.config, "get", lambda s: None)
     provider = sb.resolve_build_sandbox_provider()
-    checkout = ws.make_checkout("/warm", sb_registry(), sandbox_provider=provider)  # see helper note
-    import uuid
-
-    from kdive.domain.errors import CategorizedError, ErrorCategory
-
+    checkout = ws.make_checkout("/warm", SecretRegistry(), sandbox_provider=provider)
     with pytest.raises(CategorizedError) as exc:
-        checkout(uuid.uuid4(), _server_profile(), tmp_workspace(), b"frag")
+        checkout(uuid.uuid4(), _profile(), tmp_path / "run", b"frag")
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 ```
 
-> Implementer note: reuse the test module's existing helpers for a `SecretRegistry`, a `ServerBuildProfile`, and a temp workspace (named `sb_registry()`/`_server_profile()`/`tmp_workspace()` as placeholders — match the real fixture names already in `test_build.py`). The assertion that matters: the checkout closure raises `CONFIGURATION_ERROR` before spawning anything.
-
-Run: `uv run python -m pytest tests/providers/local_libvirt/test_build.py::test_fail_closed_checkout_when_root_without_build_user -q` → Expected: FAIL (`make_checkout` has no `sandbox_provider` — until Task 4 merged it will already exist; the new assertion is the failing target).
+Run: `uv run python -m pytest tests/providers/local_libvirt/test_build.py::test_fail_closed_checkout_when_root_without_build_user -q` → Expected: FAIL until Task 4's `make_checkout(..., sandbox_provider=...)` is on the branch; with Task 4 merged the closure resolves the provider and raises `CONFIGURATION_ERROR` (the assertion target). If `make_checkout` does not accept `sandbox_provider`, Task 4 was not completed first.
 
 - [ ] **Step 2: Wire the provider in `from_env`.** In `build.py`, add imports:
 
@@ -987,32 +1000,31 @@ git commit -m "feat(build): wire build sandbox into local builder from_env"
 
 **Files:**
 - Modify: `docs/operating/build-source-staging.md`
-- Regenerate: config reference (`just config-docs`) + packaged doc snapshot (`just resources-docs`)
+- Regenerate: packaged doc snapshot (`just resources-docs`)
 
-**Interfaces:** none (docs only).
+**Interfaces:** none (docs only). The config reference was already regenerated in Task 1 (where the setting was added); this task is the operator prose + the packaged resource snapshot only.
 
 - [ ] **Step 1: Document the setting + prereqs.** In `docs/operating/build-source-staging.md`, add a section describing: `KDIVE_BUILD_USER` (name of an unprivileged account); the root-worker behavior (a root worker demotes every build subprocess to that account; with no build user it fails the BUILD job closed with a `CONFIGURATION_ERROR`); and the two operator prerequisites — the build-workspace parent (`KDIVE_BUILD_WORKSPACE`, default `/var/lib/kdive/build`) must be traversable (`o+x`) by the build user, and the warm tree (`KDIVE_KERNEL_SRC`) and any patch refs must be readable by it. Keep prose plain (no "robust"/"comprehensive"/etc.). Cross-reference ADR-0214.
 
-- [ ] **Step 2: Regenerate the generated docs.** Run:
+- [ ] **Step 2: Regenerate the packaged doc snapshot.** Run:
 
 ```bash
-just config-docs        # regenerate the config reference from the registry
-just resources-docs     # regenerate the packaged MCP doc-resource snapshot
+just resources-docs     # regenerate the packaged MCP doc-resource snapshot from canonical docs/
 ```
 
 - [ ] **Step 3: Verify the doc/config gates.** Run:
 
 ```bash
-just config-docs-check && just config-guard && just env-docs-check && just resources-docs-check \
-  && just docs-links && just docs-paths
+just resources-docs-check && just docs-links && just docs-paths \
+  && just config-docs-check && just env-docs-check
 ```
 
-Expected: all pass.
+Expected: all pass (config-docs-check is already green from Task 1).
 
-- [ ] **Step 4: Commit.**
+- [ ] **Step 4: Commit.** Stage the prose doc + the regenerated snapshot path `git status` shows:
 
 ```bash
-git add docs/operating/build-source-staging.md src/kdive/mcp/resources/_content/ docs/reference/
+git add docs/operating/build-source-staging.md src/kdive/mcp/resources/_content/build-source-staging.md
 git commit -m "docs(build): document KDIVE_BUILD_USER root-build privilege drop"
 ```
 
@@ -1027,6 +1039,6 @@ git commit -m "docs(build): document KDIVE_BUILD_USER root-build privilege drop"
 - Error contract rows → Task 2 (`CONFIGURATION_ERROR` cases) + Task 4 (existing categories for mkdir/rsync).
 - Testing bullets (resolution table, memoization, kwarg+env assembly, demotion wiring, fail-closed, no-op-when-unprivileged) → Tasks 1-5 tests.
 
-**Placeholder scan:** The only soft spot is the Task 5 fixture names (`sb_registry()/_server_profile()/tmp_workspace()`), flagged with an explicit implementer note to match the real `test_build.py` fixtures — acceptable because the surrounding test module owns those names.
+**Placeholder scan:** The Task 5 test now uses the real `test_build.py` fixtures (`_profile()`, `SecretRegistry`, `tmp_path`) — no placeholder helper names remain. Config-doc regeneration is folded into Task 1 (the commit that adds the setting), so no commit is config-doc-stale. The second `make_checkout` caller (`remote_libvirt`) is called out as an intentional no-op.
 
 **Type consistency:** `sandbox: BuildSandbox | None` default `None` is uniform across `execution.py` and `workspace.py`; `make_checkout`/`LocalLibvirtBuild.__init__` take `sandbox_provider: SandboxProvider | None`; `SandboxProvider.get() -> BuildSandbox | None`; `BuildSandbox.own(path)` and `.run(argv, *, env=None, **kwargs)` names match every call site. `sandbox_run(sandbox, argv, **kwargs)` signature is identical at all call sites.
