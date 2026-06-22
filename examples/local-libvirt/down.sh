@@ -14,13 +14,29 @@ example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${example_dir}/env.sh"
 pid_file="${KDIVE_STACK_PID_FILE}"
 
-# True only when pid is alive AND its command line is still a `python -m kdive` process.
-# Reads /proc/<pid>/cmdline (NUL-separated) without sudo; an unreadable or non-matching
-# cmdline (gone, recycled, or hidden by hidepid) reads as "not ours" and is left alone.
-is_kdive_proc() {
-  local pid="$1" cmdline
-  cmdline=$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null) || return 1
-  [[ "${cmdline}" == *"-m kdive "* ]]
+# Can this (non-root) user read root pids' /proc entries directly? On a default /proc, yes;
+# under `hidepid=2` a non-root user cannot see a root pid at all. Probe once against init
+# (pid 1, root-owned): if its cmdline is unreadable, fall back to a privileged read so the
+# kdive identity check still works under hidepid. Probed once so the common path takes no
+# extra sudo.
+if tr '\0' ' ' </proc/1/cmdline >/dev/null 2>&1; then
+  need_sudo_proc=0
+else
+  need_sudo_proc=1
+fi
+
+# Echo a pid's command line (NUL→space), or nothing when the pid is gone. `cat … 2>/dev/null`
+# (not a `<` redirect) so a gone pid's open error is swallowed by cat's own stderr rather than
+# leaking a shell redirection error. The trailing `|| true` forces a 0 exit: with `pipefail`
+# set, cat's failure on a gone pid would otherwise propagate and abort `cmd=$(read_cmdline …)`
+# under `set -e`. Empty output == gone, so callers test the string.
+read_cmdline() {
+  local pid="$1"
+  if ((need_sudo_proc)); then
+    sudo cat "/proc/${pid}/cmdline" 2>/dev/null | tr '\0' ' ' || true
+  else
+    cat "/proc/${pid}/cmdline" 2>/dev/null | tr '\0' ' ' || true
+  fi
 }
 
 if [[ ! -f "${pid_file}" ]]; then
@@ -42,9 +58,10 @@ fi
 # abort the loop under `set -e`.
 recycled=()
 for pid in "${pids[@]}"; do
-  if is_kdive_proc "${pid}"; then
+  cmd=$(read_cmdline "${pid}")
+  if [[ "${cmd}" == *"-m kdive "* ]]; then
     sudo kill "${pid}" || true
-  elif [[ -d /proc/${pid} ]]; then
+  elif [[ -n "${cmd}" ]]; then
     recycled+=("${pid}")
   fi
 done
@@ -54,10 +71,12 @@ sleep 2
 # Round 2: SIGKILL any kdive process that ignored the term, then collect real survivors.
 survivors=()
 for pid in "${pids[@]}"; do
-  if is_kdive_proc "${pid}"; then
+  cmd=$(read_cmdline "${pid}")
+  if [[ "${cmd}" == *"-m kdive "* ]]; then
     sudo kill -9 "${pid}" || true
     sleep 1
-    if is_kdive_proc "${pid}"; then
+    cmd=$(read_cmdline "${pid}")
+    if [[ "${cmd}" == *"-m kdive "* ]]; then
       survivors+=("${pid}")
     fi
   fi
