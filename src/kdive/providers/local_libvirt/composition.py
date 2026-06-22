@@ -113,10 +113,12 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         live_introspector=live_introspector,
         # ADR-0208: advertise the core-producing capture methods local can actually fetch a vmcore
         # for — KDUMP (host-side overlay harvest, #115/ADR-0203) and HOST_DUMP (libvirt domain core
-        # dump, B4/ADR-0211). B2 (#676/ADR-0210 §2) wired offline drgn introspection, so
-        # introspection advertises {offline-vmcore}; the debug-transport set (B1) and the live
-        # introspection mode (B3) stay empty until those planes land.
+        # dump, B4/ADR-0211); the gdbstub debug transport B1 resolves from the live domain XML
+        # (#675/ADR-0210) — drgn-live stays out (needs session networking, #697); and the
+        # offline-vmcore introspection mode B2 wired (#676/ADR-0210 §2). The live introspection
+        # mode (B3) stays empty until that plane lands.
         supported_capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}),
+        supported_debug_transports=frozenset({"gdbstub"}),
         supported_introspection=frozenset({"offline-vmcore"}),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,

@@ -396,6 +396,42 @@ def test_start_session_unsupported_transport_is_capability_unsupported(migrated_
     asyncio.run(_run())
 
 
+def test_start_session_admits_gdbstub_but_rejects_drgn_live_on_gdbstub_only_provider(
+    migrated_url: str,
+) -> None:
+    # B1 (#675): local advertises {"gdbstub"} only — admission opens a gdbstub session but
+    # fail-fasts drgn-live with capability_unsupported before any resolver/transport runs (#697).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, sys_id)
+            conn_fake = _FakeConnector()
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
+                provider_resolver(
+                    connector=conn_fake,
+                    profile_policy=_PROFILE_POLICY,
+                    supported_debug_transports=frozenset({"gdbstub"}),
+                ),
+                runtime_resolver=None,
+                secret_registry=SecretRegistry(),
+            )
+            admitted = await handlers.start_session(
+                pool, _ctx(), run_id=run_id, transport="gdbstub"
+            )
+            rejected = await handlers.start_session(
+                pool, _ctx(), run_id=run_id, transport="drgn-live"
+            )
+        assert admitted.status == "live"  # gdbstub admitted, transport opened
+        assert ("kdive-x", "gdbstub") in conn_fake.opened
+        assert rejected.status == "error"
+        assert rejected.data["reason"] == "capability_unsupported"
+        assert rejected.data["capability"] == "debug_transport:drgn-live"
+        assert rejected.data["supported"] == ["gdbstub"]
+
+    asyncio.run(_run())
+
+
 def test_second_start_session_is_transport_conflict(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

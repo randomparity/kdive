@@ -114,7 +114,8 @@ def register(
                 "real booted Run."
             ),
             providers=(
-                "local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a."
+                "local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); "
+                "remote-libvirt: implemented; fault-inject: n/a."
             ),
         ),
     )
@@ -145,7 +146,8 @@ def register(
                 "a real booted Run."
             ),
             providers=(
-                "local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a."
+                "local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); "
+                "remote-libvirt: implemented; fault-inject: n/a."
             ),
         ),
     )

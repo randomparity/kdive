@@ -46,7 +46,8 @@ shape, scoped to loopback.
 The `drgn-live` transport realizes over a loopback-forwarded **guest SSH port** (ADR-0039). That
 requires a session-networking capability that does not exist on `main`: host port-forward
 (hostfwd/passt) rendering, a guest image running `sshd`, and credential plumbing. That is a
-separate feature, filed as a follow-up issue (recorded in the PR body). This spec wires
+separate feature, filed as follow-up [#697](https://github.com/randomparity/kdive/issues/697).
+This spec wires
 **gdbstub only** and leaves `drgn-live` **out** of `supported_debug_transports`, so ADR-0209
 admission fail-fasts a `drgn-live` request with `capability_unsupported` **before** it reaches
 `_real_resolve_ssh_endpoint`. That stub is rewritten to return an honest
@@ -165,7 +166,7 @@ pure and unit-tested with a fake libvirt connection. `_real_resolve_endpoint` no
 ### 4. `_real_resolve_ssh_endpoint`: honest unsupported, deferred
 
 Rewrite the stub to raise `CONFIGURATION_ERROR` ("drgn-live is not supported on local-libvirt:
-no session SSH transport (deferred, see <follow-up issue>)"). It is unreachable in production
+no session SSH transport (deferred, see #697)"). It is unreachable in production
 (admission rejects `drgn-live` first) but the honest category matters if it is ever reached
 directly.
 
