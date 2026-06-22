@@ -47,7 +47,7 @@ from kdive.inventory.reconcile_coefficients import reconcile_coefficients
 from kdive.inventory.reconcile_images import reconcile_images
 from kdive.inventory.reconcile_resources import reconcile_resources
 from kdive.providers.infra.reaping import NullReaper
-from kdive.reconciler.inventory import InventoryReconcilePass
+from kdive.reconciler.inventory import InventoryReconcilePass, _cwd_inventory_shadowed
 from kdive.reconciler.loop import ReconcileConfig, reconcile_once
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
@@ -822,6 +822,80 @@ def test_inventory_pass_repairs_drift_on_unchanged_file(
             assert repaired == 1  # the deleted config row is re-created (drift repaired)
             async with await _connect(migrated_url) as check:
                 assert await _exists(check, "drift-base")
+
+    asyncio.run(_run())
+
+
+# --- loop pass: CWD-shadow upgrade warning (ADR-0112 fallback removal) ----------------
+
+
+def test_cwd_inventory_shadowed_detects_unloaded_repo_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # var unset + XDG default absent + ./systems.toml present in CWD == the silent-drop-off case.
+    monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "systems.toml").write_text("schema_version = 2\n")
+    absent_default = tmp_path / "xdg" / "kdive" / "systems.toml"
+    assert _cwd_inventory_shadowed(absent_default) is True
+
+
+def test_cwd_inventory_shadowed_false_when_var_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An explicit KDIVE_SYSTEMS_TOML means the operator chose the path; nothing is shadowed.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "systems.toml").write_text("schema_version = 2\n")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(tmp_path / "elsewhere.toml"))
+    assert _cwd_inventory_shadowed(tmp_path / "xdg" / "systems.toml") is False
+
+
+def test_cwd_inventory_shadowed_false_when_default_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The resolved default exists, so it IS being loaded; a CWD file is irrelevant.
+    monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "systems.toml").write_text("schema_version = 2\n")
+    present_default = tmp_path / "default.toml"
+    present_default.write_text("schema_version = 2\n")
+    assert _cwd_inventory_shadowed(present_default) is False
+
+
+def test_cwd_inventory_shadowed_false_when_no_cwd_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # No ./systems.toml at all: the normal pre-config state, not an upgrade regression.
+    monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert _cwd_inventory_shadowed(tmp_path / "xdg" / "systems.toml") is False
+
+
+def test_inventory_pass_warns_once_about_shadowed_cwd_file(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The shadowed-CWD warning must fire exactly once across passes. This is the regression
+    # guard for the reset()/warn-once interaction: _load() calls reset() every pass while the
+    # file is absent (the shadow condition), so a flag cleared in reset() would re-warn each
+    # loop. KDIVE_SYSTEMS_TOML unset + XDG default absent (autouse sandbox) + ./systems.toml in
+    # CWD == shadowed; the CWD file is intentionally NOT loaded, so the pass is a quiet no-op.
+    async def _run() -> None:
+        monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "systems.toml").write_text("schema_version = 2\n")
+        store = _FakeImageStore()
+        pass_ = InventoryReconcilePass()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with caplog.at_level("WARNING", logger="kdive.reconciler.inventory"):
+                async with pool.connection() as conn:
+                    assert await pass_.run(conn, store) == 0  # shadowed file is not loaded
+                async with pool.connection() as conn:
+                    assert await pass_.run(conn, store) == 0
+        warnings = [r for r in caplog.records if "no longer auto-loaded" in r.getMessage()]
+        assert len(warnings) == 1
 
     asyncio.run(_run())
 

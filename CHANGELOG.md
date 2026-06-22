@@ -205,6 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CONFIGURATION_ERROR` instead of silently writing to the per-user XDG default the
   reconciler never reads (which made `export_systems_toml(persist=true)` report success
   while the data was lost).
+- Warn once when a repo-root `./systems.toml` exists but `KDIVE_SYSTEMS_TOML` is unset and
+  the XDG default is absent, so an upgrade no longer silently reconciles nothing (ADR-0112).
 - Make remote_connection generic over the connection slice
 - Move RSP codec to providers/debug_common (ADR-0083)
 - Move drgn report helpers to providers/debug_common (ADR-0083)

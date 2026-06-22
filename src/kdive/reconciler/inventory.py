@@ -39,6 +39,8 @@ from pathlib import Path
 
 from psycopg import AsyncConnection
 
+import kdive.config as config
+from kdive.config.core_settings import SYSTEMS_TOML
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
@@ -54,6 +56,20 @@ def _changes(diff: ReconcileDiff) -> int:
     return len(diff.created) + len(diff.updated) + len(diff.pruned) + len(diff.cordoned)
 
 
+def _cwd_inventory_shadowed(resolved: Path) -> bool:
+    """True when a repo-relative ``./systems.toml`` is present but no longer auto-loaded.
+
+    ADR-0112 removed the working-directory-relative inventory fallback: the path is now
+    ``KDIVE_SYSTEMS_TOML`` else the XDG default. An operator who relied on a repo-root
+    ``./systems.toml`` upgrades into a silent no-op. This detects exactly that case — the
+    var is unset, the XDG default does not exist, and a ``./systems.toml`` sits in the CWD —
+    so the reconciler can warn once instead of reconciling nothing in silence.
+    """
+    return (
+        config.get(SYSTEMS_TOML) is None and not resolved.exists() and Path("systems.toml").exists()
+    )
+
+
 class InventoryReconcilePass:
     """A stateful inventory reconcile pass that caches the last-good parse by file hash.
 
@@ -66,6 +82,11 @@ class InventoryReconcilePass:
     def __init__(self) -> None:
         self._cached_hash: str | None = None
         self._cached_doc: InventoryDoc | None = None
+        # Process-lifetime, NOT parse-cache state: a CWD-shadow warning is emitted at most once
+        # per instance. Deliberately kept out of reset() — reset() fires every pass while the
+        # file is absent (the shadow condition itself), so clearing it there would re-warn each
+        # loop and defeat the once-only guard.
+        self._cwd_shadow_warned = False
 
     def reset(self) -> None:
         self._cached_hash = None
@@ -93,6 +114,13 @@ class InventoryReconcilePass:
                 so the loop records this pass as failed without aborting siblings).
         """
         path = systems_toml_path()
+        if not self._cwd_shadow_warned and _cwd_inventory_shadowed(path):
+            _log.warning(
+                "inventory: ./systems.toml exists but KDIVE_SYSTEMS_TOML is unset; it is no "
+                "longer auto-loaded (ADR-0112). Move it to %s or set KDIVE_SYSTEMS_TOML.",
+                path,
+            )
+            self._cwd_shadow_warned = True
         doc = self._load(path)
         if doc is None:
             return 0
