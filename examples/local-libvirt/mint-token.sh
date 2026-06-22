@@ -14,6 +14,10 @@
 # source of truth in kdive.cli.login. Its `iss` matches what the host processes validate
 # against, so no kubectl/port-forward dance is needed (unlike the Helm demo-token.sh).
 #
+# The token expires after KDIVE_TOKEN_TTL seconds (env.sh default 12h). The MCP client only
+# re-reads ${KDIVE_TOKEN} when it reconnects, so when a token expires, re-run this and
+# reconnect the kdive server in your client.
+#
 # DEV ONLY: the bundled mock issuer mints a valid token for any caller. Never run this
 # against a real deployment; production supplies its own OIDC token via $KDIVE_TOKEN.
 set -euo pipefail
@@ -22,17 +26,18 @@ example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=examples/local-libvirt/env.sh disable=SC1091
 source "${example_dir}/env.sh"
 
-exec "${KDIVE_PYTHON}" - "${KDIVE_PROJECT}" <<'PY'
+exec "${KDIVE_PYTHON}" - "${KDIVE_PROJECT}" "${KDIVE_TOKEN_TTL}" <<'PY'
 import sys
 
 from kdive.cli.login import mint_local_token
 
-project = sys.argv[1]
+project, ttl_seconds = sys.argv[1], int(sys.argv[2])
 print(
     mint_local_token(
         project=project,
         role="admin",
         platform_roles=["platform_admin", "platform_operator"],
+        ttl_seconds=ttl_seconds,
     )
 )
 PY

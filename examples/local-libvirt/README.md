@@ -62,7 +62,22 @@ examples/local-libvirt/down.sh
 docker compose down -v    # from the repo root, to remove the backends + volumes
 ```
 
-Tokens are short-lived; re-run step 2 and reconnect the client when one expires.
+## Tokens
+
+`mint-token.sh` mints a bearer token from the mock-OIDC issuer carrying
+`roles={KDIVE_PROJECT: admin}` plus `platform_admin`/`platform_operator`.
+
+- **Lifetime.** The token expires after `KDIVE_TOKEN_TTL` seconds (default `43200` = 12h).
+  The mock issuer's own default is one hour; this example overrides it because a
+  build→boot→debug→capture session routinely runs longer. Set `KDIVE_TOKEN_TTL` before
+  minting to change it.
+- **Refreshing in a running session.** The installed `.mcp.json` carries
+  `Authorization: Bearer ${KDIVE_TOKEN}`, and your MCP client expands `${KDIVE_TOKEN}` from
+  its environment **once, when it connects** — it does not re-read the variable mid-session.
+  So re-exporting `KDIVE_TOKEN` alone does nothing to a live connection. To pick up a new
+  token (after expiry, or any time): re-run step 2 to export a fresh one, then **reconnect**
+  the `kdive` server in your client (in Claude Code: `/mcp` → reconnect, or restart). Once a
+  token expires, in-flight tool calls fail with `401` until you reconnect.
 
 ## How bring-up and teardown behave
 
@@ -99,6 +114,7 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_LIBVIRT_URI` | `qemu:///system` | libvirt connection the worker drives. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for `python -m kdive` and the processes. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
+| `KDIVE_TOKEN_TTL` | `43200` (12h) | Lifetime in seconds of the token `mint-token.sh` issues. |
 | `KDIVE_STACK_PID_FILE` / `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack.pid` / `…/local-stack-logs` | Where `up.sh` records the process pids and writes per-process logs. |
 
 The pid file and logs live under the XDG state dir (`$XDG_STATE_HOME`, default

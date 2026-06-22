@@ -69,6 +69,40 @@ def test_mint_local_token_omits_platform_roles_by_default(
 
     assert captured["roles"] == {"demo": "viewer"}
     assert "platform_roles" not in captured
+    assert "exp" not in captured
+
+
+def test_mint_local_token_sets_exp_from_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ttl_seconds`` overrides the issuer's default expiry with ``now + ttl_seconds``."""
+    import time
+
+    issuer = OidcIssuer(base_url="http://issuer.example/default", audience="kdive")
+    monkeypatch.setattr(login.OidcIssuer, "from_config", classmethod(lambda cls: issuer))
+    captured: dict[str, object] = {}
+
+    def _capture_code(got_issuer: OidcIssuer, claims: Mapping[str, object]) -> str:
+        captured.update(claims)
+        return "code"
+
+    monkeypatch.setattr(login, "_authorization_code", _capture_code)
+    monkeypatch.setattr(login, "_exchange_code", lambda got_issuer, code: "token")
+
+    before = time.time()
+    login.mint_local_token(project="local", ttl_seconds=43200)
+    after = time.time()
+
+    exp = captured["exp"]
+    assert isinstance(exp, int)
+    assert before + 43200 - 2 <= exp <= after + 43200 + 2
+
+
+def test_mint_local_token_rejects_nonpositive_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-positive ``ttl_seconds`` fails fast rather than minting an already-dead token."""
+    issuer = OidcIssuer(base_url="http://issuer.example/default", audience="kdive")
+    monkeypatch.setattr(login.OidcIssuer, "from_config", classmethod(lambda cls: issuer))
+
+    with pytest.raises(ValueError, match="ttl_seconds"):
+        login.mint_local_token(project="local", ttl_seconds=0)
 
 
 @pytest.mark.oidc_issuer

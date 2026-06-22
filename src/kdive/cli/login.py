@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -217,6 +218,7 @@ def mint_local_token(
     role: str = "admin",
     platform_roles: Sequence[str] | None = None,
     subject: str = "local-dev",
+    ttl_seconds: int | None = None,
 ) -> str:
     """Mint a *project-role* bearer token from the mock-OIDC issuer and return it.
 
@@ -235,9 +237,15 @@ def mint_local_token(
         platform_roles: Platform roles to encode, or ``None`` to omit the claim entirely
             (distinct from an empty list).
         subject: The token ``sub`` (default ``local-dev``).
+        ttl_seconds: Token lifetime in seconds. The mock issuer applies our claims after
+            its own default ``exp``, so an injected ``exp`` overrides the issuer default
+            (3600s); ``None`` keeps that 1-hour default. Must be positive when set.
 
     Returns:
         The minted access token.
+
+    Raises:
+        ValueError: ``ttl_seconds`` is set but not positive.
     """
     issuer = OidcIssuer.from_config()
     claims = _build_claims(
@@ -248,6 +256,10 @@ def mint_local_token(
         platform_roles=list(platform_roles) if platform_roles is not None else None,
         agent_session=None,
     )
+    if ttl_seconds is not None:
+        if ttl_seconds <= 0:
+            raise ValueError(f"ttl_seconds must be positive, got {ttl_seconds}")
+        claims["exp"] = int(time.time()) + ttl_seconds
     code = _authorization_code(issuer, claims)
     return _exchange_code(issuer, code)
 
