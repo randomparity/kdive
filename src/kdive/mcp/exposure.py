@@ -76,6 +76,9 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "accounting.report_all_projects": _PLAT_AUDITOR,
     "accounting.set_budget": _ADMIN,
     "accounting.set_quota": _ADMIN,
+    # reports
+    "reports.generate_granted_set": _VIEWER,
+    "reports.generate_all_projects": _PLAT_AUDITOR,
     # allocations
     "allocations.get": _VIEWER,
     "allocations.list": _VIEWER,

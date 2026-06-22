@@ -56,3 +56,14 @@ deploy/ansible/artifacts/
 
 # mutation testing (scripts/mutate.py): mutmut's working/cache dir
 /mutants/
+
+# Transient OS files (never committed)
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini

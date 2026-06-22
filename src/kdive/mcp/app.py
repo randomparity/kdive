@@ -73,6 +73,7 @@ from kdive.mcp.tools.ops.build_hosts import registrar as ops_build_hosts_tools
 from kdive.mcp.tools.ops.images import registrar as ops_images_tools
 from kdive.mcp.tools.ops.resources import host_ops as ops_resource_host_tools
 from kdive.mcp.tools.ops.resources import registrar as ops_resource_mutation_tools
+from kdive.mcp.tools.reports import register as register_report_tools
 from kdive.providers.assembly.composition import ProviderComposition
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 from kdive.providers.core.resolver import ProviderResolver
@@ -345,6 +346,7 @@ _PLANE_REGISTRARS: tuple[PlaneRegistrar, ...] = (
     _pool_only_plane_registrar(register_accounting_usage),
     _pool_only_plane_registrar(register_accounting_reports),
     _pool_only_plane_registrar(register_accounting_admin),
+    _pool_only_plane_registrar(register_report_tools),
     _register_reconcile_tools,
     _register_reconcile_systems_tools,
     _register_ops_resource_host_tools,
