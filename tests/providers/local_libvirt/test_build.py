@@ -1210,7 +1210,7 @@ def test_merge_config_fragment_write_failure_is_infrastructure_failure(
 ) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *_args: 0)
+    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *_args, **_kw: 0)
 
     def _write_bytes(_path: Path, _data: bytes) -> int:
         raise PermissionError("workspace is unwritable")
@@ -1635,17 +1635,22 @@ def test_real_checkout_calls_steps_in_order_with_right_args(
     order: list[str] = []
     seen: dict[str, object] = {}
 
-    def _sync(kernel_src: str, ws: Path, secret_registry: SecretRegistry) -> None:
-        del secret_registry
+    def _sync(
+        kernel_src: str, ws: Path, secret_registry: SecretRegistry, sandbox: object = None
+    ) -> None:
+        del secret_registry, sandbox
         order.append("sync")
         seen["sync"] = (kernel_src, ws)
 
-    def _merge(fragment_bytes: bytes, ws: Path, run_id: UUID) -> None:
+    def _merge(fragment_bytes: bytes, ws: Path, run_id: UUID, sandbox: object = None) -> None:
+        del sandbox
         order.append("merge")
         seen["merge"] = (fragment_bytes, ws, run_id)
 
-    def _patch(patch_ref: str, ws: Path, secret_registry: SecretRegistry) -> None:
-        del secret_registry
+    def _patch(
+        patch_ref: str, ws: Path, secret_registry: SecretRegistry, sandbox: object = None
+    ) -> None:
+        del secret_registry, sandbox
         order.append("patch")
         seen["patch"] = (patch_ref, ws)
 
@@ -1674,13 +1679,13 @@ def test_real_checkout_skips_patch_when_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     order: list[str] = []
-    monkeypatch.setattr(build_host_workspace, "sync_tree", lambda *_: order.append("sync"))
+    monkeypatch.setattr(build_host_workspace, "sync_tree", lambda *_, **__: order.append("sync"))
     monkeypatch.setattr(
         build_host_workspace,
         "merge_config",
         lambda *_, **__: order.append("merge"),
     )
-    monkeypatch.setattr(build_host_workspace, "apply_patch", lambda *_: order.append("patch"))
+    monkeypatch.setattr(build_host_workspace, "apply_patch", lambda *_, **__: order.append("patch"))
 
     profile = _profile()  # patch_ref is None
     build_host_workspace.real_checkout(
@@ -1737,13 +1742,16 @@ def test_real_checkout_git_source_invokes_clone_tree(
         *,
         run_id: UUID,
         secret_registry: SecretRegistry,
+        sandbox: object = None,
     ) -> None:
-        del ws, run_id, secret_registry
+        del ws, run_id, secret_registry, sandbox
         seen["remote"] = source.remote
         seen["allow"] = tuple(allow)
 
     monkeypatch.setattr(build_host_workspace, "clone_tree", _clone)
-    monkeypatch.setattr(build_host_workspace, "sync_tree", lambda *_: seen.setdefault("sync", True))
+    monkeypatch.setattr(
+        build_host_workspace, "sync_tree", lambda *_, **__: seen.setdefault("sync", True)
+    )
     monkeypatch.setattr(build_host_workspace, "merge_config", lambda *_, **__: None)
 
     build_host_workspace.real_checkout(
@@ -1801,9 +1809,9 @@ def test_clone_tree_cleans_workspace_and_runs_git_sequence(
     calls: list[list[str]] = []
 
     def _fake_run_git(
-        args: list[str], *, cwd: Path | None, run_id: UUID
+        args: list[str], *, cwd: Path | None, run_id: UUID, sandbox: object = None
     ) -> subprocess.CompletedProcess[str]:
-        del cwd, run_id
+        del cwd, run_id, sandbox
         calls.append(args)
         return subprocess.CompletedProcess(args=["git", *args], returncode=0, stdout="", stderr="")
 

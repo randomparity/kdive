@@ -25,6 +25,7 @@ from kdive.providers.shared.build_host.execution import (
     run_make_target,
     workspace_failure,
 )
+from kdive.providers.shared.build_host.sandbox import BuildSandbox, SandboxProvider, sandbox_run
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -59,7 +60,11 @@ type Checkout = Callable[[UUID, ServerBuildProfile, Path, bytes], None]
 
 
 def make_checkout(
-    kernel_src: str, secret_registry: SecretRegistry, *, allowlist: Sequence[str] = ()
+    kernel_src: str,
+    secret_registry: SecretRegistry,
+    *,
+    allowlist: Sequence[str] = (),
+    sandbox_provider: SandboxProvider | None = None,
 ) -> Checkout:
     """Create the default checkout seam (warm tree or, for a git source, an allowlisted clone).
 
@@ -67,11 +72,14 @@ def make_checkout(
         kernel_src: The warm kernel source tree path for the warm-tree lane.
         secret_registry: Registry used to redact secrets out of error details.
         allowlist: Remotes the local git-clone lane may clone (ADR-0162); empty disables it.
+        sandbox_provider: Resolves the build-user demotion lazily at checkout time (ADR-0214); a
+            root worker with no ``KDIVE_BUILD_USER`` fails closed here, before any subprocess.
     """
 
     def _checkout(
         run_id: UUID, profile: ServerBuildProfile, workspace: Path, fragment_bytes: bytes
     ) -> None:
+        sandbox = sandbox_provider.get() if sandbox_provider is not None else None
         real_checkout(
             kernel_src,
             profile,
@@ -80,6 +88,7 @@ def make_checkout(
             run_id=run_id,
             secret_registry=secret_registry,
             allowlist=allowlist,
+            sandbox=sandbox,
         )
 
     return _checkout
@@ -94,11 +103,13 @@ def real_checkout(
     run_id: UUID,
     secret_registry: SecretRegistry,
     allowlist: Sequence[str] = (),
+    sandbox: BuildSandbox | None = None,
 ) -> None:
     """Materialize a per-run workspace, merge config, and apply an optional patch.
 
     Dispatches on the profile's source provenance: a git ``kernel_source_ref`` clones the
-    allowlisted remote (ADR-0162), a bare string mirrors the warm tree.
+    allowlisted remote (ADR-0162), a bare string mirrors the warm tree. When ``sandbox`` is set
+    every build subprocess runs demoted and the workspace is handed to the build user (ADR-0214).
     """
     git_source = git_source_of(profile)
     if git_source is not None:
@@ -108,20 +119,26 @@ def real_checkout(
             allowlist,
             run_id=run_id,
             secret_registry=secret_registry,
+            sandbox=sandbox,
         )
     else:
-        sync_tree(kernel_src, workspace, secret_registry)
-    merge_config(fragment_bytes, workspace, run_id)
+        sync_tree(kernel_src, workspace, secret_registry, sandbox=sandbox)
+    merge_config(fragment_bytes, workspace, run_id, sandbox=sandbox)
     if profile.patch_ref is not None:
-        apply_patch(profile.patch_ref, workspace, secret_registry)
+        apply_patch(profile.patch_ref, workspace, secret_registry, sandbox=sandbox)
 
 
 def _run_git(
-    args: list[str], *, cwd: Path | None, run_id: UUID
+    args: list[str],
+    *,
+    cwd: Path | None,
+    run_id: UUID,
+    sandbox: BuildSandbox | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``git`` with hardened flags/env: no redirect-follow, no ambient config, vetted protos."""
+    """Run ``git`` hardened (demoted under a sandbox): no redirect-follow, vetted protos."""
     try:
-        return subprocess.run(
+        return sandbox_run(
+            sandbox,
             ["git", *_GIT_HARDENED_FLAGS, *args],
             cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
@@ -143,6 +160,7 @@ def clone_tree(
     *,
     run_id: UUID,
     secret_registry: SecretRegistry,
+    sandbox: BuildSandbox | None = None,
 ) -> None:
     """Clone ``source.remote`` at ``source.ref`` into a clean ``workspace`` (ADR-0162).
 
@@ -182,7 +200,9 @@ def clone_tree(
         workspace.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise workspace_failure("mkdir", "build_workspace", exc) from exc
-    init = _run_git(["init", str(workspace)], cwd=None, run_id=run_id)
+    if sandbox is not None:
+        sandbox.own(workspace)  # demoted git writes into a build-user-owned dir (ADR-0214)
+    init = _run_git(["init", str(workspace)], cwd=None, run_id=run_id, sandbox=sandbox)
     if init.returncode != 0:
         raise CategorizedError(
             "git init failed",
@@ -193,6 +213,7 @@ def clone_tree(
         ["-C", str(workspace), "fetch", "--depth", "1", source.remote, source.ref],
         cwd=None,
         run_id=run_id,
+        sandbox=sandbox,
     )
     if fetch.returncode != 0:
         raise CategorizedError(
@@ -204,6 +225,7 @@ def clone_tree(
         ["-C", str(workspace), "rev-parse", "--verify", "--quiet", "FETCH_HEAD"],
         cwd=None,
         run_id=run_id,
+        sandbox=sandbox,
     )
     if verify.returncode != 0:
         raise CategorizedError(
@@ -211,7 +233,9 @@ def clone_tree(
             category=ErrorCategory.TRANSPORT_FAILURE,
             details={"stderr": redacted_tail(fetch.stderr, secret_registry)},
         )
-    checkout = _run_git(["-C", str(workspace), "checkout", "FETCH_HEAD"], cwd=None, run_id=run_id)
+    checkout = _run_git(
+        ["-C", str(workspace), "checkout", "FETCH_HEAD"], cwd=None, run_id=run_id, sandbox=sandbox
+    )
     if checkout.returncode != 0:
         raise CategorizedError(
             "git checkout FETCH_HEAD failed",
@@ -220,17 +244,34 @@ def clone_tree(
         )
 
 
-def merge_config(fragment_bytes: bytes, workspace: Path, run_id: UUID) -> None:  # pragma: no cover
-    """Run base defconfig, merge the kdump fragment, and leave olddefconfig to the caller."""
-    if run_make_target(workspace, ["defconfig"], "make defconfig") != 0:
-        raise build_failure("make defconfig exited non-zero", run_id)
+def _write_fragment(fragment_bytes: bytes, workspace: Path, sandbox: BuildSandbox | None) -> None:
+    """Write the kdump fragment file, then hand it to the build user (ADR-0214).
+
+    ``write_bytes`` honors the worker umask, so a root worker with a hardened umask would leave the
+    fragment ``0600 root:root`` and the demoted ``merge_config.sh`` could not read it. ``chown`` it
+    to the build user so any file the root worker drops into the build-user-owned workspace that a
+    demoted step must read stays readable.
+    """
     fragment_path = workspace / "kdump.config.fragment"
     try:
         fragment_path.write_bytes(fragment_bytes)
     except OSError as exc:
         raise workspace_failure("write", "kdump.config.fragment", exc) from exc
+    if sandbox is not None:
+        sandbox.own(fragment_path)
+
+
+def merge_config(
+    fragment_bytes: bytes, workspace: Path, run_id: UUID, sandbox: BuildSandbox | None = None
+) -> None:  # pragma: no cover
+    """Run base defconfig (demoted), merge the kdump fragment, leave olddefconfig to the caller."""
+    if run_make_target(workspace, ["defconfig"], "make defconfig", sandbox=sandbox) != 0:
+        raise build_failure("make defconfig exited non-zero", run_id)
+    _write_fragment(fragment_bytes, workspace, sandbox)
+    fragment_path = workspace / "kdump.config.fragment"
     try:
-        merge = subprocess.run(
+        merge = sandbox_run(
+            sandbox,
             ["scripts/kconfig/merge_config.sh", "-m", ".config", str(fragment_path)],
             cwd=workspace,
             capture_output=True,
@@ -255,9 +296,12 @@ def redacted_tail(text: str, secret_registry: SecretRegistry | None = None) -> s
 
 
 def apply_patch(
-    patch_ref: str, workspace: Path, secret_registry: SecretRegistry | None = None
+    patch_ref: str,
+    workspace: Path,
+    secret_registry: SecretRegistry | None = None,
+    sandbox: BuildSandbox | None = None,
 ) -> None:
-    """Apply the resolved patch ref to the workspace tree with no-op guards."""
+    """Apply the resolved patch ref to the workspace tree (demoted) with no-op guards."""
     patch = resolve_local_ref(patch_ref, kind="patch_ref")
     if shutil.which("git") is None:
         raise CategorizedError(
@@ -275,7 +319,8 @@ def apply_patch(
     targets = patch_target_paths(patch_text, strip=1)
     before = {rel: snapshot_file_bytes(workspace / rel) for rel in targets}
     try:
-        result = subprocess.run(
+        result = sandbox_run(
+            sandbox,
             ["git", "apply", "-p1", "-v", "--", str(patch)],
             cwd=workspace,
             capture_output=True,
@@ -315,9 +360,17 @@ def apply_patch(
 
 
 def sync_tree(
-    kernel_src: str, workspace: Path, secret_registry: SecretRegistry | None = None
+    kernel_src: str,
+    workspace: Path,
+    secret_registry: SecretRegistry | None = None,
+    sandbox: BuildSandbox | None = None,
 ) -> None:
-    """Mirror the warm kernel source tree into ``workspace`` with ``rsync -a --delete``."""
+    """Mirror the warm kernel source tree into ``workspace`` with ``rsync -a --delete``.
+
+    rsync runs as the worker (root) because it must read an operator-staged tree whose permissions
+    kdive does not control; under a sandbox ``--chown`` + a dest-dir chown then hand the
+    materialized tree to the build user for the demoted ``make`` (ADR-0214).
+    """
     detail = warm_tree_source_error(kernel_src)
     if detail is not None:
         raise CategorizedError(detail, category=ErrorCategory.CONFIGURATION_ERROR)
@@ -331,9 +384,13 @@ def sync_tree(
         workspace.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise workspace_failure("mkdir", "build_workspace", exc) from exc
+    argv = ["rsync", "-a", "--delete"]
+    if sandbox is not None:
+        argv.append(f"--chown={sandbox.uid}:{sandbox.gid}")
+    argv += ["--", f"{source}/", f"{workspace}/"]
     try:
         result = subprocess.run(
-            ["rsync", "-a", "--delete", "--", f"{source}/", f"{workspace}/"],
+            argv,
             capture_output=True,
             text=True,
             timeout=RSYNC_TIMEOUT_S,
@@ -353,3 +410,5 @@ def sync_tree(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"stderr": redacted_tail(result.stderr, secret_registry)},
         )
+    if sandbox is not None:
+        sandbox.own(workspace)  # rsync --chown owns the contents; chown the dest dir too
