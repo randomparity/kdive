@@ -10,8 +10,18 @@
 A1 is the foundation of Epic A. It generalizes the one-off `supported_capture_methods`
 field on `ProviderRuntime` into a uniform, fail-closed capability descriptor that the
 surface reads to tell an agent "what can *this* System do?" A2 (#…, admission) and all of
-Epic B build on it. A1 is read-only honesty: no behavior change beyond reporting and the
-fail-closed default flip.
+Epic B build on it.
+
+A1 is mostly read-only honesty (the descriptor projection), but it carries **one intended
+behavior change**: narrowing local's `supported_capture_methods` to `{KDUMP}` changes
+`vmcore.fetch` admission on a local System. `vmcore.fetch`'s handler already rejects a method
+that is not in the bound runtime's `supported_capture_methods`
+(`src/kdive/mcp/tools/lifecycle/vmcore.py`, the `capture_method not in supported_methods` guard).
+Today local advertises HOST_DUMP, so `vmcore.fetch` with the default method (HOST_DUMP) passes
+admission and fails the job asynchronously; after A1 it is rejected synchronously with
+`reason: "method not supported by provider"`. That is the desired direction (ADR-0208: HOST_DUMP
+returns to local in B4) — fail fast instead of a deferred opaque failure — but it is a genuine
+admission change, not pure reporting, and Task 4 pins it with a regression test.
 
 ## Capability vocabulary
 
@@ -41,9 +51,9 @@ assertion), `tests/mcp/core/test_provider_runtime_boundaries.py` if it asserts t
   - `supported_introspection: frozenset[IntrospectionMode] = frozenset()`
 - **Flip** `supported_capture_methods`' default from `frozenset(CaptureMethod)` to
   `frozenset()` (a plain default, not a `default_factory`, since an empty frozenset is
-  immutable and shared-safe). Keep field ordering valid for the frozen dataclass (all three are
-  defaulted, so order among them is free; they stay before the other defaulted fields they
-  already precede / follow consistently).
+  immutable and shared-safe). Add the two new fields immediately after
+  `supported_capture_methods` and before `platform_root_cmdline`; all three are defaulted, so
+  they sit cleanly within the existing defaulted-field block and keep the frozen dataclass valid.
 - Import `DebugTransportKind` and `IntrospectionMode` into `runtime.py` from
   `kdive.providers.ports`.
 
@@ -139,6 +149,17 @@ Known fallout from narrowing local to `{KDUMP}`:
   test imports the real builder and fails on drift, so the constant MUST track the narrowing.
 - `tests/providers/test_capture_capabilities.py`,
   `tests/providers/local_libvirt/test_composition.py` — assert the new `{KDUMP}` set.
+- `tests/mcp/lifecycle/test_vmcore_tools.py` is insulated: it builds runtimes via
+  `provider_resolver(..., supported_capture_methods={HOST_DUMP})`, an explicit override, not the
+  real local composition. So the suite stays green and will NOT catch the admission change — which
+  is exactly why Task 4 adds an explicit regression test driven through the real local runtime.
+
+Regression test for the intended admission change (drive through the REAL local composition, not
+a `provider_resolver` fixture with an overridden capture set): a local System `vmcore.fetch` with
+`method="host_dump"` (and the no-method default, which is HOST_DUMP) returns a
+`CONFIGURATION_ERROR` whose `data.reason` is `"method not supported by provider"` and enqueues no
+job. Place it in `tests/mcp/lifecycle/test_vmcore_tools.py` (or a sibling) using the real
+local-libvirt runtime so the descriptor narrowing is what drives the rejection.
 
 ## Guardrails (run directly, not via `just ci | tail`)
 
