@@ -67,14 +67,11 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     assert isinstance(runtime.vmcore_introspector, LocalLibvirtVmcoreIntrospect)
     assert isinstance(runtime.live_introspector, LocalLibvirtLiveIntrospect)
     assert isinstance(runtime.rootfs_build_plane, LocalLibvirtRootfsBuildPlane)
-    assert runtime.supported_capture_methods == frozenset(
-        {
-            CaptureMethod.CONSOLE,
-            CaptureMethod.HOST_DUMP,
-            CaptureMethod.GDBSTUB,
-            CaptureMethod.KDUMP,
-        }
-    )
+    # ADR-0208: local advertises only the core-producing capture method it can fetch ({KDUMP}),
+    # and starts with empty debug/introspection sets (filled by Epic B).
+    assert runtime.supported_capture_methods == frozenset({CaptureMethod.KDUMP})
+    assert runtime.supported_debug_transports == frozenset()
+    assert runtime.supported_introspection == frozenset()
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, GdbMiEngine)
     # Direct-kernel boot: the platform owns the whole-disk root device (ADR-0183).

@@ -89,6 +89,10 @@ def test_build_runtime_wires_fault_inject_ports_and_capabilities() -> None:
     assert runtime.supported_capture_methods == frozenset(
         {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
     )
+    # ADR-0208: fault-inject reports its synthetic capability — both transports its connector
+    # accepts (gdbstub + drgn-live) and both introspection modes FaultInjectIntrospect realizes.
+    assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
+    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live"})
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, FaultInjectDebugEngine)
     assert runtime.debug.attach_seam is fault_inject_attach_seam
