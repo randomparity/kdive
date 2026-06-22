@@ -153,6 +153,13 @@
 | `KDIVE_REMOTE_LIBVIRT_NETWORK` | reconciler, worker | `default` | no | libvirt network for guests. |
 | `KDIVE_REMOTE_LIBVIRT_STORAGE_POOL` | reconciler, worker | `default` | no | libvirt storage pool for guest disks. |
 
+## reports
+
+| Variable | Processes | Default | Required | Value |
+|----------|-----------|---------|----------|-------|
+| `KDIVE_REPORT_ARTIFACT_RETENTION_DAYS` | reconciler, server, worker | `7` | no | Age in days after which the reconciler `gc_report_artifacts` sweep deletes a generated report's spreadsheet artifact (object + row). Reports are ephemeral and re-runnable (ADR-0208). |
+| `KDIVE_REPORT_INLINE_MAX_BYTES` | server | `65536` | no | Total byte budget for the inline report payload `reports.generate_*` returns in `items[].data.rows_json`. A section whose serialized rows exceed the remaining budget degrades to a bounded preview plus `inline_truncated`; the full set is in the spreadsheet artifact (ADR-0208). |
+
 ## secrets
 
 | Variable | Processes | Default | Required | Value |

@@ -218,6 +218,33 @@ ARTIFACT_DOWNLOAD_TTL_SECONDS = Setting(
     ),
     suggest="an integer number of seconds, e.g. 900",
 )
+REPORT_INLINE_MAX_BYTES = Setting(
+    name="KDIVE_REPORT_INLINE_MAX_BYTES",
+    parse=_int,
+    default=str(64 * 1024),
+    group="reports",
+    processes=_SERVER,
+    help=(
+        "Total byte budget for the inline report payload `reports.generate_*` returns in "
+        "`items[].data.rows_json`. A section whose serialized rows exceed the remaining "
+        "budget degrades to a bounded preview plus `inline_truncated`; the full set is in "
+        "the spreadsheet artifact (ADR-0208)."
+    ),
+    suggest="an integer number of bytes, e.g. 65536 (64 KiB)",
+)
+REPORT_ARTIFACT_RETENTION_DAYS = Setting(
+    name="KDIVE_REPORT_ARTIFACT_RETENTION_DAYS",
+    parse=_int,
+    default="7",
+    group="reports",
+    processes=_STORE_USERS,
+    help=(
+        "Age in days after which the reconciler `gc_report_artifacts` sweep deletes a "
+        "generated report's spreadsheet artifact (object + row). Reports are ephemeral and "
+        "re-runnable (ADR-0208)."
+    ),
+    suggest="an integer number of days, e.g. 7",
+)
 
 MAX_BUILD_CONFIG_BYTES = Setting(
     name="KDIVE_MAX_BUILD_CONFIG_BYTES",
@@ -548,6 +575,8 @@ SETTINGS = [
     MAX_UPLOAD_BYTES,
     ARTIFACT_INLINE_MAX_BYTES,
     ARTIFACT_DOWNLOAD_TTL_SECONDS,
+    REPORT_INLINE_MAX_BYTES,
+    REPORT_ARTIFACT_RETENTION_DAYS,
     MAX_BUILD_CONFIG_BYTES,
     DEBUG_DIR,
     CRASH_DIR,
