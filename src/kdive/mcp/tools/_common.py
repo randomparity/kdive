@@ -192,6 +192,37 @@ def config_error_reason(
     )
 
 
+def capability_unsupported(
+    object_id: str, *, capability: str, provider: str, supported: list[str]
+) -> ToolResponse:
+    """A ``configuration_error`` for a plane/method the bound provider cannot serve (ADR-0209).
+
+    Capability-aware admission (ADR-0209, building on the ADR-0208 descriptor) rejects an
+    unsupported plane/method **before** enqueue/execution and maps it to the existing
+    ``CONFIGURATION_ERROR`` — a caller/configuration mismatch, not a runtime dependency fault
+    (ADR-0097). ``data`` carries the machine-readable ``reason: capability_unsupported`` plus the
+    requested ``capability`` token (e.g. ``capture_method:host_dump``, ``debug_transport:gdbstub``,
+    ``introspection:live``), the bound ``provider`` name, and the provider's ``supported`` set for
+    that plane (sorted for a stable wire order). ``detail`` is a fixed template naming the provider
+    and capability — the values are provider-derived enum-like tokens, never a secret, hostname,
+    object-store key, or caller-un-supplied resource name (ADR-0123), so they are safe to echo.
+    """
+    ordered = sorted(supported)
+    data: dict[str, JsonValue] = {
+        "reason": "capability_unsupported",
+        "capability": capability,
+        "provider": provider,
+        "supported": [value for value in ordered],
+    }
+    detail = (
+        f"provider {provider!r} does not support {capability!r}; "
+        f"supported on this provider: {', '.join(ordered) or '(none)'}"
+    )
+    return ToolResponse.failure(
+        object_id, ErrorCategory.CONFIGURATION_ERROR, detail=detail, data=data
+    )
+
+
 def not_found(object_id: str, *, data: ResponseDataInput | None = None) -> ToolResponse:
     """Build a ``not_found`` failure envelope for a valid-but-absent object id (ADR-0097).
 
@@ -236,6 +267,7 @@ __all__ = [
     "as_uuid",
     "authorizing",
     "authz_denied",
+    "capability_unsupported",
     "clamp_list_limit",
     "config_error",
     "config_error_reason",
