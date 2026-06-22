@@ -65,11 +65,11 @@ Files: `install.py`, `test_install.py`.
 
 Files: `install.py`, `test_install.py`.
 
-- [ ] **Test first.** The real upload/`statns` calls are `live_vm`-gated, so unit-test the *host-free* parts:
-  - The kernel filename is derived from the modules-tarball version: assert the writer would target `/boot/vmlinuz-<ver>` where `<ver>` is `_RealGuestModuleWriter._read_release(tar, overlay)` for a tarball laid out `lib/modules/<ver>/…` (extend the existing `test_modules_bundle_read_release_matches_build_layout`, or add a sibling that pins the `/boot/vmlinuz-<ver>` path string built from that version).
-  - The non-empty sentinel: extract a pure helper (e.g. `_kernel_upload_ok(size: int) -> bool` or a small `_verify_kernel(statns_size)` that raises `INFRASTRUCTURE_FAILURE` on size 0) and test that size 0 raises with the overlay path in `details` and size > 0 passes. Keep it pure so it is not `live_vm`-gated.
+- [ ] **Test first.** The real upload/`statns` calls are `live_vm`-gated, so the version→path wiring and the sentinel must be **extracted into pure helpers** and tested host-free (do not assert only `_read_release` — that already exists and proves nothing about the wiring):
+  - **Kernel destination path** — add a pure helper `_kernel_dest(version: str) -> str` returning `f"/boot/vmlinuz-{version}"` that `inject` calls. Unit-test it directly (e.g. `_kernel_dest("7.0.0") == "/boot/vmlinuz-7.0.0"`) **and** that it composes with `_read_release`'s recovered `<ver>` (feed a `lib/modules/<ver>/…` tarball through `_read_release`, then through `_kernel_dest`, and assert the full `/boot/vmlinuz-<ver>` string) — so a typo like `vmlinux-` or a missing `-{version}` suffix is caught in CI.
+  - **Non-empty sentinel** — add a pure helper (e.g. `_verify_kernel_size(size: int, overlay: str) -> None`) that raises `INFRASTRUCTURE_FAILURE` (overlay path in `details`) on size 0 and returns on size > 0. Unit-test both branches. Keep it pure so it is not `live_vm`-gated.
   Run; confirm failure for the expected reason.
-- [ ] **Implement.** In `_RealGuestModuleWriter`: add `upload`, `mkdir_p`, `statns` to the `_GuestFS` Protocol. After `_extract_and_index`, within the same `inject` rw session: `guest.mkdir_p("/boot")`, `guest.upload(str(kernel_image), f"/boot/vmlinuz-{version}")`, then read size via `statns` and call the pure verifier — raise `_io_failure`-style `INFRASTRUCTURE_FAILURE` (overlay path in `details`) on a zero/absent kernel. Order: extract modules → depmod → modules.dep sentinel → mkdir/upload kernel → kernel sentinel. Annotate the real I/O lines `# pragma: no cover - live_vm`; keep the size verifier pure (covered).
+- [ ] **Implement.** In `_RealGuestModuleWriter`: add `upload`, `mkdir_p`, `statns` to the `_GuestFS` Protocol. After `_extract_and_index`, within the same `inject` rw session: `guest.mkdir_p("/boot")`, `guest.upload(str(kernel_image), self._kernel_dest(version))`, then read the size via `statns` and call `_verify_kernel_size(size, overlay)`. Order: extract modules → depmod → modules.dep sentinel → mkdir/upload kernel → kernel-size sentinel. Annotate only the real I/O lines (`mkdir_p`/`upload`/`statns`) `# pragma: no cover - live_vm`; the two helpers stay pure (covered).
 - [ ] **Guardrails.** `just lint && just type && uv run python -m pytest tests/providers/local_libvirt/test_install.py -q`. Green.
 
 **Acceptance:** `<ver>` for the kernel filename comes from the modules tarball (one source); a zero-byte kernel upload is a typed `INFRASTRUCTURE_FAILURE` naming the overlay; a non-empty upload passes. Idempotency holds (upload truncates/creates; `mkdir_p` is idempotent).
@@ -108,7 +108,7 @@ Files: `install.py`, `test_install.py`.
 | Writer is handed the staged kernel path (KDUMP lane) | Task 2 unit test |
 | Force-off → fetch → inject ordering preserved | existing test, extended (Task 2) |
 | Non-kdump System does not force-off/fetch/stage kernel | existing test, new fake signature (Task 2) |
-| Kernel filename derives from modules-tarball `<ver>` | Task 3 unit test |
-| Zero-byte kernel upload → typed `INFRASTRUCTURE_FAILURE` | Task 3 unit test (pure verifier) |
+| Kernel destination path derives from modules-tarball `<ver>` | Task 3 unit test (pure `_kernel_dest` composed with `_read_release`) |
+| Zero-byte kernel upload → typed `INFRASTRUCTURE_FAILURE` | Task 3 unit test (pure `_verify_kernel_size`) |
 | Real `upload`/`mkdir_p`/`statns` into overlay | `live_vm` / runbook (hardware) |
 | Full panic→arm→capture→harvest arc | `live_vm` / runbook (hardware), gap-2 image precondition |
