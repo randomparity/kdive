@@ -112,10 +112,15 @@ class _LibvirtConn(Protocol):
     def close(self) -> int: ...
 
 
-class GuestModuleWriter(Protocol):
-    """Inject a kernel ``modules.tar.gz`` into a System's overlay at ``/lib/modules/<ver>``."""
+class GuestKernelWriter(Protocol):
+    """Stage a built kernel into a System overlay: ``/lib/modules/<ver>`` + ``/boot/vmlinuz-<ver>``.
 
-    def inject(self, overlay: str, modules_tar: Path) -> None: ...
+    ``kernel_image`` is the from-source kernel already fetched for the direct-kernel ``<kernel>``
+    element; the writer also lands it at ``/boot/vmlinuz-<ver>`` so the guest's ``kdumpctl`` can
+    kexec-load a crash kernel (ADR-0207). ``modules_tar`` is the ``/lib/modules/<ver>`` tree.
+    """
+
+    def inject(self, overlay: str, kernel_image: Path, modules_tar: Path) -> None: ...
 
 
 type Connect = Callable[[], _LibvirtConn]
@@ -144,7 +149,7 @@ class LocalLibvirtInstall:
         staging_root: Path,
         boot_window_polls: int = _DEFAULT_BOOT_WINDOW_POLLS,
         fetch_modules: Fetch | None = None,
-        module_writer: GuestModuleWriter | None = None,
+        kernel_writer: GuestKernelWriter | None = None,
     ) -> None:
         self._connect = connect
         self._fetch_kernel = fetch_kernel
@@ -153,7 +158,7 @@ class LocalLibvirtInstall:
         self._staging_root = staging_root
         self._boot_window_polls = boot_window_polls
         self._fetch_modules = fetch_modules or fetch_kernel
-        self._module_writer = module_writer
+        self._kernel_writer = kernel_writer
 
     @classmethod
     def from_env(cls) -> LocalLibvirtInstall:
@@ -175,7 +180,7 @@ class LocalLibvirtInstall:
             readiness=_real_readiness,
             staging_root=staging_root,
             fetch_modules=_real_fetch,
-            module_writer=_RealGuestModuleWriter(),
+            kernel_writer=_RealGuestKernelWriter(),
         )
 
     def install(self, request: InstallRequest) -> None:
@@ -234,28 +239,36 @@ class LocalLibvirtInstall:
             _close(conn)
 
     def _inject_built_modules(self, system_id: UUID, modules_ref: str, staging_dir: Path) -> None:
-        """Force-off the domain, then inject ``/lib/modules/<ver>`` into its overlay (ADR-0203).
+        """Force-off the domain, then stage the built kernel into its overlay (ADR-0203/0207).
+
+        Injects ``/lib/modules/<ver>`` *and* the from-source kernel image at
+        ``/boot/vmlinuz-<ver>`` so the guest's ``kdumpctl`` has a crash kernel to kexec-load —
+        under direct-kernel boot the running kernel is supplied by libvirt and is otherwise absent
+        from the guest ``/boot`` (ADR-0207). The kernel image is the one ``install`` already
+        fetched to ``staging_dir/kernel`` for the ``<kernel>`` element; no extra fetch.
 
         Ordered force-off → fetch → inject: a rw libguestfs mount of a live qcow2 corrupts it,
         and ``runs.install`` can target an already-booted System (ADR-0026 §7 recovery), so the
         domain is destroyed (idempotent) before the writer touches the overlay. Injection itself
-        is idempotent (clobber + re-extract), so a retried install self-heals a partial write.
+        is idempotent (clobber + re-extract; the kernel upload truncates/creates), so a retried
+        install self-heals a partial write.
 
         Raises:
             CategorizedError: ``MISSING_DEPENDENCY`` if libguestfs is absent or no writer is
                 configured; ``INFRASTRUCTURE_FAILURE`` on a force-off or libguestfs fault; any
                 fetch error category from the modules-fetch seam.
         """
-        if self._module_writer is None:
+        if self._kernel_writer is None:
             raise CategorizedError(
-                "module injection requested but no GuestModuleWriter is configured",
+                "kernel staging requested but no GuestKernelWriter is configured",
                 category=ErrorCategory.MISSING_DEPENDENCY,
                 details={"system_id": str(system_id)},
             )
         self._force_off_if_active(system_id)
         modules_tar = staging_dir / "modules.tar.gz"
         self._fetch_modules(modules_ref, modules_tar)
-        self._module_writer.inject(overlay_path(system_id), modules_tar)
+        kernel_image = staging_dir / "kernel"
+        self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar)
 
     def _force_off_if_active(self, system_id: UUID) -> None:
         """Destroy the System's domain if it is running (idempotent), mirroring ``_power_cycle``.
@@ -490,10 +503,39 @@ def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
 
 
 _MODULES_ROOT = "/lib/modules"
+_BOOT_ROOT = "/boot"
+
+
+def _kernel_dest(version: str) -> str:
+    """The in-guest path the from-source kernel is staged to for ``kdumpctl`` (ADR-0207).
+
+    ``kdumpctl`` kexec-loads the crash kernel from ``/boot/vmlinuz-$(uname -r)``; under
+    direct-kernel boot ``uname -r`` is ``version`` (the ``/lib/modules/<ver>`` release), so the
+    kernel must land at exactly ``/boot/vmlinuz-<ver>``.
+    """
+    return f"{_BOOT_ROOT}/vmlinuz-{version}"
+
+
+def _verify_kernel_size(size: int, overlay: str, dest: str) -> None:
+    """Sentinel for the staged kernel: a zero-byte upload is always a failure (ADR-0207).
+
+    Unlike the modules ``modules.dep`` sentinel (which must accept a valid empty file for an
+    all-builtin kernel), a kernel image is never legitimately empty, so a zero size means the
+    upload was truncated or never landed.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` (overlay + dest in details) if ``size`` is 0.
+    """
+    if size <= 0:
+        raise CategorizedError(
+            "kernel staging completed but /boot/vmlinuz is empty after upload",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"overlay": overlay, "dest": dest},
+        )
 
 
 class _GuestFS(Protocol):  # pragma: no cover - live_vm (libguestfs binding surface)
-    """The subset of the libguestfs handle the module writer drives (typing only)."""
+    """The subset of the libguestfs handle the kernel writer drives (typing only)."""
 
     def add_drive_opts(self, filename: str, *, format: str, readonly: int) -> None: ...
     def launch(self) -> None: ...
@@ -503,27 +545,34 @@ class _GuestFS(Protocol):  # pragma: no cover - live_vm (libguestfs binding surf
     def tar_in(self, tarfile: str, directory: str, *, compress: str) -> None: ...
     def command(self, arguments: list[str]) -> str: ...
     def is_file(self, path: str) -> int: ...
+    def mkdir_p(self, path: str) -> None: ...
+    def upload(self, filename: str, remotefilename: str) -> None: ...
+    def statns(self, path: str) -> dict[str, int]: ...
     def shutdown(self) -> None: ...
     def close(self) -> None: ...
 
 
-class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
-    """Inject ``/lib/modules/<ver>`` into a System overlay rw via libguestfs (ADR-0203).
+class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
+    """Stage the built kernel into a System overlay rw via libguestfs (ADR-0203/0207).
 
     Mirrors ``retrieve.py``'s ``_LibguestfsCoreReader`` idioms but mounts read-WRITE
-    (``readonly=0``). Injection is idempotent: the module version directory is clobbered
-    before the tarball is extracted, then ``depmod`` is run and a completion sentinel
-    (``depmod`` exit 0 + a ``modules.dep`` file present) is verified — an all-builtin kdump
-    kernel leaves a valid *empty* ``modules.dep``, so the sentinel checks existence, not size.
-    A missing ``guestfs`` binding is a ``MISSING_DEPENDENCY``; any libguestfs/depmod fault is an
-    ``INFRASTRUCTURE_FAILURE`` carrying the overlay path.
+    (``readonly=0``). One rw session writes both the modules tree and the kernel image so the
+    kernel can never pair with a stale module tree (or vice versa). Injection is idempotent: the
+    module version directory is clobbered before the tarball is extracted, ``depmod`` is run, and
+    a ``modules.dep``-present sentinel is verified (an all-builtin kdump kernel leaves a valid
+    *empty* ``modules.dep``, so that sentinel checks existence, not size); then the kernel is
+    uploaded to ``/boot/vmlinuz-<ver>`` (``upload`` truncates/creates, so a retry self-heals a
+    partial write) and a *non-empty* size sentinel is verified. A missing ``guestfs`` binding is a
+    ``MISSING_DEPENDENCY``; any libguestfs/depmod fault is an ``INFRASTRUCTURE_FAILURE`` carrying
+    the overlay path.
     """
 
-    def inject(self, overlay: str, modules_tar: Path) -> None:
+    def inject(self, overlay: str, kernel_image: Path, modules_tar: Path) -> None:
         version = self._read_release(modules_tar, overlay)
         guest = self._mount_rw(overlay)
         try:
             self._extract_and_index(guest, overlay, str(modules_tar), version)
+            self._stage_kernel(guest, overlay, str(kernel_image), version)
         finally:
             with contextlib.suppress(Exception):
                 guest.shutdown()
@@ -536,7 +585,7 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
             import guestfs  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
         except ImportError as exc:
             raise CategorizedError(
-                "libguestfs (the guestfs Python binding) is required to inject kernel modules",
+                "libguestfs (the guestfs Python binding) is required to stage the built kernel",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             ) from exc
         guest = guestfs.GuestFS(python_return_dict=True)
@@ -546,13 +595,13 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
             roots = guest.inspect_os()
         except Exception as exc:
             guest.close()
-            raise _RealGuestModuleWriter._io_failure(
+            raise _RealGuestKernelWriter._io_failure(
                 "opening the System overlay read-write", overlay, exc
             ) from exc
         if not roots:
             guest.close()
             raise CategorizedError(
-                "could not inspect the System overlay to inject kernel modules",
+                "could not inspect the System overlay to stage the built kernel",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"overlay": overlay},
             )
@@ -567,7 +616,7 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
             guest.tar_in(tar, "/", compress="gzip")  # members are lib/modules/<ver>/...
             guest.command(["depmod", "-a", version])
         except Exception as exc:
-            raise _RealGuestModuleWriter._io_failure(
+            raise _RealGuestKernelWriter._io_failure(
                 "extracting and indexing the kernel modules", overlay, exc
             ) from exc
         if not guest.is_file(f"{version_dir}/modules.dep"):
@@ -578,14 +627,31 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
             )
 
     @staticmethod
+    def _stage_kernel(guest: _GuestFS, overlay: str, kernel_image: str, version: str) -> None:
+        """Upload the from-source kernel to ``/boot/vmlinuz-<ver>`` (ADR-0207), then verify size.
+
+        Idempotent: ``mkdir_p`` and ``upload`` (truncate/create) self-heal a partial prior write.
+        """
+        dest = _kernel_dest(version)
+        try:
+            guest.mkdir_p(_BOOT_ROOT)
+            guest.upload(kernel_image, dest)
+            size = guest.statns(dest)["st_size"]
+        except Exception as exc:
+            raise _RealGuestKernelWriter._io_failure(
+                "staging the from-source kernel into /boot", overlay, exc
+            ) from exc
+        _verify_kernel_size(size, overlay, dest)
+
+    @staticmethod
     def _read_release(modules_tar: Path, overlay: str) -> str:
         """The injected modules version: the dir name under ``lib/modules/`` in the host tarball.
 
         The build seam stages members as ``lib/modules/<ver>/...`` (the remote-consistent layout),
         so the version is the first path component after the ``lib/modules/`` prefix. It is read
         from the host-side archive (the tarball is on the worker filesystem, not yet in the
-        appliance), avoiding a brittle appliance shell-out; the version drives both the clobber
-        target and the ``depmod`` argument.
+        appliance), avoiding a brittle appliance shell-out; the version drives the clobber target,
+        the ``depmod`` argument, and the ``/boot/vmlinuz-<ver>`` kernel destination (ADR-0207).
         """
         prefix = _MODULES_ROOT.strip("/") + "/"
         try:
@@ -597,7 +663,7 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
                         if version:
                             return version
         except (OSError, tarfile.TarError) as exc:
-            raise _RealGuestModuleWriter._io_failure(
+            raise _RealGuestKernelWriter._io_failure(
                 "reading the modules tarball version", overlay, exc
             ) from exc
         raise CategorizedError(
@@ -609,7 +675,7 @@ class _RealGuestModuleWriter:  # pragma: no cover - live_vm (libguestfs)
     @staticmethod
     def _io_failure(op: str, overlay: str, exc: Exception) -> CategorizedError:
         return CategorizedError(
-            f"libguestfs failed {op} for module injection",
+            f"libguestfs failed {op} for kernel staging",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"overlay": overlay, "error": type(exc).__name__},
         )
