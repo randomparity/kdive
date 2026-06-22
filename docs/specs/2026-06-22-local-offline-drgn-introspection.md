@@ -65,6 +65,18 @@ descriptor change: `supported_debug_transports` (B1) and the `live` introspectio
 out of scope and remain unset by this change. Admission (ADR-0209) then admits
 `introspect.from_vmcore` on a local-libvirt Run instead of returning `capability_unsupported`.
 
+**Surface effect on `resources.describe`.** `resources.describe` projects
+`runtime.supported_introspection` verbatim into the System's capability descriptor
+(`mcp/tools/catalog/resources.py`). Before this change a local System reports no introspection
+modes; after it, the System reports `offline-vmcore`. That is the intended, honest report: the
+seam is wired, so the plane is admissible. It does **not** assert hardware-proof — that fact lives
+in the tool's `maturity` flag (§3), which stays `partial`. The two are deliberately separate
+signals: `describe` answers "would admission admit this plane?" (now yes), the maturity flag
+answers "is the wired path proven on hardware?" (not yet). On a drgn-less host the admitted call
+then returns `MISSING_DEPENDENCY` from the open seam — the honest runtime outcome. This combined
+surface (describe advertises `offline-vmcore`; maturity stays `partial`) is the designed contract,
+not an accident, and the acceptance criteria below pin both halves.
+
 ### 3. Maturity stays `partial` (deliberate deviation from ADR-0210's literal text)
 
 ADR-0210 and design-doc invariant 2 say each B plane "promotes its maturity in the same PR that
@@ -85,28 +97,51 @@ pre-wiring "planned (M2.8 B2)", and leaves the `implemented` promotion to the or
 post-merge live run. The catalog therefore never claims more than is true: admission admits the
 plane (it is wired), and the maturity flag still tells an agent the path is not yet hardware-proven.
 
-The honesty drift-guard moves with the state: `introspect.from_vmcore` leaves the
-`_LOCAL_PLANNED_PROVIDER_TOOLS` "planned" set, and a new positive assertion pins its pointer to the
-"wired, pending live" wording so the honesty test keeps teeth.
+The honesty drift-guard moves with the state, and the replacement must be **provably at least as
+strong** as the guard it removes. The removed guard
+(`test_local_stubbed_planes_advertise_planned_provider_pointer`) asserts both `local-libvirt:
+planned` *and* `remote-libvirt: implemented` are present in the pointer. `introspect.from_vmcore`
+leaves `_LOCAL_PLANNED_PROVIDER_TOOLS`, and a new positive assertion on its pointer asserts:
+
+- **present:** the stable marker `local-libvirt: wired` (the post-wiring, pre-promotion state) and
+  `remote-libvirt: implemented`;
+- **absent:** both `local-libvirt: planned` and `local-libvirt: implemented`.
+
+Requiring the absence of *both* `planned` and `implemented` means the new guard cannot be satisfied
+by an unchanged pre-wiring pointer (`planned`) **or** by a future over-promotion to `implemented`
+before the B6 live proof — so it is strictly stronger than the substring it replaces, not weaker.
+The pointer's exact wording is therefore: `local-libvirt: wired, pending live KVM proof (M2.8 B6
+#680); remote-libvirt: implemented; fault-inject: n/a.`
 
 ## Acceptance criteria
 
 - **CI (fakes):**
   - `LocalLibvirtVmcoreIntrospect.from_env()` returns a port whose `open_program`/`run_helper` are
     the real `debug_common.drgn_program` seams (not `None`), asserted without importing drgn.
-  - With drgn absent (the CI host), `from_env().from_vmcore(...)` over a core carrying a valid
-    VMCOREINFO `BUILD-ID=` line that matches `expected_build_id` raises `MISSING_DEPENDENCY` from
-    the drgn-open seam — proving the wired path reaches the import, not the old `None`-guard.
+  - With drgn absent (the CI host), `from_env().from_vmcore(...)` raises `MISSING_DEPENDENCY` from
+    the drgn-open seam — proving the wired path reaches the import, not the old `None`-guard. Because
+    `from_vmcore` fetches **two** objects before the open (the vmcore at `vmcore_ref`, then the
+    vmlinux at `debuginfo_ref` — `introspect.py` lines 99 and 101, both ahead of the open at line
+    110), the test's fetch fake must serve **both** refs, and `read_vmcore_build_id` must be the real
+    `read_vmcoreinfo_build_id` over a vmcore blob whose `BUILD-ID=` line matches `expected_build_id`.
+    Only that combination drives control past provenance and the second fetch into the import; a fake
+    that serves only the core ref, or a build-id that mismatches, exercises a *different* failure
+    (`CONFIGURATION_ERROR`) and would not prove the import is reached.
   - `build_runtime(...).supported_introspection == frozenset({"offline-vmcore"})`; the debug-
     transport and `live` introspection sets stay empty.
   - The introspect admission test admits `introspect.from_vmcore` on a local descriptor advertising
     `offline-vmcore` (it already covers the deny path with an empty descriptor; add/confirm the
     admit path so the acceptance criterion "admission admits offline introspection on local" is a
     test, not a claim).
-  - `introspect.from_vmcore` carries `maturity: "partial"` with a `providers` pointer that no longer
-    says "local-libvirt: planned" and instead states local-libvirt is wired pending live proof;
-    `remote-libvirt: implemented` is preserved. Generated `docs/guide/reference/introspect.md` is
-    regenerated to match (`just docs`), so `docs-check` stays green.
+  - `resources.describe` for a local System projects `offline-vmcore` into its introspection
+    capability list (the §2 surface effect), asserted by the resources-tool test or descriptor
+    projection test.
+  - `introspect.from_vmcore` carries `maturity: "partial"` with the exact `providers` pointer
+    `local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented;
+    fault-inject: n/a.`. The honesty test asserts `local-libvirt: wired` and `remote-libvirt:
+    implemented` are present and that **neither** `local-libvirt: planned` nor `local-libvirt:
+    implemented` appears (see §3). Generated `docs/guide/reference/introspect.md` is regenerated to
+    match (`just docs`), so `docs-check` stays green.
   - The full existing orchestration/redaction/byte-cap unit suite for the offline port stays green
     (behavior unchanged).
 - **Live (KVM host) — orchestrator post-merge, NOT this PR:** `introspect.from_vmcore` runs the
@@ -128,7 +163,9 @@ The honesty drift-guard moves with the state: `introspect.from_vmcore` leaves th
   with no VMCOREINFO `BUILD-ID=` line surfaces `CONFIGURATION_ERROR` from `read_vmcoreinfo_build_id`,
   also before the import. Only a provenance-valid core on a drgn-less host reaches the
   `MISSING_DEPENDENCY` from the open seam. The CI test must therefore feed a core whose VMCOREINFO
-  build-id matches `expected_build_id` to exercise the import-reaching path.
+  build-id matches `expected_build_id` **and** a fetch fake that serves both the vmcore and vmlinux
+  refs (the second fetch at `introspect.py:101` runs before the open), or it exercises a different
+  failure than the import-reaching one it claims to.
 - **Honesty regression.** Removing `introspect.from_vmcore` from the "planned" guard set without a
   replacement positive assertion would let a future edit silently revert the pointer to a dishonest
   "implemented" or drop the live-proof caveat. Mitigation: the new positive assertion pins the
