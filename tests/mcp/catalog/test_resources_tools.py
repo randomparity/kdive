@@ -17,6 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import ALLOCATIONS, SYSTEMS
 from kdive.db.resource_discovery import register_discovered_resource
 from kdive.domain.capacity.state import AllocationState, SystemState
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Allocation, System
@@ -200,6 +201,124 @@ def test_describe_adds_pool_cost_host(migrated_url: str) -> None:
         assert resp.data["host_uri"] == "qemu:///system"
 
     asyncio.run(_run())
+
+
+def _descriptor_runtime(
+    *,
+    capture: frozenset[CaptureMethod],
+    transports: frozenset[str],
+    introspection: frozenset[str],
+) -> ProviderRuntime:
+    unused_port = cast(Any, object())
+    return ProviderRuntime(
+        profile_policy=unused_port,
+        provisioner=unused_port,
+        builder=unused_port,
+        installer=unused_port,
+        booter=unused_port,
+        connector=unused_port,
+        controller=unused_port,
+        retriever=unused_port,
+        crash_postmortem=unused_port,
+        vmcore_introspector=unused_port,
+        live_introspector=unused_port,
+        supported_capture_methods=capture,
+        supported_debug_transports=cast(Any, transports),
+        supported_introspection=cast(Any, introspection),
+    )
+
+
+def _resolver_with_descriptor(kind: ResourceKind, runtime: ProviderRuntime) -> ProviderResolver:
+    return ProviderResolver({kind: runtime})
+
+
+def test_describe_projects_local_partial_capability(migrated_url: str) -> None:
+    # ADR-0208: a local System reports build/boot/kdump and NOT debug/introspect/host-dump.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            runtime = _descriptor_runtime(
+                capture=frozenset({CaptureMethod.KDUMP}),
+                transports=frozenset(),
+                introspection=frozenset(),
+            )
+            return await catalog_resources_tools.describe_resource(
+                pool,
+                CTX,
+                res_id,
+                resolver=_resolver_with_descriptor(ResourceKind.LOCAL_LIBVIRT, runtime),
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "available"
+    capabilities = set(cast(list[str], resp.data["capabilities"]))
+    assert capabilities == {"build", "boot", "kdump"}
+    assert "debug" not in capabilities
+    assert "introspect" not in capabilities
+    assert "host-dump" not in capabilities
+    assert resp.data["supported_capture_methods"] == ["kdump"]
+    assert resp.data["supported_debug_transports"] == []
+    assert resp.data["supported_introspection"] == []
+
+
+def test_describe_projects_remote_full_capability(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register_remote(pool)
+            runtime = _descriptor_runtime(
+                capture=frozenset(
+                    {
+                        CaptureMethod.KDUMP,
+                        CaptureMethod.HOST_DUMP,
+                        CaptureMethod.GDBSTUB,
+                        CaptureMethod.CONSOLE,
+                    }
+                ),
+                transports=frozenset({"gdbstub", "drgn-live"}),
+                introspection=frozenset({"offline-vmcore", "live"}),
+            )
+            return await catalog_resources_tools.describe_resource(
+                pool,
+                CTX,
+                res_id,
+                resolver=_resolver_with_descriptor(ResourceKind.REMOTE_LIBVIRT, runtime),
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "available"
+    capabilities = set(cast(list[str], resp.data["capabilities"]))
+    assert capabilities == {"build", "boot", "kdump", "host-dump", "debug", "introspect"}
+    assert resp.data["supported_debug_transports"] == ["drgn-live", "gdbstub"]
+    assert resp.data["supported_introspection"] == ["live", "offline-vmcore"]
+
+
+def test_describe_omits_capabilities_when_no_resolver(migrated_url: str) -> None:
+    # Degraded path: no resolver → omit the capability block, never fail the describe.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            return await catalog_resources_tools.describe_resource(pool, CTX, res_id)
+
+    resp = asyncio.run(_run())
+    assert resp.status == "available"
+    assert "capabilities" not in resp.data
+    assert "supported_capture_methods" not in resp.data
+
+
+def test_describe_omits_capabilities_when_kind_unregistered(migrated_url: str) -> None:
+    # The resolver has no runtime for the resource's kind → resolution raises CategorizedError,
+    # the capability block is omitted, and the describe still succeeds.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            empty_resolver = ProviderResolver({})
+            return await catalog_resources_tools.describe_resource(
+                pool, CTX, res_id, resolver=empty_resolver
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.status == "available"
+    assert "capabilities" not in resp.data
 
 
 def test_describe_hides_resource_outside_project_affinity(migrated_url: str) -> None:
