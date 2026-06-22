@@ -965,6 +965,20 @@ def test_factory_file_without_systems_toml_is_configuration_error(
     assert "KDIVE_SYSTEMS_TOML" in str(exc.value)
 
 
+def test_factory_file_with_empty_systems_toml_is_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An explicitly-empty KDIVE_SYSTEMS_TOML parses to "" (not None) and systems_toml_path()
+    # treats "" as unset → the XDG default. A `is None` guard would let "" through to that
+    # silent write; the falsiness guard must reject it exactly like the unset case.
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", "")
+    _load_env(monkeypatch, KDIVE_INVENTORY_WRITEBACK="file")
+    with pytest.raises(CategorizedError) as exc:
+        writeback.resolve_writeback_target()
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"variable": "KDIVE_SYSTEMS_TOML"}
+
+
 def test_factory_unknown_value_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _load_env(monkeypatch, KDIVE_INVENTORY_WRITEBACK="bogus")
     with pytest.raises(CategorizedError) as exc:

@@ -871,6 +871,17 @@ def test_cwd_inventory_shadowed_false_when_no_cwd_file(
     assert _cwd_inventory_shadowed(tmp_path / "xdg" / "systems.toml") is False
 
 
+def test_cwd_inventory_shadowed_true_when_var_is_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An explicitly-empty KDIVE_SYSTEMS_TOML resolves to the XDG default just like unset, so it
+    # is still the shadow case — the helper must treat "" as unset (falsiness, not `is None`).
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", "")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "systems.toml").write_text("schema_version = 2\n")
+    assert _cwd_inventory_shadowed(tmp_path / "xdg" / "systems.toml") is True
+
+
 def test_inventory_pass_warns_once_about_shadowed_cwd_file(
     migrated_url: str,
     monkeypatch: pytest.MonkeyPatch,

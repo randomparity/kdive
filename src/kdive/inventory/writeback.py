@@ -282,7 +282,12 @@ def resolve_writeback_target() -> WritebackTarget | None:
         name = config.get(INVENTORY_WRITEBACK_CONFIGMAP) or "kdive-systems"
         return ConfigMapWriteback.from_in_cluster(name=name, key=_CONFIGMAP_KEY)
     if selected == "file":
-        if config.get(SYSTEMS_TOML) is None:
+        # Falsiness, not `is None`: an explicitly-empty KDIVE_SYSTEMS_TOML parses to "" (not
+        # None), and systems_toml_path() treats "" as unset and returns the XDG default. Guarding
+        # on `is None` would let "" slip through to that silent-XDG-write the reconciler never
+        # reads — the exact data loss this guard exists to prevent. Match the resolver's
+        # empty-is-unset semantics here.
+        if not config.get(SYSTEMS_TOML):
             raise CategorizedError(
                 f"{INVENTORY_WRITEBACK.name}=file requires {SYSTEMS_TOML.name} to name the "
                 "writable inventory volume shared with the reconciler; refusing to fall back to "

@@ -64,10 +64,12 @@ def _cwd_inventory_shadowed(resolved: Path) -> bool:
     ``./systems.toml`` upgrades into a silent no-op. This detects exactly that case — the
     var is unset, the XDG default does not exist, and a ``./systems.toml`` sits in the CWD —
     so the reconciler can warn once instead of reconciling nothing in silence.
+
+    Uses falsiness (not ``is None``): an explicitly-empty ``KDIVE_SYSTEMS_TOML`` parses to
+    ``""``, which ``systems_toml_path()`` treats as unset and resolves to the XDG default.
+    Matching that here keeps the warning and the resolver in agreement on "unset".
     """
-    return (
-        config.get(SYSTEMS_TOML) is None and not resolved.exists() and Path("systems.toml").exists()
-    )
+    return not config.get(SYSTEMS_TOML) and not resolved.exists() and Path("systems.toml").exists()
 
 
 class InventoryReconcilePass:
