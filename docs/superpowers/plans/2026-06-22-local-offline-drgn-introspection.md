@@ -127,20 +127,42 @@ local" and "describe reports offline-vmcore" from claims into tests.
 
 **Files:**
 - `tests/mcp/debug/test_introspect_tools.py` (admission admit-path)
-- `tests/mcp/catalog/test_resources_tools.py` **or** `tests/providers/test_runtime_descriptor.py`
-  (describe projection) — pick whichever already exercises `supported_introspection` projection;
-  prefer extending an existing test module over a new file.
+- `tests/mcp/catalog/test_resources_tools.py` (describe projection — update the existing local test)
+- `tests/mcp/systems_support.py` (**only if** admit-path harness option (b) is chosen; additive
+  optional kwarg)
 
 **Implementation (tests only — no src change):**
 1. **Admit path:** the deny path already exists
    (`test_from_vmcore_unsupported_plane_is_capability_unsupported`, using
-   `provider_resolver(supported_introspection=frozenset())`). Add a sibling
-   `test_from_vmcore_admitted_when_offline_vmcore_supported`: same harness with
-   `provider_resolver(supported_introspection=frozenset({"offline-vmcore"}))` and a fake
-   `VmcoreIntrospector` returning a canned `IntrospectOutput`; assert the response is a success
-   envelope (status succeeded, `data["report"]` present) and that `_require_introspection` did
-   **not** short-circuit (the fake introspector was called). This pins ADR-0209 admission for the
-   wired descriptor.
+   `provider_resolver(supported_introspection=frozenset())` driven through `_call_registered_tool`).
+   The admit path must pass the `_require_introspection` gate **and** then run a working introspector
+   behind it — but the shared `provider_resolver` helper hardwires `vmcore_introspector=unused_port`
+   (`tests/mcp/systems_support.py:142`) and exposes **no** parameter for it. So
+   `provider_resolver(supported_introspection=frozenset({"offline-vmcore"}))` alone would pass the
+   gate and then call `unused_port.from_vmcore(...)` → `AttributeError`, not a success. Two viable
+   harnesses; **prefer (a)** to keep the scope fence tight:
+   - **(a) Bespoke resolver (no shared-helper edit):** in the new test, build a `ProviderRuntime`
+     (or a `SimpleNamespace` cast to `ProviderRuntime`, matching the existing
+     `test_register_adds_the_tool` pattern at lines 360-368) carrying
+     `supported_introspection=frozenset({"offline-vmcore"})`,
+     `vmcore_introspector=_FakeIntrospector()`, `component_sources` with `provider="local-libvirt"`,
+     and the minimum other fields `with_runtime_for_run` reads; wrap it in a `ProviderResolver`
+     keyed by `ResourceKind.LOCAL_LIBVIRT`. Drive it through `_call_registered_tool` so the full
+     registered tool → `_gated` → `_require_introspection` → `_FakeIntrospector.from_vmcore` path
+     runs. (Inspect what `with_runtime_for_run` resolves a runtime from — if it resolves by Run/
+     System the test must seed a built Run with a core, reusing `_built_run_with_core` like the deny
+     test.)
+   - **(b) Additive `provider_resolver` param (alternative):** add an optional
+     `vmcore_introspector: object | None = None` kwarg to `provider_resolver`, defaulting to
+     `unused_port` (purely additive — no existing caller passes it, so none change). Then the admit
+     test reads `provider_resolver(supported_introspection=frozenset({"offline-vmcore"}),
+     vmcore_introspector=_FakeIntrospector())`. Only choose this if (a) proves to need too much
+     hand-wired runtime; it widens the touched-file set to a shared helper.
+   - **Assertions (either harness):** response is a success envelope (`status == "succeeded"`,
+     `data["report"]` present) and the `_FakeIntrospector` recorded the call (proving the gate did
+     **not** short-circuit). This pins ADR-0209 admission for the wired descriptor. If `_built_run_with_core`
+     or `_FakeIntrospector` are module-private, reuse them in-module (the new test lives in the same
+     `test_introspect_tools.py`).
 2. **Describe projection:** `tests/mcp/catalog/test_resources_tools.py` already has
    `test_describe_projects_local_partial_capability` (≈line 235), which injects
    `introspection=frozenset()` and asserts `"introspect" not in capabilities` and
