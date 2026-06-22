@@ -55,7 +55,15 @@ Generation is **synchronous** in the server tool handler — the same process an
 model as `accounting.report_all_projects`, which already scans `ledger`/`budgets` synchronously.
 Each section is bounded by a documented per-section row cap; a capped section sets a
 `truncated` flag in its inline envelope and in the rendered sheet header so a truncated report
-is never mistaken for a complete one.
+is never mistaken for a complete one. The inline payload is additionally bounded by a byte
+budget: a section over its share degrades to a bounded row preview and points the agent at the
+spreadsheet ref, so the envelope never becomes the bulk dump the artifact is for.
+
+The report is point-in-time, so the handler captures one **`as_of`** timestamp (`SELECT now()`)
+and threads it through every section. Sections compare against `as_of` rather than evaluating SQL
+`now()` independently, which makes the report internally consistent (a concurrent reconciler
+expiry sweep cannot make the lease section disagree with the rest) and the active/stale lease
+boundary deterministic under test.
 
 The report is returned in **two shapes from one envelope**:
 
@@ -69,6 +77,13 @@ The report is returned in **two shapes from one envelope**:
   **mints the presigned download URL itself** (the same `presign_get` + `asyncio.to_thread`
   path the artifact reads use) and returns it in `refs`; re-fetching a stale report is a cheap
   re-run, which also yields fresher data.
+
+Report artifacts have a **synthetic** `owner_id` (no foreign key), so unlike System-owned
+vmcores — which are reaped when their System is torn down — nothing would ever delete them. To
+keep ephemeral, re-runnable reports from leaking storage, the reconciler gains a
+`gc_report_artifacts` sweep (modeled on `gc_idempotency_keys`) that deletes `report`-retention
+artifacts (object + row) older than a configured retention, with per-object failures logged and
+retried rather than fatal.
 
 All free-text fields pass through the redaction registry before being written into the inline
 envelope or the rendered artifacts. `owner_kind = 'reports'` needs no migration: `artifacts.owner_kind`
@@ -87,9 +102,13 @@ XLSX rendering adds one pinned dependency, `openpyxl`.
   - `openpyxl` is a new runtime dependency (pinned, `uv.lock` updated) and new supply-chain
     surface; it is only imported on the XLSX render path.
   - Report artifacts are owned by `owner_kind = 'reports'` with a synthetic `owner_id` that is
-    not a foreign key to any table, so their lifecycle is governed only by the `report` retention
-    class, not by an owning row's deletion. The presigned URL is the sole retrieval path and is
-    time-boxed; there is no durable `reports.get`.
+    not a foreign key to any table, so a reconciler GC sweep (not an owning row's deletion) is
+    what reaps them, after a configured retention. The presigned URL is the sole retrieval path
+    and is time-boxed; there is no durable `reports.get`, and a re-download after reap/TTL is a
+    cheap report re-run.
+  - The reconciler gains one more periodic sweep and one configuration value
+    (`KDIVE_REPORT_ARTIFACT_RETENTION`); the sweep must scope strictly to the `report` retention
+    class so it never touches System-owned evidence artifacts.
   - Synchronous generation bounds report size by per-section caps. A report that needs the full
     unbounded fleet/ledger is explicitly out of scope for v1 and would motivate the worker-job
     variant below.
