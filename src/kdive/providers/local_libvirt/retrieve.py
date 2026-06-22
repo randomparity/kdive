@@ -421,6 +421,13 @@ def _real_host_dump_capture(system_id: UUID) -> Path | None:  # pragma: no cover
     never force-offs the domain: ``coreDumpWithFormat`` dumps the *active* domain in place
     (ADR-0211), so an inactive domain is a readiness failure, not something to quiesce.
 
+    Worker-readability precondition (B6 live drive): under the default ``qemu:///system`` URI the
+    dump file is written by the QEMU/root process, not the worker, so the worker must be able to
+    read (and remove) what QEMU writes under the system temp dir — provision group access to the
+    qemu-written path, or run the worker against ``qemu:///session`` (worker-owned QEMU). This
+    mirrors the kdump console-log ownership constraint; the libguestfs kdump harvest sidesteps it
+    by reading the overlay itself.
+
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the produced core exceeds ``MAX_CORE_BYTES``;
             ``INFRASTRUCTURE_FAILURE`` when the libvirt core dump fails on an active domain.
