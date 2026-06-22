@@ -22,12 +22,14 @@ from kdive.providers.local_libvirt.lifecycle import install
 from kdive.providers.local_libvirt.lifecycle.install import (
     ConsoleVerdict,
     Fetch,
-    GuestModuleWriter,
+    GuestKernelWriter,
     LocalLibvirtInstall,
     ReadinessResult,
-    _RealGuestModuleWriter,
+    _kernel_dest,
+    _RealGuestKernelWriter,
     _stage_object,
     _verdict_to_result,
+    _verify_kernel_size,
     classify_console,
 )
 from kdive.providers.ports import InstallRequest
@@ -70,15 +72,23 @@ class _Readiness:
 
 
 @dataclass
-class _FakeModuleWriter:
-    """Records an "inject" into the shared events list; ``fail`` raises INFRASTRUCTURE_FAILURE."""
+class _FakeKernelWriter:
+    """Records an "inject" into the shared events list; ``fail`` raises INFRASTRUCTURE_FAILURE.
+
+    Captures the kernel image and modules tarball paths it was handed so a test can assert the
+    install plane stages the from-source kernel alongside the modules (ADR-0207).
+    """
 
     events: list[str]
     injected: bool = False
     fail: bool = False
+    kernel_image: Path | None = None
+    modules_tar: Path | None = None
 
-    def inject(self, overlay: str, modules_tar: Path) -> None:
+    def inject(self, overlay: str, kernel_image: Path, modules_tar: Path) -> None:
         self.events.append("inject")
+        self.kernel_image = kernel_image
+        self.modules_tar = modules_tar
         if self.fail:
             raise CategorizedError(
                 "synthetic inject failure", category=ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -135,7 +145,7 @@ def _install(
     fetch: _Fetch | None = None,
     seam: _Readiness | None = None,
     staging_root: Path,
-    module_writer: GuestModuleWriter | None = None,
+    kernel_writer: GuestKernelWriter | None = None,
     fetch_modules: Fetch | None = None,
 ) -> LocalLibvirtInstall:
     fetch = fetch or _Fetch()
@@ -148,7 +158,7 @@ def _install(
         staging_root=staging_root,
         boot_window_polls=3,
         fetch_modules=fetch_modules or fetch,
-        module_writer=module_writer,
+        kernel_writer=kernel_writer,
     )
 
 
@@ -246,14 +256,18 @@ def test_install_kdump_with_initrd_proceeds(tmp_path: Path) -> None:
 def test_install_kdump_with_modules_ref_injects_and_no_initrd_rendered(tmp_path: Path) -> None:
     events: list[str] = []
     conn = _conn_with_existing(events=events)  # its domain is active
-    writer = _FakeModuleWriter(events)
+    writer = _FakeKernelWriter(events)
     fetch = _RecordingFetch(events)
-    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer, fetch_modules=fetch)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
 
     inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
 
     assert writer.injected
     assert fetch.refs == ["runs/r/modules"]  # the modules tarball was fetched
+    # The writer is handed the per-Run staged kernel image (already fetched for the <kernel>
+    # element) so it can also stage /boot/vmlinuz-<ver> in-guest (ADR-0207).
+    assert writer.kernel_image == tmp_path / str(_SYS) / str(_RUN) / "kernel"
+    assert writer.kernel_image is not None and writer.kernel_image.exists()
     # force-off precedes the fetch which precedes the inject.
     assert events.index("destroy") < events.index("fetch") < events.index("inject")
     assert len(conn.defined_xml) == 1
@@ -266,9 +280,9 @@ def test_install_non_kdump_with_modules_ref_does_not_force_off_or_inject(tmp_pat
     # its install must not force-off the domain, fetch modules, or require libguestfs.
     events: list[str] = []
     conn = _conn_with_existing(events=events)  # its domain is active
-    writer = _FakeModuleWriter(events)
+    writer = _FakeKernelWriter(events)
     fetch = _RecordingFetch(events)
-    inst = _install(conn=conn, staging_root=tmp_path, module_writer=writer, fetch_modules=fetch)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
 
     inst.install(_request(method=CaptureMethod.CONSOLE, modules_ref="runs/r/modules"))
 
@@ -284,11 +298,11 @@ def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails
     # The corruption guard must fire before the writer touches the overlay, regardless of outcome.
     events: list[str] = []
     conn = _conn_with_existing(events=events)
-    writer = _FakeModuleWriter(events, fail=True)
+    writer = _FakeKernelWriter(events, fail=True)
     inst = _install(
         conn=conn,
         staging_root=tmp_path,
-        module_writer=writer,
+        kernel_writer=writer,
         fetch_modules=_RecordingFetch(events),
     )
 
@@ -325,7 +339,49 @@ def test_modules_bundle_read_release_matches_build_layout(tmp_path: Path) -> Non
     tar_path = tmp_path / "modules.tar.gz"
     tar_path.write_bytes(bundle.data)
 
-    assert _RealGuestModuleWriter._read_release(tar_path, "ov") == version
+    assert _RealGuestKernelWriter._read_release(tar_path, "ov") == version
+
+
+# --- install: kernel staging into the guest /boot (ADR-0207) -------------------------
+
+
+def test_kernel_dest_is_boot_vmlinuz_for_version() -> None:
+    # kdumpctl kexec-loads /boot/vmlinuz-$(uname -r); the staged kernel must land at exactly
+    # that path. A typo (vmlinux-, missing -<ver>) would leave kdump unable to find the kernel.
+    assert _kernel_dest("7.0.0") == "/boot/vmlinuz-7.0.0"
+
+
+def test_kernel_dest_composes_with_read_release(tmp_path: Path) -> None:
+    # The kernel filename's <ver> is the same modules-tarball release depmod indexed — one
+    # version source for /lib/modules/<ver> and /boot/vmlinuz-<ver>. Feed a build-layout tarball
+    # through _read_release, then _kernel_dest, and assert the full destination path.
+    version = "7.0.0-kdive"
+    mod_root = tmp_path / "modroot"
+    ver_dir = mod_root / "lib" / "modules" / version
+    (ver_dir / "kernel").mkdir(parents=True)
+    (ver_dir / "modules.order").write_bytes(b"kernel/foo.ko\n")
+    bundle = _local_modules_bundle(tmp_path / "workspace", mod_root)
+    assert isinstance(bundle, ArtifactBytes)
+    tar_path = tmp_path / "modules.tar.gz"
+    tar_path.write_bytes(bundle.data)
+
+    recovered = _RealGuestKernelWriter._read_release(tar_path, "ov")
+    assert _kernel_dest(recovered) == f"/boot/vmlinuz-{version}"
+
+
+def test_verify_kernel_size_rejects_empty_upload() -> None:
+    # A zero-byte kernel in /boot is always a failed upload (unlike modules.dep, which is
+    # validly empty for an all-builtin kernel) → typed INFRASTRUCTURE_FAILURE naming the overlay.
+    with pytest.raises(CategorizedError) as caught:
+        _verify_kernel_size(0, "ov", "/boot/vmlinuz-7.0.0")
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details["overlay"] == "ov"
+    assert caught.value.details["dest"] == "/boot/vmlinuz-7.0.0"
+
+
+def test_verify_kernel_size_accepts_non_empty_upload() -> None:
+    # A non-empty kernel passes the sentinel (returns without raising).
+    _verify_kernel_size(1, "ov", "/boot/vmlinuz-7.0.0")
 
 
 # --- install: failures ---------------------------------------------------------------
