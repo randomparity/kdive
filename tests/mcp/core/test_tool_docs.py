@@ -421,6 +421,64 @@ def test_non_partial_tools_have_no_maturity_detail() -> None:
     assert not offenders, f"non-partial tools carrying a stale maturity_detail: {offenders}"
 
 
+# The debug/introspect/host-dump planes whose local-libvirt seam is an Epic-B stub
+# (M2.8 honesty, #673). Their `providers` pointer must say the local-libvirt path is
+# *planned* and the remote-libvirt path *implemented* — not the pre-honesty "wired"
+# half-truth. A promotion to `implemented` for a plane is the diff that flips its
+# pointer here. `vmcore.fetch` is the mixed case: local KDUMP is already implemented
+# (#654), only its HOST_DUMP path is the planned Epic-B (B4) stub, so its pointer
+# legitimately reads per-method rather than a bare "local-libvirt: planned".
+_LOCAL_PLANNED_PROVIDER_TOOLS = frozenset(
+    {
+        "debug.set_breakpoint",
+        "debug.clear_breakpoint",
+        "debug.list_breakpoints",
+        "debug.read_memory",
+        "debug.read_registers",
+        "debug.continue",
+        "debug.interrupt",
+        "debug.start_session",
+        "debug.end_session",
+        "introspect.from_vmcore",
+        "introspect.run",
+    }
+)
+
+
+def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
+    # #673 / M2.8 honesty: a local-libvirt System cannot run these planes today
+    # (the seam raises MISSING_DEPENDENCY); the catalog must say so. Each in-scope
+    # tool carries a `providers` pointer marking local-libvirt `planned` and
+    # remote-libvirt `implemented`.
+    by_name = {t.name: t for t in TOOLS}
+    offenders: list[str] = []
+    for name in sorted(_LOCAL_PLANNED_PROVIDER_TOOLS):
+        tool = by_name.get(name)
+        if tool is None:
+            offenders.append(f"{name}: tool not registered")
+            continue
+        providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
+        if not isinstance(providers, str):
+            offenders.append(f"{name}: missing providers pointer")
+            continue
+        if "local-libvirt: planned" not in providers:
+            offenders.append(f"{name}: local-libvirt not marked planned ({providers!r})")
+        if "remote-libvirt: implemented" not in providers:
+            offenders.append(f"{name}: remote-libvirt not marked implemented ({providers!r})")
+    assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
+
+
+def test_vmcore_fetch_host_dump_path_marked_planned_on_local() -> None:
+    # #673: vmcore.fetch defaults toward a core-producing method; local KDUMP is
+    # implemented but its HOST_DUMP seam is the planned Epic-B (B4) stub. The pointer
+    # must name HOST_DUMP as planned on local while crediting the implemented remote.
+    tool = next(t for t in TOOLS if t.name == "vmcore.fetch")
+    providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
+    assert isinstance(providers, str), "vmcore.fetch: missing providers pointer"
+    assert "HOST_DUMP planned" in providers, providers
+    assert "remote-libvirt: implemented" in providers, providers
+
+
 def test_maturity_meta_rejects_partial_without_reason() -> None:
     with pytest.raises(ValueError, match="requires reason"):
         _docmeta.maturity_meta("partial")

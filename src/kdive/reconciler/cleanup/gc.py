@@ -42,7 +42,7 @@ async def gc_idempotency_keys(conn: AsyncConnection, retention: timedelta) -> in
 async def gc_report_artifacts(
     conn: AsyncConnection, store: ArtifactObjectDeleter, retention: timedelta
 ) -> int:
-    """Delete report spreadsheet artifacts (object + row) older than ``retention`` (ADR-0208).
+    """Delete report spreadsheet artifacts (object + row) older than ``retention`` (ADR-0212).
 
     Scoped strictly to ``owner_kind = 'reports'`` so System-owned evidence is never touched.
     Reports have a synthetic owner with no teardown trigger, so without this sweep their

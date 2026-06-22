@@ -155,6 +155,63 @@ class _RaisingCrash:
 # --- vmcore.fetch tool ---------------------------------------------------------------------
 
 
+def _real_local_handlers() -> vmcore_tools.VmcoreHandlers:
+    """A VmcoreHandlers bound to the REAL local-libvirt runtime (descriptor narrowing applies).
+
+    Unlike ``_vmcore_handlers``, this does not override ``supported_capture_methods`` — it uses
+    the production local composition, so the ADR-0208 narrowing to ``{KDUMP}`` is what drives the
+    admission decision.
+    """
+    from kdive.domain.catalog.resources import ResourceKind
+    from kdive.providers.assembly.composition import build_local_runtime
+    from kdive.providers.core.resolver import ProviderResolver
+
+    registry = SecretRegistry()
+    runtime = build_local_runtime(secret_registry=registry)
+    resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
+    return vmcore_tools.VmcoreHandlers(resolver=resolver, secret_registry=registry)
+
+
+async def _job_count(pool: AsyncConnectionPool) -> int:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'capture_vmcore'")
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+def test_fetch_vmcore_host_dump_rejected_on_local_at_admission(migrated_url: str) -> None:
+    # ADR-0208: local advertises only {KDUMP}, so vmcore.fetch(host_dump) — the default method —
+    # is rejected up front (CONFIGURATION_ERROR "method not supported by provider") and enqueues
+    # no job, instead of the pre-A1 deferred async failure. Driven through the REAL local runtime.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), system_id=sys_id, method="host_dump")
+            jobs = await _job_count(pool)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert data_str(resp, "reason") == "method not supported by provider"
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_kdump_admitted_on_local(migrated_url: str) -> None:
+    # The narrowing leaves the one method local CAN fetch (KDUMP) admissible.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), system_id=sys_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.status == "queued"
+        assert jobs == 1
+
+    asyncio.run(_run())
+
+
 def test_fetch_vmcore_crashed_enqueues_job(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

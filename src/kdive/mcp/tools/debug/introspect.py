@@ -208,6 +208,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
                 "A non-gated test or recorded live_stack run introspects a real captured core "
                 "and returns a redacted report."
             ),
+            providers=(
+                "local-libvirt: planned (M2.8 B2); remote-libvirt: implemented; fault-inject: n/a."
+            ),
         ),
     )
     async def introspect_from_vmcore_tool(
@@ -250,7 +253,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
                 "A non-gated test or recorded live_stack run runs a live drgn helper against "
                 "a real booted Run."
             ),
-            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+            providers=(
+                "local-libvirt: planned (M2.8 B3); remote-libvirt: implemented; fault-inject: n/a."
+            ),
         ),
     )
     async def introspect_run_tool(

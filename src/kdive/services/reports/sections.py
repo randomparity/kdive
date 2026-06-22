@@ -1,4 +1,4 @@
-"""The v1 report sections (ADR-0208).
+"""The v1 report sections (ADR-0212).
 
 Each section gathers from existing tables; ``costs`` reuses the accounting ledger
 rollup rather than re-deriving its SQL. Every section selects ``cap + 1`` rows and

@@ -1,4 +1,4 @@
-"""The reports.generate_* MCP tools (ADR-0208).
+"""The reports.generate_* MCP tools (ADR-0212).
 
 Two tools mirror the accounting reporting split: ``generate_granted_set`` (the caller's
 granted projects, ``viewer`` floor) and ``generate_all_projects`` (``platform_auditor``).

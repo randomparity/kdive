@@ -26,8 +26,10 @@ from kdive.providers.ports import (
     Connector,
     Controller,
     CrashPostmortem,
+    DebugTransportKind,
     GdbMiEngine,
     Installer,
+    IntrospectionMode,
     LiveIntrospector,
     Provisioner,
     Retriever,
@@ -89,9 +91,16 @@ class ProviderRuntime:
     crash_postmortem: CrashPostmortem
     vmcore_introspector: VmcoreIntrospector
     live_introspector: LiveIntrospector
-    supported_capture_methods: frozenset[CaptureMethod] = field(
-        default_factory=lambda: frozenset(CaptureMethod)
-    )
+    # The provider capability descriptor (ADR-0208): three sibling frozensets read by the surface
+    # (resources.describe) and capability-aware admission to answer "what can this provider do?".
+    # Each defaults to **empty** (fail-closed): an unconfigured or partially-wired provider
+    # advertises *no* capability, so the surface can never report a stubbed plane as working. A
+    # plane joins its set only in the change that wires its real seam. ``supported_capture_methods``
+    # is the authority for which core-producing methods ``vmcore.fetch`` admits; the per-System
+    # default method is owned by ``ProfilePolicy.capture_method`` (ADR-0209), not duplicated here.
+    supported_capture_methods: frozenset[CaptureMethod] = frozenset()
+    supported_debug_transports: frozenset[DebugTransportKind] = frozenset()
+    supported_introspection: frozenset[IntrospectionMode] = frozenset()
     # The platform-owned root device cmdline (ADR-0183). ``"root=/dev/vda"`` for direct-kernel
     # boot (local-libvirt's whole-disk-ext4 overlay); ``None`` when the in-guest bootloader owns
     # the root device (remote-libvirt inherits ``root=UUID=…`` via ``grubby --copy-default``).

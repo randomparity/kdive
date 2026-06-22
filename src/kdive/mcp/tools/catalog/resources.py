@@ -23,6 +23,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
 from kdive.db.repositories import RESOURCES
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -39,6 +40,7 @@ from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools._resource_envelopes import resource_config_error, resource_envelope
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, projects_with_role
 from kdive.services.allocation.admission.affinity import resource_visible_to_projects
@@ -223,6 +225,7 @@ async def describe_resource(
         envelope.data["pool"] = resource.pool
         envelope.data["cost_class"] = resource.cost_class
         envelope.data["host_uri"] = resource.host_uri
+        _project_capabilities(envelope, resolver, resource.kind, resource.name)
         if resource.kind is ResourceKind.REMOTE_LIBVIRT:
             probe = staged_probe or _runtime_staged_probe(resolver, resource.kind, resource.name)
             statuses = (
@@ -236,6 +239,59 @@ async def describe_resource(
             ]
             envelope.data["staged_base_images"] = staged_base_images
         return envelope
+
+
+def _project_capabilities(
+    envelope: ToolResponse,
+    resolver: ProviderResolver | None,
+    kind: ResourceKind,
+    name: str | None,
+) -> None:
+    """Project the bound provider's capability descriptor onto a describe envelope (ADR-0208).
+
+    Reads the resolved runtime's descriptor and emits a provider-neutral ``capabilities`` plane
+    list plus the raw supported sets. No ``ResourceKind`` branching: every plane token is derived
+    from the descriptor or the universal ports. The block is omitted (never an error) when no
+    resolver is wired or the kind is unregistered — the same degrade-don't-fail contract as the
+    staged-volume probe (ADR-0194).
+    """
+    if resolver is None:
+        return
+    try:
+        runtime = resolver.resolve(kind)
+        if name is not None:
+            runtime = runtime.for_resource(name)
+    except CategorizedError:
+        return
+    capabilities: list[JsonValue] = [plane for plane in _capability_planes(runtime)]
+    capture: list[JsonValue] = [
+        method.value for method in sorted(runtime.supported_capture_methods, key=lambda m: m.value)
+    ]
+    transports: list[JsonValue] = [t for t in sorted(runtime.supported_debug_transports)]
+    introspection: list[JsonValue] = [m for m in sorted(runtime.supported_introspection)]
+    envelope.data["capabilities"] = capabilities
+    envelope.data["supported_capture_methods"] = capture
+    envelope.data["supported_debug_transports"] = transports
+    envelope.data["supported_introspection"] = introspection
+
+
+def _capability_planes(runtime: ProviderRuntime) -> list[str]:
+    """The sorted supported-plane tokens for ``runtime``, derived only from the descriptor.
+
+    ``build``/``boot`` are universal (every runtime wires a builder/booter). ``kdump`` and
+    ``host-dump`` track the core-producing capture methods; ``debug`` and ``introspect`` track the
+    non-empty transport/introspection sets.
+    """
+    planes = {"build", "boot"}
+    if CaptureMethod.KDUMP in runtime.supported_capture_methods:
+        planes.add("kdump")
+    if CaptureMethod.HOST_DUMP in runtime.supported_capture_methods:
+        planes.add("host-dump")
+    if runtime.supported_debug_transports:
+        planes.add("debug")
+    if runtime.supported_introspection:
+        planes.add("introspect")
+    return sorted(planes)
 
 
 def _runtime_staged_probe(

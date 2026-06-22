@@ -228,7 +228,7 @@ REPORT_INLINE_MAX_BYTES = Setting(
         "Total byte budget for the inline report payload `reports.generate_*` returns in "
         "`items[].data.rows_json`. A section whose serialized rows exceed the remaining "
         "budget degrades to a bounded preview plus `inline_truncated`; the full set is in "
-        "the spreadsheet artifact (ADR-0208)."
+        "the spreadsheet artifact (ADR-0212)."
     ),
     suggest="an integer number of bytes, e.g. 65536 (64 KiB)",
 )
@@ -241,7 +241,7 @@ REPORT_ARTIFACT_RETENTION_DAYS = Setting(
     help=(
         "Age in days after which the reconciler `gc_report_artifacts` sweep deletes a "
         "generated report's spreadsheet artifact (object + row). Reports are ephemeral and "
-        "re-runnable (ADR-0208)."
+        "re-runnable (ADR-0212)."
     ),
     suggest="an integer number of days, e.g. 7",
 )

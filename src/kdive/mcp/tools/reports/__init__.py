@@ -1,4 +1,4 @@
-"""Report-generation MCP tools (ADR-0208)."""
+"""Report-generation MCP tools (ADR-0212)."""
 
 from __future__ import annotations
 

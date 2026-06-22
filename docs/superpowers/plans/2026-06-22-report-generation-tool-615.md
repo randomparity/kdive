@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.14, FastMCP, psycopg (async), pydantic, openpyxl (new), pytest + testcontainers Postgres.
 
-**Spec:** `docs/superpowers/specs/2026-06-22-report-generation-tool-615.md` · **ADR:** `docs/adr/0208-report-generation-tool.md`
+**Spec:** `docs/superpowers/specs/2026-06-22-report-generation-tool-615.md` · **ADR:** `docs/adr/0212-report-generation-tool.md`
 
 ## Global Constraints
 
@@ -90,7 +90,7 @@ REPORT_INLINE_MAX_BYTES = Setting(
         "Total byte budget for the inline report payload `reports.generate_*` returns in "
         "`items[].data.rows_json`. A section whose serialized rows exceed its share degrades "
         "to a bounded preview plus `inline_truncated`; the full set is in the spreadsheet "
-        "artifact (ADR-0208)."
+        "artifact (ADR-0212)."
     ),
     suggest="an integer number of bytes, e.g. 65536 (64 KiB)",
 )
@@ -104,7 +104,7 @@ REPORT_ARTIFACT_RETENTION_DAYS = Setting(
     help=(
         "Age in days after which the reconciler `gc_report_artifacts` sweep deletes a "
         "generated report's spreadsheet artifact (object + row). Reports are ephemeral and "
-        "re-runnable (ADR-0208)."
+        "re-runnable (ADR-0212)."
     ),
     suggest="an integer number of days, e.g. 7",
 )
@@ -202,7 +202,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'kdive.services.reports
 
 ```python
 # src/kdive/services/reports/__init__.py
-"""Report domain: section registry and the composed report (ADR-0208)."""
+"""Report domain: section registry and the composed report (ADR-0212)."""
 
 from __future__ import annotations
 
@@ -434,7 +434,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'kdive.services.reports
 
 ```python
 # src/kdive/services/reports/sections.py
-"""The v1 report sections (ADR-0208). Each gather composes existing data-access."""
+"""The v1 report sections (ADR-0212). Each gather composes existing data-access."""
 
 from __future__ import annotations
 
@@ -746,7 +746,7 @@ Expected: FAIL — module missing.
 
 ```python
 # src/kdive/services/reports/render.py
-"""CSV and XLSX rendering of a Report (ADR-0208). openpyxl is imported here only."""
+"""CSV and XLSX rendering of a Report (ADR-0212). openpyxl is imported here only."""
 
 from __future__ import annotations
 
@@ -1063,7 +1063,7 @@ class ReportArtifactStore(Protocol):
 async def gc_report_artifacts(
     conn: AsyncConnection, store: ReportArtifactStore, retention: timedelta
 ) -> int:
-    """Delete report artifacts (object + row) older than ``retention`` (ADR-0208).
+    """Delete report artifacts (object + row) older than ``retention`` (ADR-0212).
 
     Scoped strictly to ``owner_kind = 'reports'`` so System-owned evidence is never touched.
     A per-object store failure is logged and retried next pass, not fatal.
@@ -1190,7 +1190,7 @@ If FAIL because redaction is not applied, add `_redact_rows` in the Task 5 handl
 
 - [ ] **Step 3: Document the tools**
 
-Add `reports.generate_granted_set` and `reports.generate_all_projects` to the MCP tool-surface doc found by the grep, matching the existing entry style; reference ADR-0208.
+Add `reports.generate_granted_set` and `reports.generate_all_projects` to the MCP tool-surface doc found by the grep, matching the existing entry style; reference ADR-0212.
 
 - [ ] **Step 4: Doc + full guardrails, commit**
 

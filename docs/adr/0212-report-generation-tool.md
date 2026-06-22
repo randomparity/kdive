@@ -1,4 +1,4 @@
-# ADR 0208 — Report generation plane: composed cross-cutting report with spreadsheet artifacts
+# ADR 0212 — Report generation plane: composed cross-cutting report with spreadsheet artifacts
 
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-22

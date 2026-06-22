@@ -3,7 +3,7 @@
 - **Status:** Draft
 - **Date:** 2026-06-22
 - **Issue:** [#615](https://github.com/randomparity/kdive/issues/615)
-- **ADR:** [ADR-0208](../../adr/0208-report-generation-tool.md)
+- **ADR:** [ADR-0212](../../adr/0212-report-generation-tool.md)
 
 ## Problem
 
@@ -30,7 +30,7 @@ output.
 - A durable `reports` object with its own `list`/`get` tools (reports are ephemeral renderings
   of live state; re-running is cheap and yields fresher data).
 - Worker-job (async) generation. v1 is synchronous and bounded by per-section caps; the job
-  variant is the recorded escalation path (ADR-0208) if caps prove too small.
+  variant is the recorded escalation path (ADR-0212) if caps prove too small.
 - A migration or new persistent tables. The report composes existing tables; spreadsheet
   artifacts reuse the `artifacts` table with `owner_kind = 'reports'` and are reaped by a
   reconciler GC sweep (see Lifecycle / cleanup).

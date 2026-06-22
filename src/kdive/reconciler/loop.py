@@ -307,7 +307,7 @@ def _repair_plan(
                 lambda conn: _repair_abandoned_uploads(conn, upload_store),
             )
         )
-        # Reap report spreadsheet artifacts past retention (ADR-0208); the synthetic report
+        # Reap report spreadsheet artifacts past retention (ADR-0212); the synthetic report
         # owner has no teardown trigger, so this sweep is their only cleanup path.
         repairs.append(
             _RepairSpec(

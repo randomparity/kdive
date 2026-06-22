@@ -937,6 +937,16 @@ def test_remote_runtime_advertises_all_four_capture_methods() -> None:
     )
 
 
+def test_remote_runtime_advertises_its_debug_and_introspection_descriptor() -> None:
+    # ADR-0208: remote reports what it already implements — both live-debug transports
+    # (gdbstub + drgn-live, ADR-0083/0085) and both introspection modes (offline-vmcore +
+    # live, the wired RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
+    runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
+
+    assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
+    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live"})
+
+
 def test_remote_runtime_advertises_host_dump_as_a_capture_method() -> None:
     # #301: HOST_DUMP is in vmcore.fetch's _VMCORE_METHODS, so advertising it admits
     # vmcore.fetch(method=host_dump) on remote through the existing tool.

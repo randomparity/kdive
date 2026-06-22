@@ -1,4 +1,4 @@
-"""CSV and XLSX rendering of a Report (ADR-0208).
+"""CSV and XLSX rendering of a Report (ADR-0212).
 
 ``openpyxl`` is imported here only — the XLSX path is the sole reason for the
 dependency. A truncated section carries a header note in both formats so a clipped

@@ -25,6 +25,12 @@ _TRANSPORT_KINDS: frozenset[TransportHandleKind] = frozenset(("gdbstub", "ssh", 
 DebugTransportKind = Literal["gdbstub", "drgn-live"]
 DEBUG_TRANSPORT_KINDS: frozenset[DebugTransportKind] = frozenset(("gdbstub", "drgn-live"))
 
+# The introspection modes a provider can serve, mirroring ``DebugTransportKind`` (ADR-0208):
+# ``offline-vmcore`` is ``introspect.from_vmcore`` and ``live`` is ``introspect.run``. Read as
+# part of the ProviderRuntime capability descriptor; empty ⇒ the corresponding tool is unsupported.
+IntrospectionMode = Literal["offline-vmcore", "live"]
+INTROSPECTION_MODES: frozenset[IntrospectionMode] = frozenset(("offline-vmcore", "live"))
+
 
 class TransportHandleData(NamedTuple):
     """A decoded transport handle: the transport kind and its loopback endpoint."""

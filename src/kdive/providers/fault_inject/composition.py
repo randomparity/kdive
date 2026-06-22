@@ -107,6 +107,11 @@ def build_runtime(
         supported_capture_methods=frozenset(
             {CaptureMethod.CONSOLE, CaptureMethod.HOST_DUMP, CaptureMethod.GDBSTUB}
         ),
+        # ADR-0208: fault-inject reports its synthetic capability — both transports its connector
+        # accepts (FaultInjectConnect admits the full DEBUG_TRANSPORT_KINDS) and both introspection
+        # modes FaultInjectIntrospect realizes (from_vmcore + introspect_live).
+        supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
+        supported_introspection=frozenset({"offline-vmcore", "live"}),
         debug=DebugCapabilities(
             attach_seam=fault_inject_attach_seam,
             engine=FaultInjectDebugEngine(),

@@ -1,4 +1,4 @@
-"""Report domain: section registry and the composed point-in-time report (ADR-0208).
+"""Report domain: section registry and the composed point-in-time report (ADR-0212).
 
 A report is a fixed, ordered set of :class:`ReportSection`s. Each section gathers its
 rows from existing data-access against one shared ``as_of`` snapshot, so every section

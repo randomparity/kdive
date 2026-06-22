@@ -1,4 +1,4 @@
-"""Write a report's spreadsheet renderings to the object store (ADR-0208).
+"""Write a report's spreadsheet renderings to the object store (ADR-0212).
 
 ``register_artifact_row`` only builds the row — the caller inserts it after the object
 write (ADR-0005 write-before-commit). This helper therefore takes ``conn`` and, per
