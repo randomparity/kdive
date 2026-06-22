@@ -17,7 +17,7 @@ Capture and persist a vmcore.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `method` | `console`, `host_dump`, `gdbstub`, `kdump` | no | Capture method; must be supported by the local-libvirt provider. |
+| `method` | `console`, `host_dump`, `gdbstub`, `kdump` (nullable) | no | Core-producing capture method (KDUMP/HOST_DUMP) the bound provider must advertise. Omit to resolve the System profile's method; a profile with no implicit core method requires an explicit one. |
 | `system_id` | string | yes | The crashed System whose vmcore to capture. |
 
 ## `vmcore.list`
