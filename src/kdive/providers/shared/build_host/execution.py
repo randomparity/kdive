@@ -11,6 +11,7 @@ from uuid import UUID
 
 from kdive.build_artifacts.validation import parse_gnu_build_id
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.shared.build_host.sandbox import BuildSandbox, sandbox_run
 
 MAKE_TIMEOUT_S = 2 * 60 * 60
 OBJCOPY_TIMEOUT_S = 60
@@ -94,10 +95,11 @@ def real_read_vmlinux(workspace: Path) -> bytes:  # pragma: no cover - live_vm
     )
 
 
-def real_run_make(workspace: Path) -> int:  # pragma: no cover - live_vm
-    """Run the default parallel kernel build."""
+def real_run_make(workspace: Path, sandbox: BuildSandbox | None = None) -> int:  # pragma: no cover
+    """Run the default parallel kernel build (demoted when a sandbox is active)."""
     try:
-        return subprocess.run(
+        return sandbox_run(
+            sandbox,
             ["make", "-C", str(workspace), f"-j{os.cpu_count() or 1}"],
             timeout=MAKE_TIMEOUT_S,
             check=False,
@@ -112,22 +114,30 @@ def real_run_make(workspace: Path) -> int:  # pragma: no cover - live_vm
         raise launch_failure("make", exc, category=ErrorCategory.INFRASTRUCTURE_FAILURE) from exc
 
 
-def real_run_olddefconfig(workspace: Path) -> int:  # pragma: no cover - live_vm
-    return run_make_target(workspace, ["olddefconfig"], "make olddefconfig")
+def real_run_olddefconfig(
+    workspace: Path, sandbox: BuildSandbox | None = None
+) -> int:  # pragma: no cover
+    return run_make_target(workspace, ["olddefconfig"], "make olddefconfig", sandbox=sandbox)
 
 
-def real_run_modules_install(workspace: Path, mod_root: Path) -> int:  # pragma: no cover
+def real_run_modules_install(
+    workspace: Path, mod_root: Path, sandbox: BuildSandbox | None = None
+) -> int:  # pragma: no cover
     return run_make_target(
         workspace,
         [f"INSTALL_MOD_PATH={mod_root}", "modules_install"],
         "make modules_install",
+        sandbox=sandbox,
     )
 
 
-def run_make_target(workspace: Path, args: list[str], label: str) -> int:
-    """Run ``make -C <workspace> <args...>`` and map launch/timeout faults."""
+def run_make_target(
+    workspace: Path, args: list[str], label: str, sandbox: BuildSandbox | None = None
+) -> int:
+    """Run ``make -C <workspace> <args...>`` (demoted when a sandbox is active); map faults."""
     try:
-        return subprocess.run(
+        return sandbox_run(
+            sandbox,
             ["make", "-C", str(workspace), *args],
             timeout=MAKE_TIMEOUT_S,
             check=False,
