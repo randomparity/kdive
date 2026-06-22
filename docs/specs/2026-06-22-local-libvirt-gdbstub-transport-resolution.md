@@ -101,14 +101,46 @@ already-defined branch does not apply there).
 
 The bind-probe and the existing-domain `XMLDesc` read are injected seams so allocation is
 unit-tested with fakes (a fake "free port" source and a fake existing-domain XML), with the real
-socket/libvirt calls `# pragma: no cover - live_vm`.
+socket/libvirt calls `# pragma: no cover - live_vm`. Concretely, `provision()` gains a
+`_gdb_port_for(system_id, *, connect)` step: it opens a connection, looks the domain up by
+`domain_name_for(system_id)`, and on `VIR_ERR_NO_DOMAIN` (no prior define) or an absent recorded
+port falls through to the bind-probe; any other libvirt error is `INFRASTRUCTURE_FAILURE`. The
+"free port" source is a `Callable[[], int]` injected into `LocalLibvirtProvisioning.__init__`
+(default = the real bind-probe), so the allocation branch is fake-driven in tests. This step runs
+**only** when `debug.gdbstub` is set, so a non-gdbstub provision opens no extra connection
+(unchanged path).
+
+### 2a. Install preserves the gdbstub element across the direct-kernel re-define
+
+Local boot is two-phase: `provision()` defines the domain, then `install()`
+(`local_libvirt/lifecycle/install.py::_render_os_section`) re-defines it by reading the live
+`XMLDesc()`, editing **only** the `<os>` subtree, and `defineXML`-ing the result — it preserves
+all other elements, including `<qemu:commandline>`. **Hazard:** `install.py` parses with
+`defusedxml.fromstring` and re-serializes with `ET.tostring` **without** registering the `qemu:`
+namespace prefix, so the round-trip would emit `<ns0:commandline>` (an auto-assigned prefix)
+instead of `<qemu:commandline>`. libvirt's qemu-passthrough schema requires the `qemu:` prefix
+and the `xmlns:qemu` declaration on the `<domain>`, so a re-prefixed element is rejected or
+silently dropped — the gdbstub vanishes after install, breaking the live round-trip even though
+provision recorded it correctly. **Fix:** `install._render_os_section` must call
+`register_qemu_namespace()` (and `register_kdive_namespace()`, which it already implicitly relies
+on for the metadata element it also round-trips) before `ET.tostring`. A unit test renders a
+provision XML with the gdbstub element, runs it through the install os-edit, and asserts the
+re-serialized XML still contains a `qemu:`-prefixed `<commandline>` with the same `-gdb tcp:` arg
+(it would catch a regression where the prefix is dropped). This is the one edit in `install.py`;
+it is a correctness fix for the element this PR introduces, not new install behavior.
 
 ### 3. Resolve: read the recorded port back from the live domain XML
 
 Implement `_real_resolve_endpoint(system)` in `local_libvirt/lifecycle/connect.py`:
 
-1. Connect to libvirt (`KDIVE_LIBVIRT_URI`), look up the domain by the name core derived
-   (`SystemHandle` carries the domain name, as the existing remote/local handle contract does).
+1. Connect to libvirt (`KDIVE_LIBVIRT_URI`), look up the domain by `lookupByName(str(system))`.
+   The `SystemHandle` passed to `open_transport` **is the domain name**: the caller computes
+   `handle_name = system.domain_name or str(system.id)` (`sessions_lifecycle.py`), and a
+   provisioned local System's `domain_name` is `domain_name_for(system.id)` = `kdive-<uuid>`.
+   So `str(system)` is directly `lookupByName`-able, exactly as remote's gdbstub-port enumeration
+   uses `domain.name()`. (If a System with no recorded `domain_name` somehow reaches here,
+   `str(system)` is the bare UUID, which `lookupByName` will not find → the not-found branch
+   below, a clean `CONFIGURATION_ERROR`.)
 2. Read `domain.XMLDesc()` and parse the gdbstub port with the shared `recorded_gdb_port()`
    reader (promoted to a shared helper, see §5).
 3. Return `("127.0.0.1", port)`.
@@ -165,6 +197,13 @@ wrapper (it adds remote-specific operation/domain detail); the shared helper is 
   `CONFIGURATION_ERROR` on attach, not an opaque `MISSING_DEPENDENCY`.
 - No schema/migration change; the seams satisfy the existing `Connector` port unchanged.
 - The phantom `LibvirtDebugOptions.gdbstub` flag becomes a real contract.
+- **No change to `vmcore.fetch` admission.** `ProfilePolicy.capture_method` already returns
+  `GDBSTUB` for a gdbstub-flagged System (`profile_policy.py`), and `GDBSTUB` is not a
+  core-producing method (not in `vmcore.py::_VMCORE_METHODS`) nor in local's
+  `supported_capture_methods` (`{KDUMP}`). So a gdbstub-only System still resolves to *no implicit
+  core method* and `vmcore.fetch` fail-fasts with the existing actionable `CONFIGURATION_ERROR`.
+  This PR neither fixes nor regresses that pre-existing, correct behavior; flagged here so the
+  `gdbstub`-implies-`GDBSTUB`-capture-method interaction is not mistaken for a new gap.
 
 ## Acceptance
 
@@ -173,6 +212,9 @@ wrapper (it adds remote-specific operation/domain detail); the shared helper is 
   on `127.0.0.1`, with the allocated port.
 - Port allocation reuses a recorded port (idempotent retry) and bind-probes a fresh one
   otherwise.
+- The install os-edit preserves the gdbstub element: a provision XML carrying
+  `<qemu:commandline>` survives `install._render_os_section` with the `qemu:` prefix and `-gdb
+  tcp:` arg intact (regression test for the namespace-prefix hazard in §2a).
 - `_real_resolve_endpoint` returns `("127.0.0.1", port)` from a fake domain XML; maps not-found,
   no-recorded-port, and malformed-XML to the categories in §3.
 - `supported_debug_transports == frozenset({"gdbstub"})` in `build_runtime`; admission now admits
