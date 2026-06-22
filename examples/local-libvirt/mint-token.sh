@@ -25,23 +25,14 @@ source "${example_dir}/env.sh"
 exec "${KDIVE_PYTHON}" - "${KDIVE_PROJECT}" <<'PY'
 import sys
 
-from kdive.cli.login import (
-    OidcIssuer,
-    _authorization_code,
-    _build_claims,
-    _exchange_code,
-)
+from kdive.cli.login import mint_local_token
 
 project = sys.argv[1]
-issuer = OidcIssuer.from_config()
-claims = _build_claims(
-    subject="local-dev",
-    audience=issuer.audience,
-    projects=[project],
-    roles={project: "admin"},
-    platform_roles=["platform_admin", "platform_operator"],
-    agent_session=None,
+print(
+    mint_local_token(
+        project=project,
+        role="admin",
+        platform_roles=["platform_admin", "platform_operator"],
+    )
 )
-code = _authorization_code(issuer, claims)
-print(_exchange_code(issuer, code))
 PY

@@ -39,8 +39,8 @@ missing.
 | File | Purpose |
 |------|---------|
 | `env.sh` | Sources the live-stack env, then sets `KDIVE_PROJECT`, `KDIVE_GUEST_IMAGE`, `KDIVE_LIBVIRT_URI=qemu:///system`, and `KDIVE_PYTHON`. Source it; don't run it. |
-| `up.sh` | Idempotent bring-up: preflight → staging dir → backends → migrate → seed project → start the trio as root → install `.mcp.json`. |
-| `down.sh` | Stop the root processes (`sudo kill` by pid file). Backends are left running. |
+| `up.sh` | Idempotent bring-up: preflight → duplicate-trio guard → staging dir → backends → migrate → seed project → start the trio as root → block on `/readyz` → merge `.mcp.json`. |
+| `down.sh` | Stop the root processes by pid file (`sudo kill`, then SIGKILL survivors); keeps the pid file if any process refuses to die. Backends are left running. |
 | `mint-token.sh` | Print an admin developer token for `KDIVE_PROJECT` to stdout. |
 | `mcp.json` | The MCP client config installed into the kernel tree; reads the token from `${KDIVE_TOKEN}` (holds no secret). |
 
@@ -63,6 +63,29 @@ docker compose down -v    # from the repo root, to remove the backends + volumes
 ```
 
 Tokens are short-lived; re-run step 2 and reconnect the client when one expires.
+
+## How bring-up and teardown behave
+
+- **Readiness gate.** `up.sh` does not print "stack is up" on a timer. After starting the
+  trio it polls the server's `/readyz` and only prints success once it returns `200` (pg +
+  MinIO + mock-OIDC all reachable). If a process exits first or readiness is not reached
+  within 90s, `up.sh` prints the per-process log paths under `KDIVE_STACK_LOG_DIR` and exits
+  non-zero. `/readyz` is served by the aux health listener on `127.0.0.1:9464` (the server's
+  per-process default), **not** on the MCP port `:8000`, which has no health routes.
+  - *Caveat:* if you export `KDIVE_HEALTH_BIND_ADDR`, it applies to **all three** processes,
+    so worker and reconciler then collide with the server on that one port and fail to bind.
+    Leave it unset (the default specializes the port per process: server `9464`, worker
+    `9465`, reconciler `9466`). `up.sh` polls whatever `KDIVE_HEALTH_BIND_ADDR` resolves to,
+    falling back to `127.0.0.1:9464`.
+- **Duplicate-run guard.** `up.sh` refuses to start if a root `kdive` trio is already
+  running (a second trio would fight over the same domains); stop the first with `down.sh`.
+- **`.mcp.json` is merged, not clobbered.** If `KDIVE_KERNEL_SRC/.mcp.json` already exists,
+  `up.sh` copies it to `.mcp.json.bak` and replaces only its `kdive` server entry — any other
+  MCP servers you configured (and any other top-level keys) are preserved. A missing file is
+  created from the template. The step is idempotent.
+- **Teardown verifies.** `down.sh` sends `sudo kill` to each live pid, waits, escalates to
+  SIGKILL for any that remain, and reports survivors. If a process cannot be stopped it keeps
+  the pid file and exits non-zero so a re-run can finish the job; a clean stop removes it.
 
 ## Configuration
 
