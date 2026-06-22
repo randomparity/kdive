@@ -99,8 +99,9 @@ pass untouched). No behavior change to remote.
    - `debug.gdbstub=False` → no extra connection for port lookup; rendered XML has no gdbstub
      (free-port source NOT called).
    - A non-`NO_DOMAIN` libvirt error during the port lookup → `INFRASTRUCTURE_FAILURE`.
-2. Add a `free_port: Callable[[], int] | None` ctor param (default = real bind-probe
-   `# pragma: no cover - live_vm`). Add `_gdb_port_for(system_id, *, conn)`:
+2. Add `XMLDesc(self, flags: int) -> str` to the `_LibvirtDomain` Protocol (additive; the real
+   `virDomain` already has it). Add a `free_port: Callable[[], int] | None` ctor param (default =
+   real bind-probe `# pragma: no cover - live_vm`). Add `_gdb_port_for(system_id, *, conn)`:
    `lookupByName(domain_name_for(system_id))` → `recorded_gdb_port(XMLDesc())`; on NO_DOMAIN or
    `None` → `free_port()`; other libvirt error → infra failure. Call it in `provision` (and
    `reprovision` inherits via `provision`) only when the flag is set; thread the port into
@@ -138,10 +139,17 @@ otherwise unchanged; idempotent retry reuses the recorded port.
      real endpoint (no longer raises MISSING_DEPENDENCY). Replace it with a test that `from_env`'s
      resolver, given a fake connection, returns the recorded endpoint — or drives the
      no-domain/no-port error. The MISSING_DEPENDENCY assertion is deleted (the defect is fixed).
-2. Make `LocalLibvirtConnect.from_env` wire a real `_real_resolve_endpoint` that opens
-   `libvirt.open(KDIVE_LIBVIRT_URI)`, looks up `str(system)`, reads `XMLDesc()`, parses via shared
-   `recorded_gdb_port`, returns `("127.0.0.1", port)`; the libvirt-open + XMLDesc are the only
-   `# pragma: no cover - live_vm` lines, the branch logic is pure and injected for tests.
+2. Preserve the existing injection contract (20+ connect tests inject `resolve_endpoint=` at
+   construction; keep the `_ResolveEndpoint = Callable[[SystemHandle], tuple[str, int]]` type and
+   `__init__` unchanged). Add a module-level **factory** `_resolve_endpoint_via(connect:
+   _Connect) -> _ResolveEndpoint` returning a closure that does the lookup→XMLDesc→parse→compose
+   with the error mapping; `from_env` wires `resolve_endpoint=_resolve_endpoint_via(_default_connect)`
+   where `_default_connect` opens `libvirt.open(KDIVE_LIBVIRT_URI)` and is the only
+   `# pragma: no cover - live_vm` seam. Tests call `_resolve_endpoint_via(fake_connect)(system)`
+   directly, so every branch is pure-testable without real libvirt. (`libvirt.open` + `XMLDesc`
+   are the only un-covered lines; lookup/parse/compose/error-map are covered.) Define a narrow
+   `_Connect`/`_Domain` Protocol locally (or reuse the provisioning one) exposing `lookupByName`,
+   `XMLDesc`, `close`.
 3. Run focused connect tests + `just lint type`.
 
 **Acceptance:** all six cases pass; `_open_gdbstub`'s loopback check and RSP probe path are
