@@ -146,4 +146,3 @@ ADR-0203/0206/0207 already established — CI cannot detect any of these.
 - **Set the squashfs/loop/overlay symbols as `=m` (modules).** Rejected: the existing kdump
   fragment symbols are all `=y`, and a kdump crash initramfs must not depend on the primary
   kernel having loaded extra modules first; built-in keeps the crash environment self-contained.
-```
