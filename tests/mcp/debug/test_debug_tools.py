@@ -364,6 +364,38 @@ def test_start_session_attaches_and_row_is_live(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_start_session_unsupported_transport_is_capability_unsupported(migrated_url: str) -> None:
+    # ADR-0209: a provider whose descriptor does not advertise the requested transport rejects the
+    # session up front with capability_unsupported — no debug_sessions row, no transport opened.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, sys_id)
+            conn_fake = _FakeConnector()
+            handlers = debug_tools.DebugSessionHandlers.from_resolver(
+                provider_resolver(
+                    connector=conn_fake,
+                    profile_policy=_PROFILE_POLICY,
+                    supported_debug_transports=frozenset(),
+                ),
+                runtime_resolver=None,
+                secret_registry=SecretRegistry(),
+            )
+            before = await _session_count(pool)
+            resp = await handlers.start_session(pool, _ctx(), run_id=run_id, transport="gdbstub")
+            after = await _session_count(pool)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "capability_unsupported"
+        assert resp.data["capability"] == "debug_transport:gdbstub"
+        assert resp.data["supported"] == []
+        assert after == before  # no new row
+        assert conn_fake.opened == []  # transport never opened
+
+    asyncio.run(_run())
+
+
 def test_second_start_session_is_transport_conflict(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
