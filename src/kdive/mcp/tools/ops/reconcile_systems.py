@@ -18,17 +18,15 @@ are recorded — the diff carries only ``(kind, name)`` identities.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-import kdive.config as config
-from kdive.config.core_settings import SYSTEMS_TOML
 from kdive.domain.errors import ErrorCategory
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
+from kdive.inventory.path import systems_toml_path
 from kdive.inventory.reconcile import ReconcileDiff, ReconcileRecord
 from kdive.inventory.reconcile_images import ImageHeadStore
 from kdive.inventory.reconcile_pipeline import reconcile_all
@@ -60,12 +58,6 @@ class _AbsentImageStore:
 
     def head_present(self, key: str) -> bool:  # noqa: ARG002 - protocol param name, unused
         return False
-
-
-def _resolve_path() -> Path:
-    """Resolve the inventory file path from ``KDIVE_SYSTEMS_TOML`` (default ``./systems.toml``)."""
-    raw = config.get(SYSTEMS_TOML)
-    return Path(raw) if raw is not None else Path("./systems.toml")
 
 
 async def reconcile_systems(
@@ -133,7 +125,7 @@ async def _run_pass(pool: AsyncConnectionPool, store: ImageHeadStore) -> Reconci
 
 def _load() -> InventoryDoc | None:
     """Load the inventory doc from the default path; an absent file returns ``None``."""
-    return load_inventory_optional(_resolve_path())
+    return load_inventory_optional(systems_toml_path())
 
 
 def _names(records: list[ReconcileRecord]) -> list[str]:

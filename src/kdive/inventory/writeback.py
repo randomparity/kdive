@@ -38,9 +38,9 @@ import kdive.config as config
 from kdive.config.core_settings import (
     INVENTORY_WRITEBACK,
     INVENTORY_WRITEBACK_CONFIGMAP,
-    SYSTEMS_TOML,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.inventory.path import systems_toml_path
 from kdive.inventory.serialize import REMOTE_PLACEHOLDER_PREFIX
 
 __all__ = [
@@ -279,7 +279,7 @@ def resolve_writeback_target() -> WritebackTarget | None:
         name = config.get(INVENTORY_WRITEBACK_CONFIGMAP) or "kdive-systems"
         return ConfigMapWriteback.from_in_cluster(name=name, key=_CONFIGMAP_KEY)
     if selected == "file":
-        return MountedFileWriteback(Path(config.require(SYSTEMS_TOML)))
+        return MountedFileWriteback(systems_toml_path())
     raise CategorizedError(
         f"unknown {INVENTORY_WRITEBACK.name} value {selected!r}",
         category=ErrorCategory.CONFIGURATION_ERROR,

@@ -394,17 +394,23 @@ IMAGE_PRIVATE_MAX_BYTES = Setting(
 SYSTEMS_TOML = Setting(
     name="KDIVE_SYSTEMS_TOML",
     parse=_str,
-    default="./systems.toml",
+    default=None,
     group="inventory",
     processes=frozenset({"reconciler", "worker"}),
     help=(
         "Path to the declarative systems inventory file reconciled into the catalog "
         "(ADR-0112). The reconciler's inventory pass reads it each loop; the worker resolves "
-        "the per-op remote-libvirt connection config from it (ADR-0112 §connection). An absent "
-        "default file is the normal pre-config state (systems.toml is gitignored) and is a quiet "
-        "no-op, while a present-but-malformed file fails that pass without aborting siblings."
+        "the per-op remote-libvirt connection config from it (ADR-0112 §connection). When unset "
+        "the path defaults to the per-user XDG location $XDG_CONFIG_HOME/kdive/systems.toml "
+        "(falling back to ~/.config/kdive/systems.toml) — a CWD-independent default, never a "
+        "working-directory-relative ./systems.toml. An absent default file is the normal "
+        "pre-config state (systems.toml is gitignored) and is a quiet no-op, while a "
+        "present-but-malformed file fails that pass without aborting siblings."
     ),
-    suggest="a path to a systems.toml, e.g. ./systems.toml or /etc/kdive/systems.toml",
+    suggest=(
+        "a path to a systems.toml, e.g. ~/.config/kdive/systems.toml or /etc/kdive/systems.toml; "
+        "leave unset for the XDG default"
+    ),
 )
 
 INVENTORY_WRITEBACK = Setting(

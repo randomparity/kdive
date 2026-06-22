@@ -2058,14 +2058,13 @@ def test_on_demand_reconcile_systems_also_prices(
     migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The path that silently skipped pricing before Task 4 — pin it explicitly.
-    from kdive.config.core_settings import SYSTEMS_TOML
+    import kdive.config as config
     from kdive.mcp.tools.ops import reconcile_systems as rs
 
     async def _run() -> None:
         path = _write_toml(tmp_path, _priced_remote_toml("4.0"))
-        monkeypatch.setattr(
-            rs.config, "get", lambda key: str(path) if key is SYSTEMS_TOML else None
-        )
+        monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+        config.load()
         ctx = RequestContext(
             principal="admin-1",
             agent_session="s",

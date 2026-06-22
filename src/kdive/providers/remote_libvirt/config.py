@@ -16,14 +16,13 @@ topology, not declarative inventory).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import kdive.config as config
-from kdive.config.core_settings import SYSTEMS_TOML
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import ImageEntry, InventoryDoc, RemoteLibvirtInstance, StagedSource
+from kdive.inventory.path import systems_toml_path
 from kdive.providers.remote_libvirt.settings import (
     REMOTE_LIBVIRT_MACHINE,
     REMOTE_LIBVIRT_NETWORK,
@@ -88,10 +87,6 @@ class RemoteLibvirtConfig:
         return self.gdb_port_min + 1
 
 
-def _systems_toml_path() -> Path:
-    return Path(config.get(SYSTEMS_TOML) or "./systems.toml")
-
-
 def _load_inventory_doc() -> InventoryDoc | None:
     """Load and validate the ``systems.toml`` document, or ``None`` when the file is absent.
 
@@ -100,7 +95,7 @@ def _load_inventory_doc() -> InventoryDoc | None:
             unreadable/malformed/invalid (the parse error is surfaced verbatim).
     """
     try:
-        return load_inventory_optional(_systems_toml_path())
+        return load_inventory_optional(systems_toml_path())
     except InventoryError as exc:
         raise CategorizedError(
             f"systems.toml is present but invalid: {exc}",

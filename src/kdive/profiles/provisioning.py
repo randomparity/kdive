@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import StrEnum
-from pathlib import Path
 from typing import Annotated, Literal, cast
 
 from pydantic import (
@@ -430,12 +429,10 @@ def _catalog_name_declared(provider: str, name: str) -> bool:
     Returns ``True`` when the inventory file is absent (nothing to check against — defer to the
     DB fetch) or when a declared ``[[image]]`` matches ``(provider, name)``.
     """
-    import kdive.config as config
-    from kdive.config.core_settings import SYSTEMS_TOML
     from kdive.inventory.loader import load_inventory_optional
+    from kdive.inventory.path import systems_toml_path
 
-    raw = config.get(SYSTEMS_TOML) or "./systems.toml"
-    doc = load_inventory_optional(Path(raw))
+    doc = load_inventory_optional(systems_toml_path())
     if doc is None:
         return True
     return any(img.provider == provider and img.name == name for img in doc.image)
