@@ -48,18 +48,31 @@ def capability_unsupported(
 - Tool signature + `fetch_vmcore` + `_fetch_vmcore`: `method` becomes `CaptureMethod | str | None`
   defaulting to `None` (drop the static `HOST_DUMP`). Remove `HOST_DUMP` from the tool `Field`
   default; the FastMCP param becomes optional.
-- The runtime callback passes the **whole `runtime`** (not just `supported_capture_methods`) so the
-  handler can read `profile_policy` and `component_sources.provider`.
+- **Retire the legacy path (challenge finding 1).** `_fetch_vmcore` today takes a
+  `supported_methods: frozenset[CaptureMethod]` param and carries three ad-hoc `_config_error`
+  branches (unknown method / non-core / `"method not supported by provider"`). **Drop the
+  `supported_methods` param** and **replace those branches** with the resolution below, so there is
+  exactly one code path per condition and the unsupported-method case returns the ADR-0209
+  `capability_unsupported` shape — never the old `"method not supported by provider"` string. The
+  runtime callback passes the **whole `runtime`** (not just `supported_capture_methods`) so the
+  handler reads `profile_policy`, `supported_capture_methods`, and `component_sources.provider`.
 - Resolution order inside `_fetch_vmcore`, after the System is loaded (the profile lives on the row):
   1. If `method` supplied: parse → must be a known `CaptureMethod` (else config_error
-     `invalid capture method`); must be core-producing (`_VMCORE_METHODS`, else config_error
-     `method does not produce a vmcore`); must be in `runtime.supported_capture_methods` (else the
-     new `capability_unsupported` with `capability=f"capture_method:{m.value}"`).
-  2. If omitted: `resolved = runtime.profile_policy.capture_method(profile)` clamped to
-     `_VMCORE_METHODS`. If `resolved` is core-producing AND in `supported_capture_methods`, use it.
-     Otherwise (non-core profile method, e.g. console/gdbstub System) there is no implicit core
-     default → `capability_unsupported` (capability = the resolved method, or a
-     `missing_required_field`-style config_error naming that an explicit core `method` is required).
+     `invalid capture method` — reuse the unknown-method branch); must be core-producing
+     (`_VMCORE_METHODS`, else config_error `method does not produce a vmcore`); must be in
+     `runtime.supported_capture_methods` (else `capability_unsupported` with
+     `capability=f"capture_method:{m.value}"`, `provider=runtime.component_sources.provider`,
+     `supported=[m.value for m in sorted(runtime.supported_capture_methods)]`).
+  2. If omitted: `resolved = runtime.profile_policy.capture_method(profile)`. If `resolved` is
+     core-producing (`_VMCORE_METHODS`) **and** in `supported_capture_methods`, use it as the
+     default. Otherwise — the profile's method is non-core (console/gdbstub System) **or** the
+     provider does not support it — there is no valid implicit core method, so the tool requires an
+     explicit one: return `config_error_reason(system_id, ConfigErrorReason.MISSING_REQUIRED_FIELD,
+     detail="no implicit core capture method for this System's profile; pass an explicit method")`
+     (challenge finding 2 — `missing_required_field` is the honest reason: the provider may well
+     support core methods, the caller just omitted `method` on a System whose profile yields none).
+     This is distinct from `capability_unsupported`, which is reserved for an *explicit* method the
+     provider does not support.
 - The profile parse uses `ProvisioningProfile.parse(system.provisioning_profile)`; a parse failure
   is the existing typed failure path.
 - Keep the existing dedup key `f"{system_id}:capture_vmcore:{method.value}"` keyed on the *resolved*
@@ -70,9 +83,11 @@ def capability_unsupported(
     `{KDUMP}`) → `queued`, one `capture_vmcore` job, dedup key `...:kdump`.
   - no-method on a `preserve_on_crash` local System (`→ HOST_DUMP`) with a descriptor that supports
     `{HOST_DUMP}` → `queued`.
-  - no-method on a console-only System (`→ CONSOLE`, non-core) → `CONFIGURATION_ERROR`, no job.
-  - explicit unsupported (`host_dump` on local `{KDUMP}`) → `capability_unsupported`, no job.
-  - explicit non-core (`console`) → config_error, no job.
+  - no-method on a console-only System (`→ CONSOLE`, non-core) → `CONFIGURATION_ERROR` with
+    `reason == "missing_required_field"`, no job.
+  - explicit unsupported (`host_dump` on local `{KDUMP}`) → `CONFIGURATION_ERROR` with
+    `reason == "capability_unsupported"` and `supported == ["kdump"]`, no job.
+  - explicit non-core (`console`) → config_error `method does not produce a vmcore`, no job.
 
 ## debug.start_session — supported_debug_transports gate (Task 3)
 
