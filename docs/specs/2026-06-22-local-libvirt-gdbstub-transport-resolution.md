@@ -122,8 +122,11 @@ instead of `<qemu:commandline>`. libvirt's qemu-passthrough schema requires the 
 and the `xmlns:qemu` declaration on the `<domain>`, so a re-prefixed element is rejected or
 silently dropped — the gdbstub vanishes after install, breaking the live round-trip even though
 provision recorded it correctly. **Fix:** `install._render_os_section` must call
-`register_qemu_namespace()` (and `register_kdive_namespace()`, which it already implicitly relies
-on for the metadata element it also round-trips) before `ET.tostring`. A unit test renders a
+`register_qemu_namespace()` before `ET.tostring`. (`register_*` mutates *process-global*
+ElementTree prefix state, so the existing kdive metadata element survives install today only
+because `provision()` happened to register the kdive prefix earlier in the same process — install
+should also call `register_kdive_namespace()` to be self-sufficient rather than depend on that
+cross-call global ordering.) A unit test renders a
 provision XML with the gdbstub element, runs it through the install os-edit, and asserts the
 re-serialized XML still contains a `qemu:`-prefixed `<commandline>` with the same `-gdb tcp:` arg
 (it would catch a regression where the prefix is dropped). This is the one edit in `install.py`;
