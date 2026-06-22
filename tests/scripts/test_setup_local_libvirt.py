@@ -46,9 +46,18 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     # check-local-libvirt.sh also probes `python3 -c "import guestfs, drgn"`; that probe must
     # succeed (exit 0) but is not an onboarding call, so keep it out of the helper call log.
     _stub(bindir, "python3", _python_stub_body(calllog))
+    # check-local-libvirt.sh requires a writable install-staging dir; provide one so the
+    # preflight the setup script runs first passes.
+    staging = tmp_path / "install-staging"
+    staging.mkdir()
     # Stub bin first so it shadows real python3/virsh/etc.; system bins follow so the
     # scripts' `dirname` (and other coreutils) resolve.
-    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "KDIVE_KVM_NODE": str(kvm)}
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(kvm),
+        "KDIVE_INSTALL_STAGING": str(staging),
+    }
     return bindir, env, calllog
 
 

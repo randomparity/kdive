@@ -10,6 +10,9 @@ readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 # python3. Probe the same interpreter the worker uses; override on a host-services
 # deployment, e.g. KDIVE_PYTHON=/opt/kdive/.venv/bin/python.
 readonly PY="${KDIVE_PYTHON:-python3}"
+# runs.install stages the kernel/initrd here before booting the System; must be writable
+# by the worker user and live under a path the qemu user can traverse (see the boot check).
+readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
 fail=0
 
 note_fail() {
@@ -28,6 +31,16 @@ _default_net_active() {
   [[ "$out" == *"Active:"*[Yy]es* ]]
 }
 _venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
+_dir_writable() {
+  local dir="$1" probe
+  [[ -d "$dir" && -w "$dir" ]] || return 1
+  probe="${dir}/.kdive-write-probe.$$"
+  if : >"${probe}" 2>/dev/null; then
+    rm -f "${probe}"
+    return 0
+  fi
+  return 1
+}
 
 _has_kvm || note_fail "${KVM_NODE} not readable/writable (KVM unavailable)" \
   "enable virtualization in BIOS and load kvm modules; ensure your user can access ${KVM_NODE}"
@@ -46,6 +59,10 @@ fi
 _venv_imports_kdump_deps || note_fail \
   "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203)" \
   "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
+
+_dir_writable "${INSTALL_STAGING}" || note_fail \
+  "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \
+  "create it writable under a world-traversable path (NOT \$HOME, which a 0700 mode hides from the qemu user that boots the VM): sudo install -d -o \"\$USER\" ${INSTALL_STAGING} — see docs/operating/runbooks/four-method-live-run.md section 4b"
 
 if ((fail)); then
   printf "\nlocal-libvirt host is NOT ready (see failures above)\n" >&2

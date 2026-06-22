@@ -183,7 +183,7 @@ host-side libguestfs, the guest's `kdumpctl` builds a crash initramfs in-guest, 
 `control.force_crash` the guest writes a real `/var/crash/<ts>/vmcore`. The worker then
 force-stops System B's domain (over `KDIVE_LIBVIRT_URI`) and harvests the vmcore host-side
 from the qcow2 overlay with a read-only libguestfs mount, extracting build-id + redacted
-dmesg with drgn. There is no crash→reboot→upload window to wait out, but two prerequisites
+dmesg with drgn. There is no crash→reboot→upload window to wait out, but three prerequisites
 apply on the **worker host**:
 
 - `libguestfs` (the `guestfs` Python binding) must be importable by the **worker venv**
@@ -194,6 +194,9 @@ apply on the **worker host**:
   boot cmdline reserves crash memory. The install gate is satisfied when either the build
   supplied injected modules (`modules_ref`) or a separate initrd was uploaded (`initrd_ref`);
   a local kdump System with neither is a `configuration_error` (see ADR-0206).
+- The install-staging and console host directories must be prepared for the worker user and the
+  `qemu` user — see [Prepare the worker-host directories](#prepare-the-worker-host-directories-install-staging--console)
+  below. This applies to **every** local install/boot, not only kdump.
 
 #### Wire the worker venv (drgn + libguestfs)
 
@@ -247,6 +250,36 @@ default. Do both once on the worker host:
    `scripts/check-local-libvirt.sh` fails with this exact fix hint when the import does not
    resolve. On a host-services deployment where the worker runs a venv outside the checkout, set
    `KDIVE_PYTHON=/opt/kdive/.venv/bin/python` so the preflight probes the worker's interpreter.
+
+#### Prepare the worker-host directories (install staging + console)
+
+`runs.install` stages the built kernel/initrd under `KDIVE_INSTALL_STAGING` (default
+`/var/lib/kdive/install`) before defining the domain, and `runs.boot` reads the guest serial
+console log libvirt writes under `/var/lib/kdive/console`. On `qemu:///system` the VM runs as the
+`qemu` user and `virtlogd` writes the console log as `root`, so both directories carry
+host-permission constraints a non-root worker must satisfy:
+
+- **Install staging** must be a directory the worker user can write **and** the `qemu` user can
+  traverse to read the staged kernel. Create it once under a world-traversable path — never under a
+  private `$HOME` (mode `0700` hides the staged kernel from `qemu`, and the VM fails to start with
+  `could not open kernel file … Permission denied`):
+
+  ```bash
+  sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install
+  ```
+
+  `scripts/check-local-libvirt.sh` fails with this fix when the directory is missing or unwritable.
+  To stage elsewhere, set `KDIVE_INSTALL_STAGING` for the worker to another world-traversable,
+  worker-writable path (again, not `$HOME`).
+
+- **Console log** at `/var/lib/kdive/console/<system>.log` is created by `virtlogd` as `root:root`
+  mode `0600`; the boot job reads it to capture the redacted console artifact, so the worker user
+  must be able to read it. The simplest arrangement is to **run the worker as `root`** (the natural
+  identity for managing `qemu:///system` domains, libguestfs, and kexec). If the worker runs
+  unprivileged, a default POSIX ACL alone does **not** help — the `0600` create-mode zeroes the ACL
+  mask; instead pre-create each `…/console/<system>.log` as the worker user before boot (a
+  worker-owned file inherits the directory's `virt_log_t` SELinux type and stays worker-readable
+  while `virtlogd` appends to it), or grant the worker read access via your site's policy.
 
 Fetching the core force-stops the domain. For a `crashed` System this is benign — kdive does
 not auto-recover a crashed System — but a guest that kdump-rebooted back to multi-user is
