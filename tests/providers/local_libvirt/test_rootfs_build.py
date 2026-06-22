@@ -18,9 +18,11 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput, RootfsBuildSpec
+from kdive.providers.local_libvirt import rootfs_build
 from kdive.providers.local_libvirt.rootfs_build import (
     LocalLibvirtRootfsBuildPlane,
     RootfsBuildTools,
+    _real_virt_builder,
 )
 
 
@@ -185,3 +187,49 @@ def test_build_rejects_a_name_that_would_escape_the_workspace(
         _plane(tmp_path, tools).build(_spec(name=bad_name))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert not tools.builder_calls, "an unsafe name is rejected before any libguestfs stage runs"
+
+
+def _capture_virt_builder_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, packages: tuple[str, ...]
+) -> list[str]:
+    """Drive the real virt-builder seam with a stubbed runner and return the argv it built."""
+    captured: list[list[str]] = []
+
+    def _fake_run_guestfs_tool(argv: list[str], **_: object) -> None:
+        captured.append(argv)
+
+    monkeypatch.setattr(rootfs_build, "run_guestfs_tool", _fake_run_guestfs_tool)
+    key = tmp_path / "id.pub"
+    key.write_text("ssh-ed25519 AAAA kdive\n")
+    _real_virt_builder(
+        distro="fedora",
+        releasever="43",
+        packages=packages,
+        authorized_key=key,
+        scratch=tmp_path / "scratch.qcow2",
+        size="6G",
+    )
+    assert len(captured) == 1, "virt-builder runs once"
+    return captured[0]
+
+
+def test_virt_builder_stages_nmi_panic_sysctl_for_a_kdump_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A kdump image must panic on the NMI `control.force_crash` injects; without this sysctl the
+    # guest ignores it and kdump never triggers (ADR-0212, #688, mirrors remote ADR-0084).
+    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("kdump-utils",))
+    assert "--write" in argv
+    write_value = argv[argv.index("--write") + 1]
+    assert write_value == "/etc/sysctl.d/99-kdive-kdump.conf:kernel.unknown_nmi_panic=1\n"
+
+
+def test_virt_builder_omits_nmi_panic_sysctl_for_a_non_kdump_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-kdump (e.g. build-host) image never runs force_crash; a stray NMI must not panic it,
+    # so the sysctl is gated on the same kdump-utils condition that enables kdump.service.
+    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("gcc", "make"))
+    joined = " ".join(argv)
+    assert "unknown_nmi_panic" not in joined
+    assert "99-kdive-kdump.conf" not in joined
