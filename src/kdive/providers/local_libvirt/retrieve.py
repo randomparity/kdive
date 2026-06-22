@@ -75,10 +75,9 @@ class _StorePort(Protocol):
 
 
 type _WaitForVmcore = Callable[[UUID], Path | None]
-type _HostDumpCapture = Callable[[UUID], bytes | None]
+type _HostDumpCapture = Callable[[UUID], Path | None]
 type _ReadBuildId = Callable[[bytes], str]
 type _ReadBuildIdFromFile = Callable[[Path], str]
-type _ExtractRedacted = Callable[[bytes], bytes]
 type _ExtractRedactedFromFile = Callable[[Path], bytes]
 type _FetchObject = Callable[[str], bytes]
 type _RunCrash = Callable[[Path, Path, str], CrashResult]
@@ -95,7 +94,6 @@ class LocalLibvirtRetrieve:
         wait_for_vmcore: _WaitForVmcore,
         read_vmcore_build_id: _ReadBuildId,
         read_vmcore_build_id_from_file: _ReadBuildIdFromFile,
-        extract_redacted: _ExtractRedacted,
         extract_redacted_from_file: _ExtractRedactedFromFile,
         host_dump_capture: _HostDumpCapture,
         secret_registry: SecretRegistry,
@@ -108,7 +106,6 @@ class LocalLibvirtRetrieve:
         self._wait_for_vmcore = wait_for_vmcore
         self._read_vmcore_build_id = read_vmcore_build_id
         self._read_vmcore_build_id_from_file = read_vmcore_build_id_from_file
-        self._extract_redacted = extract_redacted
         self._extract_redacted_from_file = extract_redacted_from_file
         self._host_dump_capture = host_dump_capture
         self._fetch_object = fetch_object
@@ -124,7 +121,6 @@ class LocalLibvirtRetrieve:
             wait_for_vmcore=_real_wait_for_vmcore,
             read_vmcore_build_id=_real_read_build_id,
             read_vmcore_build_id_from_file=read_core_build_id_from_file,
-            extract_redacted=_real_extract_redacted_bytes,
             extract_redacted_from_file=lambda core: redact_dmesg(
                 core, read_core_dmesg_from_file, secret_registry
             ),
@@ -137,9 +133,10 @@ class LocalLibvirtRetrieve:
     def capture(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
         """Capture a core via ``method``; store raw + redacted; return refs + build-id.
 
-        ``KDUMP`` streams the harvested core from a worker temp file straight to the object
-        store, never holding the whole core in one in-memory buffer (#657); ``HOST_DUMP``
-        keeps the bytes path.
+        Both ``KDUMP`` (the ADR-0203 overlay harvest) and ``HOST_DUMP`` (the ADR-0211 libvirt
+        domain core dump) stream the captured core from a worker temp file straight to the object
+        store, never holding the whole core in one in-memory buffer (#657); they differ only in the
+        seam that produces that file.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for capture/build-id provenance or
@@ -149,11 +146,17 @@ class LocalLibvirtRetrieve:
                 propagated from a failed artifact store.
         """
         if method is CaptureMethod.HOST_DUMP:
-            return self._capture_host_dump(system_id, method)
-        return self._capture_kdump(system_id, method)
+            return self._capture_via_file(system_id, method, self._host_dump_capture(system_id))
+        return self._capture_via_file(system_id, method, self._wait_for_vmcore(system_id))
 
-    def _capture_kdump(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        core = self._wait_for_vmcore(system_id)
+    def _capture_via_file(
+        self, system_id: UUID, method: CaptureMethod, core: Path | None
+    ) -> CaptureOutput:
+        """Stream ``core`` (a worker temp file) to the store as raw + redacted; own its cleanup.
+
+        ``core`` is the spooled file a capture seam produced (``None`` when no core exists). The
+        spool dir is removed in ``finally`` on every path once a core is present (#657).
+        """
         if core is None:
             raise self._no_core(system_id)
         try:
@@ -173,22 +176,6 @@ class LocalLibvirtRetrieve:
             )
         finally:
             _remove_spool(core)
-
-    def _capture_host_dump(self, system_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        data = self._host_dump_capture(system_id)
-        if data is None:
-            raise self._no_core(system_id)
-        build_id = self._read_vmcore_build_id(data)
-        raw = self._put(system_id, f"vmcore-{method.value}", data, Sensitivity.SENSITIVE)
-        redacted = self._put(
-            system_id,
-            f"vmcore-{method.value}-redacted",
-            self._extract_redacted(data),
-            Sensitivity.REDACTED,
-        )
-        return CaptureOutput(
-            raw=raw, redacted=redacted, vmcore_build_id=build_id, raw_size_bytes=len(data)
-        )
 
     @staticmethod
     def _no_core(system_id: UUID) -> CategorizedError:
@@ -426,19 +413,52 @@ def _real_read_build_id(data: bytes) -> str:  # pragma: no cover - live_vm (drgn
     return read_via_tempfile(data, read_core_build_id_from_file)
 
 
-def _real_extract_redacted_bytes(data: bytes) -> bytes:  # pragma: no cover - live_vm
-    raise CategorizedError(
-        "local host_dump redaction runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-    )
+def _real_host_dump_capture(system_id: UUID) -> Path | None:  # pragma: no cover - live_vm (libvirt)
+    """Dump the System's live domain memory to a worker temp file via the libvirt core dump.
 
+    Returns the spooled core path (caller-owned, streamed + cleaned up by ``capture``), or ``None``
+    when there is no live domain to dump — a missing or inactive domain. Unlike the kdump path this
+    never force-offs the domain: ``coreDumpWithFormat`` dumps the *active* domain in place
+    (ADR-0211), so an inactive domain is a readiness failure, not something to quiesce.
 
-def _real_host_dump_capture(system_id: UUID) -> bytes | None:  # pragma: no cover - live_vm
-    raise CategorizedError(
-        "real host-dump capture runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-        details={"system_id": str(system_id)},
-    )
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the produced core exceeds ``MAX_CORE_BYTES``;
+            ``INFRASTRUCTURE_FAILURE`` when the libvirt core dump fails on an active domain.
+    """
+    conn = libvirt.open(_libvirt_uri())
+    try:
+        try:
+            domain = conn.lookupByName(domain_name_for(system_id))
+        except libvirt.libvirtError:
+            return None  # no domain — nothing to dump (READINESS_FAILURE upstream)
+        if not domain.isActive():
+            return None  # crashed-then-shutoff: no live memory to dump (READINESS_FAILURE)
+        spool_dir = Path(tempfile.mkdtemp(prefix="kdive-host-dump-"))
+        dest = spool_dir / "vmcore"
+        try:
+            domain.coreDumpWithFormat(
+                str(dest),
+                libvirt.VIR_DOMAIN_CORE_DUMP_FORMAT_RAW,
+                libvirt.VIR_DUMP_MEMORY_ONLY,
+            )
+        except libvirt.libvirtError as exc:
+            _remove_spool(dest)
+            raise CategorizedError(
+                "local host_dump core-dump failed",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id)},
+            ) from exc
+        size_bytes = dest.stat().st_size
+        if size_bytes > MAX_CORE_BYTES:
+            _remove_spool(dest)
+            raise CategorizedError(
+                "host_dump core exceeds the single-object ceiling",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"size_bytes": size_bytes, "max_bytes": MAX_CORE_BYTES},
+            )
+        return dest
+    finally:
+        conn.close()
 
 
 __all__ = [
