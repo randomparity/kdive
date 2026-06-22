@@ -340,8 +340,8 @@ def register(
                 "advertised core-producing method per provider."
             ),
             providers=(
-                "local-libvirt: HOST_DUMP/KDUMP; remote-libvirt: HOST_DUMP/KDUMP; "
-                "fault-inject: simulated HOST_DUMP."
+                "local-libvirt: KDUMP implemented, HOST_DUMP planned (M2.8 B4); "
+                "remote-libvirt: implemented (KDUMP/HOST_DUMP); fault-inject: simulated HOST_DUMP."
             ),
         ),
     )

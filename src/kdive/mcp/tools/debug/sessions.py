@@ -113,7 +113,9 @@ def register(
                 "A non-gated test or recorded live_stack run attaches a debug session to a "
                 "real booted Run."
             ),
-            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+            providers=(
+                "local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a."
+            ),
         ),
     )
     async def debug_start_session(
@@ -142,7 +144,9 @@ def register(
                 "A non-gated test or recorded live_stack run ends a debug session attached to "
                 "a real booted Run."
             ),
-            providers="local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.",
+            providers=(
+                "local-libvirt: planned (M2.8 B1); remote-libvirt: implemented; fault-inject: n/a."
+            ),
         ),
     )
     async def debug_end_session(
