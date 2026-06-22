@@ -72,9 +72,11 @@ sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install /var/lib/kdive/console
 > - libguestfs builds an appliance from the **host** kernel, which Debian/Ubuntu ship `root:0600`.
 >   Make them readable or the appliance fails with `cp: cannot open '/boot/vmlinuz-…'`:
 >   `sudo chmod 0644 /boot/vmlinuz-*` (re-apply after a kernel upgrade, or use `dpkg-statoverride`).
-> - On Ubuntu 24.04 `virt-builder --install` can fail with `libguestfs error: passt exited with
->   status 1` because the `passt` AppArmor profile denies its socket under libguestfs's run dir.
->   Unload it: `sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`.
+> - libguestfs uses `passt` for the appliance's network (needed by `virt-builder --install`). On
+>   Ubuntu 24.04 this can fail with `libguestfs error: passt exited with status 1`. Unloading the
+>   `passt` AppArmor profile (`sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`) clears one
+>   cause, but a libguestfs/passt version mismatch may still block it; if so, build the rootfs on a
+>   host with a working libguestfs appliance, or stage a prebuilt bootable qcow2 (see Step 6).
 
 ## 2. Run the preflight
 
@@ -225,16 +227,25 @@ allocations.request project=demo request={
 ```
 
 **Provision a System.** Provision boots a qcow2 rootfs from disk, so it needs a **bootable image**
-on the host — the minimal example's `s3` image is digest-less and does not provide one. Build a
-kdive-ready rootfs (uses libguestfs/virt-builder — see the Step 1 Debian/Ubuntu notes):
+on the host — the minimal example's `s3` image is digest-less and does not provide one. Get a
+bootable qcow2 by either:
 
-```bash
-.venv/bin/python -m kdive build-fs --kind debug --distro fedora \
-  --workspace /var/lib/kdive/build \
-  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
-```
+- building a kdive-ready rootfs with `build-fs` (uses libguestfs/virt-builder — needs the Step 1
+  Debian/Ubuntu libguestfs fixes; on Ubuntu 24.04 the `virt-builder --install` step may still be
+  blocked by the passt/libguestfs mismatch noted there):
 
-Then provision against it. Local-libvirt provisioning uses `boot_method: direct-kernel`
+  ```bash
+  .venv/bin/python -m kdive build-fs --kind debug --distro fedora \
+    --workspace /var/lib/kdive/build \
+    --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
+  ```
+
+- or staging any prebuilt bootable qcow2 (e.g. a Fedora/Cloud base image) at a world-readable path
+  under `/var/lib/kdive/rootfs/local/` and pointing `rootfs.path` at it. (The clean-room validation
+  of this page used a staged base qcow2, because `build-fs` was blocked by the Ubuntu 24.04
+  passt/libguestfs issue above.)
+
+Then provision against whichever rootfs you staged. Local-libvirt provisioning uses `boot_method: direct-kernel`
 (`kernel_source_ref` is required by the schema but only used by a later build Run; provision boots
 the rootfs's own kernel from disk). `disk_gb` must equal the allocation's (ADR-0205):
 
