@@ -1,7 +1,10 @@
 # kdive systems inventory descriptor (EXAMPLE) — schema v2 (ADR-0112).
 #
-# Copy to `systems.toml` (repo root, GITIGNORED) and fill in your environment. This is the single
-# declarative source of truth for the inventory the app loads into the database:
+# Copy to the inventory path and fill in your environment — the per-user XDG default
+# `~/.config/kdive/systems.toml`, or wherever `KDIVE_SYSTEMS_TOML` points (a repo-root
+# `systems.toml` is GITIGNORED but is only loaded when `KDIVE_SYSTEMS_TOML` names it; there is no
+# working-directory fallback). This is the single declarative source of truth for the inventory
+# the app loads into the database:
 #
 #   * `[[image]]`           -> reconciled into `image_catalog` (replaces the former in-code
 #                             `images/seed_data/*.yaml` + `admin/default_fixtures.py` rootfs YAML
@@ -13,7 +16,8 @@
 #                             name, so you can pool several remote-libvirt hosts in one fleet.
 #
 # Load it with `kdive reconcile-systems` (or the deploy `migrate` step, or the reconciler loop).
-# Path is `KDIVE_SYSTEMS_TOML` (default `./systems.toml`; in k8s a mounted ConfigMap).
+# Path is `KDIVE_SYSTEMS_TOML` (default the XDG `~/.config/kdive/systems.toml`, ADR-0112; in k8s a
+# mounted ConfigMap).
 #
 # WHOLE-FILE PARSE, ALL-OR-NOTHING: a present-but-malformed file fails the ENTIRE reconcile pass
 # for that iteration — images, cost-class coefficients, resources, and build_hosts are all skipped

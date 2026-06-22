@@ -58,9 +58,69 @@ KDIVE_SETUP_AUDITED=1 \
 See [Project onboarding](../project-onboarding.md) for the audited-onboarding rationale and
 why `kdivectl` cannot perform these writes.
 
-## 4. Test the lifecycle
+## 4. Declare your inventory
 
-With the project onboarded, request an allocation and drive a System through its lifecycle:
+Onboarding (§3) seeds the project's budget and quota, but `allocations.request` still dead-ends
+until the **inventory** exists: a local-libvirt resource, a priced cost class, an image, and a
+kdump build-config. Most of these are declared in `systems.toml` and reconciled into the catalog
+(the local-libvirt resource itself is created by discovery — see below) — a fresh or broken file
+produces `configuration_error` / no grantable resource with no breadcrumb back to the file, so this
+step is not optional.
+
+`systems.toml` is the single declarative source of truth for the inventory the app loads into the
+database (ADR-0112). Its default path is the per-user XDG location
+`~/.config/kdive/systems.toml` (there is no working-directory fallback; set `KDIVE_SYSTEMS_TOML`
+to point elsewhere).
+
+Start from the minimal, local-only example —
+[`examples/systems-local-libvirt.toml`](examples/systems-local-libvirt.toml). It declares the
+four entities a beginner needs (one image, one `qemu:///system` host, one priced cost class, one
+kdump fragment); the full multi-provider reference is `systems.toml.example` at the repo root.
+
+```bash
+mkdir -p ~/.config/kdive
+cp docs/operating/providers/examples/systems-local-libvirt.toml ~/.config/kdive/systems.toml
+kdive reconcile-systems --check   # validate only (no DB/S3 writes); exits 0 when the file is valid
+kdive reconcile-systems           # apply: creates the image, cost class, and build config
+```
+
+The image is declared with an `s3` source and **no `digest`**, so its catalog row stays `defined`
+(expected) until the object is published — this does not block the lifecycle. The rootfs a System
+actually boots comes from the provisioning profile, not this row's digest.
+
+The local-libvirt **resource** is not created by this file — **discovery** creates and sizes it.
+The running reconciler enumerates `qemu:///system`, inserts the resource row, and probes its
+vcpus/memory_mb ceiling; `reconcile-systems` then binds the host (matched by `host_uri`) to your
+declared `name`, `cost_class`, and `concurrent_allocation_cap`. So the host services from §2 (which
+include the reconciler) must be running. If you reconcile before discovery has enumerated the host,
+the overlay logs a benign `no discovered local-libvirt host … overlay deferred` warning and
+converges on the next reconciler pass once the host is discovered.
+
+### kdump capture prerequisites
+
+Provisioning and booting need only the inventory above. **kdump vmcore capture** (the `kdump`
+method in the lifecycle below) needs extra one-time host setup, because the capture is host-side:
+the guest's kdump writes `/var/crash/<ts>/vmcore` (booting its crash kernel via `kexec`), then the
+worker force-stops the domain, harvests the core from the qcow2 overlay with libguestfs, and reads
+the guest console log that `virtlogd` writes as `root:0600`. Concretely:
+
+- **Run the worker as `root`** — the natural identity for managing `qemu:///system` domains,
+  libguestfs, and kexec, and the simplest way to read the `root:0600` console log.
+- **Wire `drgn` + `libguestfs` into the worker venv** — `drgn` (the `live` dependency group) and
+  the system `guestfs` binding must both be importable by the worker's interpreter; absence is a
+  `missing_dependency`, not a silent skip.
+- **Prepare the install-staging and console host directories** for the worker and `qemu` users.
+
+These are detailed in the four-method runbook's
+[§4b kdump](../runbooks/four-method-live-run.md#4b-kdump) section (worker-venv wiring and
+host-directory prep included). The kernel-config symbols a kdump build must carry to actually arm
+are tracked in [#688](https://github.com/randomparity/kdive/issues/688); the example's `kdump`
+build-config already includes that arming set.
+
+## 5. Test the lifecycle
+
+With the project onboarded and the inventory reconciled, request an allocation and drive a System
+through its lifecycle:
 
 ```bash
 # allocations.request → provision → build → boot → verify → teardown → release
