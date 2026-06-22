@@ -36,11 +36,14 @@ if ((${#pids[@]} == 0)); then
 fi
 
 # Round 1: ask each pid that is still a kdive process to terminate. A pid that is alive but
-# NOT a kdive process is recorded as recycled and never signalled.
+# NOT a kdive process is recorded as recycled and never signalled. `|| true`: a process that
+# exits in the gap between the identity check and the signal makes `kill` fail harmlessly —
+# round 2 and the survivor check below decide the real outcome, so one stray failure must not
+# abort the loop under `set -e`.
 recycled=()
 for pid in "${pids[@]}"; do
   if is_kdive_proc "${pid}"; then
-    sudo kill "${pid}"
+    sudo kill "${pid}" || true
   elif [[ -d /proc/${pid} ]]; then
     recycled+=("${pid}")
   fi
