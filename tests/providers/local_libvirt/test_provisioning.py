@@ -34,7 +34,12 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import (
 )
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.shared import libvirt_xml as libvirt_xml_contract
-from kdive.providers.shared.libvirt_xml import KDIVE_METADATA_NS, parse_metadata_system_id
+from kdive.providers.shared.libvirt_xml import (
+    KDIVE_METADATA_NS,
+    QEMU_NS,
+    parse_metadata_system_id,
+    recorded_gdb_port,
+)
 from tests.providers.local_libvirt.fakes import libvirt_error
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
@@ -89,6 +94,7 @@ def test_import_does_not_register_elementtree_namespace(
     def fake_register_namespace(prefix: str, uri: str) -> None:
         calls.append((prefix, uri))
 
+    monkeypatch.setattr(libvirt_xml_contract, "_qemu_namespace_registered", False)
     monkeypatch.setattr(ET, "register_namespace", fake_register_namespace)
     reloaded = importlib.reload(provisioning_module)
 
@@ -97,7 +103,9 @@ def test_import_does_not_register_elementtree_namespace(
     reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK)
     reloaded.render_domain_xml(_SYS, _profile(), disk_path=_DISK)
 
-    assert calls == [("kdive", KDIVE_METADATA_NS)]
+    # Rendering registers both the kdive metadata prefix and the qemu passthrough prefix
+    # (the latter is needed for the gdbstub <qemu:commandline>), each once.
+    assert calls == [("kdive", KDIVE_METADATA_NS), ("qemu", QEMU_NS)]
 
 
 def test_render_carries_name_memory_vcpu_machine_and_rootfs() -> None:
@@ -233,6 +241,36 @@ def test_render_defaults_machine_when_absent() -> None:
     root = _safe_fromstring(_render(profile=_profile(domain_xml_params={})))
     os_type = root.find("os/type")
     assert os_type is not None and os_type.get("machine") == "q35"
+
+
+def test_render_emits_loopback_gdbstub_when_flag_set() -> None:
+    xml = render_domain_xml(_SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=4444)
+    # The recorded port round-trips through the shared parser, on loopback.
+    assert recorded_gdb_port(xml) == 4444
+    root = _safe_fromstring(xml)
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert args == ["-gdb", "tcp:127.0.0.1:4444"]
+
+
+def test_render_omits_gdbstub_when_flag_unset() -> None:
+    xml = _render()  # default profile has debug.gdbstub False
+    assert recorded_gdb_port(xml) is None
+    root = _safe_fromstring(xml)
+    assert root.find(f"./{{{QEMU_NS}}}commandline") is None
+
+
+def test_render_ignores_gdb_port_when_flag_unset() -> None:
+    # A stray port with the flag off renders nothing — the flag is the gate, not the port.
+    xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, gdb_port=4444)
+    assert recorded_gdb_port(xml) is None
+
+
+def test_render_rejects_gdbstub_flag_without_a_port() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        render_domain_xml(_SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=None)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 def test_validate_profile_rejects_unknown_domain_xml_param() -> None:
