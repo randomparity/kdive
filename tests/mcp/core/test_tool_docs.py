@@ -119,6 +119,8 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "ops.reconcile_systems": ("tests/mcp/ops/test_reconcile_systems.py",),
     "ops.set_cost_class_coeff": ("tests/mcp/ops/test_ops_tuning.py",),
     "ops.set_host_capacity": ("tests/mcp/ops/test_ops_tuning.py",),
+    "reports.generate_all_projects": ("tests/mcp/tools/reports/test_generate.py",),
+    "reports.generate_granted_set": ("tests/mcp/tools/reports/test_generate.py",),
     "resources.availability": ("tests/mcp/catalog/test_availability_tools.py",),
     "resources.cordon": ("tests/mcp/catalog/test_resources_tools.py",),
     "resources.deregister": ("tests/mcp/ops/test_resources_mutation.py",),
