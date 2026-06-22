@@ -10,6 +10,8 @@
 
 **Promotion:** A non-gated test or recorded live_stack run introspects a real captured core and returns a redacted report.
 
+**Provider support:** local-libvirt: planned (M2.8 B2); remote-libvirt: implemented; fault-inject: n/a.
+
 Run offline drgn introspection over a Run's captured core; returns redacted report.
 
 | Parameter | Type | Required | Description |
@@ -24,7 +26,7 @@ Run offline drgn introspection over a Run's captured core; returns redacted repo
 
 **Promotion:** A non-gated test or recorded live_stack run runs a live drgn helper against a real booted Run.
 
-**Provider support:** local-libvirt: wired; remote-libvirt: wired; fault-inject: n/a.
+**Provider support:** local-libvirt: planned (M2.8 B3); remote-libvirt: implemented; fault-inject: n/a.
 
 Run live drgn introspection over a live drgn-live DebugSession. Requires operator.
 
