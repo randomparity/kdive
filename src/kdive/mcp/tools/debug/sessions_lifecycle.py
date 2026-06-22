@@ -38,6 +38,7 @@ from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
@@ -109,6 +110,8 @@ class _DetachResources:
 class _AttachResources:
     connector: Connector
     profile_policy: ProfilePolicy
+    supported_debug_transports: frozenset[DebugTransportKind]
+    provider: str
 
 
 type _ConnectorForRun = Callable[[AsyncConnection, Run], Awaitable[_AttachResources | ToolResponse]]
@@ -126,7 +129,12 @@ def _resolved_connector_for_run(resolver: ProviderResolver) -> _ConnectorForRun:
             runtime = await resolver.runtime_for_run(conn, run.id)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(str(run.id), exc)
-        return _AttachResources(connector=runtime.connector, profile_policy=runtime.profile_policy)
+        return _AttachResources(
+            connector=runtime.connector,
+            profile_policy=runtime.profile_policy,
+            supported_debug_transports=runtime.supported_debug_transports,
+            provider=runtime.component_sources.provider,
+        )
 
     return connector_for_run
 
@@ -338,6 +346,13 @@ class DebugSessionHandlers:
         resources = await self._connector_for_run(conn, run)
         if isinstance(resources, ToolResponse):
             return resources
+        if transport not in resources.supported_debug_transports:
+            return _capability_unsupported(
+                str(run_id),
+                capability=f"debug_transport:{transport}",
+                provider=resources.provider,
+                supported=sorted(resources.supported_debug_transports),
+            )
         backend = self._credential_backend(session_id, transport)
         resolved = _resolve_credential(system, transport, resources.profile_policy, backend)
         if isinstance(resolved, ToolResponse):

@@ -32,6 +32,12 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
+from kdive.providers.ports import (
+    DEBUG_TRANSPORT_KINDS,
+    INTROSPECTION_MODES,
+    DebugTransportKind,
+    IntrospectionMode,
+)
 from kdive.security.authz.rbac import Role
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
@@ -103,6 +109,8 @@ def provider_resolver(
     retriever: object | None = None,
     crash_postmortem: object | None = None,
     supported_capture_methods: frozenset[CaptureMethod] | None = None,
+    supported_debug_transports: frozenset[DebugTransportKind] | None = None,
+    supported_introspection: frozenset[IntrospectionMode] | None = None,
     profile_policy: object | None = None,
     platform_root_cmdline: str | None = "root=/dev/vda",
 ) -> ProviderResolver:
@@ -110,6 +118,12 @@ def provider_resolver(
 
     ``platform_root_cmdline`` defaults to the local-libvirt root device; pass ``None`` to model a
     provider (e.g. remote-libvirt) whose in-guest bootloader owns the root device (ADR-0183).
+
+    The capability-descriptor fields (``supported_capture_methods`` / ``supported_debug_transports``
+    / ``supported_introspection``) default to the **full** set so a test provider is capable by
+    default (matching the historic permissive ``supported_capture_methods`` default); a
+    capability-aware-admission test (ADR-0209) passes an empty/narrowed set to model an unsupported
+    plane.
     """
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
@@ -132,6 +146,14 @@ def provider_resolver(
             supported_capture_methods
             if supported_capture_methods is not None
             else frozenset(CaptureMethod)
+        ),
+        supported_debug_transports=(
+            supported_debug_transports
+            if supported_debug_transports is not None
+            else DEBUG_TRANSPORT_KINDS
+        ),
+        supported_introspection=(
+            supported_introspection if supported_introspection is not None else INTROSPECTION_MODES
         ),
         component_sources=TEST_COMPONENT_SOURCES,
         rootfs_validator=lambda _: None,
