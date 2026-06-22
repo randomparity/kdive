@@ -24,3 +24,16 @@ def test_kdump_fragment_carries_xfs_root_support() -> None:
     data = KDUMP_FRAGMENT_PATH.read_bytes()
     assert b"CONFIG_XFS_FS=y" in data
     assert b"CONFIG_XFS_POSIX_ACL=y" in data
+
+
+def test_kdump_fragment_carries_in_guest_arming_prerequisites() -> None:
+    # Fedora kdumpctl builds a zstd-squashfs crash initramfs and loads the crash kernel via the
+    # kexec_file_load syscall; without these the from-source kernel cannot arm kdump (ADR-0212,
+    # #688). SQUASHFS/SQUASHFS_ZSTD + the loop/overlay backing are dracut's squash module;
+    # KEXEC_FILE is `kexec -s -p`. =y so the crash environment loads no extra modules first.
+    data = KDUMP_FRAGMENT_PATH.read_bytes()
+    assert b"CONFIG_SQUASHFS=y" in data
+    assert b"CONFIG_SQUASHFS_ZSTD=y" in data
+    assert b"CONFIG_BLK_DEV_LOOP=y" in data
+    assert b"CONFIG_OVERLAY_FS=y" in data
+    assert b"CONFIG_KEXEC_FILE=y" in data
