@@ -66,16 +66,16 @@ def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
 
 
-def test_default_path_runs_seed_demo(tmp_path: Path) -> None:
+def test_default_path_runs_seed_project(tmp_path: Path) -> None:
     _bindir, env, calllog = _healthy_local(tmp_path)
     result = _run(env)
     assert result.returncode == 0, result.stderr
     logged = calllog.read_text()
-    assert "-m kdive seed-demo" in logged
+    assert "-m kdive seed-project" in logged
     assert "--project demo" in logged
 
 
-def test_audited_path_runs_mcp_helper_not_seed_demo(tmp_path: Path) -> None:
+def test_audited_path_runs_mcp_helper_not_seed_project(tmp_path: Path) -> None:
     _bindir, env, calllog = _healthy_local(tmp_path)
     env |= {
         "KDIVE_SETUP_AUDITED": "1",
@@ -87,6 +87,7 @@ def test_audited_path_runs_mcp_helper_not_seed_demo(tmp_path: Path) -> None:
     logged = calllog.read_text()
     assert "kdive_set_accounting" in logged
     assert "seed-demo" not in logged
+    assert "seed-project" not in logged
 
 
 def test_audited_path_emits_argv_the_helper_accepts(tmp_path: Path) -> None:

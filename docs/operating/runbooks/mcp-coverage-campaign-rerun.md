@@ -37,7 +37,7 @@ fetched TLS certs, guest helpers).
 2. **Seed the build-config catalog** (else remote `runs.build` fails — F6/#373):
    ```
    uv run python -c "import asyncio,kdive.config as c; from kdive.config.core_settings import DATABASE_URL; from psycopg import AsyncConnection; from kdive.build_configs.seed import seed_build_configs; from kdive.store.objectstore import object_store_from_env; \
-   asyncio.run((lambda: (lambda conn: None))())" # see seed snippet in the report; or run: kdive seed-demo
+   asyncio.run((lambda: (lambda conn: None))())" # see seed snippet in the report; or run: kdive seed-project
    ```
    (Simplest: open an async connection + object store and call `seed_build_configs`.)
 3. Render `d1.env` from the root `systems.toml` (fill it from `systems.toml.example` first):

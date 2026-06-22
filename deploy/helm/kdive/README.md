@@ -120,8 +120,8 @@ be overridden. To test a denial per session, mint a narrowed token with
 platform roles. To change the *default* grant deploy-wide, narrow it with
 `--set demo.oidc.claims.roles.demo=viewer` or drop `platform_roles`. The grant only
 authorizes operations on a project with a budget/quota row; the demo seeds project `demo`
-via `kdive seed-demo`, so if you change the project name, seed it
-(`kdive seed-demo --project <name>`). This is demo-only — the issuer mints a valid token
+via `kdive seed-project`, so if you change the project name, seed it
+(`kdive seed-project --project <name>`). This is demo-only — the issuer mints a valid token
 for any caller and must never front a real RBAC boundary.
 
 ## Health probes & scrape (ADR-0090 §5)

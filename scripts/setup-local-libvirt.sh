@@ -3,7 +3,7 @@
 # instead of dead-ending on quota_exceeded (#497).
 #
 # Runs the local-libvirt preflight, then seeds the demo project's budget + quota:
-#   default       : python -m kdive seed-demo  (token-less; the local host path)
+#   default       : python -m kdive seed-project  (token-less; the local host path)
 #   audited (opt) : the role-gated accounting.set_quota / set_budget MCP tools, when
 #                   KDIVE_SETUP_AUDITED=1 and KDIVE_MCP_BASE are set (needs an OIDC issuer
 #                   configured to assert the project-admin claims and a KDIVE_TOKEN).
@@ -43,12 +43,12 @@ main() {
     return 0
   fi
 
-  "${PY}" -m kdive seed-demo \
+  "${PY}" -m kdive seed-project \
     --project "${PROJECT}" \
     --limit-kcu "${LIMIT_KCU}" \
     --max-concurrent-allocations "${MAX_ALLOC}" \
     --max-concurrent-systems "${MAX_SYS}"
-  printf "onboarded project %s via seed-demo\n" "${PROJECT}"
+  printf "onboarded project %s via seed-project\n" "${PROJECT}"
 }
 
 main "$@"

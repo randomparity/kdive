@@ -134,7 +134,7 @@ demo:
     # narrowed token with `scripts/demo-token.sh --role viewer|operator` (the template also
     # registers `client_id: kdive-demo-<role>` variants — project role only, no platform
     # roles); to change the *default* grant deploy-wide use `--set demo.oidc.claims.roles.demo=
-    # viewer`. If you change the project name, run `kdive seed-demo --project <name>` so it
+    # viewer`. If you change the project name, run `kdive seed-project --project <name>` so it
     # has a budget/quota row.
     claims:
       sub: kdive-demo

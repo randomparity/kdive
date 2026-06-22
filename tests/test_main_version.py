@@ -86,18 +86,18 @@ def test_install_fixtures_overrides() -> None:
     assert args.force is True
 
 
-def test_seed_demo_defaults() -> None:
-    args = build_parser().parse_args(["seed-demo"])
+def test_seed_project_defaults() -> None:
+    args = build_parser().parse_args(["seed-project"])
     assert args.project == "demo"
     assert args.limit_kcu == "1000000"
     assert args.max_concurrent_allocations == 4
     assert args.max_concurrent_systems == 4
 
 
-def test_seed_demo_overrides_and_int_coercion() -> None:
+def test_seed_project_overrides_and_int_coercion() -> None:
     args = build_parser().parse_args(
         [
-            "seed-demo",
+            "seed-project",
             "--project",
             "p",
             "--limit-kcu",

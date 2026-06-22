@@ -12,7 +12,7 @@ from kdive.admin.bootstrap import (
     install_fixtures,
     migrate,
     seed_build_configs_step,
-    seed_demo,
+    seed_project,
     seed_project_statements,
 )
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
@@ -47,7 +47,7 @@ def test_seed_project_sql_params_are_parameterized() -> None:
     assert any("demo'; drop table budgets; --" in params for _statement, params in statements)
 
 
-def test_seed_demo_registers_discovered_resources(
+def test_seed_project_registers_discovered_resources(
     monkeypatch: pytest.MonkeyPatch, migrated_url: str
 ) -> None:
     calls: list[str] = []
@@ -63,7 +63,7 @@ def test_seed_demo_registers_discovered_resources(
     )
 
     asyncio.run(
-        seed_demo(
+        seed_project(
             project="demo",
             limit_kcu=Decimal("1000000"),
             max_concurrent_allocations=4,

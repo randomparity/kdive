@@ -208,7 +208,7 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         "0",
         "When 1, setup-local-libvirt.sh onboards via the audited MCP admin tools instead of "
-        "seed-demo (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN).",
+        "seed-project (requires KDIVE_MCP_BASE and a project-admin KDIVE_TOKEN).",
     ),
     ExternalEnvVar(
         "KDIVE_MCP_BASE",

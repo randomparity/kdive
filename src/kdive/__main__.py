@@ -3,7 +3,7 @@
 The long-running processes are `python -m kdive {server|worker|reconciler}`:
 `server` runs the FastMCP streamable-HTTP app, `worker` runs the job-queue worker
 loop, and `reconciler` runs the drift-repair loop (ADR-0021). One-shot operator
-commands share the same parser: `migrate`, `install-fixtures`, `seed-demo`, and
+commands share the same parser: `migrate`, `install-fixtures`, `seed-project`, and
 `build-fs`. Every command configures the structured logger first (ADR-0014).
 """
 
@@ -118,7 +118,7 @@ def _add_install_fixtures_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
 
 
-def _add_seed_demo_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_seed_project_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project", default="demo")
     parser.add_argument("--limit-kcu", default="1000000")
     parser.add_argument("--max-concurrent-allocations", type=int, default=4)
@@ -178,16 +178,16 @@ def _handle_install_fixtures(
     install_fixtures(Path(args.dest), force=args.force)
 
 
-def _handle_seed_demo(
+def _handle_seed_project(
     args: argparse.Namespace, secret_registry: SecretRegistry, telemetry: Telemetry | None
 ) -> None:
     del secret_registry, telemetry
     from decimal import Decimal
 
-    from kdive.admin.bootstrap import seed_demo
+    from kdive.admin.bootstrap import seed_project
 
     asyncio.run(
-        seed_demo(
+        seed_project(
             project=args.project,
             limit_kcu=Decimal(args.limit_kcu),
             max_concurrent_allocations=args.max_concurrent_allocations,
@@ -269,10 +269,10 @@ _COMMANDS: tuple[_Command, ...] = (
         add_arguments=_add_install_fixtures_arguments,
     ),
     _Command(
-        "seed-demo",
-        "seed a project for local agent demos",
-        _handle_seed_demo,
-        add_arguments=_add_seed_demo_arguments,
+        "seed-project",
+        "seed a project's budget/quota and register discovered resources",
+        _handle_seed_project,
+        add_arguments=_add_seed_project_arguments,
     ),
     _Command(
         "build-fs",

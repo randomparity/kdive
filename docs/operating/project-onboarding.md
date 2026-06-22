@@ -53,17 +53,20 @@ parameter list. Confirm the result with the read-only `accounting.usage_project`
 > Onboard a project from an MCP client that holds the project-`admin` token. See the
 > [kdivectl runbook](runbooks/kdivectl.md).
 
-## Relationship to `seed-demo`
+## Relationship to `seed-project`
 
-`python -m kdive seed-demo` writes the same `budgets` and `quotas` rows (and registers
-the local libvirt resource) for a demo project. It is a **bootstrap convenience, not
-the production path**: it runs as an installed-package CLI at deploy time, before any
-request, so it has no OIDC token and no request context. It therefore writes the rows
+`python -m kdive seed-project` writes the same `budgets` and `quotas` rows (and registers
+the local libvirt resource) for a project. It is the **token-less bootstrap path, not
+the audited production path**: it runs as an installed-package CLI at deploy time, before
+any request, so it has no OIDC token and no request context. It therefore writes the rows
 with raw idempotent `INSERT`s instead of calling `accounting.set_budget` /
 `accounting.set_quota`, which means those writes are **not role-gated and leave no
 audit row**.
 
-The end state is identical row content, so a demo project seeded this way behaves the
-same at run time. Use `seed-demo` for local stacks and demos
+The end state is identical row content, so a project seeded this way behaves the
+same at run time. Use `seed-project` for local stacks and demos
 ([Local stack administration](local-stack.md)); onboard real tenants with the audited
 admin tools above so every policy change is attributable.
+
+> Renamed from `seed-demo` in #669. Accepted ADRs and archived plans that predate the
+> rename still refer to `seed-demo`; the command is now `seed-project`.

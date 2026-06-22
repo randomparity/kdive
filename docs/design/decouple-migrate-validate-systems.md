@@ -51,7 +51,7 @@ self-healing. See ADR-0121 "Decision".
 `_reconcile_inventory_images` or `_seed_build_configs_step`. The now-orphaned
 `_reconcile_inventory_images`, `_reconcile_image_store`, and `_NoS3HeadStore` helpers are
 removed (the reconciler loop owns continuous inventory reconcile, ADR-0112). `_seed_build_configs_step`
-stays (re-homed in B). `register_discovered_resources`/`seed_demo`/`install_fixtures` are unchanged.
+stays (re-homed in B). `register_discovered_resources`/`seed_project`/`install_fixtures` are unchanged.
 
 `job-migrate.yaml` drops the `kdive.systemsEnv`/`systemsVolume`/`systemsVolumeMount` includes
 (migrate no longer reads `systems.toml`).
