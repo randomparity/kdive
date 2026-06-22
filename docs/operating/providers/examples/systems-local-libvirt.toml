@@ -1,0 +1,98 @@
+# kdive minimal local-libvirt inventory — schema v2 (ADR-0112).
+#
+# The smallest `systems.toml` that makes a local-libvirt allocation grantable. Drop it at the
+# XDG default path and reconcile it into the catalog:
+#
+#   mkdir -p ~/.config/kdive
+#   cp docs/operating/providers/examples/systems-local-libvirt.toml ~/.config/kdive/systems.toml
+#   kdive reconcile-systems --check    # validate only (no DB/S3 writes); exits 0 when valid
+#   kdive reconcile-systems            # apply: creates the image, cost class, and build config
+#
+# The local-libvirt resource itself is created and sized by DISCOVERY (the running reconciler
+# enumerating qemu:///system), not by this file — `reconcile-systems` binds the host matched by
+# `host_uri` to the `name`/`cost_class`/`concurrent_allocation_cap` below. So the reconciler must be
+# running; until discovery enumerates the host, the overlay is deferred with a benign warning.
+#
+# `KDIVE_SYSTEMS_TOML` overrides the path. This is the *starting point*; the full multi-provider
+# reference (remote fleet, build hosts, fault-inject, campaign knobs) is `systems.toml.example` at
+# the repo root. See docs/operating/providers/local-libvirt-walkthrough.md for the linear setup.
+
+schema_version = 2
+
+# ---------------------------------------------------------------------------------------------
+# IMAGE — the kdive-ready local baseline rootfs, reconciled into image_catalog.
+#
+# Declared `s3`; with no `digest` the row stays `defined` (expected) until its object is
+# published — it does not block the lifecycle. The rootfs a System actually boots comes from the
+# provisioning profile, not this row's digest.
+# ---------------------------------------------------------------------------------------------
+[[image]]
+provider = "local-libvirt"
+name = "fedora-kdive-ready-43"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
+# digest = "sha256:…"   # uncomment once published to mark the row `registered`
+
+# ---------------------------------------------------------------------------------------------
+# HOST — one local-libvirt resource on qemu:///system, reconciled into resources.
+#
+# Local-libvirt omits vcpus/memory_mb here: discovery probes the host's size ceiling and merges
+# it onto the row, so this overlay only sets name/cost_class/concurrent_allocation_cap.
+# ---------------------------------------------------------------------------------------------
+[[local_libvirt]]
+name = "workstation"
+host_uri = "qemu:///system"
+cost_class = "local-kvm"
+concurrent_allocation_cap = 1
+
+# ---------------------------------------------------------------------------------------------
+# COST CLASS — prices the `local-kvm` label the host carries (ADR-0115).
+#
+# REQUIRED: a host whose cost_class has no coefficient is admitted to the catalog but DENIED
+# every allocation (`allocations.request` → configuration_error). `coeff` may be a number (1.0)
+# or a quoted decimal string ("1.0"); the latter is what `ops.export_cost_classes` emits for an
+# exact round-trip.
+# ---------------------------------------------------------------------------------------------
+[[cost_class]]
+name = "local-kvm"
+coeff = "1.0"
+
+# ---------------------------------------------------------------------------------------------
+# BUILD CONFIG — the kdump kernel-config fragment (ADR-0122).
+#
+# `kdump` is the seeded build default a from-source build resolves when its profile names no
+# config. Declaring it here makes THIS file authoritative for the fragment: it overrides the
+# packaged seed and any live `buildconfig.set`. So the content must stay COMPLETE — a partial
+# kdump fragment silently disarms kdump (a missing SQUASHFS/KEXEC_FILE/OVERLAY symbol yields no
+# vmcore; #679, #688). The arming set below mirrors the packaged seed
+# `src/kdive/build_configs/data/kdump.config`. If you do not need to customize it, delete this
+# block and rely on the packaged seed (`kdive seed-build-configs`).
+# ---------------------------------------------------------------------------------------------
+[[build_config]]
+name = "kdump"
+description = "kdump/debuginfo kernel-config fragment"
+content = """
+CONFIG_KEXEC=y
+CONFIG_KEXEC_CORE=y
+CONFIG_CRASH_DUMP=y
+CONFIG_PROC_VMCORE=y
+CONFIG_RELOCATABLE=y
+CONFIG_RANDOMIZE_BASE=y
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_DEBUG_KERNEL=y
+CONFIG_MAGIC_SYSRQ=y
+CONFIG_XFS_FS=y
+CONFIG_XFS_POSIX_ACL=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_OVERLAY_FS=y
+CONFIG_KEXEC_FILE=y
+"""
