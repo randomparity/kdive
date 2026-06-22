@@ -1153,7 +1153,7 @@ from kdive.security.secrets.redaction import REDACTION, Redactor
 from kdive.services.reports import Report, Section
 from kdive.services.reports.render import render_csv, render_xlsx
 
-_SECRET = "sup3r-s3cret-token-value"
+_SECRET = "sup3r-s3cret-token-value"  # pragma: allowlist secret  (planted test value)
 
 
 def test_redact_rows_scrubs_secret_in_inline_and_render() -> None:

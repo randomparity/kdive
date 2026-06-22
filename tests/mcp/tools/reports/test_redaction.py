@@ -10,7 +10,7 @@ from kdive.services.reports import Report, Section
 from kdive.services.reports.render import render_csv, render_xlsx
 
 _AS_OF = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
-_SECRET = "sup3r-s3cret-token-value"
+_SECRET = "sup3r-s3cret-token-value"  # pragma: allowlist secret  (planted test value)
 
 
 def _report_with_secret() -> Report:
