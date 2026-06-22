@@ -181,9 +181,10 @@ async def _job_count(pool: AsyncConnectionPool) -> int:
 
 
 def test_fetch_vmcore_host_dump_rejected_on_local_at_admission(migrated_url: str) -> None:
-    # ADR-0208: local advertises only {KDUMP}, so vmcore.fetch(host_dump) — the default method —
-    # is rejected up front (CONFIGURATION_ERROR "method not supported by provider") and enqueues
-    # no job, instead of the pre-A1 deferred async failure. Driven through the REAL local runtime.
+    # ADR-0209: local advertises only {KDUMP}, so an explicit vmcore.fetch(host_dump) is rejected
+    # up front with the capability_unsupported shape (reason + provider + supported set) and
+    # enqueues no job, instead of the pre-A1 deferred async failure. Driven through the REAL local
+    # runtime so the ADR-0208 narrowing to {KDUMP} is what drives the decision.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
@@ -192,7 +193,76 @@ def test_fetch_vmcore_host_dump_rejected_on_local_at_admission(migrated_url: str
             jobs = await _job_count(pool)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
-        assert data_str(resp, "reason") == "method not supported by provider"
+        assert data_str(resp, "reason") == "capability_unsupported"
+        assert data_str(resp, "capability") == "capture_method:host_dump"
+        assert data_str(resp, "provider") == "local-libvirt"
+        assert resp.data["supported"] == ["kdump"]
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_no_method_resolves_kdump_on_crashkernel_local(migrated_url: str) -> None:
+    # ADR-0209: with no method, vmcore.fetch resolves capture_method(profile) clamped to the
+    # core-producing set. The seeded crashkernel local System resolves to KDUMP, which local
+    # supports, so the no-method call is admitted and dedups under the resolved :kdump key.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), system_id=sys_id, method=None)
+            assert resp.status == "queued"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'capture_vmcore' "
+                    "AND dedup_key = %s",
+                    (f"{sys_id}:capture_vmcore:kdump",),
+                )
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+async def _set_console_only_profile(pool: AsyncConnectionPool, sys_id: str) -> None:
+    """Rewrite the System's profile so capture_method(profile) resolves to non-core CONSOLE."""
+    from psycopg.types.json import Jsonb
+
+    profile = {
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 4,
+        "memory_mb": 4096,
+        "disk_gb": 20,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
+        "provider": {
+            "local-libvirt": {
+                "domain_xml_params": {"machine": "q35"},
+                "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/fedora-40.qcow2"},
+            }
+        },
+    }
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE systems SET provisioning_profile = %s WHERE id = %s", (Jsonb(profile), sys_id)
+        )
+
+
+def test_fetch_vmcore_no_method_console_only_requires_explicit_method(migrated_url: str) -> None:
+    # ADR-0209: a console-only System has no implicit core capture method, so the no-method call
+    # is a configuration_error (missing_required_field) — NOT capability_unsupported, since the
+    # provider does support core methods; the caller simply omitted one. No job is enqueued.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            await _set_console_only_profile(pool, sys_id)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), system_id=sys_id, method=None)
+            jobs = await _job_count(pool)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert data_str(resp, "reason") == "missing_required_field"
         assert jobs == 0
 
     asyncio.run(_run())
@@ -309,23 +379,33 @@ def test_fetch_vmcore_malformed_uuid_is_config_error(migrated_url: str) -> None:
 
 
 def test_fetch_rejects_unsupported_method(migrated_url: str) -> None:
+    # The fake runtime supports only {HOST_DUMP}; an explicit kdump is capability_unsupported.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             resp = await _fetch_vmcore(pool, _ctx(), system_id=sys_id, method="kdump")
+            jobs = await _job_count(pool)
             assert resp.status == "error"
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+            assert data_str(resp, "reason") == "capability_unsupported"
+            assert data_str(resp, "capability") == "capture_method:kdump"
+            assert resp.data["supported"] == ["host_dump"]
+            assert jobs == 0
 
     asyncio.run(_run())
 
 
 def test_fetch_rejects_non_core_method(migrated_url: str) -> None:
+    # A non-core method (console) is rejected before the capability check — it produces no vmcore.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             resp = await _fetch_vmcore(pool, _ctx(), system_id=sys_id, method="console")
+            jobs = await _job_count(pool)
             assert resp.status == "error"
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+            assert data_str(resp, "reason") == "method does not produce a vmcore"
+            assert jobs == 0
 
     asyncio.run(_run())
 

@@ -28,12 +28,19 @@ from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.ports import DebugTransportKind, LiveIntrospector, VmcoreIntrospector
+from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.ports import (
+    DebugTransportKind,
+    IntrospectionMode,
+    LiveIntrospector,
+    VmcoreIntrospector,
+)
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 
@@ -41,6 +48,27 @@ from kdive.security.authz.rbac import Role
 # offline path. There is no caller-supplied drgn script — an unknown helper is rejected.
 _LIVE_HELPERS = frozenset({"tasks", "modules", "sysinfo"})
 _DRGN_LIVE: DebugTransportKind = "drgn-live"
+_OFFLINE_VMCORE: IntrospectionMode = "offline-vmcore"
+_LIVE_INTROSPECTION: IntrospectionMode = "live"
+
+
+def _require_introspection(
+    object_id: str, runtime: ProviderRuntime, mode: IntrospectionMode
+) -> ToolResponse | None:
+    """Reject an introspection mode the bound provider's descriptor lacks (ADR-0209).
+
+    Returns a ``capability_unsupported`` ``configuration_error`` on a miss (no port is touched), or
+    ``None`` when the provider advertises ``mode``. The check reads ``supported_introspection`` and
+    never branches on ``ResourceKind``.
+    """
+    if mode in runtime.supported_introspection:
+        return None
+    return _capability_unsupported(
+        object_id,
+        capability=f"introspection:{mode}",
+        provider=runtime.component_sources.provider,
+        supported=sorted(runtime.supported_introspection),
+    )
 
 
 async def introspect_from_vmcore(
@@ -225,18 +253,17 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     ) -> ToolResponse:
         """Run offline drgn introspection over a Run's captured core; returns redacted report."""
         ctx = current_context()
+
+        async def _gated(runtime: ProviderRuntime) -> ToolResponse:
+            denied = _require_introspection(run_id, runtime, _OFFLINE_VMCORE)
+            if denied is not None:
+                return denied
+            return await introspect_from_vmcore(
+                pool, ctx, run_id=run_id, introspector=runtime.vmcore_introspector
+            )
+
         return await with_runtime_for_run(
-            pool,
-            resolver,
-            ctx,
-            run_id,
-            lambda runtime: introspect_from_vmcore(
-                pool,
-                ctx,
-                run_id=run_id,
-                introspector=runtime.vmcore_introspector,
-            ),
-            required_role=Role.VIEWER,
+            pool, resolver, ctx, run_id, _gated, required_role=Role.VIEWER
         )
 
     @app.tool(
@@ -281,6 +308,9 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
                 runtime = await resolver.runtime_for_session(conn, resolved.session_id)
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(session_id, exc)
+        denied = _require_introspection(session_id, runtime, _LIVE_INTROSPECTION)
+        if denied is not None:
+            return denied
         return await _introspect_live_session(
             session_id,
             resolved=resolved,
