@@ -41,6 +41,7 @@ from kdive.config.core_settings import (
     SYSTEMS_TOML,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.inventory.path import systems_toml_path
 from kdive.inventory.serialize import REMOTE_PLACEHOLDER_PREFIX
 
 __all__ = [
@@ -269,7 +270,9 @@ def resolve_writeback_target() -> WritebackTarget | None:
         ``None`` when writeback is off (unset / ``off``); otherwise the configured adapter.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` on an unknown value, or (for ``configmap``) when
+        CategorizedError: ``CONFIGURATION_ERROR`` on an unknown value, for ``file`` when
+            ``KDIVE_SYSTEMS_TOML`` is unset (the reconciler does not read the per-user XDG
+            default, so a writeback there would be silently lost), or (for ``configmap``) when
             not running in a pod.
     """
     selected = (config.get(INVENTORY_WRITEBACK) or "off").strip().lower()
@@ -279,7 +282,20 @@ def resolve_writeback_target() -> WritebackTarget | None:
         name = config.get(INVENTORY_WRITEBACK_CONFIGMAP) or "kdive-systems"
         return ConfigMapWriteback.from_in_cluster(name=name, key=_CONFIGMAP_KEY)
     if selected == "file":
-        return MountedFileWriteback(Path(config.require(SYSTEMS_TOML)))
+        # Falsiness, not `is None`: an explicitly-empty KDIVE_SYSTEMS_TOML parses to "" (not
+        # None), and systems_toml_path() treats "" as unset and returns the XDG default. Guarding
+        # on `is None` would let "" slip through to that silent-XDG-write the reconciler never
+        # reads — the exact data loss this guard exists to prevent. Match the resolver's
+        # empty-is-unset semantics here.
+        if not config.get(SYSTEMS_TOML):
+            raise CategorizedError(
+                f"{INVENTORY_WRITEBACK.name}=file requires {SYSTEMS_TOML.name} to name the "
+                "writable inventory volume shared with the reconciler; refusing to fall back to "
+                "the per-user XDG default the reconciler does not read",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"variable": SYSTEMS_TOML.name},
+            )
+        return MountedFileWriteback(systems_toml_path())
     raise CategorizedError(
         f"unknown {INVENTORY_WRITEBACK.name} value {selected!r}",
         category=ErrorCategory.CONFIGURATION_ERROR,

@@ -196,6 +196,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Default `KDIVE_SYSTEMS_TOML` to `~/.config/kdive/systems.toml` (XDG), not `./systems.toml`
+  (ADR-0112). Inventory resolution is now CWD-independent; there is no repo-relative fallback.
+  A box that relied on a repo-root `./systems.toml` being auto-loaded must move it to
+  `~/.config/kdive/systems.toml` or set `KDIVE_SYSTEMS_TOML` explicitly. Deployments are
+  unaffected (Helm sets the path explicitly).
+- Reject `KDIVE_INVENTORY_WRITEBACK=file` when `KDIVE_SYSTEMS_TOML` is unset with a
+  `CONFIGURATION_ERROR` instead of silently writing to the per-user XDG default the
+  reconciler never reads (which made `export_systems_toml(persist=true)` report success
+  while the data was lost).
+- Warn once when a repo-root `./systems.toml` exists but `KDIVE_SYSTEMS_TOML` is unset and
+  the XDG default is absent, so an upgrade no longer silently reconciles nothing (ADR-0112).
 - Make remote_connection generic over the connection slice
 - Move RSP codec to providers/debug_common (ADR-0083)
 - Move drgn report helpers to providers/debug_common (ADR-0083)

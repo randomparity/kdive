@@ -93,19 +93,6 @@ def test_singleton_resolver_is_gone() -> None:
     assert not hasattr(config_module, "resolve_base_image_staged_volume")
 
 
-def test_systems_toml_path_defaults_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
-    config.load()
-    assert config_module._systems_toml_path() == Path("./systems.toml")
-
-
-def test_systems_toml_path_honours_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    target = tmp_path / "custom.toml"
-    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(target))
-    config.load()
-    assert config_module._systems_toml_path() == target
-
-
 def test_by_name_builds_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_inventory(tmp_path, monkeypatch)
     cfg = remote_config_for_resource(_RESOURCE)

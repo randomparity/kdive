@@ -144,3 +144,27 @@ hosts (removes the singleton `KDIVE_REMOTE_LIBVIRT_*` env vars); (4) runtime mut
   any allocation on a host that lacks it; ADR-0007 §2) means a pre-existing file whose
   `[[remote_libvirt]]` block omits them parsed before but now stalls the whole pass until both
   fields are added. The `systems.toml.example` header carries the operator-facing upgrade note.
+
+## Addendum (2026-06-21) — `KDIVE_SYSTEMS_TOML` defaults to an XDG path
+
+`KDIVE_SYSTEMS_TOML` originally defaulted to the **relative** `./systems.toml`, resolved against
+each process's working directory. That made inventory resolution non-deterministic: two kdive
+processes started from different directories read different files (or none), and on a developer
+box a repo-root `systems.toml` was picked up only by the process that happened to run from the
+repo. The default is now **CWD-independent and per-user**: when `KDIVE_SYSTEMS_TOML` is unset the
+path resolves to `$XDG_CONFIG_HOME/kdive/systems.toml` (falling back to
+`~/.config/kdive/systems.toml`), mirroring the `kdive login` token cache's `XDG_STATE_HOME`
+idiom. There is deliberately **no** `./systems.toml` back-compat fallback — reintroducing it would
+restore the working-directory dependence this change removes. An operator who wants a specific
+file (repo-relative or otherwise) sets `KDIVE_SYSTEMS_TOML` explicitly; deployments already do
+(Helm sets it to the ConfigMap mount).
+
+Resolution is centralized in one helper, `kdive.inventory.path.systems_toml_path()`, which all
+readers and the file-mode writeback call (so writeback targets the same path the reconciler
+reads). The `Setting.default` is `None` (a machine-varying default string would make the
+generated config reference non-deterministic); the resolved location is documented in the
+setting's `help`. An absent default file remains a quiet no-op (`systems.toml` is gitignored), so
+a fresh box with no `~/.config/kdive/systems.toml` reconciles nothing — exactly the pre-config
+state. This is a behavioral change for any box that relied on a repo-root `./systems.toml` being
+auto-loaded: move it to `~/.config/kdive/systems.toml` or set `KDIVE_SYSTEMS_TOML` to keep it
+loaded.

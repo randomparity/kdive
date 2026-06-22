@@ -1,7 +1,8 @@
 """The reconciler's inventory pass: reconcile ``systems.toml`` into the catalog (ADR-0112).
 
-This is the loop trigger of the M2.6 inventory engine (#391/#393). Each pass reads the path in
-``KDIVE_SYSTEMS_TOML`` (default ``./systems.toml``) and reconciles it through the one ordered
+This is the loop trigger of the M2.6 inventory engine (#391/#393). Each pass resolves the
+inventory path via :func:`kdive.inventory.path.systems_toml_path` (``KDIVE_SYSTEMS_TOML``, else
+the XDG default ``~/.config/kdive/systems.toml``) and reconciles it through the one ordered
 chain (:func:`kdive.inventory.reconcile_pipeline.reconcile_all`): into ``image_catalog`` via
 :func:`kdive.inventory.reconcile_images.reconcile_images`, prices ``cost_class_coefficients``
 via :func:`kdive.inventory.reconcile_coefficients.reconcile_coefficients` run **before** the
@@ -43,6 +44,7 @@ from kdive.config.core_settings import SYSTEMS_TOML
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory_optional
 from kdive.inventory.model import InventoryDoc
+from kdive.inventory.path import systems_toml_path
 from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile_images import ImageHeadStore
 from kdive.inventory.reconcile_pipeline import reconcile_all
@@ -54,11 +56,20 @@ def _changes(diff: ReconcileDiff) -> int:
     return len(diff.created) + len(diff.updated) + len(diff.pruned) + len(diff.cordoned)
 
 
-def _systems_toml_path() -> Path:
-    """Resolve the inventory file path from ``KDIVE_SYSTEMS_TOML`` (default ``./systems.toml``)."""
-    raw = config.get(SYSTEMS_TOML)
-    # The setting carries a default, so ``raw`` is non-None outside a misconfigured registry.
-    return Path(raw) if raw is not None else Path("./systems.toml")
+def _cwd_inventory_shadowed(resolved: Path) -> bool:
+    """True when a repo-relative ``./systems.toml`` is present but no longer auto-loaded.
+
+    ADR-0112 removed the working-directory-relative inventory fallback: the path is now
+    ``KDIVE_SYSTEMS_TOML`` else the XDG default. An operator who relied on a repo-root
+    ``./systems.toml`` upgrades into a silent no-op. This detects exactly that case — the
+    var is unset, the XDG default does not exist, and a ``./systems.toml`` sits in the CWD —
+    so the reconciler can warn once instead of reconciling nothing in silence.
+
+    Uses falsiness (not ``is None``): an explicitly-empty ``KDIVE_SYSTEMS_TOML`` parses to
+    ``""``, which ``systems_toml_path()`` treats as unset and resolves to the XDG default.
+    Matching that here keeps the warning and the resolver in agreement on "unset".
+    """
+    return not config.get(SYSTEMS_TOML) and not resolved.exists() and Path("systems.toml").exists()
 
 
 class InventoryReconcilePass:
@@ -73,6 +84,11 @@ class InventoryReconcilePass:
     def __init__(self) -> None:
         self._cached_hash: str | None = None
         self._cached_doc: InventoryDoc | None = None
+        # Process-lifetime, NOT parse-cache state: a CWD-shadow warning is emitted at most once
+        # per instance. Deliberately kept out of reset() — reset() fires every pass while the
+        # file is absent (the shadow condition itself), so clearing it there would re-warn each
+        # loop and defeat the once-only guard.
+        self._cwd_shadow_warned = False
 
     def reset(self) -> None:
         self._cached_hash = None
@@ -99,7 +115,14 @@ class InventoryReconcilePass:
             InventoryError: The file is present but malformed/invalid (logged then re-raised
                 so the loop records this pass as failed without aborting siblings).
         """
-        path = _systems_toml_path()
+        path = systems_toml_path()
+        if not self._cwd_shadow_warned and _cwd_inventory_shadowed(path):
+            _log.warning(
+                "inventory: ./systems.toml exists but KDIVE_SYSTEMS_TOML is unset; it is no "
+                "longer auto-loaded (ADR-0112). Move it to %s or set KDIVE_SYSTEMS_TOML.",
+                path,
+            )
+            self._cwd_shadow_warned = True
         doc = self._load(path)
         if doc is None:
             return 0

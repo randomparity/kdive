@@ -25,10 +25,11 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.build_configs.rules import exceeds_build_config_cap
-from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES, SYSTEMS_TOML
+from kdive.config.core_settings import MAX_BUILD_CONFIG_BYTES
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory, load_inventory_optional
 from kdive.inventory.model import InventoryDoc
+from kdive.inventory.path import systems_toml_path
 from kdive.inventory.reconcile import ReconcileDiff
 from kdive.inventory.reconcile_images import ImageHeadStore, reconcile_images
 
@@ -120,9 +121,7 @@ def _load_doc(path: Path | None) -> InventoryDoc | None:
     """
     if path is not None:
         return load_inventory(path)
-    # SYSTEMS_TOML carries a default, so get() is non-None outside a misconfigured registry.
-    resolved = config.get(SYSTEMS_TOML) or "./systems.toml"
-    return load_inventory_optional(Path(resolved))
+    return load_inventory_optional(systems_toml_path())
 
 
 def _print_diff(diff: ReconcileDiff) -> None:

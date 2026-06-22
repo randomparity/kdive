@@ -210,7 +210,9 @@ def _add_reconcile_systems_arguments(parser: argparse.ArgumentParser) -> None:
         "--path",
         type=Path,
         default=None,
-        help="path to systems.toml (default: KDIVE_SYSTEMS_TOML, then ./systems.toml)",
+        help=(
+            "path to systems.toml (default: KDIVE_SYSTEMS_TOML, then ~/.config/kdive/systems.toml)"
+        ),
     )
     parser.add_argument(
         "--check",

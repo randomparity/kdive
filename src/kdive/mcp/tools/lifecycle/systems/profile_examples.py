@@ -18,8 +18,6 @@ the caller's host.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from kdive.domain.catalog.images import ImageVisibility
 from kdive.inventory.model import ImageEntry, InventoryDoc, StagedSource
 from kdive.mcp.responses import ToolResponse
@@ -237,9 +235,7 @@ def _remote_base_volume(doc: InventoryDoc | None) -> str | None:
 
 def load_inventory_for_examples() -> InventoryDoc | None:
     """Load the configured ``systems.toml`` for the examples tool (``None`` when absent)."""
-    import kdive.config as config
-    from kdive.config.core_settings import SYSTEMS_TOML
     from kdive.inventory.loader import load_inventory_optional
+    from kdive.inventory.path import systems_toml_path
 
-    raw = config.get(SYSTEMS_TOML) or "./systems.toml"
-    return load_inventory_optional(Path(raw))
+    return load_inventory_optional(systems_toml_path())

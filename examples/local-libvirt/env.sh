@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Environment for the local-libvirt developer setup example.
+#
+# Sources the canonical live-stack defaults (DB / OIDC / S3 / HTTP / kernel-src), then
+# layers the few values this example needs. Source it, don't execute it:
+#
+#   source examples/local-libvirt/env.sh
+#
+# Every value is overridable from the caller's environment.
+set -euo pipefail
+
+example_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${example_dir}/../.." && pwd)"
+
+# Reuse the live-stack env so this example tracks the same defaults the rest of the project
+# documents. It already exports KDIVE_KERNEL_SRC=~/src/linux, KDIVE_INSTALL_STAGING=
+# /var/lib/kdive/install, and the OIDC issuer on :8090 (the host-published mock issuer).
+# shellcheck source=scripts/live-stack/env.sh disable=SC1091
+source "${repo_root}/scripts/live-stack/env.sh"
+
+# The project this example onboards and mints a token for. One name, threaded through the
+# seed step (up.sh) and the token claims (mint-token.sh) so they always agree.
+export KDIVE_PROJECT="${KDIVE_PROJECT:-local}"
+
+# Quota/budget seeded for the project. Generous defaults for a single-developer box.
+export KDIVE_LIMIT_KCU="${KDIVE_LIMIT_KCU:-1000000}"
+export KDIVE_MAX_ALLOC="${KDIVE_MAX_ALLOC:-4}"
+export KDIVE_MAX_SYS="${KDIVE_MAX_SYS:-4}"
+
+# Lifetime (seconds) of the token mint-token.sh issues. The bundled mock issuer defaults to
+# 3600 (1h), which a build→boot→debug→capture session routinely outlasts — so default to 12h
+# here to avoid mid-session expiry. The MCP client only re-reads the token when it reconnects,
+# so a longer TTL means fewer re-mint/reconnect cycles. Overridable.
+export KDIVE_TOKEN_TTL="${KDIVE_TOKEN_TTL:-43200}"
+
+# The local-libvirt provider drives system-scope QEMU/KVM domains. qemu:///system is the
+# provider default; exported here for visibility because it is the core of this setup.
+export KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
+
+# The catalog rootfs the System boots — the operator-built kdive-ready guest image.
+export KDIVE_GUEST_IMAGE="${KDIVE_GUEST_IMAGE:-/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2}"
+
+# The interpreter that runs `python -m kdive ...` and the three processes. Defaults to the
+# repo venv; override for an installed deployment (e.g. /opt/kdive/.venv/bin/python).
+export KDIVE_PYTHON="${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
+
+# Runtime state (pid file + per-process logs) for the processes up.sh starts. This is state,
+# not config: per the XDG base-dir spec pid/logs belong under $XDG_STATE_HOME, and that is
+# already where the kdive login token cache lives (kdive.cli.login). Never inside the repo.
+# The KDIVE_STACK_* names match scripts/live-stack/start.sh so the convention is shared.
+state_home="${XDG_STATE_HOME:-${HOME}/.local/state}/kdive"
+export KDIVE_STACK_PID_FILE="${KDIVE_STACK_PID_FILE:-${state_home}/local-stack.pid}"
+export KDIVE_STACK_LOG_DIR="${KDIVE_STACK_LOG_DIR:-${state_home}/local-stack-logs}"
