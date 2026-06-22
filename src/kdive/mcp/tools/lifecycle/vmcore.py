@@ -25,6 +25,7 @@ from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError
+from kdive.domain.lifecycle import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import CaptureVmcorePayload
@@ -33,20 +34,29 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import (
+    ConfigErrorReason,
+    job_envelope,
+)
+from kdive.mcp.tools._common import (
     as_uuid as _as_uuid,
 )
 from kdive.mcp.tools._common import (
     authorizing as job_authorizing,
 )
 from kdive.mcp.tools._common import (
+    capability_unsupported as _capability_unsupported,
+)
+from kdive.mcp.tools._common import (
     config_error as _config_error,
 )
 from kdive.mcp.tools._common import (
-    job_envelope,
+    config_error_reason as _config_error_reason,
 )
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run, with_runtime_for_system
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
+from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports import CrashPostmortem
 from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
@@ -86,7 +96,7 @@ class VmcoreHandlers:
         ctx: RequestContext,
         *,
         system_id: str,
-        method: CaptureMethod | str = CaptureMethod.HOST_DUMP,
+        method: CaptureMethod | str | None = None,
         idempotency_key: str | None = None,
     ) -> ToolResponse:
         return await with_runtime_for_system(
@@ -99,7 +109,7 @@ class VmcoreHandlers:
                 ctx,
                 system_id=system_id,
                 method=method,
-                supported_methods=runtime.supported_capture_methods,
+                runtime=runtime,
                 idempotency_key=idempotency_key,
             ),
             required_role=Role.OPERATOR,
@@ -160,33 +170,83 @@ class VmcoreHandlers:
         )
 
 
+def _supported_method_values(runtime: ProviderRuntime) -> list[str]:
+    """Provider's supported core methods as sorted tokens for an error's ``supported`` set."""
+    return [m.value for m in sorted(runtime.supported_capture_methods, key=lambda m: m.value)]
+
+
+def _resolve_capture_method(
+    system_id: str,
+    method: CaptureMethod | str | None,
+    system: System,
+    runtime: ProviderRuntime,
+) -> CaptureMethod | ToolResponse:
+    """Resolve the capture method to admit, or a typed rejection (ADR-0209).
+
+    An explicit method must parse, be core-producing (``_VMCORE_METHODS``), and be advertised by
+    the bound provider's descriptor (else ``capability_unsupported``). An omitted method resolves
+    through the System profile's ``capture_method`` clamped to the core-producing set; if that
+    yields no descriptor-supported core method the call needs an explicit ``method``
+    (``missing_required_field`` — the provider may support core methods, the caller omitted one).
+    """
+    if method is not None:
+        try:
+            explicit = method if isinstance(method, CaptureMethod) else CaptureMethod(method)
+        except ValueError:
+            return _config_error(
+                system_id, data={"method": method, "reason": "unknown capture method"}
+            )
+        if explicit not in _VMCORE_METHODS:
+            return _config_error(
+                system_id, data={"method": method, "reason": "method does not produce a vmcore"}
+            )
+        if explicit not in runtime.supported_capture_methods:
+            return _capability_unsupported(
+                system_id,
+                capability=f"capture_method:{explicit.value}",
+                provider=runtime.component_sources.provider,
+                supported=_supported_method_values(runtime),
+            )
+        return explicit
+    try:
+        profile = ProvisioningProfile.parse(system.provisioning_profile)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(system_id, exc)
+    resolved = runtime.profile_policy.capture_method(profile)
+    if resolved in _VMCORE_METHODS and resolved in runtime.supported_capture_methods:
+        return resolved
+    return _config_error_reason(
+        system_id,
+        ConfigErrorReason.MISSING_REQUIRED_FIELD,
+        accepted_values=_supported_method_values(runtime),
+        detail=(
+            "this System's profile resolves to no implicit core capture method; "
+            "pass an explicit core-producing method"
+        ),
+    )
+
+
 async def _fetch_vmcore(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
     system_id: str,
-    method: CaptureMethod | str = CaptureMethod.HOST_DUMP,
-    supported_methods: frozenset[CaptureMethod],
+    method: CaptureMethod | str | None = None,
+    runtime: ProviderRuntime,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit a `capture_vmcore` job on a `crashed` System (operator); return the job handle."""
+    """Admit a `capture_vmcore` job on a `crashed` System (operator); return the job handle.
+
+    The capture method is admitted against the bound provider's ADR-0208 descriptor (ADR-0209):
+    an explicit method the provider does not support is rejected up front with
+    ``capability_unsupported``; an omitted method is resolved through the System profile's
+    ``ProfilePolicy.capture_method`` clamped to the core-producing set, and a System whose profile
+    yields no implicit core method requires an explicit ``method``. No job row is created on any
+    rejection.
+    """
     uid = _as_uuid(system_id)
     if uid is None:
         return _config_error(system_id)
-    try:
-        capture_method = method if isinstance(method, CaptureMethod) else CaptureMethod(method)
-    except ValueError:
-        return _config_error(system_id, data={"method": method, "reason": "unknown capture method"})
-    if capture_method not in _VMCORE_METHODS:
-        return _config_error(
-            system_id,
-            data={"method": method, "reason": "method does not produce a vmcore"},
-        )
-    if capture_method not in supported_methods:
-        return _config_error(
-            system_id,
-            data={"method": method, "reason": "method not supported by provider"},
-        )
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             system = await SYSTEMS.get(conn, uid)
@@ -195,6 +255,11 @@ async def _fetch_vmcore(
             require_role(ctx, system.project, Role.OPERATOR)
             if system.state is not SystemState.CRASHED:
                 return _config_error(system_id, data={"current_status": system.state.value})
+
+            resolved = _resolve_capture_method(system_id, method, system, runtime)
+            if isinstance(resolved, ToolResponse):
+                return resolved
+            capture_method = resolved
 
             async def _enqueue() -> ToolResponse:
                 job = await queue.enqueue(
@@ -348,9 +413,15 @@ def register(
     async def vmcore_fetch(
         system_id: Annotated[str, Field(description="The crashed System whose vmcore to capture.")],
         method: Annotated[
-            CaptureMethod,
-            Field(description="Capture method; must be supported by the local-libvirt provider."),
-        ] = CaptureMethod.HOST_DUMP,
+            CaptureMethod | None,
+            Field(
+                description=(
+                    "Core-producing capture method (KDUMP/HOST_DUMP) the bound provider must "
+                    "advertise. Omit to resolve the System profile's method; a profile with no "
+                    "implicit core method requires an explicit one."
+                )
+            ),
+        ] = None,
         idempotency_key: Annotated[
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
