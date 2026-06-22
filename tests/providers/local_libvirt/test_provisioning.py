@@ -296,6 +296,14 @@ class _ProvDomain:
     create_error: int | None = None
     destroy_error: int | None = None
     undefine_error: int | None = None
+    xml_desc: str | None = None  # XMLDesc() result; gdbstub port reuse reads it back
+
+    def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - mirrors the libvirt binding name
+        return (
+            self.xml_desc
+            if self.xml_desc is not None
+            else f"<domain><name>{self.domain_name}</name></domain>"
+        )
 
     def create(self) -> int:
         if self.create_error is not None:
@@ -424,6 +432,65 @@ def test_provision_already_running_domain_does_not_undefine() -> None:
     conn = _ProvConn(defined={name: dom})
     _prov(conn).provision(_SYS, _profile())
     assert dom.undefined is False  # kept the running domain
+
+
+# --- gdbstub port allocation (ADR-0210 §1) -------------------------------------------------
+
+
+def _gdb_profile() -> ProvisioningProfile:
+    return _profile(debug={"gdbstub": True})
+
+
+def _prov_with_port(conn: _ProvConn, *, free_port: Callable[[], int]) -> LocalLibvirtProvisioning:
+    return LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=ProvisioningFiles(
+            make_overlay=lambda _base, _overlay: None,
+            remove_overlay=lambda _overlay: None,
+            overlay_exists=lambda _overlay: False,
+            prepare_console_log=lambda _path: None,
+        ),
+        materialize_rootfs=lambda rootfs, _system_id: rootfs.path,
+        free_port=free_port,
+    )
+
+
+def test_provision_gdbstub_allocates_a_fresh_port_when_no_prior_domain() -> None:
+    conn = _ProvConn()  # lookupByName raises NO_DOMAIN (empty `defined`)
+    _prov_with_port(conn, free_port=lambda: 5555).provision(_SYS, _gdb_profile())
+    # The fresh port was recorded into the defined domain XML on loopback.
+    assert recorded_gdb_port(conn.recorded_xml[-1]) == 5555
+
+
+def test_provision_gdbstub_reuses_the_recorded_port_on_retry() -> None:
+    name = domain_name_for(_SYS)
+    recorded = render_domain_xml(_SYS, _gdb_profile(), disk_path=_DISK, gdb_port=6666)
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=recorded)})
+
+    def fail_free_port() -> int:
+        raise AssertionError("must reuse the recorded port, not allocate a fresh one")
+
+    _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _gdb_profile())
+    assert recorded_gdb_port(conn.recorded_xml[-1]) == 6666
+
+
+def test_provision_non_gdbstub_does_not_allocate_a_port() -> None:
+    conn = _ProvConn()
+
+    def fail_free_port() -> int:
+        raise AssertionError("a non-gdbstub provision must not allocate a port")
+
+    _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _profile())
+    assert recorded_gdb_port(conn.recorded_xml[-1]) is None
+
+
+def test_provision_gdbstub_port_lookup_infra_error_is_infrastructure_failure() -> None:
+    # A non-NO_DOMAIN libvirt error during the reuse lookup is an infrastructure fault, not a
+    # silent fall-through to a fresh port (which would drift from the live domain).
+    conn = _ProvConn(lookup_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        _prov_with_port(conn, free_port=lambda: 5555).provision(_SYS, _gdb_profile())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_provision_already_running_domain_is_idempotent() -> None:
