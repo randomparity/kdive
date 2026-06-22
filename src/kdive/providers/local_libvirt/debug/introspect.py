@@ -4,12 +4,14 @@
 `LocalLibvirtRetrieve`'s `CrashPostmortem`: fetching the raw core + `vmlinux` from the
 object store, verifying the core's build-id against the Run's recorded build-id
 (provenance), opening drgn against the staged core, and running three fixed helpers
-(tasks, modules, sysinfo). The drgn open/helper path is `live_vm`-gated, so the
-orchestration, provenance, dispatch, byte-cap, and redaction are unit-tested with a fake
-`_Program`. The assembled report is `Redactor`-scrubbed **inside the port** — the port is
-the single redaction boundary, so any later persistence is of already-redacted text. The
-real drgn package is an operator-provided live-host prerequisite, not a normal service
-dependency; these ports stay disabled until the live runner injects drgn-backed seams.
+(tasks, modules, sysinfo). `from_env` wires the real shared drgn seams (ADR-0210 §2); the
+orchestration, provenance, dispatch, byte-cap, and redaction stay unit-tested with a fake
+`_Program`, and the drgn open itself runs only under the `live_vm` gate. The assembled report
+is `Redactor`-scrubbed **inside the port** — the port is the single redaction boundary, so any
+later persistence is of already-redacted text. The real drgn package is an operator-provided
+live-host prerequisite, not a normal service dependency: the open seam imports it lazily, so a
+host without drgn surfaces a `MISSING_DEPENDENCY` from the open seam, not an ``ImportError``.
+`LocalLibvirtLiveIntrospect` (the live drgn-over-SSH port) remains stubbed until B3 (#677).
 """
 
 from __future__ import annotations
@@ -17,9 +19,15 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.ports import IntrospectOutput, LiveIntrospector, VmcoreIntrospector
+from kdive.providers.shared.debug_common.drgn_program import (
+    open_vmcore_program,
+    read_vmcoreinfo_build_id,
+    run_introspection_helper,
+)
 from kdive.providers.shared.debug_common.introspect import (
     _REPORT_BYTE_CAP,
     _Program,
@@ -43,9 +51,10 @@ class LocalLibvirtVmcoreIntrospect:
     (``live_vm`` seam), runs the three helpers, redacts and byte-caps the assembled report,
     and returns it — the port is the single redaction boundary.
 
-    The drgn seams (``open_program``/``run_helper``) are ``None`` off-gate; ``from_vmcore``
-    then raises ``MISSING_DEPENDENCY`` before touching the store, mirroring
-    ``LocalLibvirtRetrieve.run``'s seam guard. The ``live_vm`` runner injects real seams.
+    ``from_env`` wires the real ``open_program``/``run_helper`` seams; on a host without drgn the
+    open seam raises ``MISSING_DEPENDENCY`` (it imports drgn lazily). A test may still pass ``None``
+    seams to exercise the off-gate guard, which raises ``MISSING_DEPENDENCY`` before touching the
+    store, mirroring ``LocalLibvirtRetrieve.run``'s seam guard.
     """
 
     def __init__(
@@ -66,16 +75,22 @@ class LocalLibvirtVmcoreIntrospect:
 
     @classmethod
     def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtVmcoreIntrospect:
-        """Build from env; does not import drgn or open the store (lazy ``live_vm`` seams).
+        """Build from env with the real drgn seams (lazy: drgn imports on first use).
 
-        The drgn seams are left ``None``, so ``from_vmcore`` raises ``MISSING_DEPENDENCY``
-        up front off-gate — it never reads the store or imports drgn. The ``live_vm`` runner
-        constructs the port with real seams on a host where the operator has provided drgn.
+        drgn stays an operator-provided live-host prerequisite — the open seam imports it inside
+        the call, so composition builds on hosts without it and ``from_vmcore`` raises the
+        documented ``MISSING_DEPENDENCY`` from the open seam (not an up-front ``None`` guard).
         """
+        # ``open_vmcore_program`` returns ``DrgnProgramAdapter`` (its ``iter_*`` are typed
+        # ``list[object]``); cast it to the seam alias whose ``_Program`` reads the same surface
+        # with the narrower helper-facing element types. ``run_introspection_helper`` accepts
+        # ``Any`` for ``program`` so it needs no cast.
         return cls(
             fetch_object=_real_fetch_object,
-            read_vmcore_build_id=_real_read_vmcore_build_id,
+            read_vmcore_build_id=read_vmcoreinfo_build_id,
             secret_registry=secret_registry,
+            open_program=cast("_OpenProgram", open_vmcore_program),
+            run_helper=run_introspection_helper,
         )
 
     def from_vmcore(
@@ -247,13 +262,6 @@ def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
     # The ref is a key the system itself produced; there is no client etag handle, so the
     # read is unconditional (ADR-0054). An empty etag would 412 here, not skip the check.
     return object_store_from_env().get_artifact(ref, None).data
-
-
-def _real_read_vmcore_build_id(data: bytes) -> str:  # pragma: no cover - live_vm
-    raise CategorizedError(
-        "vmcore build-id extraction runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-    )
 
 
 __all__ = [
