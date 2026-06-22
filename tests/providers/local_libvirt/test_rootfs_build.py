@@ -217,7 +217,7 @@ def test_virt_builder_stages_nmi_panic_sysctl_for_a_kdump_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A kdump image must panic on the NMI `control.force_crash` injects; without this sysctl the
-    # guest ignores it and kdump never triggers (ADR-0212, #688, mirrors remote ADR-0084).
+    # guest ignores it and kdump never triggers (ADR-0213, #688, mirrors remote ADR-0084).
     argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("kdump-utils",))
     assert "--write" in argv
     write_value = argv[argv.index("--write") + 1]

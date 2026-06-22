@@ -83,6 +83,8 @@
 | [`postmortem.crash`](postmortem.md#postmortemcrash) | `partial` |
 | [`postmortem.triage`](postmortem.md#postmortemtriage) | `partial` |
 | [`projects.list`](projects.md#projectslist) | `implemented` |
+| [`reports.generate_all_projects`](reports.md#reportsgenerate_all_projects) | `implemented` |
+| [`reports.generate_granted_set`](reports.md#reportsgenerate_granted_set) | `implemented` |
 | [`resources.availability`](resources.md#resourcesavailability) | `implemented` |
 | [`resources.cordon`](resources.md#resourcescordon) | `implemented` |
 | [`resources.deregister`](resources.md#resourcesderegister) | `implemented` |

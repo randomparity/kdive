@@ -1,4 +1,4 @@
-# ADR 0212 — Local-libvirt from-source kdump: in-guest kernel-config and image prerequisites
+# ADR 0213 — Local-libvirt from-source kdump: in-guest kernel-config and image prerequisites
 
 - **Status:** Accepted
 - **Date:** 2026-06-22

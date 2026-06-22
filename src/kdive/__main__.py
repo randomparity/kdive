@@ -18,6 +18,7 @@ import signal
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from psycopg_pool import AsyncConnectionPool
@@ -27,6 +28,7 @@ from kdive.config.core_settings import (
     HTTP_HOST,
     HTTP_PORT,
     LOG_LEVEL,
+    REPORT_ARTIFACT_RETENTION_DAYS,
     S3_BUCKET,
     S3_ENDPOINT_URL,
     S3_REGION,
@@ -522,6 +524,9 @@ async def _run_reconciler(secret_registry: SecretRegistry, telemetry: Telemetry)
                 config=ReconcileConfig(
                     upload_store=upload_store,
                     image_store=upload_store,
+                    report_artifact_retention=timedelta(
+                        days=config.require(REPORT_ARTIFACT_RETENTION_DAYS)
+                    ),
                     console_registry=console_hosting.registry if console_hosting else None,
                     resetter=provider_composition.build_reconciler_transport_resetter(),
                     dump_volume_reaper=provider_composition.build_reconciler_dump_volume_reaper(),

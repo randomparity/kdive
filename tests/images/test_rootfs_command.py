@@ -13,5 +13,5 @@ def test_debug_image_ships_kdump_service_package() -> None:
 
 
 def test_debug_image_ships_keyutils_for_kdumpctl() -> None:
-    """The debug image must ship keyutils (`keyctl`), which `kdumpctl` invokes (ADR-0212, #688)."""
+    """The debug image must ship keyutils (`keyctl`), which `kdumpctl` invokes (ADR-0213, #688)."""
     assert "keyutils" in DEFAULT_DEBUG_FS_PACKAGES

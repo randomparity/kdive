@@ -70,7 +70,7 @@ _FSTAB = "/dev/vda / ext4 defaults 0 1\n"
 _SELINUX_CONFIG = "SELINUX=disabled\nSELINUXTYPE=targeted\n"
 # Local `control.force_crash` injects an NMI; the guest must panic on it for kdump to trigger.
 # Staged only on the kdump image, the local equivalent of the remote base-image obligation
-# (ADR-0212, #688, mirrors ADR-0084).
+# (ADR-0213, #688, mirrors ADR-0084).
 _KDUMP_SYSCTL_PATH = "/etc/sysctl.d/99-kdive-kdump.conf"
 _KDUMP_SYSCTL_CONTENT = "kernel.unknown_nmi_panic=1\n"
 
