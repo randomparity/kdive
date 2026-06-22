@@ -324,6 +324,38 @@ def test_from_vmcore_unsupported_plane_is_capability_unsupported(
     asyncio.run(_run())
 
 
+def test_from_vmcore_admitted_when_offline_vmcore_supported(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0209/0210 B2: a local provider advertising offline-vmcore introspection admits
+    # introspect.from_vmcore — the gate passes and the wired port runs, returning the report.
+    from tests.mcp.systems_support import provider_resolver
+
+    port = _FakeIntrospector()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _built_run_with_core(pool)
+            resolver = provider_resolver(
+                supported_introspection=frozenset({"offline-vmcore"}),
+                vmcore_introspector=port,
+            )
+            resp = await _call_registered_tool(
+                pool,
+                resolver,
+                tool="introspect.from_vmcore",
+                arguments={"run_id": run_id},
+                ctx=_ctx(),
+                monkeypatch=monkeypatch,
+            )
+        assert resp.status == "succeeded"
+        assert "report" in resp.data
+        # The gate did not short-circuit: the wired port was actually invoked.
+        assert port.kwargs["expected_build_id"] == "deadbeef"
+
+    asyncio.run(_run())
+
+
 def test_run_unsupported_live_plane_is_capability_unsupported(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

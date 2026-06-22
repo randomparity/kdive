@@ -233,14 +233,15 @@ def _resolver_with_descriptor(kind: ResourceKind, runtime: ProviderRuntime) -> P
 
 
 def test_describe_projects_local_partial_capability(migrated_url: str) -> None:
-    # ADR-0208: a local System reports build/boot/kdump and NOT debug/introspect/host-dump.
+    # ADR-0208/0210: after B2 (#676) a local System reports build/boot/kdump AND introspect
+    # (offline-vmcore wired), but still NOT debug (B1) or host-dump (B4).
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
             runtime = _descriptor_runtime(
                 capture=frozenset({CaptureMethod.KDUMP}),
                 transports=frozenset(),
-                introspection=frozenset(),
+                introspection=frozenset({"offline-vmcore"}),
             )
             return await catalog_resources_tools.describe_resource(
                 pool,
@@ -252,13 +253,13 @@ def test_describe_projects_local_partial_capability(migrated_url: str) -> None:
     resp = asyncio.run(_run())
     assert resp.status == "available"
     capabilities = set(cast(list[str], resp.data["capabilities"]))
-    assert capabilities == {"build", "boot", "kdump"}
+    assert capabilities == {"build", "boot", "kdump", "introspect"}
+    assert "introspect" in capabilities
     assert "debug" not in capabilities
-    assert "introspect" not in capabilities
     assert "host-dump" not in capabilities
     assert resp.data["supported_capture_methods"] == ["kdump"]
     assert resp.data["supported_debug_transports"] == []
-    assert resp.data["supported_introspection"] == []
+    assert resp.data["supported_introspection"] == ["offline-vmcore"]
 
 
 def test_describe_projects_remote_full_capability(migrated_url: str) -> None:

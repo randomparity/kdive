@@ -108,6 +108,7 @@ def provider_resolver(
     controller: object | None = None,
     retriever: object | None = None,
     crash_postmortem: object | None = None,
+    vmcore_introspector: object | None = None,
     supported_capture_methods: frozenset[CaptureMethod] | None = None,
     supported_debug_transports: frozenset[DebugTransportKind] | None = None,
     supported_introspection: frozenset[IntrospectionMode] | None = None,
@@ -123,7 +124,8 @@ def provider_resolver(
     / ``supported_introspection``) default to the **full** set so a test provider is capable by
     default (matching the historic permissive ``supported_capture_methods`` default); a
     capability-aware-admission test (ADR-0209) passes an empty/narrowed set to model an unsupported
-    plane.
+    plane. ``vmcore_introspector`` is injectable so an admission *admit*-path test can run a fake
+    port behind the gate; it defaults to an unused port for the deny/short-circuit tests.
     """
     unused_port = cast(Any, object())
     runtime = ProviderRuntime(
@@ -140,7 +142,9 @@ def provider_resolver(
         crash_postmortem=cast(
             Any, crash_postmortem if crash_postmortem is not None else unused_port
         ),
-        vmcore_introspector=unused_port,
+        vmcore_introspector=cast(
+            Any, vmcore_introspector if vmcore_introspector is not None else unused_port
+        ),
         live_introspector=unused_port,
         supported_capture_methods=(
             supported_capture_methods

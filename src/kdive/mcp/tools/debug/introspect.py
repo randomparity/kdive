@@ -237,7 +237,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
                 "and returns a redacted report."
             ),
             providers=(
-                "local-libvirt: planned (M2.8 B2); remote-libvirt: implemented; fault-inject: n/a."
+                "local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); "
+                "remote-libvirt: implemented; fault-inject: n/a."
             ),
         ),
     )

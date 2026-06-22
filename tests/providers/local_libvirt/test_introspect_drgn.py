@@ -382,11 +382,57 @@ def test_from_vmcore_byte_cap_trims_tasks_and_sets_truncated() -> None:
     assert len(trimmed) < 200
 
 
-def test_from_env_real_seams_raise_missing_dependency() -> None:
+def test_from_env_wires_real_drgn_seams() -> None:
+    """from_env wires the shared production drgn seams (not None), without importing drgn."""
+    from kdive.providers.shared.debug_common.drgn_program import (
+        open_vmcore_program,
+        read_vmcoreinfo_build_id,
+        run_introspection_helper,
+    )
+
     introspector = LocalLibvirtVmcoreIntrospect.from_env(secret_registry=SecretRegistry())
+    assert introspector._open_program is open_vmcore_program
+    assert introspector._run_helper is run_introspection_helper
+    assert introspector._read_vmcore_build_id is read_vmcoreinfo_build_id
+
+
+def test_from_env_reaches_drgn_import_missing_dependency() -> None:
+    """The wired real seams drive the import-reaching path, not the removed None-guard.
+
+    A provenance-valid core (matching VMCOREINFO BUILD-ID) plus a fetch fake serving *both* the
+    vmcore and vmlinux refs drives control past provenance and both fetches into the drgn open seam.
+    drgn is an operator-provided live-host prerequisite absent on CI, so the open raises
+    MISSING_DEPENDENCY from ``_require_drgn``. We accept DEBUG_ATTACH_FAILURE too (defensive: a dev
+    venv that *does* carry drgn would fail to open the synthetic blob as a real core) — either
+    proves the import was reached and the old up-front None-guard is gone (live-dep divergence).
+    """
+    from kdive.providers.shared.debug_common.drgn_program import (
+        open_vmcore_program,
+        read_vmcoreinfo_build_id,
+        run_introspection_helper,
+    )
+
+    build_id = "ab" * 20
+    core = b"\x00" * 64 + b"VMCOREINFO\x00BUILD-ID=%s\n" % build_id.encode("ascii")
+
+    def _open(vmcore: Path, vmlinux: Path) -> _Program:
+        return cast("_Program", open_vmcore_program(vmcore, vmlinux))
+
+    introspector = LocalLibvirtVmcoreIntrospect(
+        fetch_object=lambda ref: core if "core" in ref else b"vmlinux-bytes",
+        read_vmcore_build_id=read_vmcoreinfo_build_id,
+        secret_registry=SecretRegistry(),
+        open_program=_open,
+        run_helper=run_introspection_helper,
+    )
     with pytest.raises(CategorizedError) as exc:
-        introspector.from_vmcore(vmcore_ref="v", debuginfo_ref="d", expected_build_id="deadbeef")
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+        introspector.from_vmcore(
+            vmcore_ref="run/core", debuginfo_ref="run/vmlinux", expected_build_id=build_id
+        )
+    assert exc.value.category in (
+        ErrorCategory.MISSING_DEPENDENCY,
+        ErrorCategory.DEBUG_ATTACH_FAILURE,
+    )
 
 
 # --- LocalLibvirtLiveIntrospect orchestration (ADR-0039) -----------------------------------
