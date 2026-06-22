@@ -108,7 +108,6 @@ def _kdump_retriever(
         wait_for_vmcore=lambda system_id: core_path,
         read_vmcore_build_id=lambda data: pytest.fail("bytes build-id seam used on kdump path"),
         read_vmcore_build_id_from_file=lambda path: build_id,
-        extract_redacted=lambda data: pytest.fail("bytes dmesg seam used on kdump path"),
         extract_redacted_from_file=lambda path: b"dmesg: password=[REDACTED]",
         host_dump_capture=lambda _sid: pytest.fail("host_dump seam used on kdump path"),
         secret_registry=SecretRegistry(),
@@ -205,7 +204,6 @@ def _crash_retriever(*, observed_build_id: str, crash: CrashResult) -> LocalLibv
         wait_for_vmcore=lambda s: None,
         read_vmcore_build_id=lambda data: observed_build_id,
         read_vmcore_build_id_from_file=lambda path: observed_build_id,
-        extract_redacted=lambda data: b"",
         extract_redacted_from_file=lambda path: b"",
         host_dump_capture=lambda s: None,
         secret_registry=SecretRegistry(),
@@ -247,7 +245,6 @@ def test_run_rejects_bad_command_before_fetching_or_running_crash() -> None:
         wait_for_vmcore=lambda s: None,
         read_vmcore_build_id=lambda data: "deadbeef",
         read_vmcore_build_id_from_file=lambda path: "deadbeef",
-        extract_redacted=lambda data: b"",
         extract_redacted_from_file=lambda path: b"",
         host_dump_capture=lambda s: None,
         secret_registry=SecretRegistry(),
@@ -268,19 +265,83 @@ def test_run_rejects_bad_command_before_fetching_or_running_crash() -> None:
     assert fetched == []
 
 
-def test_capture_host_dump_uses_dump_seam() -> None:
-    store = _FakeStore()
-    retr = LocalLibvirtRetrieve(
-        tenant="local",
+def _host_dump_retriever(
+    store: _FakeStore, *, core_path: Path | None, build_id: str = "hostbid"
+) -> LocalLibvirtRetrieve:
+    """A retriever whose host_dump seam yields a spooled ``Path`` (file-streamed, #657)."""
+    return LocalLibvirtRetrieve(
+        tenant=_TENANT,
         store_factory=lambda: store,
         wait_for_vmcore=lambda _sid: pytest.fail("kdump seam used for host_dump"),
-        read_vmcore_build_id=lambda _b: "bid",
-        read_vmcore_build_id_from_file=lambda _p: pytest.fail("path build-id seam on host_dump"),
-        extract_redacted=lambda _b: b"dmesg",
-        extract_redacted_from_file=lambda _p: pytest.fail("path dmesg seam on host_dump"),
-        host_dump_capture=lambda _sid: b"\x7fELFcore",
+        read_vmcore_build_id=lambda _b: pytest.fail("bytes build-id seam used on host_dump path"),
+        read_vmcore_build_id_from_file=lambda _p: build_id,
+        extract_redacted_from_file=lambda _p: b"dmesg: password=[REDACTED]",
+        host_dump_capture=lambda _sid: core_path,
         secret_registry=SecretRegistry(),
     )
-    out = retr.capture(_SYS, CaptureMethod.HOST_DUMP)
-    assert out.vmcore_build_id == "bid"
-    assert out.raw is not None and out.redacted is not None
+
+
+def test_capture_host_dump_streams_raw_core_and_returns_build_id(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"\x7fELFcore")
+    store = _FakeStore()
+    out = _host_dump_retriever(store, core_path=core).capture(_SYS, CaptureMethod.HOST_DUMP)
+    assert isinstance(out, CaptureOutput)
+    assert out.raw.key == f"{_TENANT}/systems/{_SYS}/vmcore-host_dump"
+    assert out.redacted.key == f"{_TENANT}/systems/{_SYS}/vmcore-host_dump-redacted"
+    assert out.vmcore_build_id == "hostbid"
+    assert out.raw_size_bytes == len(b"\x7fELFcore")
+    # the raw core is streamed (a path), not held as bytes.
+    assert len(store.streams) == 1
+    stream_key, stream_name, stream_path, stream_sha = store.streams[0]
+    assert stream_name == "vmcore-host_dump"
+    assert stream_sha == _sha256_b64(b"\x7fELFcore")
+    assert [name for _, name, _, _ in store.puts] == ["vmcore-host_dump-redacted"]
+    redacted_data = next(d for _, name, _, d in store.puts if name == "vmcore-host_dump-redacted")
+    assert b"[REDACTED]" in redacted_data
+
+
+def test_capture_host_dump_removes_the_spool_dir_on_success(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"\x7fELFcore")
+    _host_dump_retriever(_FakeStore(), core_path=core).capture(_SYS, CaptureMethod.HOST_DUMP)
+    assert not core.exists()
+    assert not core.parent.exists()
+
+
+def test_capture_host_dump_removes_the_spool_dir_on_store_failure(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"\x7fELFcore")
+    retr = _host_dump_retriever(_FakeStore(fail_on="vmcore-host_dump"), core_path=core)
+    with pytest.raises(CategorizedError) as exc:
+        retr.capture(_SYS, CaptureMethod.HOST_DUMP)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not core.exists()
+    assert not core.parent.exists()
+
+
+def test_capture_host_dump_no_core_is_readiness_failure() -> None:
+    with pytest.raises(CategorizedError) as exc:
+        _host_dump_retriever(_FakeStore(), core_path=None).capture(_SYS, CaptureMethod.HOST_DUMP)
+    assert exc.value.category is ErrorCategory.READINESS_FAILURE
+
+
+def test_capture_host_dump_verifies_stored_checksum(tmp_path: Path) -> None:
+    core = _spooled_core(tmp_path, b"\x7fELFcore")
+
+    @dataclass
+    class _CorruptingStore(_FakeStore):
+        def head(self, key: str) -> HeadResult | None:
+            base = super().head(key)
+            if base is None:
+                return None
+            return HeadResult(
+                size_bytes=base.size_bytes,
+                checksum_sha256="mismatch",
+                etag=base.etag,
+                sensitivity=base.sensitivity,
+            )
+
+    with pytest.raises(CategorizedError) as exc:
+        _host_dump_retriever(_CorruptingStore(), core_path=core).capture(
+            _SYS, CaptureMethod.HOST_DUMP
+        )
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not core.exists()

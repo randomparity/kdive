@@ -26,17 +26,17 @@ GIT_COMMAND_TIMEOUT_S = 120
 
 # Per-provider advertised capture-method coverage (M2.5 capstone, #304). The four-method
 # vocabulary is fixed (CaptureMethod: console/host_dump/gdbstub/kdump). Remote advertises all
-# four (M2.5 exit). Local advertises only {kdump}: ADR-0208 narrows its capture set to the
+# four (M2.5 exit). Local advertises {kdump, host_dump}: ADR-0208 narrows its capture set to the
 # core-producing methods it can actually fetch a vmcore for, dropping the non-core console/gdbstub
-# half-truths and HOST_DUMP (whose seam returns in M2.8 B4). Local stays the default and remote
-# the opt-in provider (#198). This is a pinned constant because the gate is stdlib-only (CI runs
-# it without a synced env); a drift-guard unit test (tests/scripts/test_m2_portability_gate.py)
-# imports the real build_*_runtime builders and fails if this table ever diverges from what
-# composition.py advertises.
+# half-truths; HOST_DUMP's seam landed in M2.8 B4 (ADR-0211, libvirt domain core dump). Local
+# stays the default and remote the opt-in provider (#198). This is a pinned constant because the
+# gate is stdlib-only (CI runs it without a synced env); a drift-guard unit test
+# (tests/scripts/test_m2_portability_gate.py) imports the real build_*_runtime builders and fails
+# if this table ever diverges from what composition.py advertises.
 _CAPTURE_VOCABULARY = ("console", "host_dump", "gdbstub", "kdump")
 CAPTURE_COVERAGE: dict[str, frozenset[str]] = {
     "remote-libvirt": frozenset({"console", "host_dump", "gdbstub", "kdump"}),
-    "local-libvirt": frozenset({"kdump"}),
+    "local-libvirt": frozenset({"kdump", "host_dump"}),
 }
 
 CORE_PREFIXES = (
@@ -242,10 +242,10 @@ def render_capture_coverage() -> list[str]:
         "",
         f"Advertised capture methods per provider, of the {total}-method vocabulary "
         f"(`{'`, `'.join(_CAPTURE_VOCABULARY)}`). Remote reaches **4/4** (M2.5 exit, ADR-0084). "
-        "Local advertises **1/4** (`kdump`): ADR-0208 narrowed its set to the core-producing "
-        "method it can actually fetch a vmcore for (host-side overlay harvest, #115/ADR-0203); "
-        "host_dump returns in M2.8 B4. Local stays the default and remote the opt-in provider "
-        "(#198).",
+        "Local advertises **2/4** (`host_dump`, `kdump`): ADR-0208 narrowed its set to the "
+        "core-producing methods it can actually fetch a vmcore for — the host-side overlay harvest "
+        "(#115/ADR-0203) and the libvirt domain core dump (M2.8 B4/ADR-0211). Local stays the "
+        "default and remote the opt-in provider (#198).",
         "",
         "| provider | coverage | advertised methods |",
         "|---|---:|---|",

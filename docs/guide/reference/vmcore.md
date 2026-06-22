@@ -10,7 +10,7 @@
 
 **Promotion:** A non-gated test or recorded live_stack run captures a real vmcore by each advertised core-producing method per provider.
 
-**Provider support:** local-libvirt: KDUMP implemented, HOST_DUMP planned (M2.8 B4); remote-libvirt: implemented (KDUMP/HOST_DUMP); fault-inject: simulated HOST_DUMP.
+**Provider support:** local-libvirt: KDUMP implemented, HOST_DUMP wired (M2.8 B4, ADR-0211), pending live KVM proof (B6 #680); remote-libvirt: implemented (KDUMP/HOST_DUMP); fault-inject: simulated HOST_DUMP.
 
 Capture and persist a vmcore.
 

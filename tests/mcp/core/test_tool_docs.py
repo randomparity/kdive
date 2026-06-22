@@ -484,14 +484,16 @@ def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
     assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
 
 
-def test_vmcore_fetch_host_dump_path_marked_planned_on_local() -> None:
-    # #673: vmcore.fetch defaults toward a core-producing method; local KDUMP is
-    # implemented but its HOST_DUMP seam is the planned Epic-B (B4) stub. The pointer
-    # must name HOST_DUMP as planned on local while crediting the implemented remote.
+def test_vmcore_fetch_host_dump_path_marked_wired_pending_proof_on_local() -> None:
+    # B4 (ADR-0211) wired local's HOST_DUMP seam, so the pointer no longer calls it "planned";
+    # it is "wired … pending live KVM proof" until B6 (#680) runs the live drive that promotes
+    # the tool maturity. The pointer still credits the implemented remote.
     tool = next(t for t in TOOLS if t.name == "vmcore.fetch")
     providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
     assert isinstance(providers, str), "vmcore.fetch: missing providers pointer"
-    assert "HOST_DUMP planned" in providers, providers
+    assert "HOST_DUMP wired" in providers, providers
+    assert "pending live KVM proof" in providers, providers
+    assert "HOST_DUMP planned" not in providers, providers
     assert "remote-libvirt: implemented" in providers, providers
 
 

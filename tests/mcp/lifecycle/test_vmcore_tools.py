@@ -180,24 +180,26 @@ async def _job_count(pool: AsyncConnectionPool) -> int:
     return int(row["n"])
 
 
-def test_fetch_vmcore_host_dump_rejected_on_local_at_admission(migrated_url: str) -> None:
-    # ADR-0209: local advertises only {KDUMP}, so an explicit vmcore.fetch(host_dump) is rejected
-    # up front with the capability_unsupported shape (reason + provider + supported set) and
-    # enqueues no job, instead of the pre-A1 deferred async failure. Driven through the REAL local
-    # runtime so the ADR-0208 narrowing to {KDUMP} is what drives the decision.
+def test_fetch_vmcore_host_dump_admitted_on_local_after_b4(migrated_url: str) -> None:
+    # B4 (ADR-0211) wired local's HOST_DUMP seam and ADR-0208/0211 added it to local's advertised
+    # set, so an explicit vmcore.fetch(host_dump) is now ADMITTED (no longer the A1 fail-fast
+    # capability_unsupported rejection): it enqueues one capture_vmcore job dedup'd under the
+    # method-encoded key. Driven through the REAL local runtime so the descriptor drives the
+    # decision.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             handlers = _real_local_handlers()
             resp = await handlers.fetch_vmcore(pool, _ctx(), system_id=sys_id, method="host_dump")
-            jobs = await _job_count(pool)
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert data_str(resp, "reason") == "capability_unsupported"
-        assert data_str(resp, "capability") == "capture_method:host_dump"
-        assert data_str(resp, "provider") == "local-libvirt"
-        assert resp.data["supported"] == ["kdump"]
-        assert jobs == 0
+            assert resp.status == "queued"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'capture_vmcore' "
+                    "AND dedup_key = %s",
+                    (f"{sys_id}:capture_vmcore:host_dump",),
+                )
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 1
 
     asyncio.run(_run())
 

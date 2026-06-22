@@ -18,14 +18,15 @@ from scripts.m2_portability_gate import (
 )
 
 
-def test_render_report_records_remote_full_and_local_kdump_only_coverage() -> None:
+def test_render_report_records_remote_full_and_local_dual_method_coverage() -> None:
     md = render_report({"src/kdive/domain/catalog/resources.py": 4})
     assert "## Capture-method coverage" in md
-    # Remote reaches 4/4 (M2.5 exit); local advertises only kdump (1/4) after ADR-0208 narrowed
-    # its capture set to the core-producing method it can fetch.
+    # Remote reaches 4/4 (M2.5 exit); local advertises kdump + host_dump (2/4) after ADR-0208
+    # narrowed its set to the core-producing methods it can fetch (kdump #115, host_dump B4).
     assert "| `remote-libvirt` | 4 / 4 |" in md
-    assert "| `local-libvirt` | 1 / 4 |" in md
+    assert "| `local-libvirt` | 2 / 4 |" in md
     assert "kdump" in md
+    assert "host_dump" in md
 
 
 def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
@@ -40,10 +41,11 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     local = build_local_runtime(secret_registry=registry).supported_capture_methods
     assert CAPTURE_COVERAGE["remote-libvirt"] == frozenset(m.value for m in remote)
     assert CAPTURE_COVERAGE["local-libvirt"] == frozenset(m.value for m in local)
-    # Remote advertises all four methods; local advertises only kdump (ADR-0208 narrowed it to
-    # the core-producing method it can fetch — #115/ADR-0203 added the kdump overlay harvest).
+    # Remote advertises all four methods; local advertises kdump + host_dump (ADR-0208 narrowed it
+    # to the core-producing methods it can fetch — #115/ADR-0203 overlay harvest, B4/ADR-0211 dump).
     assert "kdump" in CAPTURE_COVERAGE["remote-libvirt"]
     assert "kdump" in CAPTURE_COVERAGE["local-libvirt"]
+    assert "host_dump" in CAPTURE_COVERAGE["local-libvirt"]
 
 
 def test_render_report_lists_allowlisted_and_flags_violations() -> None:
