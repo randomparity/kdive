@@ -1707,15 +1707,37 @@ def test_from_env_threads_remote_allowlist(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("KDIVE_LOCAL_BUILD_REMOTE_ALLOWLIST", "github.com/myorg, git.example.com")
 
     def _fake_make_checkout(
-        kernel_src: str, secret_registry: SecretRegistry, *, allowlist: Sequence[str]
+        kernel_src: str,
+        secret_registry: SecretRegistry,
+        *,
+        allowlist: Sequence[str],
+        sandbox_provider: object = None,
     ) -> object:
-        del kernel_src, secret_registry
+        del kernel_src, secret_registry, sandbox_provider
         captured["allow"] = tuple(allowlist)
         return lambda *_a, **_k: None
 
     monkeypatch.setattr(build_module._build_workspace, "make_checkout", _fake_make_checkout)
     LocalLibvirtBuild.from_env(secret_registry=SecretRegistry())
     assert captured["allow"] == ("github.com/myorg", "git.example.com")
+
+
+def test_fail_closed_checkout_when_root_without_build_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A root worker with no KDIVE_BUILD_USER must refuse the local build lane before any subprocess.
+    import uuid
+
+    from kdive.providers.shared.build_host import sandbox as sb
+    from kdive.providers.shared.build_host.workspaces import workspace as ws
+
+    monkeypatch.setattr(sb.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(sb.config, "get", lambda s: None)
+    provider = sb.resolve_build_sandbox_provider()
+    checkout = ws.make_checkout("/warm", SecretRegistry(), sandbox_provider=provider)
+    with pytest.raises(CategorizedError) as exc:
+        checkout(uuid.uuid4(), _profile(), tmp_path / "run", b"frag")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
 # --- clone_tree (local git lane) + provenance dispatch (ADR-0162) -------------------
