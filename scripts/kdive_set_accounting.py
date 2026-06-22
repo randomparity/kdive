@@ -3,7 +3,7 @@
 Calls ``accounting.set_quota`` then ``accounting.set_budget`` (and reads back
 ``accounting.usage_project``) against a running KDIVE server's MCP endpoint, using a
 bearer token that carries the project ``admin`` role. This is the production-style,
-audited alternative to ``seed-demo``'s raw INSERTs (see
+audited alternative to ``seed-project``'s raw INSERTs (see
 ``docs/operating/project-onboarding.md``).
 
 DEMO/operator helper. The bundled mock OIDC issuer mints a valid token for any caller, so

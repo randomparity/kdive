@@ -1,4 +1,4 @@
-"""Installed-package admin helpers: migrate, install-fixtures, seed-demo.
+"""Installed-package admin helpers: migrate, install-fixtures, seed-project.
 
 The app-process bring-up (the `stack` supervisor and the `install-compose`/
 `print-local-env` dev crutches) was retired in ADR-0088 decision 9: the published
@@ -133,7 +133,7 @@ def seed_project_statements(
     max_concurrent_allocations: int,
     max_concurrent_systems: int,
 ) -> list[tuple[str, Sequence[Any]]]:
-    """Build the idempotent budget/quota upserts for a demo project (see :func:`seed_demo`).
+    """Build the idempotent budget/quota upserts for a project (see :func:`seed_project`).
 
     These raw ``INSERT``s reproduce the row content the audited ``accounting.set_budget`` /
     ``accounting.set_quota`` tools write, but deliberately bypass them: the seeder runs at
@@ -159,7 +159,7 @@ def seed_project_statements(
     ]
 
 
-async def seed_demo(
+async def seed_project(
     *,
     project: str,
     limit_kcu: Decimal,
@@ -168,8 +168,9 @@ async def seed_demo(
 ) -> None:
     """Seed budget/quota rows and register discoverable resources for enabled providers.
 
-    A bootstrap convenience for demos and local stacks, not the production onboarding path:
-    the writes bypass the audited admin tools (see :func:`seed_project_statements`).
+    The token-less onboarding path for local/host deployments: the writes bypass the audited
+    admin tools (see :func:`seed_project_statements`), so it runs at deploy time with no OIDC
+    token or request context.
     """
     from kdive.db.pool import create_pool
 

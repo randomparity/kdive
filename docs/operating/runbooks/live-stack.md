@@ -20,7 +20,7 @@ kdump catalog default, the kernel-build-config provisioning milestone's acceptan
 [four-method-live-run.md](four-method-live-run.md).
 
 The `just` recipes below are source-tree conveniences. Installed-package deployments use
-`python -m kdive migrate` and `python -m kdive seed-demo`, then run the app tier from the
+`python -m kdive migrate` and `python -m kdive seed-project`, then run the app tier from the
 compose reference (`docker compose up -d migrate server worker reconciler`); see
 [`docs/operating/local-stack.md`](../local-stack.md) and
 [`deploy/compose/README.md`](../../../deploy/compose/README.md). For a **Kubernetes / Helm**
@@ -119,7 +119,7 @@ set -a
 . /etc/kdive/local.env
 set +a
 python -m kdive migrate
-python -m kdive seed-demo --project demo
+python -m kdive seed-project --project demo
 ```
 
 ## 3. Build the VM fixtures
@@ -181,7 +181,7 @@ reference ([`deploy/compose/README.md`](../../../deploy/compose/README.md)):
 
 ```bash
 python -m kdive migrate
-python -m kdive seed-demo --project demo
+python -m kdive seed-project --project demo
 docker compose up -d migrate server worker reconciler
 ```
 
@@ -210,7 +210,7 @@ set -a
 . /etc/kdive/local.env
 set +a
 python -m kdive migrate
-python -m kdive seed-demo --project demo
+python -m kdive seed-project --project demo
 docker compose up -d migrate server worker reconciler
 ```
 

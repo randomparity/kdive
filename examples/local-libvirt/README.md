@@ -10,7 +10,7 @@ log), the stack onboards a project named **`local`**, and an MCP client opened i
 kernel tree (`~/src/linux` by default) drives that very checkout.
 
 This example calls the real product commands (`docker compose`, `python -m kdive migrate`,
-`python -m kdive seed-demo`) rather than the source-tree `just` recipes, so it mirrors a
+`python -m kdive seed-project`) rather than the source-tree `just` recipes, so it mirrors a
 real deployment. For the underlying reference material see
 [`docs/operating/local-stack.md`](../../docs/operating/local-stack.md), the
 [local-libvirt walkthrough](../../docs/operating/providers/local-libvirt-walkthrough.md),
@@ -210,7 +210,7 @@ stays local-only.
   production brings its own token via `$KDIVE_TOKEN`.
 - `.mcp.json` references the token through `${KDIVE_TOKEN}` and never stores it, so the file
   is safe to leave in the kernel tree.
-- `seed-demo` writes budget/quota with raw `INSERT`s and no audit row — a deliberate
+- `seed-project` writes budget/quota with raw `INSERT`s and no audit row — a deliberate
   token-less bootstrap for a single-developer box. Onboarding someone else's tenant uses
   the audited admin tools instead; see
   [project onboarding](../../docs/operating/project-onboarding.md).

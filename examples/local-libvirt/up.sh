@@ -118,9 +118,9 @@ step "migrate"
 
 # 6. Onboard the project — budget/quota rows plus registration of the discovered local
 #    libvirt resource. Token-less bootstrap (raw INSERTs), the correct path for a
-#    single-developer box. (The product command is still named seed-demo; see issue #669.)
+#    single-developer box.
 step "seed project '${KDIVE_PROJECT}'"
-(cd "${repo_root}" && "${KDIVE_PYTHON}" -m kdive seed-demo \
+(cd "${repo_root}" && "${KDIVE_PYTHON}" -m kdive seed-project \
   --project "${KDIVE_PROJECT}" \
   --limit-kcu "${KDIVE_LIMIT_KCU}" \
   --max-concurrent-allocations "${KDIVE_MAX_ALLOC}" \

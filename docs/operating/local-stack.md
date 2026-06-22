@@ -50,7 +50,7 @@ python -m kdive migrate
 ## Seed A Demo Project
 
 ```bash
-python -m kdive seed-demo \
+python -m kdive seed-project \
   --project demo \
   --limit-kcu 1000000 \
   --max-concurrent-allocations 4 \
@@ -60,7 +60,7 @@ python -m kdive seed-demo \
 This creates the budget/quota rows needed for agent allocations and registers the local
 libvirt resource discovered on the host.
 
-`seed-demo` is a bootstrap convenience: it writes the rows with raw `INSERT`s at deploy
+`seed-project` is a token-less bootstrap: it writes the rows with raw `INSERT`s at deploy
 time, before any request, so the writes are not role-gated and leave no audit row. For a
 production tenant, onboard the project with the audited admin tools instead — see
 [Project onboarding](project-onboarding.md).

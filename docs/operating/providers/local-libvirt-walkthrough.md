@@ -42,7 +42,7 @@ resolves:
 just setup-local-libvirt
 ```
 
-By default this runs `python -m kdive seed-demo`, which writes the budget/quota rows with no
+By default this runs `python -m kdive seed-project`, which writes the budget/quota rows with no
 token. To onboard through the audited, role-gated admin tools instead (the production-style
 path), set `KDIVE_SETUP_AUDITED=1` and supply a project-`admin` token in `KDIVE_TOKEN` — this
 path needs an OIDC issuer configured to assert the project-`admin` claims, and the local

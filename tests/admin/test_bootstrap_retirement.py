@@ -1,7 +1,7 @@
 """The hand-rolled app bootstrap is retired (ADR-0088 decision 9).
 
 The `stack` supervisor and the `install-compose`/`print-local-env` dev crutches are
-removed; only `migrate`/`install-fixtures`/`seed-demo` remain. The image (or the compose
+removed; only `migrate`/`install-fixtures`/`seed-project` remain. The image (or the compose
 app tier) is the bring-up path that replaces them.
 """
 
@@ -25,7 +25,7 @@ def test_removed_subcommands_exit_on_parse() -> None:
 
 def test_retained_subcommands_still_parse() -> None:
     parser = build_parser()
-    for retained in ("server", "worker", "reconciler", "migrate", "seed-demo"):
+    for retained in ("server", "worker", "reconciler", "migrate", "seed-project"):
         args = parser.parse_args([retained])
         assert args.command == retained
     assert parser.parse_args(["install-fixtures"]).command == "install-fixtures"
