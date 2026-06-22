@@ -277,6 +277,81 @@ def test_from_vmcore_port_attach_failure_is_typed(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+async def _call_registered_tool(
+    pool: AsyncConnectionPool,
+    resolver: ProviderResolver,
+    *,
+    tool: str,
+    arguments: dict[str, object],
+    ctx: RequestContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> ToolResponse:
+    """Register the introspect tools and invoke one through the FastMCP transport (wrapper path)."""
+    monkeypatch.setattr(introspect_tools, "current_context", lambda: ctx)
+    app: FastMCP = FastMCP(name="t")
+    introspect_tools.register(app, pool, resolver=resolver)
+    async with Client(app) as client:
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
+    assert result.structured_content is not None
+    return ToolResponse.model_validate(result.structured_content)
+
+
+def test_from_vmcore_unsupported_plane_is_capability_unsupported(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0209: a provider whose descriptor lacks offline-vmcore introspection rejects
+    # introspect.from_vmcore up front with capability_unsupported; the drgn port is never called.
+    from tests.mcp.systems_support import provider_resolver
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _built_run_with_core(pool)
+            resolver = provider_resolver(supported_introspection=frozenset())
+            resp = await _call_registered_tool(
+                pool,
+                resolver,
+                tool="introspect.from_vmcore",
+                arguments={"run_id": run_id},
+                ctx=_ctx(),
+                monkeypatch=monkeypatch,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "capability_unsupported"
+        assert resp.data["capability"] == "introspection:offline-vmcore"
+        assert resp.data["supported"] == []
+
+    asyncio.run(_run())
+
+
+def test_run_unsupported_live_plane_is_capability_unsupported(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0209: a provider whose descriptor lacks live introspection rejects introspect.run up
+    # front with capability_unsupported; the live drgn port is never called.
+    from tests.mcp.systems_support import provider_resolver
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            resolver = provider_resolver(supported_introspection=frozenset())
+            resp = await _call_registered_tool(
+                pool,
+                resolver,
+                tool="introspect.run",
+                arguments={"session_id": session_id, "helper": "tasks"},
+                ctx=_live_ctx(),
+                monkeypatch=monkeypatch,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "capability_unsupported"
+        assert resp.data["capability"] == "introspection:live"
+        assert resp.data["supported"] == []
+
+    asyncio.run(_run())
+
+
 def test_register_adds_the_tool() -> None:
     from fastmcp import FastMCP
 
@@ -415,6 +490,8 @@ def test_run_tool_uses_already_resolved_live_session(
                 SimpleNamespace(
                     vmcore_introspector=_FakeIntrospector(),
                     live_introspector=port,
+                    supported_introspection=frozenset({"live"}),
+                    component_sources=SimpleNamespace(provider="local-libvirt"),
                 ),
             )
             resolver = _CountingResolver(runtime)
