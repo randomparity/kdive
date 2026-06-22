@@ -67,10 +67,13 @@ docker compose down -v    # from the repo root, to remove the backends + volumes
 `mint-token.sh` mints a bearer token from the mock-OIDC issuer carrying
 `roles={KDIVE_PROJECT: admin}` plus `platform_admin`/`platform_operator`.
 
-- **Lifetime.** The token expires after `KDIVE_TOKEN_TTL` seconds (default `43200` = 12h).
-  The mock issuer's own default is one hour; this example overrides it because a
-  build→boot→debug→capture session routinely runs longer. Set `KDIVE_TOKEN_TTL` before
-  minting to change it.
+- **Lifetime.** The token expires after `KDIVE_TOKEN_TTL` seconds. The default is `43200`
+  (12h) — the mock issuer's own default is one hour, but this example overrides it because a
+  build→boot→capture session routinely runs longer. The value must be a positive integer of
+  seconds (minimum `1`); **no maximum is enforced** — `exp` is simply set to `now +
+  KDIVE_TOKEN_TTL`, so you can mint a token that lasts as long as you like (a long-lived
+  dev token is a mild security trade-off, acceptable only because the issuer is the bundled
+  mock on your own machine). Set `KDIVE_TOKEN_TTL` before minting to change it.
 - **Refreshing in a running session.** The installed `.mcp.json` carries
   `Authorization: Bearer ${KDIVE_TOKEN}`, and your MCP client expands `${KDIVE_TOKEN}` from
   its environment **once, when it connects** — it does not re-read the variable mid-session.
@@ -114,7 +117,7 @@ Everything is overridable from the environment before running the scripts:
 | `KDIVE_LIBVIRT_URI` | `qemu:///system` | libvirt connection the worker drives. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for `python -m kdive` and the processes. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
-| `KDIVE_TOKEN_TTL` | `43200` (12h) | Lifetime in seconds of the token `mint-token.sh` issues. |
+| `KDIVE_TOKEN_TTL` | `43200` (12h) | Lifetime in seconds of the token `mint-token.sh` issues. Minimum `1`; no enforced maximum. |
 | `KDIVE_STACK_PID_FILE` / `KDIVE_STACK_LOG_DIR` | `~/.local/state/kdive/local-stack.pid` / `…/local-stack-logs` | Where `up.sh` records the process pids and writes per-process logs. |
 
 The pid file and logs live under the XDG state dir (`$XDG_STATE_HOME`, default
