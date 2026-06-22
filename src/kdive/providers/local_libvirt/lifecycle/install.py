@@ -50,6 +50,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports import InstallRequest
+from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
 from kdive.store.objectstore import object_store_from_env
 
@@ -325,7 +326,14 @@ class LocalLibvirtInstall:
 
         ``initrd_path`` is optional: when ``None`` (embedded-initramfs kernel) no ``<initrd>``
         element is emitted, so libvirt boots the kernel without a separate initrd.
+
+        Registers the kdive + qemu prefixes before re-serializing: ``register_*`` mutates
+        process-global ElementTree state, so a domain provisioned with a gdbstub (the
+        ``<qemu:commandline>`` passthrough, ADR-0210) would otherwise round-trip to an
+        auto-assigned ``ns0:`` prefix that libvirt rejects — silently dropping the gdbstub.
         """
+        register_kdive_namespace()
+        register_qemu_namespace()
         try:
             domain = conn.lookupByName(domain_name)
             current = domain.XMLDesc(0)

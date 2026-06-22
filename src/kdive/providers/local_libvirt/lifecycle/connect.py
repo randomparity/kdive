@@ -248,13 +248,20 @@ def _real_probe(host: str, port: int) -> bool:  # pragma: no cover - live_vm
     return rsp_reachable(host, port)
 
 
-def _real_resolve_ssh_endpoint(
-    system: SystemHandle,
-) -> tuple[str, int]:  # pragma: no cover - live_vm
+def _real_resolve_ssh_endpoint(system: SystemHandle) -> tuple[str, int]:
+    """drgn-live over SSH is not supported on local-libvirt yet (#697).
+
+    The transport needs session-networking (a loopback SSH port-forward + in-guest sshd +
+    credential plumbing) that does not exist on local. The descriptor leaves ``drgn-live``
+    unadvertised, so capability-aware admission (ADR-0209) rejects it before this resolver is
+    reached; if it is ever reached directly, an honest ``CONFIGURATION_ERROR`` is correct —
+    ``MISSING_DEPENDENCY`` would wrongly imply an absent host package rather than an unbuilt
+    capability.
+    """
     raise CategorizedError(
-        "resolving a libvirt guest's loopback-forwarded ssh endpoint runs only under "
-        "the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
+        "drgn-live is not supported on local-libvirt: no session SSH transport "
+        "(deferred, see #697)",
+        category=ErrorCategory.CONFIGURATION_ERROR,
         details={"system": str(system)},
     )
 

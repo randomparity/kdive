@@ -451,16 +451,17 @@ def test_open_unsupported_kind_is_configuration_error() -> None:
     assert str(exc.value) == "unsupported transport kind: 'telnet'"
 
 
-def test_from_env_ssh_resolver_raises_missing_dependency() -> None:
+def test_from_env_ssh_resolver_is_unsupported_configuration_error() -> None:
+    # drgn-live over SSH needs session-networking that does not exist on local yet (#697); the
+    # descriptor leaves drgn-live unadvertised, so admission rejects it first. If reached
+    # directly, the resolver is honestly a CONFIGURATION_ERROR — not MISSING_DEPENDENCY, which
+    # would wrongly imply an absent host package.
     connector = LocalLibvirtConnect.from_env()
     with pytest.raises(CategorizedError) as exc:
         connector.open_transport(_SYSTEM, "drgn-live")
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
-    assert str(exc.value) == (
-        "resolving a libvirt guest's loopback-forwarded ssh endpoint runs only under "
-        "the live_vm gate"
-    )
-    assert exc.value.details == {"system": str(_SYSTEM)}
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "drgn-live" in str(exc.value)
+    assert "#697" in str(exc.value)
 
 
 def test_close_ssh_transport_is_noop_and_never_raises() -> None:
