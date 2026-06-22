@@ -65,6 +65,19 @@ build inherits), not in any per-host file-authoritative `[[build_config]]`. The 
 `=y` (built-in), consistent with the existing kdump symbols, so the crash environment needs no
 extra modules loaded.
 
+A fragment `=y` line is a *request*, not a guarantee: `make olddefconfig` re-resolves Kconfig
+and drops any symbol whose base-config dependencies are unmet. The build orchestrator already
+guards this — `_validate_final_config` reads the post-`olddefconfig` `.config` and, via
+`_dropped_fragment_symbols`, raises a `CONFIGURATION_ERROR` naming any dropped fragment symbol
+*before* `make` runs (`providers/shared/build_host/orchestration.py`,
+`providers/shared/build_host/common.py`, ADR-0096). So each new symbol relies on the base config
+satisfying its Kconfig deps (`CONFIG_KEXEC_FILE` → x86_64 `ARCH_SUPPORTS_KEXEC_FILE`;
+`CONFIG_SQUASHFS_ZSTD` → `CONFIG_SQUASHFS`, added alongside), and any unmet dependency surfaces as
+a loud, fail-fast build error that names the dropped symbol — not a silently miscompiled kernel.
+These symbols are enforced by that existing fragment-survival guard; they are not added to the
+separate `REQUIRED_KERNEL_CONFIG` group list (which is for symbols required independent of the
+fragment), so there is no second source to keep in sync.
+
 ### 2. The `kdive-ready` debug image (rootfs builder)
 
 The debug image, and only the debug image (the `kdump` capability), ships:
@@ -98,9 +111,12 @@ ADR-0203/0206/0207 already established — CI cannot detect any of these.
 - No MCP surface, port, schema, or migration change. The fragment edit re-publishes through the
   existing ADR-0096 seed path (new sha256 → seed upserts the updated bytes); an operator- or
   config-owned override is still skipped, unchanged.
-- Verification stays hardware-gated. Unit tests assert the fragment contains the five symbols
-  and that the debug build stages the sysctl + `keyutils`; they do **not** prove the guest arms
-  kdump. The honest end-to-end proof is the #679 re-run.
+- Verification is layered. Unit tests assert the fragment contains the five symbols and that the
+  debug build stages the sysctl + `keyutils` — necessary but not sufficient (fragment text is not
+  the built `.config`). The build-time olddefconfig **drop-guard** (`_dropped_fragment_symbols`)
+  is the real on-build check that each symbol survives into the kernel `.config`, failing the
+  build with the dropped symbol named if a base dep is unmet. Neither proves the guest *arms*
+  kdump; that end-to-end proof stays hardware-gated — the honest signal is the #679 re-run.
 - ADR-0207's named contingency (BLS / `KDUMP_KERNELVER`) is recorded as **not** the cause; if a
   future live run reopens kernel resolution, this ADR does not preclude it, but it is not the
   observed gap.
