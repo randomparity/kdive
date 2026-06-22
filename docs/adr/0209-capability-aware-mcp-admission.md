@@ -1,4 +1,4 @@
-# ADR 0209 — Capability-aware MCP admission and provider-aware tool defaults
+# ADR 0209 — Capability-aware MCP admission and profile-resolved tool defaults
 
 - **Status:** Accepted
 - **Date:** 2026-06-22
@@ -36,7 +36,8 @@ The descriptor must be *enforced* at the tool boundary, and the steering default
 Make the MCP admission layer **capability-aware**: consult the bound runtime's ADR-0208
 descriptor and reject an unsupported plane/method **before** enqueueing a job or running a
 synchronous op, with an actionable `configuration_error`; and make `vmcore.fetch`'s default
-**provider-aware** so the surface never steers a caller into an unsupported method.
+**profile-resolved** (through the existing `capture_method(profile)` seam) so the surface never
+steers a caller into an unsupported method.
 
 ### 1. Fail fast, before enqueue, with actionable detail
 
@@ -59,15 +60,26 @@ supports capture method KDUMP; HOST_DUMP is not available on this provider"). No
 created, no synchronous seam is touched — the failure is immediate and self-correcting, the
 opposite of today's deferred `MISSING_DEPENDENCY`.
 
-### 2. `vmcore.fetch` loses its static `HOST_DUMP` default
+### 2. `vmcore.fetch` loses its static `HOST_DUMP` default — resolved via the existing profile seam
 
 The `method: CaptureMethod = CaptureMethod.HOST_DUMP` default is removed. The method becomes
-**provider-resolved**: when the caller omits it, `vmcore.fetch` uses the bound provider's
-declared default core-producing method (a `default_capture_method` the descriptor exposes — for
-local that is `KDUMP`, for remote `HOST_DUMP`/`KDUMP` per its profile). An explicitly supplied
-method is validated against the descriptor (rule 1). A provider that produces no core advertises
-an empty core-producing set and the tool rejects the call up front. The surface never carries a
-hard-coded method that a given provider cannot honor.
+**profile-resolved through the seam that already owns this decision**: the providers already
+implement `ProfilePolicy.capture_method(profile)` (`providers/core/runtime.py`), which returns the
+crash-capture method the System's profile enables (local: `KDUMP` for a crashkernel profile,
+`HOST_DUMP` for `preserve_on_crash`, `GDBSTUB`/`CONSOLE` otherwise). A new flat provider-level
+"default method" field is **deliberately not introduced** — it would duplicate and could
+contradict `capture_method(profile)` (a flat `KDUMP` is wrong for a local System provisioned
+`preserve_on_crash`).
+
+When the caller omits `method`, `vmcore.fetch` resolves it as `capture_method(profile)` **clamped
+to the core-producing methods** (`{KDUMP, HOST_DUMP}` — the existing `_VMCORE_METHODS`, since
+`CONSOLE`/`GDBSTUB` produce no core). If the profile's method is core-producing and in the
+descriptor's `supported_capture_methods`, that is the default; if it is non-core (e.g. a
+console-only System), there is no valid implicit core method, so the tool requires an explicit
+core-producing `method` and otherwise returns the rule-1 `configuration_error`. An explicitly
+supplied method is validated against the descriptor (rule 1). The surface never carries a
+hard-coded method that a given provider cannot honor, and the per-System resolution stays in the
+one seam that already encodes it.
 
 ### 3. Capability rejection is `CONFIGURATION_ERROR`, not a new category
 
@@ -112,6 +124,12 @@ admits a remote-libvirt System (which supports the plane) and rejects a local-li
   ADR-0097 discipline is to map to the most specific existing category and carry the specificity
   in `data`, not to mint strings. `CONFIGURATION_ERROR` + `reason: capability_unsupported` does
   exactly that.
+- **A flat `default_capture_method` field on the descriptor (ADR-0208).** Rejected: it duplicates
+  the existing `ProfilePolicy.capture_method(profile)`, which already resolves the per-System
+  capture method from the profile, and a provider-flat value would contradict it (a flat `KDUMP`
+  is wrong for a local System provisioned `preserve_on_crash` → `HOST_DUMP`). Resolve the omitted
+  `vmcore.fetch` method through `capture_method(profile)` clamped to the core-producing set
+  instead of adding a redundant field.
 - **Enforce in a shared middleware wrapping every tool.** Rejected as premature: only four tools
   are provider-plane-gated, and each needs a plane-specific capability key; an explicit check in
   each handler is clearer than a generic interceptor inferring the plane from the tool name. Can

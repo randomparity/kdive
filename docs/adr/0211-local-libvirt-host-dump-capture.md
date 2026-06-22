@@ -8,7 +8,7 @@
   first-method-wins per System), [ADR-0203](0203-local-libvirt-kdump-overlay-harvest.md) (the
   existing local kdump capture path this complements), [ADR-0208](0208-provider-capability-descriptor.md)
   (the descriptor this flips on), [ADR-0209](0209-capability-aware-mcp-admission.md) (the
-  provider-aware `vmcore.fetch` default this makes honest for local).
+  profile-resolved `vmcore.fetch` default this makes honest for local).
 - **Spec:** authored per-issue during `work-issue` (B4), alongside this ADR.
 
 ## Context
@@ -32,7 +32,7 @@ and the development host has libvirt `qemu:///session` available to prove it.
 
 Implement `_real_host_dump_capture` against the **libvirt domain core dump**, giving local-libvirt
 a real HOST_DUMP path with the same method-aware storage contract as KDUMP, and making
-ADR-0209's provider-aware default honest.
+ADR-0209's profile-resolved `vmcore.fetch` default honest for a `preserve_on_crash` local System.
 
 ### 1. Capture via `virDomainCoreDumpWithFlags` to a worker-readable path
 
@@ -50,14 +50,17 @@ System captured via host-dump and one captured via kdump never collide, and `vmc
 existing same-method-dedup / different-method-conflict checks apply unchanged. No new storage
 shape.
 
-### 3. The descriptor flips and the maturity promotes with the wiring
+### 3. The descriptor flips and the `vmcore.fetch` tool maturity promotes with the wiring
 
-`supported_capture_methods` already lists `HOST_DUMP` for local; this ADR makes that listing
-**true**. The host-dump path's ADR-0175 maturity promotes to `implemented`, and (per ADR-0209)
-the provider-aware default resolution can rely on local actually honoring HOST_DUMP — though
-local's declared default core-producing method stays `KDUMP` (the profile-driven choice), with
-HOST_DUMP available explicitly. Until B4 lands, ADR-0209 fail-fast already rejects a HOST_DUMP
-request on local with a clear `configuration_error` rather than the deferred `MISSING_DEPENDENCY`.
+A1 narrowed local's `supported_capture_methods` to `{KDUMP}` (host-dump was stubbed); this ADR
+adds `HOST_DUMP` back, now **truthfully**, since the seam is real. With both of local's
+core-producing methods working — kdump (proven live in B5) and host-dump (this issue) — the
+`vmcore.fetch` **tool's** ADR-0175 maturity promotes to `implemented` (host-dump was its blocking
+partial reason); this is why B4 depends on B5's kdump live proof. Per ADR-0209 the omitted-method
+default stays profile-resolved through `capture_method(profile)` (a `preserve_on_crash` local
+System now resolves a working `HOST_DUMP`; a crashkernel System resolves `KDUMP`) — no flat
+provider default. Until B4 lands, ADR-0209 fail-fast already rejects a HOST_DUMP request on local
+with a clear `configuration_error` rather than the deferred `MISSING_DEPENDENCY`.
 
 ### 4. Seam split + live proof
 

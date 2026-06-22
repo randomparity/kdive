@@ -51,25 +51,47 @@ does this provider support."
 `ProviderRuntime` gains, alongside the existing `supported_capture_methods`:
 
 - `supported_debug_transports: frozenset[DebugTransportKind]` — the live-debug transports the
-  provider can open (`GDBSTUB`, `DRGN_LIVE`). Empty ⇒ `debug.start_session` is unsupported.
-- `supported_introspection: frozenset[IntrospectionMode]` — `OFFLINE_VMCORE` (`introspect.from_vmcore`)
-  and/or `LIVE` (`introspect.run`). Empty ⇒ the corresponding introspection tool is unsupported.
+  provider can open (`"gdbstub"`, `"drgn-live"`). Empty ⇒ `debug.start_session` is unsupported.
+  `DebugTransportKind` is the **existing** `Literal["gdbstub", "drgn-live"]` already defined in
+  `providers/ports/lifecycle.py` and used by the connect plane (the `"drgn-live"` kind is
+  ADR-0085); this ADR reuses it, it does not introduce it.
+- `supported_introspection: frozenset[IntrospectionMode]` — `"offline-vmcore"` (`introspect.from_vmcore`)
+  and/or `"live"` (`introspect.run`). Empty ⇒ the corresponding introspection tool is unsupported.
+  `IntrospectionMode` is a **new** `Literal["offline-vmcore", "live"]` added in `providers/ports/`,
+  mirroring the existing `DebugTransportKind` style.
 
-`supported_capture_methods` stays the host-dump/kdump/etc. authority and is read as part of the
-same descriptor. The descriptor is **declarative data**, not a new port protocol — no provider
-implements a new method; it populates fields. The capability vocabulary is the existing,
-**extensible enums** (`CaptureMethod`, `DebugTransportKind`, and the new `IntrospectionMode`),
-so a future provider with a genuinely new capability adds an enum variant and populates the set,
-rather than introducing a parallel mechanism.
+`supported_capture_methods` (a `frozenset[CaptureMethod]`) stays the authority for which
+**core-producing** capture methods `vmcore.fetch` admits, and is read as part of the same
+descriptor. A provider lists only the methods that actually yield a fetchable core: A1 narrows
+local's set to `{KDUMP}` (+`HOST_DUMP` after B4), dropping the non-core `CONSOLE`/`GDBSTUB` members
+it advertises today (those are crash-handling modes, already excluded from `vmcore.fetch` by the
+existing `_VMCORE_METHODS`, and produce no vmcore — listing them is the half-truth this ADR removes). The descriptor is **declarative data**, not
+a new port protocol — no provider implements a new method; it populates fields. The capability
+vocabulary is a set of stable string `Literal`s / the `CaptureMethod` enum, so a future provider
+with a genuinely new capability adds a `Literal` member / enum variant and populates the set,
+rather than introducing a parallel mechanism. The descriptor carries **no** "default method"
+field — the per-System default `vmcore.fetch` resolves to is owned by the existing
+`ProfilePolicy.capture_method(profile)` seam, not duplicated here (see ADR-0209).
 
 ### 2. Conservative defaults — a partial/unconfigured provider reports *less*, never more
 
-Every descriptor field defaults to **empty/false** on `ProviderRuntime`. A provider that has not
-yet wired a plane (local-libvirt before its Epic B plane lands), or is constructed unconfigured,
+Every descriptor field defaults to **empty** on `ProviderRuntime`. A provider that has not yet
+wired a plane (local-libvirt before its Epic B plane lands), or is constructed unconfigured,
 reports *no* capability for it. The surface can therefore never advertise a stubbed plane as
 working: under-reporting fails closed (an agent is told "unsupported" for something that turns
 out to work — annoying but safe), while over-reporting would resurrect the exact trap this ADR
 removes. A plane is added to its descriptor set **in the same change that wires its real seam**.
+
+**This deliberately changes the existing `supported_capture_methods` default.** Today that field
+defaults to `frozenset(CaptureMethod)` — *every* method, i.e. fail-**open**, the opposite of the
+principle above. This ADR flips its default to the empty frozenset so the new and existing
+descriptor fields share one fail-closed rule. The change is safe in production because all three
+current providers (`local`, `remote`, `fault_inject`) already pass `supported_capture_methods`
+explicitly in their `composition.py`, so their advertised methods are unchanged; the only callers
+affected are constructions that relied on the permissive default (chiefly test fixtures and any
+ad-hoc `ProviderRuntime(...)` built without the field), which must now set it explicitly — caught
+at the type/test layer, not at runtime. A1's PR makes this flip together with adding the sibling
+fields, so the descriptor is uniform from the first commit.
 
 ### 3. Every current provider populates the descriptor in this ADR's change
 
