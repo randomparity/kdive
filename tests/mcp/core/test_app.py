@@ -88,6 +88,10 @@ def test_build_app_registers_jobs_tools() -> None:
             "accounting.report_all_projects",
         } <= names
         assert {
+            "reports.generate_granted_set",
+            "reports.generate_all_projects",
+        } <= names
+        assert {
             "allocations.request",
             "allocations.get",
             "allocations.release",
