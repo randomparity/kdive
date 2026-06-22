@@ -114,7 +114,14 @@ as ADR-0203/0206 already established for this path.
   `/lib/modules/<ver>` (already injected, `depmod`-indexed) and `kexec -p` loads the bzImage
   directly; neither needs `System.map` or the `.config`, and the build publishes neither as an
   artifact. Staging them would add build artifacts for no kdump-path requirement.
-- Real arm/capture verification stays hardware-gated; CI covers the seam contract with fakes.
+- Real arm/capture verification stays hardware-gated; CI covers the seam contract with fakes —
+  it verifies the kernel is staged and the sentinel rejects an empty upload, **not** that the
+  overlay arms kdump.
+- **Named dependency (hardware-only):** this relies on the guest image's `kdumpctl` resolving
+  the crash kernel by the bare path `/boot/vmlinuz-$(uname -r)` (the #666 live-run mechanism),
+  not via `grubby`/BLS (no entry exists under direct-kernel boot). If a live run shows otherwise,
+  the contingency — pin `KDUMP_KERNELVER` in `/etc/sysconfig/kdump` and/or write a BLS entry — is
+  a named follow-up, out of scope here; CI cannot detect this case.
 
 ## Considered & rejected
 

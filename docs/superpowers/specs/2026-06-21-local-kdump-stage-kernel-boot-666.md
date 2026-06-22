@@ -29,6 +29,15 @@ has no `vmlinuz-7.0.0`, so `kdumpctl` has no crash kernel to load — even with
 `/lib/modules/7.0.0` injected and `kdump.service` enabled. Module injection alone cannot arm
 in-guest kdump under direct-kernel boot.
 
+**Named dependency:** this fix assumes the shipped guest image's `kdumpctl` resolves the crash
+kernel by the bare path `/boot/vmlinuz-$(uname -r)` (the mechanism the #666 live run observed),
+**not** via `grubby`/BLS (`/boot/loader/entries/*.conf`) — which under direct-kernel boot has no
+entry and no grub. If a live run shows `kdumpctl` consulting BLS/`grubby` instead, staging the
+bare path is necessary but not sufficient, and the contingency is a named follow-up: pin
+`KDUMP_KERNELVER` in the guest's `/etc/sysconfig/kdump` and/or write a BLS entry for the
+from-source kernel. That contingency is out of scope here and must not be assumed away — CI
+cannot detect it (see Acceptance).
+
 This is the second of the two gaps the live run found. The first (Fedora ships `kdump.service`
 disabled; the run's image predated the rootfs builder's `systemctl enable kdump.service`) is an
 **image-level** gap addressed by rebuilding the guest image with current code, and is out of
@@ -100,7 +109,15 @@ Out of scope:
 - The kernel sentinel rejects a zero-byte upload (positive-size check), distinct from the
   modules sentinel.
 
+Because the CI acceptance verifies plumbing (the writer is handed the kernel, the sentinel
+rejects an empty upload) but **cannot** verify that the resulting overlay actually arms kdump,
+the bare-path dependency named in Root cause is confirmable only on hardware. A green CI run is
+not evidence that kdump arms.
+
 ### Live (hardware, runbook / `live_vm`)
+
+**Precondition:** the run must use a guest image rebuilt with `kdump.service` enabled (gap 2,
+out of scope here) so a failure isolates to the kernel-staging change rather than the image.
 
 A local-libvirt run that boots a from-source kdump kernel, `control.force_crash`, and
 `vmcore.fetch method=kdump` returns a real redacted vmcore (`/var/crash/<ts>/vmcore` harvested
