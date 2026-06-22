@@ -139,10 +139,36 @@ For a build that clones a git ref on a dedicated build host instead of the worke
 3. Name the host in the build profile's `build_host` field (or leave it to the default
    selection once a compatible remote host is registered).
 
+## Building under a root worker: `KDIVE_BUILD_USER` (ADR-0214)
+
+Local-libvirt kdump capture requires the worker to run **as root** on the KVM host (the
+console log is `root:0600`; vmcore harvest needs libguestfs + force-off + `kexec`). A local
+build, though, clones and `make`s operator/agent-supplied kernel source — arbitrary code
+execution that must **not** run as root. Set `KDIVE_BUILD_USER` to the name of an unprivileged
+account and the worker drops to it for every build subprocess (git clone, `make`, config merge,
+patch); it keeps root only for the libvirt/console/`kexec` operations.
+
+- **Non-root worker:** `KDIVE_BUILD_USER` is ignored — builds run as the current user, unchanged.
+- **Root worker with `KDIVE_BUILD_USER` set** to a resolvable non-root account: every build
+  subprocess is demoted to it.
+- **Root worker with `KDIVE_BUILD_USER` unset** (or naming an unknown account, or root): the
+  local build lane is **refused** — the `BUILD` job fails with a `configuration_error` naming the
+  setting. The worker never silently compiles untrusted source as root.
+
+Operator prerequisites for the build account (a missing one surfaces as a categorized build
+failure, not a silent root build):
+
+- The build-workspace parent (`KDIVE_BUILD_WORKSPACE`, default `/var/lib/kdive/build`) must be
+  **traversable** (`o+x`) by the build user.
+- The warm tree (`KDIVE_KERNEL_SRC`) and any `patch_ref` must be **readable** by the build user.
+
+The worker logs the demotion target (`uid`/`gid`) when it demotes, and logs a skip when it is not
+root, so you can confirm from the worker log that builds run unprivileged.
+
 ## Related
 
-- [Config reference](../guide/reference/config.md) — `KDIVE_KERNEL_SRC` and the other
-  worker settings.
+- [Config reference](../guide/reference/config.md) — `KDIVE_KERNEL_SRC`, `KDIVE_BUILD_USER`, and
+  the other worker settings.
 - [Local libvirt](providers/local-libvirt.md) — the `worker-local` provider prerequisites.
 - [Remote libvirt host setup](runbooks/remote-libvirt-host-setup.md) — preparing a remote
   build/boot host.
