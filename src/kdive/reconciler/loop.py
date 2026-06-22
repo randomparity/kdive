@@ -87,9 +87,11 @@ _log = logging.getLogger(__name__)
 DEFAULT_QUEUE_MAX_WAIT = allocation_repairs.DEFAULT_QUEUE_MAX_WAIT
 DEFAULT_IDEMPOTENCY_RETENTION = gc_repairs.DEFAULT_IDEMPOTENCY_RETENTION
 DEFAULT_DUMP_VOLUME_GRACE = gc_repairs.DEFAULT_DUMP_VOLUME_GRACE
+DEFAULT_REPORT_ARTIFACT_RETENTION = gc_repairs.DEFAULT_REPORT_ARTIFACT_RETENTION
 
 _expire_one = allocation_repairs._expire_one
 _gc_idempotency_keys = gc_repairs.gc_idempotency_keys
+_gc_report_artifacts = gc_repairs.gc_report_artifacts
 _promote_pending = allocation_repairs.promote_pending
 _reap_console_collectors = gc_repairs.reap_console_collectors
 _reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
@@ -110,6 +112,7 @@ __all__ = [
     "Reconciler",
     "_expire_one",
     "_gc_idempotency_keys",
+    "_gc_report_artifacts",
     "_probe_build_host_reachability",
     "_promote_pending",
     "_reap_expired_runtime_resources",
@@ -215,6 +218,7 @@ class ReconcileConfig:
     interval: timedelta = DEFAULT_INTERVAL
     debug_session_stale_after: timedelta = DEFAULT_DEBUG_SESSION_STALE_AFTER
     idempotency_retention: timedelta = DEFAULT_IDEMPOTENCY_RETENTION
+    report_artifact_retention: timedelta = DEFAULT_REPORT_ARTIFACT_RETENTION
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
     heartbeat: Heartbeat | None = None
@@ -296,10 +300,19 @@ def _repair_plan(
         )
     if config.upload_store is not None:
         upload_store = config.upload_store
+        report_retention = config.report_artifact_retention
         repairs.append(
             _RepairSpec(
                 "abandoned_uploads",
                 lambda conn: _repair_abandoned_uploads(conn, upload_store),
+            )
+        )
+        # Reap report spreadsheet artifacts past retention (ADR-0208); the synthetic report
+        # owner has no teardown trigger, so this sweep is their only cleanup path.
+        repairs.append(
+            _RepairSpec(
+                "report_artifacts_gc_count",
+                lambda conn: _gc_report_artifacts(conn, upload_store, report_retention),
             )
         )
     if config.console_registry is not None:
@@ -353,6 +366,7 @@ ALL_REPAIR_KINDS: tuple[str, ...] = (
     "reaped_dump_volumes",
     "build_host_states_changed",
     "abandoned_uploads",
+    "report_artifacts_gc_count",
     "console_collectors_reaped",
     "reconcile_inventory",
     "leaked_images",

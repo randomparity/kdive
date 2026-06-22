@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
+from typing import Protocol
 
 from psycopg import AsyncConnection
 
@@ -16,6 +18,13 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_IDEMPOTENCY_RETENTION = timedelta(days=7)
 DEFAULT_DUMP_VOLUME_GRACE = timedelta(minutes=30)
+DEFAULT_REPORT_ARTIFACT_RETENTION = timedelta(days=7)
+
+
+class ArtifactObjectDeleter(Protocol):
+    """The object-store delete surface the report-artifact reaper needs."""
+
+    def delete(self, key: str) -> None: ...
 
 
 async def gc_idempotency_keys(conn: AsyncConnection, retention: timedelta) -> int:
@@ -27,6 +36,42 @@ async def gc_idempotency_keys(conn: AsyncConnection, retention: timedelta) -> in
         deleted = cur.rowcount
     if deleted:
         _log.info("reconciler: GC'd %d idempotency key(s) past retention", deleted)
+    return deleted
+
+
+async def gc_report_artifacts(
+    conn: AsyncConnection, store: ArtifactObjectDeleter, retention: timedelta
+) -> int:
+    """Delete report spreadsheet artifacts (object + row) older than ``retention`` (ADR-0208).
+
+    Scoped strictly to ``owner_kind = 'reports'`` so System-owned evidence is never touched.
+    Reports have a synthetic owner with no teardown trigger, so without this sweep their
+    objects and rows would accumulate without bound. A per-object store failure is logged and
+    retried next pass rather than aborting the sweep.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, object_key FROM artifacts "
+            "WHERE owner_kind = 'reports' AND created_at < now() - %s",
+            (retention,),
+        )
+        candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+    deleted = 0
+    for artifact_id, object_key in candidates:
+        try:
+            await asyncio.to_thread(store.delete, object_key)
+        except Exception:  # noqa: BLE001 - one object failure must not starve the rest
+            _log.warning(
+                "reconciler: deleting report artifact object %s failed; retry next pass",
+                object_key,
+                exc_info=True,
+            )
+            continue
+        async with conn.transaction(), conn.cursor() as cur:
+            await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
+        deleted += 1
+    if deleted:
+        _log.info("reconciler: GC'd %d report artifact(s) past retention", deleted)
     return deleted
 
 
