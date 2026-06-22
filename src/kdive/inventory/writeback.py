@@ -38,6 +38,7 @@ import kdive.config as config
 from kdive.config.core_settings import (
     INVENTORY_WRITEBACK,
     INVENTORY_WRITEBACK_CONFIGMAP,
+    SYSTEMS_TOML,
 )
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.inventory.path import systems_toml_path
@@ -269,7 +270,9 @@ def resolve_writeback_target() -> WritebackTarget | None:
         ``None`` when writeback is off (unset / ``off``); otherwise the configured adapter.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` on an unknown value, or (for ``configmap``) when
+        CategorizedError: ``CONFIGURATION_ERROR`` on an unknown value, for ``file`` when
+            ``KDIVE_SYSTEMS_TOML`` is unset (the reconciler does not read the per-user XDG
+            default, so a writeback there would be silently lost), or (for ``configmap``) when
             not running in a pod.
     """
     selected = (config.get(INVENTORY_WRITEBACK) or "off").strip().lower()
@@ -279,6 +282,14 @@ def resolve_writeback_target() -> WritebackTarget | None:
         name = config.get(INVENTORY_WRITEBACK_CONFIGMAP) or "kdive-systems"
         return ConfigMapWriteback.from_in_cluster(name=name, key=_CONFIGMAP_KEY)
     if selected == "file":
+        if config.get(SYSTEMS_TOML) is None:
+            raise CategorizedError(
+                f"{INVENTORY_WRITEBACK.name}=file requires {SYSTEMS_TOML.name} to name the "
+                "writable inventory volume shared with the reconciler; refusing to fall back to "
+                "the per-user XDG default the reconciler does not read",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"variable": SYSTEMS_TOML.name},
+            )
         return MountedFileWriteback(systems_toml_path())
     raise CategorizedError(
         f"unknown {INVENTORY_WRITEBACK.name} value {selected!r}",
