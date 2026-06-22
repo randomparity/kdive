@@ -111,14 +111,11 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         crash_postmortem=retrieve,
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
-        supported_capture_methods=frozenset(
-            {
-                CaptureMethod.CONSOLE,
-                CaptureMethod.HOST_DUMP,
-                CaptureMethod.GDBSTUB,
-                CaptureMethod.KDUMP,
-            }
-        ),
+        # ADR-0208: advertise only the core-producing capture method local can actually fetch a
+        # vmcore for — {KDUMP} now (host-side overlay harvest, #115/ADR-0203), + HOST_DUMP once B4
+        # wires its seam. The debug-transport and introspection sets start empty (the local seams
+        # are still live_vm-injected stubs); Epic B's B1/B2/B3 populate them as each plane lands.
+        supported_capture_methods=frozenset({CaptureMethod.KDUMP}),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
             engine=GdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),
