@@ -47,3 +47,34 @@ def parse_metadata_system_id(meta_xml: str) -> str | None:
         return None
     text = (element.text or "").strip()
     return text or None
+
+
+def recorded_gdb_port_from_root(root: ET.Element) -> int | None:
+    """The gdbstub port a parsed domain element records via ``-gdb tcp:host:port``, or ``None``.
+
+    Walks the ``<qemu:commandline>`` args for a ``-gdb`` flag immediately followed by a
+    ``tcp:...:<port>`` value and returns the trailing integer; ``None`` when absent or the port
+    text is non-integer. Shared by remote-libvirt (LAN-visible host:port) and local-libvirt
+    (loopback) — both record the port the same way (ADR-0079/0080, ADR-0210 §1).
+    """
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    for previous, current in zip(args, args[1:], strict=False):
+        if previous != "-gdb" or current is None:
+            continue
+        _, _, port_text = current.rpartition(":")
+        try:
+            return int(port_text)
+        except ValueError:
+            return None
+    return None
+
+
+def recorded_gdb_port(domain_xml: str) -> int | None:
+    """The gdbstub port a domain's XML records, or ``None`` if absent/malformed."""
+    try:
+        root: ET.Element = _safe_fromstring(domain_xml)
+    except ET.ParseError, DefusedXmlException:
+        return None
+    return recorded_gdb_port_from_root(root)
