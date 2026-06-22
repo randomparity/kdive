@@ -1,71 +1,161 @@
 # local-libvirt walkthrough
 
 End-to-end setup for the local-libvirt provider, where the KDIVE worker drives QEMU/KVM
-guests on its own host. For the provider's prerequisites and config see
-[the local-libvirt provider reference](local-libvirt.md); this page is the linear path from a
-prepared host to a verified run.
+guests on its own host. This page is the linear path from a **bare libvirt-capable host** to a
+booted System; for the provider's reference config see
+[the local-libvirt provider reference](local-libvirt.md).
 
-> **Deployment:** the KDIVE app processes run as **host services** on the libvirt host (see
-> [systemd](../systemd.md)), so the worker has native `/dev/kvm` and libvirt access. The
-> app-tier-only [docker-compose](../docker-compose.md) worker has no KVM/libvirt access and
-> cannot drive this provider — use compose only for the backends (Postgres, MinIO, OIDC).
+> **Deployment:** the KDIVE app processes run as **host processes** on the libvirt host, so the
+> worker has native `/dev/kvm` and libvirt access. The app-tier-only
+> [docker-compose](../docker-compose.md) worker has no KVM/libvirt access and cannot drive this
+> provider — compose is used here only for the **backends** (Postgres, MinIO, OIDC).
 
-## 1. Prepare
+> **No `just` required.** `just` is a developer/CI task runner. Everything below uses the
+> packaged commands (`python -m kdive …`) and the `scripts/*.sh` helpers directly, so an operator
+> never needs `just` or the dev workflow. The examples assume the repo is checked out and the
+> project virtualenv is at `.venv` (Step 1).
 
-Run the read-only preflight; fix anything it reports before continuing:
+## 1. Get the code and install host packages
+
+Clone the repo (the host-process deployment runs from this checkout, and the `scripts/`,
+`deploy/systemd/`, and example-inventory files live here):
 
 ```bash
-just check-local-libvirt
+git clone https://github.com/randomparity/kdive.git ~/kdive
+cd ~/kdive
 ```
 
-## 2. Install
+Report the host packages KDIVE needs (distro-aware), then install them. The reporter lists a
+dev/CI tier (`just`, `prek`, `node`, `npm`) you can ignore for an operator host:
 
-Bring up the backends, then run the three KDIVE processes as host services:
+```bash
+./scripts/check-setup-deps.sh        # report-only; prints the install hints below
+```
+
+On Debian/Ubuntu the operator set is:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  pkg-config libvirt-dev libvirt-daemon-system libvirt-clients \
+  qemu-system-x86 qemu-utils qemu-kvm \
+  libguestfs-tools python3-guestfs passt \
+  gcc make flex bison bc libssl-dev libelf-dev rsync xz-utils git \
+  docker.io docker-compose-v2 gdb
+```
+
+Add yourself to the `libvirt`, `kvm`, and `docker` groups, then **start a new login shell** so the
+membership takes effect:
+
+```bash
+sudo usermod -aG libvirt,kvm,docker "$USER"   # log out/in (or `exec su -l "$USER"`) afterwards
+```
+
+Build the project virtualenv with [`uv`](https://docs.astral.sh/uv/) (no published wheel; the venv
+is built from this checkout). `libvirt-python` compiles against `libvirt-dev`, installed above:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # if uv is not already present
+uv sync                                           # creates .venv with kdive importable
+.venv/bin/python -m kdive --help                  # sanity check
+```
+
+Create the host directories the worker stages into (world-traversable, **not** under a private
+`$HOME` — `0700` hides the staged kernel from the `qemu` user that boots the VM):
+
+```bash
+sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install /var/lib/kdive/console \
+  /var/lib/kdive/rootfs/local /var/lib/kdive/build
+```
+
+> **Debian/Ubuntu libguestfs notes** (needed for the Step 6 image build, harmless otherwise):
+> - libguestfs builds an appliance from the **host** kernel, which Debian/Ubuntu ship `root:0600`.
+>   Make them readable or the appliance fails with `cp: cannot open '/boot/vmlinuz-…'`:
+>   `sudo chmod 0644 /boot/vmlinuz-*` (re-apply after a kernel upgrade, or use `dpkg-statoverride`).
+> - On Ubuntu 24.04 `virt-builder --install` can fail with `libguestfs error: passt exited with
+>   status 1` because the `passt` AppArmor profile denies its socket under libguestfs's run dir.
+>   Unload it: `sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`.
+
+## 2. Run the preflight
+
+Check the host (report-only; it never changes anything). Point it at the venv interpreter:
+
+```bash
+KDIVE_PYTHON="$PWD/.venv/bin/python" ./scripts/check-local-libvirt.sh
+```
+
+Fix what it reports. One failure is expected to remain on most hosts and is **not** fatal for the
+core lifecycle: the `import guestfs, drgn` check is only needed for the **kdump capture** method
+(Step 5). See [kdump capture prerequisites](#kdump-capture-prerequisites) for the `drgn`/libguestfs
+wiring and a Python-version caveat.
+
+## 3. Bring up the backends and start the host processes
+
+Bring up the backing services with compose (backends only — not the app tier):
 
 ```bash
 docker compose up -d --wait postgres minio oidc
 docker compose run --rm minio-init
 ```
 
-Install and start the host services as described in [systemd](../systemd.md), then apply the
-schema with `python -m kdive migrate`. See [Local stack administration](../local-stack.md)
-for the package-on-host layout.
+The host processes read their backend connection from `KDIVE_*` environment variables. The
+backends above publish on host ports, so the **host-process** values are (these mirror the comment
+block at the top of `docker-compose.yml`; note OIDC is published on **8090**):
 
-## 3. Onboard the project
+```bash
+cat > ~/kdive/.kdive-host.env <<'EOF'
+export KDIVE_DATABASE_URL=postgresql://kdive:kdive@localhost:5432/kdive   # pragma: allowlist secret - local demo only
+export KDIVE_OIDC_ISSUER=http://localhost:8090/default
+export KDIVE_OIDC_JWKS_URI=http://localhost:8090/default/jwks
+export KDIVE_OIDC_AUDIENCE=kdive
+export KDIVE_S3_ENDPOINT_URL=http://localhost:9000
+export KDIVE_S3_BUCKET=kdive-artifacts
+export KDIVE_S3_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin     # pragma: allowlist secret - local demo only
+export KDIVE_PYTHON=$HOME/kdive/.venv/bin/python
+EOF
+source ~/kdive/.kdive-host.env
+```
+
+Apply the schema, then start the three processes (a real deployment runs them under systemd — see
+[systemd](../systemd.md); shown here as plain processes for clarity):
+
+```bash
+.venv/bin/python -m kdive migrate
+.venv/bin/python -m kdive server     &   # MCP HTTP API
+.venv/bin/python -m kdive worker     &   # runs provision/build/install/capture jobs
+.venv/bin/python -m kdive reconciler &   # drift-repair AND provider discovery
+```
+
+The **reconciler runs discovery**: it enumerates `qemu:///system`, creates the local-libvirt
+resource row, and probes its vcpus/memory_mb ceiling. It must be running for the resource to exist.
+
+## 4. Onboard the project
 
 A fresh database has no quota or budget, so the first `allocations.request` would dead-end on
-`quota_exceeded`. Seed the demo project's budget and quota. Run this from the repo checkout
-with the project venv active (or set `KDIVE_PYTHON=/opt/kdive/.venv/bin/python`), so `kdive`
-resolves:
+`quota_exceeded`. Seed the demo project's budget and quota:
 
 ```bash
-just setup-local-libvirt
+.venv/bin/python -m kdive seed-project \
+  --project demo --limit-kcu 1000000 \
+  --max-concurrent-allocations 4 --max-concurrent-systems 4
 ```
 
-By default this runs `python -m kdive seed-project`, which writes the budget/quota rows with no
-token. To onboard through the audited, role-gated admin tools instead (the production-style
-path), set `KDIVE_SETUP_AUDITED=1` and supply a project-`admin` token in `KDIVE_TOKEN` — this
-path needs an OIDC issuer configured to assert the project-`admin` claims, and the local
-script does **not** mint a token for you (unlike the remote one):
+`seed-project` is the token-less bootstrap (raw inserts, no audit row). To onboard through the
+audited, role-gated admin tools instead, use `./scripts/setup-local-libvirt.sh` with
+`KDIVE_SETUP_AUDITED=1` and a project-`admin` token from a claims-asserting issuer — see
+[Project onboarding](../project-onboarding.md). (That script re-runs the Step 2 preflight and
+aborts if **any** check fails, including the kdump-only `guestfs`/`drgn` one, so prefer the direct
+`seed-project` above unless you have wired those deps.)
 
-```bash
-KDIVE_SETUP_AUDITED=1 \
-  KDIVE_MCP_BASE=http://localhost:8000/mcp \
-  KDIVE_TOKEN="$(your-issuer-mint-command)" \
-  just setup-local-libvirt
-```
+## 5. Declare your inventory
 
-See [Project onboarding](../project-onboarding.md) for the audited-onboarding rationale and
-why `kdivectl` cannot perform these writes.
-
-## 4. Declare your inventory
-
-Onboarding (§3) seeds the project's budget and quota, but `allocations.request` still dead-ends
-until the **inventory** exists: a local-libvirt resource, a priced cost class, an image, and a
-kdump build-config. Most of these are declared in `systems.toml` and reconciled into the catalog
-(the local-libvirt resource itself is created by discovery — see below) — a fresh or broken file
-produces `configuration_error` / no grantable resource with no breadcrumb back to the file, so this
-step is not optional.
+The reconciler's discovery already created a **grantable** local-libvirt resource (it carries the
+seeded `local` cost class, which is priced), so after Step 4 an `allocations.request` is granted.
+What `systems.toml` adds is the rest of the inventory the **lifecycle** needs: the **image** a
+System boots, the **kdump build-config**, and (optionally) a custom cost class. A fresh or broken
+file fails the reconcile pass with a `configuration_error`, so it is still worth getting right.
 
 `systems.toml` is the single declarative source of truth for the inventory the app loads into the
 database (ADR-0112). Its default path is the per-user XDG location
@@ -73,61 +163,94 @@ database (ADR-0112). Its default path is the per-user XDG location
 to point elsewhere).
 
 Start from the minimal, local-only example —
-[`examples/systems-local-libvirt.toml`](examples/systems-local-libvirt.toml). It declares the
-four entities a beginner needs (one image, one `qemu:///system` host, one priced cost class, one
-kdump fragment); the full multi-provider reference is `systems.toml.example` at the repo root.
+[`examples/systems-local-libvirt.toml`](examples/systems-local-libvirt.toml). It declares one
+image, one priced cost class for the `qemu:///system` host, and one kdump fragment; the full
+multi-provider reference is `systems.toml.example` at the repo root.
 
 ```bash
 mkdir -p ~/.config/kdive
 cp docs/operating/providers/examples/systems-local-libvirt.toml ~/.config/kdive/systems.toml
-kdive reconcile-systems --check   # validate only (no DB/S3 writes); exits 0 when the file is valid
-kdive reconcile-systems           # apply: creates the image, cost class, and build config
+.venv/bin/python -m kdive reconcile-systems --check   # validate only (no DB/S3 writes); exits 0 when valid
+.venv/bin/python -m kdive reconcile-systems           # apply: creates the image, cost class, build config
 ```
 
-The image is declared with an `s3` source and **no `digest`**, so its catalog row stays `defined`
-(expected) until the object is published — this does not block the lifecycle. The rootfs a System
-actually boots comes from the provisioning profile, not this row's digest.
+`reconcile-systems` creates the image, the cost-class coefficient, and the build-config, and
+**binds** the discovered local-libvirt resource (matched by `host_uri`) to your declared `name`,
+`cost_class`, and `concurrent_allocation_cap`. The local-libvirt resource row itself is created and
+sized by discovery (Step 3), not by this file; if you reconcile before discovery has enumerated the
+host, the overlay logs a benign `no discovered local-libvirt host … overlay deferred` warning and
+converges on the next reconciler pass.
 
-The local-libvirt **resource** is not created by this file — **discovery** creates and sizes it.
-The running reconciler enumerates `qemu:///system`, inserts the resource row, and probes its
-vcpus/memory_mb ceiling; `reconcile-systems` then binds the host (matched by `host_uri`) to your
-declared `name`, `cost_class`, and `concurrent_allocation_cap`. So the host services from §2 (which
-include the reconciler) must be running. If you reconcile before discovery has enumerated the host,
-the overlay logs a benign `no discovered local-libvirt host … overlay deferred` warning and
-converges on the next reconciler pass once the host is discovered.
+The image is declared with an `s3` source and **no `digest`**, so its catalog row stays `defined`
+(expected) until the object is published — this does not block allocation. The rootfs a System
+actually boots comes from the provisioning profile (Step 6), not this row's digest.
 
 ### kdump capture prerequisites
 
-Provisioning and booting need only the inventory above. **kdump vmcore capture** (the `kdump`
-method in the lifecycle below) needs extra one-time host setup, because the capture is host-side:
-the guest's kdump writes `/var/crash/<ts>/vmcore` (booting its crash kernel via `kexec`), then the
-worker force-stops the domain, harvests the core from the qcow2 overlay with libguestfs, and reads
-the guest console log that `virtlogd` writes as `root:0600`. Concretely:
+Provisioning and booting (Step 6) need only the inventory above. **kdump vmcore capture** (the
+`kdump` method) needs extra one-time host setup, because the capture is host-side: the guest's
+kdump writes `/var/crash/<ts>/vmcore` (booting its crash kernel via `kexec`), then the worker
+force-stops the domain, harvests the core from the qcow2 overlay with libguestfs, and reads the
+guest console log that `virtlogd` writes as `root:0600`. Concretely:
 
 - **Run the worker as `root`** — the natural identity for managing `qemu:///system` domains,
   libguestfs, and kexec, and the simplest way to read the `root:0600` console log.
-- **Wire `drgn` + `libguestfs` into the worker venv** — `drgn` (the `live` dependency group) and
-  the system `guestfs` binding must both be importable by the worker's interpreter; absence is a
-  `missing_dependency`, not a silent skip.
-- **Prepare the install-staging and console host directories** for the worker and `qemu` users.
+- **Wire `drgn` + `libguestfs` into the worker venv** — `uv sync --group live` pulls `drgn`; the
+  system `guestfs` binding is wired separately. **Caveat:** the binding is an ABI-locked system
+  package built for the **distro** Python (e.g. 3.12 on Ubuntu 24.04), while `uv` builds the venv
+  on the **project** Python (3.14); the symlink wiring in the runbook only works when those minor
+  versions match. Absence is a `missing_dependency`, not a silent skip.
+- **Prepare the install-staging and console host directories** (done in Step 1).
 
 These are detailed in the four-method runbook's
-[§4b kdump](../runbooks/four-method-live-run.md#4b-kdump) section (worker-venv wiring and
-host-directory prep included). The kernel-config symbols a kdump build must carry to actually arm
-are tracked in [#688](https://github.com/randomparity/kdive/issues/688); the example's `kdump`
-build-config already includes that arming set.
+[§4b kdump](../runbooks/four-method-live-run.md#4b-kdump) section. The kernel-config symbols a kdump
+build must carry to actually arm are tracked in
+[#688](https://github.com/randomparity/kdive/issues/688); the example's `kdump` build-config
+already includes that arming set.
 
-## 5. Test the lifecycle
+## 6. Test the lifecycle
 
-With the project onboarded and the inventory reconciled, request an allocation and drive a System
-through its lifecycle:
+The lifecycle steps are MCP tool calls. Issue them from an agent session or a scripted client
+authenticated with a project token (the bundled mock issuer mints one — see the
+[live-stack runbook](../runbooks/live-stack.md) for the scripted-client/token details).
 
-```bash
-# allocations.request → provision → build → boot → verify → teardown → release
+**Request an allocation.** With the project onboarded and the resource discovered, this is granted:
+
+```text
+allocations.request project=demo request={
+  "vcpus": 2, "memory_gb": 2, "disk_gb": 10,
+  "resource": {"mode": "kind", "kind": "local-libvirt"}
+}
+# → status=granted; suggested_next_actions: [allocations.get, systems.provision, allocations.release]
 ```
 
-Issue these as MCP tool calls from an agent session or a scripted client. For the deep
-build→boot→debug steps and the canonical dcache `dhash_entries` verification, follow the
+**Provision a System.** Provision boots a qcow2 rootfs from disk, so it needs a **bootable image**
+on the host — the minimal example's `s3` image is digest-less and does not provide one. Build a
+kdive-ready rootfs (uses libguestfs/virt-builder — see the Step 1 Debian/Ubuntu notes):
+
+```bash
+.venv/bin/python -m kdive build-fs --kind debug --distro fedora \
+  --workspace /var/lib/kdive/build \
+  --dest /var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2
+```
+
+Then provision against it. Local-libvirt provisioning uses `boot_method: direct-kernel`
+(`kernel_source_ref` is required by the schema but only used by a later build Run; provision boots
+the rootfs's own kernel from disk). `disk_gb` must equal the allocation's (ADR-0205):
+
+```text
+systems.provision allocation_id=<granted id> profile={
+  "schema_version": 1, "arch": "x86_64", "vcpu": 2, "memory_mb": 2048, "disk_gb": 10,
+  "boot_method": "direct-kernel", "kernel_source_ref": "/path/to/linux",
+  "provider": {"local-libvirt": {"rootfs":
+    {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"}}}
+}
+# → status=queued; the worker define+starts a tagged libvirt domain. Poll systems.get until ready.
+```
+
+A successful provision yields a running `kdive-<system-id>` domain (`virsh -c qemu:///system list`)
+and a System in state `ready`. For the deep build → boot → debug steps (the four capture methods
+and the canonical dcache `dhash_entries` verification) follow the
 [four-method live run](../runbooks/four-method-live-run.md) and
-[live stack](../runbooks/live-stack.md) runbooks. A successful run reaches a ready System via
-`provision` (minimum) and ideally completes teardown and release.
+[live stack](../runbooks/live-stack.md) runbooks. Tear the System down and release the allocation
+with `systems.teardown` and `allocations.release` when done.
