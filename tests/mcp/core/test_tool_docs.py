@@ -439,10 +439,26 @@ _LOCAL_PLANNED_PROVIDER_TOOLS = frozenset(
         "debug.interrupt",
         "debug.start_session",
         "debug.end_session",
-        "introspect.from_vmcore",
         "introspect.run",
     }
 )
+
+
+def test_introspect_from_vmcore_pointer_marks_wired_pending_live() -> None:
+    # M2.8 B2 (#676): local offline drgn introspection is wired (the seam exists) but its
+    # maturity stays `partial` until the B6 live KVM proof. The pointer must say local-libvirt
+    # is `wired` (not `planned`, not `implemented`) and remote-libvirt is `implemented`. This
+    # replacement guard is strictly stronger than the removed planned-set check: it forbids both
+    # the stale `planned` and a premature `implemented` for local-libvirt.
+    by_name = {t.name: t for t in TOOLS}
+    tool = by_name["introspect.from_vmcore"]
+    assert (tool.meta or {}).get("maturity") == "partial"
+    providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
+    assert isinstance(providers, str), "introspect.from_vmcore: missing providers pointer"
+    assert "local-libvirt: wired" in providers, providers
+    assert "remote-libvirt: implemented" in providers, providers
+    assert "local-libvirt: planned" not in providers, providers
+    assert "local-libvirt: implemented" not in providers, providers
 
 
 def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
