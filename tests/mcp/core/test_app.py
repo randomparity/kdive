@@ -431,7 +431,7 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "introspect.run": "partial",
     "debug.end_session": "implemented",
     "control.force_crash": "partial",
-    "vmcore.fetch": "partial",
+    "vmcore.fetch": "implemented",
     "vmcore.list": "partial",
     "postmortem.triage": "partial",
     "introspect.from_vmcore": "implemented",

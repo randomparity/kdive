@@ -4,13 +4,7 @@
 
 ## `vmcore.fetch`
 
-`partial`
-
-**Maturity:** provider_support — Captures a vmcore by a core-producing method (HOST_DUMP/KDUMP) the bound provider must advertise; capture runs only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run captures a real vmcore by each advertised core-producing method per provider.
-
-**Provider support:** local-libvirt: HOST_DUMP implemented (proven KVM, B6 #680); KDUMP partial — final_action regression, fix in flight #705; remote-libvirt: implemented (KDUMP/HOST_DUMP); fault-inject: simulated HOST_DUMP.
+`implemented`
 
 Capture and persist a vmcore.
 

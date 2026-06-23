@@ -119,5 +119,5 @@
 | [`systems.provision_defined`](systems.md#systemsprovision_defined) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `partial` |
 | [`systems.teardown`](systems.md#systemsteardown) | `partial` |
-| [`vmcore.fetch`](vmcore.md#vmcorefetch) | `partial` |
+| [`vmcore.fetch`](vmcore.md#vmcorefetch) | `implemented` |
 | [`vmcore.list`](vmcore.md#vmcorelist) | `partial` |
