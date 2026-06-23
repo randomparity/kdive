@@ -125,6 +125,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KVM device node `check-local-libvirt.sh` probes for hardware virtualization.",
     ),
     ExternalEnvVar(
+        "KDIVE_BOOT_DIR",
+        "script",
+        "/boot",
+        "Boot directory `check-local-libvirt.sh` scans for readable `vmlinuz-*` host kernels "
+        "(libguestfs build-fs appliance, ADR-0222).",
+    ),
+    ExternalEnvVar(
         "KDIVE_REMOTE_SSH_PORT",
         "script",
         "22",
