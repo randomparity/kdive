@@ -66,13 +66,21 @@ def _run_recovery(run: Run) -> dict[str, JsonValue]:
     }
 
 
-def _run_artifact_refs(run: Run) -> dict[str, str]:
-    """The Run's object-store artifact keys, for the envelope ``refs`` slot."""
+def _run_artifact_refs(run: Run, *, console_ref: str | None = None) -> dict[str, str]:
+    """The Run's object-store artifact keys, for the envelope ``refs`` slot.
+
+    ``console_ref`` is the boot step's console evidence artifact id (ADR-0226), surfaced as
+    ``console`` so an agent resolves it directly via ``artifacts.get``; it is supplied only on
+    the ``runs.get`` success path (which loads the boot step), and omitted when no boot step
+    recorded evidence.
+    """
     refs: dict[str, str] = {}
     if run.kernel_ref:
         refs["kernel"] = run.kernel_ref
     if run.debuginfo_ref:
         refs["debuginfo"] = run.debuginfo_ref
+    if console_ref is not None:
+        refs["console"] = console_ref
     return refs
 
 
@@ -148,11 +156,12 @@ def envelope_for_run(
             data["expected_boot_failure"] = kind
         data["expected_boot_failure_detail"] = cast(JsonValue, run.expected_boot_failure)
     data.update(_run_recovery(run))
+    console_ref = step_progress.console_evidence_artifact_id if step_progress is not None else None
     return ToolResponse.success(
         str(run.id),
         run.state.value,
         suggested_next_actions=actions,
-        refs=_run_artifact_refs(run),
+        refs=_run_artifact_refs(run, console_ref=console_ref),
         data=data,
     )
 

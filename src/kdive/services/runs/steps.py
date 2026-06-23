@@ -105,6 +105,7 @@ class StepProgress:
     install: str
     boot: str
     boot_outcome: str | None
+    console_evidence_artifact_id: str | None = None
 
     def steps_map(self) -> dict[str, str]:
         """The fixed-key `runs.get` `data.steps` map; `build` is `succeeded` by construction."""
@@ -117,10 +118,14 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     A missing row is reported as ``pending`` (the step has not started); a present row
     carries its persisted ``running``/``succeeded`` state verbatim. ``boot_outcome`` is the
     ``boot`` step result's recorded outcome (``None`` when boot is unrecorded or carries no
-    outcome), used to route the booted-run next-action.
+    outcome), used to route the booted-run next-action. ``console_evidence_artifact_id`` is the
+    console artifact id the boot handler recorded in the same ``boot`` result (ADR-0226), used to
+    surface ``refs.console`` on ``runs.get``; ``None`` when boot is unrecorded or captured no
+    console evidence.
     """
     states = {step: "pending" for step in _PROGRESS_STEPS}
     boot_outcome: str | None = None
+    console_evidence_artifact_id: str | None = None
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT step, state, result FROM run_steps WHERE run_id = %s AND step = ANY(%s)",
@@ -130,9 +135,16 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     for row in rows:
         states[row["step"]] = row["state"]
         if row["step"] == "boot" and isinstance(row["result"], Mapping):
-            outcome = cast("Mapping[str, object]", row["result"]).get("boot_outcome")
+            boot_result = cast("Mapping[str, object]", row["result"])
+            outcome = boot_result.get("boot_outcome")
             boot_outcome = outcome if isinstance(outcome, str) else None
-    return StepProgress(install=states["install"], boot=states["boot"], boot_outcome=boot_outcome)
+            console_evidence_artifact_id = _optional_str(boot_result.get("evidence_artifact_id"))
+    return StepProgress(
+        install=states["install"],
+        boot=states["boot"],
+        boot_outcome=boot_outcome,
+        console_evidence_artifact_id=console_evidence_artifact_id,
+    )
 
 
 async def installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | None:
