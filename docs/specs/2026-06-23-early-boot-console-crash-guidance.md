@@ -50,23 +50,37 @@ exception message, secret, hostname, object-store key, or caller-un-supplied res
 name interpolated. One shared narrative constant (`mcp/tools/lifecycle/vmcore.py`) so
 the wording cannot drift.
 
-### 1. Postmortem console-crash redirect (`mcp/tools/lifecycle/vmcore.py`)
+### 1. Postmortem console-crash redirect
 
-`_postmortem_crash` currently catches the resolver `CategorizedError` and maps it via
-`vmcore_target_failure(run_id, exc)`. Extend the handler so that, **for a
-`no_vmcore` miss only**, it consults the run's `expected_boot_failure`:
+The console-crash kind is propagated **on the `NO_VMCORE` error**, not re-fetched in
+the handler. This is the single load-bearing mechanism: the resolver already holds the
+`run` object at the `NO_VMCORE` raise site, so re-fetching in the handler would
+duplicate the resolver's `RUNS.get` + project-scope check, force the handler to
+re-parse `run_id` (the handler holds only the string; `uid` is resolver-internal), and
+silently desync if the resolver's precondition order ever changes.
 
-- The handler already opens `conn` and resolves the run for the resolver call. Read
-  the Run via `RUNS.get(conn, uid)` (the same lookup the resolver does) — or thread
-  the run out of a small resolver helper — and check
-  `run.expected_boot_failure` for `kind == "console_crash"`.
-- The console-crash branch fires **only** when the caught error's
-  `details["reason"] == NO_VMCORE` **and** `expected_boot_failure.kind ==
-  "console_crash"`. Any other reason (`no_debuginfo`, `no_build`), the absent-reason
-  miss, and a non-console-crash run all keep the existing `vmcore_target_failure`
-  path unchanged.
-- The console-crash branch returns
-  `config_error(run_id, detail=<narrative>, data={...})` with:
+**Resolver (`mcp/tools/_vmcore_targets.py`).** At the `vmcore_ref is None` branch,
+`resolve_run_vmcore_target` raises the `NO_VMCORE` `not_found` carrying the run's
+expected-boot-failure kind in `details`:
+`details={"reason": NO_VMCORE, "expected_boot_failure": <kind-or-None>}`, where the
+kind is read from `run.expected_boot_failure` (the serialized dict's `kind` key — an
+author-controlled enum-like token, the same value `runs.get` already surfaces, never
+guest/exception text; `None` when the run declared none). A new `_precondition`
+helper variant takes the optional kind so only the `NO_VMCORE` raise carries it. The
+other preconditions (`NO_DEBUGINFO`, `NO_BUILD`) and the absent-Run miss are
+unchanged. The project-scope and viewer-role checks are already complete before
+`NO_VMCORE` is raised (lines 63-66 of the resolver), so anything downstream performs
+**no further authz**.
+
+**Handler (`mcp/tools/lifecycle/vmcore.py`).** `_postmortem_crash` catches the
+resolver `CategorizedError` and currently maps it via `vmcore_target_failure(run_id,
+exc)`. Extend that catch so that **only** when
+`exc.details.get("reason") == NO_VMCORE` **and** `exc.details.get(
+"expected_boot_failure") == "console_crash"` it returns the console-crash redirect
+instead; every other case (other reasons, absent reason, a missing or
+non-`console_crash` kind) falls through to the unchanged `vmcore_target_failure`
+path. The redirect returns `config_error(run_id, detail=<narrative>, data={...})`
+with:
   - `data.reason = EXPECTED_CONSOLE_CRASH` (`"expected_console_crash"`),
   - `data.expected_boot_failure = "console_crash"`,
   - `detail` = the shared narrative constant explaining the early-boot-crash-before-
@@ -78,10 +92,9 @@ the existing `if resp.status == "error": return resp` short-circuit in
 `_postmortem_triage` passes the `configuration_error` straight through (it does **not**
 relabel actions, which is correct — the redirect's own next actions must win).
 
-The redirect must run **after** role enforcement: the resolver raises
-`AuthorizationError` before any precondition check, so a non-viewer never reaches the
-console-crash branch (it is only reached via the caught `CategorizedError`, which the
-authz failure is not).
+Because the redirect is reached only through the *caught* `CategorizedError`, a
+non-viewer (whom the resolver rejects with `AuthorizationError`, a plain `Exception`,
+**before** any precondition check) never reaches it — authz is never weakened.
 
 ### 2. `vmcore.fetch` non-`CRASHED` detail (`mcp/tools/lifecycle/vmcore.py`)
 
@@ -98,9 +111,11 @@ already surfaced in `data.current_status`, so echoing it leaks nothing (ADR-0123
 
 - A `console_crash` run that resolves to no vmcore: `postmortem.triage` (and
   `postmortem.crash`) returns `configuration_error` with `data.reason ==
-  "expected_console_crash"`, `data.expected_boot_failure == "console_crash"`, a
-  non-null `detail` naming the early-boot-crash-before-kexec case and the console as
-  the evidence source, and `suggested_next_actions == ["runs.get", "artifacts.list"]`.
+  "expected_console_crash"`, `data.expected_boot_failure == "console_crash"`, and
+  `suggested_next_actions == ["runs.get", "artifacts.list"]`. The `detail` is exactly
+  the shared narrative constant (the test asserts `detail == <constant>` against the
+  named module symbol, not merely non-null, so a vacuous detail fails); the constant
+  contains the stable substrings `"kexec"` and `"console"` so its meaning is pinned.
 - A run with **no** `expected_boot_failure`, or one whose kind is not `console_crash`,
   that resolves to no vmcore: unchanged — `not_found` + `data.reason == "no_vmcore"` +
   `suggested_next_actions == ["vmcore.fetch", "runs.get"]`.
