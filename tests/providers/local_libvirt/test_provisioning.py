@@ -576,6 +576,62 @@ def test_provision_already_running_domain_is_idempotent() -> None:
     assert conn.closed == 1
 
 
+# --- drgn-live SSH port allocation (ADR-0218 §3) -------------------------------------------
+
+
+def _ssh_profile() -> ProvisioningProfile:
+    return _profile(ssh_credential_ref="guest_key.pem")
+
+
+def test_provision_ssh_allocates_a_fresh_port_when_no_prior_domain() -> None:
+    conn = _ProvConn()  # lookupByName raises NO_DOMAIN (empty `defined`)
+    _prov_with_port(conn, free_port=lambda: 40022).provision(_SYS, _ssh_profile())
+    # The fresh port was recorded into the defined domain's forwarded SSH arg on loopback.
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40022
+
+
+def test_provision_ssh_reuses_the_recorded_port_on_retry() -> None:
+    name = domain_name_for(_SYS)
+    recorded = render_domain_xml(_SYS, _ssh_profile(), disk_path=_DISK, ssh_port=40023)
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=recorded)})
+
+    def fail_free_port() -> int:
+        raise AssertionError("must reuse the recorded SSH port, not allocate a fresh one")
+
+    _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _ssh_profile())
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40023
+
+
+def test_provision_non_ssh_does_not_allocate_an_ssh_port() -> None:
+    conn = _ProvConn()
+
+    def fail_free_port() -> int:
+        raise AssertionError("a provision with no ssh_credential_ref must not allocate an SSH port")
+
+    _prov_with_port(conn, free_port=fail_free_port).provision(_SYS, _profile())
+    assert recorded_ssh_port(conn.recorded_xml[-1]) is None
+
+
+def test_provision_ssh_port_lookup_infra_error_is_infrastructure_failure() -> None:
+    # A non-NO_DOMAIN libvirt error during the reuse lookup is an infrastructure fault, not a
+    # silent fall-through to a fresh port (which would drift from the live forwarded port).
+    conn = _ProvConn(lookup_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError) as caught:
+        _prov_with_port(conn, free_port=lambda: 40022).provision(_SYS, _ssh_profile())
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_provision_gdbstub_and_ssh_allocate_both_ports() -> None:
+    # A System provisioned for both transports bind-probes two independent loopback ports, both
+    # recorded into the one defined domain XML.
+    ports = iter([5555, 40022])
+    conn = _ProvConn()
+    profile = _profile(debug={"gdbstub": True}, ssh_credential_ref="guest_key.pem")
+    _prov_with_port(conn, free_port=lambda: next(ports)).provision(_SYS, profile)
+    assert recorded_gdb_port(conn.recorded_xml[-1]) == 5555
+    assert recorded_ssh_port(conn.recorded_xml[-1]) == 40022
+
+
 def test_teardown_destroys_and_undefines() -> None:
     name = domain_name_for(_SYS)
     dom = _ProvDomain(name)
