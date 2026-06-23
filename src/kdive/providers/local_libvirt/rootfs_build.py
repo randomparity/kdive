@@ -87,6 +87,34 @@ _KDUMP_FINAL_ACTION_CMD = (
     "sed -i '/^[[:space:]]*final_action[[:space:]]/d' /etc/kdump.conf && "
     "printf 'final_action poweroff\\n' >> /etc/kdump.conf"
 )
+# The live `introspect.run` path (ADR-0219) SSH-execs this fixed-argv in-guest helper; the debug
+# image must carry the repo's reviewed reference implementation, made read-executable. `build-fs`
+# runs `python -m kdive` from the source checkout, so the helper resolves relative to the source
+# tree. Staged only on the debug image (`drgn` in packages) (ADR-0220, #724).
+_DRGN_HELPER_GUEST_PATH = "/usr/local/sbin/kdive-drgn"
+_DRGN_HELPER_REPO_RELPATH = ("deploy", "remote-libvirt-guest-helpers", "kdive-drgn")
+# The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to be reachable.
+# An interface-name-independent NetworkManager keyfile DHCPs whatever ethernet device the SSH NIC
+# enumerates as under direct-kernel boot (no stable NIC naming). Written 0600 — NM ignores a
+# world-readable keyfile (ADR-0220, #724).
+_SSH_NIC_KEYFILE_PATH = "/etc/NetworkManager/system-connections/kdive-ssh-nic.nmconnection"
+_SSH_NIC_KEYFILE_CONTENT = """[connection]
+id=kdive-ssh-nic
+type=ethernet
+autoconnect=true
+autoconnect-priority=-100
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=ignore
+"""
+
+
+def _drgn_helper_source() -> Path:
+    """Resolve the reviewed ``kdive-drgn`` reference helper from the source tree (ADR-0220)."""
+    return Path(__file__).parents[4].joinpath(*_DRGN_HELPER_REPO_RELPATH)
 
 
 def _resolve_managed_public_key() -> Path:
@@ -112,6 +140,43 @@ def _run(argv: list[str], *, stage: str, timeout_s: int) -> None:
     )
 
 
+def _debug_image_args(packages: tuple[str, ...], cleanup: list[Path]) -> list[str]:
+    """Stage the drgn helper + SSH-NIC DHCP keyfile for a debug image (ADR-0220, #724).
+
+    Returns the virt-builder argv fragment and appends any tempfiles to ``cleanup`` for the
+    caller to unlink. Non-debug images (no ``drgn`` in ``packages``) get an empty fragment.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if the reviewed ``kdive-drgn`` helper is not a
+            readable file in the source tree — fail loud rather than ship a guest that cannot
+            introspect.
+    """
+    if "drgn" not in packages:
+        return []
+    helper = _drgn_helper_source()
+    if not helper.is_file():
+        raise CategorizedError(
+            "the kdive-drgn in-guest helper is missing from the source tree; cannot build a "
+            "debug rootfs that can be live-introspected",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"helper": str(helper)},
+        )
+    with tempfile.NamedTemporaryFile("w", suffix=".nmconnection", delete=False) as keyfile:
+        keyfile.write(_SSH_NIC_KEYFILE_CONTENT)
+        keyfile_path = Path(keyfile.name)
+    cleanup.append(keyfile_path)
+    return [
+        "--upload",
+        f"{helper}:{_DRGN_HELPER_GUEST_PATH}",
+        "--run-command",
+        f"chmod 0755 {_DRGN_HELPER_GUEST_PATH}",
+        "--upload",
+        f"{keyfile_path}:{_SSH_NIC_KEYFILE_PATH}",
+        "--run-command",
+        f"chmod 0600 {_SSH_NIC_KEYFILE_PATH}",
+    ]
+
+
 def _real_virt_builder(
     *,
     distro: str,
@@ -123,9 +188,11 @@ def _real_virt_builder(
 ) -> None:
     """Customize a base scratch image: sshd + key + the kdive-ready marker unit + packages."""
     template = resolve_base_template(distro, releasever)
+    cleanup: list[Path] = []
     with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as unit:
         unit.write(_READINESS_UNIT)
         unit_path = Path(unit.name)
+    cleanup.append(unit_path)
     try:
         argv = [
             "virt-builder",
@@ -152,6 +219,7 @@ def _real_virt_builder(
                 "--run-command",
                 _KDUMP_FINAL_ACTION_CMD,
             ]
+        argv += _debug_image_args(packages, cleanup)
         argv += [
             "--ssh-inject",
             f"root:file:{authorized_key}",
@@ -162,7 +230,8 @@ def _real_virt_builder(
         ]
         _run(argv, stage="virt-builder", timeout_s=_VIRT_BUILDER_TIMEOUT_S)
     finally:
-        unit_path.unlink(missing_ok=True)
+        for path in cleanup:
+            path.unlink(missing_ok=True)
 
 
 def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> None:
