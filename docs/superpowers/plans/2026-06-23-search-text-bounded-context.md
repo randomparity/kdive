@@ -79,15 +79,20 @@ FastMCP arg-binding; the handler never sees it. Re-envelope at the existing
   <builder>)` in `_BINDING_CONVERSIONS`.
 
 **Acceptance (TDD):**
-- New tests in the binding-middleware test module: feed a `ValidationError` shaped like
-  FastMCP's (construct one by validating a small Pydantic model with the same
-  constraints, or by running the real tool) for each field, low and high edge for at
-  least one field, and assert the resulting envelope is `configuration_error`,
-  `data.reason == "bad_search_input"`, and `detail` names the field + bound.
-- A test that an `int_parsing` error under `before_lines` does **not** match the
-  matcher (non-goal boundary).
-- Drive it red first (no conversion registered → the over-cap `ValidationError`
-  propagates unconverted), then add the conversion → green.
+- New tests in the binding-middleware test module unit-test the matcher and builder
+  directly: construct a `ValidationError` by calling `ArtifactSearchRequest`'s
+  validator on an over-cap value (e.g. `ArtifactSearchRequest.model_validate({...,
+  "before_lines": 25})` inside `pytest.raises(ValidationError) as exc_info`), then pass
+  `exc_info.value` to the matcher (asserting it matches) and the builder (asserting the
+  envelope is `configuration_error`, `data.reason == "bad_search_input"`, and `detail`
+  names the field + bound). Cover each field; low (`ge`) and high (`le`) edge for at
+  least one. This keeps the test independent of the FastMCP dispatch path while
+  exercising the exact `ValidationError` shape FastMCP raises (same model constraints).
+- A test that the matcher returns false for an `int_parsing` error under
+  `before_lines` (build it via `model_validate({..., "before_lines": "abc"})`) — the
+  non-goal boundary.
+- Drive matcher/builder red first (assert the new behavior before writing it), then
+  implement → green.
 
 ## Task 4 — Equality assertion + regenerate the reference doc
 
@@ -98,9 +103,10 @@ FastMCP arg-binding; the handler never sees it. Re-envelope at the existing
 hand-edited).
 
 **Steps:**
-- Test: assert the `ArtifactSearchRequest` field constraints (read via the model's JSON
-  schema or field metadata) equal the Task 1 constants — so a future edit to one side
-  without the other fails.
+- Test: read the bounds from `ArtifactSearchRequest.model_json_schema()`
+  (`["properties"][field]["minimum"]` / `["maximum"]`) — the robust, version-stable
+  introspection path — and assert they equal the Task 1 constants, so a future edit to
+  one side without the other fails.
 - Run `just docs` to regenerate `docs/guide/reference/artifacts.md`; review the diff
   (the three context rows now carry the range text). Run `just docs-check` to confirm
   the committed doc matches a fresh generation.
