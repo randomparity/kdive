@@ -39,6 +39,7 @@ from kdive.providers.shared.libvirt_xml import (
     QEMU_NS,
     parse_metadata_system_id,
     recorded_gdb_port,
+    recorded_ssh_port,
 )
 from tests.providers.local_libvirt.fakes import libvirt_error
 
@@ -287,6 +288,61 @@ def test_render_rejects_gdbstub_flag_without_a_port() -> None:
     with pytest.raises(CategorizedError) as caught:
         render_domain_xml(_SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=None)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_render_emits_loopback_ssh_forward_when_credential_ref_set() -> None:
+    xml = render_domain_xml(
+        _SYS, _profile(ssh_credential_ref="guest_key.pem"), disk_path=_DISK, ssh_port=40022
+    )
+    # The forwarded loopback port round-trips through the shared parser.
+    assert recorded_ssh_port(xml) == 40022
+    root = _safe_fromstring(xml)
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    assert args == [
+        "-netdev",
+        "user,id=kdivessh,hostfwd=tcp:127.0.0.1:40022-:22",
+        "-device",
+        "virtio-net-pci,netdev=kdivessh",
+    ]
+
+
+def test_render_omits_ssh_forward_when_no_credential_ref() -> None:
+    xml = _render()  # default profile has no ssh_credential_ref
+    assert recorded_ssh_port(xml) is None
+    root = _safe_fromstring(xml)
+    assert root.find(f"./{{{QEMU_NS}}}commandline") is None
+
+
+def test_render_ignores_ssh_port_when_no_credential_ref() -> None:
+    # A stray port with no credential ref renders nothing — the ref is the gate, not the port.
+    xml = render_domain_xml(_SYS, _profile(), disk_path=_DISK, ssh_port=40022)
+    assert recorded_ssh_port(xml) is None
+
+
+def test_render_rejects_credential_ref_without_an_ssh_port() -> None:
+    with pytest.raises(CategorizedError) as caught:
+        render_domain_xml(
+            _SYS, _profile(ssh_credential_ref="guest_key.pem"), disk_path=_DISK, ssh_port=None
+        )
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_render_gdbstub_and_ssh_share_one_commandline_element() -> None:
+    # A System provisioned for both transports carries both arg sets in a single
+    # <qemu:commandline> element (gdbstub and drgn-live coexist, ADR-0039 §4).
+    xml = render_domain_xml(
+        _SYS,
+        _profile(debug={"gdbstub": True}, ssh_credential_ref="guest_key.pem"),
+        disk_path=_DISK,
+        gdb_port=4444,
+        ssh_port=40022,
+    )
+    assert recorded_gdb_port(xml) == 4444
+    assert recorded_ssh_port(xml) == 40022
+    root = _safe_fromstring(xml)
+    assert len(root.findall(f"./{{{QEMU_NS}}}commandline")) == 1
 
 
 def test_validate_profile_rejects_unknown_domain_xml_param() -> None:
