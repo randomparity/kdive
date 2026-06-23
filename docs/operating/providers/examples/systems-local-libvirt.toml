@@ -71,8 +71,10 @@ coeff = "1.0"
 # packaged seed and any live `buildconfig.set`. So the content must stay COMPLETE — a partial
 # kdump fragment silently disarms kdump (a missing SQUASHFS/KEXEC_FILE/OVERLAY symbol yields no
 # vmcore; #679, #688). The arming set below mirrors the packaged seed
-# `src/kdive/build_configs/data/kdump.config`. If you do not need to customize it, delete this
-# block and rely on the packaged seed (`kdive seed-build-configs`).
+# `src/kdive/build_configs/data/kdump.config`. `VMCORE_INFO`/`FW_CFG_SYSFS` arm the QEMU
+# host_dump path (a parseable core; #708) and `IKCONFIG`/`IKCONFIG_PROC` expose the built
+# kernel's effective config at `/proc/config.gz` for diagnosis. If you do not need to customize
+# it, delete this block and rely on the packaged seed (`kdive seed-build-configs`).
 # ---------------------------------------------------------------------------------------------
 [[build_config]]
 name = "kdump"
@@ -81,8 +83,11 @@ content = """
 CONFIG_KEXEC=y
 CONFIG_KEXEC_CORE=y
 CONFIG_CRASH_DUMP=y
+CONFIG_VMCORE_INFO=y
 CONFIG_PROC_VMCORE=y
 CONFIG_FW_CFG_SYSFS=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
 CONFIG_RELOCATABLE=y
 CONFIG_RANDOMIZE_BASE=y
 CONFIG_DEBUG_INFO=y
