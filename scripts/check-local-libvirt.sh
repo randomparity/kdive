@@ -18,12 +18,24 @@ readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
 # Probe ALL present kernels — supermin selects by version-sort, not the running one. Override for
 # tests.
 readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
+# Worker connection URI + effective uid drive the non-root-readability advisory (ADR-0223, #699):
+# under qemu:///system, virtlogd/QEMU write root-owned files a non-root worker cannot read back.
+# KDIVE_EFFECTIVE_UID overrides $EUID for tests, mirroring the KDIVE_KVM_NODE override.
+readonly LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
+readonly EFFECTIVE_UID="${KDIVE_EFFECTIVE_UID:-$EUID}"
 fail=0
 
 note_fail() {
   printf "FAIL: %s\n" "$1" >&2
   printf "  fix: %s\n" "$2" >&2
   fail=1
+}
+
+# Advisory: report-only guidance that does NOT fail the preflight (the named combination still
+# works for the build and kdump-capture planes, so it must not reject an otherwise-ready host).
+note_warn() {
+  printf "WARN: %s\n" "$1" >&2
+  printf "  fix: %s\n" "$2" >&2
 }
 
 _has_kvm() { [[ -r "${KVM_NODE}" && -w "${KVM_NODE}" ]]; }
@@ -82,6 +94,12 @@ _host_kernels_readable || note_fail \
 _dir_writable "${INSTALL_STAGING}" || note_fail \
   "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \
   "create it writable under a world-traversable path (NOT \$HOME, which a 0700 mode hides from the qemu user that boots the VM): sudo install -d -o \"\$USER\" ${INSTALL_STAGING} — see docs/operating/runbooks/four-method-live-run.md section 4b"
+
+if [[ "${LIBVIRT_URI}" == "qemu:///system" && "${EFFECTIVE_UID}" -ne 0 ]]; then
+  note_warn \
+    "non-root worker under qemu:///system: boot-confirmation and host_dump capture cannot read the root-owned console log / core that virtlogd/QEMU write (ADR-0223, #699)" \
+    "run the worker as root, set KDIVE_LIBVIRT_URI=qemu:///session (worker-owned QEMU), or grant the worker group read access to the libvirt/virtlogd output; build and kdump capture still work as-is"
+fi
 
 if ((fail)); then
   printf "\nlocal-libvirt host is NOT ready (see failures above)\n" >&2
