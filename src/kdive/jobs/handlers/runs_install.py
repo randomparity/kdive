@@ -23,6 +23,7 @@ from kdive.security import audit
 from kdive.services.runs.steps import (
     cmdline_for,
     install_method_for,
+    installed_debuginfo_ref,
     installed_initrd_ref,
     installed_modules_ref,
 )
@@ -63,6 +64,7 @@ async def install_handler(
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = await installed_initrd_ref(conn, run_id)
     modules_ref = await installed_modules_ref(conn, run_id)
+    debuginfo_ref = await installed_debuginfo_ref(conn, run_id)
     job_ctx = job_context_from_job(job, run.project)
     claim = await claim_run_step(conn, run_id, "install")
     if not claim.claimed:
@@ -78,6 +80,7 @@ async def install_handler(
                 method=method,
                 initrd_ref=initrd_ref,
                 modules_ref=modules_ref,
+                debuginfo_ref=debuginfo_ref,
             ),
         )
     except Exception:
