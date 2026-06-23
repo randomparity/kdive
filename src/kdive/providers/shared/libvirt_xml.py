@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 
 from defusedxml.common import DefusedXmlException
@@ -78,3 +79,39 @@ def recorded_gdb_port(domain_xml: str) -> int | None:
     except ET.ParseError, DefusedXmlException:
         return None
     return recorded_gdb_port_from_root(root)
+
+
+# The loopback SSH forward local-libvirt renders into a `-netdev user,...hostfwd=...` arg
+# (ADR-0218 §2): a host loopback port forwarded to the guest's sshd on port 22. Anchored on the
+# `127.0.0.1` host literal and the guest port `22` so a non-kdive forward is not mistaken for one.
+_SSH_HOSTFWD_RE = re.compile(r"hostfwd=tcp:127\.0\.0\.1:(\d+)-:22")
+
+
+def recorded_ssh_port_from_root(root: ET.Element) -> int | None:
+    """The forwarded loopback SSH port a parsed domain element records, or ``None``.
+
+    Walks the ``<qemu:commandline>`` args for a ``-netdev`` flag immediately followed by a
+    ``user,...hostfwd=tcp:127.0.0.1:<port>-:22`` value and returns the forwarded host port; the
+    first matching ``-netdev`` value wins (kdive renders exactly one SSH forward). ``None`` when
+    absent or the port text is non-integer. Mirrors :func:`recorded_gdb_port_from_root` for the
+    SSH transport (ADR-0218 §6, ADR-0039).
+    """
+    args = [
+        arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
+    ]
+    for previous, current in zip(args, args[1:], strict=False):
+        if previous != "-netdev" or current is None:
+            continue
+        match = _SSH_HOSTFWD_RE.search(current)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def recorded_ssh_port(domain_xml: str) -> int | None:
+    """The forwarded loopback SSH port a domain's XML records, or ``None`` if absent/malformed."""
+    try:
+        root: ET.Element = _safe_fromstring(domain_xml)
+    except ET.ParseError, DefusedXmlException:
+        return None
+    return recorded_ssh_port_from_root(root)

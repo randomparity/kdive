@@ -10,6 +10,7 @@ from kdive.providers.shared.libvirt_xml import (
     parse_capabilities_arch,
     parse_metadata_system_id,
     recorded_gdb_port,
+    recorded_ssh_port,
     register_kdive_namespace,
 )
 
@@ -21,6 +22,21 @@ _GDB_DOMAIN = (
     "</qemu:commandline>"
     "</domain>"
 )
+
+
+def _ssh_arg(port: int) -> str:
+    return f"user,id=kdivessh,hostfwd=tcp:127.0.0.1:{port}-:22"
+
+
+def _ssh_domain(port: int) -> str:
+    return (
+        f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-netdev'/>"
+        f"<qemu:arg value='{_ssh_arg(port)}'/>"
+        "<qemu:arg value='-device'/>"
+        "<qemu:arg value='virtio-net-pci,netdev=kdivessh'/>"
+        "</qemu:commandline></domain>"
+    )
 
 
 def test_parse_capabilities_arch_reads_host_cpu_arch() -> None:
@@ -60,6 +76,55 @@ def test_recorded_gdb_port_is_none_for_non_integer_port() -> None:
 
 def test_recorded_gdb_port_is_none_for_malformed_xml() -> None:
     assert recorded_gdb_port("<domain") is None
+
+
+def test_recorded_ssh_port_reads_the_loopback_hostfwd_arg() -> None:
+    assert recorded_ssh_port(_ssh_domain(40022)) == 40022
+
+
+def test_recorded_ssh_port_is_none_without_a_netdev_arg() -> None:
+    no_ssh = f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline></qemu:commandline></domain>"
+    assert recorded_ssh_port(no_ssh) is None
+    assert recorded_ssh_port("<domain/>") is None
+
+
+def test_recorded_ssh_port_is_none_for_a_different_host_or_guest_port() -> None:
+    # A -netdev hostfwd that is not the kdive loopback-to-guest:22 shape is not a kdive SSH forward.
+    other_host = (
+        f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-netdev'/>"
+        "<qemu:arg value='user,id=x,hostfwd=tcp:10.0.0.1:40022-:22'/>"
+        "</qemu:commandline></domain>"
+    )
+    other_guest = (
+        f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-netdev'/>"
+        "<qemu:arg value='user,id=x,hostfwd=tcp:127.0.0.1:40022-:80'/>"
+        "</qemu:commandline></domain>"
+    )
+    assert recorded_ssh_port(other_host) is None
+    assert recorded_ssh_port(other_guest) is None
+
+
+def test_recorded_ssh_port_is_none_for_malformed_xml() -> None:
+    assert recorded_ssh_port("<domain") is None
+
+
+def test_recorded_ssh_port_coexists_with_a_gdb_arg() -> None:
+    # A System with both gdbstub and SSH carries both args in one commandline element; each
+    # reader reads only its own.
+    both = (
+        f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-gdb'/>"
+        "<qemu:arg value='tcp:127.0.0.1:4444'/>"
+        "<qemu:arg value='-netdev'/>"
+        f"<qemu:arg value='{_ssh_arg(40022)}'/>"
+        "<qemu:arg value='-device'/>"
+        "<qemu:arg value='virtio-net-pci,netdev=kdivessh'/>"
+        "</qemu:commandline></domain>"
+    )
+    assert recorded_gdb_port(both) == 4444
+    assert recorded_ssh_port(both) == 40022
 
 
 def test_register_kdive_namespace_is_idempotent(monkeypatch) -> None:
