@@ -141,14 +141,16 @@ provisioner already owns `allowed_roots` (`self._allowed_roots`, default `[ROOTF
 staged-path containment is enforced at resolution exactly as the `local` lane enforces it.
 
 **s3 cache directory.** The s3 branch caches the fetched object under a digest-keyed file in a
-dedicated `rootfs-cache/` subdir of `ROOTFS_DIR` (e.g. `/var/lib/kdive/rootfs/.cache/`), created
-`mkdir(parents, exist_ok)` by the fetch and **kept distinct from `allowed_roots`** so a cached s3
-image is never mistaken for a staged-path candidate (staged-path resolves a declared row's `path`,
-not a directory scan — but the isolation is documented to stay true if discovery ever scans). The
-worker process must be able to write it; an unwritable cache dir surfaces as the existing
-`INFRASTRUCTURE_FAILURE` from `fetch_registered_rootfs`'s `_cache_io_error`. The temp-sibling +
-atomic-rename write (so a partial download never surfaces as a cache hit) is preserved in the sync
-port. The plan pins the exact path constant.
+sibling `rootfs-cache/` directory **outside** `allowed_roots` — `Path(ROOTFS_DIR).parent /
+"rootfs-cache"` (e.g. `/var/lib/kdive/rootfs-cache/`, since `allowed_roots` defaults to
+`[/var/lib/kdive/rootfs]`) — created `mkdir(parents, exist_ok)` by the fetch, so a cached s3 image is
+never reachable as a staged-path candidate. The worker process must be able to write it; an
+unwritable cache dir surfaces as the existing `INFRASTRUCTURE_FAILURE` from `_cache_io_error`. The
+temp-sibling + atomic-rename write (so a partial download never surfaces as a cache hit) is preserved
+in the sync port. **Staged-path never touches the object store:** the fetch takes an
+`object_store_from_env` *factory* and builds it lazily only on the s3 branch, so a staged-path
+provision works when no object storage is configured (the no-S3 lane). The plan pins the exact path
+constant.
 
 **Arch resolution.** `resolve_rootfs` filters `(provider, name)` but **not** `arch`, and
 `CatalogComponentRef` carries no `arch` — so today a same-name multi-arch catalog would resolve to an

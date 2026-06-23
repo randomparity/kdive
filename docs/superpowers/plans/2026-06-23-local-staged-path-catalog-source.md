@@ -389,39 +389,45 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `resolve_public_rootfs_sync` (Task 4), `validate_local_component_path` (`kdive.components.local_paths`).
-- Produces: `fetch_registered_rootfs_sync(conn, store, *, allowed_roots: list[Path], provider, name, arch, cache_dir: Path) -> Path`.
+- Produces: `fetch_registered_rootfs_sync(conn, store_factory, *, allowed_roots: list[Path], provider, name, arch, cache_dir: Path) -> Path`. `store_factory: Callable[[], RootfsObjectStore]` is called **only** on the s3 branch — staged-path resolution must never require an object store (the no-S3 lane, ADR-0228).
 
-- [ ] **Step 1: Write failing tests** — staged-path returns the validated path (no store call); a path outside roots raises CONFIGURATION_ERROR; s3 fetches+caches+digest-checks.
+- [ ] **Step 1: Write failing tests** — staged-path returns the validated path *and never invokes the store factory*; a path outside roots raises CONFIGURATION_ERROR; s3 fetches+caches+digest-checks.
 
 ```python
-def test_sync_fetch_staged_path_returns_validated_path(pg_conn, tmp_path):
+def _exploding_factory():
+    def _f():
+        raise AssertionError("store factory must not be called for staged-path")
+    return _f
+
+def test_sync_fetch_staged_path_returns_validated_path_without_store(pg_conn, tmp_path):
     f = tmp_path / "x.img"; f.write_bytes(b"data")
     _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path=str(f))
-    out = fetch_registered_rootfs_sync(pg_conn, _store_that_must_not_be_called(),
+    out = fetch_registered_rootfs_sync(pg_conn, _exploding_factory(),
         allowed_roots=[tmp_path], provider="local-libvirt", name="fed", arch="x86_64", cache_dir=tmp_path / ".cache")
-    assert out == f.resolve()
+    assert out == f.resolve()  # factory never called -> no AssertionError
 
 def test_sync_fetch_staged_path_outside_roots_rejected(pg_conn, tmp_path):
     outside = tmp_path / "x.img"; outside.write_bytes(b"d")
     _insert_registered(pg_conn, provider="local-libvirt", name="fed", arch="x86_64", path=str(outside))
     with pytest.raises(CategorizedError) as ei:
-        fetch_registered_rootfs_sync(pg_conn, _store_unused(), allowed_roots=[tmp_path / "roots"],
+        fetch_registered_rootfs_sync(pg_conn, _exploding_factory(), allowed_roots=[tmp_path / "roots"],
             provider="local-libvirt", name="fed", arch="x86_64", cache_dir=tmp_path / ".cache")
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 def test_sync_fetch_s3_downloads_and_caches(pg_conn, tmp_path):
     data = b"qcow"; digest = "sha256:" + hashlib.sha256(data).hexdigest()
     _insert_registered(pg_conn, provider="local-libvirt", name="img", arch="x86_64", object_key="images/img", digest=digest)
-    out = fetch_registered_rootfs_sync(pg_conn, _store_returning(data), allowed_roots=[tmp_path],
+    out = fetch_registered_rootfs_sync(pg_conn, lambda: _store_returning(data), allowed_roots=[tmp_path],
         provider="local-libvirt", name="img", arch="x86_64", cache_dir=tmp_path / ".cache")
     assert out.read_bytes() == data
 ```
 
 - [ ] **Step 2: Run to verify fail** — `uv run python -m pytest tests/images/test_fetch.py -k sync -q` → FAIL.
 
-- [ ] **Step 3: Implement** `fetch_registered_rootfs_sync` in `fetch.py`. Reuse `_cache_path`, `_cache_io_error`, `_unlink_tmp_cache`. The store's `get_artifact` is synchronous; call it directly (no `to_thread`):
+- [ ] **Step 3: Implement** `fetch_registered_rootfs_sync` in `fetch.py`. Reuse `_cache_path`, `_cache_io_error`, `_unlink_tmp_cache`. The store's `get_artifact` is synchronous; call it directly (no `to_thread`). **The store is built lazily via `store_factory`, only on the s3 branch**, so staged-path never touches object storage:
 
 ```python
+from collections.abc import Callable
 from pathlib import Path
 from kdive.components.local_paths import validate_local_component_path
 from kdive.images.catalog import resolve_public_rootfs_sync
@@ -430,7 +436,7 @@ import psycopg
 
 def fetch_registered_rootfs_sync(
     conn: psycopg.Connection,
-    store: RootfsObjectStore,
+    store_factory: Callable[[], RootfsObjectStore],
     *,
     allowed_roots: list[Path],
     provider: str,
@@ -441,8 +447,9 @@ def fetch_registered_rootfs_sync(
     """Resolve a registered public rootfs and return a provider-readable local path (sync).
 
     A staged-path row resolves to its ``path`` validated against ``allowed_roots`` (no object
-    store, no cache, no digest). An s3 row downloads ``object_key``, verifies sha256 against
-    ``digest``, and caches it under a digest-keyed file in ``cache_dir``.
+    store, no cache, no digest) — ``store_factory`` is never called. An s3 row builds the store
+    via ``store_factory``, downloads ``object_key``, verifies sha256 against ``digest``, and
+    caches it under a digest-keyed file in ``cache_dir``.
     """
     row = resolve_public_rootfs_sync(conn, provider, name, arch)
     if row is None:
@@ -453,6 +460,7 @@ def fetch_registered_rootfs_sync(
         )
     if row.path is not None:
         return validate_local_component_path(row.path, allowed_roots=allowed_roots)
+    store = store_factory()
     object_key, digest = row.object_key, row.digest
     if object_key is None or digest is None:
         raise CategorizedError(
@@ -549,23 +557,26 @@ from kdive.providers.local_libvirt.lifecycle.materialize import CatalogFetch
 from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.store.objectstore import object_store_from_env
 
-_CACHE_DIR = Path(ROOTFS_DIR) / ".cache"
+# The s3-fetch cache lives OUTSIDE allowed_roots (which default to [ROOTFS_DIR]) so a cached image
+# is never reachable as a staged-path candidate, keeping the spec's isolation invariant true.
+_CACHE_DIR = Path(ROOTFS_DIR).parent / "rootfs-cache"
 
 
 def rootfs_catalog_fetch_from_env(allowed_roots: list[Path]) -> CatalogFetch:
     """A sync ``(ref, arch) -> Path`` rootfs catalog fetch (mirrors build_config_fetch_from_env).
 
-    Opens a short-lived sync ``psycopg`` connection + the env object store per call (the provision
-    seam runs in a thread and owns no async pool). Resolves the registered **public** image of
-    ``arch`` and branches: a staged-path row validates its host path against ``allowed_roots``; an
-    s3 row downloads + digest-verifies + caches under ``ROOTFS_DIR/.cache`` (kept out of
-    ``allowed_roots`` so a cached image is never a staged-path candidate).
+    Opens a short-lived sync ``psycopg`` connection per call (the provision seam runs in a thread
+    and owns no async pool). Resolves the registered **public** image of ``arch`` and branches: a
+    staged-path row validates its host path against ``allowed_roots`` (**no object store touched**);
+    an s3 row builds the object store lazily, downloads + digest-verifies + caches under
+    ``_CACHE_DIR`` (outside ``allowed_roots``). Passing ``object_store_from_env`` as a factory keeps
+    staged-path provisioning working when no object storage is configured (the no-S3 lane).
     """
 
     def _fetch(ref: CatalogComponentRef, arch: str) -> Path:
         with psycopg.connect(config.require(DATABASE_URL)) as conn:
             return fetch_registered_rootfs_sync(
-                conn, object_store_from_env(),
+                conn, object_store_from_env,
                 allowed_roots=allowed_roots, provider=ref.provider, name=ref.name, arch=arch,
                 cache_dir=_CACHE_DIR,
             )
