@@ -34,12 +34,13 @@ The local KDUMP harvest **waits for the in-guest kdump to complete before forcin
 and reading the overlay**, within a bounded window.
 
 1. **Completion signal = the guest self-shuts-off.** kdump runs a `final_action` after writing
-   the core. We pin that to `final_action shutdown` in the `kdive-ready` rootfs (a kdump.conf
+   the core. We pin that to `final_action poweroff` in the `kdive-ready` rootfs (a kdump.conf
    change in `local_libvirt/rootfs_build.py`, staged under the same `kdump-utils`-in-packages
-   gate that enables `kdump.service` and the NMI-panic sysctl). A halted guest reports
+   gate that enables `kdump.service` and the NMI-panic sysctl). A powered-off guest reports
    `VIR_DOMAIN_SHUTOFF`, which the worker polls for as the unambiguous "dump done" signal.
    Fedora's default `final_action` is `reboot`, which would never self-shut-off; pinning
-   `shutdown` makes the signal reliable rather than racing a rebooted guest.
+   `poweroff` makes the signal reliable rather than racing a rebooted guest. (kdump.conf accepts
+   only `reboot`/`halt`/`poweroff`; `shutdown` is rejected and disarms kdump entirely — #705.)
 
 2. **Bounded poll, then harvest.** `_real_wait_for_vmcore` polls the domain power-state until
    `SHUTOFF` (or the domain is gone) within `_KDUMP_SETTLE_TIMEOUT_S` (120 s, at a 3 s interval),
@@ -64,7 +65,7 @@ store, the database schema, or any other provider. `vmcore.fetch(method=kdump)` 
 
 - Local Tier 3 kdump no longer races its own dump: the worker waits out the crash-kernel write
   before destroying the domain, so `/var/crash` is populated when libguestfs reads it.
-- The `kdive-ready` image must be rebuilt and republished to carry `final_action shutdown`. That
+- The `kdive-ready` image must be rebuilt and republished to carry `final_action poweroff`. That
   rebuild is an operator/orchestrator follow-up (no live infra in this change); the code is
   correct regardless — on a `reboot`-configured guest the bounded-timeout fallback still
   force-offs and harvests the persisted core.
@@ -84,7 +85,7 @@ store, the database schema, or any other provider. `vmcore.fetch(method=kdump)` 
   out-of-band signal that does not touch the live disk.
 - **Leave kdump on the Fedora default `reboot` and rely only on a fixed wait.** Rejected as the
   sole mechanism: a blind fixed wait either over-waits every capture or under-waits a slow dump.
-  Pinning `final_action shutdown` gives a precise completion edge; the fixed-window timeout
+  Pinning `final_action poweroff` gives a precise completion edge; the fixed-window timeout
   remains only as the safety fallback.
 - **Unbounded wait for self-shutoff.** Rejected: a guest that never panics, hangs in the crash
   kernel, or is configured `reboot` would wait forever. The window is bounded and degrades to the

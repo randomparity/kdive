@@ -282,7 +282,7 @@ _VAR_CRASH_GLOB = "/var/crash/*/vmcore"
 # After the force_crash NMI panics the guest, the in-guest kdump kexecs a crash kernel, boots
 # it, mounts root, and writes /var/crash/<ts>/vmcore before its kdumpctl ``final_action`` runs.
 # That sequence is tens of seconds, so the harvest must wait for kdump to COMPLETE — signalled
-# by the domain reaching SHUTOFF (kdump ``final_action shutdown``, staged in the kdive-ready
+# by the domain reaching SHUTOFF (kdump ``final_action poweroff``, staged in the kdive-ready
 # rootfs) — before forcing the domain off and reading the overlay. The window bounds that wait;
 # on timeout we force-off and harvest anyway (the core, if written, persists on the overlay even
 # across a kdump reboot), preserving the existing "no core → readiness_failure" contract.
