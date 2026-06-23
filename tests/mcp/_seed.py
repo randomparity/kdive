@@ -98,12 +98,17 @@ async def seed_run_on_system(
     debuginfo_ref: str | None,
     build_id: str | None,
     project: str = "proj",
+    expected_boot_failure: dict[str, Any] | None = None,
 ) -> str:
     """Insert an Investigation + a `succeeded` Run on the System, plus a `build` step row.
 
     The Run carries ``debuginfo_ref``; the ``run_steps`` build row records ``build_id`` in its
     ``result`` jsonb (the postmortem reads it for provenance). A ``None`` ``build_id`` omits
     the build step row (the "Run not built" case).
+
+    ``expected_boot_failure`` (default ``None``) seeds the Run's declared boot-failure
+    metadata. It is validated by the domain ``ExpectedBootFailure`` model at construction, so a
+    supplied dict must be schema-valid (``kind == "console_crash"`` and a non-empty ``pattern``).
     """
     async with pool.connection() as conn:
         inv = await INVESTIGATIONS.insert(
@@ -132,6 +137,7 @@ async def seed_run_on_system(
                 state=RunState.SUCCEEDED,
                 build_profile={},
                 debuginfo_ref=debuginfo_ref,
+                expected_boot_failure=expected_boot_failure,
             ),
         )
         if build_id is not None:
