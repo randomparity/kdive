@@ -13,6 +13,11 @@ type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, J
 _ERROR_ENTRY_KEYS = ("loc", "msg", "type")
 # Upper bound on surfaced validation-error entries (ADR-0123): a bounded reason, never a dump.
 _MAX_ERROR_ENTRIES = 20
+# Detail keys whose list value is preserved as a bounded list of JSON scalars (ADR-0224, #731).
+# These carry a finite valid set (declared catalog names, configured roots) so a black-box MCP
+# caller can self-correct a typo'd reference; non-scalar elements are dropped and the list is
+# capped at `_MAX_ERROR_ENTRIES`. Every other list-valued detail key is still dropped.
+_ENUMERATION_KEYS = frozenset({"accepted_values", "available"})
 
 
 def validate_json_value(value: object, *, path: str) -> None:
@@ -91,16 +96,23 @@ def _sanitize_error_entry(entry: object) -> dict[str, JsonValue] | None:
 def safe_error_details(details: Mapping[str, object]) -> dict[str, JsonValue]:
     """Filter ``CategorizedError`` details to a JSON-safe payload (ADR-0019, ADR-0123).
 
-    Every key is reduced to a finite JSON scalar and non-scalars are dropped, with one reserved
-    exception: an ``errors`` list (the shape ``ProvisioningProfile.parse`` emits) is preserved as
-    a bounded list of ``{loc, msg, type}`` entries so a caller learns the exact bad field paths.
-    No submitted value echoes back — ``input``/``ctx`` are never forwarded.
+    Every key is reduced to a finite JSON scalar and non-scalars are dropped, with two reserved
+    exceptions: an ``errors`` list (the shape ``ProvisioningProfile.parse`` emits) is preserved as
+    a bounded list of ``{loc, msg, type}`` entries so a caller learns the exact bad field paths;
+    an ``accepted_values`` / ``available`` list (ADR-0224) is preserved as a bounded list of JSON
+    scalars so a caller learns the finite valid set (declared catalog names, configured roots).
+    Both lists drop non-scalar elements and cap at ``_MAX_ERROR_ENTRIES``. No submitted value
+    echoes back — ``input``/``ctx`` are never forwarded.
     """
     safe: dict[str, JsonValue] = {}
     for key, value in details.items():
         if key == "errors" and isinstance(value, list):
             entries = [_sanitize_error_entry(entry) for entry in value[:_MAX_ERROR_ENTRIES]]
             safe["errors"] = [entry for entry in entries if entry is not None]
+            continue
+        if key in _ENUMERATION_KEYS and isinstance(value, list):
+            scalars = (_scalar_or_none(item) for item in value[:_MAX_ERROR_ENTRIES])
+            safe[key] = [item for item in scalars if item is not None]
             continue
         scalar = _scalar_or_none(value)
         if scalar is not None:
