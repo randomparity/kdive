@@ -451,17 +451,73 @@ def test_open_unsupported_kind_is_configuration_error() -> None:
     assert str(exc.value) == "unsupported transport kind: 'telnet'"
 
 
-def test_from_env_ssh_resolver_is_unsupported_configuration_error() -> None:
-    # drgn-live over SSH needs session-networking that does not exist on local yet (#697); the
-    # descriptor leaves drgn-live unadvertised, so admission rejects it first. If reached
-    # directly, the resolver is honestly a CONFIGURATION_ERROR — not MISSING_DEPENDENCY, which
-    # would wrongly imply an absent host package.
+def _ssh_xml(port: int) -> str:
+    from kdive.providers.shared.libvirt_xml import QEMU_NS
+
+    return (
+        f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-netdev'/>"
+        f"<qemu:arg value='user,id=kdivessh,hostfwd=tcp:127.0.0.1:{port}-:22'/>"
+        "</qemu:commandline></domain>"
+    )
+
+
+def test_resolve_ssh_endpoint_reads_the_recorded_port_from_the_live_domain() -> None:
+    conn = _FakeGdbConn(domain=_FakeGdbDomain(_ssh_xml(40022)))
+    resolver = connect_mod._resolve_ssh_endpoint_via(lambda: conn)
+    assert resolver(_SYSTEM) == ("127.0.0.1", 40022)
+    assert conn.closed == 1  # the connection is always closed
+
+
+def test_resolve_ssh_endpoint_absent_domain_is_configuration_error() -> None:
+    conn = _FakeGdbConn(error_code=libvirt.VIR_ERR_NO_DOMAIN)
+    resolver = connect_mod._resolve_ssh_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.closed == 1
+
+
+def test_resolve_ssh_endpoint_without_a_recorded_port_is_configuration_error() -> None:
+    # A System provisioned without ssh_credential_ref records no SSH forward — actionable, not a
+    # missing dep.
+    conn = _FakeGdbConn(domain=_FakeGdbDomain("<domain/>"))
+    resolver = connect_mod._resolve_ssh_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "ssh_credential_ref" in str(exc.value)
+
+
+def test_resolve_ssh_endpoint_malformed_xml_is_infrastructure_failure() -> None:
+    conn = _FakeGdbConn(domain=_FakeGdbDomain("<domain"))
+    resolver = connect_mod._resolve_ssh_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_resolve_ssh_endpoint_other_libvirt_error_is_infrastructure_failure() -> None:
+    conn = _FakeGdbConn(error_code=libvirt.VIR_ERR_INTERNAL_ERROR)
+    resolver = connect_mod._resolve_ssh_endpoint_via(lambda: conn)
+    with pytest.raises(CategorizedError) as exc:
+        resolver(_SYSTEM)
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_from_env_ssh_resolver_resolves_from_the_live_domain() -> None:
+    # The drgn-live resolver is now real (#697): from_env wires it to read the recorded forwarded
+    # SSH port from the live domain. It no longer raises the old `#697`-deferred stub. With no real
+    # libvirt host here, opening the transport surfaces the resolver's own error (a config error
+    # for an absent domain, or an infra fault) — never the deferred-stub message.
     connector = LocalLibvirtConnect.from_env()
     with pytest.raises(CategorizedError) as exc:
         connector.open_transport(_SYSTEM, "drgn-live")
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "drgn-live" in str(exc.value)
-    assert "#697" in str(exc.value)
+    assert "deferred, see #697" not in str(exc.value)
+    assert exc.value.category in (
+        ErrorCategory.CONFIGURATION_ERROR,
+        ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
 
 
 def test_close_ssh_transport_is_noop_and_never_raises() -> None:
