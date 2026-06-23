@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import LiteralString
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, Connection
 from psycopg.rows import dict_row
 
 _RAW_VMCORE_KEY_SQL: LiteralString = (
@@ -15,6 +15,8 @@ _RAW_VMCORE_KEY_SQL: LiteralString = (
 )
 _RAW_VMCORE_KEY_LIKE = "%/vmcore-%"
 _REDACTED_VMCORE_LIKE = "%-redacted"
+
+_DEBUGINFO_REF_SQL: LiteralString = "SELECT debuginfo_ref FROM runs WHERE id = %s"
 
 
 async def raw_vmcore_key(conn: AsyncConnection, system_id: UUID) -> str | None:
@@ -26,3 +28,19 @@ async def raw_vmcore_key(conn: AsyncConnection, system_id: UUID) -> str | None:
         )
         row = await cur.fetchone()
     return None if row is None else str(row["object_key"])
+
+
+def debuginfo_ref_for_run_sync(conn: Connection, run_id: UUID) -> str | None:
+    """Return the Run's published debuginfo (vmlinux) object key, or ``None``.
+
+    Sync because the gdb-MI attach seam runs off the event loop (``asyncio.to_thread``) and owns no
+    async pool. ``None`` covers both an absent Run row and a row whose ``debuginfo_ref`` is NULL —
+    the caller (the gdb-MI debuginfo resolver) treats both as ``no_debuginfo``.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(_DEBUGINFO_REF_SQL, (run_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    ref = row["debuginfo_ref"]
+    return str(ref) if isinstance(ref, str) and ref else None
