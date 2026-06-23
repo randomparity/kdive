@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
+import socket
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from typing import Protocol
@@ -315,17 +317,62 @@ def _resolved_ssh_port(xml: str, domain_name: str) -> int:
 _real_resolve_ssh_endpoint = _resolve_ssh_endpoint_via(_default_connect)
 
 
-def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_vm
-    """Open one SSH connection to prove reachability; True iff the handshake completes.
+# sshd writes its ``SSH-<protoversion>-...`` identification string first on connect, before
+# any auth (RFC 4253 §4.2). A read-only banner check proves a live sshd is listening on the
+# forwarded port without performing the authenticated round-trip — that is introspect.run's
+# helper (ADR-0219). The deadline bounds a peer that accepts the connection but never speaks.
+_SSH_ID_PREFIX = b"SSH-"
+_SSH_PROBE_TIMEOUT_S = 2.0
 
-    Runs only under the ``live_vm`` gate — it needs a booted guest, a resolvable credential
-    (already registered into the redaction registry by the caller), and the v1 SSH client.
+
+def _ssh_banner_verdict(buffer: bytes) -> bool | None:
+    """Classify bytes accumulated from a peer that should be an sshd identification banner.
+
+    Returns ``True`` once ``buffer`` begins with ``SSH-`` (a live sshd identified itself),
+    ``False`` once ``buffer`` has diverged from that prefix (a listener that accepts TCP but
+    does not speak SSH), or ``None`` while ``buffer`` is still a proper prefix of ``SSH-`` and
+    more bytes may complete it.
     """
-    raise CategorizedError(
-        "the real ssh transport connect runs only under the live_vm gate",
-        category=ErrorCategory.MISSING_DEPENDENCY,
-        details={"port": port, "host": host},
-    )
+    if buffer.startswith(_SSH_ID_PREFIX):
+        return True
+    if not _SSH_ID_PREFIX.startswith(buffer):
+        return False
+    return None
+
+
+def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_vm
+    """Connect and read the sshd identification banner; True iff the peer speaks SSH.
+
+    sshd announces itself with an ``SSH-<protoversion>-...`` string immediately on connect
+    (RFC 4253 §4.2), so a read-only banner check proves a live sshd is listening on the
+    loopback-forwarded port — which in turn proves the guest NIC/DHCP is up and QEMU's
+    ``hostfwd`` reaches it — without performing auth (introspect.run's helper does the
+    authenticated round-trip, ADR-0219). A listener that accepts but never sends an SSH banner
+    is rejected. Mirrors ``rsp_reachable`` for the SSH transport; runs only under the
+    ``live_vm`` gate.
+    """
+    deadline = time.monotonic() + _SSH_PROBE_TIMEOUT_S
+    try:
+        sock = socket.create_connection((host, port), timeout=_SSH_PROBE_TIMEOUT_S)
+    except OSError, TimeoutError:
+        return False
+    buffer = b""
+    try:
+        while time.monotonic() < deadline:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
+            try:
+                chunk = sock.recv(256)
+            except TimeoutError:
+                continue
+            if not chunk:
+                break
+            buffer += chunk
+            verdict = _ssh_banner_verdict(buffer)
+            if verdict is not None:
+                return verdict
+    finally:
+        sock.close()
+    return False
 
 
 __all__ = ["LocalLibvirtConnect"]
