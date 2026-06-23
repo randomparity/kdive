@@ -393,23 +393,7 @@ def register(
     @app.tool(
         name="vmcore.fetch",
         annotations=_docmeta.mutating(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.PROVIDER_SUPPORT,
-            detail=(
-                "Captures a vmcore by a core-producing method (HOST_DUMP/KDUMP) the bound "
-                "provider must advertise; capture runs only under the gated live markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run captures a real vmcore by each "
-                "advertised core-producing method per provider."
-            ),
-            providers=(
-                "local-libvirt: HOST_DUMP implemented (proven KVM, B6 #680); KDUMP partial — "
-                "final_action regression, fix in flight #705; remote-libvirt: implemented "
-                "(KDUMP/HOST_DUMP); fault-inject: simulated HOST_DUMP."
-            ),
-        ),
+        meta={"maturity": "implemented"},
     )
     async def vmcore_fetch(
         system_id: Annotated[str, Field(description="The crashed System whose vmcore to capture.")],

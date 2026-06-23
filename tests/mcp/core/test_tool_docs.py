@@ -506,20 +506,15 @@ def test_local_proven_debug_planes_are_implemented() -> None:
     assert not offenders, f"proven debug planes not promoted to implemented: {offenders}"
 
 
-def test_vmcore_fetch_host_dump_proven_kdump_still_partial_on_local() -> None:
-    # B6 (#680): local HOST_DUMP was proven live on real KVM, so the pointer credits it as
-    # implemented; but the KDUMP leg is still unproven (the #705 rootfs `final_action shutdown`
-    # regression), so vmcore.fetch's OVERALL maturity stays `partial`. The pointer must reflect
-    # both: HOST_DUMP implemented, KDUMP partial.
+def test_vmcore_fetch_implemented_both_methods_proven_live() -> None:
+    # B6 (#680): both core-producing methods are now proven live on real KVM — HOST_DUMP
+    # (the #716 `<acpi/>` fix) and KDUMP (the #705 `final_action poweroff` fix) — so
+    # vmcore.fetch is `implemented` and, per ADR-0175, carries no maturity_detail/pointer.
     tool = next(t for t in TOOLS if t.name == "vmcore.fetch")
-    assert (tool.meta or {}).get("maturity") == "partial"
-    providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
-    assert isinstance(providers, str), "vmcore.fetch: missing providers pointer"
-    assert "local-libvirt: HOST_DUMP implemented" in providers, providers
-    assert "KDUMP partial" in providers, providers
-    assert "#705" in providers, providers
-    assert "HOST_DUMP wired" not in providers, providers
-    assert "remote-libvirt: implemented" in providers, providers
+    assert (tool.meta or {}).get("maturity") == "implemented"
+    assert "maturity_detail" not in (tool.meta or {}), (
+        "vmcore.fetch: implemented tool must not carry maturity_detail"
+    )
 
 
 def test_maturity_meta_rejects_partial_without_reason() -> None:
