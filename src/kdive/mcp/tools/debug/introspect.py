@@ -267,7 +267,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
                 "a real booted Run."
             ),
             providers=(
-                "local-libvirt: planned (M2.8 B3); remote-libvirt: implemented; fault-inject: n/a."
+                "local-libvirt: wired (M2.8 B3, live proof pending B6); remote-libvirt: "
+                "implemented; fault-inject: n/a."
             ),
         ),
     )

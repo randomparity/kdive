@@ -67,15 +67,15 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     assert isinstance(runtime.vmcore_introspector, LocalLibvirtVmcoreIntrospect)
     assert isinstance(runtime.live_introspector, LocalLibvirtLiveIntrospect)
     assert isinstance(runtime.rootfs_build_plane, LocalLibvirtRootfsBuildPlane)
-    # ADR-0208/0210/0211/0218: local advertises both core-producing capture methods it can fetch —
-    # KDUMP (overlay harvest) and HOST_DUMP (libvirt domain core dump, B4) — both debug transports
-    # (gdbstub B1 #675, drgn-live-over-SSH #697/ADR-0218), and the offline-vmcore introspection mode
-    # B2 wired (#676). The live introspection mode (B3 #677) stays empty until that plane lands.
+    # ADR-0208/0210/0211/0218/0219: local advertises both core-producing capture methods it can
+    # fetch — KDUMP (overlay harvest) and HOST_DUMP (libvirt domain core dump, B4) — both debug
+    # transports (gdbstub B1 #675, drgn-live-over-SSH #697/ADR-0218), and both introspection modes:
+    # offline-vmcore (B2 #676) and live (B3 #677/ADR-0219, drgn-live SSH-exec of in-guest helper).
     assert runtime.supported_capture_methods == frozenset(
         {CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}
     )
     assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
-    assert runtime.supported_introspection == frozenset({"offline-vmcore"})
+    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live"})
     assert runtime.debug is not None
     assert isinstance(runtime.debug.engine, GdbMiEngine)
     # Direct-kernel boot: the platform owns the whole-disk root device (ADR-0183).

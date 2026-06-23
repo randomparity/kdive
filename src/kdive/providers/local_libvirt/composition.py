@@ -115,13 +115,13 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         # for — KDUMP (host-side overlay harvest, #115/ADR-0203) and HOST_DUMP (libvirt domain core
         # dump, B4/ADR-0211); both debug transports the connector resolves from the live domain XML
         # — gdbstub (#675/ADR-0210) and drgn-live over a loopback-forwarded guest SSH port
-        # (#697/ADR-0218); and the offline-vmcore introspection mode B2 wired (#676/ADR-0210 §2).
-        # The live introspection mode (B3 #677) stays empty until that plane lands. `debug.*` tool
-        # maturity stays `partial` — the drgn-live transport is wired but its live KVM proof is the
-        # B6 (#680) milestone verifier's job (ADR-0218 §6).
+        # (#697/ADR-0218); and both introspection modes — offline-vmcore (B2 #676/ADR-0210 §2) and
+        # live (B3 #677/ADR-0219, drgn-live SSH-exec of the in-guest kdive-drgn helper). `debug.*`
+        # and `introspect.run` tool maturity stays `partial` — the live planes are wired but their
+        # live KVM proof is the B6 (#680) milestone verifier's job (ADR-0218 §6 / ADR-0219).
         supported_capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}),
         supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
-        supported_introspection=frozenset({"offline-vmcore"}),
+        supported_introspection=frozenset({"offline-vmcore", "live"}),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
             engine=GdbMiEngine(redactor_factory=lambda: Redactor(registry=secret_registry)),
