@@ -9,13 +9,14 @@ follow-up sweep. See `mutation-testing.md` for how `just mutate` itself works.
 
 - **407** source modules → **273** container-free "fast" targets (have at least one
   covering test that does not use the Postgres fixtures), **112** Postgres-backed targets,
-  **22** with no direct unit test.
+  and the modules with no direct unit test (originally ~22; a reproducible scan found **25** on
+  `main`). The no-direct-test bucket is now closed (#665, ADR-0229) — see below.
 - The 273 fast targets were swept in 30 weight-balanced buckets, each killing surviving
   mutants and then passing an adversarial `/challenge` review of the added tests.
 - **~3,700 mutants killed across ~210 commits.** Every bucket's added tests pass the full
   gate: `just lint`, `just type` (whole-tree), and `just test` (6,349 passed).
-- **46** fast targets could not be swept (categorized below); the 112 PG-backed and 22
-  unmapped targets were out of scope for this sweep.
+- **46** fast targets could not be swept in that run (categorized below); the 112 PG-backed and
+  the no-direct-test targets were out of scope for the 2026-06-21 sweep (the latter closed by #665).
 
 ## Reusable tooling workarounds
 
@@ -73,20 +74,48 @@ these spins up testcontainers per run (slow, can leak/collide under parallelism)
 serially in a dedicated session. Subsystems: `services/`, `store/`, `db/`, most
 `jobs/handlers/`, and the Postgres-backed `inventory/`/`reconciler/` paths.
 
-### No direct unit test (22) — coverage gaps
+### No direct unit test — DONE (#665, ADR-0229)
 
-These modules have no test that imports them directly; mutation coverage needs a unit test
-first. Notable: every `mcp/middleware/*` module, the provider `settings.py` modules,
-`services/runs/{admission,bind,states}.py`, `domain/lifecycle/rules.py`,
-`domain/catalog/ownership.py`, `config/manifest.py`, `db/probe_fence.py`.
+This bucket is closed. A reproducible AST scan (no test under `tests/` imports the module by
+dotted path) found **25** such modules on `main` (the original "22" was approximate;
+`config/manifest.py` had since gained a test, and the scan surfaced a few small contract
+modules). Each now has a direct unit test; per module:
+
+- **Mutated to 0 surviving (function-body targets):** `mcp/middleware/shared` (12),
+  `mcp/middleware/telemetry` (126), `mcp/middleware/usage` (77), `mcp/middleware/exposure` (19),
+  `mcp/middleware/denial_audit` (78), `mcp/tools/ops/_reads` (36),
+  `providers/local_libvirt/lifecycle/rootfs_catalog_fetch` (16), `services/runs/bind` (23, its
+  pure `_run_bindable_error`). `services/runs/admission` (pure helpers: 145 generated, **8
+  surviving — all equivalent**: the `cast` runtime no-op, `model_dump` `mode=` variants identical
+  for an all-`str` model, the unobservable `<`/`<=` lease-expiry boundary, the `kind=None`→`""`
+  sentinel that rejects identically, and a `detail=detail` drop that re-defaults to the same
+  string). The async Postgres-locked admission/bind create flow stays a bucket-1 target.
+- **Covered, 0 mutatable mutants (import-time-only declarations):** the three provider
+  `settings.py`, `services/runs/states`, `domain/lifecycle/rules`, `providers/shared/build_timeouts`,
+  `domain/catalog/{image_format,ownership}`, `db/probe_fence`, `providers/ports/handles`,
+  `domain/_records`, `diagnostics/provider_contracts`, `domain/profile_documents`, `profiles/types`.
+  Their code runs only at import / in a class body, so `mutate_only_covered_lines` (under
+  `max_stack_depth=8`) records nothing to mutate; the direct tests still catch a changed default,
+  dropped state, renamed enum value, or altered field set. `just mutate` now reports this as a
+  clean "0 mutants generated — no covered, mutatable lines" (ADR-0229) rather than a baseline
+  failure.
+- **Covered, but reclassified to "could not be swept" (below):** `inventory/_row_typing` and
+  `mcp/middleware/binding_errors`.
 
 ### Could not be swept this run (46)
 
-- **mutmut copy-scope / baseline (≈14):** the module's covering test reads files mutmut does
+- **mutmut copy-scope / baseline (≈15):** the module's covering test reads files mutmut does
   not copy into `mutants/` (e.g. the top-level `docs/` tree), or a `tests/conftest.py`
   re-import fails in the copy. Examples: `mcp/resources/registrar.py`, `mcp/app.py`,
   `db/repositories.py`, `config/external_env.py`, `security/secrets/secret_registry.py`,
-  `version.py`.
+  `version.py`, and `mcp/middleware/binding_errors` (its import chain resolves a source path that
+  404s as `mutants/<frozen importlib._bootstrap>` in the copy — covered by a direct test, but the
+  baseline cannot run).
+- **mutmut cannot attribute a covering test (≈1):** `inventory/_row_typing` reaches 100% line
+  coverage and mutmut generates mutants for its `@dataclass(frozen=True, slots=True)` `RowTyper`
+  methods, but the per-mutant coverage map finds no covering test at any `max_stack_depth`, so it
+  stops early. Covered by a direct test (all validator accept/reject paths); not unit-mutatable
+  here.
 - **No covered/mutatable lines (≈17):** logic is reached only through async event-loop
   frames (deep `asyncio.run` stacks exceed `max_stack_depth`, so `mutate_only_covered_lines`
   records nothing) or only via PG-backed/cross-file tests. Examples:
@@ -103,6 +132,6 @@ first. Notable: every `mcp/middleware/*` module, the provider `settings.py` modu
 ## Resuming
 
 The mapping is reproducible. Re-running a bucket is cheap: already-clean modules report
-0 surviving and are skipped. For the next sweep, prioritize the 22 unmapped modules (write
-the missing unit test, then mutate) and the 112 PG-backed targets (serial, dedicated run
-with `docker ps` cleanup afterward).
+0 surviving and are skipped. The "no direct unit test" bucket is now closed (#665); the next
+sweep's remaining work is the 112 PG-backed targets (serial, dedicated run with `docker ps`
+cleanup afterward) and the tooling/structure-blocked set above.
