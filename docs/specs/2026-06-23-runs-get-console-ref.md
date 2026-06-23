@@ -1,6 +1,6 @@
 # Surface `refs.console` on `runs.get` (#735)
 
-- **Status:** Draft
+- **Status:** Accepted
 - **Date:** 2026-06-23
 - **Issue:** [#735](https://github.com/randomparity/kdive/issues/735) — MCP: surface
   `refs.console` on `runs.get`. Part of #736; coordinates with #734.
