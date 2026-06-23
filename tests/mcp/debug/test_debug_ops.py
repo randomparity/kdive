@@ -282,7 +282,7 @@ def test_set_breakpoint_returns_set(migrated_url: str) -> None:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
             controller = _FakeMiController(
                 {
-                    "-break-insert -h panic": [
+                    "-break-insert panic": [
                         {"type": "result", "message": "done", "payload": {"bkpt": {"number": "1"}}}
                     ]
                 }

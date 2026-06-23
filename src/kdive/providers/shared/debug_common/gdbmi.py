@@ -217,10 +217,11 @@ class GdbMiEngine:
                 code="bad_location",
                 details={"location": location},
             )
-        # Hardware breakpoint (-h): a software breakpoint's 0xCC write does not survive a frozen
-        # boot's reset-vector insertion and can fail on read-only kernel .text.
+        # Software breakpoint (no -h): QEMU's gdbstub honors a software breakpoint's 0xCC write
+        # on a running guest, but does not reliably trap on hardware (debug-register) breakpoints,
+        # so a `-break-insert -h` at a hot symbol could go `^running` and never `*stopped` (#711).
         return self._breakpoint_ref(
-            self.execute_mi_command(attachment, f"-break-insert -h {location}"), key="bkpt"
+            self.execute_mi_command(attachment, f"-break-insert {location}"), key="bkpt"
         )
 
     def clear_breakpoint(self, attachment: GdbMiAttachment, number: str) -> None:

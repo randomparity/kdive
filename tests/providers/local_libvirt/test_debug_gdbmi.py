@@ -171,10 +171,12 @@ def test_pygdbmi_response_timeout_can_return_empty_when_requested() -> None:
 # --- breakpoints ---------------------------------------------------------------------------
 
 
-def test_set_breakpoint_uses_hardware_insert_and_parses_ref(tmp_path: Path) -> None:
+def test_set_breakpoint_uses_software_insert_and_parses_ref(tmp_path: Path) -> None:
+    # Software breakpoint (no -h): QEMU's gdbstub honors software breakpoints reliably, whereas
+    # hardware breakpoints over the stub can silently never fire (#711).
     controller = _FakeMiController(
         responses={
-            "-break-insert -h panic": [
+            "-break-insert panic": [
                 {
                     "type": "result",
                     "message": "done",
@@ -186,7 +188,8 @@ def test_set_breakpoint_uses_hardware_insert_and_parses_ref(tmp_path: Path) -> N
     ref = _engine().set_breakpoint(_attachment(controller, tmp_path), "panic")
     assert ref.number == "1"
     assert ref.func == "panic"
-    assert "-break-insert -h panic" in controller.written
+    assert "-break-insert panic" in controller.written
+    assert "-break-insert -h panic" not in controller.written
 
 
 def test_set_breakpoint_rejects_non_identifier(tmp_path: Path) -> None:
@@ -558,7 +561,7 @@ def test_read_memory_transcript_line_is_redacted(tmp_path: Path) -> None:
     engine = _engine(Redactor(secret_values=[secret]))
     engine.append_transcript(
         attachment.transcript_path,
-        "-break-insert -h panic",
+        "-break-insert panic",
         [MiRecord(type="console", payload=f"loaded {secret}")],
     )
     transcript = attachment.transcript_path.read_text(encoding="utf-8")
@@ -578,7 +581,7 @@ def test_transcript_redactor_sees_secrets_registered_after_engine_creation(
     try:
         engine.append_transcript(
             attachment.transcript_path,
-            "-break-insert -h panic",
+            "-break-insert panic",
             [MiRecord(type="console", payload=f"loaded {secret}")],
         )
     finally:
@@ -851,7 +854,7 @@ def test_interrupt_returns_none_when_no_stop(tmp_path: Path) -> None:
 def test_run_maps_mi_error_to_debug_attach_failure(tmp_path: Path) -> None:
     controller = _FakeMiController(
         responses={
-            "-break-insert -h panic": [
+            "-break-insert panic": [
                 {"type": "result", "message": "error", "payload": {"msg": "no symbol"}}
             ]
         }
@@ -859,9 +862,9 @@ def test_run_maps_mi_error_to_debug_attach_failure(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as exc:
         _engine().set_breakpoint(_attachment(controller, tmp_path), "panic")
     assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
-    assert exc.value.details["command"] == "-break-insert -h panic"
+    assert exc.value.details["command"] == "-break-insert panic"
     assert exc.value.details["payload"] == {"msg": "no symbol"}
-    assert str(exc.value) == "gdb/MI command failed: -break-insert -h panic"
+    assert str(exc.value) == "gdb/MI command failed: -break-insert panic"
 
 
 def test_execute_mi_command_passes_command_timeout_to_write(tmp_path: Path) -> None:
