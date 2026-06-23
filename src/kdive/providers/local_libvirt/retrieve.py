@@ -61,7 +61,10 @@ from kdive.providers.shared.debug_common.crash_postmortem import (
 from kdive.providers.shared.debug_common.crash_postmortem import (
     run_crash_postmortem as _run_crash_postmortem,
 )
-from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import (
+    WORKER_READABILITY_REMEDIATION,
+    domain_name_for,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import object_store_from_env
 
@@ -176,6 +179,20 @@ class LocalLibvirtRetrieve:
                 vmcore_build_id=build_id,
                 raw_size_bytes=core.stat().st_size,
             )
+        except PermissionError as err:
+            # A host_dump core is written by the QEMU/root process under qemu:///system, so a
+            # non-root worker cannot read it back (ADR-0223). This is a host config problem that
+            # never heals on retry, not the uncategorized infrastructure failure it surfaced as.
+            raise CategorizedError(
+                "failed to read the captured core",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "system_id": str(system_id),
+                    "operation": "read_spooled_core",
+                    "error": type(err).__name__,
+                    "remediation": WORKER_READABILITY_REMEDIATION,
+                },
+            ) from err
         finally:
             _remove_spool(core)
 

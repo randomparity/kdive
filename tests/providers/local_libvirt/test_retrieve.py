@@ -21,6 +21,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
 from kdive.providers.ports import CaptureOutput, CrashOutput, CrashResult
+from kdive.providers.shared.runtime_paths import WORKER_READABILITY_REMEDIATION
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -321,6 +322,59 @@ def test_capture_host_dump_no_core_is_readiness_failure() -> None:
     with pytest.raises(CategorizedError) as exc:
         _host_dump_retriever(_FakeStore(), core_path=None).capture(_SYS, CaptureMethod.HOST_DUMP)
     assert exc.value.category is ErrorCategory.READINESS_FAILURE
+
+
+def _retriever_with_build_id_seam(
+    store: _FakeStore, *, core_path: Path, build_id_seam: object
+) -> LocalLibvirtRetrieve:
+    """A host_dump retriever whose build-id seam (the first spooled-core read) the caller sets."""
+    return LocalLibvirtRetrieve(
+        tenant=_TENANT,
+        store_factory=lambda: store,
+        wait_for_vmcore=lambda _sid: pytest.fail("kdump seam used for host_dump"),
+        read_vmcore_build_id=lambda _b: pytest.fail("bytes build-id seam used on host_dump path"),
+        read_vmcore_build_id_from_file=build_id_seam,  # type: ignore[arg-type]
+        extract_redacted_from_file=lambda _p: pytest.fail("dmesg read after a build-id failure"),
+        host_dump_capture=lambda _sid: core_path,
+        secret_registry=SecretRegistry(),
+    )
+
+
+def test_capture_host_dump_unreadable_core_is_configuration_error(tmp_path: Path) -> None:
+    """A root-owned host_dump core (qemu:///system writes it as root) is a host config problem,
+    not an uncategorized infrastructure failure (ADR-0223). The build-id read fails first."""
+
+    def deny(_p: Path) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    core = _spooled_core(tmp_path, b"\x7fELFcore")
+    retr = _retriever_with_build_id_seam(_FakeStore(), core_path=core, build_id_seam=deny)
+    with pytest.raises(CategorizedError) as exc:
+        retr.capture(_SYS, CaptureMethod.HOST_DUMP)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["operation"] == "read_spooled_core"
+    assert exc.value.details["remediation"] == WORKER_READABILITY_REMEDIATION
+    # the spool is still cleaned up despite the failure.
+    assert not core.exists()
+    assert not core.parent.exists()
+
+
+def test_capture_host_dump_missing_dependency_is_not_remapped(tmp_path: Path) -> None:
+    """A drgn-absent MISSING_DEPENDENCY (a CategorizedError, not a PermissionError) must surface
+    unchanged — the PermissionError remap must not swallow it."""
+
+    def no_drgn(_p: Path) -> str:
+        raise CategorizedError(
+            "drgn is not installed on this worker host",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+        )
+
+    core = _spooled_core(tmp_path, b"\x7fELFcore")
+    retr = _retriever_with_build_id_seam(_FakeStore(), core_path=core, build_id_seam=no_drgn)
+    with pytest.raises(CategorizedError) as exc:
+        retr.capture(_SYS, CaptureMethod.HOST_DUMP)
+    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert not core.parent.exists()
 
 
 def test_capture_host_dump_verifies_stored_checksum(tmp_path: Path) -> None:
