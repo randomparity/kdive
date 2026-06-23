@@ -42,13 +42,27 @@ existing discovery surface covers it and the `catalog` lane resolves it.
    entry seeds `state=registered`, `object_key=NULL`, `volume=NULL`, `path=<path>`, `digest=NULL`,
    `managed_by=config` (`reconcile_images._realize` gains a `StagedPathSource` branch).
 
-3. **Resolution.** A `catalog` rootfs ref whose backing row carries `path` resolves to that path
-   validated through `validate_local_component_path(path, allowed_roots=…)` — re-checking
-   absolute-ness, existence (`resolve(strict=True)`, which also rejects symlink escape),
-   `allowed_roots` containment, regular-file, and readability — and returns it directly: **no S3
-   fetch, no cache.** The existing `object_key`+`digest` S3 lane is unchanged. The catalog
-   resolver (`images/fetch.py`) is threaded the worker's already-known `allowed_roots` and
-   branches on which source column the registered row carries.
+3. **Resolution — wire the local-libvirt catalog rootfs lane (it is currently unwired).**
+   `LocalLibvirtProvisioning.from_env()` (`composition.py:94`) builds the provisioner with **no**
+   `catalog_fetch`, so today a `catalog` rootfs ref on local-libvirt raises *"catalog rootfs
+   materialization is not wired for this lane"* (`materialize.py:106`) and `fetch_registered_rootfs`
+   (`images/fetch.py`) has no production caller — local-libvirt advertises `catalog` rootfs support
+   (`composition.py:51`) it cannot deliver. We wire it: a synchronous
+   `rootfs_catalog_fetch_from_env(allowed_roots)` (mirroring `build_config_fetch_from_env`,
+   `build_configs/defaults.py:33`) lazily opens a sync `psycopg` connection + object store per call
+   — the provider seam is synchronous and runs off the event loop via `asyncio.to_thread`. It
+   resolves the registered row and branches on the source column:
+   - `path` (staged-path) → `validate_local_component_path(path, allowed_roots=…)` (re-checks
+     absolute-ness, existence via `resolve(strict=True)` which also rejects symlink escape,
+     `allowed_roots` containment, regular-file, readability) and returns it — **no object store,
+     no cache, no digest.**
+   - `object_key` (s3) → fetch the object, verify its sha256 against `digest`, cache it
+     (`fetch_registered_rootfs`'s existing logic, made synchronous).
+   The fetch resolves at **public scope** (`visibility = public`): local-libvirt's discoverable
+   catalog images are declared `PUBLIC` for exactly this purpose. Project-private catalog rootfs on
+   local-libvirt is out of scope (it resolves to "unknown registered rootfs catalog entry", not a
+   silent wrong image) — a follow-up can thread the owning project through the seam if local
+   multi-tenant private images ever land.
 
 4. **No new discovery surface.** `fixtures.list` / `images.list` query shapes are unchanged: a
    registered public `staged-path` row already surfaces by `(provider, name, arch)`, and the agent
@@ -63,6 +77,16 @@ existing discovery surface covers it and the `catalog` lane resolves it.
 - A pure-MCP agent discovers a local rootfs through the existing catalog surface and provisions
   it via the catalog lane — D1 closed with **no new tool, port, or response schema**. The
   local-libvirt walkthrough declares an `[[image]]` instead of instructing a host `ls`.
+- Wiring the lane also closes the latent gap where local-libvirt advertised `catalog` rootfs
+  support but raised "not wired for this lane": **both** s3-backed and staged-path catalog rootfs
+  refs now resolve on local-libvirt. `fetch_registered_rootfs` becomes live production code.
+- A registered staged-path row is **declared, not probed**: seeding sets `registered` with no
+  filesystem existence check (no analog to the S3 HEAD that gates `pending → registered`), matching
+  the remote `staged`/volume lane. Discovery may therefore advertise a `registered` staged-path
+  image whose file is currently absent/unreadable/escaped; **resolution is the authoritative gate**,
+  re-validating `allowed_roots` containment on every provision and failing closed as a
+  `configuration_error`. The reconcile context is server-side without guaranteed provider-root
+  filesystem access, so a seed-time probe is deliberately omitted.
 - The path is validated against `allowed_roots` on **every** resolution (no-leak / no-escape,
   ADR-0123/0065). A staged-path row whose file drifts outside roots, vanishes, becomes a
   non-regular file, or is unreadable fails closed as a `configuration_error` at provision — not
