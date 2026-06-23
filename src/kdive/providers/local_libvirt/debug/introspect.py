@@ -11,18 +11,26 @@ is `Redactor`-scrubbed **inside the port** — the port is the single redaction 
 later persistence is of already-redacted text. The real drgn package is an operator-provided
 live-host prerequisite, not a normal service dependency: the open seam imports it lazily, so a
 host without drgn surfaces a `MISSING_DEPENDENCY` from the open seam, not an ``ImportError``.
-`LocalLibvirtLiveIntrospect` (the live drgn-over-SSH port) remains stubbed until B3 (#677).
+`LocalLibvirtLiveIntrospect` (the live drgn-over-SSH port, ADR-0219) SSH-execs the in-guest
+`kdive-drgn <helper>` over the drgn-live SSH transport (ADR-0218) and assembles the same redacted
+report — drgn runs in the guest, the worker only opens SSH and parses JSON, mirroring
+`RemoteLibvirtLiveIntrospect`.
 """
 
 from __future__ import annotations
 
+import ipaddress
+import json
+import subprocess  # noqa: S404 - fixed argv only, no shell; helper name validated before use
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.prereqs.managed_ssh_key import managed_private_key_path
 from kdive.providers.ports import IntrospectOutput, LiveIntrospector, VmcoreIntrospector
+from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.shared.debug_common.drgn_program import (
     open_vmcore_program,
     read_vmcoreinfo_build_id,
@@ -34,6 +42,19 @@ from kdive.providers.shared.debug_common.introspect import (
     assemble_report,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+# The fixed live-helper set (ADR-0033 §2 / ADR-0085): the same three in-tree helpers as the
+# offline path. There is no caller-supplied drgn script — an unknown helper is rejected.
+_LIVE_HELPERS = frozenset({"tasks", "modules", "sysinfo"})
+# The single in-guest drgn helper the base image carries (ADR-0079/0085); SSH-exec'd with fixed
+# argv against the guest's live /proc/kcore, prints one section JSON object on stdout.
+_DRGN_HELPER = "/usr/local/sbin/kdive-drgn"
+_LOOPBACK_HOST = "127.0.0.1"  # the live transport is loopback-only (ADR-0218 §1)
+_SSH_USER = "root"  # the rootfs --ssh-injects the managed key to root (ADR-0052/0218 §1)
+# Bound the SSH+helper round-trip. introspect.run runs the seam via asyncio.to_thread, so this
+# also caps how long a wedged sshd can hold a worker thread-pool slot.
+_LIVE_INTROSPECT_SSH_TIMEOUT_S = 60
+_SSH_CONNECT_TIMEOUT_S = 10
 
 # --- LocalLibvirtVmcoreIntrospect (the realized port) --------------------------------------
 
@@ -171,82 +192,86 @@ def _normalize_attach_error(exc: Exception, message: str) -> CategorizedError:
     return CategorizedError(message, category=ErrorCategory.DEBUG_ATTACH_FAILURE)
 
 
-# --- LocalLibvirtLiveIntrospect (the live drgn-over-SSH port, ADR-0039) ---------------------
+# --- LocalLibvirtLiveIntrospect (the live drgn-over-SSH port, ADR-0219) ----------------------
 
-type _OpenLiveProgram = Callable[[str], _Program]
+# (transport_handle, helper) -> the section dict the in-guest ``kdive-drgn <helper>`` emits.
+type _RunLiveHelper = Callable[[str, str], dict[str, object]]
 
 
 class LocalLibvirtLiveIntrospect:
-    """The realized live-introspection port (ADR-0039 §3).
+    """The realized live-introspection port (ADR-0219).
 
-    Attaches drgn to the **running** guest kernel over the session's transport handle
-    (drgn-over-SSH), runs one selected helper from the same fixed set as the offline port,
-    and returns the same redacted, byte-bounded report. The port is the single redaction
-    boundary.
+    Runs live drgn introspection by SSH-exec'ing the in-guest ``kdive-drgn <helper>`` helper over
+    the drgn-live SSH transport (ADR-0218) and parsing its one-JSON-object section output, then
+    redacting + byte-capping it through the shared ``assemble_report`` (the single redaction
+    boundary). drgn runs **in the guest** against its own live ``/proc/kcore``; the worker only
+    opens an SSH connection and parses JSON. This mirrors ``RemoteLibvirtLiveIntrospect`` exactly,
+    differing only in the channel (SSH vs the qemu-guest-agent).
 
-    The drgn seams (``open_live_program``/``run_helper``) are ``None`` off-gate; ``run`` then
-    raises ``MISSING_DEPENDENCY``, mirroring the offline port's seam guard. The ``live_vm``
-    runner injects the real ``open_live_program`` on a host where the operator has provided
-    drgn; that seam opens drgn against the live kernel over the already-authenticated
-    transport.
+    The ``run_live_helper`` seam is ``None`` off-gate; ``introspect_live`` then raises
+    ``MISSING_DEPENDENCY``, mirroring the offline port's seam guard. ``from_env`` wires the real
+    ``_real_run_live_helper`` (its ``subprocess`` SSH call is the only ``live_vm`` seam; the handle
+    validation and error mapping run in CI).
     """
 
     def __init__(
         self,
         *,
         secret_registry: SecretRegistry,
-        open_live_program: _OpenLiveProgram | None = None,
-        run_helper: _RunHelper | None = None,
+        run_live_helper: _RunLiveHelper | None = None,
     ) -> None:
         self._secret_registry = secret_registry
-        self._open_live_program = open_live_program
-        self._run_helper = run_helper
+        self._run_live_helper = run_live_helper
         self._report_byte_cap = _REPORT_BYTE_CAP
 
     @classmethod
     def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtLiveIntrospect:
-        """Build from env; the drgn seam is left ``None`` so ``introspect_live`` raises off-gate."""
-        return cls(secret_registry=secret_registry)
+        """Build from env with the real SSH-exec seam (opens no SSH and imports no drgn here).
+
+        The seam closes over ``secret_registry`` so it can register the managed key value for
+        redaction; its real ``subprocess`` SSH call runs only under the ``live_vm`` gate, but its
+        handle-validation / managed-key-resolution branches run in CI.
+        """
+
+        def _seam(transport_handle: str, helper: str) -> dict[str, object]:
+            return _real_run_live_helper(transport_handle, helper, secret_registry=secret_registry)
+
+        return cls(secret_registry=secret_registry, run_live_helper=_seam)
 
     def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
-        """Attach drgn to the live kernel, run one helper, return a redacted report.
+        """SSH-exec one in-guest helper over the drgn-live transport; return a redacted report.
+
+        Validates ``helper`` against the fixed set **before** the seam runs (no SSH round-trip for
+        a bad helper), routes the returned section into its report field, and redacts + byte-caps
+        through ``assemble_report``.
 
         Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` if ``helper`` is not one of the fixed
-                in-tree helper names.
-            CategorizedError: ``MISSING_DEPENDENCY`` if the drgn seams were not configured
-                (off-gate); a transport-layer ``CategorizedError`` (``transport_failure`` /
-                ``debug_attach_failure``) propagated from the live seam; ``DEBUG_ATTACH_FAILURE``
-                if drgn cannot attach to the live kernel for any other reason.
+            CategorizedError: ``MISSING_DEPENDENCY`` if the live seam was not configured (off-gate);
+                ``CONFIGURATION_ERROR`` if ``helper`` is not one of the fixed in-tree helper names;
+                a transport-layer ``CategorizedError`` (``transport_failure`` /
+                ``debug_attach_failure`` / ``infrastructure_failure`` / ``configuration_error``)
+                propagated from the seam;
+                ``DEBUG_ATTACH_FAILURE`` if the seam fails for any other reason.
         """
-        if self._open_live_program is None or self._run_helper is None:
+        if self._run_live_helper is None:
             raise CategorizedError(
                 "live drgn introspection runs only under the live_vm gate",
                 category=ErrorCategory.MISSING_DEPENDENCY,
             )
-        try:
-            program = self._open_live_program(transport_handle)
-        except Exception as exc:  # noqa: BLE001 - any live-attach fault becomes a typed failure
-            raise _normalize_attach_error(
-                exc, "drgn could not attach to the live guest kernel"
-            ) from exc
-        if helper == "tasks":
-            tasks = self._run_helper(program, "tasks")
-            modules: dict[str, object] = {}
-            sysinfo: dict[str, object] = {}
-        elif helper == "modules":
-            tasks = {}
-            modules = self._run_helper(program, "modules")
-            sysinfo = {}
-        elif helper == "sysinfo":
-            tasks = {}
-            modules = {}
-            sysinfo = self._run_helper(program, "sysinfo")
-        else:
+        if helper not in _LIVE_HELPERS:
             raise CategorizedError(
                 f"unknown live introspection helper: {helper}",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
+        try:
+            section = self._run_live_helper(transport_handle, helper)
+        except Exception as exc:  # noqa: BLE001 - any seam fault becomes a typed failure
+            raise _normalize_attach_error(
+                exc, "drgn could not attach to the live guest kernel"
+            ) from exc
+        tasks = section if helper == "tasks" else {}
+        modules = section if helper == "modules" else {}
+        sysinfo = section if helper == "sysinfo" else {}
         return assemble_report(
             tasks,
             modules,
@@ -254,6 +279,124 @@ class LocalLibvirtLiveIntrospect:
             byte_cap=self._report_byte_cap,
             secret_registry=self._secret_registry,
         )
+
+
+def _validate_ssh_target(transport_handle: str) -> int:
+    """Decode the handle and return the loopback SSH port; raise CONFIGURATION_ERROR otherwise.
+
+    Re-enforces the ``ssh`` scheme + loopback host at use time (defense-in-depth: the connect
+    plane already enforced loopback at open time, ADR-0218 §1), so a tampered or forged handle
+    cannot redirect the SSH connection off loopback. Runs before any IO.
+    """
+    decoded = TransportHandleData.decode(transport_handle)
+    if decoded.kind != "ssh":
+        raise CategorizedError(
+            f"live introspection handle must be an ssh transport, got {decoded.kind!r}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    try:
+        is_loopback = ipaddress.ip_address(decoded.host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise CategorizedError(
+            "live introspection ssh host must be a loopback IP literal",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return decoded.port
+
+
+def _real_run_live_helper(
+    transport_handle: str, helper: str, *, secret_registry: SecretRegistry
+) -> dict[str, object]:
+    """SSH-exec ``kdive-drgn <helper>`` in the guest and return its section dict (ADR-0219).
+
+    Decodes + re-validates the handle (loopback ssh, before IO), resolves the kdive-managed
+    private key as the ``root`` identity, and runs ``ssh … kdive-drgn <helper>`` with fixed argv.
+    The helper name is validated by the caller against the fixed set, so no caller-controlled
+    string reaches the remote command.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle or an absent
+            managed key (both before IO); ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or
+            timeout; ``DEBUG_ATTACH_FAILURE`` for a non-zero helper exit (drgn could not attach
+            in-guest); ``INFRASTRUCTURE_FAILURE`` for undecodable / non-object helper stdout.
+    """
+    port = _validate_ssh_target(transport_handle)
+    key_path = managed_private_key_path()
+    if not key_path.is_file():
+        raise CategorizedError(
+            "the kdive-managed SSH private key is not present on this worker host",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"key_path": str(key_path)},
+        )
+    secret_registry.register(key_path.read_text(encoding="utf-8"), scope=None)
+    argv = [
+        "ssh",
+        "-i",
+        str(key_path),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        f"ConnectTimeout={_SSH_CONNECT_TIMEOUT_S}",
+        "-p",
+        str(port),
+        f"{_SSH_USER}@{_LOOPBACK_HOST}",
+        "--",
+        _DRGN_HELPER,
+        helper,
+    ]
+    return _exec_live_helper(argv)
+
+
+def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover - live_vm
+    """Run the fixed ssh argv and decode the in-guest helper's one JSON section object.
+
+    The ``# pragma: no cover - live_vm`` covers the real ssh subprocess; it needs a booted guest
+    with a reachable loopback-forwarded sshd, the managed key authorized, and the in-guest
+    ``kdive-drgn`` + ``drgn`` (the ADR-0219 named live gaps).
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; helper pre-validated
+            argv,
+            timeout=_LIVE_INTROSPECT_SSH_TIMEOUT_S,
+            check=False,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "live drgn introspection ssh round-trip exceeded the timeout",
+            category=ErrorCategory.TRANSPORT_FAILURE,
+            details={"timeout_s": _LIVE_INTROSPECT_SSH_TIMEOUT_S},
+        ) from exc
+    except OSError as exc:
+        raise CategorizedError(
+            "could not launch ssh for live drgn introspection",
+            category=ErrorCategory.TRANSPORT_FAILURE,
+        ) from exc
+    if proc.returncode != 0:
+        raise CategorizedError(
+            "in-guest drgn helper exited non-zero (could not attach to the live kernel)",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"exit_status": proc.returncode},
+        )
+    try:
+        decoded = json.loads(proc.stdout.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise CategorizedError(
+            "in-guest drgn helper returned undecodable JSON",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise CategorizedError(
+            "in-guest drgn helper output was not a JSON object",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    return cast("dict[str, object]", decoded)
 
 
 def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm
