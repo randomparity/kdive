@@ -24,7 +24,7 @@ from pydantic import Field
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -53,7 +53,13 @@ from kdive.mcp.tools._common import (
     config_error_reason as _config_error_reason,
 )
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run, with_runtime_for_system
-from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
+from kdive.mcp.tools._vmcore_targets import (
+    CONSOLE_CRASH,
+    EXPECTED_CONSOLE_CRASH,
+    NO_VMCORE,
+    resolve_run_vmcore_target,
+    vmcore_target_failure,
+)
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
@@ -69,6 +75,17 @@ from kdive.services.idempotency.envelope import keyed_mutation
 _log = logging.getLogger(__name__)
 
 _TRIAGE_COMMANDS: tuple[str, ...] = ("log", "bt")
+
+# Author-controlled narrative for the early-boot console-crash redirect (#734, ADR-0227). For a
+# Run that declared expected_boot_failure=console_crash, the kernel panics before kdump's capture
+# kernel is loaded via kexec, so kdump never produces a vmcore — none is expected by design, and
+# the console artifact is the evidence source. One shared constant so the wording cannot drift; it
+# interpolates no guest output, secret, or caller-supplied identifier.
+CONSOLE_CRASH_GUIDANCE = (
+    "this run declared an early-boot console_crash: the kernel panicked before the kdump "
+    "capture kernel was loaded via kexec, so no vmcore is produced and none is expected. "
+    "Read the console artifact instead — fetch its reference with runs.get."
+)
 
 # Idempotency-store kind for vmcore.fetch (the registered tool name); ADR-0193.
 _VMCORE_FETCH_KIND = "vmcore.fetch"
@@ -314,6 +331,29 @@ def _vmcore_item(artifact: RedactedArtifact) -> ToolResponse:
 # --- postmortem.crash / .triage ------------------------------------------------------------
 
 
+def _console_crash_redirect(run_id: str, exc: CategorizedError) -> ToolResponse | None:
+    """The early-boot console-crash redirect, or ``None`` to fall through (#734, ADR-0227).
+
+    Fires only when the resolver miss is ``no_vmcore`` **and** the Run declared
+    ``expected_boot_failure=console_crash`` (carried on the error's ``details`` by the resolver).
+    Returns a ``configuration_error`` — not the suppressed ``not_found`` the bare miss would yield
+    — so the author-controlled narrative ``detail`` reaches the caller and points it at the
+    console artifact via ``runs.get``. Every other miss returns ``None`` (the handler then keeps
+    the existing reason-keyed ``vmcore_target_failure`` envelope unchanged).
+    """
+    if exc.details.get("reason") != NO_VMCORE:
+        return None
+    if exc.details.get("expected_boot_failure") != CONSOLE_CRASH:
+        return None
+    return ToolResponse.failure(
+        run_id,
+        ErrorCategory.CONFIGURATION_ERROR,
+        detail=CONSOLE_CRASH_GUIDANCE,
+        suggested_next_actions=["runs.get", "artifacts.list"],
+        data={"reason": EXPECTED_CONSOLE_CRASH, "expected_boot_failure": CONSOLE_CRASH},
+    )
+
+
 async def _postmortem_crash(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -331,7 +371,8 @@ async def _postmortem_crash(
             try:
                 resolved = await resolve_run_vmcore_target(conn, ctx, run_id)
             except CategorizedError as exc:
-                return vmcore_target_failure(run_id, exc)
+                redirect = _console_crash_redirect(run_id, exc)
+                return redirect if redirect is not None else vmcore_target_failure(run_id, exc)
         try:
             output = await asyncio.to_thread(
                 crash.run_crash_postmortem,
