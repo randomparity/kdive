@@ -399,8 +399,10 @@ def test_start_session_unsupported_transport_is_capability_unsupported(migrated_
 def test_start_session_admits_gdbstub_but_rejects_drgn_live_on_gdbstub_only_provider(
     migrated_url: str,
 ) -> None:
-    # B1 (#675): local advertises {"gdbstub"} only — admission opens a gdbstub session but
-    # fail-fasts drgn-live with capability_unsupported before any resolver/transport runs (#697).
+    # Admission mechanism (ADR-0209): a provider advertising {"gdbstub"} only opens a gdbstub
+    # session but fail-fasts drgn-live with capability_unsupported before any resolver/transport
+    # runs. (Local now advertises both transports — #697/ADR-0218 — so the descriptor here is a
+    # deliberately narrowed fake driving the admission gate, not local's live descriptor.)
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
