@@ -738,6 +738,62 @@ def test_execution_control_resume_raises_transport_stall_after_interrupt_timeout
     assert "-exec-interrupt" in engine.transcript_commands
 
 
+class _CaptureStopEngine(_ExecutionEngine):
+    """An engine whose continue command itself returns an early ``*stopped`` (#711)."""
+
+    def execute_mi_command(self, attachment: GdbMiAttachment, command: str) -> list[MiRecord]:
+        del attachment
+        self.executed.append(command)
+        return [
+            MiRecord(type="result", message="running"),
+            MiRecord(
+                type="notify",
+                message="stopped",
+                payload={"reason": "breakpoint-hit", "bkptno": "1"},
+            ),
+        ]
+
+
+def test_resume_returns_stop_captured_by_continue_command(tmp_path: Path) -> None:
+    # Test A (#711): the breakpoint fires within milliseconds, so the continue command's own
+    # reader captures ^running AND the *stopped. resume() must surface that stop without polling
+    # the stream afresh (where the already-consumed *stopped would be gone -> false stall).
+    engine = _CaptureStopEngine()
+    control = ExecutionControl(engine, command_timeout_sec=1.0)
+    controller = _FakeMiController(reads=[])
+    attachment = _attachment(controller, tmp_path)
+
+    stop = control.resume(attachment, "-exec-continue", timeout_sec=1.0)
+
+    assert stop.reason == "breakpoint-hit"
+    assert stop.bkptno == "1"
+    assert engine.executed == ["-exec-continue"]
+    # No fresh stream poll and no interrupt: the stop came from the continue records.
+    assert controller.read_timeouts == []
+    assert controller.written == []
+
+
+def test_resume_falls_through_to_wait_when_continue_has_no_stop(tmp_path: Path) -> None:
+    # Test B (#711 regression guard): a slow breakpoint leaves the continue command with only
+    # ^running, so resume() must still poll wait_for_stop for the later *stopped.
+    engine = _ExecutionEngine()
+    control = ExecutionControl(engine, command_timeout_sec=1.0)
+    controller = _FakeMiController(
+        reads=[
+            [{"type": "notify", "message": "stopped", "payload": {"reason": "breakpoint-hit"}}],
+        ],
+    )
+    attachment = _attachment(controller, tmp_path)
+
+    stop = control.resume(attachment, "-exec-continue", timeout_sec=1.0)
+
+    assert stop.reason == "breakpoint-hit"
+    assert engine.executed == ["-exec-continue"]
+    # The fall-through poll ran (at least one read slice) and no interrupt was needed.
+    assert controller.read_timeouts == [0.5]
+    assert controller.written == []
+
+
 def test_continue_returns_stop_on_breakpoint_hit(tmp_path: Path) -> None:
     controller = _FakeMiController(
         responses={"-exec-continue": [{"type": "result", "message": "running", "payload": None}]},
