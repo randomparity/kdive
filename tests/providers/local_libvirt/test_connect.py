@@ -451,6 +451,92 @@ def test_open_unsupported_kind_is_configuration_error() -> None:
     assert str(exc.value) == "unsupported transport kind: 'telnet'"
 
 
+# --- SSH banner reachability probe (ADR-0218/0039) -----------------------------------------
+
+
+def test_ssh_banner_verdict_accepts_openssh_identification() -> None:
+    assert connect_mod._ssh_banner_verdict(b"SSH-2.0-OpenSSH_9.6\r\n") is True
+
+
+def test_ssh_banner_verdict_accepts_bare_prefix() -> None:
+    # The prefix alone is enough — a live sshd has identified itself as speaking SSH.
+    assert connect_mod._ssh_banner_verdict(b"SSH-") is True
+
+
+def test_ssh_banner_verdict_undecided_while_still_a_prefix() -> None:
+    # Partial reads that could still complete to "SSH-" keep the probe reading.
+    assert connect_mod._ssh_banner_verdict(b"") is None
+    assert connect_mod._ssh_banner_verdict(b"S") is None
+    assert connect_mod._ssh_banner_verdict(b"SSH") is None
+
+
+def test_ssh_banner_verdict_rejects_non_ssh_listener() -> None:
+    # A listener that accepts TCP but speaks something else is rejected once the first bytes
+    # diverge from "SSH-".
+    assert connect_mod._ssh_banner_verdict(b"220 smtp ready\r\n") is False
+    assert connect_mod._ssh_banner_verdict(b"SSX") is False
+
+
+class _FakeSshSocket:
+    """A connected socket that yields canned recv chunks, then EOF."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = [*chunks, b""]
+
+    def settimeout(self, _timeout: float) -> None:
+        return None
+
+    def recv(self, _size: int) -> bytes:
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+def test_real_ssh_connect_false_when_connection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_connect(address: tuple[str, int], *, timeout: float) -> object:
+        assert address == ("127.0.0.1", 2222)
+        assert timeout > 0
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(connect_mod.socket, "create_connection", fail_connect)
+    assert connect_mod._real_ssh_connect("127.0.0.1", 2222) is False
+
+
+def test_real_ssh_connect_true_when_peer_sends_ssh_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        connect_mod.socket,
+        "create_connection",
+        lambda _addr, *, timeout: _FakeSshSocket([b"SSH-2.0-OpenSSH_9.6\r\n"]),
+    )
+    assert connect_mod._real_ssh_connect("127.0.0.1", 2222) is True
+
+
+def test_real_ssh_connect_false_when_peer_is_not_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        connect_mod.socket,
+        "create_connection",
+        lambda _addr, *, timeout: _FakeSshSocket([b"220 smtp ready\r\n"]),
+    )
+    assert connect_mod._real_ssh_connect("127.0.0.1", 2222) is False
+
+
+def test_real_ssh_connect_false_when_peer_sends_no_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A listener that accepts then immediately closes (EOF) without a banner is rejected.
+    monkeypatch.setattr(
+        connect_mod.socket, "create_connection", lambda _addr, *, timeout: _FakeSshSocket([])
+    )
+    assert connect_mod._real_ssh_connect("127.0.0.1", 2222) is False
+
+
 def _ssh_xml(port: int) -> str:
     from kdive.providers.shared.libvirt_xml import QEMU_NS
 
