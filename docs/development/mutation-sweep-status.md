@@ -19,6 +19,11 @@ follow-up sweep. See `mutation-testing.md` for how `just mutate` itself works.
 
 ## Reusable tooling workarounds
 
+> **Folded into the recipe (ADR-0229).** `just mutate` now applies both workarounds below
+> automatically — it generates a per-run `sitecustomize.py` shim on a unique temp dir, prepends it
+> to `PYTHONPATH`, and sets `UV_NO_SYNC=1` for the spawned mutmut/pytest subprocesses. No manual
+> `export` is needed; the detail below is retained as the rationale.
+
 Two environment issues block `just mutate` on parts of the tree. Both are worked around
 without editing repo source — apply them when sweeping cli/mcp/security/config modules.
 

@@ -60,3 +60,10 @@ config afterward. mutmut runs the suite from an isolated copy under `mutants/` (
 the wrapper copies the whole `src/kdive` package (otherwise `import kdive.*` fails in the copy)
 and scopes mutation to your target file with `only_mutate`. The `mutants/` cache is reused when
 you re-run the same target and reset when you switch targets.
+
+The wrapper also spawns mutmut with two environment workarounds applied automatically, so a run
+against any import chain (mcp/cli/security/config) needs no manual setup (ADR-0229): it generates
+a per-run `sitecustomize.py` shim on a unique temp dir and prepends it to `PYTHONPATH` (eagerly
+completing the `beartype.claw` + `multiprocessing` imports so the beartype meta-path hook cannot
+abort a spawned worker's baseline), and sets `UV_NO_SYNC=1` (so `uv run` never rewrites the shared
+editable `kdive.pth` under a parallel worktree). The shim dir is removed when the run ends.

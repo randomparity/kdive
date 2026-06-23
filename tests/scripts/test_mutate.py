@@ -5,6 +5,7 @@ mutmut itself is never run here; these test the wrapper's pure decision logic.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -24,7 +25,9 @@ from scripts.mutate import (
     resolve_source,
     resolve_test_paths,
     run_mutmut,
+    shim_source,
     signature,
+    subprocess_env,
     write_signature,
 )
 
@@ -265,3 +268,41 @@ def test_run_mutmut_aborts_on_broken_baseline() -> None:
 
 def test_collect_results_returns_stdout() -> None:
     assert collect_results(runner=_fake_runner(0, "a: survived\n")) == "a: survived\n"
+
+
+def test_subprocess_env_sets_uv_no_sync() -> None:
+    env = subprocess_env({}, "/tmp/shim")
+    assert env["UV_NO_SYNC"] == "1"
+
+
+def test_subprocess_env_uses_shim_dir_when_no_existing_pythonpath() -> None:
+    env = subprocess_env({}, "/tmp/shim")
+    assert env["PYTHONPATH"] == "/tmp/shim"
+
+
+def test_subprocess_env_prepends_shim_dir_preserving_existing_pythonpath() -> None:
+    env = subprocess_env({"PYTHONPATH": "/existing/a"}, "/tmp/shim")
+    assert env["PYTHONPATH"] == f"/tmp/shim{os.pathsep}/existing/a"
+
+
+def test_subprocess_env_preserves_other_base_keys_without_mutating_input() -> None:
+    base = {"HOME": "/home/dev", "PYTHONPATH": "/x"}
+    env = subprocess_env(base, "/tmp/shim")
+    assert env["HOME"] == "/home/dev"
+    # the builder must not mutate the caller's mapping in place
+    assert base == {"HOME": "/home/dev", "PYTHONPATH": "/x"}
+
+
+def test_shim_source_eager_imports_beartype_and_multiprocessing_under_guard() -> None:
+    src = shim_source()
+    assert "import multiprocessing" in src
+    assert "beartype.claw._clawstate" in src
+    assert "beartype.claw._importlib._clawimpload" in src
+    assert "import pytest" in src
+    # the eager imports must be best-effort so a missing optional dep never aborts startup
+    assert "try:" in src
+    assert "except Exception:" in src
+
+
+def test_shim_source_is_valid_python() -> None:
+    compile(shim_source(), "sitecustomize.py", "exec")

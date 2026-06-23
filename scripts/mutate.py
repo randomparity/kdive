@@ -17,10 +17,12 @@ See docs/development/mutation-testing.md.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -181,8 +183,57 @@ _CONFIG_PATH = _ROOT / "setup.cfg"
 _MUTANTS_DIR = _ROOT / "mutants"
 
 
-def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=_ROOT, text=True, capture_output=True, check=False)
+def shim_source() -> str:
+    """Return the ``sitecustomize.py`` body that pre-empts the beartype.claw import race.
+
+    ``key_value`` (via ``py-key-value-aio``) installs a beartype meta-path import hook at import
+    time. In a freshly *spawned* mutmut Pool worker that hook can intercept a stdlib/pytest import
+    while ``beartype.claw._clawstate`` is still initializing, aborting mutmut's baseline. Eagerly
+    completing the ``multiprocessing`` + ``beartype.claw`` + ``pytest`` imports at interpreter
+    startup (every worker imports ``sitecustomize`` if it is on ``PYTHONPATH``) closes the window.
+    Best-effort: a missing optional dependency must never abort startup, so the imports are guarded.
+    """
+    return (
+        "import multiprocessing.connection\n"
+        "import multiprocessing.context\n"
+        "import multiprocessing.pool\n"
+        "import multiprocessing.popen_spawn_posix\n"
+        "import multiprocessing.queues\n"
+        "import multiprocessing.reduction\n"
+        "import multiprocessing.resource_sharer\n"
+        "import multiprocessing.resource_tracker\n"
+        "import multiprocessing.spawn\n"
+        "import multiprocessing.synchronize\n"
+        "import multiprocessing.util\n"
+        "\n"
+        "try:\n"
+        "    import beartype.claw._clawstate\n"
+        "    import beartype.claw._importlib._clawimpload\n"
+        "    import pytest\n"
+        "except Exception:\n"
+        "    pass\n"
+    )
+
+
+def subprocess_env(base: dict[str, str], shim_dir: str) -> dict[str, str]:
+    """Build the env for the spawned pytest/mutmut subprocesses (folds in the two workarounds).
+
+    Prepends ``shim_dir`` to any inherited ``PYTHONPATH`` (so the worker auto-imports the shim
+    without losing an existing path) and sets ``UV_NO_SYNC=1`` (so ``uv run`` never rewrites the
+    shared editable ``kdive.pth`` out from under a parallel worktree). The caller's mapping is not
+    mutated.
+    """
+    env = dict(base)
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = f"{shim_dir}{os.pathsep}{existing}" if existing else shim_dir
+    env["UV_NO_SYNC"] = "1"
+    return env
+
+
+def _run_subprocess(
+    cmd: list[str], env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=_ROOT, text=True, capture_output=True, check=False, env=env)
 
 
 def preflight_collect(test_paths: list[str], runner=_run_subprocess) -> None:
@@ -233,18 +284,28 @@ def main(argv: list[str] | None = None) -> int:
         source_rel = resolve_source(args.source)
         test_paths = resolve_test_paths(args.tests)
         guard_no_existing_config(_CONFIG_PATH)
-        preflight_collect(test_paths)
-        sig = signature(source_rel, test_paths)
-        prepare_store(sig, _MUTANTS_DIR)
-        _CONFIG_PATH.write_text(render_config(source_rel, test_paths))
+        shim_dir = tempfile.mkdtemp(prefix="kdive-mutate-shim-")
+        (Path(shim_dir) / "sitecustomize.py").write_text(shim_source())
+        env = subprocess_env(dict(os.environ), shim_dir)
+
+        def runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+            return _run_subprocess(cmd, env=env)
+
         try:
-            run_stdout = run_mutmut()
-            survivors = parse_survivors(collect_results())
-            total = parse_total_mutants(run_stdout)
-            write_signature(sig, _MUTANTS_DIR)
-            print(format_summary(total, survivors, source_rel, test_paths))
+            preflight_collect(test_paths, runner=runner)
+            sig = signature(source_rel, test_paths)
+            prepare_store(sig, _MUTANTS_DIR)
+            _CONFIG_PATH.write_text(render_config(source_rel, test_paths))
+            try:
+                run_stdout = run_mutmut(runner=runner)
+                survivors = parse_survivors(collect_results(runner=runner))
+                total = parse_total_mutants(run_stdout)
+                write_signature(sig, _MUTANTS_DIR)
+                print(format_summary(total, survivors, source_rel, test_paths))
+            finally:
+                _CONFIG_PATH.unlink(missing_ok=True)
         finally:
-            _CONFIG_PATH.unlink(missing_ok=True)
+            shutil.rmtree(shim_dir, ignore_errors=True)
     except MutateError as exc:
         print(f"mutate: {exc}", file=sys.stderr)
         return 1
