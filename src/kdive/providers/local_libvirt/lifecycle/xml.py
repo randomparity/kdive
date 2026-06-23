@@ -126,7 +126,10 @@ def _append_ssh_forward(domain: ET.Element, ssh_port: int | None) -> None:
     ``-netdev user`` is QEMU's built-in unprivileged SLIRP user-mode network (no bridge, no root,
     no daemon); ``hostfwd=tcp:127.0.0.1:<port>-:22`` forwards the loopback-only host port to the
     guest's sshd. The ``virtio-net-pci`` device binds the netdev so the guest sees a single NIC it
-    brings up by DHCP.
+    brings up by DHCP. ``restrict=on`` isolates the guest to the forwarded port only — it blocks
+    all guest-initiated outbound traffic (NAT'd internet/DNS, host-network access) the drgn-live
+    control channel never needs, so an agent-supplied kernel cannot use the NIC for egress; the
+    inbound ``hostfwd`` SSH connection still works (ADR-0218 §2, defense-in-depth on the new NIC).
     """
     if ssh_port is None:
         raise CategorizedError(
@@ -134,7 +137,7 @@ def _append_ssh_forward(domain: ET.Element, ssh_port: int | None) -> None:
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     commandline = _qemu_commandline(domain)
-    netdev = f"user,id=kdivessh,hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
+    netdev = f"user,id=kdivessh,restrict=on,hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")

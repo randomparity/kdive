@@ -268,7 +268,7 @@ def test_install_preserves_the_ssh_forward_qemu_commandline(tmp_path: Path) -> N
         f"{_SYS}</kdive:system></metadata>"
         "<qemu:commandline>"
         "<qemu:arg value='-netdev'/>"
-        "<qemu:arg value='user,id=kdivessh,hostfwd=tcp:127.0.0.1:40022-:22'/>"
+        "<qemu:arg value='user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22'/>"
         "<qemu:arg value='-device'/>"
         "<qemu:arg value='virtio-net-pci,netdev=kdivessh'/>"
         "</qemu:commandline>"

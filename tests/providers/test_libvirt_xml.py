@@ -25,7 +25,7 @@ _GDB_DOMAIN = (
 
 
 def _ssh_arg(port: int) -> str:
-    return f"user,id=kdivessh,hostfwd=tcp:127.0.0.1:{port}-:22"
+    return f"user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:22"
 
 
 def _ssh_domain(port: int) -> str:

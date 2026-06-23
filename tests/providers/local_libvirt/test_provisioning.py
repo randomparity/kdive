@@ -302,7 +302,7 @@ def test_render_emits_loopback_ssh_forward_when_credential_ref_set() -> None:
     ]
     assert args == [
         "-netdev",
-        "user,id=kdivessh,hostfwd=tcp:127.0.0.1:40022-:22",
+        "user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22",
         "-device",
         "virtio-net-pci,netdev=kdivessh",
     ]

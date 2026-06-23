@@ -63,7 +63,7 @@ passthrough (the same `QEMU_NS` / `register_qemu_namespace()` helpers B1 and rem
 ```xml
 <qemu:commandline>
   <qemu:arg value="-netdev"/>
-  <qemu:arg value="user,id=kdivessh,hostfwd=tcp:127.0.0.1:<port>-:22"/>
+  <qemu:arg value="user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:<port>-:22"/>
   <qemu:arg value="-device"/>
   <qemu:arg value="virtio-net-pci,netdev=kdivessh"/>
 </qemu:commandline>
@@ -71,7 +71,11 @@ passthrough (the same `QEMU_NS` / `register_qemu_namespace()` helpers B1 and rem
 
 `-netdev user` is QEMU's built-in unprivileged SLIRP user-mode network (no host bridge, no root,
 no extra daemon); `hostfwd=tcp:127.0.0.1:<port>-:22` forwards a **loopback-only** host port to the
-guest's sshd. The `127.0.0.1` literal is hard-coded: local-libvirt is single-host and the loopback
+guest's sshd. `restrict=on` isolates the guest to that forwarded port only — it blocks every
+guest-initiated outbound packet (NAT'd internet/DNS, host-network access) the drgn-live control
+channel never needs, while the inbound `hostfwd` SSH connection and SLIRP's built-in DHCP still
+work; an agent-supplied kernel therefore cannot use the new NIC for egress (defense-in-depth). The
+`127.0.0.1` literal is hard-coded: local-libvirt is single-host and the loopback
 bind is the security boundary, identical to the gdbstub `-gdb tcp:127.0.0.1:<port>` rule and
 mirrored by `_is_loopback_literal` enforcement at connect time. The guest is expected to bring the
 NIC up by DHCP (SLIRP's built-in DHCP server hands the guest `10.0.2.15`) using the fedora
