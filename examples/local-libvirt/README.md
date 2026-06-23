@@ -146,6 +146,12 @@ host allocatable, and `KDIVE_GUEST_IMAGE` is enough to boot a System. By default
 resolved independently of the working directory — there is no repo-relative
 `./systems.toml` fallback — so the stack behaves the same no matter where you launch it.
 
+For an MCP agent with **no host shell**, `KDIVE_GUEST_IMAGE` is not enough on its own: that
+host path is not visible from the MCP surface, so an agent cannot discover what to provision
+with. Declaring a `staged-path` `[[image]]` (below) registers that local file in the catalog
+so `fixtures.list` / `systems.profile_examples` surface it and the agent provisions with a
+`catalog` reference — no host `ls` (ADR-0228).
+
 If you want to declaratively pin host config, prices, or build fragments, create
 `~/.config/kdive/systems.toml`. The file must start with `schema_version = 2`. The
 sections relevant to this **local-libvirt** example are below; the repo-root
@@ -165,14 +171,15 @@ cost_class = "local"
 # concurrent_allocation_cap = 1   # optional; how many allocations this host serves at once
 # pool = "default"                # optional; group interchangeable hosts for by-pool allocation
 
-# OPTIONAL: register a local-libvirt rootfs in the image_catalog for the *catalog*
-# provisioning lane (provision with `rootfs = {kind = "catalog", name = "..."}`). This is a
-# DIFFERENT path from KDIVE_GUEST_IMAGE, not a drop-in for it: KDIVE_GUEST_IMAGE is a
-# local-disk file booted directly via `rootfs.kind = "local"` with no catalog row, while the
-# `s3` source below boots a System only after you actually upload the qcow2 to the object
-# store at `object_key` — `build-fs` writes the file to local disk and does NOT publish it to
-# S3. Until the object exists the row stays `defined` and cannot boot anything. `source` is
-# exactly one of s3 | build | staged; an `s3` image is shown here.
+# RECOMMENDED: register the local-disk rootfs `build-fs` wrote as a catalog image, so an
+# MCP agent can DISCOVER it (`fixtures.list` / `systems.profile_examples`) and provision with
+# `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-43"}` —
+# no host `ls` and no `KDIVE_GUEST_IMAGE` needed. A `staged-path` source (ADR-0228) points at
+# the host file directly: it seeds `registered` (bootable) immediately, with no object-store
+# upload. The path must live under the provider `allowed_roots` (`/var/lib/kdive/rootfs`) and
+# the image must be `public`. `source` is exactly one of s3 | build | staged | staged-path;
+# use `s3` instead only if you publish the qcow2 to the object store (the row then stays
+# `defined` and unbootable until the object exists).
 [[image]]
 provider = "local-libvirt"
 name = "fedora-kdive-ready-43"
@@ -182,9 +189,8 @@ root_device = "/dev/vda"
 visibility = "public"
 capabilities = ["kdive-ready-console", "ssh", "drgn"]
 [image.source]
-kind = "s3"
-object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
-# digest = "sha256:…"   # uncomment once published to mark the row `registered`
+kind = "staged-path"
+path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
 
 # Price the `local` cost class (provider-agnostic). A host whose cost_class has no
 # coefficient is admitted but denied every allocation (configuration_error).
