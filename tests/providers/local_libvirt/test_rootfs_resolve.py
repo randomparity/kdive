@@ -62,6 +62,66 @@ def test_validate_rootfs_reference_rejects_undeclared_catalog_name(tmp_path, mon
     assert e.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
+_TWO_IMAGE_SYSTEMS_TOML = (
+    _DECLARED_SYSTEMS_TOML
+    + """[[image]]
+provider = "local-libvirt"
+name = "alpha"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+[image.source]
+kind = "staged"
+volume = "alpha.qcow2"
+"""
+)
+
+
+def test_validate_rootfs_reference_undeclared_name_enumerates_available(
+    tmp_path, monkeypatch
+) -> None:
+    # The rejection carries the declared (provider, name) set so a black-box MCP caller can
+    # self-correct a typo without host access (#731, ADR-0224).
+    toml = tmp_path / "systems.toml"
+    toml.write_text(_DECLARED_SYSTEMS_TOML, encoding="utf-8")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(toml))
+    with pytest.raises(CategorizedError) as e:
+        validate_rootfs_reference(
+            CatalogComponentRef(kind="catalog", provider="local-libvirt", name="no-such")
+        )
+    assert e.value.details["available"] == ["local-libvirt/known"]
+
+
+def test_validate_rootfs_reference_available_is_sorted_provider_name(tmp_path, monkeypatch) -> None:
+    toml = tmp_path / "systems.toml"
+    toml.write_text(_TWO_IMAGE_SYSTEMS_TOML, encoding="utf-8")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(toml))
+    with pytest.raises(CategorizedError) as e:
+        validate_rootfs_reference(
+            CatalogComponentRef(kind="catalog", provider="local-libvirt", name="no-such")
+        )
+    # Sorted "provider/name" strings, stable wire order regardless of declaration order.
+    assert e.value.details["available"] == ["local-libvirt/alpha", "local-libvirt/known"]
+
+
+def test_validate_rootfs_reference_available_leaks_no_caller_input(tmp_path, monkeypatch) -> None:
+    toml = tmp_path / "systems.toml"
+    toml.write_text(_DECLARED_SYSTEMS_TOML, encoding="utf-8")
+    monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(toml))
+    with pytest.raises(CategorizedError) as e:
+        validate_rootfs_reference(
+            CatalogComponentRef(kind="catalog", provider="local-libvirt", name="no-such")
+        )
+    available = e.value.details["available"]
+    assert isinstance(available, list)
+    entries: list[str] = [entry for entry in available if isinstance(entry, str)]
+    assert entries == available  # every element is a string
+    # Only operator-declared provider/name strings — never the caller-submitted bad name.
+    assert "no-such" not in entries
+    assert all("/" in entry for entry in entries)
+
+
 def test_validate_rootfs_reference_accepts_declared_catalog_name(tmp_path, monkeypatch) -> None:
     toml = tmp_path / "systems.toml"
     toml.write_text(_DECLARED_SYSTEMS_TOML, encoding="utf-8")
