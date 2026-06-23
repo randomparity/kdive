@@ -60,22 +60,33 @@ depend on #735 landing first and works against `main` as-is.
    handler (`mcp/tools/lifecycle/vmcore.py`), when `resolve_run_vmcore_target` raises
    a `no_vmcore` `not_found`, consult the already-loaded Run's
    `expected_boot_failure`. If its `kind == "console_crash"`, return a tailored
-   envelope **instead of** the suppressed `not_found`:
-   - category stays `not_found` (no core *was* found — the category is honest), but
-   - `data.reason` becomes `expected_console_crash` (a new, distinct reason token, so
-     a client can branch on it),
-   - `data.expected_boot_failure = "console_crash"` echoes the run's declared kind,
-   - `suggested_next_actions = ["runs.get", "artifacts.list"]` point at the tools
-     that surface the console artifact reference (`runs.get` carries `refs.console`
-     per #735; `artifacts.list` enumerates the run's artifacts), and
-   - a real, non-suppressed narrative `detail` explains the early-boot-crash-before-
-     kexec case and that the console is the evidence source.
+   envelope **instead of** the suppressed `not_found`, categorized
+   `configuration_error`:
+   - The category is `configuration_error`, **not** `not_found`. This is the
+     deliberate, established way (ADR-0142's `debug.start_session` "booted into
+     expected crash" redirect) to surface an author-controlled redirect `detail`: the
+     ADR-0123 no-leak seam force-suppresses a `not_found` `detail` to the `"not
+     found"` constant, so a real narrative `detail` is *impossible* on a `not_found`
+     envelope. For a `console_crash` run the failure is not "the core is not yet
+     captured" (a transient `not_found`) but "this run can never produce a core — you
+     called the wrong tool for its declared failure mode", which is a caller/usage
+     mismatch — `configuration_error` — exactly as ADR-0142 classifies the analogous
+     live-attach-on-expected-crash redirect.
+   - `data.reason = "expected_console_crash"` (a new, distinct reason token a client
+     can branch on, paired with the prose detail per the ADR-0174 reason+detail
+     pattern).
+   - `data.expected_boot_failure = "console_crash"` echoes the run's declared kind.
+   - `suggested_next_actions = ["runs.get", "artifacts.list"]` point at the tools that
+     surface the console artifact reference (`runs.get` carries `refs.console` per
+     #735; `artifacts.list` enumerates the run's artifacts).
+   - A real, non-suppressed narrative `detail` explains the early-boot-crash-before-
+     kexec case and that the console is the evidence source. It passes the seam
+     because `configuration_error` is not a suppressed category, and it leaks nothing:
+     the run already resolved (project-scoped, viewer-authorized) and the text is
+     identical for every `console_crash` run.
 
-   The narrative is carried as `data.guidance` (always passes the seam) *and* as the
-   `detail` field. Because the tailored envelope is built with a non-suppressed
-   construction path for this one case, the `detail` reaches the client. A run with
-   no `expected_boot_failure`, or one whose kind is not `console_crash`, keeps the
-   existing reason-keyed `no_vmcore` envelope unchanged.
+   A run with no `expected_boot_failure`, or one whose kind is not `console_crash`,
+   keeps the existing reason-keyed `no_vmcore` `not_found` envelope unchanged.
 
 2. **Non-null `detail` on `vmcore.fetch` for a non-`CRASHED` System.** The
    `current_status` `_config_error` gains a fixed-template `detail`: "system must be
@@ -89,16 +100,21 @@ depend on #735 landing first and works against `main` as-is.
 
 ## Consequences
 
-- An agent that triages an early-boot console-crash run now gets a `not_found` whose
-  `detail` and `data.guidance` explain that no vmcore is expected by design and point
-  at `runs.get` for the console reference — instead of a bare `"not found"` /
-  `no_vmcore`. The category stays `not_found` (no core exists), preserving the
-  is-error contract; only the reason token, next actions, and narrative change for
-  this one case.
+- An agent that triages an early-boot console-crash run now gets a
+  `configuration_error` whose `detail` explains that no vmcore is expected by design
+  and whose `suggested_next_actions` point at `runs.get` for the console reference —
+  instead of a bare `not_found` / `"not found"` / `no_vmcore`.
+- The error **category changes** for this one case: a `console_crash` run that
+  resolves to no core now reports `configuration_error` (was `not_found`). A client
+  that branched on `not_found` + `data.reason == "no_vmcore"` for the console-crash
+  run will now see `configuration_error` + `data.reason == "expected_console_crash"`.
+  This is the same trade ADR-0142 made for the `debug.start_session` expected-crash
+  redirect; the category shift is what makes the narrative `detail` deliverable. A
+  non-console-crash run (a run that simply has not captured yet) is **unchanged** —
+  still `not_found` + `no_vmcore`.
 - A new `data.reason` value `expected_console_crash` joins the `no_vmcore` /
   `no_debuginfo` / `no_build` vocabulary. It is additive; existing clients keying on
-  the old tokens are unaffected, and a non-console-crash run still reports
-  `no_vmcore`.
+  the old tokens for non-console-crash runs are unaffected.
 - `vmcore.fetch` on a non-crashed System now carries a one-line reason. The
   `current_status` data field and the `configuration_error` category are unchanged,
   so existing callers see only a populated `detail` where it was null.
@@ -107,20 +123,26 @@ depend on #735 landing first and works against `main` as-is.
 
 ## Alternatives considered
 
-- **Put the narrative in the suppressed `not_found` `detail`.** Rejected: ADR-0123
-  forces a `not_found` `detail` to the `"not found"` constant, so the narrative would
-  never reach the client. The tailored-envelope path exists precisely because the
-  console-crash case is a resolved-and-authorized run, not a no-leak lookup miss.
-- **Change the `no_vmcore` category to `configuration_error`** so its `detail` passes
-  the seam unconditionally. Rejected: the postmortem genuinely found no core, which
-  is `not_found` per ADR-0097/0142; flipping the category for narrative convenience
-  would mis-describe the failure and break clients that branch on `not_found` for the
-  capture-not-ready signal. Keeping `not_found` and adding a distinct reason token is
-  the honest split.
-- **Surface the redirect only in `data`, leave `detail` suppressed.** Rejected: the
-  acceptance criterion asks for a `detail` an agent reads without parsing `data`, and
-  a resolved-authorized run's console-crash status is not leak-sensitive — there is no
-  reason to withhold it from `detail`.
+- **Keep `not_found` and put the narrative in the suppressed `detail`.** Rejected:
+  ADR-0123 forces a `not_found` `detail` to the `"not found"` constant inside
+  `ToolResponse.failure`, keyed purely on category, so the narrative would never reach
+  the client. Delivering a real `detail` requires a non-suppressed category, which is
+  why the console-crash case is reclassified `configuration_error`.
+- **Keep `not_found` and surface the redirect only in `data`** (`data.guidance` /
+  `data.reason`), leaving `detail` suppressed. This is the ADR-0142 shape for the
+  vmcore preconditions and is leak-safe. Rejected as the chosen path because the #734
+  acceptance asks specifically for a `detail` an agent reads without parsing `data`,
+  and a resolved-authorized run's console-crash status is not leak-sensitive — there
+  is no reason to withhold it from `detail`. ADR-0142 itself routes the directly
+  analogous `debug.start_session` expected-crash redirect through
+  `configuration_error` for exactly this reason, so this ADR follows that precedent
+  rather than the `data`-only precondition shape.
+- **Reclassify *all* `no_vmcore` misses as `configuration_error`.** Rejected: a run
+  that simply has not captured a core yet (no `expected_boot_failure`) is genuinely
+  `not_found` per ADR-0097/0142 and is retry-able once `vmcore.fetch` runs; only the
+  `console_crash` subset is a permanent design fact warranting the
+  caller-mismatch category. Scoping the reclassification to `console_crash` keeps the
+  honest split.
 - **Detect the console-crash case in the resolver** (`_vmcore_targets.py`) rather
   than the handler. Rejected: the resolver is shared by `introspect.*` and other
   vmcore-centric callers (ADR-0165) for which the postmortem-specific console
