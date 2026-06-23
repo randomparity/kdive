@@ -18,6 +18,11 @@ from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
     expected_uploads as _expected_uploads,
 )
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.artifacts.artifact_search import (
+    AFTER_LINES_RANGE,
+    BEFORE_LINES_RANGE,
+    MAX_MATCHES_RANGE,
+)
 from kdive.serialization import JsonValue
 
 
@@ -133,9 +138,39 @@ def _register_artifacts_search_text(app: FastMCP, pool: AsyncConnectionPool) -> 
             str,
             Field(description="Literal OR search pattern, e.g. '__d_lookup' or 'panic'."),
         ],
-        before_lines: Annotated[int, Field(description="Context lines before each match.")] = 2,
-        after_lines: Annotated[int, Field(description="Context lines after each match.")] = 4,
-        max_matches: Annotated[int, Field(description="Maximum match windows to return.")] = 20,
+        before_lines: Annotated[
+            int,
+            Field(
+                ge=BEFORE_LINES_RANGE[0],
+                le=BEFORE_LINES_RANGE[1],
+                description=(
+                    f"Context lines before each match "
+                    f"({BEFORE_LINES_RANGE[0]}–{BEFORE_LINES_RANGE[1]})."
+                ),
+            ),
+        ] = 2,
+        after_lines: Annotated[
+            int,
+            Field(
+                ge=AFTER_LINES_RANGE[0],
+                le=AFTER_LINES_RANGE[1],
+                description=(
+                    f"Context lines after each match "
+                    f"({AFTER_LINES_RANGE[0]}–{AFTER_LINES_RANGE[1]})."
+                ),
+            ),
+        ] = 4,
+        max_matches: Annotated[
+            int,
+            Field(
+                ge=MAX_MATCHES_RANGE[0],
+                le=MAX_MATCHES_RANGE[1],
+                description=(
+                    f"Maximum match windows to return "
+                    f"({MAX_MATCHES_RANGE[0]}–{MAX_MATCHES_RANGE[1]})."
+                ),
+            ),
+        ] = 20,
     ) -> ToolResponse:
         """Search a redacted System artifact with bounded literal line context."""
         return await read_handlers.artifacts_search_text(

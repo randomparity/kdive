@@ -26,6 +26,9 @@ from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.artifacts.artifact_search import (
+    AFTER_LINES_RANGE,
+    BEFORE_LINES_RANGE,
+    MAX_MATCHES_RANGE,
     ArtifactSearchInputError,
     parse_literal_terms,
     search_text,
@@ -67,9 +70,37 @@ class ArtifactSearchRequest(BaseModel):
         str,
         Field(description="Literal OR search pattern, e.g. '__d_lookup' or 'panic'."),
     ]
-    before_lines: Annotated[int, Field(description="Context lines before each match.")] = 2
-    after_lines: Annotated[int, Field(description="Context lines after each match.")] = 4
-    max_matches: Annotated[int, Field(description="Maximum match windows to return.")] = 20
+    before_lines: Annotated[
+        int,
+        Field(
+            ge=BEFORE_LINES_RANGE[0],
+            le=BEFORE_LINES_RANGE[1],
+            description=(
+                f"Context lines before each match "
+                f"({BEFORE_LINES_RANGE[0]}–{BEFORE_LINES_RANGE[1]})."
+            ),
+        ),
+    ] = 2
+    after_lines: Annotated[
+        int,
+        Field(
+            ge=AFTER_LINES_RANGE[0],
+            le=AFTER_LINES_RANGE[1],
+            description=(
+                f"Context lines after each match ({AFTER_LINES_RANGE[0]}–{AFTER_LINES_RANGE[1]})."
+            ),
+        ),
+    ] = 4
+    max_matches: Annotated[
+        int,
+        Field(
+            ge=MAX_MATCHES_RANGE[0],
+            le=MAX_MATCHES_RANGE[1],
+            description=(
+                f"Maximum match windows to return ({MAX_MATCHES_RANGE[0]}–{MAX_MATCHES_RANGE[1]})."
+            ),
+        ),
+    ] = 20
 
 
 @dataclass(frozen=True, slots=True)
