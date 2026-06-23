@@ -414,25 +414,26 @@ def validate_rootfs_reference(rootfs: RootfsSource) -> None:
     """
     if not isinstance(rootfs, CatalogComponentRef):
         return
-    if _catalog_name_declared(rootfs.provider, rootfs.name):
-        return
-    raise CategorizedError(
-        f"unknown rootfs catalog name: {rootfs.name}",
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        details={"provider": rootfs.provider, "name": rootfs.name},
-    )
-
-
-def _catalog_name_declared(provider: str, name: str) -> bool:
-    """Whether ``(provider, name)`` is a declared ``systems.toml`` image (or no file is present).
-
-    Returns ``True`` when the inventory file is absent (nothing to check against — defer to the
-    DB fetch) or when a declared ``[[image]]`` matches ``(provider, name)``.
-    """
     from kdive.inventory.loader import load_inventory_optional
     from kdive.inventory.path import systems_toml_path
 
     doc = load_inventory_optional(systems_toml_path())
     if doc is None:
-        return True
-    return any(img.provider == provider and img.name == name for img in doc.image)
+        # No declared baseline (absent file is the normal pre-config state) — defer to the DB
+        # fetch, which rejects an unknown name with its own enumeration.
+        return
+    if any(img.provider == rootfs.provider and img.name == rootfs.name for img in doc.image):
+        return
+    raise CategorizedError(
+        f"unknown rootfs catalog name: {rootfs.name}",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "provider": rootfs.provider,
+            "name": rootfs.name,
+            # The declared (provider, name) set so a black-box caller can self-correct a typo
+            # without host access (#731, ADR-0224). Sorted for a stable wire order; only
+            # operator-declared catalog identities, never caller input or a secret (no-leak,
+            # ADR-0123). Empty only when the declared inventory itself declares no images.
+            "available": sorted(f"{img.provider}/{img.name}" for img in doc.image),
+        },
+    )

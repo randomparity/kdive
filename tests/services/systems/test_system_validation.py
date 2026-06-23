@@ -141,7 +141,14 @@ def test_validate_profile_validates_the_profiles_own_catalog_rootfs(
 
     error = exc_info.value
     assert error.category is ErrorCategory.CONFIGURATION_ERROR
-    assert error.details == {"provider": "local-libvirt", "name": "undeclared-name"}
+    # The rejection enumerates the declared (provider, name) set so a black-box caller can
+    # self-correct (#731, ADR-0224). The exact-dict assertion is itself the no-leak guard: only
+    # the catalog identity is present, never the inventory source's object_key (ADR-0123).
+    assert error.details == {
+        "provider": "local-libvirt",
+        "name": "undeclared-name",
+        "available": ["local-libvirt/declared-image"],
+    }
 
 
 def test_validate_rootfs_for_provider_invokes_validator_for_regular_rootfs() -> None:

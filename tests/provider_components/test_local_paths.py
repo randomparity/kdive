@@ -31,6 +31,53 @@ def test_rejects_path_outside_allowed_roots(tmp_path: Path) -> None:
     assert str(caught.value) == "local component path is outside provider allowed roots"
 
 
+def test_outside_roots_rejection_enumerates_accepted_values(tmp_path: Path) -> None:
+    # The rejection carries the configured roots so a black-box MCP caller can self-correct
+    # without host access (#731, ADR-0224). Roots are matched against the code's own
+    # strict=False resolution so the asserted strings equal what the code emits.
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    outside = tmp_path / "outside.qcow2"
+    outside.write_bytes(b"data")
+
+    with pytest.raises(CategorizedError) as caught:
+        validate_local_component_path(str(outside), allowed_roots=[root_b, root_a])
+
+    expected = sorted([str(root_a.resolve()), str(root_b.resolve())])
+    assert caught.value.details["accepted_values"] == expected
+
+
+def test_outside_roots_accepted_values_leaks_no_caller_path(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.qcow2"
+    outside.write_bytes(b"data")
+
+    with pytest.raises(CategorizedError) as caught:
+        validate_local_component_path(str(outside), allowed_roots=[root])
+
+    accepted = caught.value.details["accepted_values"]
+    assert isinstance(accepted, list)
+    # Only the configured roots — never the caller-submitted bad path.
+    assert str(outside.resolve()) not in accepted
+    assert str(outside) not in accepted
+
+
+def test_non_outside_roots_rejections_carry_no_enumeration(tmp_path: Path) -> None:
+    # The accepted_values attach is scoped to the outside-roots branch; other rejections name
+    # no finite valid set and stay bare (spec out-of-scope).
+    with pytest.raises(CategorizedError) as relative:
+        validate_local_component_path("relative/base.qcow2", allowed_roots=[tmp_path])
+    assert "accepted_values" not in relative.value.details
+
+    missing = tmp_path / "absent.qcow2"
+    with pytest.raises(CategorizedError) as nonexistent:
+        validate_local_component_path(str(missing), allowed_roots=[tmp_path])
+    assert "accepted_values" not in nonexistent.value.details
+
+
 def test_rejects_relative_path(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as caught:
         validate_local_component_path("relative/base.qcow2", allowed_roots=[tmp_path])

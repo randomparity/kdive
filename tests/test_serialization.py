@@ -134,3 +134,47 @@ def test_safe_error_details_non_list_errors_value_dropped_as_scalar() -> None:
     assert safe_error_details({"errors": "boom"}) == {"errors": "boom"}
     # A dict under `errors` (not a list) is dropped like any non-scalar.
     assert safe_error_details({"errors": {"x": 1}}) == {}
+
+
+# ---------------------------------------------------------------------------
+# safe_error_details — reserved enumeration keys (ADR-0224, #731)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_error_details_preserves_available_scalar_list() -> None:
+    # An `available` list of scalars survives (mirrors the `errors` widening). Order is
+    # preserved as given — sorting is the producer's responsibility (ADR-0224 R1/R2).
+    out = safe_error_details({"available": ["b/y", "a/x"]})
+    assert out == {"available": ["b/y", "a/x"]}
+
+
+def test_safe_error_details_preserves_accepted_values_scalar_list() -> None:
+    out = safe_error_details({"accepted_values": ["/r1", "/r2"]})
+    assert out == {"accepted_values": ["/r1", "/r2"]}
+
+
+def test_safe_error_details_drops_non_scalar_enumeration_elements() -> None:
+    out = safe_error_details({"available": ["ok", {"x": 1}, 5, math.nan]})
+    assert out == {"available": ["ok", 5]}
+
+
+def test_safe_error_details_caps_enumeration_list_length() -> None:
+    out = safe_error_details({"available": [str(i) for i in range(30)]})
+    assert isinstance(out["available"], list)
+    assert len(out["available"]) == 20
+
+
+def test_safe_error_details_preserves_empty_enumeration_list() -> None:
+    assert safe_error_details({"available": []}) == {"available": []}
+    assert safe_error_details({"accepted_values": []}) == {"accepted_values": []}
+
+
+def test_safe_error_details_drops_list_under_non_reserved_key() -> None:
+    # A list under any non-reserved key is still dropped — no behaviour change (ADR-0224 R3).
+    assert safe_error_details({"supported": ["a", "b"]}) == {}
+
+
+def test_safe_error_details_enumeration_key_with_scalar_value_unaffected() -> None:
+    # The enumeration widening only triggers on a list; a scalar under the key falls through to
+    # the scalar rule and survives unchanged.
+    assert safe_error_details({"available": "x"}) == {"available": "x"}

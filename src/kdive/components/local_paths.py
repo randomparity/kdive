@@ -27,7 +27,13 @@ def validate_local_component_path(
 
     roots = [root.resolve(strict=False) for root in allowed_roots]
     if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
-        raise _config_error("local component path is outside provider allowed roots")
+        # Surface the configured roots so a black-box MCP caller can self-correct without host
+        # access (#731, ADR-0224). Sorted for a stable wire order; only operator-configured
+        # roots, never the caller-submitted path or a secret (no-leak, ADR-0123).
+        raise _config_error(
+            "local component path is outside provider allowed roots",
+            details={"accepted_values": sorted(str(root) for root in roots)},
+        )
     if not resolved.is_file():
         raise _config_error("local component path is not a regular file")
     if not os.access(resolved, os.R_OK):
@@ -50,5 +56,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _config_error(message: str) -> CategorizedError:
-    return CategorizedError(message, category=ErrorCategory.CONFIGURATION_ERROR)
+def _config_error(message: str, *, details: dict[str, object] | None = None) -> CategorizedError:
+    return CategorizedError(
+        message, category=ErrorCategory.CONFIGURATION_ERROR, details=details or {}
+    )
