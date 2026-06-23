@@ -14,13 +14,7 @@ Run offline drgn introspection over a Run's captured core; returns redacted repo
 
 ## `introspect.run`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — Runs live drgn over a drgn-live DebugSession; requires a real attached live session, reached only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run runs a live drgn helper against a real booted Run.
-
-**Provider support:** local-libvirt: wired (M2.8 B3, live proof pending B6); remote-libvirt: implemented; fault-inject: n/a.
+`implemented` · `read-only`
 
 Run live drgn introspection over a live drgn-live DebugSession. Requires operator.
 

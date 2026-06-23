@@ -116,9 +116,9 @@ def build_runtime(*, secret_registry: SecretRegistry) -> ProviderRuntime:
         # dump, B4/ADR-0211); both debug transports the connector resolves from the live domain XML
         # — gdbstub (#675/ADR-0210) and drgn-live over a loopback-forwarded guest SSH port
         # (#697/ADR-0218); and both introspection modes — offline-vmcore (B2 #676/ADR-0210 §2) and
-        # live (B3 #677/ADR-0219, drgn-live SSH-exec of the in-guest kdive-drgn helper). `debug.*`
-        # and `introspect.run` tool maturity stays `partial` — the live planes are wired but their
-        # live KVM proof is the B6 (#680) milestone verifier's job (ADR-0218 §6 / ADR-0219).
+        # live (B3 #677/ADR-0219, drgn-live SSH-exec of the in-guest kdive-drgn helper). All these
+        # planes were proven live end-to-end on real KVM by the B6 (#680) milestone verifier, so
+        # `debug.*` and `introspect.run` tool maturity is `implemented` (ADR-0218 §6 / ADR-0219).
         supported_capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}),
         supported_debug_transports=frozenset({"gdbstub", "drgn-live"}),
         supported_introspection=frozenset({"offline-vmcore", "live"}),

@@ -426,9 +426,10 @@ def test_non_partial_tools_have_no_maturity_detail() -> None:
 # remote-libvirt path *implemented* — not the pre-honesty "wired" half-truth. A promotion to
 # `implemented` for a plane is the diff that flips its pointer here. The `debug.*` planes moved
 # to their own implemented-guard once B1 (#675) wired the gdbstub transport they run over;
-# `introspect.from_vmcore` got its own wired-pending guard once B2 (#676) wired it; and
-# `introspect.run` moved to its own wired-partial guard once B3 (#677/ADR-0219) wired the live
-# drgn-over-SSH seam — so no local plane is a MISSING_DEPENDENCY stub any more.
+# `introspect.from_vmcore` got its own implemented-guard once B2 (#676) wired it and B6 (#680)
+# proved it live; and `introspect.run` got its own implemented-guard once B3 (#677/ADR-0219)
+# wired the live drgn-over-SSH seam and B6 proved it live (#682/ADR-0221) — so no local plane is
+# a MISSING_DEPENDENCY stub any more.
 _LOCAL_PLANNED_PROVIDER_TOOLS: frozenset[str] = frozenset()
 
 # The `debug.*` planes were proven live end-to-end on real KVM (M2.8 B6 #680, ADR-0208
@@ -484,18 +485,17 @@ def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
     assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
 
 
-def test_introspect_run_wired_partial_pending_live_proof() -> None:
-    # B3 (#677/ADR-0219): local-libvirt's live drgn-over-SSH seam is wired, but per ADR-0208
-    # invariant 5 the maturity stays `partial` until the B6 (#680) live KVM proof. The pointer
-    # must say local-libvirt is `wired` (not `planned`, no longer a MISSING_DEPENDENCY stub) and
-    # remote-libvirt `implemented`, and the tool must still carry a `partial` maturity.
+def test_introspect_run_promoted_to_implemented() -> None:
+    # M2.8 B6 (#680/#682): local-libvirt live drgn-over-SSH introspection was proven live on real
+    # KVM. The per-Run DWARF vmlinux staged at /usr/lib/debug/lib/modules/<ver>/vmlinux (#728/
+    # ADR-0221) let in-guest `drgn -k` resolve typed kernel objects: introspect.run(sysinfo)
+    # returned release 7.0.0 with cpus_online=2, and run(tasks)/run(modules) both succeeded
+    # (decode_errors=0). So the tool is now `implemented` and — per ADR-0175 — carries no
+    # maturity_detail.
     tool = next(t for t in TOOLS if t.name == "introspect.run")
     meta = tool.meta or {}
-    assert meta.get("maturity") == "partial"
-    providers = (meta.get("maturity_detail") or {}).get("providers")
-    assert isinstance(providers, str)
-    assert "local-libvirt: wired" in providers
-    assert "remote-libvirt: implemented" in providers
+    assert meta.get("maturity") == "implemented"
+    assert meta.get("maturity_detail") is None
 
 
 def test_local_proven_debug_planes_are_implemented() -> None:

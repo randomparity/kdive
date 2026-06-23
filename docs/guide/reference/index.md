@@ -54,7 +54,7 @@
 | [`images.publish`](images.md#imagespublish) | `implemented` |
 | [`images.upload`](images.md#imagesupload) | `implemented` |
 | [`introspect.from_vmcore`](introspect.md#introspectfrom_vmcore) | `implemented` |
-| [`introspect.run`](introspect.md#introspectrun) | `partial` |
+| [`introspect.run`](introspect.md#introspectrun) | `implemented` |
 | [`inventory.clear_override`](inventory.md#inventoryclear_override) | `implemented` |
 | [`inventory.list`](inventory.md#inventorylist) | `implemented` |
 | [`investigations.close`](investigations.md#investigationsclose) | `implemented` |
