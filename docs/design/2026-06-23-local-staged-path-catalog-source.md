@@ -65,6 +65,11 @@ new MCP tool or response schema. See ADR-0228 for the decision and rejected alte
    lane): `from_env()` now supplies a `catalog_fetch`, so `materialize.py:106`'s "not wired for this
    lane" no longer fires for a registered public image. A non-existent name still fails closed as a
    `configuration_error`.
+9. A `staged-path` image declared with `visibility = "private"` is rejected at inventory load with a
+   `configuration_error` (local staged-path is public-only by contract).
+10. Resolution matches the provisioning profile's `arch`: with same-name x86_64 and aarch64 public
+    images declared, an x86_64 profile resolves the x86_64 row (not an arbitrary one), and a profile
+    whose arch has no declared image fails closed as `configuration_error`.
 
 ## Design
 
@@ -72,15 +77,16 @@ new MCP tool or response schema. See ADR-0228 for the decision and rejected alte
 
 | Layer | File | Change |
 |-------|------|--------|
-| Inventory model | `inventory/model.py` | `StagedPathSource(kind="staged-path", path)`; add to `ImageSource` union; validate `path` absolute |
+| Inventory model | `inventory/model.py` | `StagedPathSource(kind="staged-path", path)`; add to `ImageSource` union; validate `path` absolute; reject `staged-path` + `visibility="private"` |
 | Inventory serialize | `inventory/serialize.py` (+ tests) | round-trip the new source kind if serialization is field-explicit |
 | Domain model | `domain/catalog/images.py` | `ImageCatalogEntry.path: str | None = None` |
 | Migration | `db/schema/0047_image_catalog_staged_path.sql` | add `path text`; rework `image_object_present` CHECK to 3-way exactly-one |
 | Seeding | `inventory/reconcile_images.py` | `_realize` returns `path`; `StagedPathSource` → `(registered, None, None, path, None, None)`; INSERT/UPDATE carry `path` |
-| Sync resolver | `images/catalog.py` | add `resolve_public_rootfs_sync(conn, provider, name)` — the sync, public-scope twin of `resolve_rootfs` |
-| Resolution lane | `images/fetch.py` | add a sync `fetch_registered_rootfs_sync(conn, store, allowed_roots, provider, name)` (or refactor) branching `path`→validate / `object_key`→S3-fetch+digest+cache |
-| Fetch wiring | new `providers/local_libvirt/lifecycle/rootfs_catalog_fetch.py` (or `materialize.py`) | `rootfs_catalog_fetch_from_env(allowed_roots) -> CatalogFetch` mirroring `build_config_fetch_from_env`: lazy sync `psycopg.connect` + `object_store_from_env`, resolve+branch |
-| Provisioner wiring | `providers/local_libvirt/lifecycle/provisioning.py`, `composition.py` | `from_env()` wires `catalog_fetch=rootfs_catalog_fetch_from_env(self._allowed_roots)`; `_materialize_rootfs_base` passes `catalog_fetch=self._catalog_fetch` into the context |
+| Sync resolver | `images/catalog.py` | add `resolve_public_rootfs_sync(conn, provider, name, arch)` — sync, public-scope, **arch-matched** twin of `resolve_rootfs` |
+| Resolution lane | `images/fetch.py` | add a sync `fetch_registered_rootfs_sync(conn, store, allowed_roots, provider, name, arch, cache_dir)` (or refactor) branching `path`→validate / `object_key`→S3-fetch+digest+cache |
+| Fetch wiring | new `providers/local_libvirt/lifecycle/rootfs_catalog_fetch.py` (or `materialize.py`) | `rootfs_catalog_fetch_from_env(allowed_roots) -> CatalogFetch` mirroring `build_config_fetch_from_env`: lazy sync `psycopg.connect` + `object_store_from_env`, resolve(arch)+branch |
+| Seam: arch | `providers/local_libvirt/lifecycle/materialize.py` | `CatalogFetch` gains an `arch` arg; `_materialize_catalog_rootfs` passes the context's arch |
+| Provisioner wiring | `providers/local_libvirt/lifecycle/provisioning.py`, `composition.py` | `from_env()` wires `catalog_fetch=rootfs_catalog_fetch_from_env(self._allowed_roots)`; `_materialize_rootfs_base` puts `profile.arch` + `catalog_fetch=self._catalog_fetch` into the context |
 | Walkthrough | `examples/local-libvirt/…`, `systems.toml.example` | declare a staged-path `[[image]]`; drop the host `ls` step |
 
 ### Data shapes
@@ -134,10 +140,35 @@ sync `psycopg.connect(DATABASE_URL)` + `object_store_from_env()` — exactly lik
 provisioner already owns `allowed_roots` (`self._allowed_roots`, default `[ROOTFS_DIR]`), so
 staged-path containment is enforced at resolution exactly as the `local` lane enforces it.
 
-**Scope note (RBAC):** resolution is **public-scope only**. Local-libvirt's discoverable catalog
-images are declared `PUBLIC`; a project-private catalog rootfs on local-libvirt resolves to "unknown
-registered rootfs catalog entry" (honest miss, not a silent wrong image). Threading the owning
-project through the sync seam is a follow-up if local multi-tenant private images ever land.
+**s3 cache directory.** The s3 branch caches the fetched object under a digest-keyed file in a
+dedicated `rootfs-cache/` subdir of `ROOTFS_DIR` (e.g. `/var/lib/kdive/rootfs/.cache/`), created
+`mkdir(parents, exist_ok)` by the fetch and **kept distinct from `allowed_roots`** so a cached s3
+image is never mistaken for a staged-path candidate (staged-path resolves a declared row's `path`,
+not a directory scan — but the isolation is documented to stay true if discovery ever scans). The
+worker process must be able to write it; an unwritable cache dir surfaces as the existing
+`INFRASTRUCTURE_FAILURE` from `fetch_registered_rootfs`'s `_cache_io_error`. The temp-sibling +
+atomic-rename write (so a partial download never surfaces as a cache hit) is preserved in the sync
+port. The plan pins the exact path constant.
+
+**Arch resolution.** `resolve_rootfs` filters `(provider, name)` but **not** `arch`, and
+`CatalogComponentRef` carries no `arch` — so today a same-name multi-arch catalog would resolve to an
+arbitrary arch (`LIMIT 1`). Since staged-path makes same-name multi-arch local images plausible
+(operator stages an x86_64 and an aarch64 rootfs), resolution must match the **provisioning profile's
+`arch`** (which the provision flow already holds). The materialization threads `profile.arch` into the
+catalog fetch (`CatalogFetch` gains an `arch` argument; `_materialize_rootfs_base` reads it from the
+profile), and `resolve_public_rootfs_sync(conn, provider, name, arch)` filters on it. The
+`image_catalog_one_public` unique index on `(provider, name, arch)` then guarantees a deterministic
+single match. A name with no row for the profile's arch fails closed as "unknown registered rootfs
+catalog entry". This corrects the pre-existing arch-agnostic resolution rather than inheriting it.
+
+**Scope note (RBAC).** Resolution is **public-scope only**. Local-libvirt's discoverable catalog
+images are declared `PUBLIC`; a project-private catalog rootfs on local-libvirt cannot be resolved by
+the public-scope seam. To avoid a *discoverable-but-not-provisionable* trap (a private staged-path row
+would still surface to its owning project via the RBAC-scoped `images.list`, yet provision would
+reject it as "unknown registered rootfs catalog entry"), **the inventory loader rejects a
+`staged-path` image declared with `visibility = "private"`** with a `configuration_error` — local
+staged-path is public-only by contract. Threading the owning project through the sync seam (to support
+private local images) is a follow-up.
 
 ### No-leak / safety
 
@@ -161,6 +192,11 @@ project through the sync seam is a follow-up if local multi-tenant private image
 - **Staged-path declared for a non-local provider** → out of scope; resolution is local-libvirt's.
   Remote keeps `staged`/volume. (Validation may warn/reject a `staged-path` on remote — decided in
   the plan.)
+- **Staged-path declared `private`** → rejected at inventory load (`configuration_error`); local
+  staged-path is public-only, so it can never be a discoverable-but-unprovisionable row.
+- **Two same-`(provider,name)` images of different `arch`** → resolution matches the profile's arch
+  deterministically (unique `(provider,name,arch)` index); a missing arch is an "unknown" miss.
+- **s3 cache dir unwritable** → `INFRASTRUCTURE_FAILURE` from `_cache_io_error` (unchanged path).
 - **Empty / absent `systems.toml`** → no images seeded; `profile_examples` keeps its placeholder
   fallback; unchanged.
 

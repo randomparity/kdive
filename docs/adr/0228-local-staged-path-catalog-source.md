@@ -58,11 +58,15 @@ existing discovery surface covers it and the `catalog` lane resolves it.
      no cache, no digest.**
    - `object_key` (s3) → fetch the object, verify its sha256 against `digest`, cache it
      (`fetch_registered_rootfs`'s existing logic, made synchronous).
-   The fetch resolves at **public scope** (`visibility = public`): local-libvirt's discoverable
-   catalog images are declared `PUBLIC` for exactly this purpose. Project-private catalog rootfs on
-   local-libvirt is out of scope (it resolves to "unknown registered rootfs catalog entry", not a
-   silent wrong image) — a follow-up can thread the owning project through the seam if local
-   multi-tenant private images ever land.
+   The fetch resolves at **public scope** (`visibility = public`) and **matches the provisioning
+   profile's `arch`** (the `catalog` ref carries no arch, and `resolve_rootfs` historically dropped
+   it — so the fetch threads `profile.arch` and `resolve_public_rootfs_sync` filters on it, making the
+   match deterministic via the `(provider, name, arch)` unique index). To keep public-scope honest, a
+   `staged-path` image declared with `visibility = "private"` is **rejected at inventory load** — a
+   private row would still surface to its owning project via the RBAC-scoped `images.list` yet be
+   unresolvable by the public-scope seam (a discoverable-but-unprovisionable trap), so local
+   staged-path is public-only by contract. Threading the owning project through the seam (to support
+   private local images) is a follow-up.
 
 4. **No new discovery surface.** `fixtures.list` / `images.list` query shapes are unchanged: a
    registered public `staged-path` row already surfaces by `(provider, name, arch)`, and the agent
