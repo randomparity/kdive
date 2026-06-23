@@ -728,6 +728,72 @@ def test_postmortem_triage_never_booted_reports_no_vmcore(migrated_url: str) -> 
         # (#553, ADR-0165). The next action points at the capture entry.
         assert resp.data["reason"] == "no_vmcore"
         assert resp.suggested_next_actions == ["vmcore.fetch", "runs.get"]
+        # The non-console-crash no_vmcore envelope carries no expected_boot_failure key — pinning
+        # the resolver's conditional attachment (safe_error_details forwards scalars; #734).
+        assert "expected_boot_failure" not in resp.data
+
+    asyncio.run(_run())
+
+
+async def _console_crash_run_no_core(pool: AsyncConnectionPool) -> str:
+    """A console_crash run with debuginfo + build but no captured core (early-boot crash)."""
+    sys_id = await seed_crashed_system(pool)
+    return await seed_run_on_system(
+        pool,
+        sys_id,
+        debuginfo_ref="k/runs/r/vmlinux",
+        build_id="deadbeef",
+        expected_boot_failure={"kind": "console_crash", "pattern": "Kernel panic"},
+    )
+
+
+def test_console_crash_guidance_constant_pins_meaning() -> None:
+    # The narrative is one shared constant; assert its stable substrings so a reworded constant
+    # that drops the early-boot/console framing fails (#734, ADR-0227).
+    assert "kexec" in vmcore_tools.CONSOLE_CRASH_GUIDANCE
+    assert "console" in vmcore_tools.CONSOLE_CRASH_GUIDANCE
+
+
+def test_postmortem_triage_console_crash_redirects_to_console(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _console_crash_run_no_core(pool)
+            resp = await _vmcore_handlers().postmortem_triage(pool, _ctx(), run_id=run_id)
+        # A console_crash run resolves to no vmcore by design (crash precedes kexec). Triage
+        # redirects to the console with a non-suppressed configuration_error detail (#734).
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "expected_console_crash"
+        assert resp.data["expected_boot_failure"] == "console_crash"
+        assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
+        assert resp.detail == vmcore_tools.CONSOLE_CRASH_GUIDANCE
+
+    asyncio.run(_run())
+
+
+def test_postmortem_crash_console_crash_redirects_to_console(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _console_crash_run_no_core(pool)
+            resp = await _vmcore_handlers().postmortem_crash(
+                pool, _ctx(), run_id=run_id, commands=["log"]
+            )
+        # postmortem.crash surfaces the same redirect (triage delegates to it; #734).
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "expected_console_crash"
+        assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
+        assert resp.detail == vmcore_tools.CONSOLE_CRASH_GUIDANCE
+
+    asyncio.run(_run())
+
+
+def test_postmortem_triage_console_crash_requires_viewer(migrated_url: str) -> None:
+    # The redirect is reachable only through the caught precondition error; a non-viewer is
+    # rejected by the resolver's AuthorizationError first, so the redirect never weakens authz.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _console_crash_run_no_core(pool)
+            with pytest.raises(AuthorizationError):
+                await _vmcore_handlers().postmortem_triage(pool, _ctx(role=None), run_id=run_id)
 
     asyncio.run(_run())
 
