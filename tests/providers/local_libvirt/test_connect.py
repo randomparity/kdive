@@ -505,19 +505,19 @@ def test_resolve_ssh_endpoint_other_libvirt_error_is_infrastructure_failure() ->
     assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
-def test_from_env_ssh_resolver_resolves_from_the_live_domain() -> None:
-    # The drgn-live resolver is now real (#697): from_env wires it to read the recorded forwarded
-    # SSH port from the live domain. It no longer raises the old `#697`-deferred stub. With no real
-    # libvirt host here, opening the transport surfaces the resolver's own error (a config error
-    # for an absent domain, or an infra fault) — never the deferred-stub message.
-    connector = LocalLibvirtConnect.from_env()
-    with pytest.raises(CategorizedError) as exc:
-        connector.open_transport(_SYSTEM, "drgn-live")
-    assert "deferred, see #697" not in str(exc.value)
-    assert exc.value.category in (
-        ErrorCategory.CONFIGURATION_ERROR,
-        ErrorCategory.INFRASTRUCTURE_FAILURE,
-    )
+def test_real_resolve_ssh_endpoint_is_wired_not_the_deferred_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The module-level `_real_resolve_ssh_endpoint` (the one `from_env` wires) is now the real
+    # resolver over `_default_connect`, not the old `#697`-deferred stub. Stub the libvirt `open`
+    # seam (the only `live_vm` boundary) with a fake recording the forwarded port so the test never
+    # touches a real libvirt socket — a real `libvirt.open` here both flakes off-host and pollutes
+    # process-global libvirt error state for later tests. Calling the resolver directly proves the
+    # wiring without invoking the `live_vm`-gated SSH probe.
+    conn = _FakeGdbConn(domain=_FakeGdbDomain(_ssh_xml(40022)))
+    monkeypatch.setattr(connect_mod.libvirt, "open", lambda _uri: conn)
+    monkeypatch.setattr(connect_mod.config, "require", lambda _setting: "qemu:///system")
+    assert connect_mod._real_resolve_ssh_endpoint(_SYSTEM) == ("127.0.0.1", 40022)
 
 
 def test_close_ssh_transport_is_noop_and_never_raises() -> None:
