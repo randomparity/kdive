@@ -216,13 +216,26 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: the existing `note_fail` function and `fail` variable in the script; the test's `_stub`/`_run` helpers and the all-healthy env in `tests/scripts/test_check_local_libvirt.py`.
-- Produces: a new `KDIVE_BOOT_DIR` env override (default `/boot`) and a `_host_kernels_readable` probe. The all-healthy test must set `KDIVE_BOOT_DIR` to a dir with a readable `vmlinuz-*` so it stays green.
+- Produces: a new `KDIVE_BOOT_DIR` env override (default `/boot`) and a `_host_kernels_readable` probe. **Hermeticity requirement:** because the probe defaults `BOOT_DIR` to the runner's real `/boot`, **every** test in `tests/scripts/test_check_local_libvirt.py` must set `KDIVE_BOOT_DIR` to a controlled tmp dir, or it will read the host `/boot` and become flaky. `test_all_healthy_exits_zero` (asserts exit 0) is the one that actually breaks without it; the four failure-path tests would otherwise read host `/boot` harmlessly (their exit-1 assertion still holds) but must still be pinned for hermeticity.
 
 **Context:** The script is report-only, `set -euo pipefail`, each probe a small function so tests drive it via stubs/overrides. supermin picks the appliance kernel by version-sort, so we probe **all** `/boot/vmlinuz-*`: if any present one is unreadable, `note_fail`. If none exist, skip (unusual `/boot` layout must not false-fail). The empty-glob case must be handled explicitly — under `set -u`/no-`nullglob`, a non-matching `/boot/vmlinuz-*` glob stays literal, so guard with an existence test, not a bare `for` over the pattern.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `tests/scripts/test_check_local_libvirt.py`. First, update the existing `test_all_healthy_exits_zero` to provide a readable kernel (otherwise the new probe fails it): create `KDIVE_BOOT_DIR` with a readable `vmlinuz-test` and add it to that test's `env`. Then add:
+First, pin **every existing test** in `tests/scripts/test_check_local_libvirt.py` to a controlled boot dir so none read the host `/boot` once the probe exists. Concretely:
+
+- In `test_all_healthy_exits_zero` (currently lines 42-64), before building `env`, add a readable kernel and pass the dir:
+
+```python
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-test").write_text("")  # readable; the new ADR-0222 kernel probe passes
+```
+and add `"KDIVE_BOOT_DIR": str(boot),` to that test's `env` dict.
+
+- In each of the four failure-path tests (`test_unwritable_install_staging_fails_with_hint`, `test_missing_venv_bindings_fails_with_hint`, `test_missing_kvm_node_fails`, `test_user_not_in_libvirt_group_fails`), add `"KDIVE_BOOT_DIR": str(tmp_path / "boot-empty"),` to their `env` dicts (the dir need not exist — an absent/empty boot dir exercises the probe's skip path, so the kernel probe stays neutral and each test still fails for its intended reason).
+
+Then add the new tests below:
 
 ```python
 def _healthy_env(tmp_path: Path, bindir: Path, py: Path, boot: Path) -> dict[str, str]:
