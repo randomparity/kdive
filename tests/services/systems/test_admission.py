@@ -93,6 +93,46 @@ def test_failure_from_error_threads_detail_and_structured_errors() -> None:
     ]
 
 
+def test_failure_from_error_threads_enumeration_list_to_data() -> None:
+    # End-to-end (#731, ADR-0224): the reserved enumeration keys survive safe_error_details
+    # through the admission failure_details and into the provision response data, on the path
+    # systems.provision actually exercises. Before the safe_error_details reservation the list
+    # was dropped here as a non-scalar.
+    exc = CategorizedError(
+        "unknown rootfs catalog name: no-such",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={
+            "provider": "local-libvirt",
+            "name": "no-such",
+            "available": ["local-libvirt/known"],
+        },
+    )
+
+    failure = admission._failure_from_error(_SYSTEM_ID, exc)
+    response = _admission_response(failure)
+
+    assert failure.failure_details is not None
+    assert failure.failure_details["available"] == ["local-libvirt/known"]
+    available = response.data["available"]
+    assert available == ["local-libvirt/known"]
+    # The caller-submitted bad name is never echoed into the enumeration (no-leak, ADR-0123).
+    assert isinstance(available, list)
+    assert "no-such" not in available
+
+
+def test_failure_from_error_threads_accepted_values_list_to_data() -> None:
+    exc = CategorizedError(
+        "local component path is outside provider allowed roots",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"accepted_values": ["/srv/images", "/var/lib/kdive/images"]},
+    )
+
+    failure = admission._failure_from_error(_SYSTEM_ID, exc)
+    response = _admission_response(failure)
+
+    assert response.data["accepted_values"] == ["/srv/images", "/var/lib/kdive/images"]
+
+
 def test_failure_from_error_suppresses_detail_for_not_found() -> None:
     exc = CategorizedError(
         "system 11111111-2222-3333-4444-555555555555 was not found",
