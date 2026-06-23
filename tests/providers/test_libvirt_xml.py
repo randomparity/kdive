@@ -34,7 +34,7 @@ def _ssh_domain(port: int) -> str:
         "<qemu:arg value='-netdev'/>"
         f"<qemu:arg value='{_ssh_arg(port)}'/>"
         "<qemu:arg value='-device'/>"
-        "<qemu:arg value='virtio-net-pci,netdev=kdivessh'/>"
+        "<qemu:arg value='virtio-net-pci,netdev=kdivessh,addr=0x10'/>"
         "</qemu:commandline></domain>"
     )
 
@@ -120,7 +120,7 @@ def test_recorded_ssh_port_coexists_with_a_gdb_arg() -> None:
         "<qemu:arg value='-netdev'/>"
         f"<qemu:arg value='{_ssh_arg(40022)}'/>"
         "<qemu:arg value='-device'/>"
-        "<qemu:arg value='virtio-net-pci,netdev=kdivessh'/>"
+        "<qemu:arg value='virtio-net-pci,netdev=kdivessh,addr=0x10'/>"
         "</qemu:commandline></domain>"
     )
     assert recorded_gdb_port(both) == 4444

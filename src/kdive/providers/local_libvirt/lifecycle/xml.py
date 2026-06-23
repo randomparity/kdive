@@ -141,4 +141,12 @@ def _append_ssh_forward(domain: ET.Element, ssh_port: int | None) -> None:
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")
-    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="virtio-net-pci,netdev=kdivessh")
+    # Pin an explicit PCI slot. Without ``addr=`` QEMU auto-assigns the first free slot (0x1 on
+    # the q35 ``pcie.0`` root complex), which collides with a libvirt-managed ``pcie-root-port``:
+    # because this NIC is added via raw ``-device`` on the qemu commandline, libvirt's PCI
+    # allocator cannot see it and routes its own devices over the same slot, so ``define``/``start``
+    # fails (``slot 1 function 0 not available``). Slot 0x10 sits in the gap between libvirt's
+    # low-numbered root-ports and its high-numbered integrated devices (LPC/USB/SATA at 0x1a-0x1f).
+    ET.SubElement(
+        commandline, f"{{{QEMU_NS}}}arg", value="virtio-net-pci,netdev=kdivessh,addr=0x10"
+    )

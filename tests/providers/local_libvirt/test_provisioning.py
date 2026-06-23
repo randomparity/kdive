@@ -304,7 +304,7 @@ def test_render_emits_loopback_ssh_forward_when_credential_ref_set() -> None:
         "-netdev",
         "user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:40022-:22",
         "-device",
-        "virtio-net-pci,netdev=kdivessh",
+        "virtio-net-pci,netdev=kdivessh,addr=0x10",
     ]
 
 
