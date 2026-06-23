@@ -14,8 +14,10 @@ sanitized and allowlist-checked before any `crash` invocation.
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -277,6 +279,19 @@ class LocalLibvirtRetrieve:
 
 _VAR_CRASH_GLOB = "/var/crash/*/vmcore"
 
+# After the force_crash NMI panics the guest, the in-guest kdump kexecs a crash kernel, boots
+# it, mounts root, and writes /var/crash/<ts>/vmcore before its kdumpctl ``final_action`` runs.
+# That sequence is tens of seconds, so the harvest must wait for kdump to COMPLETE — signalled
+# by the domain reaching SHUTOFF (kdump ``final_action shutdown``, staged in the kdive-ready
+# rootfs) — before forcing the domain off and reading the overlay. The window bounds that wait;
+# on timeout we force-off and harvest anyway (the core, if written, persists on the overlay even
+# across a kdump reboot), preserving the existing "no core → readiness_failure" contract.
+_KDUMP_SETTLE_TIMEOUT_S = 120.0
+_KDUMP_SETTLE_POLL_INTERVAL_S = 3.0
+
+type _DomainSettled = Callable[[], bool]
+type _Sleep = Callable[[float], None]
+
 
 def _libvirt_uri() -> str:
     """The provider's configured libvirt URI (``KDIVE_LIBVIRT_URI``, default ``qemu:///system``)."""
@@ -360,13 +375,39 @@ class _LibguestfsCoreReader:  # pragma: no cover - live_vm (libguestfs)
         return guest
 
 
+def _poll_until_settled(
+    is_settled: _DomainSettled,
+    sleep: _Sleep,
+    *,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> bool:
+    """Poll ``is_settled`` until it is true or the bounded window elapses (ADR-0217).
+
+    Returns ``True`` the moment the domain is observed settled (kdump finished and the guest
+    self-shut-off), or ``False`` if the window elapses first. The first probe is taken before
+    any sleep so an already-settled domain returns immediately with no wait; thereafter it
+    sleeps ``poll_interval_s`` between probes. The probe budget is bounded by
+    ``ceil(timeout_s / poll_interval_s)`` so the total wait never exceeds ``timeout_s``.
+    """
+    probes = max(1, math.ceil(timeout_s / poll_interval_s))
+    for probe in range(probes):
+        if is_settled():
+            return True
+        if probe < probes - 1:
+            sleep(poll_interval_s)
+    return False
+
+
 def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (libvirt)
     """Force the System's domain off (idempotent) so its overlay is safe to read offline.
 
     Opens the provider's configured URI (``KDIVE_LIBVIRT_URI``), the same source as
-    ``control.py``/``discovery.py`` — never ``libvirt.open(None)``. ``vmcore.fetch`` admits
-    only on a ``CRASHED`` System, so a force-off is consistent with its state, and libguestfs
-    reads of a disk a running guest is mutating are unsafe (ADR-0203).
+    ``control.py``/``discovery.py`` — never ``libvirt.open(None)``. By the time the harvest
+    reaches here the in-guest kdump has been waited out (``_real_wait_for_vmcore``), so a
+    force-off only quiesces a guest that kdump-rebooted back to running, or one whose kdump
+    never finished — libguestfs reads of a disk a running guest is mutating are unsafe
+    (ADR-0203/0217).
     """
     conn = libvirt.open(_libvirt_uri())
     try:
@@ -380,8 +421,35 @@ def _force_off_domain(system_id: UUID) -> None:  # pragma: no cover - live_vm (l
         conn.close()
 
 
+def _real_domain_settled(system_id: UUID) -> bool:  # pragma: no cover - live_vm (libvirt)
+    """True when the System's domain is shut off or gone — the kdump-complete signal (ADR-0217).
+
+    A domain that kdump halted/shut-down after writing its core reports ``VIR_DOMAIN_SHUTOFF``;
+    a domain that has been undefined/removed is also "settled". Any other state (running, the
+    crash kernel still booting/dumping) is not settled, so the poll keeps waiting.
+    """
+    conn = libvirt.open(_libvirt_uri())
+    try:
+        try:
+            domain = conn.lookupByName(domain_name_for(system_id))
+        except libvirt.libvirtError:
+            return True  # gone — nothing left running, treat as settled
+        state, _reason = domain.state()
+        return state == libvirt.VIR_DOMAIN_SHUTOFF
+    finally:
+        conn.close()
+
+
 def _real_wait_for_vmcore(system_id: UUID) -> Path | None:  # pragma: no cover - live_vm
-    """Harvest the newest overlay core to a worker temp file; ``None`` when none exists.
+    """Wait for in-guest kdump to finish, then harvest the newest overlay core (ADR-0217).
+
+    Polls the domain for the kdump-complete signal (self-shut-off) within a bounded window
+    before forcing the domain off and reading its overlay. ``force_crash`` only *starts* kdump
+    (the NMI panic); the crash kernel then boots and writes ``/var/crash/<ts>/vmcore``, which
+    takes tens of seconds — so destroying the domain immediately (the pre-ADR-0217 behaviour)
+    raced the dump and harvested an empty ``/var/crash``. On timeout we force-off and harvest
+    anyway: a core already written persists on the overlay, and an absent core stays a
+    ``READINESS_FAILURE`` exactly as before.
 
     Owns the spool's lifecycle only up to a successful return: it creates a private temp
     directory, streams the chosen core into it, and removes the directory if no core is found
@@ -389,6 +457,12 @@ def _real_wait_for_vmcore(system_id: UUID) -> Path | None:  # pragma: no cover -
     cleanup, so the file survives this function's ``finally`` (it is on the host filesystem,
     independent of the libguestfs appliance handle).
     """
+    _poll_until_settled(
+        lambda: _real_domain_settled(system_id),
+        time.sleep,
+        timeout_s=_KDUMP_SETTLE_TIMEOUT_S,
+        poll_interval_s=_KDUMP_SETTLE_POLL_INTERVAL_S,
+    )
     _force_off_domain(system_id)
     overlay = overlay_path(system_id)
     spool_dir = Path(tempfile.mkdtemp(prefix="kdive-kdump-"))
