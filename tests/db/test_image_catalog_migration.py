@@ -157,6 +157,54 @@ def test_defined_row_accepts_null_object_key(pg_conn: psycopg.Connection) -> Non
     assert row is not None and row[0] is None
 
 
+def test_staged_path_row_accepts_path_only(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    _insert_image(
+        pg_conn,
+        state="registered",
+        object_key=None,
+        volume=None,
+        path="/var/lib/kdive/rootfs/x.img",
+        digest=None,
+    )
+    row = pg_conn.execute("SELECT path FROM image_catalog WHERE state = 'registered'").fetchone()
+    assert row is not None and row[0] == "/var/lib/kdive/rootfs/x.img"
+
+
+def test_registered_row_rejects_two_of_three_sources(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _insert_image(
+            pg_conn,
+            state="registered",
+            object_key="images/x",
+            volume=None,
+            path="/var/lib/kdive/rootfs/x.img",
+            digest="sha256:abc",
+        )
+
+
+def test_registered_row_rejects_no_source(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _insert_image(
+            pg_conn, state="registered", object_key=None, volume=None, path=None, digest=None
+        )
+
+
+def test_defined_row_rejects_path(pg_conn: psycopg.Connection) -> None:
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _insert_image(
+            pg_conn,
+            state="defined",
+            object_key=None,
+            volume=None,
+            path="/var/lib/kdive/rootfs/x.img",
+            digest=None,
+        )
+
+
 def test_two_registered_public_same_identity_rejected(pg_conn: psycopg.Connection) -> None:
     migrate.apply_migrations(pg_conn)
     _insert_image(pg_conn, object_key="images/a")

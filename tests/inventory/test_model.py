@@ -15,6 +15,7 @@ from kdive.inventory.model import (
     BuildSource,
     InventoryDoc,
     S3Source,
+    StagedPathSource,
     StagedSource,
 )
 
@@ -167,6 +168,44 @@ def test_build_source() -> None:
     assert isinstance(src, BuildSource)
     assert src.base == "fedora-43"
     assert src.components == ["kdump"]
+
+
+def _staged_path_image(**over: Any) -> dict[str, Any]:
+    img: dict[str, Any] = {
+        "provider": "local-libvirt",
+        "name": "local-rootfs",
+        "arch": "x86_64",
+        "format": "qcow2",
+        "root_device": "/dev/vda",
+        "visibility": "public",
+        "source": {"kind": "staged-path", "path": "/var/lib/kdive/rootfs/local-rootfs.qcow2"},
+    }
+    img.update(over)
+    return img
+
+
+def test_staged_path_source_parses() -> None:
+    d = _doc(image=[_staged_path_image()], remote_libvirt=[])
+    src = InventoryDoc.parse(d).image[0].source
+    assert isinstance(src, StagedPathSource)
+    assert src.path == "/var/lib/kdive/rootfs/local-rootfs.qcow2"
+
+
+def test_staged_path_rejects_relative_path() -> None:
+    d = _doc(
+        image=[_staged_path_image(source={"kind": "staged-path", "path": "rootfs/local.qcow2"})],
+        remote_libvirt=[],
+    )
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
+
+
+def test_staged_path_rejects_private_visibility() -> None:
+    # A private staged-path image would surface to its owning project via images.list yet be
+    # unresolvable by the public-scope local catalog lane (ADR-0228) — reject at load.
+    d = _doc(image=[_staged_path_image(visibility="private")], remote_libvirt=[])
+    with pytest.raises(InventoryError):
+        InventoryDoc.parse(d)
 
 
 def test_duplicate_image_identity_rejected() -> None:

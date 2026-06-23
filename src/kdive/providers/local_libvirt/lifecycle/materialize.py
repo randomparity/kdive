@@ -23,8 +23,9 @@ from kdive.components.references import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import _UploadRootfs
 
-# Resolve a `catalog` reference to a provider-readable local path (DB row → object → cache).
-type CatalogFetch = Callable[[CatalogComponentRef], Path]
+# Resolve a `catalog` reference (for a target arch) to a provider-readable local path. A staged-path
+# row resolves to its host path; an s3 row resolves DB row → object → cache (ADR-0092/0228).
+type CatalogFetch = Callable[[CatalogComponentRef, str], Path]
 type MaterializableRootfsRef = LocalComponentRef | CatalogComponentRef | _UploadRootfs
 
 
@@ -41,12 +42,16 @@ class RootfsUploadContext:
 class RootfsMaterializationContext:
     """Inputs needed to resolve a provider-readable rootfs base path.
 
-    ``catalog_fetch`` resolves a ``catalog`` reference through ``image_catalog`` and downloads its
-    object to a checksum-verified cache; it is ``None`` in lanes that never resolve a catalog
-    reference (then a ``catalog`` reference is a configuration error).
+    ``catalog_fetch`` resolves a ``catalog`` reference through ``image_catalog`` (a staged-path row
+    to its host path, an s3 row downloaded to a checksum-verified cache); it is ``None`` in lanes
+    that never resolve a catalog reference (then a ``catalog`` reference is a configuration error).
+    ``arch`` is the provisioning profile's target arch, threaded into ``catalog_fetch`` so a
+    same-name multi-arch image resolves deterministically (ADR-0228); it is unused on the
+    ``local``/``upload`` lanes.
     """
 
     allowed_roots: list[Path]
+    arch: str = "x86_64"
     upload: RootfsUploadContext | None = None
     catalog_fetch: CatalogFetch | None = None
 
@@ -108,4 +113,4 @@ def _materialize_catalog_rootfs(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"provider": ref.provider, "name": ref.name},
         )
-    return context.catalog_fetch(ref)
+    return context.catalog_fetch(ref, context.arch)

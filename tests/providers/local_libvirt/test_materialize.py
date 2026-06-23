@@ -40,20 +40,44 @@ def test_materialize_catalog_rootfs_uses_injected_fetch(tmp_path: Path) -> None:
     # supplies a fetch that returns the checksum-verified local cache path.
     cached = tmp_path / "abc.qcow2"
     cached.write_bytes(b"data")
-    seen: list[CatalogComponentRef] = []
+    seen: list[tuple[CatalogComponentRef, str]] = []
 
-    def _fetch(ref: CatalogComponentRef) -> Path:
-        seen.append(ref)
+    def _fetch(ref: CatalogComponentRef, arch: str) -> Path:
+        seen.append((ref, arch))
         return cached
 
     ref = CatalogComponentRef(kind="catalog", provider="local-libvirt", name="base")
     result = materialize_rootfs_base(
         ref,
-        context=RootfsMaterializationContext(allowed_roots=[tmp_path], catalog_fetch=_fetch),
+        context=RootfsMaterializationContext(
+            allowed_roots=[tmp_path], arch="x86_64", catalog_fetch=_fetch
+        ),
     )
 
     assert result == cached
-    assert seen == [ref]
+    assert seen == [(ref, "x86_64")]
+
+
+def test_materialize_catalog_rootfs_threads_arch(tmp_path: Path) -> None:
+    # The provisioning profile's arch is threaded into the fetch so a same-name multi-arch image
+    # resolves deterministically (ADR-0228).
+    cached = tmp_path / "a.qcow2"
+    cached.write_bytes(b"d")
+    seen: list[str] = []
+
+    def _fetch(_ref: CatalogComponentRef, arch: str) -> Path:
+        seen.append(arch)
+        return cached
+
+    ref = CatalogComponentRef(kind="catalog", provider="local-libvirt", name="fed")
+    materialize_rootfs_base(
+        ref,
+        context=RootfsMaterializationContext(
+            allowed_roots=[tmp_path], arch="aarch64", catalog_fetch=_fetch
+        ),
+    )
+
+    assert seen == ["aarch64"]
 
 
 def test_materialize_local_rootfs_enforces_sha256(tmp_path: Path) -> None:

@@ -45,8 +45,10 @@ class ImageCatalogEntry(DomainModel):
     bytes are not built yet — and ``digest`` is the qcow2 content digest (a rootfs image has no
     kernel ``build_id``), ``None`` until built. ``visibility``/``owner``/``expires_at`` express
     the public-vs-project-private scope (ADR-0093); the DB ``CHECK`` constraints tie ``owner``
-    and ``expires_at`` to the private case and ``object_key`` to the non-``DEFINED`` case.
-    ``pending_since`` backs the publish-deadline grace window the reconciler keys off.
+    and ``expires_at`` to the private case. A non-``DEFINED`` row carries exactly one of
+    ``object_key`` (S3), ``volume`` (a staged provider volume), or ``path`` (a local-libvirt
+    staged host file under the provider ``allowed_roots``, ADR-0228); a ``DEFINED`` row carries
+    none. ``pending_since`` backs the publish-deadline grace window the reconciler keys off.
     """
 
     provider: str
@@ -65,6 +67,7 @@ class ImageCatalogEntry(DomainModel):
     pending_since: datetime
     managed_by: ManagedBy = ManagedBy.RUNTIME
     volume: str | None = None
+    path: str | None = None
 
 
 __all__ = ["ImageCatalogEntry", "ImageState", "ImageVisibility"]

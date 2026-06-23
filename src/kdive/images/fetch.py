@@ -12,15 +12,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Protocol
 
+import psycopg
 from psycopg import AsyncConnection
 
 from kdive.artifacts import storage as artifact_types
+from kdive.components.local_paths import validate_local_component_path
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.catalog import resolve_rootfs
+from kdive.images.catalog import resolve_public_rootfs_sync, resolve_rootfs
 
 _SHA256_DIGEST = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 
@@ -144,5 +147,79 @@ async def fetch_registered_rootfs(
             object_key=object_key,
             cache_path=cached,
             err=err,
+        ) from err
+    return cached
+
+
+def fetch_registered_rootfs_sync(
+    conn: psycopg.Connection,
+    store_factory: Callable[[], RootfsObjectStore],
+    *,
+    allowed_roots: list[Path],
+    provider: str,
+    name: str,
+    arch: str,
+    cache_dir: Path,
+) -> Path:
+    """Resolve a registered public rootfs and return a provider-readable local path (sync).
+
+    The synchronous twin of :func:`fetch_registered_rootfs` for the local-libvirt provision seam,
+    which runs off the event loop and owns no async pool (ADR-0228). Resolves the registered public
+    image of ``arch`` and branches on the source column:
+
+    - a **staged-path** row resolves to its ``path`` validated against ``allowed_roots``
+      (``validate_local_component_path`` re-checks absolute-ness, existence, containment incl.
+      symlink escape, regular-file, and readability) — **no object store, no cache, no digest**;
+      ``store_factory`` is never called, so a staged-path provision works with no object storage
+      configured (the no-S3 lane).
+    - an **s3** row builds the store via ``store_factory``, downloads ``object_key``, verifies its
+      sha256 against ``digest``, and caches it under a digest-keyed file in ``cache_dir``.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when no registered public image of ``arch``
+            resolves or a staged path fails validation; ``INFRASTRUCTURE_FAILURE`` on a digest
+            mismatch or a cache IO fault.
+    """
+    row = resolve_public_rootfs_sync(conn, provider, name, arch)
+    if row is None:
+        raise CategorizedError(
+            "unknown registered rootfs catalog entry",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"provider": provider, "name": name, "arch": arch},
+        )
+    if row.path is not None:
+        return validate_local_component_path(row.path, allowed_roots=allowed_roots)
+    object_key, digest = row.object_key, row.digest
+    if object_key is None or digest is None:  # Defensive: an s3 registered row carries both.
+        raise CategorizedError(
+            "registered rootfs row is missing its object_key or digest",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"provider": provider, "name": name},
+        )
+    cached = _cache_path(cache_dir, digest)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if cached.is_file():
+            return cached
+    except OSError as err:
+        raise _cache_io_error(
+            provider=provider, name=name, object_key=object_key, cache_path=cached, err=err
+        ) from err
+    fetched = store_factory().get_artifact(object_key, None)
+    actual = "sha256:" + hashlib.sha256(fetched.data).hexdigest()
+    if actual != digest:
+        raise CategorizedError(
+            "fetched rootfs object digest does not match the catalog row",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"provider": provider, "name": name, "object_key": object_key},
+        )
+    tmp = cached.with_suffix(".qcow2.partial")
+    try:
+        tmp.write_bytes(fetched.data)
+        tmp.replace(cached)
+    except OSError as err:
+        _unlink_tmp_cache(tmp)
+        raise _cache_io_error(
+            provider=provider, name=name, object_key=object_key, cache_path=cached, err=err
         ) from err
     return cached

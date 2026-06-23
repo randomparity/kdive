@@ -248,6 +248,44 @@ def _remote_base_volume_profile(volume: str) -> dict[str, object]:
 # --- tests ---------------------------------------------------------------------------
 
 
+def test_staged_path_image_seeds_registered_with_path(migrated_url: str, tmp_path: Path) -> None:
+    async def _run() -> None:
+        doc = load_inventory(
+            _write_toml(
+                tmp_path,
+                "schema_version = 2\n"
+                "[[image]]\n"
+                'provider = "local-libvirt"\n'
+                'name = "local-rootfs"\n'
+                'arch = "x86_64"\n'
+                'format = "qcow2"\n'
+                'root_device = "/dev/vda"\n'
+                'visibility = "public"\n'
+                "[image.source]\n"
+                'kind = "staged-path"\n'
+                'path = "/var/lib/kdive/rootfs/local-rootfs.qcow2"\n',
+            )
+        )
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            diff = await reconcile_images(conn, doc, store)
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "local-rootfs")
+        assert row["state"] == "registered"
+        assert row["path"] == "/var/lib/kdive/rootfs/local-rootfs.qcow2"
+        assert row["object_key"] is None
+        assert row["volume"] is None
+        assert row["digest"] is None
+        assert row["managed_by"] == "config"
+        assert "local-rootfs" in {c.name for c in diff.created}
+        assert store.deleted == []
+
+    asyncio.run(_run())
+
+
 def test_staged_image_registers_with_volume(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
         doc = load_inventory(

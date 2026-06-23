@@ -156,6 +156,40 @@ def test_full_inventory_examples_are_valid_and_use_real_refs(
     assert remote["base_image_volume"] == "remote-base.qcow2"
 
 
+_STAGED_PATH_INVENTORY = """
+schema_version = 2
+
+[[image]]
+provider = "local-libvirt"
+name = "fedora-local"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda1"
+visibility = "public"
+[image.source]
+kind = "staged-path"
+path = "/var/lib/kdive/rootfs/fedora-local.qcow2"
+"""
+
+
+def test_local_example_uses_catalog_ref_for_public_staged_path_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A public staged-path image (ADR-0228) makes the local example a real `catalog` ref, just
+    # like any other public source kind — profile_examples is source-kind-agnostic. The path
+    # itself is never emitted into the example.
+    path = _write_inventory(tmp_path, _STAGED_PATH_INVENTORY)
+    monkeypatch.setenv(SYSTEMS_TOML.name, str(path))
+    config.reset()
+    doc = load_inventory_optional(path)
+    assert doc is not None
+    data = _examples(doc)["local-libvirt"]
+    rootfs = _profile_of(data)["provider"]["local-libvirt"]["rootfs"]
+    assert rootfs == {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-local"}
+    assert data["uses_real_reference"] is True
+    assert "/var/lib/kdive/rootfs/fedora-local.qcow2" not in str(data)
+
+
 def test_placeholder_examples_are_still_valid_when_no_public_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

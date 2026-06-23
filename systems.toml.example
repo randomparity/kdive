@@ -56,6 +56,25 @@ kind = "s3"
 object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
 # digest = "sha256:…"   # uncomment once published to mark the row `registered`
 
+# A `staged-path` source (local-libvirt only, ADR-0228) registers an operator-staged rootfs
+# FILE — the qcow2 `build-fs` writes to local disk — without any object-store upload. It seeds
+# `registered` (bootable) immediately and is discoverable from the MCP surface
+# (`fixtures.list` / `systems.profile_examples`), so a host-shell-free agent can provision with
+# `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-local"}`. The `path`
+# must be absolute and under the provider `allowed_roots` (`/var/lib/kdive/rootfs`), and the
+# image must be `public` (a private staged-path image is rejected at load).
+[[image]]
+provider = "local-libvirt"
+name = "fedora-local"
+arch = "x86_64"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["kdive-ready-console", "ssh", "drgn"]
+[image.source]
+kind = "staged-path"
+path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
+
 [[image]]
 provider = "local-libvirt"
 name = "fedora-cloud-43"

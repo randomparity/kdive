@@ -232,9 +232,15 @@ sized by discovery (Step 3), not by this file; if you reconcile before discovery
 host, the overlay logs a benign `no discovered local-libvirt host … overlay deferred` warning and
 converges on the next reconciler pass.
 
-The image is declared with an `s3` source and **no `digest`**, so its catalog row stays `defined`
-(expected) until the object is published — this does not block allocation. The rootfs a System
-actually boots comes from the provisioning profile (Step 6), not this row's digest.
+The image is declared with a **`staged-path`** source (ADR-0228): the source is the rootfs FILE on
+local disk (the path `build-fs` writes to in Step 6), so its catalog row seeds **`registered`**
+(bootable) immediately — no object-store upload. That makes it discoverable from the MCP surface
+alone: `fixtures.list` / `systems.profile_examples` list it, and a System can be provisioned with a
+`catalog` reference (`{kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-43"}`)
+rather than a host path (Step 6). The file need not exist yet at reconcile time (declared, not
+probed) — provisioning re-validates it against the provider `allowed_roots`, so build it before you
+provision. (Declare an `s3` source instead only if you publish the qcow2 to the object store; an
+`s3` row with no `digest` stays `defined` until published.)
 
 ### kdump capture prerequisites
 
@@ -365,8 +371,7 @@ allocations.request project=demo request={
 ```
 
 **Provision a System.** Provision boots a qcow2 rootfs from disk, so it needs a **bootable image**
-on the host — the minimal example's `s3` image is digest-less and does not provide one. Get a
-bootable qcow2 by either:
+on the host. Get one by either:
 
 - building a kdive-ready rootfs with `build-fs` (uses libguestfs/virt-builder — needs the Step 1
   Debian/Ubuntu libguestfs fixes; on Ubuntu 24.04 the `virt-builder --install` step may still be
@@ -379,22 +384,33 @@ bootable qcow2 by either:
   ```
 
 - or staging any prebuilt bootable qcow2 (e.g. a Fedora/Cloud base image) at a world-readable path
-  under `/var/lib/kdive/rootfs/local/` and pointing `rootfs.path` at it. (The clean-room validation
-  of this page used a staged base qcow2, because `build-fs` was blocked by the Ubuntu 24.04
-  passt/libguestfs issue above.)
+  under `/var/lib/kdive/rootfs/local/`. (The clean-room validation of this page used a staged base
+  qcow2, because `build-fs` was blocked by the Ubuntu 24.04 passt/libguestfs issue above.)
 
-Then provision against whichever rootfs you staged. Local-libvirt provisioning uses `boot_method: direct-kernel`
+The `staged-path` `[[image]]` you reconciled (Step 4) points at exactly that file, so once it
+exists the catalog row resolves it. Local-libvirt provisioning uses `boot_method: direct-kernel`
 (`kernel_source_ref` is required by the schema but only used by a later build Run; provision boots
-the rootfs's own kernel from disk). `disk_gb` must equal the allocation's (ADR-0205):
+the rootfs's own kernel from disk). `disk_gb` must equal the allocation's (ADR-0205).
+
+**Recommended — provision by `catalog` reference** (what a host-shell-free agent does: discover the
+name via `fixtures.list` / `systems.profile_examples`, then paste it):
 
 ```text
 systems.provision allocation_id=<granted id> profile={
   "schema_version": 1, "arch": "x86_64", "vcpu": 2, "memory_mb": 2048, "disk_gb": 10,
   "boot_method": "direct-kernel", "kernel_source_ref": "/path/to/linux",
   "provider": {"local-libvirt": {"rootfs":
-    {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"}}}
+    {"kind": "catalog", "provider": "local-libvirt", "name": "fedora-kdive-ready-43"}}}
 }
 # → status=queued; the worker define+starts a tagged libvirt domain. Poll systems.get until ready.
+```
+
+The `local` host-path form still works when you have not declared an `[[image]]` (it needs no
+inventory, but the path is invisible to an agent without host access):
+
+```text
+  "provider": {"local-libvirt": {"rootfs":
+    {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"}}}
 ```
 
 A successful provision yields a running `kdive-<system-id>` domain (`virsh -c qemu:///system list`)

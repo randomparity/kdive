@@ -17,7 +17,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from kdive.inventory import serialize
-from kdive.inventory.model import InventoryDoc
+from kdive.inventory.model import InventoryDoc, StagedPathSource
 from kdive.inventory.overrides import BUILD_HOST_RESOURCE_KIND, InventorySourceKind
 
 # ---- TOML emitter primitives ----------------------------------------------------------
@@ -71,6 +71,7 @@ def _image(
     object_key: str | None = None,
     digest: str | None = None,
     volume: str | None = None,
+    path: str | None = None,
     state: str = "defined",
 ) -> serialize.ImageRow:
     return serialize.ImageRow(
@@ -84,6 +85,7 @@ def _image(
         object_key=object_key,
         digest=digest,
         volume=volume,
+        path=path,
         state=state,
     )
 
@@ -188,6 +190,27 @@ def test_serialize_image_staged_source() -> None:
     text = serialize.serialize_inventory(snap)
     assert 'kind = "staged"' in text
     assert 'volume = "vol-x"' in text
+
+
+def test_serialize_image_staged_path_source() -> None:
+    snap = _snapshot(
+        images=(
+            _image(
+                provider="local-libvirt",
+                name="local-rootfs",
+                path="/var/lib/kdive/rootfs/local-rootfs.qcow2",
+                state="registered",
+            ),
+        )
+    )
+    text = serialize.serialize_inventory(snap)
+    assert 'kind = "staged-path"' in text
+    assert 'path = "/var/lib/kdive/rootfs/local-rootfs.qcow2"' in text
+    # Round-trips: the emitted inventory re-parses with the staged-path source.
+    parsed = InventoryDoc.parse(tomllib.loads(text))
+    source = parsed.image[0].source
+    assert isinstance(source, StagedPathSource)
+    assert source.path == "/var/lib/kdive/rootfs/local-rootfs.qcow2"
 
 
 def test_completed_remote_skeleton_parses_after_filling_placeholders() -> None:

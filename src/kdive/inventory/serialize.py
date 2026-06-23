@@ -109,6 +109,9 @@ class ImageRow:
     digest: str | None
     volume: str | None
     state: str
+    # A local-libvirt staged-path source (ADR-0228); defaulted so existing constructors are
+    # unchanged. Mutually exclusive with object_key/volume (DB image_object_present CHECK).
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -243,12 +246,15 @@ def _emit_image(image: ImageRow) -> str:
 
 
 def _emit_image_source(image: ImageRow) -> list[str]:
-    """Reconstruct the ``[image.source]`` table from ``(object_key, volume, state)``.
+    """Reconstruct the ``[image.source]`` table from ``(object_key, volume, path, state)``.
 
-    A ``volume`` is a ``staged`` source; an ``object_key`` is an ``s3`` source (with the digest
-    iff present); a ``defined`` row with neither is emitted as an ``s3`` skeleton with a
-    placeholder ``object_key`` (its original build base is not stored — see the header).
+    A ``path`` is a local-libvirt ``staged-path`` source (ADR-0228); a ``volume`` is a ``staged``
+    source; an ``object_key`` is an ``s3`` source (with the digest iff present); a ``defined`` row
+    with none is emitted as an ``s3`` skeleton with a placeholder ``object_key`` (its original
+    build base is not stored — see the header).
     """
+    if image.path is not None:
+        return ["[image.source]", 'kind = "staged-path"', f"path = {_toml_str(image.path)}"]
     if image.volume is not None:
         return ["[image.source]", 'kind = "staged"', f"volume = {_toml_str(image.volume)}"]
     if image.object_key is not None:
@@ -375,7 +381,7 @@ async def _read_images(conn: AsyncConnection) -> tuple[ImageRow, ...]:
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT provider, name, arch, format, root_device, visibility, capabilities, "
-            "object_key, digest, volume, state "
+            "object_key, digest, volume, path, state "
             "FROM image_catalog WHERE managed_by = %s",
             (_CONFIG_MANAGED_BY,),
         )
@@ -392,6 +398,7 @@ async def _read_images(conn: AsyncConnection) -> tuple[ImageRow, ...]:
             object_key,
             digest,
             volume,
+            path,
             state,
         ) = raw
         rows.append(
@@ -406,6 +413,7 @@ async def _read_images(conn: AsyncConnection) -> tuple[ImageRow, ...]:
                 object_key=None if object_key is None else str(object_key),
                 digest=None if digest is None else str(digest),
                 volume=None if volume is None else str(volume),
+                path=None if path is None else str(path),
                 state=str(state),
             )
         )

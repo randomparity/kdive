@@ -25,7 +25,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from kdive.build_configs.rules import validate_build_config_content, validate_build_config_name
 from kdive.domain.accounting.cost_class_rules import parse_positive_coeff, validate_cost_class_name
@@ -58,7 +58,28 @@ class StagedSource(BaseModel):
     volume: str
 
 
-ImageSource = Annotated[S3Source | BuildSource | StagedSource, Field(discriminator="kind")]
+class StagedPathSource(BaseModel):
+    """An image backed by an operator-staged rootfs file under a local-libvirt provider root.
+
+    The local-libvirt analog of :class:`StagedSource` (which names a libvirt storage-pool volume):
+    ``path`` is an absolute host path validated against the provider's ``allowed_roots`` at
+    provision time. No S3 object, no digest (ADR-0228). Public-only — see :class:`ImageEntry`.
+    """
+
+    kind: Literal["staged-path"]
+    path: str
+
+    @field_validator("path")
+    @classmethod
+    def _validate_absolute(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("staged-path source path must be absolute")
+        return value
+
+
+ImageSource = Annotated[
+    S3Source | BuildSource | StagedSource | StagedPathSource, Field(discriminator="kind")
+]
 """Discriminated union of image realization sources, keyed on the ``kind`` literal."""
 
 
@@ -78,6 +99,21 @@ class ImageEntry(BaseModel):
     def identity(self) -> tuple[str, str, str]:
         """The stable identity tuple ``(provider, name, arch)``."""
         return (self.provider, self.name, self.arch)
+
+    @model_validator(mode="after")
+    def _staged_path_is_public(self) -> Self:
+        """A ``staged-path`` image must be public (ADR-0228).
+
+        The local-libvirt catalog rootfs lane resolves at public scope, so a private staged-path
+        row would surface to its owning project via ``images.list`` yet be unresolvable at provision
+        — a discoverable-but-unprovisionable trap. Reject it at load instead.
+        """
+        if isinstance(self.source, StagedPathSource) and self.visibility != ImageVisibility.PUBLIC:
+            raise ValueError(
+                "a staged-path image must have visibility = 'public'; project-private local "
+                "staged-path images are not supported"
+            )
+        return self
 
 
 class _Instance(BaseModel):

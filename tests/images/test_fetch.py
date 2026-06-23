@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from kdive.artifacts import storage as artifact_types
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.images.fetch import fetch_registered_rootfs
+from kdive.images.fetch import fetch_registered_rootfs, fetch_registered_rootfs_sync
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _QCOW2 = b"qcow2-bytes-for-test"
@@ -255,3 +257,109 @@ def test_fetch_cache_replace_error_is_typed_and_removes_partial(
             assert not partial.exists()
 
     asyncio.run(_run())
+
+
+def _insert_registered_sync(conn: psycopg.Connection, **kw: object) -> None:
+    row: dict[str, object] = {
+        "provider": "local-libvirt",
+        "name": "fed",
+        "arch": "x86_64",
+        "format": "qcow2",
+        "root_device": "/dev/vda",
+        "object_key": None,
+        "volume": None,
+        "path": None,
+        "digest": None,
+        "visibility": "public",
+        "owner": None,
+        "expires_at": None,
+        "state": "registered",
+    }
+    row.update(kw)
+    cols = list(row.keys())
+    query = sql.SQL("INSERT INTO image_catalog ({cols}) VALUES ({vals})").format(
+        cols=sql.SQL(", ").join(sql.Identifier(c) for c in cols),
+        vals=sql.SQL(", ").join(sql.Placeholder(c) for c in cols),
+    )
+    conn.execute(query, row)
+
+
+def _exploding_factory() -> Callable[[], _FakeStore]:
+    def _f() -> _FakeStore:
+        raise AssertionError("store factory must not be called for staged-path")
+
+    return _f
+
+
+def test_sync_fetch_staged_path_returns_validated_path_without_store(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    f = tmp_path / "x.img"
+    f.write_bytes(b"data")
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        _insert_registered_sync(conn, path=str(f))
+        out = fetch_registered_rootfs_sync(
+            conn,
+            _exploding_factory(),
+            allowed_roots=[tmp_path],
+            provider="local-libvirt",
+            name="fed",
+            arch="x86_64",
+            cache_dir=tmp_path / ".cache",
+        )
+        assert out == f.resolve()
+
+
+def test_sync_fetch_staged_path_outside_roots_rejected(migrated_url: str, tmp_path: Path) -> None:
+    outside = tmp_path / "x.img"
+    outside.write_bytes(b"d")
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        _insert_registered_sync(conn, path=str(outside))
+        with pytest.raises(CategorizedError) as ei:
+            fetch_registered_rootfs_sync(
+                conn,
+                _exploding_factory(),
+                allowed_roots=[roots],
+                provider="local-libvirt",
+                name="fed",
+                arch="x86_64",
+                cache_dir=tmp_path / ".cache",
+            )
+        assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_sync_fetch_unknown_name_rejected(migrated_url: str, tmp_path: Path) -> None:
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        with pytest.raises(CategorizedError) as ei:
+            fetch_registered_rootfs_sync(
+                conn,
+                _exploding_factory(),
+                allowed_roots=[tmp_path],
+                provider="local-libvirt",
+                name="absent",
+                arch="x86_64",
+                cache_dir=tmp_path / ".cache",
+            )
+        assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_sync_fetch_s3_downloads_and_caches(migrated_url: str, tmp_path: Path) -> None:
+    key = "images/local-libvirt/fed/x86_64.qcow2"
+    store = _FakeStore(key, _QCOW2)
+    cache = tmp_path / ".cache"
+    with psycopg.connect(migrated_url, autocommit=True) as conn:
+        _insert_registered_sync(conn, object_key=key, digest=_DIGEST)
+        out = fetch_registered_rootfs_sync(
+            conn,
+            lambda: store,
+            allowed_roots=[tmp_path],
+            provider="local-libvirt",
+            name="fed",
+            arch="x86_64",
+            cache_dir=cache,
+        )
+        assert out.read_bytes() == _QCOW2
+        assert out.parent == cache
+        assert store.gets == [key]
