@@ -59,6 +59,10 @@ def render_domain_xml(
     ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
+    features = ET.SubElement(domain, "features")
+    # QEMU emits the VMCOREINFO note that drgn/crash need to locate the kernel in a host_dump
+    # core only when the domain advertises this feature; mirror remote's domain (issue #703).
+    ET.SubElement(features, "vmcoreinfo", state="on")
     devices = ET.SubElement(domain, "devices")
     disk = ET.SubElement(devices, "disk", type="file", device="disk")
     ET.SubElement(disk, "driver", name="qemu", type="qcow2")

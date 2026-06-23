@@ -435,6 +435,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enable vmcoreinfo on the local-libvirt domain so host_dump cores parse
 - Harden TLS URI validation, gate merge blind spot, typed IO errors
 - Percent-decode URI parameter names before fail-closed checks
 - Remote runtime no-op rootfs validator + typed enumeration fault
