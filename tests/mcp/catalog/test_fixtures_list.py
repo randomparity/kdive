@@ -59,6 +59,36 @@ async def _insert_staged(conn: AsyncConnection, *, name: str, volume: str) -> No
     )
 
 
+async def _insert_staged_path(conn: AsyncConnection, *, name: str, path: str) -> None:
+    await conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, path, capabilities, provenance, "
+        " visibility, owner, state, managed_by) "
+        "VALUES ('local-libvirt', %s, 'x86_64', 'qcow2', '/dev/vda', %s, '{}', '{}', "
+        " 'public', NULL, 'registered', 'config')",
+        (name, path),
+    )
+
+
+def test_fixtures_list_surfaces_staged_path_without_leaking_path(migrated_url: str) -> None:
+    # A staged-path image is discoverable by (provider, name, arch), but its absolute host path is
+    # never projected to the wire (no-leak, ADR-0123/0228).
+    secret = "/var/lib/kdive/rootfs/secret-local.qcow2"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            async with pool.connection() as conn:
+                await _insert_staged_path(conn, name="local-rootfs", path=secret)
+            resp = await fixtures.list_fixtures(pool)
+        rows = [json_mapping(row) for row in data_sequence(resp, "fixtures")]
+        match = next(row for row in rows if row["name"] == "local-rootfs")
+        assert match["provider"] == "local-libvirt"
+        assert "path" not in match
+        assert secret not in str(resp.model_dump())
+
+    asyncio.run(_run())
+
+
 def test_fixtures_carry_staged_volume(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

@@ -92,6 +92,18 @@ async def _insert_staged(pool: AsyncConnectionPool, *, name: str, volume: str) -
         )
 
 
+async def _insert_staged_path(pool: AsyncConnectionPool, *, name: str, path: str) -> None:
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO image_catalog "
+            "(provider, name, arch, format, root_device, path, visibility, owner, "
+            " state, pending_since) "
+            "VALUES ('local-libvirt', %(name)s, 'x86_64', 'qcow2', '/dev/vda', %(path)s, "
+            " 'public', NULL, 'registered', now())",
+            {"name": name, "path": path},
+        )
+
+
 def _names(resp: object) -> set[str]:
     items = getattr(resp, "items", [])
     return {str(item.data["name"]) for item in items}
@@ -112,6 +124,23 @@ def test_list_carries_staged_volume_token(migrated_url: str) -> None:
             resp = await catalog_images.list_images(pool, _ctx())
         assert _volume_of(resp, "fedora-remote") == "fedora-remote.qcow2"
         assert _volume_of(resp, "local-s3") == ""  # no staged volume -> empty string
+
+    asyncio.run(_run())
+
+
+def test_list_surfaces_staged_path_without_leaking_path(migrated_url: str) -> None:
+    # A staged-path image is listed (discoverable by name) but its absolute host path is never
+    # projected into the response envelope (no-leak, ADR-0123/0228).
+    secret = "/var/lib/kdive/rootfs/secret-local.qcow2"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_staged_path(pool, name="local-rootfs", path=secret)
+            resp = await catalog_images.list_images(pool, _ctx())
+        assert "local-rootfs" in _names(resp)
+        item = next(i for i in resp.items if i.data["name"] == "local-rootfs")
+        assert "path" not in item.data
+        assert secret not in str(resp.model_dump())
 
     asyncio.run(_run())
 
