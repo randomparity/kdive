@@ -60,6 +60,10 @@ def render_domain_xml(
     os_el = ET.SubElement(domain, "os")
     ET.SubElement(os_el, "type", arch=profile.arch, machine=machine).text = "hvm"
     features = ET.SubElement(domain, "features")
+    # On x86 the guest's qemu_fw_cfg driver locates the fw_cfg device only via ACPI, so the
+    # VMCOREINFO note below is written only when ACPI is present; mirror remote (issue #708,
+    # ADR-0215).
+    ET.SubElement(features, "acpi")
     # QEMU emits the VMCOREINFO note that drgn/crash need to locate the kernel in a host_dump
     # core only when the domain advertises this feature; mirror remote's domain (issue #703).
     ET.SubElement(features, "vmcoreinfo", state="on")

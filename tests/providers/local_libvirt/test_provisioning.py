@@ -239,6 +239,13 @@ def test_render_enables_vmcoreinfo_feature() -> None:
     assert vmcoreinfo.get("state") == "on"
 
 
+def test_render_enables_acpi_feature() -> None:
+    # The guest's qemu_fw_cfg driver finds the fw_cfg device (and so writes the VMCOREINFO note)
+    # only via ACPI on x86; without <acpi> the <vmcoreinfo> feature is inert (issue #708, ADR-0215).
+    root = _safe_fromstring(_render())
+    assert root.find("features/acpi") is not None
+
+
 def test_render_metadata_tag_round_trips_through_discovery() -> None:
     root = _safe_fromstring(_render())
     tag = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}system")
