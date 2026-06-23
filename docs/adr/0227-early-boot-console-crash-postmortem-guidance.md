@@ -86,7 +86,14 @@ depend on #735 landing first and works against `main` as-is.
      identical for every `console_crash` run.
 
    A run with no `expected_boot_failure`, or one whose kind is not `console_crash`,
-   keeps the existing reason-keyed `no_vmcore` `not_found` envelope unchanged.
+   keeps the existing reason-keyed `no_vmcore` `not_found` envelope unchanged. The
+   kind is propagated **on the `no_vmcore` error's `details`** (where the resolver
+   already holds the run) rather than re-fetched in the handler, and it is attached
+   **only** for the `console_crash` case: the non-console-crash fall-through path runs
+   the error's `details` through `safe_error_details` (which forwards every scalar to
+   `data`), so an unconditional kind would surface a new `data.expected_boot_failure`
+   key on the unchanged envelope the day a second kind is introduced. Conditional
+   attachment keeps that envelope's `data` exactly `{reason: no_vmcore}`.
 
 2. **Non-null `detail` on `vmcore.fetch` for a non-`CRASHED` System.** The
    `current_status` `_config_error` gains a fixed-template `detail`: "system must be

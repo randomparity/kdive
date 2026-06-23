@@ -60,14 +60,29 @@ re-parse `run_id` (the handler holds only the string; `uid` is resolver-internal
 silently desync if the resolver's precondition order ever changes.
 
 **Resolver (`mcp/tools/_vmcore_targets.py`).** At the `vmcore_ref is None` branch,
-`resolve_run_vmcore_target` raises the `NO_VMCORE` `not_found` carrying the run's
-expected-boot-failure kind in `details`:
-`details={"reason": NO_VMCORE, "expected_boot_failure": <kind-or-None>}`, where the
-kind is read from `run.expected_boot_failure` (the serialized dict's `kind` key — an
-author-controlled enum-like token, the same value `runs.get` already surfaces, never
-guest/exception text; `None` when the run declared none). A new `_precondition`
-helper variant takes the optional kind so only the `NO_VMCORE` raise carries it. The
-other preconditions (`NO_DEBUGINFO`, `NO_BUILD`) and the absent-Run miss are
+`resolve_run_vmcore_target` raises the `NO_VMCORE` `not_found`. The
+`expected_boot_failure` key is attached to `details` **only when the run's declared
+kind is exactly `"console_crash"`** — not for any other kind and not for a run that
+declared none:
+`details={"reason": NO_VMCORE, "expected_boot_failure": "console_crash"}` for a
+console-crash run, and `details={"reason": NO_VMCORE}` (byte-identical to today) for
+every other no-vmcore run. The kind is read from `run.expected_boot_failure` (the
+serialized dict's `kind` key — an author-controlled enum-like token, the same value
+`runs.get` already surfaces, never guest/exception text).
+
+Scoping the key to `console_crash` (rather than always attaching `<kind-or-None>`)
+is load-bearing for the fall-through contract: the non-console-crash path falls
+through to `vmcore_target_failure` → `failure_from_error` → `safe_error_details`,
+which forwards **every** JSON scalar in `details` to the envelope `data`. Attaching an
+unconditional kind would surface a new `data.expected_boot_failure` key on the
+non-console-crash `no_vmcore` `not_found` envelope the day a second
+`expected_boot_failure.kind` is introduced (today the domain Literal admits only
+`console_crash`, but the contract must not depend on that staying true). Conditional
+attachment keeps that envelope's `data` exactly `{reason: no_vmcore}` regardless of
+future kinds. A new `_precondition` helper variant takes the optional kind so only
+the console-crash `NO_VMCORE` raise carries it.
+
+The other preconditions (`NO_DEBUGINFO`, `NO_BUILD`) and the absent-Run miss are
 unchanged. The project-scope and viewer-role checks are already complete before
 `NO_VMCORE` is raised (lines 63-66 of the resolver), so anything downstream performs
 **no further authz**.
@@ -118,7 +133,10 @@ already surfaced in `data.current_status`, so echoing it leaks nothing (ADR-0123
   contains the stable substrings `"kexec"` and `"console"` so its meaning is pinned.
 - A run with **no** `expected_boot_failure`, or one whose kind is not `console_crash`,
   that resolves to no vmcore: unchanged — `not_found` + `data.reason == "no_vmcore"` +
-  `suggested_next_actions == ["vmcore.fetch", "runs.get"]`.
+  `suggested_next_actions == ["vmcore.fetch", "runs.get"]`. The test asserts the
+  envelope `data` carries **no** `expected_boot_failure` key (pinning the conditional
+  attachment so a future second kind cannot silently leak it through
+  `safe_error_details`).
 - A `no_debuginfo` / `no_build` / absent-Run miss: unchanged, regardless of
   `expected_boot_failure` (the redirect is scoped to `no_vmcore`).
 - `vmcore.fetch` on a non-`CRASHED` System: `configuration_error` with a non-null
