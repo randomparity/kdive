@@ -67,6 +67,25 @@ def test_dropped_fragment_symbols_accepts_module_survivor() -> None:
     assert _dropped_fragment_symbols(fragment, final) == []
 
 
+def test_dropped_fragment_symbols_reports_builtin_downgraded_to_module() -> None:
+    # A fragment requesting =y must end up =y. olddefconfig honoring a base-defconfig
+    # value of =m instead silently disarms a built-in-only requirement (e.g. the
+    # qemu_fw_cfg VMCOREINFO write path probing at boot under =y; #708). Treat the
+    # downgrade as a dropped symbol so the build fails loud rather than producing an
+    # unparseable host_dump core.
+    fragment = "CONFIG_FW_CFG_SYSFS=y\n"
+    final = "CONFIG_FW_CFG_SYSFS=m\n"
+    assert _dropped_fragment_symbols(fragment, final) == ["CONFIG_FW_CFG_SYSFS"]
+
+
+def test_dropped_fragment_symbols_accepts_module_request_built_in() -> None:
+    # A fragment requesting =m is satisfied by either =m or a stronger =y in the final
+    # config: asking for a module and getting it built in still arms the symbol.
+    fragment = "CONFIG_FOO=m\n"
+    final = "CONFIG_FOO=y\n"
+    assert _dropped_fragment_symbols(fragment, final) == []
+
+
 def test_dropped_fragment_symbols_only_counts_enabled_non_comment_lines() -> None:
     # A symbol requested =y but written =n in the final config is dropped: the enabled
     # set is built only from lines that genuinely end in =y/=m and are not comments,
