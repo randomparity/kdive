@@ -22,9 +22,15 @@ schema_version = 2
 # ---------------------------------------------------------------------------------------------
 # IMAGE — the kdive-ready local baseline rootfs, reconciled into image_catalog.
 #
-# Declared `s3`; with no `digest` the row stays `defined` (expected) until its object is
-# published — it does not block the lifecycle. The rootfs a System actually boots comes from the
-# provisioning profile, not this row's digest.
+# Declared `staged-path` (ADR-0228): the source is the qcow2 FILE on local disk (the path
+# `build-fs` writes to in Step 6), under the provider allowed_roots (`/var/lib/kdive/rootfs`). It
+# seeds `registered` (bootable) immediately — no object-store upload — so an MCP agent with no host
+# shell can DISCOVER it (`fixtures.list` / `systems.profile_examples`) and provision with
+# `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-43"}`. The
+# path must be absolute, under allowed_roots, and the image `public` (a private staged-path image is
+# rejected at load). The file need not exist yet at reconcile time (declared, not probed) —
+# provisioning re-validates it, so build it in Step 6 before you provision. Use an `s3` source
+# instead only if you publish the qcow2 to the object store.
 # ---------------------------------------------------------------------------------------------
 [[image]]
 provider = "local-libvirt"
@@ -35,9 +41,8 @@ root_device = "/dev/vda"
 visibility = "public"
 capabilities = ["kdive-ready-console", "ssh", "drgn"]
 [image.source]
-kind = "s3"
-object_key = "rootfs/local/fedora-kdive-ready-43.qcow2"
-# digest = "sha256:…"   # uncomment once published to mark the row `registered`
+kind = "staged-path"
+path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
 
 # ---------------------------------------------------------------------------------------------
 # HOST — one local-libvirt resource on qemu:///system, reconciled into resources.
