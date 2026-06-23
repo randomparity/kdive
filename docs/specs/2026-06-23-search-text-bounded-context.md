@@ -71,13 +71,26 @@ that re-envelopes such typed binding errors. Register a conversion for
   `{before_lines, after_lines, max_matches}` and a numeric-range `type`
   (`greater_than_equal` / `less_than_equal`).
 - **build:** a `CONFIGURATION_ERROR` with `data.reason = "bad_search_input"` and a
-  `detail` of the form `"<field> must be between <ge> and <le> (got <input>)"`,
-  reconstructed from the first matching error's `loc`, the parameter's known bounds,
-  and the offending input. The object id is `artifact_id` (or the tool name when
-  absent), matching the existing conversions.
+  `detail` of the form `"<field> must be between <ge> and <le>"`, reconstructed from
+  the first matching error's `loc` and the parameter's known bounds. The offending
+  input value is **not** echoed into `detail` — the detail is a pure fixed template of
+  field name plus the two integer bounds, so R4 holds with no caller-derived content at
+  all. The object id is `artifact_id` (or the tool name when absent), matching the
+  existing conversions.
 
 The two bound sources are central constants so the registrar signature, the model,
 the middleware detail, and the runtime `_bounded_int` all read the same numbers.
+
+**Non-goal — type-coercion errors stay out of scope.** A non-integer context value
+(e.g. `before_lines: "abc"` or `3.5`) produces a Pydantic `int_parsing` /
+`int_from_float` error under the same `loc` but with a *different* error `type` and no
+range `ctx`. The conversion deliberately matches **only** the numeric-range error
+types (`greater_than_equal` / `less_than_equal`), so a type-coercion error does not
+become a `bad_search_input` envelope — it keeps FastMCP's default binding behavior.
+#733 is strictly about the undocumented *caps*; a wrong *type* was never the defect,
+the MCP transport's JSON typing already constrains it, and re-enveloping it would be a
+separate (and broader) decision. A test asserts the predicate ignores an
+`int_parsing` error under a context field so this boundary cannot silently widen.
 
 ### Defense-in-depth (R5)
 
@@ -97,8 +110,12 @@ bounds.
   `configuration_error`, `data.reason == "bad_search_input"`, and `detail` contains
   the offending field name and its bound. One case per field; both the low (`ge`) and
   high (`le`) edge for at least one field.
-- **No leak (R4):** assert the `detail` is the fixed template (no caller free text /
-  secret / key).
+- **No leak (R4):** assert the `detail` is the fixed `"<field> must be between <ge>
+  and <le>"` template (field name + two integer bounds only; no caller-supplied value
+  echoed).
+- **Type-coercion non-goal:** assert the conversion predicate does **not** match an
+  `int_parsing` error under a context field (a non-integer `before_lines` is not
+  re-enveloped as `bad_search_input`).
 - **Direct caller (R5):** `search_text(...)` with an out-of-range value still raises
   `ArtifactSearchInputError` naming the field; assert the schema/model and
   `_bounded_int` bounds are equal.
