@@ -149,6 +149,18 @@ async def installed_modules_ref(conn: AsyncConnection, run_id: UUID) -> str | No
     return result.modules_ref
 
 
+async def installed_debuginfo_ref(conn: AsyncConnection, run_id: UUID) -> str | None:
+    """The Run's published DWARF vmlinux ref (ADR-0221), or ``None`` if it built none.
+
+    Threaded into install so the local provider can stage the vmlinux in-guest for live drgn;
+    other providers ignore it.
+    """
+    result = await existing_build_result(conn, run_id)
+    if result is None:
+        return None
+    return result.debuginfo_ref
+
+
 def system_required_cmdline(method: CaptureMethod, root_cmdline: str | None) -> str:
     """Compose the platform-owned kernel cmdline (ADR-0183).
 

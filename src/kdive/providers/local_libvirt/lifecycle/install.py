@@ -119,9 +119,13 @@ class GuestKernelWriter(Protocol):
     ``kernel_image`` is the from-source kernel already fetched for the direct-kernel ``<kernel>``
     element; the writer also lands it at ``/boot/vmlinuz-<ver>`` so the guest's ``kdumpctl`` can
     kexec-load a crash kernel (ADR-0207). ``modules_tar`` is the ``/lib/modules/<ver>`` tree.
+    ``vmlinux``, when given, is the run's DWARF ``vmlinux`` staged at
+    ``/usr/lib/debug/lib/modules/<ver>/vmlinux`` for in-guest live drgn (ADR-0221).
     """
 
-    def inject(self, overlay: str, kernel_image: Path, modules_tar: Path) -> None: ...
+    def inject(
+        self, overlay: str, kernel_image: Path, modules_tar: Path, vmlinux: Path | None = None
+    ) -> None: ...
 
 
 type Connect = Callable[[], _LibvirtConn]
@@ -216,8 +220,12 @@ class LocalLibvirtInstall:
         if request.initrd_ref is not None:
             initrd_path = staging_dir / "initrd"
             self._fetch_initrd(request.initrd_ref, initrd_path)
-        if request.method is CaptureMethod.KDUMP and request.modules_ref is not None:
-            self._inject_built_modules(request.system_id, request.modules_ref, staging_dir)
+        if request.modules_ref is not None and (
+            request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None
+        ):
+            self._inject_built_modules(
+                request.system_id, request.modules_ref, request.debuginfo_ref, staging_dir
+            )
         if request.method is CaptureMethod.KDUMP and not (
             request.modules_ref is not None or initrd_path is not None
         ):
@@ -239,7 +247,9 @@ class LocalLibvirtInstall:
         finally:
             _close(conn)
 
-    def _inject_built_modules(self, system_id: UUID, modules_ref: str, staging_dir: Path) -> None:
+    def _inject_built_modules(
+        self, system_id: UUID, modules_ref: str, debuginfo_ref: str | None, staging_dir: Path
+    ) -> None:
         """Force-off the domain, then stage the built kernel into its overlay (ADR-0203/0207).
 
         Injects ``/lib/modules/<ver>`` *and* the from-source kernel image at
@@ -247,6 +257,11 @@ class LocalLibvirtInstall:
         under direct-kernel boot the running kernel is supplied by libvirt and is otherwise absent
         from the guest ``/boot`` (ADR-0207). The kernel image is the one ``install`` already
         fetched to ``staging_dir/kernel`` for the ``<kernel>`` element; no extra fetch.
+
+        When ``debuginfo_ref`` is set the run's DWARF ``vmlinux`` is fetched and staged in-guest
+        at ``/usr/lib/debug/lib/modules/<ver>/vmlinux`` so the live ``kdive-drgn`` helper's
+        ``drgn -k`` resolves typed symbols against ``/proc/kcore`` (ADR-0221); it rides this same
+        rw session (the modules tarball is the ``<ver>`` source either way).
 
         Ordered force-off → fetch → inject: a rw libguestfs mount of a live qcow2 corrupts it,
         and ``runs.install`` can target an already-booted System (ADR-0026 §7 recovery), so the
@@ -268,8 +283,12 @@ class LocalLibvirtInstall:
         self._force_off_if_active(system_id)
         modules_tar = staging_dir / "modules.tar.gz"
         self._fetch_modules(modules_ref, modules_tar)
+        vmlinux: Path | None = None
+        if debuginfo_ref is not None:
+            vmlinux = staging_dir / "vmlinux"
+            self._fetch_modules(debuginfo_ref, vmlinux)
         kernel_image = staging_dir / "kernel"
-        self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar)
+        self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar, vmlinux)
 
     def _force_off_if_active(self, system_id: UUID) -> None:
         """Destroy the System's domain if it is running (idempotent), mirroring ``_power_cycle``.
@@ -512,6 +531,35 @@ def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
 
 _MODULES_ROOT = "/lib/modules"
 _BOOT_ROOT = "/boot"
+_DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
+
+
+def _vmlinux_dest(version: str) -> str:
+    """The drgn-discoverable in-guest path for the running kernel's DWARF vmlinux (ADR-0221).
+
+    drgn's ``-k`` debuginfo finder searches ``/usr/lib/debug/lib/modules/<uname -r>/vmlinux``;
+    under direct-kernel boot ``uname -r`` is ``version`` (the ``/lib/modules/<ver>`` release), so
+    the DWARF vmlinux must land there for the in-guest ``kdive-drgn`` helper to resolve typed
+    symbols against ``/proc/kcore``.
+    """
+    return f"{_DEBUGINFO_ROOT}/{version}/vmlinux"
+
+
+def _verify_vmlinux_size(size: int, overlay: str, dest: str) -> None:
+    """Sentinel for the staged DWARF vmlinux: a zero-byte upload is always a failure (ADR-0221).
+
+    A vmlinux is never legitimately empty, so a zero size means the upload was truncated or never
+    landed and the in-guest drgn would fail to resolve types.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` (overlay + dest in details) if ``size`` is 0.
+    """
+    if size <= 0:
+        raise CategorizedError(
+            "vmlinux staging completed but the in-guest debuginfo file is empty after upload",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"overlay": overlay, "dest": dest},
+        )
 
 
 def _kernel_dest(version: str) -> str:
@@ -575,12 +623,16 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
     the overlay path.
     """
 
-    def inject(self, overlay: str, kernel_image: Path, modules_tar: Path) -> None:
+    def inject(
+        self, overlay: str, kernel_image: Path, modules_tar: Path, vmlinux: Path | None = None
+    ) -> None:
         version = self._read_release(modules_tar, overlay)
         guest = self._mount_rw(overlay)
         try:
             self._extract_and_index(guest, overlay, str(modules_tar), version)
             self._stage_kernel(guest, overlay, str(kernel_image), version)
+            if vmlinux is not None:
+                self._stage_vmlinux(guest, overlay, str(vmlinux), version)
         finally:
             with contextlib.suppress(Exception):
                 guest.shutdown()
@@ -650,6 +702,25 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
                 "staging the from-source kernel into /boot", overlay, exc
             ) from exc
         _verify_kernel_size(size, overlay, dest)
+
+    @staticmethod
+    def _stage_vmlinux(guest: _GuestFS, overlay: str, vmlinux: str, version: str) -> None:
+        """Upload the DWARF vmlinux to the drgn debuginfo path, then verify size (ADR-0221).
+
+        Lands the run's ``vmlinux`` at ``/usr/lib/debug/lib/modules/<ver>/vmlinux`` so the
+        in-guest ``kdive-drgn`` helper's ``drgn -k`` resolves typed symbols against
+        ``/proc/kcore``. Idempotent: ``mkdir_p`` + truncating ``upload`` self-heal a partial write.
+        """
+        dest = _vmlinux_dest(version)
+        try:
+            guest.mkdir_p(f"{_DEBUGINFO_ROOT}/{version}")
+            guest.upload(vmlinux, dest)
+            size = guest.statns(dest)["st_size"]
+        except Exception as exc:
+            raise _RealGuestKernelWriter._io_failure(
+                "staging the DWARF vmlinux for live drgn", overlay, exc
+            ) from exc
+        _verify_vmlinux_size(size, overlay, dest)
 
     @staticmethod
     def _read_release(modules_tar: Path, overlay: str) -> str:

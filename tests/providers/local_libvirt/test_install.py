@@ -30,6 +30,7 @@ from kdive.providers.local_libvirt.lifecycle.install import (
     _stage_object,
     _verdict_to_result,
     _verify_kernel_size,
+    _vmlinux_dest,
     classify_console,
 )
 from kdive.providers.ports import InstallRequest
@@ -84,11 +85,15 @@ class _FakeKernelWriter:
     fail: bool = False
     kernel_image: Path | None = None
     modules_tar: Path | None = None
+    vmlinux: Path | None = None
 
-    def inject(self, overlay: str, kernel_image: Path, modules_tar: Path) -> None:
+    def inject(
+        self, overlay: str, kernel_image: Path, modules_tar: Path, vmlinux: Path | None = None
+    ) -> None:
         self.events.append("inject")
         self.kernel_image = kernel_image
         self.modules_tar = modules_tar
+        self.vmlinux = vmlinux
         if self.fail:
             raise CategorizedError(
                 "synthetic inject failure", category=ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -168,6 +173,7 @@ def _request(
     method: CaptureMethod = CaptureMethod.HOST_DUMP,
     initrd_ref: str | None = None,
     modules_ref: str | None = None,
+    debuginfo_ref: str | None = None,
 ) -> InstallRequest:
     return InstallRequest(
         system_id=_SYS,
@@ -177,6 +183,7 @@ def _request(
         method=method,
         initrd_ref=initrd_ref,
         modules_ref=modules_ref,
+        debuginfo_ref=debuginfo_ref,
     )
 
 
@@ -346,6 +353,86 @@ def test_install_non_kdump_with_modules_ref_does_not_force_off_or_inject(tmp_pat
     assert not writer.injected
     assert fetch.refs == []
     assert len(conn.defined_xml) == 1  # normal direct-kernel boot still defined
+
+
+def test_install_kdump_with_debuginfo_fetches_and_stages_vmlinux(tmp_path: Path) -> None:
+    # A from-source kdump build with a debuginfo_ref (the DWARF vmlinux) stages it in-guest for
+    # live drgn, riding the same rw injection session as the modules (ADR-0221).
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
+
+    inst.install(
+        _request(
+            method=CaptureMethod.KDUMP, modules_ref="runs/r/modules", debuginfo_ref="runs/r/vmlinux"
+        )
+    )
+
+    assert writer.injected
+    assert fetch.refs == ["runs/r/modules", "runs/r/vmlinux"]  # modules then the DWARF vmlinux
+    assert writer.vmlinux == tmp_path / str(_SYS) / str(_RUN) / "vmlinux"
+
+
+def test_install_host_dump_with_debuginfo_injects_vmlinux(tmp_path: Path) -> None:
+    # The vmlinux trigger is independent of the capture method: a non-kdump System that carries
+    # both a modules_ref and a debuginfo_ref still injects, so drgn-live works without kdump.
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
+
+    inst.install(
+        _request(
+            method=CaptureMethod.HOST_DUMP,
+            modules_ref="runs/r/modules",
+            debuginfo_ref="runs/r/vmlinux",
+        )
+    )
+
+    assert writer.injected
+    assert fetch.refs == ["runs/r/modules", "runs/r/vmlinux"]
+    assert writer.vmlinux == tmp_path / str(_SYS) / str(_RUN) / "vmlinux"
+
+
+def test_install_kdump_without_debuginfo_passes_no_vmlinux(tmp_path: Path) -> None:
+    # The kdump path with no debuginfo_ref injects modules + kernel exactly as before, handing
+    # the writer no vmlinux (the existing behavior is preserved unchanged).
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    inst = _install(
+        conn=conn,
+        staging_root=tmp_path,
+        kernel_writer=writer,
+        fetch_modules=_RecordingFetch(events),
+    )
+
+    inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
+
+    assert writer.injected
+    assert writer.vmlinux is None
+
+
+def test_install_host_dump_without_debuginfo_does_not_inject(tmp_path: Path) -> None:
+    # A non-kdump System with modules but no debuginfo_ref triggers neither force-off nor inject.
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
+
+    inst.install(_request(method=CaptureMethod.HOST_DUMP, modules_ref="runs/r/modules"))
+
+    assert events == []
+    assert not writer.injected
+
+
+def test_vmlinux_dest_is_drgn_discoverable_path() -> None:
+    # drgn -k's debuginfo finder searches /usr/lib/debug/lib/modules/<uname -r>/vmlinux.
+    assert _vmlinux_dest("7.0.0") == "/usr/lib/debug/lib/modules/7.0.0/vmlinux"
 
 
 def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(
