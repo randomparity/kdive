@@ -36,6 +36,23 @@ def test_local_root_console_omits_crashkernel() -> None:
     )
 
 
+def test_gdbstub_appends_nokaslr_so_vmlinux_symbols_match_running_base() -> None:
+    # A gdbstub-debug System boots with -gdb; KASLR (CONFIG_RANDOMIZE_BASE=y) would relocate the
+    # running kernel away from the fetched vmlinux's link base, so breakpoints set by symbol
+    # never fire (#711). nokaslr pins the running base to the symbol addresses.
+    assert (
+        system_required_cmdline(CaptureMethod.GDBSTUB, _LOCAL_ROOT)
+        == "console=ttyS0 root=/dev/vda nokaslr"
+    )
+
+
+def test_non_gdbstub_boots_never_carry_nokaslr() -> None:
+    # nokaslr is debug-only: a normal console/kdump boot keeps KASLR enabled.
+    assert "nokaslr" not in system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT)
+    assert "nokaslr" not in system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT)
+    assert "nokaslr" not in system_required_cmdline(CaptureMethod.HOST_DUMP, _LOCAL_ROOT)
+
+
 def test_console_is_always_first_then_root_then_crashkernel() -> None:
     # Deterministic token order regardless of method/root.
     assert system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT).split() == [

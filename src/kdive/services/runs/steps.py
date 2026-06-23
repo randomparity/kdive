@@ -18,6 +18,11 @@ from kdive.providers.core.runtime import ProfilePolicy
 
 _REQUIRED_CONSOLE = "console=ttyS0"
 _KDUMP_CRASHKERNEL = "crashkernel=256M"
+# Disable KASLR on a gdbstub-debug boot so the running kernel's base matches the fetched
+# vmlinux's link-time symbol addresses. With CONFIG_RANDOMIZE_BASE=y (the kdump fragment
+# default) the kernel relocates to a random base, so a breakpoint set by symbol resolves to the
+# wrong address over the gdbstub and never fires (#711).
+_GDBSTUB_NOKASLR = "nokaslr"
 _PLATFORM_OWNED_CMDLINE_TOKENS = ("root=", "console=", "crashkernel=")
 
 
@@ -150,13 +155,19 @@ def system_required_cmdline(method: CaptureMethod, root_cmdline: str | None) -> 
     ``console=ttyS0`` (serial console capture parity) leads; ``root_cmdline`` follows when the
     provider owns the root device (``"root=/dev/vda"`` for local-libvirt's direct-kernel boot,
     ``None`` for remote-libvirt where the in-guest bootloader supplies ``root=UUID=…``); the kdump
-    crashkernel reservation is last. Tokens are emitted in this fixed order, dropping ``None``.
+    crashkernel reservation, or the gdbstub ``nokaslr`` pin (#711), is last. The trailing token is
+    keyed off the resolved ``method``, so a System that sets both ``crashkernel`` and
+    ``debug.gdbstub`` resolves to ``KDUMP`` (crashkernel wins in ``capture_method``) and gets
+    crashkernel, not ``nokaslr`` — a live gdb symbol breakpoint over such a System would still miss
+    the running KASLR base. Tokens are emitted in this fixed order, dropping ``None``.
     """
     tokens = [_REQUIRED_CONSOLE]
     if root_cmdline:
         tokens.append(root_cmdline)
     if method is CaptureMethod.KDUMP:
         tokens.append(_KDUMP_CRASHKERNEL)
+    elif method is CaptureMethod.GDBSTUB:
+        tokens.append(_GDBSTUB_NOKASLR)
     return " ".join(tokens)
 
 
