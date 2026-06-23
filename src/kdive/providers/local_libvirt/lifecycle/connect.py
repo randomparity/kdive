@@ -1,14 +1,17 @@
-"""Local-libvirt Connect plane: a single-attach QEMU gdbstub transport (ADR-0032).
+"""Local-libvirt Connect plane: single-attach gdbstub + drgn-live-over-SSH transports (ADR-0032).
 
 `LocalLibvirtConnect` realizes the handler-facing `Connector` port: `open_transport(system,
-"gdbstub")` resolves the System's gdbstub endpoint, enforces loopback-only **before any
-network IO** (the ported v1 "F2" SSRF control), probes RSP reachability over an injected
-seam, and returns an opaque `TransportHandle` (an encoded `TransportHandleData`) the session
-row persists; `close_transport(handle)` validates the handle and then no-ops (gdbstub is
-connectionless RSP). The gdbstub endpoint resolver reads the port the provisioner recorded
-in the **live** libvirt domain XML over an injected `connect` seam (ADR-0210 §1); only the
-`libvirt.open`/`XMLDesc` calls and the real socket probe are `# pragma: no cover - live_vm`,
-so the resolver's lookup/parse/error branches and the orchestration are unit-tested with fakes.
+"gdbstub")` resolves the System's gdbstub endpoint and `open_transport(system, "drgn-live")`
+resolves the loopback-forwarded guest SSH endpoint; both enforce loopback-only **before any
+network IO** (the ported v1 "F2" SSRF control), probe reachability over an injected seam (an RSP
+framing probe for gdbstub, an SSH connect for drgn-live), and return an opaque `TransportHandle`
+(an encoded `TransportHandleData`) the session row persists; `close_transport(handle)` validates
+the handle and then no-ops (both are connectionless from the Connect plane's view). Each endpoint
+resolver reads the port the provisioner recorded in the **live** libvirt domain XML over an
+injected `connect` seam — the gdbstub `-gdb` port (ADR-0210 §1) and the SSH `hostfwd` port
+(ADR-0218 §5); only the `libvirt.open`/`XMLDesc` calls and the real socket/SSH probes are
+`# pragma: no cover - live_vm`, so both resolvers' lookup/parse/error branches and the
+orchestration are unit-tested with fakes.
 
 The RSP-framing codec (`rsp_frame`/`valid_rsp_frame`) and the bounded probe are ported from
 v1 `transport/core/rsp_probe.py` + `bounded.py`: the probe exchanges one **read-only** `?`
@@ -38,12 +41,15 @@ from kdive.providers.ports import (
     TransportHandleData,
 )
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
-from kdive.providers.shared.libvirt_xml import recorded_gdb_port_from_root
+from kdive.providers.shared.libvirt_xml import (
+    recorded_gdb_port_from_root,
+    recorded_ssh_port_from_root,
+)
 
 _GDBSTUB: DebugTransportKind = "gdbstub"
 _DRGN_LIVE: DebugTransportKind = "drgn-live"  # the agent-facing transport kind (ADR-0085)
 _SSH_SCHEME = "ssh"  # the handle scheme local emits — its SSH realization (ADR-0039)
-_GDBSTUB_HOST = "127.0.0.1"  # loopback-only: the local gdbstub never listens off-host (ADR-0210)
+_LOOPBACK_HOST = "127.0.0.1"  # loopback-only: local transports never listen off-host (ADR-0210)
 
 type _ResolveEndpoint = Callable[[SystemHandle], tuple[str, int]]
 type _Probe = Callable[[str, int], bool]
@@ -210,7 +216,7 @@ def _resolve_endpoint_via(connect: _Connect) -> _ResolveEndpoint:
             ) from exc
         finally:
             _close(conn)
-        return (_GDBSTUB_HOST, _resolved_port(xml, domain_name))
+        return (_LOOPBACK_HOST, _resolved_port(xml, domain_name))
 
     return resolve
 
@@ -248,22 +254,65 @@ def _real_probe(host: str, port: int) -> bool:  # pragma: no cover - live_vm
     return rsp_reachable(host, port)
 
 
-def _real_resolve_ssh_endpoint(system: SystemHandle) -> tuple[str, int]:
-    """drgn-live over SSH is not supported on local-libvirt yet (#697).
+def _resolve_ssh_endpoint_via(connect: _Connect) -> _ResolveEndpoint:
+    """Build the drgn-live SSH endpoint resolver over ``connect`` (ADR-0218 §5).
 
-    The transport needs session-networking (a loopback SSH port-forward + in-guest sshd +
-    credential plumbing) that does not exist on local. The descriptor leaves ``drgn-live``
-    unadvertised, so capability-aware admission (ADR-0209) rejects it before this resolver is
-    reached; if it is ever reached directly, an honest ``CONFIGURATION_ERROR`` is correct —
-    ``MISSING_DEPENDENCY`` would wrongly imply an absent host package rather than an unbuilt
-    capability.
+    The returned resolver reads the System's recorded forwarded SSH port from its **live** libvirt
+    domain XML (the loopback port the provisioner's ``hostfwd`` recorded, the one QEMU actually
+    forwards to the guest sshd) and returns the loopback endpoint. Mirrors
+    ``_resolve_endpoint_via`` for the SSH transport; the libvirt ``open``/``XMLDesc`` calls live
+    behind ``connect``, so every branch below is exercised with a fake connection.
     """
-    raise CategorizedError(
-        "drgn-live is not supported on local-libvirt: no session SSH transport "
-        "(deferred, see #697)",
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        details={"system": str(system)},
-    )
+
+    def resolve(system: SystemHandle) -> tuple[str, int]:
+        domain_name = str(system)
+        conn = connect()
+        try:
+            domain = conn.lookupByName(domain_name)
+            xml = domain.XMLDesc(0)
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                raise _config_error(
+                    f"System {domain_name!r} has no running libvirt domain to open a drgn-live "
+                    "SSH transport to"
+                ) from exc
+            raise CategorizedError(
+                "libvirt error reading the drgn-live SSH domain XML",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"domain": domain_name},
+            ) from exc
+        finally:
+            _close(conn)
+        return (_LOOPBACK_HOST, _resolved_ssh_port(xml, domain_name))
+
+    return resolve
+
+
+def _resolved_ssh_port(xml: str, domain_name: str) -> int:
+    """The forwarded SSH port the domain XML records; raise an actionable error otherwise.
+
+    Malformed XML is an infrastructure read fault (libvirt handed back a broken document); a
+    well-formed domain that records no forwarded SSH port is a configuration error (the System was
+    not provisioned for drgn-live).
+    """
+    try:
+        root = _safe_fromstring(xml)
+    except (ET.ParseError, DefusedXmlException) as exc:
+        raise CategorizedError(
+            "malformed libvirt domain XML reading the drgn-live SSH port",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"domain": domain_name},
+        ) from exc
+    port = recorded_ssh_port_from_root(root)
+    if port is None:
+        raise _config_error(
+            f"System {domain_name!r} was not provisioned for drgn-live; reprovision with "
+            "the profile's ssh_credential_ref set"
+        )
+    return port
+
+
+_real_resolve_ssh_endpoint = _resolve_ssh_endpoint_via(_default_connect)
 
 
 def _real_ssh_connect(host: str, port: int) -> bool:  # pragma: no cover - live_vm
