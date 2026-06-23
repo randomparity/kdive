@@ -224,6 +224,18 @@ def test_virt_builder_stages_nmi_panic_sysctl_for_a_kdump_image(
     assert write_value == "/etc/sysctl.d/99-kdive-kdump.conf:kernel.unknown_nmi_panic=1\n"
 
 
+def test_virt_builder_pins_kdump_final_action_to_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host-side harvest waits for the guest to self-shut-off after dumping (ADR-0217); pinning
+    # kdump `final_action shutdown` makes VIR_DOMAIN_SHUTOFF the reliable completion signal instead
+    # of Fedora's default `reboot`, which never self-shuts-off.
+    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("kdump-utils",))
+    joined = " ".join(argv)
+    assert "final_action shutdown" in joined
+    assert "/etc/kdump.conf" in joined
+
+
 def test_virt_builder_omits_nmi_panic_sysctl_for_a_non_kdump_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,3 +245,4 @@ def test_virt_builder_omits_nmi_panic_sysctl_for_a_non_kdump_image(
     joined = " ".join(argv)
     assert "unknown_nmi_panic" not in joined
     assert "99-kdive-kdump.conf" not in joined
+    assert "final_action" not in joined
