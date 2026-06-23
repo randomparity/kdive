@@ -43,9 +43,13 @@ fix of the host environment:
 1. **Signature remap in `run_guestfs_tool`.** On a non-zero tool exit, before the
    existing generic `PROVISIONING_FAILURE`, match two libguestfs stderr
    signatures and raise a `CONFIGURATION_ERROR` naming the host fix:
-   - kernel-unreadable (`Permission denied` reading a `/boot/vmlinuz` path, or a
-     supermin "cannot read … kernel" line) → the `chmod 0644 /boot/vmlinuz-*`
-     fix;
+   - kernel-unreadable → the `chmod 0644 /boot/vmlinuz-*` fix. The match must
+     **bind the permission failure to the kernel path on one logical match** — a
+     `/boot/vmlinuz…: Permission denied` (cp/open) line, or a supermin
+     "cannot read … kernel" line — never bare `Permission denied`, which also
+     appears for an unwritable output qcow2, an SELinux denial on the scratch
+     image, or a workspace permission problem; those must fall through to the
+     generic failure (a negative test pins this).
    - passt appliance-network (`passt exited with status …`) → the AppArmor-unload
      note plus the "build on a working-appliance host / stage a prebuilt qcow2"
      fallback.
@@ -57,12 +61,20 @@ fix of the host environment:
    errors carry a `remediation` detail key and keep the truncated `stderr`.
 
 2. **Cheap preflight in `check-local-libvirt.sh`.** Add a host-kernel-readability
-   probe: if `/boot/vmlinuz-$(uname -r)` exists it must be readable by the
-   invoking user, else `note_fail` with the `chmod` fix. Distro- and user-neutral
-   (`-r` passes for a root worker or a `0644` Fedora kernel; the probe is skipped
-   when the path is absent so an unusual `/boot` layout does not false-fail). A
-   `KDIVE_HOST_KERNEL` override makes it stub-testable, mirroring
-   `KDIVE_KVM_NODE`. The passt failure is **not** preflighted — see Alternatives.
+   probe over **all** `/boot/vmlinuz-*` entries: if any exists it must be readable
+   by the invoking user, else `note_fail` with the `chmod` fix. We probe the whole
+   set, not `/boot/vmlinuz-$(uname -r)`, because supermin selects the appliance
+   kernel by version-sort (commonly the newest installed kernel, which after a
+   kernel upgrade pending a reboot is **not** the running one) — probing only the
+   running kernel would pass while build-fs still fails on the newer unreadable
+   one. Distro- and user-neutral (`-r` passes for a root worker or a `0644` Fedora
+   kernel; the probe is skipped when no `/boot/vmlinuz-*` exists so an unusual
+   `/boot` layout does not false-fail). The probe is only predictive when run as
+   the **same user as the worker** (`-r` is evaluated as the script runner): the
+   fix hint says so, mirroring the existing `KDIVE_PYTHON` "probe the interpreter
+   the worker uses" note. A `KDIVE_BOOT_DIR` override makes it stub-testable,
+   mirroring `KDIVE_KVM_NODE`. The passt failure is **not** preflighted — see
+   Alternatives.
 
 3. **Docs.** Cross-link this ADR from the walkthrough's existing caveat block and
    note that the preflight now catches the kernel-readability case in Step 2.
@@ -70,8 +82,11 @@ fix of the host environment:
 ## Consequences
 
 - A first-run operator on Ubuntu 24.04 gets an actionable next step instead of a
-  raw `cp: … Permission denied` / `passt exited with status 1` dump, and the
-  kernel case is caught by `just check-local-libvirt` before the slow build.
+  raw `cp: … Permission denied` / `passt exited with status 1` dump. The kernel
+  case is caught by `just check-local-libvirt` before the slow build **when the
+  preflight is run as the worker user** and the unreadable kernel is present in
+  `/boot` at preflight time; if not, the build-time remap still produces the same
+  actionable message. The remap, not the preflight, is the guarantee.
 - The error category for these two cases changes from `PROVISIONING_FAILURE` to
   `CONFIGURATION_ERROR` (the host, not kdive, must change) — consistent with the
   existing `_ensure_workspace_writable` host-setup mapping. Callers that branch on
