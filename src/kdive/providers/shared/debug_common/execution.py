@@ -38,6 +38,11 @@ class ExecutionControl:
         self._engine = engine
         self._command_timeout_sec = command_timeout_sec
 
+    def _stop_from_records(self, records: list[MiRecord]) -> GdbStopRecord | None:
+        """The parsed stop for the first ``*stopped`` record, or None if none is present."""
+        stop = next((record for record in records if record.message == "stopped"), None)
+        return self._engine.stop_record_from(stop) if stop is not None else None
+
     def wait_for_stop(
         self, attachment: GdbMiAttachment, *, timeout_sec: float
     ) -> GdbStopRecord | None:
@@ -49,9 +54,9 @@ class ExecutionControl:
             attachment.records.extend(records)
             if records:
                 self._engine.append_transcript(attachment.transcript_path, "<read>", records)
-            stop = next((record for record in records if record.message == "stopped"), None)
+            stop = self._stop_from_records(records)
             if stop is not None:
-                return self._engine.stop_record_from(stop)
+                return stop
         return None
 
     def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
@@ -73,8 +78,13 @@ class ExecutionControl:
             )
         requested = math.ceil(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC
         bounded = max(1, min(requested, MAX_INTERACTIVE_WAIT_SEC))
-        self._engine.execute_mi_command(attachment, verb)
-        stop = self.wait_for_stop(attachment, timeout_sec=bounded)
+        # The continue command's own reader can capture an early ``*stopped`` (a hot-path
+        # breakpoint fires within milliseconds) alongside ``^running``. Scan those records
+        # first; only poll the stream afresh when they hold no stop (ADR-0216, #711).
+        resumed = self._engine.execute_mi_command(attachment, verb)
+        stop = self._stop_from_records(resumed)
+        if stop is None:
+            stop = self.wait_for_stop(attachment, timeout_sec=bounded)
         if stop is not None:
             return self._engine.redact_stop(stop)
         interrupted = self.interrupt(attachment)
