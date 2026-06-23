@@ -154,6 +154,50 @@ def test_resolve_run_vmcore_target_booted_no_core_reason(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_resolve_run_vmcore_target_console_crash_carries_kind(migrated_url: str) -> None:
+    # A console_crash run with no captured core carries its declared kind on the no_vmcore
+    # error's details, so the postmortem handler can redirect to the console (#734, ADR-0227).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(
+                pool,
+                system_id,
+                debuginfo_ref="k/runs/r/vmlinux",
+                build_id="deadbeef",
+                expected_boot_failure={"kind": "console_crash", "pattern": "Kernel panic"},
+            )
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as exc:
+                    await resolve_run_vmcore_target(conn, _ctx(), run_id)
+
+        assert exc.value.category is ErrorCategory.NOT_FOUND
+        assert exc.value.details["reason"] == NO_VMCORE
+        assert exc.value.details["expected_boot_failure"] == "console_crash"
+
+    asyncio.run(_run())
+
+
+def test_resolve_run_vmcore_target_no_boot_failure_omits_kind(migrated_url: str) -> None:
+    # A run without expected_boot_failure carries NO `expected_boot_failure` key on its no_vmcore
+    # error — so the non-console-crash no_vmcore envelope stays byte-identical to today and
+    # safe_error_details cannot leak a kind into its `data` (#734, ADR-0227).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            run_id = await seed_run_on_system(
+                pool, system_id, debuginfo_ref="k/runs/r/vmlinux", build_id="deadbeef"
+            )
+            async with pool.connection() as conn:
+                with pytest.raises(CategorizedError) as exc:
+                    await resolve_run_vmcore_target(conn, _ctx(), run_id)
+
+        assert exc.value.details["reason"] == NO_VMCORE
+        assert "expected_boot_failure" not in exc.value.details
+
+    asyncio.run(_run())
+
+
 def test_resolve_run_vmcore_target_never_booted_reports_no_vmcore(migrated_url: str) -> None:
     # A never-booted run lacks debuginfo, build, AND a captured core at once. Triaging it through
     # the vmcore-centric resolver reports the operative gap (no_vmcore), not the earliest-unmet

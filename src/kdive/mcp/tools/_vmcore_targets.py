@@ -10,6 +10,7 @@ from psycopg import AsyncConnection
 from kdive.db.artifact_queries import raw_vmcore_key
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle import Run
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.security.authz.context import RequestContext
@@ -22,6 +23,17 @@ from kdive.services.runs.steps import existing_build_result
 NO_DEBUGINFO = "no_debuginfo"
 NO_BUILD = "no_build"
 NO_VMCORE = "no_vmcore"
+
+# The early-boot console-crash kind, declared on the Run as ``expected_boot_failure`` (ADR-0064).
+# When a Run with this kind resolves to no vmcore, the kdump capture kernel never loaded (the
+# crash precedes kexec), so no core is expected by design and the console artifact is the evidence
+# source. The kind is carried on the ``NO_VMCORE`` error so the postmortem handler can redirect to
+# the console (#734, ADR-0227).
+CONSOLE_CRASH = "console_crash"
+
+# `data.reason` for the postmortem console-crash redirect envelope (#734, ADR-0227). Distinct from
+# `no_vmcore` so a client can branch on "no core is expected by design" vs "no core captured yet".
+EXPECTED_CONSOLE_CRASH = "expected_console_crash"
 
 # reason token -> literal next tool names. An absent or unknown reason (e.g. the absent-Run /
 # ungranted-project miss, which carries no reason so the envelope cannot leak membership) maps to
@@ -65,7 +77,7 @@ async def resolve_run_vmcore_target(
     require_role(ctx, run.project, Role.VIEWER)
     vmcore_ref = await raw_vmcore_key(conn, run.require_system_id())
     if vmcore_ref is None:
-        raise _precondition_not_found(NO_VMCORE)
+        raise _no_vmcore_not_found(run)
     if run.debuginfo_ref is None:
         raise _precondition_not_found(NO_DEBUGINFO)
     build_id = await _build_id_for_run(conn, uid)
@@ -106,6 +118,27 @@ def _precondition_not_found(reason: str) -> CategorizedError:
         "run does not resolve to a captured vmcore target",
         category=ErrorCategory.NOT_FOUND,
         details={"reason": reason},
+    )
+
+
+def _no_vmcore_not_found(run: Run) -> CategorizedError:
+    """The ``NO_VMCORE`` miss, carrying the console-crash kind iff the Run declared it (#734).
+
+    The kind is attached to ``details`` **only** when ``run.expected_boot_failure.kind`` is
+    exactly ``console_crash``: the non-console-crash miss falls through ``vmcore_target_failure``
+    → ``safe_error_details`` (which forwards every scalar to ``data``), so an unconditional kind
+    would surface a new ``data.expected_boot_failure`` key on the unchanged envelope the day a
+    second kind exists (ADR-0227). Conditional attachment keeps that envelope's ``data`` exactly
+    ``{reason: no_vmcore}``.
+    """
+    details: dict[str, object] = {"reason": NO_VMCORE}
+    boot_failure = run.expected_boot_failure
+    if isinstance(boot_failure, dict) and boot_failure.get("kind") == CONSOLE_CRASH:
+        details["expected_boot_failure"] = CONSOLE_CRASH
+    return CategorizedError(
+        "run does not resolve to a captured vmcore target",
+        category=ErrorCategory.NOT_FOUND,
+        details=details,
     )
 
 
