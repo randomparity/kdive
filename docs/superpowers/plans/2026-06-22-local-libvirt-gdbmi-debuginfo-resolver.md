@@ -106,6 +106,12 @@ before `GdbMiEngine().attach(...)` (spec §1, §2).
        with psycopg.connect(config.require(DATABASE_URL)) as conn:
            return debuginfo_ref_for_run_sync(conn, UUID(run_id))
    ```
+   - `UUID(run_id)` relies on the caller's guarantee that `run_id == str(session.run_id)` (a valid
+     UUID the handler already produced, `ops.py:128`). A non-UUID `run_id` is a programming error,
+     not an operational path, so `UUID()` is allowed to raise `ValueError` here — it cannot be
+     reached through the live caller. State this in a one-line comment so a future caller change does
+     not silently turn it into an uncaught `ValueError`. (The resolver itself never parses `run_id`;
+     this conversion lives only in the live DB seam.)
 4. Reuse the shared object fetch: import `default_fetch_object` from
    `kdive.providers.shared.debug_common.crash_postmortem` (the same seam introspect/crash use) — no
    third copy.
@@ -147,7 +153,7 @@ the deleted stub remains (grep `_resolve_debuginfo_ref` returns nothing in src).
 
 ---
 
-## Task 3 — tests (TDD: write first, watch fail, then implement Tasks 1–2)
+## Task 3 — tests (TDD: after Task 1 lands, write tests, watch fail, implement Task 2)
 
 **Where it fits:** proves the resolver orchestration + the no_debuginfo error contract with fakes;
 replaces the obsolete stub test (spec acceptance criteria).
@@ -175,9 +181,20 @@ replaces the obsolete stub test (spec acceptance criteria).
      `resolve` writes where told and computes no `run_id`-derived path itself.
 - Use `DebuginfoResolver` from `kdive.providers.local_libvirt.debug.gdbmi`.
 
-**TDD sequence:** write these tests against the not-yet-existing `DebuginfoResolver` → run, confirm
-they fail with `ImportError`/`AttributeError` (expected reason) → implement Task 2's resolver →
-rerun, confirm pass → implement Task 1's query → run full `test_debug_gdbmi.py` → green.
+**TDD sequence (and task ordering):** Task 2's module adds a top-level
+`from kdive.db.artifact_queries import debuginfo_ref_for_run_sync`, so the resolver module will not
+import until **Task 1 lands first**. Execute in task number order — **Task 1 (query) → Task 2
+(resolver + seam) → Task 3 (tests)**:
+1. Land Task 1 so `debuginfo_ref_for_run_sync` exists (the resolver module's import resolves).
+2. Write these resolver tests against the not-yet-existing `DebuginfoResolver` → run, confirm they
+   fail with `ImportError`/`AttributeError` (expected reason — the class is absent).
+3. Implement Task 2's `DebuginfoResolver` + seam → rerun, confirm the resolver tests pass.
+4. Run the full `test_debug_gdbmi.py` → green (the deleted stub test is gone; nothing references
+   `_resolve_debuginfo_ref`).
+
+Do **not** implement Task 2 before Task 1: with Task 2 in place and Task 1 absent, the module's
+top-level import raises `ImportError` and the resolver tests cannot collect — that is a self-inflicted
+ordering failure, not the clean red the TDD step expects.
 
 **Acceptance:** the three (or four) resolver tests pass; the full pre-existing engine suite stays
 green; `just test` green; no test asserts the old `MISSING_DEPENDENCY` "live_vm gate" message for
