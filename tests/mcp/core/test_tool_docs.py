@@ -425,14 +425,11 @@ def test_non_partial_tools_have_no_maturity_detail() -> None:
 # #673). Their `providers` pointer must say the local-libvirt path is *planned* and the
 # remote-libvirt path *implemented* — not the pre-honesty "wired" half-truth. A promotion to
 # `implemented` for a plane is the diff that flips its pointer here. The `debug.*` planes moved
-# to _LOCAL_WIRED_PROVIDER_TOOLS once B1 (#675) wired the gdbstub transport they run over;
-# `introspect.from_vmcore` got its own wired-pending guard once B2 (#676) wired it, leaving only
-# `introspect.run` (B3, live drgn) still planned here.
-_LOCAL_PLANNED_PROVIDER_TOOLS = frozenset(
-    {
-        "introspect.run",
-    }
-)
+# to their own implemented-guard once B1 (#675) wired the gdbstub transport they run over;
+# `introspect.from_vmcore` got its own wired-pending guard once B2 (#676) wired it; and
+# `introspect.run` moved to its own wired-partial guard once B3 (#677/ADR-0219) wired the live
+# drgn-over-SSH seam — so no local plane is a MISSING_DEPENDENCY stub any more.
+_LOCAL_PLANNED_PROVIDER_TOOLS: frozenset[str] = frozenset()
 
 # The `debug.*` planes were proven live end-to-end on real KVM (M2.8 B6 #680, ADR-0208
 # invariant 5): start_session opened a live gdbstub session, set_breakpoint("schedule") →
@@ -485,6 +482,20 @@ def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
         if "remote-libvirt: implemented" not in providers:
             offenders.append(f"{name}: remote-libvirt not marked implemented ({providers!r})")
     assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
+
+
+def test_introspect_run_wired_partial_pending_live_proof() -> None:
+    # B3 (#677/ADR-0219): local-libvirt's live drgn-over-SSH seam is wired, but per ADR-0208
+    # invariant 5 the maturity stays `partial` until the B6 (#680) live KVM proof. The pointer
+    # must say local-libvirt is `wired` (not `planned`, no longer a MISSING_DEPENDENCY stub) and
+    # remote-libvirt `implemented`, and the tool must still carry a `partial` maturity.
+    tool = next(t for t in TOOLS if t.name == "introspect.run")
+    meta = tool.meta or {}
+    assert meta.get("maturity") == "partial"
+    providers = (meta.get("maturity_detail") or {}).get("providers")
+    assert isinstance(providers, str)
+    assert "local-libvirt: wired" in providers
+    assert "remote-libvirt: implemented" in providers
 
 
 def test_local_proven_debug_planes_are_implemented() -> None:
