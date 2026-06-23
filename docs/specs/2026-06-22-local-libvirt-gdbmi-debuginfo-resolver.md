@@ -71,9 +71,17 @@ injected seams, mirroring `LocalLibvirtVmcoreIntrospect`'s `fetch_object`/`open_
    caller is the attach seam, so it surfaces as a configuration error the agent can act on
    (`runs.build`), never a `MISSING_DEPENDENCY` (which would falsely imply a missing host tool) and
    never a `None` the seam would then hand to gdb as a non-existent path.
-2. `data = fetch_object(ref)`; write `data` to `dest` (the temp vmlinux path the seam computed).
-   Return `dest`. The fetch's own errors (object-store IO / a vanished object) propagate as the
-   object store's typed `CategorizedError` exactly as they do for the introspect/crash paths.
+2. `data = fetch_object(ref)`; write `data` to `dest` (the per-attach private vmlinux path the seam
+   computed, see §2). Return `dest`. The fetch's own errors (object-store IO / a vanished object)
+   propagate as the object store's typed `CategorizedError` exactly as they do for the
+   introspect/crash paths.
+
+`run_id` is the caller's `str(session.run_id)` — a UUID string the handler already produced
+(`ops.py:128`). The resolver does **not** interpolate `run_id` into any filesystem path (§2 derives
+`dest` from `mkdtemp`, not from `run_id`), so a hostile `run_id` cannot traverse the filesystem; it
+reaches only the parameterized sync SQL read, where a non-matching id is a row miss surfaced as the
+same `no_debuginfo` `CONFIGURATION_ERROR` as a row with a null `debuginfo_ref`. The resolver
+therefore needs no separate run_id-shape gate beyond what the caller guarantees.
 
 The orchestration is pure: a test injects a fake `read_debuginfo_ref` and `fetch_object` and asserts
 (a) a present ref is fetched and written to `dest`, (b) a `None` ref raises the `no_debuginfo`
@@ -98,8 +106,30 @@ calls `resolve(run_id, vmlinux_path)` before `GdbMiEngine().attach(...)`:
 
 The seam stays `# pragma: no cover - live_vm` (it spawns gdb); the resolver class and its
 orchestration are **not** live-gated and are unit-tested. `default_attach_seam` no longer discards
-the resolved ref (today's `del debuginfo_ref`): it materializes the vmlinux to `vmlinux_path` so
+the resolved ref (today's `del debuginfo_ref`): it materializes the vmlinux to a private path so
 `GdbMiEngine.attach`'s `resolved_vmlinux.is_file()` check passes against a real symbol file.
+
+**Staging path — private, not the fixed predictable name (security).** Today's seam computes
+`vmlinux_path = Path(tempfile.gettempdir()) / f"kdive-debuginfo-{run_id}"` (line 38) — a fixed,
+world-readable, attacker-guessable name in a shared temp dir that is never written (the stub raises
+first) and never cleaned up. Wiring the resolver would turn that latent path into a real write of
+fetched bytes, so on a shared host a local user could pre-create the path as a symlink (gdb then
+loads attacker-controlled symbols) or two concurrent attaches for the same `run_id` could race a
+half-written file past `is_file()`. **This change replaces line 38**: the seam creates a private
+per-attach directory via `tempfile.mkdtemp(prefix="kdive-debuginfo-")` (mode `0o700`, owner-only)
+and stages the vmlinux as `<dir>/vmlinux`. The unguessable, owner-only directory removes the
+symlink-precreation and cross-`run_id` collision hazards, mirroring how the introspect/kdump paths
+stage to `tempfile.NamedTemporaryFile` / `mkdtemp` rather than a fixed name. The seam owns cleanup:
+on **any** failure of `resolve` or `attach` it removes the private directory (`shutil.rmtree`,
+best-effort, mirroring `retrieve._remove_spool`); on success the staged vmlinux must outlive the
+seam because the live `GdbController` reads symbols from it for the session's lifetime, so the
+directory is recorded for removal when the session is reaped. The reap path already exists
+(`DebugEngineRuntime.reap`, `ops.py:134`) — it gains a best-effort `rmtree` of the per-session
+staging dir, keyed the same way the transcript is. (If wiring reap-time cleanup proves to widen the
+change beyond this seam, the fallback is to stage under a per-session subdir the existing reap
+already cleans; the spec's hard requirement is only that the path is **private + unguessable** and
+that a failed attach leaves nothing behind — a leaked vmlinux on clean session end is a disk-usage
+nit, not a security issue, and is tracked rather than blocking.)
 
 ### 3. Composition wiring stays minimal
 
@@ -120,6 +150,11 @@ on `composition.py` (shared with #703's `xml.py` work) at zero lines.
     `None`).
   - `resolve` propagates a `CategorizedError` raised by `fetch_object` unchanged (object-store IO
     failure path).
+  - `resolve(run_id, dest)` writes to the `dest` it is handed and does **not** derive that path from
+    `run_id` (the staging-path safety property): a test passes a `dest` under `tmp_path` and asserts
+    the bytes land there, proving the resolver never computes a fixed/`run_id`-derived path itself —
+    the private-dir construction lives in `default_attach_seam` (live-gated), the resolver just
+    writes where told.
   - The pre-existing `test_debuginfo_resolver_default_raises_missing_dependency` is **replaced** (not
     left asserting the stub): the module-level `_resolve_debuginfo_ref` stub is gone, so that test is
     deleted and the three resolver-orchestration tests above stand in its place. No test asserts the
@@ -146,6 +181,19 @@ on `composition.py` (shared with #703's `xml.py` work) at zero lines.
   attach orchestration.** Those are correct; only the local resolver seam was a stub.
 - **#703's domain-XML vmcoreinfo work.** Different file (`lifecycle/xml.py`); the only shared file is
   `composition.py`, which this change leaves at zero edits.
+- **Build-id provenance check between the published vmlinux and the live kernel.** The
+  introspect/crash paths verify the captured core's build-id against the Run's recorded build-id
+  (`introspect._verify_provenance`) because both the core and the vmlinux are static objects in
+  hand. The gdb-MI attach is different: the "ground truth" is the *running* kernel behind the
+  gdbstub, whose build-id is not cheaply recoverable before symbols are loaded (that is the very
+  thing the attach establishes). A mismatch — e.g. a re-provision that booted a different image than
+  the Run built, or the local provider's known rootfs-from-disk boot running a non-built kernel —
+  would surface as wrong symbol addresses, and gross mismatches make gdb's own `-break-insert` fail
+  (a `DEBUG_ATTACH_FAILURE` the agent already sees). This change does **not** add a pre-attach
+  build-id gate; the decision is deliberate (no cheap pre-symbol-load source for the live build-id)
+  and is flagged to the orchestrator as a possible follow-up once B6's live drive shows whether the
+  silent-mismatch case is reachable in practice. This is called out so the "mirroring the Retrieve
+  plane" framing is not read as a claim that provenance is checked here — it is not.
 
 ## Risks & failure modes
 
@@ -162,9 +210,15 @@ on `composition.py` (shared with #703's `xml.py` work) at zero lines.
   shared `default_fetch_object` seam rather than adding a third copy; the resolver's `fetch_object`
   is that same provider-neutral seam.
 - **Secret leakage.** The resolver moves only an object **key** (a system-produced ref) and raw
-  vmlinux **bytes** to a temp file; it returns no guest/console text and persists nothing. All
-  textual gdb/MI output is still redacted by the engine downstream (unchanged). No new redaction
-  boundary is needed, and the resolver returns a `Path`, never echoed prose.
+  vmlinux **bytes** to an owner-only (`0o700`) private temp dir; it returns no guest/console text and
+  persists nothing. The vmlinux is a kernel build artifact, not a secret, and it sits in a directory
+  no other local user can read. All textual gdb/MI output is still redacted by the engine downstream
+  (unchanged). No new redaction boundary is needed, and the resolver returns a `Path`, never echoed
+  prose.
+- **Staging-path hijack / leak.** Covered by §2: the per-attach `mkdtemp(0o700)` dir is unguessable
+  and owner-only (no symlink-precreation, no cross-`run_id` collision), and the seam `rmtree`s it on
+  any attach failure. The residual is a vmlinux that outlives a *cleanly* ended session until reap
+  removes it — a disk nit, not a security exposure.
 - **Cross-agent conflict on `composition.py`.** #703 may also touch `composition.py`. Mitigation:
   this change makes **zero** edits to `composition.py` (the seam ref is already wired); the only
   files touched are `debug/gdbmi.py`, a new sync query in the db layer, and the test file.
