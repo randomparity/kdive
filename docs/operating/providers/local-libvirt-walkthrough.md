@@ -298,9 +298,49 @@ typed symbol.
 
 ## 6. Test the lifecycle
 
-The lifecycle steps are MCP tool calls. Issue them from an agent session or a scripted client
-authenticated with a project token (the bundled mock issuer mints one — see the
-[live-stack runbook](../runbooks/live-stack.md) for the scripted-client/token details).
+The lifecycle steps are MCP tool calls. Issue them from an MCP client (e.g. an agent session)
+that connects to the server's HTTP transport at `http://127.0.0.1:8000/mcp`, authenticated with
+a project-scoped bearer token.
+
+### Connect an MCP client
+
+The server speaks streamable HTTP and expects an `Authorization: Bearer <token>` header. Point
+your MCP client at it with a `.mcp.json` in the tree you want to drive (your kernel source
+checkout); the token is read from `${KDIVE_TOKEN}` at connect time, so the file itself holds no
+secret:
+
+```json
+{
+  "mcpServers": {
+    "kdive": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer ${KDIVE_TOKEN}" }
+    }
+  }
+}
+```
+
+Mint the token from the **host-process** mock issuer with
+[`examples/local-libvirt/mint-token.sh`](../../../examples/local-libvirt/mint-token.sh) (this is
+the host-mode equivalent of the live-stack runbook's mint; the Kubernetes `scripts/demo-token.sh`
+does not apply here). The token must grant the **same project you seeded in Step 4** — `demo` in
+this walkthrough — or every project-scoped call dead-ends on `quota_exceeded`:
+
+```bash
+export KDIVE_TOKEN=$(KDIVE_PROJECT=demo examples/local-libvirt/mint-token.sh)
+```
+
+The token carries `roles={demo: admin}` plus the platform roles, so it reaches every tool; it
+expires after `KDIVE_TOKEN_TTL` seconds (default 12h). The client expands `${KDIVE_TOKEN}` **once,
+when it connects**, so after a token expires you must re-export it and then **reconnect** the
+`kdive` server in your client (in Claude Code: `/mcp` → reconnect), not just re-run the export.
+
+The [`examples/local-libvirt/`](../../../examples/local-libvirt/) helpers automate this end to
+end: `up.sh` installs the `.mcp.json` into `KDIVE_KERNEL_SRC` (merging, not clobbering, any
+existing file) and starts the trio; see that example's README for the full bring-up. Note the
+example seeds and tokenises a project named `local` by default — set `KDIVE_PROJECT=demo` to match
+this walkthrough, or seed `local` instead of `demo` in Step 4.
 
 **Request an allocation.** With the project onboarded and the resource discovered, this is granted:
 
