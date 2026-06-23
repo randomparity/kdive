@@ -12,6 +12,14 @@ MAX_LINE_CHARS = 512
 MAX_MATCHES_JSON_CHARS = 64 * 1024
 CLIPPED = "...[clipped]"
 
+# The single source of the context caps (ADR-0225). The tool schema, the
+# ``ArtifactSearchRequest`` model, the binding-error re-envelope, and the runtime
+# ``_bounded_int`` guard below all read these ``(low, high)`` pairs so the
+# schema-advertised bound and the runtime bound cannot drift.
+BEFORE_LINES_RANGE = (0, 10)
+AFTER_LINES_RANGE = (0, 20)
+MAX_MATCHES_RANGE = (1, 50)
+
 
 class ArtifactSearchInputError(ValueError):
     """The requested search is malformed or outside the ADR-0064 bounds."""
@@ -74,9 +82,15 @@ def search_text(
 ) -> SearchResult:
     """Search UTF-8-ish bytes line-by-line with bounded context windows."""
     terms = parse_literal_terms(pattern)
-    before_lines = _bounded_int(before_lines, low=0, high=10, label="before_lines")
-    after_lines = _bounded_int(after_lines, low=0, high=20, label="after_lines")
-    max_matches = _bounded_int(max_matches, low=1, high=50, label="max_matches")
+    before_lines = _bounded_int(
+        before_lines, low=BEFORE_LINES_RANGE[0], high=BEFORE_LINES_RANGE[1], label="before_lines"
+    )
+    after_lines = _bounded_int(
+        after_lines, low=AFTER_LINES_RANGE[0], high=AFTER_LINES_RANGE[1], label="after_lines"
+    )
+    max_matches = _bounded_int(
+        max_matches, low=MAX_MATCHES_RANGE[0], high=MAX_MATCHES_RANGE[1], label="max_matches"
+    )
     lines = data.decode("utf-8", errors="replace").splitlines()
     matches: list[SearchMatch] = []
     truncated = False

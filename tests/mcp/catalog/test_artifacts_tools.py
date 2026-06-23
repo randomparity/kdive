@@ -8,12 +8,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.mcp.app import build_app
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts.reads import (
@@ -22,9 +24,33 @@ from kdive.mcp.tools.catalog.artifacts.reads import (
     artifacts_get,
     artifacts_list,
 )
+from kdive.security.artifacts.artifact_search import (
+    AFTER_LINES_RANGE,
+    BEFORE_LINES_RANGE,
+    MAX_MATCHES_RANGE,
+)
 from kdive.security.authz.rbac import AuthorizationError, Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp._seed import seed_crashed_system
+from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.json_data import data_str
+
+_CONTEXT_BOUNDS = {
+    "before_lines": BEFORE_LINES_RANGE,
+    "after_lines": AFTER_LINES_RANGE,
+    "max_matches": MAX_MATCHES_RANGE,
+}
+
+
+def _search_text_param_schema() -> dict[str, dict[str, object]]:
+    """The `artifacts.search_text` parameter schema from a DB-free built app."""
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    kp = make_keypair()
+    verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
+    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    tool = asyncio.run(app.get_tool("artifacts.search_text"))
+    assert tool is not None
+    return tool.parameters["properties"]
 
 
 def _ctx(
@@ -601,6 +627,25 @@ def test_artifacts_list_excludes_quarantined(migrated_url: str) -> None:
         assert red_id in ids
 
     asyncio.run(_run())
+
+
+def test_search_text_schema_advertises_context_caps() -> None:
+    props = _search_text_param_schema()
+    for field, (low, high) in _CONTEXT_BOUNDS.items():
+        schema = props[field]
+        assert schema["minimum"] == low, field
+        assert schema["maximum"] == high, field
+        # The description states the range so the cap is discoverable in the schema text.
+        assert f"{low}–{high}" in str(schema["description"]), field
+
+
+def test_search_text_model_bounds_equal_runtime_bounds() -> None:
+    # R5: the schema/model bound and the runtime `_bounded_int` bound are the same
+    # numbers, so a future edit to one without the other fails here.
+    props = ArtifactSearchRequest.model_json_schema()["properties"]
+    for field, (low, high) in _CONTEXT_BOUNDS.items():
+        assert props[field]["minimum"] == low, field
+        assert props[field]["maximum"] == high, field
 
 
 def test_artifacts_search_text_quarantined_is_not_found(migrated_url: str) -> None:
