@@ -24,13 +24,13 @@
 
 **Files:**
 - Modify: `src/kdive/providers/shared/libvirt_xml.py`
-- Test: `tests/providers/shared/test_libvirt_xml.py` (create if absent; else append)
+- Test: `tests/providers/test_libvirt_xml.py` (existing — append; this is where `recorded_gdb_port` is tested)
 
 **Interfaces:**
 - Produces: `recorded_ssh_port_from_root(root: ET.Element) -> int | None`, `recorded_ssh_port(domain_xml: str) -> int | None`. Parses the value of the `<qemu:arg>` following a `-gdb`-style scan, matching `hostfwd=tcp:127.0.0.1:(\d+)-:22` (regex anchored on `127.0.0.1` host + guest port `22`). First match wins; non-integer/absent → `None`; malformed XML wrapper → `None`.
 
 - [ ] **Step 1: Write failing tests.** Cover: reads the forwarded port from a rendered `-netdev ...hostfwd=tcp:127.0.0.1:<port>-:22` arg; `None` when no `-netdev`; `None` when a `-netdev` value has a different host/guest-port; `None` for non-integer; `None` for malformed XML via `recorded_ssh_port("<domain")`; coexists with a `-gdb` arg in the same commandline (both readers read their own).
-- [ ] **Step 2: Run — expect FAIL (function not defined).** `uv run pytest tests/providers/shared/test_libvirt_xml.py -q`
+- [ ] **Step 2: Run — expect FAIL (function not defined).** `uv run pytest tests/providers/test_libvirt_xml.py -q`
 - [ ] **Step 3: Implement** `recorded_ssh_port_from_root` + `recorded_ssh_port` mirroring `recorded_gdb_port_from_root`/`recorded_gdb_port`, using `re.search(r"hostfwd=tcp:127\.0\.0\.1:(\d+)-:22", value)` on each `-netdev`-following arg value.
 - [ ] **Step 4: Run — expect PASS.** Plus `just lint && just type`.
 - [ ] **Step 5: Commit** `feat(local-libvirt): add shared recorded_ssh_port domain-XML reader`.
@@ -41,7 +41,7 @@
 
 **Files:**
 - Modify: `src/kdive/providers/local_libvirt/lifecycle/xml.py`
-- Test: `tests/providers/local_libvirt/test_xml.py` (or wherever `render_domain_xml` is tested — locate first)
+- Test: `tests/providers/local_libvirt/test_provisioning.py` (where `render_domain_xml` is unit-tested) + `tests/adversarial/test_provider_xml.py` (cross-provider XML invariants)
 
 **Interfaces:**
 - Consumes: `recorded_ssh_port` (Task 1) in tests to assert the rendered port.
@@ -59,7 +59,7 @@
 
 **Files:**
 - Modify: `src/kdive/providers/local_libvirt/lifecycle/provisioning.py`
-- Test: `tests/providers/local_libvirt/test_provisioning.py` (locate the gdbstub-port allocation tests; mirror them)
+- Test: `tests/providers/local_libvirt/test_provisioning.py` (mirror the `_gdb_port_for` allocation tests)
 
 **Interfaces:**
 - Consumes: `render_domain_xml(..., ssh_port=...)` (Task 2), `recorded_ssh_port` (Task 1), the existing injected `self._free_port` seam.
@@ -76,7 +76,7 @@
 ### Task 4: Install preserves the SSH forward (regression test only)
 
 **Files:**
-- Test: `tests/providers/local_libvirt/test_install.py` (locate the gdbstub-preservation test; mirror it)
+- Test: `tests/providers/local_libvirt/test_install.py` (mirror `test_install_preserves_the_gdbstub_qemu_commandline`, install.py:231)
 
 **Interfaces:**
 - Consumes: `render_domain_xml(..., ssh_port=...)`, `install._render_os_section` (or the public install path the gdbstub test drives), `recorded_ssh_port`.
@@ -111,7 +111,7 @@ No production change — `install._render_os_section` already calls `register_qe
 
 **Files:**
 - Modify: `src/kdive/providers/local_libvirt/composition.py:121` (`supported_debug_transports`)
-- Test: `tests/providers/local_libvirt/test_composition.py` (or wherever `build_runtime`'s descriptor is asserted — locate)
+- Test: `tests/providers/local_libvirt/test_composition.py` + `tests/providers/test_runtime_descriptor.py` (both assert the descriptor)
 
 **Interfaces:**
 - Produces: `build_runtime(...).supported_debug_transports == frozenset({"gdbstub", "drgn-live"})`; `supported_introspection` unchanged.
