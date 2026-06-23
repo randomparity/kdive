@@ -95,19 +95,40 @@ exactly as the offline port and remote live port do.
 1. Decode the handle (`TransportHandleData.decode`) and require `kind == "ssh"`, host loopback,
    port in range — a non-loopback or non-ssh handle is a `CONFIGURATION_ERROR` *before* any IO
    (defense-in-depth: the connect plane already enforced loopback, this re-checks at use).
-2. Resolve the managed SSH identity for `root@127.0.0.1` via the existing
-   `materialized_ssh_identity(ssh_credential_ref, secret_registry)` (0600 temp file, deleted on
-   every exit; key value registered for redaction — the machinery `ssh_transport.py` already
-   ships). The `ssh_credential_ref` is read from env/config the same way the connect plane reads
-   it; the value never enters the handle, a state row, or a response.
-3. Run `ssh -i <identity> <BatchMode/StrictHostKeyChecking=accept-new/ConnectTimeout> -p <port>
-   root@127.0.0.1 -- /usr/local/sbin/kdive-drgn <helper>` with **fixed argv** (the helper name is
-   validated against the fixed set before this runs — never a shell string, no caller interpolation
-   into the remote command) and a bounded timeout.
+2. Resolve the **kdive-managed SSH private key** — the identity for `root@127.0.0.1`. The seam
+   signature is `introspect_live(transport_handle, helper)`: it carries **no** System, profile, or
+   `ssh_credential_ref` (those are resolved at `debug.start_session`, a *different* worker call).
+   The honest, in-reach source is the env-level managed keypair the rootfs build authorized:
+   `kdive.prereqs.managed_ssh_key.managed_private_key_path()` — a fixed, already-`0600` absolute
+   path (the private counterpart to the `managed_public_key_path()` `rootfs_build` `--ssh-inject`s
+   to `root`, ADR-0052/0218 §1). This is exactly the key ADR-0218 §1 pins the transport to
+   (`root@127.0.0.1` + the managed private key); a per-System `ssh_credential_ref` mismatch is not
+   relevant here because the build authorized only the managed key. The seam registers the key
+   value into the redaction registry and passes the path to `ssh -i`; the value never enters the
+   handle, a state row, or a response. (No `materialized_ssh_identity` copy is needed — the managed
+   key is already a stable `0600` file, not a secrets-root-relative ref to stage into a temp file.)
+   The managed private key being absent (a host where the managed keypair was never generated) is a
+   `CONFIGURATION_ERROR` before any IO.
+3. Run `ssh -i <managed-private-key> -o BatchMode=yes -o StrictHostKeyChecking=no -o
+   UserKnownHostsFile=/dev/null -o ConnectTimeout=<n> -p <port> root@127.0.0.1 --
+   /usr/local/sbin/kdive-drgn <helper>` with **fixed argv** (the helper name is validated against
+   the fixed set before this runs — never a shell string, no caller interpolation into the remote
+   command) and a bounded subprocess timeout (`_LIVE_INTROSPECT_SSH_TIMEOUT_S`, a named module
+   constant). **Host-key policy:** the forwarded port is a recycled loopback `127.0.0.1:<port>` that
+   B1's bind-probe re-allocates per provision and that successive (rebuilt) guests reuse, so TOFU
+   host-key pinning (`accept-new`) would hard-fail later Systems on a recycled port with a sticky
+   `REMOTE HOST IDENTIFICATION HAS CHANGED` that no operator can clear. A per-op throwaway
+   `known_hosts` (`UserKnownHostsFile=/dev/null` + `StrictHostKeyChecking=no`) is used instead: the
+   security boundary is the loopback bind plus managed-key auth (ADR-0218 §1), not host-key TOFU,
+   so discarding the host key adds no exposure on `127.0.0.1` and removes the recycled-port trap.
+   The build transport's `_SSH_BASE_OPTIONS` (`StrictHostKeyChecking=accept-new`) is **not** reused
+   verbatim for this reason; the loopback-control-channel options are spelled out here.
 4. A non-zero exit → `DEBUG_ATTACH_FAILURE` (drgn could not attach in-guest, e.g. no debuginfo);
    undecodable / non-object stdout → `INFRASTRUCTURE_FAILURE`; an SSH launch/connect fault →
-   `TRANSPORT_FAILURE`; a timeout → `TRANSPORT_FAILURE`. These map onto the same categories the
-   remote live path and the offline path already use.
+   `TRANSPORT_FAILURE`; a subprocess timeout → `TRANSPORT_FAILURE`. These map onto the same
+   categories the remote live path and the offline path already use. The handler runs the seam via
+   `asyncio.to_thread`, so the bounded timeout also caps how long a wedged sshd can hold a
+   thread-pool slot.
 
 The connectable surface (decode, loopback re-check, helper-validation, error mapping) is
 unit-tested with an injected fake; only the real `subprocess` SSH call is `live_vm`-gated.
@@ -137,7 +158,9 @@ from ADR-0210 §1's literal "flip and promote in one PR" — see ADR-0219.
   - The assembled report is redacted at the port boundary (a planted guest secret is masked) and
     byte-capped (a tiny cap trims `tasks` and sets `truncated`).
   - A non-zero in-guest exit → `DEBUG_ATTACH_FAILURE`; undecodable output →
-    `INFRASTRUCTURE_FAILURE`; an SSH transport fault → `TRANSPORT_FAILURE` (all via injected fakes).
+    `INFRASTRUCTURE_FAILURE`; an SSH transport fault and a subprocess timeout → `TRANSPORT_FAILURE`
+    (all via injected fakes; the timeout case asserts the mapping with a fake that raises the
+    timeout, not a real wall-clock wait).
   - `from_env()` wires a non-`None` real seam (without importing drgn or opening SSH); calling it
     on a host without the live prerequisites raises a categorized error, not an `ImportError`.
   - The local provider descriptor advertises `live` introspection (`composition.py` test).
@@ -152,8 +175,9 @@ from ADR-0210 §1's literal "flip and promote in one PR" — see ADR-0219.
 | live seam not configured (off-gate) | `MISSING_DEPENDENCY` | `introspect_live` guard |
 | unknown helper | `CONFIGURATION_ERROR` | before seam runs |
 | handle is not `ssh://` / non-loopback host / bad port | `CONFIGURATION_ERROR` | `_real_run_live_helper`, before IO |
-| `ssh_credential_ref` unresolvable | `CONFIGURATION_ERROR` | `materialized_ssh_identity` |
-| SSH connect/launch fault or timeout | `TRANSPORT_FAILURE` | seam |
+| managed private key absent (keypair never generated) | `CONFIGURATION_ERROR` | seam, before IO |
+| SSH connect/launch fault or `ConnectTimeout`/subprocess timeout | `TRANSPORT_FAILURE` | seam |
+| recycled loopback port + rebuilt guest host key | not a failure (throwaway `known_hosts`) | seam SSH options |
 | in-guest helper exits non-zero (drgn cannot attach) | `DEBUG_ATTACH_FAILURE` | seam |
 | undecodable / non-object helper stdout | `INFRASTRUCTURE_FAILURE` | seam |
 | guest SSH unreachable (the #697 DHCP gap) | `TRANSPORT_FAILURE` (honest fail, never false success) | seam |

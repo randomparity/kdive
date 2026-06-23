@@ -82,16 +82,31 @@ unchanged in shape from the remote live port.
    (defense-in-depth: the connect plane already enforced loopback at open time; the seam
    re-enforces at use time so a tampered/forged handle cannot redirect the SSH connection off
    loopback).
-2. Materialize the managed SSH identity via the existing `materialized_ssh_identity(
-   ssh_credential_ref, secret_registry)` (0600 temp file deleted on every exit; key value
-   registered for redaction). The `ssh_credential_ref` resolves from config exactly as the connect
-   plane resolves it; the key value never enters the handle, a row, or a response.
-3. Run `ssh -i <identity> -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o
-   ConnectTimeout=... -p <port> root@127.0.0.1 -- /usr/local/sbin/kdive-drgn <helper>` with fixed
-   argv and a bounded timeout.
+2. Resolve the **kdive-managed SSH private key** as the `root@127.0.0.1` identity. The
+   `LiveIntrospector` port is `introspect_live(transport_handle, helper)` — it carries no System,
+   profile, or `ssh_credential_ref` (those resolve at `debug.start_session`, a different worker
+   call). The in-reach source is the env-level managed keypair the rootfs build authorized:
+   `managed_private_key_path()` (the private counterpart to the `managed_public_key_path()`
+   `rootfs_build` `--ssh-inject`s to `root`, ADR-0052) — an already-`0600` stable path, so no temp
+   copy is needed. ADR-0218 §1 pins the transport to exactly this key, so a per-System
+   `ssh_credential_ref` is not consulted here (the build authorized only the managed key). The seam
+   registers the key value for redaction; the value never enters the handle, a row, or a response.
+   An absent managed key is a `CONFIGURATION_ERROR` before any IO.
+3. Run `ssh -i <managed-private-key> -o BatchMode=yes -o StrictHostKeyChecking=no -o
+   UserKnownHostsFile=/dev/null -o ConnectTimeout=<n> -p <port> root@127.0.0.1 --
+   /usr/local/sbin/kdive-drgn <helper>` with fixed argv and a bounded subprocess timeout (a named
+   constant). **Host-key policy:** the forward is a recycled loopback `127.0.0.1:<port>` (B1's
+   bind-probe re-allocates per provision; successive rebuilt guests reuse it), so TOFU
+   (`accept-new`) would later hard-fail a recycled port with a sticky `IDENTIFICATION HAS CHANGED`.
+   A per-op throwaway `known_hosts` (`UserKnownHostsFile=/dev/null` + `StrictHostKeyChecking=no`) is
+   used instead: the security boundary is the loopback bind plus managed-key auth (ADR-0218 §1), not
+   host-key TOFU, so discarding the host key adds no exposure on `127.0.0.1`. The build transport's
+   `accept-new` `_SSH_BASE_OPTIONS` is deliberately not reused for this control channel.
 4. Error mapping: SSH launch/connect fault or timeout → `TRANSPORT_FAILURE`; non-zero helper exit
    → `DEBUG_ATTACH_FAILURE`; undecodable / non-object stdout → `INFRASTRUCTURE_FAILURE`. Identical
-   categories to the remote live path and the offline path.
+   categories to the remote live path and the offline path. The handler runs the seam via
+   `asyncio.to_thread`, so the bounded timeout also caps how long a wedged sshd holds a thread-pool
+   slot.
 
 ### 4. Descriptor flip is live-gated; tool maturity stays `partial`
 
