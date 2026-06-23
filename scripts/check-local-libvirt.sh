@@ -13,6 +13,11 @@ readonly PY="${KDIVE_PYTHON:-python3}"
 # runs.install stages the kernel/initrd here before booting the System; must be writable
 # by the worker user and live under a path the qemu user can traverse (see the boot check).
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+# libguestfs builds its supermin appliance from a host kernel under this dir; Debian/Ubuntu ship
+# /boot/vmlinuz-* root:0600, unreadable by a non-root worker, so build-fs fails (ADR-0222, #694).
+# Probe ALL present kernels — supermin selects by version-sort, not the running one. Override for
+# tests.
+readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 fail=0
 
 note_fail() {
@@ -31,6 +36,16 @@ _default_net_active() {
   [[ "$out" == *"Active:"*[Yy]es* ]]
 }
 _venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
+_host_kernels_readable() {
+  local k found=0
+  for k in "${BOOT_DIR}"/vmlinuz-*; do
+    [[ -e "$k" ]] || continue # no-match glob stays literal under no-nullglob; skip it
+    found=1
+    [[ -r "$k" ]] || return 1
+  done
+  ((found)) || return 0 # no kernels present: unusual layout, do not false-fail
+  return 0
+}
 _dir_writable() {
   local dir="$1" probe
   [[ -d "$dir" && -w "$dir" ]] || return 1
@@ -59,6 +74,10 @@ fi
 _venv_imports_kdump_deps || note_fail \
   "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203)" \
   "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
+
+_host_kernels_readable || note_fail \
+  "a host kernel under ${BOOT_DIR} (vmlinuz-*) is not readable by this user (libguestfs build-fs appliance, ADR-0222)" \
+  "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): sudo chmod 0644 /boot/vmlinuz-* (re-apply after kernel upgrades, or use dpkg-statoverride)"
 
 _dir_writable "${INSTALL_STAGING}" || note_fail \
   "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \

@@ -52,12 +52,16 @@ def test_all_healthy_exits_zero(tmp_path: Path) -> None:
     kvm.write_text("")
     staging = tmp_path / "install-staging"
     staging.mkdir()
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-test").write_text("")  # readable; the ADR-0222 host-kernel probe passes
     env = {
         "PATH": str(bindir),
         "HOME": str(tmp_path),
         "KDIVE_KVM_NODE": str(kvm),
         "KDIVE_PYTHON": str(py),
         "KDIVE_INSTALL_STAGING": str(staging),
+        "KDIVE_BOOT_DIR": str(boot),
     }
     result = _run(env)
     assert result.returncode == 0, result.stderr
@@ -82,6 +86,8 @@ def test_unwritable_install_staging_fails_with_hint(tmp_path: Path) -> None:
         "KDIVE_PYTHON": str(py),
         # Points at a path that does not exist -> not a writable directory.
         "KDIVE_INSTALL_STAGING": str(tmp_path / "absent-staging"),
+        # Absent boot dir -> the kernel probe skips, staying neutral for this assertion.
+        "KDIVE_BOOT_DIR": str(tmp_path / "boot-empty"),
     }
     result = _run(env)
     assert result.returncode == 1
@@ -106,6 +112,7 @@ def test_missing_venv_bindings_fails_with_hint(tmp_path: Path) -> None:
         "HOME": str(tmp_path),
         "KDIVE_KVM_NODE": str(kvm),
         "KDIVE_PYTHON": str(py),
+        "KDIVE_BOOT_DIR": str(tmp_path / "boot-empty"),
     }
     result = _run(env)
     assert result.returncode == 1
@@ -127,6 +134,7 @@ def test_missing_kvm_node_fails(tmp_path: Path) -> None:
         "PATH": str(bindir),
         "HOME": str(tmp_path),
         "KDIVE_KVM_NODE": str(tmp_path / "nope"),
+        "KDIVE_BOOT_DIR": str(tmp_path / "boot-empty"),
     }
     result = _run(env)
     assert result.returncode == 1
@@ -142,7 +150,76 @@ def test_user_not_in_libvirt_group_fails(tmp_path: Path) -> None:
     _stub(bindir, "qemu-img", "exit 0")
     kvm = tmp_path / "kvm"
     kvm.write_text("")
-    env = {"PATH": str(bindir), "HOME": str(tmp_path), "KDIVE_KVM_NODE": str(kvm)}
+    env = {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(kvm),
+        "KDIVE_BOOT_DIR": str(tmp_path / "boot-empty"),
+    }
     result = _run(env)
     assert result.returncode == 1
     assert "libvirt" in result.stderr.lower()
+
+
+def _healthy_env(tmp_path: Path, bindir: Path, py: Path, boot: Path) -> dict[str, str]:
+    kvm = tmp_path / "kvm"
+    kvm.write_text("")
+    staging = tmp_path / "install-staging"
+    staging.mkdir(exist_ok=True)
+    return {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "KDIVE_KVM_NODE": str(kvm),
+        "KDIVE_PYTHON": str(py),
+        "KDIVE_INSTALL_STAGING": str(staging),
+        "KDIVE_BOOT_DIR": str(boot),
+    }
+
+
+def _healthy_bin(tmp_path: Path) -> tuple[Path, Path]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "virsh", 'case "$*" in *net-info*) echo "Active: yes";; esac\nexit 0')
+    _stub(bindir, "id", "echo kvm libvirt")
+    _stub(bindir, "qemu-system-x86_64", "exit 0")
+    _stub(bindir, "qemu-img", "exit 0")
+    py = _stub_python(bindir, "venv-python", imports_ok=True)
+    return bindir, py
+
+
+def test_unreadable_host_kernel_fails_with_chmod_hint(tmp_path: Path) -> None:
+    """An unreadable /boot/vmlinuz-* fails the preflight before the slow build (ADR-0222)."""
+    bindir, py = _healthy_bin(tmp_path)
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    kernel = boot / "vmlinuz-6.8.0-124-generic"
+    kernel.write_text("")
+    # Strip all read bits so it is unreadable regardless of the (non-root) test UID.
+    kernel.chmod(0o000)
+
+    result = _run(_healthy_env(tmp_path, bindir, py, boot))
+    assert result.returncode == 1, result.stdout
+    assert "vmlinuz" in result.stderr.lower()
+    assert "chmod 0644 /boot/vmlinuz-*" in result.stderr
+
+
+def test_readable_host_kernel_passes(tmp_path: Path) -> None:
+    bindir, py = _healthy_bin(tmp_path)
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-6.8.0-124-generic").write_text("")  # readable
+
+    result = _run(_healthy_env(tmp_path, bindir, py, boot))
+    assert result.returncode == 0, result.stderr
+    assert "ready" in result.stdout.lower()
+
+
+def test_absent_boot_kernels_skip_probe(tmp_path: Path) -> None:
+    """No /boot/vmlinuz-* present (unusual layout) must skip, not fail on the literal glob."""
+    bindir, py = _healthy_bin(tmp_path)
+    boot = tmp_path / "boot"
+    boot.mkdir()  # empty
+
+    result = _run(_healthy_env(tmp_path, bindir, py, boot))
+    assert result.returncode == 0, result.stderr
+    assert "ready" in result.stdout.lower()
