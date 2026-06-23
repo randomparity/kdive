@@ -15,6 +15,38 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 _DIGEST_CHUNK = 1024 * 1024
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
+# ADR-0222 (#694): two libguestfs stderr signatures get an actionable CONFIGURATION_ERROR
+# instead of the generic PROVISIONING_FAILURE. The kernel pattern binds the permission/read
+# failure to a vmlinuz path on one match so an unrelated permission error (an unwritable output
+# qcow2, an SELinux denial on the scratch image, a workspace problem) is NOT misattributed to the
+# host kernel; supermin's own "cannot read .../vmlinuz..." phrasing is covered by the same anchor.
+_KERNEL_UNREADABLE_RE = re.compile(
+    r"(?:/boot/)?vmlinuz[^\n'\"]*['\"]?[^\n]*?(?:Permission denied|cannot (?:open|read))"
+    r"|(?:Permission denied|cannot (?:open|read))[^\n]*?vmlinuz",
+)
+_PASST_FAILURE_RE = re.compile(r"passt exited with status")
+
+_KERNEL_REMEDIATION = (
+    "the libguestfs appliance cannot read the host kernel — Debian/Ubuntu ship "
+    "/boot/vmlinuz-* as root:0600. Make them readable (run as the worker user): "
+    "`sudo chmod 0644 /boot/vmlinuz-*` (re-apply after a kernel upgrade, or use dpkg-statoverride)"
+)
+_PASST_REMEDIATION = (
+    "the libguestfs appliance network (passt) failed. Unload the passt AppArmor profile "
+    "(`sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`); if it still fails (a "
+    "libguestfs/passt version mismatch on Ubuntu 24.04), build the rootfs on a host with a "
+    "working libguestfs appliance or stage a prebuilt bootable qcow2"
+)
+
+
+def _remediation_for_stderr(stderr: str) -> tuple[str, str] | None:
+    """Return ``(message, remediation)`` for a recognized libguestfs failure, else ``None``."""
+    if _KERNEL_UNREADABLE_RE.search(stderr):
+        return ("libguestfs cannot read the host kernel /boot/vmlinuz-*", _KERNEL_REMEDIATION)
+    if _PASST_FAILURE_RE.search(stderr):
+        return ("the libguestfs appliance network (passt) failed", _PASST_REMEDIATION)
+    return None
+
 
 def validate_image_name(name: str) -> None:
     """Reject image names that could escape the build workspace."""
@@ -65,6 +97,19 @@ def run_guestfs_tool(
             details={"stage": stage, "tool": argv[0], "error": type(exc).__name__},
         ) from exc
     if result.returncode != 0:
+        known = _remediation_for_stderr(result.stderr)
+        if known is not None:
+            message, remediation = known
+            raise CategorizedError(
+                f"{stage}: {message}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "stage": stage,
+                    "tool": argv[0],
+                    "remediation": remediation,
+                    "stderr": result.stderr[-2000:],
+                },
+            )
         raise CategorizedError(
             failure_message or f"{stage} failed",
             category=ErrorCategory.PROVISIONING_FAILURE,

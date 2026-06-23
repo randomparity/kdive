@@ -171,6 +171,83 @@ def test_run_guestfs_tool_nonzero_without_failure_message_uses_stage_default(
     assert str(caught.value) == "normalize failed"
 
 
+def _stub_failed_run(monkeypatch: pytest.MonkeyPatch, stderr: str, returncode: int = 1) -> None:
+    """Make ``subprocess.run`` return a non-zero exit carrying ``stderr`` (ADR-0222 #694)."""
+
+    def _failed(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode=returncode, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(_build_common.subprocess, "run", _failed)
+
+
+def test_run_guestfs_tool_maps_unreadable_host_kernel_to_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = (
+        "cp: cannot open '/boot/vmlinuz-6.8.0-124-generic' for reading: Permission denied\n"
+        "supermin: aborting: command failed\n"
+        "libguestfs: error: /usr/bin/supermin exited with error status 1"
+    )
+    _stub_failed_run(monkeypatch, stderr)
+
+    with pytest.raises(CategorizedError) as caught:
+        run_guestfs_tool(
+            ["virt-builder", "fedora-43"],
+            stage="virt-builder",
+            timeout_s=60,
+            missing_message="virt-builder is not installed",
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "vmlinuz" in str(caught.value)
+    assert "chmod 0644 /boot/vmlinuz-*" in str(caught.value.details["remediation"])
+    assert caught.value.details["stage"] == "virt-builder"
+    assert "Permission denied" in str(caught.value.details["stderr"])
+
+
+def test_run_guestfs_tool_maps_passt_failure_to_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = "virt-builder: error: libguestfs error: passt exited with status 1"
+    _stub_failed_run(monkeypatch, stderr)
+
+    with pytest.raises(CategorizedError) as caught:
+        run_guestfs_tool(
+            ["virt-builder", "fedora-43"],
+            stage="virt-builder",
+            timeout_s=60,
+            missing_message="virt-builder is not installed",
+        )
+
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "passt" in str(caught.value)
+    assert "apparmor_parser -R /etc/apparmor.d/usr.bin.passt" in str(
+        caught.value.details["remediation"]
+    )
+
+
+def test_run_guestfs_tool_unrelated_permission_denied_stays_provisioning_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A permission error NOT on the host kernel must fall through to the generic failure,
+    # so the operator is not wrongly told to chmod /boot/vmlinuz-*.
+    stderr = "virt-make-fs: error: cannot open output '/var/lib/kdive/out.qcow2': Permission denied"
+    _stub_failed_run(monkeypatch, stderr)
+
+    with pytest.raises(CategorizedError) as caught:
+        run_guestfs_tool(
+            ["virt-make-fs"],
+            stage="repack",
+            timeout_s=60,
+            missing_message="virt-make-fs is not installed",
+            failure_message="repack failed",
+        )
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(caught.value) == "repack failed"
+    assert "remediation" not in caught.value.details
+
+
 @pytest.mark.parametrize("name", ["fedora", "Fedora_43", "kdive.ready-43", "image.1"])
 def test_validate_image_name_accepts_filename_safe_names(name: str) -> None:
     validate_image_name(name)
