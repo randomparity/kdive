@@ -247,6 +247,55 @@ build must carry to actually arm are tracked in
 [#688](https://github.com/randomparity/kdive/issues/688); the example's `kdump` build-config
 already includes that arming set.
 
+### drgn-live introspection prerequisites
+
+`introspect.run` (live drgn over the guest's own `/proc/kcore`) and a `drgn-live`
+`debug.start_session` reach the guest over a loopback-forwarded SSH port (ADR-0218/0219), not over
+any capture-method machinery. Opting a System into drgn-live is therefore **orthogonal** to its
+capture method — a kdump, gdbstub, host_dump, or plain console System can each carry it. Two
+one-time pieces of setup arm it:
+
+1. **Set `ssh_credential_ref` in the provisioning profile.** A non-`null` value is what makes
+   provisioning render the loopback SSH NIC and `hostfwd` into the domain XML; without it the guest
+   has no NIC and drgn-live cannot connect. It is an opaque **reference** — a filename, never the
+   key value:
+
+   ```jsonc
+   "provider": {"local-libvirt": {
+     "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"},
+     "ssh_credential_ref": "drgn-ssh"
+   }}
+   ```
+
+2. **Stage that reference under the secrets root.** `debug.start_session` resolves the reference
+   through the file-ref secret backend **before** opening the transport, confined to
+   `KDIVE_SECRETS_ROOT` (default `/var/lib/kdive/secrets`). The file must exist and be readable by
+   the **server** process — drgn-live sessions and `introspect.run` run server-side, not in the
+   worker — or the session fails with a `configuration_error`. The reference's *contents* are not
+   the SSH credential (see below), so stage the managed **public** key, which keeps no new private
+   key at rest; its filename must match the `ssh_credential_ref` above:
+
+   ```bash
+   sudo install -d -o "$USER" -m 0750 /var/lib/kdive/secrets
+   install -m 0644 ~/.local/share/kdive/ssh/id_kdive_ed25519.pub \
+     /var/lib/kdive/secrets/drgn-ssh
+   ```
+
+**What actually authenticates the SSH** is the kdive-**managed** private key
+(`id_kdive_ed25519`, under `~/.local/share/kdive/ssh/` or `KDIVE_SSH_KEY_DIR`), whose public half
+`build-fs` injects into the debug rootfs at image-build time (ADR-0052/0219) — **not** the
+`ssh_credential_ref` contents, which the transport resolves only to gate the session and register
+the value for log redaction. drgn-live therefore works only on a System booted from a rootfs that
+carries the managed key: the `--kind debug` image from Step 6 does; a generic base qcow2 does not.
+
+The debug rootfs also supplies the two guest-side pieces drgn needs, all automatic for the
+`--kind debug` image and a from-source build (listed here so a failure is diagnosable): the
+`kdive-drgn` helper at `/usr/local/sbin/` and `drgn` itself (ADR-0220), plus the per-Run DWARF
+`vmlinux` that the install step stages at `/usr/lib/debug/lib/modules/<ver>/vmlinux` so `drgn -k`
+can resolve typed kernel symbols (ADR-0221). A System missing the helper returns
+`debug_attach_failure`; one missing the vmlinux raises a drgn `ObjectNotFoundError` for the first
+typed symbol.
+
 ## 6. Test the lifecycle
 
 The lifecycle steps are MCP tool calls. Issue them from an agent session or a scripted client
