@@ -2,7 +2,7 @@
 
 ``_real_wait_for_vmcore`` used to force-off the domain immediately, racing the in-guest kdump
 and harvesting an empty ``/var/crash``. The fix waits for the guest to self-shut-off (kdump's
-``final_action shutdown``) within a bounded window before forcing off and harvesting. The wait
+``final_action poweroff``) within a bounded window before forcing off and harvesting. The wait
 is driven through an injected domain-settled probe and sleep seam so the poll logic is unit
 tested with fakes; only the live libvirt probe/sleep wiring is ``live_vm``-gated.
 """

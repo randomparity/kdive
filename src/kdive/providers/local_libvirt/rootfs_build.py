@@ -73,15 +73,19 @@ _SELINUX_CONFIG = "SELINUX=disabled\nSELINUXTYPE=targeted\n"
 # (ADR-0213, #688, mirrors ADR-0084).
 _KDUMP_SYSCTL_PATH = "/etc/sysctl.d/99-kdive-kdump.conf"
 _KDUMP_SYSCTL_CONTENT = "kernel.unknown_nmi_panic=1\n"
-# After dumping, the crash kernel runs kdump's ``final_action``. Pin it to ``shutdown`` so the
+# After dumping, the crash kernel runs kdump's ``final_action``. Pin it to ``poweroff`` so the
 # guest self-shuts-off (VIR_DOMAIN_SHUTOFF) the instant the dump completes — the reliable
 # completion signal the host-side harvest waits on (ADR-0217). Fedora's default is ``reboot``,
 # which never self-shuts-off and would force the harvest onto its bounded-timeout fallback. The
 # run-command strips any existing ``final_action`` line, then appends ours, so kdump.conf carries
 # exactly one.
+#
+# ``poweroff`` (NOT ``shutdown``): kdump.conf accepts only ``reboot``/``halt``/``poweroff``; any
+# other token makes kdumpctl reject the config (``Starting kdump: [FAILED]``) so kdump never arms
+# and no vmcore is written (#705 live regression).
 _KDUMP_FINAL_ACTION_CMD = (
     "sed -i '/^[[:space:]]*final_action[[:space:]]/d' /etc/kdump.conf && "
-    "printf 'final_action shutdown\\n' >> /etc/kdump.conf"
+    "printf 'final_action poweroff\\n' >> /etc/kdump.conf"
 )
 
 
