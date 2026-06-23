@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql
 
 from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
@@ -169,11 +170,11 @@ def _insert_registered_sync(conn: psycopg.Connection, **kw: object) -> None:
     }
     row.update(kw)
     cols = list(row.keys())
-    placeholders = ", ".join(f"%({c})s" for c in cols)
-    conn.execute(
-        f"INSERT INTO image_catalog ({', '.join(cols)}) VALUES ({placeholders})",  # noqa: S608
-        row,
+    query = sql.SQL("INSERT INTO image_catalog ({cols}) VALUES ({vals})").format(
+        cols=sql.SQL(", ").join(sql.Identifier(c) for c in cols),
+        vals=sql.SQL(", ").join(sql.Placeholder(c) for c in cols),
     )
+    conn.execute(query, row)
 
 
 def test_resolve_public_sync_matches_arch(migrated_url: str) -> None:

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from kdive.artifacts import storage as artifact_types
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -276,11 +277,11 @@ def _insert_registered_sync(conn: psycopg.Connection, **kw: object) -> None:
     }
     row.update(kw)
     cols = list(row.keys())
-    placeholders = ", ".join(f"%({c})s" for c in cols)
-    conn.execute(
-        f"INSERT INTO image_catalog ({', '.join(cols)}) VALUES ({placeholders})",  # noqa: S608
-        row,
+    query = sql.SQL("INSERT INTO image_catalog ({cols}) VALUES ({vals})").format(
+        cols=sql.SQL(", ").join(sql.Identifier(c) for c in cols),
+        vals=sql.SQL(", ").join(sql.Placeholder(c) for c in cols),
     )
+    conn.execute(query, row)
 
 
 def _exploding_factory() -> Callable[[], _FakeStore]:

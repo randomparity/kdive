@@ -8,6 +8,7 @@ import pytest
 
 from kdive.inventory.errors import InventoryError
 from kdive.inventory.loader import load_inventory, load_inventory_optional
+from kdive.inventory.model import StagedPathSource
 
 GOOD = """
 schema_version = 2
@@ -115,8 +116,9 @@ def test_repo_systems_toml_example_parses_with_staged_path_image() -> None:
     # image (the host-shell-free discovery path, ADR-0228) must be present and absolute.
     example = Path(__file__).resolve().parents[2] / "systems.toml.example"
     doc = load_inventory(example)
-    staged_path = [img for img in doc.image if img.source.kind == "staged-path"]
+    staged_path = [img for img in doc.image if isinstance(img.source, StagedPathSource)]
     assert staged_path, "systems.toml.example must declare a staged-path local-libvirt image"
     img = staged_path[0]
     assert img.provider == "local-libvirt"
-    assert img.source.path.startswith("/var/lib/kdive/rootfs/")  # type: ignore[union-attr]
+    assert isinstance(img.source, StagedPathSource)
+    assert img.source.path.startswith("/var/lib/kdive/rootfs/")

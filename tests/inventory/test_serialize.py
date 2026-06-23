@@ -17,7 +17,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from kdive.inventory import serialize
-from kdive.inventory.model import InventoryDoc
+from kdive.inventory.model import InventoryDoc, StagedPathSource
 from kdive.inventory.overrides import BUILD_HOST_RESOURCE_KIND, InventorySourceKind
 
 # ---- TOML emitter primitives ----------------------------------------------------------
@@ -208,7 +208,9 @@ def test_serialize_image_staged_path_source() -> None:
     assert 'path = "/var/lib/kdive/rootfs/local-rootfs.qcow2"' in text
     # Round-trips: the emitted inventory re-parses with the staged-path source.
     parsed = InventoryDoc.parse(tomllib.loads(text))
-    assert parsed.image[0].source.path == "/var/lib/kdive/rootfs/local-rootfs.qcow2"  # type: ignore[union-attr]
+    source = parsed.image[0].source
+    assert isinstance(source, StagedPathSource)
+    assert source.path == "/var/lib/kdive/rootfs/local-rootfs.qcow2"
 
 
 def test_completed_remote_skeleton_parses_after_filling_placeholders() -> None:
