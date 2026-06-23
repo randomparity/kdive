@@ -150,15 +150,20 @@ process and its files). Two seams require it:
 
 - **Build → boot confirmation.** The boot-readiness preflight tails the guest console log that
   `virtlogd` writes `root:0600` to detect boot-to-multiuser; a non-root worker gets a
-  `PermissionError` and the boot step fails (`infrastructure_failure`). Because every later plane is
-  gated on a confirmed boot, this blocks **debug, introspection, and all capture methods** at once.
+  `PermissionError` and the boot step fails with `configuration_error` — a host identity/permission
+  misconfiguration, not a transient infrastructure failure ([ADR-0223](../../adr/0223-local-libvirt-worker-readability-diagnostics.md)).
+  Because every later plane is gated on a confirmed boot, this blocks **debug, introspection, and all
+  capture methods** at once.
 - **host_dump capture.** `virDomainCoreDumpWithFormat` runs as the QEMU/root process and writes the
-  core to a `root`-owned temp file; the worker must read and remove it.
+  core to a `root`-owned temp file; the worker must read and remove it. A non-root worker gets
+  `configuration_error` with the same operator-fix guidance (ADR-0223), not an opaque `[Errno 13]`.
 
 So a non-root worker can provision but cannot confirm a boot or capture a host_dump. This is the
-worker-privilege gap tracked in [#699](https://github.com/randomparity/kdive/issues/699). The
-kdump-only note under [Declare your inventory](#kdump-capture-prerequisites) is one instance of this
-broader requirement, not a kdump-specific one.
+worker-privilege gap tracked in [#699](https://github.com/randomparity/kdive/issues/699);
+`scripts/check-local-libvirt.sh` now prints a non-failing advisory when it detects a non-root worker
+under `qemu:///system`, so the constraint is surfaced before a run. The kdump-only note under
+[Declare your inventory](#kdump-capture-prerequisites) is one instance of this broader requirement,
+not a kdump-specific one.
 
 A root worker must **not** compile kernel source as root. The local build lane runs
 operator/agent-supplied `git clone` + `make` — arbitrary code — so when the worker is root it
