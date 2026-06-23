@@ -442,7 +442,7 @@ def _prov(
             overlay_exists=overlay_exists,
             prepare_console_log=lambda _path: None,
         ),
-        materialize_rootfs=lambda rootfs, _system_id: (
+        materialize_rootfs=lambda rootfs, _system_id, _arch: (
             rootfs.path if rootfs.kind == "local" else "/var/lib/kdive/rootfs/upload.qcow2"
         ),
     )
@@ -458,6 +458,35 @@ def test_prov_helper_does_not_prepare_host_console_log(
     monkeypatch.setattr(provisioning_module.Path, "mkdir", fail_mkdir)
 
     _prov(_ProvConn()).provision(_SYS, _profile())
+
+
+def test_provision_catalog_rootfs_threads_arch_to_fetch() -> None:
+    # The wired catalog lane (ADR-0228): provisioning a `catalog` rootfs runs the real
+    # _materialize_rootfs_base, which calls the injected catalog_fetch with the ref and the
+    # profile's arch (no materialize_rootfs override here).
+    from kdive.components.references import CatalogComponentRef
+
+    seen: list[tuple[str, str]] = []
+
+    def _fetch(ref: CatalogComponentRef, arch: str) -> Path:
+        seen.append((ref.name, arch))
+        return Path("/var/lib/kdive/rootfs/resolved.qcow2")
+
+    conn = _ProvConn()
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=ProvisioningFiles(
+            make_overlay=lambda _base, _overlay: None,
+            remove_overlay=lambda _overlay: None,
+            overlay_exists=lambda _overlay: False,
+            prepare_console_log=lambda _path: None,
+        ),
+        catalog_fetch=_fetch,
+    )
+    prov.provision(
+        _SYS, _profile(rootfs={"kind": "catalog", "provider": "local-libvirt", "name": "base"})
+    )
+    assert seen == [("base", "x86_64")]
 
 
 def test_provision_defines_and_starts_returns_name() -> None:
@@ -522,7 +551,7 @@ def _prov_with_port(conn: _ProvConn, *, free_port: Callable[[], int]) -> LocalLi
             overlay_exists=lambda _overlay: False,
             prepare_console_log=lambda _path: None,
         ),
-        materialize_rootfs=lambda rootfs, _system_id: rootfs.path,
+        materialize_rootfs=lambda rootfs, _system_id, _arch: rootfs.path,
         free_port=free_port,
     )
 
@@ -673,7 +702,7 @@ def test_provision_prepares_console_log_before_define() -> None:
             overlay_exists=lambda _overlay: False,
             prepare_console_log=prepare,
         ),
-        materialize_rootfs=lambda _rootfs, _system_id: "/var/lib/kdive/rootfs/base.qcow2",
+        materialize_rootfs=lambda _rootfs, _system_id, _arch: "/var/lib/kdive/rootfs/base.qcow2",
     ).provision(_SYS, _profile())
 
     assert calls == [("prepare", f"{_SYS}.log"), ("define", "xml")]
@@ -970,7 +999,9 @@ def test_provision_console_log_failure_removes_the_overlay() -> None:
                 overlay_exists=lambda _overlay: False,
                 prepare_console_log=fail_prepare,
             ),
-            materialize_rootfs=lambda _rootfs, _system_id: "/var/lib/kdive/rootfs/base.qcow2",
+            materialize_rootfs=lambda _rootfs, _system_id, _arch: (
+                "/var/lib/kdive/rootfs/base.qcow2"
+            ),
         ).provision(_SYS, _profile())
 
     assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
@@ -1103,7 +1134,7 @@ def test_provision_passes_real_system_id_to_materialize_and_define() -> None:
             overlay_exists=lambda _overlay: False,
             prepare_console_log=lambda _path: None,
         ),
-        materialize_rootfs=lambda rootfs, system_id: (
+        materialize_rootfs=lambda rootfs, system_id, _arch: (
             seen.append(system_id) or rootfs.path  # type: ignore[func-returns-value]
         ),
     )

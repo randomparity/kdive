@@ -36,10 +36,14 @@ from kdive.profiles.provisioning import (
     validate_rootfs_reference,
 )
 from kdive.providers.local_libvirt.lifecycle.materialize import (
+    CatalogFetch,
     MaterializableRootfsRef,
     RootfsMaterializationContext,
     RootfsUploadContext,
     materialize_rootfs_base,
+)
+from kdive.providers.local_libvirt.lifecycle.rootfs_catalog_fetch import (
+    rootfs_catalog_fetch_from_env,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import (
     ROOTFS_DIR,
@@ -122,7 +126,7 @@ def reject_rootfs_without_upload_window(rootfs: RootfsSource) -> None:
         )
 
 
-type MaterializeRootfs = Callable[[RootfsSource, UUID], str]
+type MaterializeRootfs = Callable[[RootfsSource, UUID, str], str]
 
 
 def _materializable_rootfs(rootfs: RootfsSource) -> MaterializableRootfsRef:
@@ -149,21 +153,32 @@ class LocalLibvirtProvisioning:
         files: ProvisioningFiles | None = None,
         allowed_roots: list[Path] | None = None,
         materialize_rootfs: MaterializeRootfs | None = None,
+        catalog_fetch: CatalogFetch | None = None,
         free_port: FreePort | None = None,
     ) -> None:
         self._connect = connect
         self._files = files or ProvisioningFiles()
         self._allowed_roots = allowed_roots or [Path(ROOTFS_DIR)]
+        self._catalog_fetch = catalog_fetch
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
         self._free_port = free_port or _bind_probe_free_port
 
     @classmethod
     def from_env(cls) -> LocalLibvirtProvisioning:
-        """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect."""
+        """Build from ``KDIVE_LIBVIRT_URI`` (default ``qemu:///system``); does not connect.
+
+        Wires the ``catalog`` rootfs lane (ADR-0228): the catalog fetch lazily opens its own DB
+        connection + object store per call, so constructing the provisioner opens nothing.
+        """
         host_uri = config.require(LIBVIRT_URI)
+        allowed_roots = [Path(ROOTFS_DIR)]
         # `virConnect` structurally satisfies the narrow `_LibvirtConn` Protocol (only
         # `defineXML`/`lookupByName`), so no suppression is needed at this seam.
-        return cls(connect=lambda: libvirt.open(host_uri))
+        return cls(
+            connect=lambda: libvirt.open(host_uri),
+            allowed_roots=allowed_roots,
+            catalog_fetch=rootfs_catalog_fetch_from_env(allowed_roots),
+        )
 
     def provision(self, system_id: UUID, profile: ProvisioningProfile) -> str:
         """Define and start the tagged domain; return its name.
@@ -182,7 +197,7 @@ class LocalLibvirtProvisioning:
                 ``INFRASTRUCTURE_FAILURE`` for provider control-plane or overlay IO faults.
         """
         section = profile.provider.local_libvirt
-        base = self._materialize_rootfs(section.rootfs, system_id)
+        base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
         overlay = self._files.prepare_overlay(system_id, base=base)
         gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
         ssh_port = self._ssh_port_for(system_id) if section.ssh_credential_ref is not None else None
@@ -339,14 +354,18 @@ class LocalLibvirtProvisioning:
         self._teardown_domain(domain_name)
         self._files.remove_overlay_for_domain(domain_name)
 
-    def _materialize_rootfs_base(self, rootfs: RootfsSource, system_id: UUID) -> str:
+    def _materialize_rootfs_base(
+        self, rootfs: RootfsSource, system_id: UUID, arch: str = "x86_64"
+    ) -> str:
         rootfs = _materializable_rootfs(rootfs)
         return str(
             materialize_rootfs_base(
                 rootfs,
                 context=RootfsMaterializationContext(
                     allowed_roots=self._allowed_roots,
+                    arch=arch,
                     upload=RootfsUploadContext("local", system_id, Path(ROOTFS_DIR)),
+                    catalog_fetch=self._catalog_fetch,
                 ),
             )
         )
