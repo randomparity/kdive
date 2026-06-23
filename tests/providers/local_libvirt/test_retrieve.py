@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
@@ -325,7 +326,7 @@ def test_capture_host_dump_no_core_is_readiness_failure() -> None:
 
 
 def _retriever_with_build_id_seam(
-    store: _FakeStore, *, core_path: Path, build_id_seam: object
+    store: _FakeStore, *, core_path: Path, build_id_seam: Callable[[Path], str]
 ) -> LocalLibvirtRetrieve:
     """A host_dump retriever whose build-id seam (the first spooled-core read) the caller sets."""
     return LocalLibvirtRetrieve(
@@ -333,7 +334,7 @@ def _retriever_with_build_id_seam(
         store_factory=lambda: store,
         wait_for_vmcore=lambda _sid: pytest.fail("kdump seam used for host_dump"),
         read_vmcore_build_id=lambda _b: pytest.fail("bytes build-id seam used on host_dump path"),
-        read_vmcore_build_id_from_file=build_id_seam,  # type: ignore[arg-type]
+        read_vmcore_build_id_from_file=build_id_seam,
         extract_redacted_from_file=lambda _p: pytest.fail("dmesg read after a build-id failure"),
         host_dump_capture=lambda _sid: core_path,
         secret_registry=SecretRegistry(),
