@@ -119,17 +119,20 @@ half-written file past `is_file()`. **This change replaces line 38**: the seam c
 per-attach directory via `tempfile.mkdtemp(prefix="kdive-debuginfo-")` (mode `0o700`, owner-only)
 and stages the vmlinux as `<dir>/vmlinux`. The unguessable, owner-only directory removes the
 symlink-precreation and cross-`run_id` collision hazards, mirroring how the introspect/kdump paths
-stage to `tempfile.NamedTemporaryFile` / `mkdtemp` rather than a fixed name. The seam owns cleanup:
-on **any** failure of `resolve` or `attach` it removes the private directory (`shutil.rmtree`,
-best-effort, mirroring `retrieve._remove_spool`); on success the staged vmlinux must outlive the
-seam because the live `GdbController` reads symbols from it for the session's lifetime, so the
-directory is recorded for removal when the session is reaped. The reap path already exists
-(`DebugEngineRuntime.reap`, `ops.py:134`) — it gains a best-effort `rmtree` of the per-session
-staging dir, keyed the same way the transcript is. (If wiring reap-time cleanup proves to widen the
-change beyond this seam, the fallback is to stage under a per-session subdir the existing reap
-already cleans; the spec's hard requirement is only that the path is **private + unguessable** and
-that a failed attach leaves nothing behind — a leaked vmlinux on clean session end is a disk-usage
-nit, not a security issue, and is tracked rather than blocking.)
+stage to `tempfile.NamedTemporaryFile` / `mkdtemp` rather than a fixed name.
+
+**Cleanup is seam-local; no shared-state change.** The seam removes the private directory
+(`shutil.rmtree`, best-effort, mirroring `retrieve._remove_spool`) on **any** failure of `resolve`
+or `attach` — the failed-attach path leaves nothing behind. On a **successful** attach the staged
+vmlinux must outlive the seam (the live `GdbController` reads symbols from it for the session's
+lifetime), so the seam does **not** remove it on the success path. Recording the dir on the
+`GdbMiAttachment` for reap-time removal would require a field on that shared dataclass and an
+`ops.py`/`reap` edit, which this change holds out of scope (see "Out of scope"); rather than widen
+the surface, the success-path dir is left for the OS temp reaper. A vmlinux that outlives a cleanly
+ended session is a disk-usage nit (bounded: one per live session, in `0o700` dirs), **not** a
+security exposure — the security property (private, unguessable, failed-attach leaves nothing) holds
+without any reap wiring. Reclaiming the success-path dir at session reap is a deliberate follow-up,
+flagged to the orchestrator, not a requirement of this change.
 
 ### 3. Composition wiring stays minimal
 
@@ -217,8 +220,9 @@ on `composition.py` (shared with #703's `xml.py` work) at zero lines.
   prose.
 - **Staging-path hijack / leak.** Covered by §2: the per-attach `mkdtemp(0o700)` dir is unguessable
   and owner-only (no symlink-precreation, no cross-`run_id` collision), and the seam `rmtree`s it on
-  any attach failure. The residual is a vmlinux that outlives a *cleanly* ended session until reap
-  removes it — a disk nit, not a security exposure.
+  any attach failure. The residual is a vmlinux that outlives a *cleanly* ended session (left for the
+  OS temp reaper; reclaiming it at session reap is a flagged follow-up, deliberately not wired here
+  to avoid a shared-dataclass/`ops.py` edit) — a disk nit, not a security exposure.
 - **Cross-agent conflict on `composition.py`.** #703 may also touch `composition.py`. Mitigation:
   this change makes **zero** edits to `composition.py` (the seam ref is already wired); the only
   files touched are `debug/gdbmi.py`, a new sync query in the db layer, and the test file.
