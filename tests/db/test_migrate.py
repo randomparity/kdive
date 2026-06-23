@@ -150,6 +150,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0044",
         "0045",
         "0046",
+        "0047",
     ]
     assert second == []
 
@@ -563,7 +564,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
 
     monkeypatch.setattr(migrate, "discover_migrations", lambda: full)
     applied = migrate.apply_migrations(pg_conn)
-    assert applied == ["0042", "0043", "0044", "0045", "0046"]
+    assert applied == ["0042", "0043", "0044", "0045", "0046", "0047"]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
 
@@ -888,6 +889,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0044",
         "0045",
         "0046",
+        "0047",
     ]
 
 
