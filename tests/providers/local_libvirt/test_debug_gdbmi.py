@@ -987,14 +987,76 @@ def test_registry_require_raises_no_live_session() -> None:
     )
 
 
-# --- attach seam (live_vm default) ---------------------------------------------------------
+# --- debuginfo resolver --------------------------------------------------------------------
 
 
-def test_debuginfo_resolver_default_raises_missing_dependency() -> None:
-    # The M0 default (no live host) raises MISSING_DEPENDENCY; the handler re-tags it
-    # DEBUG_ATTACH_FAILURE (asserted at the handler level).
+class _RecordingFetch:
+    """A fake object-store fetch that records its ref args and returns canned bytes (or raises)."""
+
+    def __init__(self, data: bytes = b"", error: CategorizedError | None = None) -> None:
+        self._data = data
+        self._error = error
+        self.refs: list[str] = []
+
+    def __call__(self, ref: str) -> bytes:
+        self.refs.append(ref)
+        if self._error is not None:
+            raise self._error
+        return self._data
+
+
+def test_resolve_fetches_present_ref_to_dest(tmp_path: Path) -> None:
+    fetch = _RecordingFetch(data=b"ELFDATA")
+    resolver = debug_gdbmi.DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: "local/runs/r1/vmlinux", fetch_object=fetch
+    )
+    dest = tmp_path / "vmlinux"
+    result = resolver.resolve("r1", dest)
+    assert result == dest
+    assert dest.read_bytes() == b"ELFDATA"
+    assert fetch.refs == ["local/runs/r1/vmlinux"]
+
+
+def test_resolve_none_ref_raises_no_debuginfo_before_fetch(tmp_path: Path) -> None:
+    fetch = _RecordingFetch(data=b"unused")
+    resolver = debug_gdbmi.DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: None, fetch_object=fetch
+    )
+    dest = tmp_path / "vmlinux"
     with pytest.raises(CategorizedError) as exc:
-        debug_gdbmi._resolve_debuginfo_ref("run-1")
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
-    assert exc.value.details == {"run_id": "run-1"}
-    assert str(exc.value) == "resolving a Run's debuginfo object runs only under the live_vm gate"
+        resolver.resolve("r1", dest)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"run_id": "r1", "reason": "no_debuginfo"}
+    assert str(exc.value) == (
+        "the Run has no published debuginfo object; build the kernel before attaching gdb"
+    )
+    assert fetch.refs == []  # the absent debuginfo is caught before any fetch
+    assert not dest.exists()
+
+
+def test_resolve_propagates_fetch_error(tmp_path: Path) -> None:
+    boom = CategorizedError(
+        "object store unreachable", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    fetch = _RecordingFetch(error=boom)
+    resolver = debug_gdbmi.DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: "local/runs/r1/vmlinux", fetch_object=fetch
+    )
+    dest = tmp_path / "vmlinux"
+    with pytest.raises(CategorizedError) as exc:
+        resolver.resolve("r1", dest)
+    assert exc.value is boom  # re-raised unchanged
+    assert not dest.exists()
+
+
+def test_resolve_writes_to_dest_not_run_id_derived_path(tmp_path: Path) -> None:
+    # The resolver writes where it is told; it computes no run_id-derived path itself (the private
+    # per-attach staging dir is the seam's responsibility). A hostile run_id never reaches the path.
+    fetch = _RecordingFetch(data=b"SYMBOLS")
+    resolver = debug_gdbmi.DebuginfoResolver(
+        read_debuginfo_ref=lambda run_id: "key", fetch_object=fetch
+    )
+    dest = tmp_path / "custom-name"
+    resolver.resolve("../../etc/passwd", dest)
+    assert dest.read_bytes() == b"SYMBOLS"
+    assert dest.parent == tmp_path
