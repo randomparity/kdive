@@ -46,6 +46,15 @@ None` to `seed_run_on_system` (`tests/mcp/_seed.py`). When provided, pass it to 
 `SerializedExpectedBootFailure | None`, a plain dict). Default `None` keeps every
 existing caller unchanged.
 
+**Domain-validator constraint (the seed dict must be schema-valid).** The dict is fed
+straight into `Run(...)`, which validates `expected_boot_failure` against the domain
+`ExpectedBootFailure` model (`src/kdive/domain/lifecycle/__init__.py`): `kind` must be
+the Literal `"console_crash"`, and `pattern` is **required** (no default),
+`min_length=1`/`max_length=256`, with no empty pipe-split terms / no NUL / ≤16 terms.
+A missing or empty `pattern` raises a `ValidationError` at seed time (a confusing
+test-infra failure, not a feature bug). Use a single shared valid console-crash dict
+constant in the tests, e.g. `{"kind": "console_crash", "pattern": "Kernel panic"}`.
+
 **Files:** `tests/mcp/_seed.py`.
 
 **Acceptance:** existing tests still pass (`uv run python -m pytest
