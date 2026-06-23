@@ -71,7 +71,7 @@ absent, append to it if the gdbstub arg already created it):
 
 ```xml
 <qemu:arg value="-netdev"/>
-<qemu:arg value="user,id=kdivessh,hostfwd=tcp:127.0.0.1:<port>-:22"/>
+<qemu:arg value="user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:<port>-:22"/>
 <qemu:arg value="-device"/>
 <qemu:arg value="virtio-net-pci,netdev=kdivessh"/>
 ```
@@ -79,7 +79,11 @@ absent, append to it if the gdbstub arg already created it):
 `-netdev user` is QEMU's built-in unprivileged SLIRP user-mode network (no bridge, no root, no
 daemon). `hostfwd=tcp:127.0.0.1:<port>-:22` forwards the **loopback-only** host port to guest:22.
 The `127.0.0.1` literal is hard-coded (single-host; the loopback bind is the security boundary,
-mirrored by `_is_loopback_literal` at connect time). The guest gets `10.0.2.15` from SLIRP's DHCP.
+mirrored by `_is_loopback_literal` at connect time). `restrict=on` **isolates the guest to the
+forwarded port only**: it blocks every guest-initiated outbound packet (NAT'd internet/DNS, any
+host-network access) the drgn-live control channel never needs, so an agent-supplied kernel cannot
+use the new NIC for egress; the inbound `hostfwd` SSH connection and SLIRP's built-in DHCP still
+work, so the guest still gets `10.0.2.15`. This is defense-in-depth on the only NIC drgn-live adds.
 
 **Guest-side networking is a live-confirm obligation, not a proven fact.** The `rootfs_build`
 plane installs and enables sshd but configures **no** guest networking — it relies on the fedora

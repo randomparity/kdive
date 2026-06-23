@@ -457,7 +457,7 @@ def _ssh_xml(port: int) -> str:
     return (
         f"<domain xmlns:qemu='{QEMU_NS}'><qemu:commandline>"
         "<qemu:arg value='-netdev'/>"
-        f"<qemu:arg value='user,id=kdivessh,hostfwd=tcp:127.0.0.1:{port}-:22'/>"
+        f"<qemu:arg value='user,id=kdivessh,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:22'/>"
         "</qemu:commandline></domain>"
     )
 
