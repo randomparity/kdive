@@ -689,7 +689,10 @@ def test_step_progress_reads_install_boot_and_outcome(migrated_url: str) -> None
                 )
                 progress = await step_progress(conn, UUID(run_id))
         assert progress == StepProgress(
-            install="succeeded", boot="succeeded", boot_outcome="expected_crash_observed"
+            install="succeeded",
+            boot="succeeded",
+            boot_outcome="expected_crash_observed",
+            console_evidence_artifact_id=None,
         )
         assert progress.steps_map() == {
             "build": "succeeded",
@@ -706,7 +709,46 @@ def test_step_progress_missing_rows_are_pending(migrated_url: str) -> None:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
             async with pool.connection() as conn:
                 progress = await step_progress(conn, UUID(run_id))
-        assert progress == StepProgress(install="pending", boot="pending", boot_outcome=None)
+        assert progress == StepProgress(
+            install="pending", boot="pending", boot_outcome=None, console_evidence_artifact_id=None
+        )
+
+    asyncio.run(_run())
+
+
+def test_step_progress_reads_console_evidence_artifact_id(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            evidence_id = str(uuid4())
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {"boot_outcome": "ready", "evidence_artifact_id": evidence_id},
+            )
+            async with pool.connection() as conn:
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress.console_evidence_artifact_id == evidence_id
+
+    asyncio.run(_run())
+
+
+def test_step_progress_non_string_evidence_id_is_none(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {"boot_outcome": "ready", "evidence_artifact_id": 12345},
+            )
+            async with pool.connection() as conn:
+                progress = await step_progress(conn, UUID(run_id))
+        assert progress.console_evidence_artifact_id is None
 
     asyncio.run(_run())
 
@@ -777,6 +819,67 @@ def test_get_expected_crash_boot_recommends_triage(migrated_url: str) -> None:
             )
             resp = await get_run(pool, _ctx(), run_id)
         assert resp.suggested_next_actions == ["runs.get", "postmortem.triage", "vmcore.fetch"]
+
+    asyncio.run(_run())
+
+
+def test_get_booted_run_surfaces_console_ref(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            evidence_id = str(uuid4())
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {"boot_outcome": "ready", "evidence_artifact_id": evidence_id},
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.refs["console"] == evidence_id
+
+    asyncio.run(_run())
+
+
+def test_get_expected_crash_run_surfaces_console_ref(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            evidence_id = str(uuid4())
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(
+                pool,
+                run_id,
+                "boot",
+                "succeeded",
+                {"boot_outcome": "expected_crash_observed", "evidence_artifact_id": evidence_id},
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.refs["console"] == evidence_id
+
+    asyncio.run(_run())
+
+
+def test_get_booted_run_without_evidence_has_no_console_ref(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _insert_step(pool, run_id, "boot", "succeeded", {"boot_outcome": "ready"})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert "console" not in resp.refs
+
+    asyncio.run(_run())
+
+
+def test_get_unbooted_run_has_no_console_ref(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            resp = await get_run(pool, _ctx(), run_id)
+        assert "console" not in resp.refs
 
     asyncio.run(_run())
 
