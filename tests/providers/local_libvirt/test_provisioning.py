@@ -230,6 +230,15 @@ def test_xml_module_render_domain_xml_exposes_kdive_metadata() -> None:
     assert tag.text == str(_SYS)
 
 
+def test_render_enables_vmcoreinfo_feature() -> None:
+    # QEMU emits the VMCOREINFO note (which drgn/crash need to locate the kernel in a host_dump
+    # core) only when the domain advertises the libvirt <vmcoreinfo> feature (issue #703).
+    root = _safe_fromstring(_render())
+    vmcoreinfo = root.find("features/vmcoreinfo")
+    assert vmcoreinfo is not None
+    assert vmcoreinfo.get("state") == "on"
+
+
 def test_render_metadata_tag_round_trips_through_discovery() -> None:
     root = _safe_fromstring(_render())
     tag = root.find(f"metadata/{{{KDIVE_METADATA_NS}}}system")
