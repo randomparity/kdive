@@ -248,3 +248,84 @@ def test_virt_builder_omits_nmi_panic_sysctl_for_a_non_kdump_image(
     assert "unknown_nmi_panic" not in joined
     assert "99-kdive-kdump.conf" not in joined
     assert "final_action" not in joined
+
+
+def _upload_target(argv: list[str], guest_path: str) -> str:
+    """Return the host source of the `--upload <src>:<guest_path>` arg, or fail if absent."""
+    for flag, value in zip(argv, argv[1:], strict=False):
+        if flag == "--upload" and value.endswith(f":{guest_path}"):
+            return value.rsplit(":", 1)[0]
+    raise AssertionError(f"no --upload arg targets {guest_path}: {argv}")
+
+
+def test_virt_builder_stages_kdive_drgn_helper_for_a_debug_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The live `introspect.run` path SSH-execs `/usr/local/sbin/kdive-drgn <helper>` in the guest
+    # (ADR-0219/0220, #724). The debug image (drgn in packages) must stage the repo's reviewed
+    # reference helper read-executable so a live attach can run it; absent → DEBUG_ATTACH_FAILURE.
+    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("drgn",))
+    helper_src = _upload_target(argv, "/usr/local/sbin/kdive-drgn")
+    assert helper_src.endswith("deploy/remote-libvirt-guest-helpers/kdive-drgn"), (
+        "the uploaded helper is the repo's reviewed reference implementation"
+    )
+    assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv, "helper is made read-executable"
+
+
+def test_virt_builder_stages_ssh_nic_dhcp_keyfile_for_a_debug_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The drgn-live SSH transport (ADR-0218) renders a SLIRP NIC the guest must DHCP to be
+    # reachable on root@127.0.0.1:<port>; without guest networking → TRANSPORT_FAILURE. The debug
+    # image stages an interface-name-independent NM keyfile, uploaded then chmod 0600 (NM ignores
+    # world-readable keyfiles) (ADR-0220, #724).
+    keyfile = "/etc/NetworkManager/system-connections/kdive-ssh-nic.nmconnection"
+    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("drgn",))
+    # An --upload arg targets the keyfile (the host source is a tempfile cleaned up post-run, so
+    # assert on the staged content constant — what the upload writes — not the transient path).
+    _upload_target(argv, keyfile)
+    assert "method=auto" in rootfs_build._SSH_NIC_KEYFILE_CONTENT, "the keyfile DHCPs the NIC"
+    assert "interface-name" not in rootfs_build._SSH_NIC_KEYFILE_CONTENT, (
+        "no interface-name → applies to any ethernet NIC under direct-kernel boot"
+    )
+    assert f"chmod 0600 {keyfile}" in argv, "keyfile is mode 0600 so NM loads it"
+
+
+def test_virt_builder_omits_drgn_helper_and_keyfile_for_a_non_debug_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-debug (e.g. build-host) image carries no drgn and no introspection contract, so it
+    # gets neither the kdive-drgn helper nor the SSH-NIC keyfile — gated on `drgn in packages`.
+    argv = _capture_virt_builder_argv(monkeypatch, tmp_path, packages=("gcc", "make"))
+    joined = " ".join(argv)
+    assert "kdive-drgn" not in joined
+    assert "kdive-ssh-nic" not in joined
+    assert "NetworkManager" not in joined
+
+
+def test_virt_builder_fails_loud_when_drgn_helper_source_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The helper is resolved from the source tree; an absent helper file must fail loud with a
+    # CONFIGURATION_ERROR before virt-builder runs, never silently ship a guest that cannot
+    # introspect (ADR-0220 D2, #724).
+    captured: list[list[str]] = []
+
+    def _fake_run_guestfs_tool(argv: list[str], **_: object) -> None:
+        captured.append(argv)
+
+    monkeypatch.setattr(rootfs_build, "run_guestfs_tool", _fake_run_guestfs_tool)
+    monkeypatch.setattr(rootfs_build, "_drgn_helper_source", lambda: tmp_path / "missing")
+    key = tmp_path / "id.pub"
+    key.write_text("ssh-ed25519 AAAA kdive\n")
+    with pytest.raises(CategorizedError) as exc:
+        _real_virt_builder(
+            distro="fedora",
+            releasever="43",
+            packages=("drgn",),
+            authorized_key=key,
+            scratch=tmp_path / "scratch.qcow2",
+            size="6G",
+        )
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert not captured, "virt-builder never runs when the reviewed helper is missing"
