@@ -26,6 +26,26 @@ def test_kdump_fragment_carries_xfs_root_support() -> None:
     assert b"CONFIG_XFS_POSIX_ACL=y" in data
 
 
+def test_kdump_fragment_carries_host_dump_vmcoreinfo_symbols() -> None:
+    # A parseable host_dump core needs the guest kernel to write its VMCOREINFO note to
+    # QEMU's etc/vmcoreinfo fw_cfg entry at boot (#708). That write path lives behind
+    # CONFIG_VMCORE_INFO and is performed by the qemu_fw_cfg driver, which must be built
+    # in (=y) to probe before a host-side dump. VMCORE_INFO is a built-in-only requirement;
+    # the =y survival guard keeps FW_CFG_SYSFS from silently building as a module.
+    data = KDUMP_FRAGMENT_PATH.read_bytes()
+    assert b"CONFIG_VMCORE_INFO=y" in data
+    assert b"CONFIG_FW_CFG_SYSFS=y" in data
+
+
+def test_kdump_fragment_exposes_effective_config_for_diagnosis() -> None:
+    # IKCONFIG embeds the built kernel's effective .config and IKCONFIG_PROC exposes it at
+    # /proc/config.gz, so a live drive can confirm whether FW_CFG_SYSFS/VMCORE_INFO resolved
+    # =y vs =m and whether the qemu_fw_cfg driver probed (#708).
+    data = KDUMP_FRAGMENT_PATH.read_bytes()
+    assert b"CONFIG_IKCONFIG=y" in data
+    assert b"CONFIG_IKCONFIG_PROC=y" in data
+
+
 def test_kdump_fragment_carries_in_guest_arming_prerequisites() -> None:
     # Fedora kdumpctl builds a zstd-squashfs crash initramfs and loads the crash kernel via the
     # kexec_file_load syscall; without these the from-source kernel cannot arm kdump (ADR-0213,
