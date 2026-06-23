@@ -4,13 +4,7 @@
 
 ## `introspect.from_vmcore`
 
-`partial` · `read-only`
-
-**Maturity:** live_dependency — Runs offline drgn over a Run's captured core; requires a real captured vmcore plus matching debuginfo, produced only under the gated live markers.
-
-**Promotion:** A non-gated test or recorded live_stack run introspects a real captured core and returns a redacted report.
-
-**Provider support:** local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); remote-libvirt: implemented; fault-inject: n/a.
+`implemented` · `read-only`
 
 Run offline drgn introspection over a Run's captured core; returns redacted report.
 
