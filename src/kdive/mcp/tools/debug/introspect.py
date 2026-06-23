@@ -255,22 +255,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     @app.tool(
         name="introspect.run",
         annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Runs live drgn over a drgn-live DebugSession; requires a real attached "
-                "live session, reached only under the gated live markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run runs a live drgn helper against "
-                "a real booted Run."
-            ),
-            providers=(
-                "local-libvirt: wired (M2.8 B3, live proof pending B6); remote-libvirt: "
-                "implemented; fault-inject: n/a."
-            ),
-        ),
+        meta={"maturity": "implemented"},
     )
     async def introspect_run_tool(
         session_id: Annotated[str, Field(description="A live drgn-live DebugSession.")],
