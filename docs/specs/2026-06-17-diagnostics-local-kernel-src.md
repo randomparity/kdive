@@ -83,6 +83,13 @@ same two lanes as `workspace.py`'s `_BUILD_LANE_GUIDANCE` (stage a tree + set
 `checks.py` stays free of any provider/transport import — the predicate import lives only in
 the probe adapter below.
 
+> **Vantage-disclosure refinement (#701).** The check reads the **server** process's
+> `KDIVE_KERNEL_SRC`. On a split deployment whose build worker has a different env, a confident
+> `pass` reading "set on the build worker" was actively misleading — a green check while every
+> build failed `configuration_error`. The detail strings above were updated so every result
+> discloses the server vantage and the `pass` no longer claims a build-worker guarantee. Probing
+> the worker's effective env is still the ADR-0163 worker-vantage refinement (deferred, #514).
+
 ### 2. The production probe adapter `diagnostics/kernel_src.py`
 
 `warm_tree_source_probe(*, source=_kernel_src_from_config) -> WarmTreeSourceProbe`, the one

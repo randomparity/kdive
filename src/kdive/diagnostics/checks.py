@@ -634,11 +634,18 @@ class LocalKernelSrcCheck(Check):
     filesystem or config.
 
     The verdict is provider-independent (``provider=None``, like ``secret_ref``): it is a property
-    of the build worker, not a runtime provider. ``PASS`` asserts source-path usability, not that
-    the directory is a valid/buildable kernel tree — the predicate does not inspect tree contents.
-    It reads the server process's ``KDIVE_KERNEL_SRC``, which is correct when server and worker
-    share an environment (the default single-host / compose deployment); a split deployment is the
-    worker-vantage refinement (ADR-0163 "Considered & rejected").
+    of the build environment, not a runtime provider. ``PASS`` asserts source-path usability, not
+    that the directory is a valid/buildable kernel tree — the predicate does not inspect tree
+    contents.
+
+    It reads the **server** process's ``KDIVE_KERNEL_SRC``, which is authoritative only when server
+    and worker share an environment (the default single-host / compose deployment). On a split
+    deployment the build worker can carry a different ``KDIVE_KERNEL_SRC``, so a server-read pass
+    does not prove the worker's source is usable — every result detail discloses the server vantage
+    so the green is not mistaken for a build-worker guarantee (#701). Probing the worker's effective
+    env is the worker-vantage refinement deferred in ADR-0163 ("Considered & rejected", #514): it
+    needs a provider-neutral worker-job dispatch path this always-on, provider-independent check
+    lacks today. The ``vantage`` stays :class:`Vantage.SERVER` to reflect where the read happens.
     """
 
     def __init__(
@@ -671,23 +678,26 @@ class LocalKernelSrcCheck(Check):
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.PASS,
-                detail="warm-tree kernel source is set on the build worker "
-                "(KDIVE_KERNEL_SRC points at an existing absolute tree)",
+                detail="the server's KDIVE_KERNEL_SRC points at an existing absolute tree "
+                "(server vantage — not authoritative for a split-deployment build worker, "
+                "whose env may differ; ADR-0163)",
             )
         if outcome is WarmTreeSourceOutcome.UNSET:
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.FAIL,
-                detail="the local build worker has no warm-tree kernel source: KDIVE_KERNEL_SRC "
-                "is unset, so every local warm-tree build fails",
+                detail="the server's KDIVE_KERNEL_SRC is unset, so the local warm-tree build lane "
+                "has no kernel source and every local warm-tree build fails (server vantage; "
+                "a split-deployment build worker may also need it set — ADR-0163)",
                 fix=LOCAL_KERNEL_SRC_FIX,
                 failure_category=_CONFIGURATION_ERROR,
             )
         return CheckResult(
             check_id=self.id,
             status=CheckStatus.FAIL,
-            detail="KDIVE_KERNEL_SRC is set on the build worker but is not an absolute path to an "
-            "existing kernel source tree, so every local warm-tree build fails",
+            detail="the server's KDIVE_KERNEL_SRC is set but is not an absolute path to an "
+            "existing kernel source tree, so every local warm-tree build fails (server vantage; "
+            "ADR-0163)",
             fix=LOCAL_KERNEL_SRC_FIX,
             failure_category=_CONFIGURATION_ERROR,
         )
