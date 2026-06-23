@@ -255,10 +255,29 @@ def preflight_collect(test_paths: list[str], runner=_run_subprocess) -> None:
         raise MutateError(f"test collection failed: {result.stderr.strip()}")
 
 
+_NO_COVERED_MUTANTS_MARKER = "could not find any test case for any mutant"
+
+
+def no_covered_mutants(run_stdout: str) -> bool:
+    """True when mutmut stopped early because nothing it mutated was covered.
+
+    This is the expected result for a target whose only code runs at import or in a class
+    body (module-level constants, ``Setting`` declarations, enums, dataclass/Pydantic fields):
+    those lines sit deeper than ``max_stack_depth`` under pytest's import machinery, so
+    ``mutate_only_covered_lines`` records no covered, mutatable line. It is a valid "0 mutants"
+    outcome, distinct from a broken baseline.
+    """
+    return _NO_COVERED_MUTANTS_MARKER in run_stdout
+
+
 def run_mutmut(runner=_run_subprocess) -> str:
-    """Run ``mutmut run``; non-zero means a broken in-copy baseline/copy — abort."""
+    """Run ``mutmut run``; non-zero means a broken in-copy baseline/copy — abort.
+
+    Exception: mutmut also exits non-zero when it finds no covered mutant (the target is
+    import-time-only); that is a benign "0 mutants" result, not a baseline failure.
+    """
     result = runner([sys.executable, "-m", "mutmut", "run"])
-    if result.returncode != 0:
+    if result.returncode != 0 and not no_covered_mutants(result.stdout):
         raise MutateError(
             "mutmut baseline failed (failing tests or copy-scope breakage):\n"
             + result.stderr.strip()
@@ -298,10 +317,21 @@ def main(argv: list[str] | None = None) -> int:
             _CONFIG_PATH.write_text(render_config(source_rel, test_paths))
             try:
                 run_stdout = run_mutmut(runner=runner)
-                survivors = parse_survivors(collect_results(runner=runner))
-                total = parse_total_mutants(run_stdout)
                 write_signature(sig, _MUTANTS_DIR)
-                print(format_summary(total, survivors, source_rel, test_paths))
+                if no_covered_mutants(run_stdout):
+                    print(
+                        f"Mutation testing: {source_rel}\n"
+                        f"  tests: {' '.join(test_paths)}\n"
+                        "  0 mutants generated — no covered, mutatable lines.\n"
+                        "  the target's code runs only at import / in a class body (constants,"
+                        " Setting/enum/dataclass fields),\n"
+                        "  which sits deeper than max_stack_depth; the supplied tests still"
+                        " cover it for regression.\n"
+                    )
+                else:
+                    survivors = parse_survivors(collect_results(runner=runner))
+                    total = parse_total_mutants(run_stdout)
+                    print(format_summary(total, survivors, source_rel, test_paths))
             finally:
                 _CONFIG_PATH.unlink(missing_ok=True)
         finally:

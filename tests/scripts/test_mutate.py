@@ -17,6 +17,7 @@ from scripts.mutate import (
     collect_results,
     format_summary,
     guard_no_existing_config,
+    no_covered_mutants,
     parse_survivors,
     parse_total_mutants,
     preflight_collect,
@@ -264,6 +265,23 @@ def test_run_mutmut_returns_stdout_on_success() -> None:
 def test_run_mutmut_aborts_on_broken_baseline() -> None:
     with pytest.raises(MutateError, match="baseline"):
         run_mutmut(runner=_fake_runner(1, stderr="ModuleNotFoundError: kdive.config"))
+
+
+def test_run_mutmut_treats_no_covered_mutants_as_benign() -> None:
+    # mutmut exits non-zero when a target's only code runs at import (no covered, mutatable
+    # lines under max_stack_depth) — that is a valid "0 mutants" result, not a broken baseline.
+    stdout = (
+        "done in 541ms (0 files mutated, 513 ignored, 1 unmodified)\n"
+        "Stopping early, because we could not find any test case for any mutant.\n"
+    )
+    assert run_mutmut(runner=_fake_runner(1, stdout=stdout)) == stdout
+
+
+def test_no_covered_mutants_detects_the_marker() -> None:
+    assert no_covered_mutants(
+        "Stopping early, because we could not find any test case for any mutant."
+    )
+    assert not no_covered_mutants("⠇ 10/10  🎉 8  🙁 2\n")
 
 
 def test_collect_results_returns_stdout() -> None:
