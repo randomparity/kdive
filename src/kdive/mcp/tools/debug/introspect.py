@@ -225,22 +225,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     @app.tool(
         name="introspect.from_vmcore",
         annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=_docmeta.MaturityReason.LIVE_DEPENDENCY,
-            detail=(
-                "Runs offline drgn over a Run's captured core; requires a real captured "
-                "vmcore plus matching debuginfo, produced only under the gated live markers."
-            ),
-            promotion=(
-                "A non-gated test or recorded live_stack run introspects a real captured core "
-                "and returns a redacted report."
-            ),
-            providers=(
-                "local-libvirt: wired, pending live KVM proof (M2.8 B6 #680); "
-                "remote-libvirt: implemented; fault-inject: n/a."
-            ),
-        ),
+        meta={"maturity": "implemented"},
     )
     async def introspect_from_vmcore_tool(
         run_id: Annotated[
