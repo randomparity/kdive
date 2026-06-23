@@ -357,6 +357,10 @@ def test_fetch_vmcore_non_crashed_is_config_error(migrated_url: str) -> None:
             resp = await _fetch_vmcore(pool, _ctx(), system_id=sys_id)
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "torn_down"
+        # The detail names why the state blocks capture (was null before #734).
+        assert resp.detail is not None
+        assert "CRASHED" in resp.detail
+        assert "torn_down" in resp.detail
 
     asyncio.run(_run())
 

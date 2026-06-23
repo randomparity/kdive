@@ -271,7 +271,14 @@ async def _fetch_vmcore(
                 return _config_error(system_id)
             require_role(ctx, system.project, Role.OPERATOR)
             if system.state is not SystemState.CRASHED:
-                return _config_error(system_id, data={"current_status": system.state.value})
+                return _config_error(
+                    system_id,
+                    detail=(
+                        "system must be in CRASHED state to capture a vmcore; current state = "
+                        f"{system.state.value}"
+                    ),
+                    data={"current_status": system.state.value},
+                )
 
             resolved = _resolve_capture_method(system_id, method, system, runtime)
             if isinstance(resolved, ToolResponse):
