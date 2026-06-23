@@ -427,14 +427,14 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "runs.build": "partial",
     "runs.install": "partial",
     "runs.boot": "partial",
-    "debug.start_session": "partial",
+    "debug.start_session": "implemented",
     "introspect.run": "partial",
-    "debug.end_session": "partial",
+    "debug.end_session": "implemented",
     "control.force_crash": "partial",
     "vmcore.fetch": "partial",
     "vmcore.list": "partial",
     "postmortem.triage": "partial",
-    "introspect.from_vmcore": "partial",
+    "introspect.from_vmcore": "implemented",
 }
 
 

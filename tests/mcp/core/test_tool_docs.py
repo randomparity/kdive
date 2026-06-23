@@ -434,11 +434,12 @@ _LOCAL_PLANNED_PROVIDER_TOOLS = frozenset(
     }
 )
 
-# The `debug.*` planes B1 (#675) wired: the production gdbstub transport resolves from the live
-# domain XML, so the interactive debug surface runs on local — but the live KVM proof is the
-# orchestrator's post-merge job (ADR-0208 invariant 5), so maturity stays `partial` with a
-# "wired, pending live KVM proof" pointer rather than promoting to `implemented`.
-_LOCAL_WIRED_PROVIDER_TOOLS = frozenset(
+# The `debug.*` planes were proven live end-to-end on real KVM (M2.8 B6 #680, ADR-0208
+# invariant 5): start_session opened a live gdbstub session, set_breakpoint("schedule") →
+# continue → stopped(reason="breakpoint-hit") → read_registers(rip) == the schedule address,
+# then end_session detached cleanly. The whole gdb-MI set shares that one attached session, so
+# all nine are now `implemented`.
+_LOCAL_PROVEN_DEBUG_TOOLS = frozenset(
     {
         "debug.set_breakpoint",
         "debug.clear_breakpoint",
@@ -453,21 +454,14 @@ _LOCAL_WIRED_PROVIDER_TOOLS = frozenset(
 )
 
 
-def test_introspect_from_vmcore_pointer_marks_wired_pending_live() -> None:
-    # M2.8 B2 (#676): local offline drgn introspection is wired (the seam exists) but its
-    # maturity stays `partial` until the B6 live KVM proof. The pointer must say local-libvirt
-    # is `wired` (not `planned`, not `implemented`) and remote-libvirt is `implemented`. This
-    # replacement guard is strictly stronger than the removed planned-set check: it forbids both
-    # the stale `planned` and a premature `implemented` for local-libvirt.
+def test_introspect_from_vmcore_promoted_to_implemented() -> None:
+    # M2.8 B6 (#680): local offline drgn introspection was proven live on a real host_dump core
+    # (sysinfo release 7.0.0, cpus_online=1, modules.decode_errors=0, all_failed=false), so the
+    # tool is now `implemented` (ADR-0175: a non-partial tool carries no maturity_detail).
     by_name = {t.name: t for t in TOOLS}
     tool = by_name["introspect.from_vmcore"]
-    assert (tool.meta or {}).get("maturity") == "partial"
-    providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
-    assert isinstance(providers, str), "introspect.from_vmcore: missing providers pointer"
-    assert "local-libvirt: wired" in providers, providers
-    assert "remote-libvirt: implemented" in providers, providers
-    assert "local-libvirt: planned" not in providers, providers
-    assert "local-libvirt: implemented" not in providers, providers
+    assert (tool.meta or {}).get("maturity") == "implemented"
+    assert (tool.meta or {}).get("maturity_detail") is None
 
 
 def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
@@ -493,42 +487,38 @@ def test_local_stubbed_planes_advertise_planned_provider_pointer() -> None:
     assert not offenders, f"stubbed local planes with a dishonest provider pointer: {offenders}"
 
 
-def test_local_wired_debug_planes_advertise_wired_pending_proof_pointer() -> None:
-    # B1 (#675): the gdbstub transport is wired, so debug.* must NOT still say "planned"; it
-    # stays `partial` (ADR-0208 invariant 5 holds the live proof) with a "wired, pending live
-    # KVM proof" pointer. Guards against both a stale "planned" pointer and a premature
-    # promotion to `implemented`.
+def test_local_proven_debug_planes_are_implemented() -> None:
+    # B6 (#680): the gdb-MI debug surface was proven live on real KVM (ADR-0208 invariant 5
+    # satisfied), so every debug.* op is now `implemented` and — per ADR-0175 — carries no
+    # maturity_detail. Guards against a leftover `partial`/maturity_detail after promotion.
     by_name = {t.name: t for t in TOOLS}
     offenders: list[str] = []
-    for name in sorted(_LOCAL_WIRED_PROVIDER_TOOLS):
+    for name in sorted(_LOCAL_PROVEN_DEBUG_TOOLS):
         tool = by_name.get(name)
         if tool is None:
             offenders.append(f"{name}: tool not registered")
             continue
         meta = tool.meta or {}
-        if meta.get("maturity") != "partial":
-            offenders.append(f"{name}: maturity is not partial ({meta.get('maturity')!r})")
-        providers = (meta.get("maturity_detail") or {}).get("providers")
-        if not isinstance(providers, str):
-            offenders.append(f"{name}: missing providers pointer")
-            continue
-        if "local-libvirt: wired, pending live KVM proof" not in providers:
-            offenders.append(f"{name}: local-libvirt not marked wired-pending ({providers!r})")
-        if "local-libvirt: planned" in providers:
-            offenders.append(f"{name}: still marked planned ({providers!r})")
-    assert not offenders, f"wired local debug planes with a dishonest pointer: {offenders}"
+        if meta.get("maturity") != "implemented":
+            offenders.append(f"{name}: maturity is not implemented ({meta.get('maturity')!r})")
+        if meta.get("maturity_detail") is not None:
+            offenders.append(f"{name}: implemented tool still carries maturity_detail")
+    assert not offenders, f"proven debug planes not promoted to implemented: {offenders}"
 
 
-def test_vmcore_fetch_host_dump_path_marked_wired_pending_proof_on_local() -> None:
-    # B4 (ADR-0211) wired local's HOST_DUMP seam, so the pointer no longer calls it "planned";
-    # it is "wired … pending live KVM proof" until B6 (#680) runs the live drive that promotes
-    # the tool maturity. The pointer still credits the implemented remote.
+def test_vmcore_fetch_host_dump_proven_kdump_still_partial_on_local() -> None:
+    # B6 (#680): local HOST_DUMP was proven live on real KVM, so the pointer credits it as
+    # implemented; but the KDUMP leg is still unproven (the #705 rootfs `final_action shutdown`
+    # regression), so vmcore.fetch's OVERALL maturity stays `partial`. The pointer must reflect
+    # both: HOST_DUMP implemented, KDUMP partial.
     tool = next(t for t in TOOLS if t.name == "vmcore.fetch")
+    assert (tool.meta or {}).get("maturity") == "partial"
     providers = ((tool.meta or {}).get("maturity_detail") or {}).get("providers")
     assert isinstance(providers, str), "vmcore.fetch: missing providers pointer"
-    assert "HOST_DUMP wired" in providers, providers
-    assert "pending live KVM proof" in providers, providers
-    assert "HOST_DUMP planned" not in providers, providers
+    assert "local-libvirt: HOST_DUMP implemented" in providers, providers
+    assert "KDUMP partial" in providers, providers
+    assert "#705" in providers, providers
+    assert "HOST_DUMP wired" not in providers, providers
     assert "remote-libvirt: implemented" in providers, providers
 
 
