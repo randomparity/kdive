@@ -13,6 +13,19 @@ from pydantic import ValidationError
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import SHAPE_XOR_ERROR_TYPE
+from kdive.mcp.tools._common import config_error
+from kdive.security.artifacts.artifact_search import (
+    AFTER_LINES_RANGE,
+    BEFORE_LINES_RANGE,
+    MAX_MATCHES_RANGE,
+)
+
+_SEARCH_CONTEXT_BOUNDS: dict[str, tuple[int, int]] = {
+    "before_lines": BEFORE_LINES_RANGE,
+    "after_lines": AFTER_LINES_RANGE,
+    "max_matches": MAX_MATCHES_RANGE,
+}
+_RANGE_ERROR_TYPES = frozenset({"greater_than_equal", "less_than_equal"})
 
 
 def _loc_under(param: str) -> Callable[[ValidationError], bool]:
@@ -72,6 +85,38 @@ def _shape_xor_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
     return ToolResponse.failure(object_id, ErrorCategory.CONFIGURATION_ERROR, detail=detail)
 
 
+def _is_search_context_cap_error(exc: ValidationError) -> bool:
+    """Whether every error entry is an over-cap numeric-range error on a context field (ADR-0225).
+
+    Range-only by design: an ``int_parsing`` / ``int_from_float`` error under the same ``loc`` is a
+    type mismatch, not a cap rejection (the #733 non-goal), so it must not be re-enveloped as
+    ``bad_search_input``.
+    """
+    errors = exc.errors()
+    return bool(errors) and all(
+        bool(err.get("loc"))
+        and err["loc"][0] in _SEARCH_CONTEXT_BOUNDS
+        and err.get("type") in _RANGE_ERROR_TYPES
+        for err in errors
+    )
+
+
+def _search_context_cap_envelope(object_id: str, exc: ValidationError) -> ToolResponse:
+    """Envelope an over-cap context-field binding error, naming the field and its bound (ADR-0225).
+
+    Keeps the established ``data.reason = "bad_search_input"`` token and builds the ``detail`` from
+    the offending field name plus its two integer bounds only — no caller-supplied value is echoed
+    (ADR-0123/ADR-0225 R4).
+    """
+    field = str(exc.errors()[0]["loc"][0])
+    low, high = _SEARCH_CONTEXT_BOUNDS[field]
+    return config_error(
+        object_id,
+        detail=f"{field} must be between {low} and {high}",
+        data={"reason": "bad_search_input"},
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _BindingConversion:
     """How to convert one tool's binding ``ValidationError`` into an envelope."""
@@ -93,6 +138,9 @@ _BINDING_CONVERSIONS: dict[str, _BindingConversion] = {
         "system_id", _loc_under("build_profile"), _build_profile_envelope
     ),
     "allocations.request": _BindingConversion("project", _is_shape_xor_error, _shape_xor_envelope),
+    "artifacts.search_text": _BindingConversion(
+        "artifact_id", _is_search_context_cap_error, _search_context_cap_envelope
+    ),
 }
 
 

@@ -13,19 +13,25 @@ exception passes through unchanged.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.tools.base import ToolResult
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tool_payloads import AllocationRequestPayload
+from kdive.mcp.tools.catalog.artifacts.reads import ArtifactSearchRequest
 from kdive.profiles.build import ExternalBuildProfile, ServerBuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.security.artifacts.artifact_search import (
+    AFTER_LINES_RANGE,
+    BEFORE_LINES_RANGE,
+    MAX_MATCHES_RANGE,
+)
 
 
 def _envelope(result: ToolResult) -> dict[str, Any]:
@@ -326,3 +332,130 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
     assert malformed_data["status"] == "error"
     assert malformed_data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
     assert malformed_data["detail"]
+
+
+def _search_range_error(field: str, value: int) -> ValidationError:
+    """The numeric-range ``ValidationError`` FastMCP raises binding an over-cap context field.
+
+    Built from ``ArtifactSearchRequest`` (the same constraints the tool signature carries), so the
+    ``loc``/``type``/``ctx`` shape matches what FastMCP raises at argument binding.
+    """
+    try:
+        ArtifactSearchRequest.model_validate(
+            {"artifact_id": "art-1", "pattern": "panic", field: value}
+        )
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a ValidationError")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "low", "high"),
+    [
+        ("before_lines", BEFORE_LINES_RANGE[1] + 1, *BEFORE_LINES_RANGE),
+        ("before_lines", BEFORE_LINES_RANGE[0] - 1, *BEFORE_LINES_RANGE),
+        ("after_lines", AFTER_LINES_RANGE[1] + 1, *AFTER_LINES_RANGE),
+        ("max_matches", MAX_MATCHES_RANGE[1] + 1, *MAX_MATCHES_RANGE),
+        ("max_matches", MAX_MATCHES_RANGE[0] - 1, *MAX_MATCHES_RANGE),
+    ],
+)
+def test_search_text_over_cap_becomes_bad_search_input_naming_field(
+    field: str, value: int, low: int, high: int
+) -> None:
+    envelope = _envelope(
+        _drive(
+            "artifacts.search_text",
+            {"artifact_id": "art-1", "pattern": "panic", field: value},
+            _search_range_error(field, value),
+        )
+    )
+    assert envelope["status"] == "error"
+    assert envelope["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert envelope["object_id"] == "art-1"  # the call's artifact_id, not the tool name
+    assert envelope["data"]["reason"] == "bad_search_input"  # R3: token unchanged
+    detail = envelope["detail"]
+    assert field in detail  # R2: names the offending field
+    assert str(low) in detail and str(high) in detail  # ...and its bound
+    # R4 (no input echo) is asserted exactly by the fixed-template test below; a substring
+    # check here is unreliable when the input digit also appears in a bound.
+
+
+def test_search_text_detail_is_fixed_template_no_input_echo() -> None:
+    # R4: the detail is the pure "<field> must be between <low> and <high>" template.
+    envelope = _envelope(
+        _drive(
+            "artifacts.search_text",
+            {"artifact_id": "art-1", "pattern": "panic", "before_lines": 99},
+            _search_range_error("before_lines", 99),
+        )
+    )
+    assert (
+        envelope["detail"]
+        == f"before_lines must be between {BEFORE_LINES_RANGE[0]} and {BEFORE_LINES_RANGE[1]}"
+    )
+
+
+def test_search_text_type_coercion_error_is_reraised() -> None:
+    # Non-goal boundary: a non-integer context value is an int_parsing error (no range ctx); it must
+    # NOT be re-enveloped as bad_search_input — it propagates as a raw binding error.
+    try:
+        ArtifactSearchRequest.model_validate(
+            {"artifact_id": "art-1", "pattern": "panic", "before_lines": "abc"}
+        )
+    except ValidationError as exc:
+        type_error = exc
+    else:  # pragma: no cover - the model rejects a non-integer
+        raise AssertionError("expected a ValidationError")
+    assert all(err["type"] == "int_parsing" for err in type_error.errors())
+    with pytest.raises(ValidationError):
+        _drive(
+            "artifacts.search_text",
+            {"artifact_id": "art-1", "pattern": "panic", "before_lines": "abc"},
+            type_error,
+        )
+
+
+def test_search_text_non_range_validation_error_is_reraised() -> None:
+    # A ValidationError not under a context field (e.g. an unknown extra field) is not a cap
+    # rejection; it must propagate, not be mislabeled bad_search_input.
+    with pytest.raises(ValidationError):
+        _drive(
+            "artifacts.search_text",
+            {"artifact_id": "art-1", "pattern": "panic"},
+            _non_profile_validation_error(),
+        )
+
+
+def test_end_to_end_search_text_over_cap_returns_named_envelope() -> None:
+    # The integration proof for #733: an over-cap context arg behind the middleware returns the
+    # bad_search_input envelope naming the field, not a raw FastMCP ToolError — exercising the real
+    # _BINDING_CONVERSIONS["artifacts.search_text"] entry against the real ge=/le= schema.
+    from kdive.mcp.app import _advertise_envelope_output_schema
+
+    app: FastMCP = FastMCP(name="probe")
+    app.add_middleware(BindingErrorMiddleware())
+
+    @app.tool(name="artifacts.search_text")
+    async def _search(
+        artifact_id: str,
+        pattern: str,
+        before_lines: Annotated[int, Field(ge=BEFORE_LINES_RANGE[0], le=BEFORE_LINES_RANGE[1])] = 2,
+    ) -> ToolResponse:
+        return ToolResponse.success(artifact_id, "searched")
+
+    _advertise_envelope_output_schema(app)
+
+    async def _run() -> dict[str, Any] | None:
+        async with Client(app) as client:
+            result = await client.call_tool(
+                "artifacts.search_text",
+                {"artifact_id": "art-1", "pattern": "panic", "before_lines": 99},
+            )
+            return result.structured_content
+
+    data = asyncio.run(_run())
+    assert data is not None
+    assert data["status"] == "error"
+    assert data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert data["data"]["reason"] == "bad_search_input"
+    assert "before_lines" in data["detail"]
