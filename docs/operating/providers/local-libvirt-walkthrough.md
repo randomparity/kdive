@@ -133,6 +133,26 @@ Apply the schema, then start the three processes (a real deployment runs them un
 The **reconciler runs discovery**: it enumerates `qemu:///system`, creates the local-libvirt
 resource row, and probes its vcpus/memory_mb ceiling. It must be running for the resource to exist.
 
+### Worker privilege under `qemu:///system`
+
+Provisioning a System to `ready` works with a **non-root** worker — it never reads the guest
+console. But every **post-boot** plane needs the worker to read files that QEMU/`virtlogd` write as
+`root:0600` under `qemu:///system`, so the worker must run as **root** (or be given group
+read/remove access to the paths below — or use `qemu:///session`, where the worker owns the QEMU
+process and its files). Two seams require it:
+
+- **Build → boot confirmation.** The boot-readiness preflight tails the guest console log that
+  `virtlogd` writes `root:0600` to detect boot-to-multiuser; a non-root worker gets a
+  `PermissionError` and the boot step fails (`infrastructure_failure`). Because every later plane is
+  gated on a confirmed boot, this blocks **debug, introspection, and all capture methods** at once.
+- **host_dump capture.** `virDomainCoreDumpWithFormat` runs as the QEMU/root process and writes the
+  core to a `root`-owned temp file; the worker must read and remove it.
+
+So a non-root worker can provision but cannot confirm a boot or capture a host_dump. This is the
+worker-privilege gap tracked in [#699](https://github.com/randomparity/kdive/issues/699). The
+kdump-only note under [Declare your inventory](#kdump-capture-prerequisites) is one instance of this
+broader requirement, not a kdump-specific one.
+
 ## 4. Onboard the project
 
 A fresh database has no quota or budget, so the first `allocations.request` would dead-end on
@@ -189,14 +209,14 @@ actually boots comes from the provisioning profile (Step 6), not this row's dige
 
 ### kdump capture prerequisites
 
-Provisioning and booting (Step 6) need only the inventory above. **kdump vmcore capture** (the
+Provisioning the inventory above is enough to provision and boot. **kdump vmcore capture** (the
 `kdump` method) needs extra one-time host setup, because the capture is host-side: the guest's
 kdump writes `/var/crash/<ts>/vmcore` (booting its crash kernel via `kexec`), then the worker
-force-stops the domain, harvests the core from the qcow2 overlay with libguestfs, and reads the
-guest console log that `virtlogd` writes as `root:0600`. Concretely:
+force-stops the domain and harvests the core from the qcow2 overlay with libguestfs. Concretely:
 
-- **Run the worker as `root`** — the natural identity for managing `qemu:///system` domains,
-  libguestfs, and kexec, and the simplest way to read the `root:0600` console log.
+- **Run the worker as `root`** (or grant the equivalent group access) — see
+  [Worker privilege under `qemu:///system`](#worker-privilege-under-qemusystem). kdump is one of the
+  several post-boot planes that need it; it is also the natural identity for `kexec` and libguestfs.
 - **Wire `drgn` + `libguestfs` into the worker venv** — `uv sync --group live` pulls `drgn`; the
   system `guestfs` binding is wired separately. **Caveat:** the binding is an ABI-locked system
   package built for the **distro** Python (e.g. 3.12 on Ubuntu 24.04), while `uv` builds the venv
