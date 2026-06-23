@@ -40,8 +40,8 @@ module:
 | `mcp/middleware/usage.py` | usage-row construction |
 | `mcp/tools/ops/_reads.py` | ops read-projection helpers |
 | `providers/local_libvirt/lifecycle/rootfs_catalog_fetch.py` | env-driven catalog fetch helper |
-| `services/runs/admission.py` | run-admission gating (largest; 30 defs) |
-| `services/runs/bind.py` | run→system bind logic |
+| `services/runs/admission.py` | run-admission gating (largest; 30 defs) — see caveat below |
+| `services/runs/bind.py` | run→system bind logic — see caveat below |
 | `inventory/_row_typing.py` | `RowTyper` isinstance-narrowing validators |
 | `services/runs/states.py` | run lifecycle `frozenset` state sets |
 | `domain/lifecycle/rules.py` | non-terminal/terminal state tuples + sets |
@@ -72,13 +72,30 @@ the module is *covered*, and any survivor is recorded as equivalent with a reaso
 > the enum/tuple in `image_format`), they are treated as 2a — the split is a starting hypothesis,
 > the per-module mutate run is the arbiter.
 
+#### Caveat: `admission.py` / `bind.py` may not be bucket-2 targets at all
+
+Both take an `AsyncConnectionPool`/`AsyncConnection`, hold advisory locks, and run real
+`dict_row` SQL via `db/repositories.py`; the sweep status doc placed `services/` in bucket 1
+(Postgres-backed) and named deep-`asyncio.run`-frame service modules as bucket 3 ("no
+covered/mutatable lines" under `max_stack_depth=8`). They land here only because no test imports
+them *directly* today — a different fact from being unit-mutatable. Before committing them to
+bucket 2, **trial-mutate first**: write a minimal direct test and run `just mutate`. If mutmut
+reports **zero mutants generated** (the covered gating lines sit deeper than `max_stack_depth=8`
+under `asyncio.run`, or are only reachable through Postgres), the module is reclassified to
+bucket 1 or 3 with a recorded reason in `mutation-sweep-status.md` rather than forced into a
+brittle no-Postgres fake. The DoD (below) is written to admit that outcome so "Closes bucket 2"
+stays falsifiable.
+
 ## Definition of done
 
 1. Every module in the set has at least one test that **imports it directly** and asserts
    behavior (not just `import`-smokes it, except where there is genuinely no runtime surface).
-2. `just mutate <module> <new-test>` reports **0 surviving non-equivalent mutants** for each, run
-   with the folded-in tooling (no manual `PYTHONPATH`). Any retained survivor is listed in
-   `mutation-sweep-status.md` with an equivalence reason.
+2. For each in-scope module, **either** `just mutate <module> <new-test>` reports **0 surviving
+   non-equivalent mutants** (run with the folded-in tooling — no manual `PYTHONPATH`; any retained
+   survivor listed in `mutation-sweep-status.md` with an equivalence reason), **or** a trial
+   mutate showed the module is not unit-mutatable here (zero mutants generated under
+   `max_stack_depth=8`, or only Postgres-reachable) and it is **reclassified to bucket 1 or 3 with
+   a recorded reason** in `mutation-sweep-status.md`. A module is never left silently uncovered.
 3. The two `just mutate` workarounds are applied automatically by `scripts/mutate.py` (ADR-0229);
    the harness's behavioral tests cover the new env/shim logic.
 4. `mutation-sweep-status.md` is updated: bucket 2 moves from deferred to done, with the residual
@@ -97,8 +114,10 @@ the module is *covered*, and any survivor is recorded as equivalent with a reaso
 - **`admission` / `bind`**: drive the gating logic with injected dependencies at the unit boundary
   (no transport, no Postgres) per CLAUDE.md; cover the reject/deny branches, not just admit.
 - **Tooling**: the env builder prepends (not replaces) `PYTHONPATH`, sets `UV_NO_SYNC=1`, and the
-  generated `sitecustomize.py` eagerly imports the beartype/multiprocessing modules; cleanup
-  removes the transient shim dir even on failure.
+  generated `sitecustomize.py` eagerly imports the beartype/multiprocessing modules. The shim dir
+  is a **per-run unique** directory (`mkdtemp`) so concurrent `just mutate` runs across worktrees —
+  the parallel scenario `UV_NO_SYNC` itself targets — cannot clobber or prematurely delete each
+  other's shim; cleanup removes only that run's own dir, even on failure.
 
 ## Constraints / non-goals
 

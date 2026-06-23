@@ -34,9 +34,12 @@ the manual step has to go.
 `scripts/mutate.py` applies both workarounds itself, transparently, for the mutmut/pytest
 subprocesses it spawns:
 
-- Generate a transient `sitecustomize.py` (the eager-import shim) in a managed temp directory for
-  the duration of the run, and remove it (and the dir) in a `finally`, like the existing
-  `setup.cfg` handling.
+- Generate a transient `sitecustomize.py` (the eager-import shim) in a **per-run unique** temp
+  directory (`mkdtemp`) for the duration of the run, and remove that dir in a `finally`, like the
+  existing `setup.cfg` handling. The unique dir matters because the shared-venv parallel scenario
+  `UV_NO_SYNC` addresses runs several `just mutate` invocations at once; a fixed shim path would let
+  one run's cleanup delete another's live shim mid-run, intermittently reintroducing the very
+  beartype baseline failure the shim prevents.
 - Spawn the `pytest --co` preflight, `mutmut run`, and `mutmut results` subprocesses with an env
   that **prepends** the shim dir to any inherited `PYTHONPATH` (never replacing it) and sets
   `UV_NO_SYNC=1`.
