@@ -1,6 +1,6 @@
 # Spec — Enumerate valid rootfs/catalog values in provisioning rejections (#731)
 
-- **Status:** Draft
+- **Status:** Approved
 - **Date:** 2026-06-23
 - **Issue:** #731 (part of #736)
 - **ADR:** [ADR-0224](../adr/0224-enumerate-provisioning-rejection-values.md)
