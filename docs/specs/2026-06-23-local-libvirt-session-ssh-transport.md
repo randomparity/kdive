@@ -32,7 +32,9 @@ forwarded SSH port — and flips the descriptor.
    `systemctl enable sshd.service`, and `--ssh-inject root:file:<managed pubkey>` (ADR-0052). sshd
    is a normal `multi-user.target` unit; the readiness-marker unit is `WantedBy=multi-user.target`
    and fires on the live drive, so `multi-user.target` is reached under direct-kernel boot — sshd
-   starts. **No boot-path change is needed.**
+   starts. **No boot-path change is needed.** The key is injected to **`root`**'s
+   `authorized_keys`, so the live SSH transport connects as **`root@127.0.0.1`** with the managed
+   private key as the identity (see §8 for the credential-ref / identity contract).
 2. **Credential plumbing.** `sessions_lifecycle._resolve_credential` resolves the profile's
    `ssh_credential_ref` through the bound secret backend **before** `open_transport`, gated on
    `LocalLibvirtProfilePolicy.drgn_live_requires_credential` (returns `True`) +
@@ -78,6 +80,17 @@ absent, append to it if the gdbstub arg already created it):
 daemon). `hostfwd=tcp:127.0.0.1:<port>-:22` forwards the **loopback-only** host port to guest:22.
 The `127.0.0.1` literal is hard-coded (single-host; the loopback bind is the security boundary,
 mirrored by `_is_loopback_literal` at connect time). The guest gets `10.0.2.15` from SLIRP's DHCP.
+
+**Guest-side networking is a live-confirm obligation, not a proven fact.** The `rootfs_build`
+plane installs and enables sshd but configures **no** guest networking — it relies on the fedora
+`virt-builder` base template's default network stack (NetworkManager) bringing the single
+virtio NIC up by DHCP. Whether that default suffices under direct-kernel boot is **not** provable
+in CI (no booted guest) and is **not yet confirmed on hardware** (B6 has not run). The B6 live
+drive must verify the guest acquires `10.0.2.15` and sshd is reachable on guest:22; if the base
+template does not DHCP the NIC automatically, `rootfs_build` gains a one-line network-enable step
+(a `systemctl enable systemd-networkd` + a DHCP `.network` drop-in, or a NetworkManager default
+profile) as a follow-up. This spec does **not** assert the guest networks today; it renders the
+host-side forward and records that the guest-side DHCP is the one remaining live-proof risk.
 
 `render_domain_xml` gains keyword-only `ssh_port: int | None = None`. With `ssh_credential_ref`
 set and `ssh_port=None` → `CONFIGURATION_ERROR` (programming error: the provisioner always
@@ -135,10 +148,21 @@ caller already registered).
 ### 6. Shared `recorded_ssh_port` reader
 
 Add `recorded_ssh_port` / `recorded_ssh_port_from_root` to `providers/shared/libvirt_xml.py`
-beside `recorded_gdb_port`. It walks the same `<qemu:arg>` list for a value of the form
-`...hostfwd=tcp:127.0.0.1:<port>-:22...` and returns the **forwarded host port** (the integer
-between `127.0.0.1:` and `-:`), or `None` when absent or non-integer. The parse is robust to other
-`hostfwd`/`-netdev` substrings: it matches the loopback-host:port-to-guest:22 shape specifically.
+beside `recorded_gdb_port`. It walks the same `<qemu:arg>` list and, for the **`-netdev`** arg
+value (the arg immediately following a `-netdev` arg, mirroring how `recorded_gdb_port` keys off
+the arg after `-gdb`), extracts the port from the exact substring
+`hostfwd=tcp:127.0.0.1:<port>-:22`. Parse contract, pinned to avoid ambiguity:
+
+- It matches the kdive-rendered shape specifically: host literal `127.0.0.1`, guest port `22`,
+  via a regex `hostfwd=tcp:127\.0\.0\.1:(\d+)-:22` anchored on those literals. A `-netdev` value
+  with no matching `hostfwd` (or a different host/guest-port) yields `None` — the System was not
+  provisioned with the kdive SSH forward.
+- The first matching `-netdev` value wins. kdive renders exactly one SSH `-netdev` per domain, so
+  "first match" is unambiguous; a hand-edited domain with multiple is out of contract (the parser
+  reads the first, deterministically).
+- Non-integer or absent port → `None`. A malformed-XML wrapper (`recorded_ssh_port(xml)`) returns
+  `None` (the resolver maps that to `INFRASTRUCTURE_FAILURE` itself, as it does for the gdbstub
+  reader — the bare parser never raises).
 
 ### 7. Descriptor + maturity
 
@@ -148,6 +172,27 @@ between `127.0.0.1:` and `-:`), or `None` when absent or non-integer. The parse 
   on hardware; CI proves only the fake-seam contract — no KVM, no booted sshd). B6 (#680) promotes
   maturity after the live drive. `supported_introspection` is **untouched** (`introspect.run`
   `live` mode stays unadvertised until B3 #677).
+
+### 8. SSH user + identity contract (the live `_real_ssh_connect` seam)
+
+The rootfs injects the managed public key to **`root`**, so the live transport connects as
+**`root@127.0.0.1:<port>`**. The connecting identity is the **managed private key**
+(`managed_private_key_path()`, ADR-0052) — the durable half of the keypair whose public half the
+build injected. This is a hard pairing: the `ssh_credential_ref` an operator sets in the profile
+**must resolve to that managed private key** for auth to succeed (the build injected only the
+managed public key, so no other key is authorized). The profile carries `ssh_credential_ref` (the
+secret-backend reference) rather than hard-wiring the managed path so the secret-by-reference +
+redaction-registration contract (ADR-0039 §2) is uniform across providers and the operator
+controls where the key bytes live; but the *value* it resolves to must be the managed key.
+
+This pairing is a documented obligation, not a runtime-enforced check (the connector cannot
+compare an opaque resolved secret to the managed key without holding both, defeating the
+by-reference design). A mismatch surfaces as an SSH auth failure → `DEBUG_ATTACH_FAILURE` from
+`_open_ssh` (the probe rejects an endpoint that does not accept a connection) — an honest,
+actionable failure, not a silent wrong-credential success. `_real_ssh_connect` itself is
+`live_vm`-gated and out of CI scope; the spec pins **user=`root`** and **identity=managed private
+key** as its contract so B3 (#677), which builds the real drgn-over-SSH attach on top, inherits a
+defined connect target rather than re-deriving it.
 
 ## Acceptance
 

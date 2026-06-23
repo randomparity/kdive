@@ -73,10 +73,21 @@ passthrough (the same `QEMU_NS` / `register_qemu_namespace()` helpers B1 and rem
 no extra daemon); `hostfwd=tcp:127.0.0.1:<port>-:22` forwards a **loopback-only** host port to the
 guest's sshd. The `127.0.0.1` literal is hard-coded: local-libvirt is single-host and the loopback
 bind is the security boundary, identical to the gdbstub `-gdb tcp:127.0.0.1:<port>` rule and
-mirrored by `_is_loopback_literal` enforcement at connect time. The guest brings the NIC up by
-DHCP (SLIRP's built-in DHCP server hands the guest `10.0.2.15`); the kdive-ready rootfs already
-enables `systemd-networkd`/`NetworkManager` defaults sufficient for a single DHCP NIC, confirmed
-on the live drive (B6).
+mirrored by `_is_loopback_literal` enforcement at connect time. The guest is expected to bring the
+NIC up by DHCP (SLIRP's built-in DHCP server hands the guest `10.0.2.15`) using the fedora
+`virt-builder` base template's default network stack — `rootfs_build` enables sshd but configures
+**no** guest networking. That the guest DHCPs the NIC under direct-kernel boot is **not** provable
+in CI and **not yet confirmed on hardware**; the B6 (#680) live drive verifies it, and if the base
+template does not DHCP automatically, `rootfs_build` gains a one-line network-enable step as a
+follow-up. This ADR renders the host-side forward and records the guest-side DHCP as the one
+remaining live-proof risk — it does not assert the guest networks today.
+
+The rootfs injects the managed public key to **`root`**, so the live transport connects as
+**`root@127.0.0.1`** with the managed private key (ADR-0052) as the identity; the operator's
+`ssh_credential_ref` must resolve to that managed private key for auth to succeed (the build
+authorized no other key). A mismatch is an SSH auth failure → `DEBUG_ATTACH_FAILURE`, not a silent
+wrong-credential success. `_real_ssh_connect` is `live_vm`-gated and out of CI scope; pinning
+user=`root` + identity=managed-key gives B3 (#677) a defined connect target.
 
 `render_domain_xml` gains a keyword-only `ssh_port: int | None = None`. Passing `ssh_port=None`
 with `ssh_credential_ref` set is a programming error (the provisioner always allocates when the
