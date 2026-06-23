@@ -19,4 +19,14 @@ export KDIVE_STACK_BASE_URL="${KDIVE_STACK_BASE_URL:-http://${KDIVE_HTTP_HOST}:$
 export KDIVE_BUILD_WORKSPACE="${KDIVE_BUILD_WORKSPACE:-${repo_root}/.live-build}"
 export KDIVE_BUILD_COMPONENT_ROOTS="${KDIVE_BUILD_COMPONENT_ROOTS:-${repo_root}/fixtures/local-libvirt:${repo_root}/.live-components}"
 export KDIVE_INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
-export KDIVE_KERNEL_SRC="${KDIVE_KERNEL_SRC:-${HOME}/src/linux}"
+# KDIVE_KERNEL_SRC: warm-tree kernel source for local builds. An explicit value is honored
+# verbatim. The convenience default ${HOME}/src/linux is HOME-relative, so a privileged restart
+# ($HOME -> /root) would silently re-point it to a nonexistent /root/src/linux and every build would
+# fail configuration_error with no signal until attempted (#701). So the default is only exported
+# when it resolves to an existing directory; otherwise KDIVE_KERNEL_SRC is left unset, which
+# ops.diagnostics surfaces as an honest local_kernel_src FAIL instead of a misleading green.
+if [[ -n "${KDIVE_KERNEL_SRC:-}" ]]; then
+  export KDIVE_KERNEL_SRC
+elif [[ -n "${HOME:-}" && -d "${HOME}/src/linux" ]]; then
+  export KDIVE_KERNEL_SRC="${HOME}/src/linux"
+fi
