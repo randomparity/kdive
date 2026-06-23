@@ -57,10 +57,32 @@ actionable category instead of the old one.
 ### B2 — host-dump read remap
 
 `LocalLibvirtRetrieve._capture_via_file(system_id, method, core)` wraps the
-spooled-core reads (build-id, `_put_stream`'s checksum, redacted dmesg) so a
-`PermissionError` becomes `CONFIGURATION_ERROR` with the same `remediation` guidance,
-keyed on the `system_id`. The `finally`-block spool cleanup is unchanged. Store/network
-errors keep their own categories — only the local-file `PermissionError` is remapped.
+spooled-core reads so a `PermissionError` becomes `CONFIGURATION_ERROR` with the same
+`remediation` guidance, keyed on the `system_id`. The `finally`-block spool cleanup is
+unchanged. Store/network errors keep their own categories — only the local-file
+`PermissionError` is remapped.
+
+**Catch on `PermissionError` (the `OSError` subclass), at `_capture_via_file`** — not
+on a stderr string. This is precise for three reasons confirmed against the seams:
+
+- The **first** core read is `_read_vmcore_build_id_from_file(core)` (`retrieve.py:165`),
+  which is `read_core_build_id_from_file` → `open_core_program` → drgn
+  `prog.set_core_dump(os.fspath(core))` (`shared/debug_common/core_file.py:24-34`).
+  drgn opens the file there, so an unreadable root-owned core raises a **raw
+  `PermissionError`** — exactly the issue's `[Errno 13] Permission denied: '…/vmcore'`
+  envelope. The build-id read fails first, before checksum or dmesg.
+- `open_core_program`'s only wrapping is `ImportError → MISSING_DEPENDENCY` (drgn
+  absent), which is a `CategorizedError`, **not** a `PermissionError` — so
+  `except PermissionError` does not swallow the drgn-absent signal.
+- `extract_dmesg_or_sentinel` (`retrieve_kdump.py:101-106`) degrades only
+  `CategorizedError` (non-`MISSING_DEPENDENCY`) to a sentinel; a raw `PermissionError`
+  is an `OSError`, not a `CategorizedError`, so it is not silently hidden there either —
+  and it cannot be reached first anyway, since build-id reads before dmesg.
+
+The TDD test drives `_capture_via_file` with the **build-id seam** raising
+`PermissionError` (the real first-failure path) and asserts `CONFIGURATION_ERROR` +
+`remediation` + spool cleanup; a separate test asserts a seam raising
+`MISSING_DEPENDENCY` (drgn absent) is **not** remapped.
 
 The `remediation` string is a single shared constant in `runtime_paths.py` so the
 console and host-dump messages never drift.
@@ -68,12 +90,15 @@ console and host-dump messages never drift.
 ### B3 — preflight advisory
 
 `scripts/check-local-libvirt.sh` gains a `note_warn` helper (prints `WARN:` + a fix
-line to stderr, does **not** set `fail`). When `KDIVE_LIBVIRT_URI` (default
-`qemu:///system`) resolves to a `qemu:///system` URI **and** `$EUID != 0`, it emits an
-advisory that boot-confirmation and host_dump need the worker to read root-owned
-virtlogd/QEMU output, naming the three fixes. A `qemu:///session` URI or a root runner
-suppresses it. It is advisory because the combination still works for the build and
-kdump-capture planes.
+line to stderr, does **not** set `fail`). The predicate is precise: the advisory fires
+when the resolved URI is **exactly `qemu:///system`** (the literal local-system URI;
+an unset/empty `KDIVE_LIBVIRT_URI` defaults to it) **and** `$EUID != 0`. A
+`qemu:///session` URI, a root runner, or a transport-prefixed remote form
+(`qemu+ssh://…/system`, `qemu+tcp://…`) all suppress it — the remote forms' root-owned
+files live on a different host, so the local-runner identity is irrelevant there. When
+it fires, the advisory explains that boot-confirmation and host_dump need the worker to
+read root-owned virtlogd/QEMU output, naming the three fixes. It is advisory (not
+`note_fail`) because the combination still works for the build and kdump-capture planes.
 
 ### B4 — docs
 
@@ -87,13 +112,14 @@ kdump-capture planes.
 - `read_console_log` returns `CONFIGURATION_ERROR` (with `remediation`) on
   `PermissionError` and `INFRASTRUCTURE_FAILURE` on other `OSError`; missing-file still
   empty. (unit)
-- `_capture_via_file` raises `CONFIGURATION_ERROR` (with `remediation`) when a core
-  read raises `PermissionError`; the success path and store-error path are unchanged;
-  the spool is still cleaned up. (unit)
+- `_capture_via_file` raises `CONFIGURATION_ERROR` (with `remediation`) when the
+  build-id read seam (the first core read) raises `PermissionError`; a seam raising
+  `MISSING_DEPENDENCY` (drgn absent) is **not** remapped; the success path and
+  store-error path are unchanged; the spool is still cleaned up. (unit)
 - `check-local-libvirt.sh` prints the advisory and exits `0` for a non-root runner with
-  the default/system URI; prints no advisory for `KDIVE_LIBVIRT_URI=qemu:///session`;
-  the existing healthy-host exit codes are unchanged. (shell, via the existing
-  PATH-stub harness)
+  the default/system URI; prints **no** advisory for `KDIVE_LIBVIRT_URI=qemu:///session`
+  or a `qemu+ssh://…/system` remote form; the existing healthy-host exit codes are
+  unchanged. (shell, via the existing PATH-stub harness)
 - `just ci` green (lint, type, lint-shell, lint-workflows, check-mermaid, test).
 
 ## Testing constraint
