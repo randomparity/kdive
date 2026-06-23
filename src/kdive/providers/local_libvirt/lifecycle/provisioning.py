@@ -48,7 +48,7 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
-from kdive.providers.shared.libvirt_xml import recorded_gdb_port
+from kdive.providers.shared.libvirt_xml import recorded_gdb_port, recorded_ssh_port
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
 
 __all__ = [
@@ -181,13 +181,13 @@ class LocalLibvirtProvisioning:
                 ``PROVISIONING_FAILURE`` for domain/rootfs creation failures, or
                 ``INFRASTRUCTURE_FAILURE`` for provider control-plane or overlay IO faults.
         """
-        base = self._materialize_rootfs(profile.provider.local_libvirt.rootfs, system_id)
+        section = profile.provider.local_libvirt
+        base = self._materialize_rootfs(section.rootfs, system_id)
         overlay = self._files.prepare_overlay(system_id, base=base)
-        gdb_port = (
-            self._gdb_port_for(system_id) if profile.provider.local_libvirt.debug.gdbstub else None
-        )
+        gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
+        ssh_port = self._ssh_port_for(system_id) if section.ssh_credential_ref is not None else None
         xml = render_domain_xml(  # validates the profile
-            system_id, profile, disk_path=overlay.path, gdb_port=gdb_port
+            system_id, profile, disk_path=overlay.path, gdb_port=gdb_port, ssh_port=ssh_port
         )
         try:
             self._files.prepare_console(system_id)
@@ -225,6 +225,37 @@ class LocalLibvirtProvisioning:
                 return None
             name = domain_name_for(system_id)
             raise self._infra("reading the recorded gdbstub port", name) from exc
+        finally:
+            _close(conn)
+
+    def _ssh_port_for(self, system_id: UUID) -> int:
+        """Reuse the System's recorded forwarded SSH port if its domain already records one; else a
+        fresh loopback port (ADR-0218 §3).
+
+        Mirrors ``_gdb_port_for``: reuse keeps an idempotent provision retry stable so the resolver
+        and the running QEMU's forwarded port never diverge.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a libvirt fault that is not the
+                domain simply being absent (``VIR_ERR_NO_DOMAIN``).
+        """
+        existing = self._recorded_ssh_port(system_id)
+        return existing if existing is not None else self._free_port()
+
+    def _recorded_ssh_port(self, system_id: UUID) -> int | None:
+        """The forwarded SSH port the System's already-defined domain records, or ``None``."""
+        try:
+            conn = self._connect()
+        except libvirt.libvirtError as exc:
+            raise self._infra("connecting to libvirt to read the SSH port", "") from exc
+        try:
+            domain = conn.lookupByName(domain_name_for(system_id))
+            return recorded_ssh_port(domain.XMLDesc(0))
+        except libvirt.libvirtError as exc:
+            if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return None
+            name = domain_name_for(system_id)
+            raise self._infra("reading the recorded SSH port", name) from exc
         finally:
             _close(conn)
 
