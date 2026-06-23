@@ -30,6 +30,7 @@ from kdive.providers.local_libvirt.lifecycle.install import (
     _stage_object,
     _verdict_to_result,
     _verify_kernel_size,
+    _verify_vmlinux_size,
     _vmlinux_dest,
     classify_console,
 )
@@ -338,9 +339,10 @@ def test_install_kdump_with_modules_ref_injects_and_no_initrd_rendered(tmp_path:
 
 
 def test_install_non_kdump_with_modules_ref_does_not_force_off_or_inject(tmp_path: Path) -> None:
-    # Module injection (force-off + rw libguestfs mount) is gated on the KDUMP capture method.
-    # A console/gdbstub build also carries a modules_ref (the kdump config is the default), but
-    # its install must not force-off the domain, fetch modules, or require libguestfs.
+    # Module injection (force-off + rw libguestfs mount) is gated on the KDUMP capture method OR
+    # a debuginfo_ref being present (ADR-0221). A console/gdbstub build carries a modules_ref (the
+    # kdump config is the default) but no debuginfo_ref here, so its install must not force-off the
+    # domain, fetch modules, or require libguestfs.
     events: list[str] = []
     conn = _conn_with_existing(events=events)  # its domain is active
     writer = _FakeKernelWriter(events)
@@ -433,6 +435,20 @@ def test_install_host_dump_without_debuginfo_does_not_inject(tmp_path: Path) -> 
 def test_vmlinux_dest_is_drgn_discoverable_path() -> None:
     # drgn -k's debuginfo finder searches /usr/lib/debug/lib/modules/<uname -r>/vmlinux.
     assert _vmlinux_dest("7.0.0") == "/usr/lib/debug/lib/modules/7.0.0/vmlinux"
+
+
+def test_verify_vmlinux_size_rejects_empty_upload() -> None:
+    # A zero-byte vmlinux fails loud at injection (ADR-0221) rather than as an opaque in-guest
+    # drgn ELF-parse error later.
+    dest = "/usr/lib/debug/lib/modules/7.0.0/vmlinux"
+    with pytest.raises(CategorizedError) as caught:
+        _verify_vmlinux_size(0, "ov", dest)
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"overlay": "ov", "dest": dest}
+
+
+def test_verify_vmlinux_size_accepts_non_empty_upload() -> None:
+    _verify_vmlinux_size(1, "ov", "/usr/lib/debug/lib/modules/7.0.0/vmlinux")
 
 
 def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(
