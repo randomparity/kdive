@@ -57,9 +57,12 @@ surviving).
 
 ## Tasks 1–6 — `mcp/middleware/*` (test + mutate, bucket 2a)
 
-One task per module; each writes `tests/mcp/middleware/test_<name>.py` (create the dir + an
-`__init__`-free pytest package as the tree requires), drives the module's functions directly with
-fakes, and mutates to 0. Read each module first — the table is a surface hint, the code is truth.
+One task per module; each writes `tests/mcp/middleware/test_<name>.py`. `tests/mcp/middleware/`
+does not exist yet — create it **with an `__init__.py`**, mirroring the convention every one of the
+47 existing test packages follows (`tests/services/runs/__init__.py`, etc.); the suite runs in
+pytest's default prepend import mode, so an `__init__`-less dir would break package resolution.
+Each test drives the module's functions directly with fakes and mutates to 0. Read each module
+first — the table is a surface hint, the code is truth.
 
 - **Task 1 — `binding_errors.py`** → `tests/mcp/middleware/test_binding_errors.py`. Cover each
   binding-error → `CONFIGURATION_ERROR` envelope conversion + the field/loc extraction; assert the
@@ -103,9 +106,10 @@ or a recorded reclassification with reason.
 
 ## Task 9 — `services/runs/states.py` + `domain/lifecycle/rules.py` (data sets, bucket 2a)
 
-→ `tests/services/runs/test_states.py`, `tests/domain/lifecycle/test_rules.py`. Assert exact set
-membership for every exported `frozenset`/tuple; a mutant dropping/adding a state must fail.
-Mutate each to 0.
+→ `tests/services/runs/test_states.py`, `tests/domain/lifecycle/test_rules.py`.
+`tests/domain/lifecycle/` does not exist yet — create it **with an `__init__.py`** (same convention
+as Tasks 1–6). Assert exact set membership for every exported `frozenset`/tuple; a mutant
+dropping/adding a state must fail. Mutate each to 0.
 
 ---
 
