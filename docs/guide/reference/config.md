@@ -206,6 +206,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `KDIVE_BOOT_DIR` | `/boot` | Boot directory `check-local-libvirt.sh` scans for readable `vmlinuz-*` host kernels (libguestfs build-fs appliance, ADR-0222). |
 | `KDIVE_DEMO_CONTEXT` | — | kube context `demo-token.sh` uses (unset → the current context). |
 | `KDIVE_DEMO_FULLNAME` | `kdive-kdive` | Chart fullname (`<release>-kdive`) `demo-token.sh` uses to address the server/oidc pods. |
 | `KDIVE_DEMO_NAMESPACE` | `kdive-demo` | Release namespace `demo-token.sh` targets when minting a bundled-demo bearer token. |

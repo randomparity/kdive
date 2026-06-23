@@ -77,6 +77,9 @@ sudo install -d -o "$USER" -m 0755 /var/lib/kdive/install /var/lib/kdive/console
 >   `passt` AppArmor profile (`sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt`) clears one
 >   cause, but a libguestfs/passt version mismatch may still block it; if so, build the rootfs on a
 >   host with a working libguestfs appliance, or stage a prebuilt bootable qcow2 (see Step 6).
+> - Both failures now report an actionable `configuration_error` from `build-fs` instead of a raw
+>   tool dump, and the kernel-readability case is flagged by the preflight (Step 2) when run as the
+>   worker user — see [ADR-0222](../../adr/0222-ubuntu-build-fs-libguestfs-diagnostics.md).
 
 ## 2. Run the preflight
 
@@ -90,6 +93,10 @@ Fix what it reports. One failure is expected to remain on most hosts and is **no
 core lifecycle: the `import guestfs, drgn` check is only needed for the **kdump capture** method
 (Step 5). See [kdump capture prerequisites](#kdump-capture-prerequisites) for the `drgn`/libguestfs
 wiring and a Python-version caveat.
+
+The preflight also flags an unreadable host kernel (`/boot/vmlinuz-*`), which blocks the Step 6
+`build-fs` image build on Debian/Ubuntu; fix it with the `chmod` above. Run the preflight as the
+worker user, since it checks readability as whoever invokes it.
 
 ## 3. Bring up the backends and start the host processes
 

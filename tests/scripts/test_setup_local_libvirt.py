@@ -50,6 +50,12 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     # preflight the setup script runs first passes.
     staging = tmp_path / "install-staging"
     staging.mkdir()
+    # check-local-libvirt.sh also probes host-kernel readability (ADR-0222); point it at a
+    # controlled dir with a readable kernel so the preflight passes regardless of the runner's
+    # real /boot (Ubuntu CI ships root:0600 kernels, which would otherwise fail it).
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-test").write_text("")
     # Stub bin first so it shadows real python3/virsh/etc.; system bins follow so the
     # scripts' `dirname` (and other coreutils) resolve.
     env = {
@@ -57,6 +63,7 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
         "HOME": str(tmp_path),
         "KDIVE_KVM_NODE": str(kvm),
         "KDIVE_INSTALL_STAGING": str(staging),
+        "KDIVE_BOOT_DIR": str(boot),
     }
     return bindir, env, calllog
 
