@@ -66,6 +66,18 @@ def test_usable_is_pass() -> None:
     assert "existing absolute tree" in result.detail
 
 
+def test_pass_detail_discloses_server_vantage_not_the_build_worker() -> None:
+    # The check reads the SERVER process's KDIVE_KERNEL_SRC (ADR-0163). On a split deployment the
+    # build worker can carry a different env, so a confident "ok on the build worker" PASS would be
+    # actively misleading (#701: green check while every build fails). The PASS must disclose that
+    # it reflects the server's env and is not authoritative for a split-deployment build worker, and
+    # must not claim the source was verified ON the build worker.
+    check = LocalKernelSrcCheck(probe=_probe(WarmTreeSourceOutcome.USABLE))
+    result = asyncio.run(check.run())
+    assert "server" in result.detail.lower()
+    assert "on the build worker" not in result.detail.lower()
+
+
 def test_unset_is_fail_with_the_build_lane_fix() -> None:
     check = LocalKernelSrcCheck(probe=_probe(WarmTreeSourceOutcome.UNSET))
     result = asyncio.run(check.run())
