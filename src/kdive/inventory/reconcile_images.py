@@ -43,6 +43,7 @@ from kdive.inventory.model import (
     ImageEntry,
     InventoryDoc,
     S3Source,
+    StagedPathSource,
     StagedSource,
 )
 from kdive.inventory.reconcile import (
@@ -200,12 +201,12 @@ async def _create_entry(
 ) -> None:
     """Insert a new config row, realizing it per its source kind."""
     head = await _resolve_s3_head(entry, None, store)
-    state, object_key, volume, digest, warning = _realize(entry, None, head)
+    state, object_key, volume, path, digest, warning = _realize(entry, None, head)
     await conn.execute(
         "INSERT INTO image_catalog "
         "(provider, name, arch, format, root_device, visibility, capabilities, "
-        " object_key, volume, digest, state, managed_by) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " object_key, volume, path, digest, state, managed_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         (
             entry.provider,
             entry.name,
@@ -216,6 +217,7 @@ async def _create_entry(
             entry.capabilities,
             object_key,
             volume,
+            path,
             digest,
             state,
             CONFIG_MANAGED_BY,
@@ -241,15 +243,21 @@ async def _update_entry(
         "capabilities": list(entry.capabilities),
     }
     head = await _resolve_s3_head(entry, row, store)
-    state, object_key, volume, digest, warning = _realize(entry, row, head)
-    realized = {"object_key": object_key, "volume": volume, "digest": digest, "state": state}
+    state, object_key, volume, path, digest, warning = _realize(entry, row, head)
+    realized = {
+        "object_key": object_key,
+        "volume": volume,
+        "path": path,
+        "digest": digest,
+        "state": state,
+    }
 
     config_changed = any(row.get(k) != v for k, v in desired.items())
     realized_changed = any(row.get(k) != v for k, v in realized.items())
     if config_changed or realized_changed:
         await conn.execute(
             "UPDATE image_catalog SET format = %s, root_device = %s, visibility = %s, "
-            "capabilities = %s, object_key = %s, volume = %s, digest = %s, state = %s "
+            "capabilities = %s, object_key = %s, volume = %s, path = %s, digest = %s, state = %s "
             "WHERE id = %s",
             (
                 desired["format"],
@@ -258,6 +266,7 @@ async def _update_entry(
                 desired["capabilities"],
                 object_key,
                 volume,
+                path,
                 digest,
                 state,
                 row["id"],
@@ -270,20 +279,26 @@ async def _update_entry(
 
 def _realize(
     entry: ImageEntry, row: dict[str, object] | None, head: _S3Head
-) -> tuple[str, str | None, str | None, str | None, str | None]:
-    """Compute ``(state, object_key, volume, digest, warning)`` for an entry.
+) -> tuple[str, str | None, str | None, str | None, str | None, str | None]:
+    """Compute ``(state, object_key, volume, path, digest, warning)`` for an entry.
 
     Never downgrades a row already ``registered`` from a build/upload: a ``build`` (or an
     ``s3`` whose object/digest is not yet confirmed) leaves a realized row exactly as it is,
-    so the runtime-owned object_key/digest/state are preserved (invariant 1).
+    so the runtime-owned object_key/digest/state are preserved (invariant 1). A ``staged-path``
+    source seeds ``registered`` with ``path`` set and the others NULL (ADR-0228); it is declared,
+    not probed — resolution at provision time is the gate.
     """
     source = entry.source
+    if isinstance(source, StagedPathSource):
+        return (_REGISTERED, None, None, source.path, None, None)
     if isinstance(source, StagedSource):
-        return (_REGISTERED, None, source.volume, None, None)
+        return (_REGISTERED, None, source.volume, None, None, None)
     if isinstance(source, BuildSource):
-        return _realize_build(entry, row)
+        state, object_key, volume, digest, warning = _realize_build(entry, row)
+        return (state, object_key, volume, None, digest, warning)
     if isinstance(source, S3Source):
-        return _realize_s3(entry, row, source, head)
+        state, object_key, volume, digest, warning = _realize_s3(entry, row, source, head)
+        return (state, object_key, volume, None, digest, warning)
     raise AssertionError(f"unhandled image source kind: {source!r}")  # pragma: no cover
 
 
