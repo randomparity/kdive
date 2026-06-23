@@ -43,6 +43,11 @@ path does (raw + redacted, build-id read from the core, ADR-0050 method-encoded 
 `vmcore-host_dump`). The whole-core bytes are never held in one in-memory buffer — the same
 file-streaming discipline as the KDUMP harvest (#657).
 
+Under `qemu:///system` the core is written with the QEMU/root identity, so a non-root worker
+cannot read it back. [ADR-0223](0223-local-libvirt-worker-readability-diagnostics.md) makes that
+worker-readability precondition self-explanatory: an unreadable root-owned core now surfaces as a
+`configuration_error` naming the operator fix instead of an opaque `[Errno 13]`.
+
 ### 2. Storage and method semantics reuse the existing contract
 
 HOST_DUMP stores under the method-encoded key (ADR-0050 first-method-wins per System), so a

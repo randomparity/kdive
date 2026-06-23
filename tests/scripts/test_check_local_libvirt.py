@@ -223,3 +223,59 @@ def test_absent_boot_kernels_skip_probe(tmp_path: Path) -> None:
     result = _run(_healthy_env(tmp_path, bindir, py, boot))
     assert result.returncode == 0, result.stderr
     assert "ready" in result.stdout.lower()
+
+
+def _readable_boot(tmp_path: Path) -> Path:
+    boot = tmp_path / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-test").write_text("")  # readable
+    return boot
+
+
+def test_nonroot_worker_on_system_uri_warns_advisory(tmp_path: Path) -> None:
+    """A non-root worker under qemu:///system gets a non-failing advisory (ADR-0223): boot
+    confirmation + host_dump cannot read root-owned virtlogd/QEMU output."""
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_EFFECTIVE_UID"] = "1000"  # pin non-root regardless of the CI runner's real uid
+    # KDIVE_LIBVIRT_URI unset -> defaults to qemu:///system
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr  # advisory, not a failure
+    assert "ready" in result.stdout.lower()
+    assert "boot-confirmation" in result.stderr.lower()
+    assert "qemu:///session" in result.stderr  # the fix is named
+
+
+def test_session_uri_suppresses_advisory(tmp_path: Path) -> None:
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_EFFECTIVE_UID"] = "1000"
+    env["KDIVE_LIBVIRT_URI"] = "qemu:///session"  # worker owns the QEMU process
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "boot-confirmation" not in result.stderr.lower()
+
+
+def test_remote_transport_uri_suppresses_advisory(tmp_path: Path) -> None:
+    """A transport-prefixed remote URI's root-owned files live on a different host, so the
+    local-runner identity is irrelevant — no advisory."""
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_EFFECTIVE_UID"] = "1000"
+    env["KDIVE_LIBVIRT_URI"] = "qemu+ssh://host/system"
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "boot-confirmation" not in result.stderr.lower()
+
+
+def test_root_worker_on_system_uri_suppresses_advisory(tmp_path: Path) -> None:
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_EFFECTIVE_UID"] = "0"  # a root worker reads root-owned files fine
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "boot-confirmation" not in result.stderr.lower()

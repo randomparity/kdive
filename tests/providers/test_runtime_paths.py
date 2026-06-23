@@ -9,6 +9,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.shared.runtime_paths import (
+    WORKER_READABILITY_REMEDIATION,
     console_log_path,
     domain_name_for,
     read_console_log,
@@ -68,10 +69,12 @@ def test_read_console_log_missing_file_is_empty(tmp_path: Path) -> None:
     assert read_console_log(tmp_path / "missing.log") == b""
 
 
-def test_read_console_log_permission_failure_is_infrastructure_failure(
+def test_read_console_log_permission_failure_is_configuration_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A root-owned (qemu:///system virtlogd) console log is a host config problem, not a
+    retryable infrastructure failure (ADR-0223). The error names the operator fix."""
     path = tmp_path / "console.log"
 
     def fail_read_bytes(self: Path) -> bytes:
@@ -83,11 +86,12 @@ def test_read_console_log_permission_failure_is_infrastructure_failure(
     with pytest.raises(CategorizedError) as caught:
         read_console_log(path)
 
-    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert caught.value.details == {
         "operation": "read_console_log",
         "path": str(path),
         "error": "PermissionError",
+        "remediation": WORKER_READABILITY_REMEDIATION,
     }
 
 

@@ -132,6 +132,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "(libguestfs build-fs appliance, ADR-0222).",
     ),
     ExternalEnvVar(
+        "KDIVE_EFFECTIVE_UID",
+        "script",
+        "$EUID",
+        "Effective uid `check-local-libvirt.sh` uses for its non-root-worker readability advisory "
+        "(ADR-0223); overrides `$EUID` so the gate is testable independent of the runner's uid.",
+    ),
+    ExternalEnvVar(
         "KDIVE_REMOTE_SSH_PORT",
         "script",
         "22",
