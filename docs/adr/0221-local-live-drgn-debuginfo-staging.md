@@ -1,8 +1,8 @@
 # ADR-0221: Stage the per-run DWARF vmlinux in-guest for local live drgn
 
-## Status
-
-Accepted
+- **Status:** Accepted
+- **Date:** 2026-06-23
+- **Deciders:** kdive maintainers
 
 ## Context
 
