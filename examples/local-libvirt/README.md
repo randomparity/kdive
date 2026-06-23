@@ -122,7 +122,7 @@ Everything is overridable from the environment before running the scripts:
 |----------|---------|---------|
 | `KDIVE_PROJECT` | `local` | Project the stack seeds and the token grants `admin` on. |
 | `KDIVE_KERNEL_SRC` | `~/src/linux` | Kernel tree under test; where `.mcp.json` is installed. |
-| `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-43.qcow2` | Catalog rootfs the System boots. |
+| `KDIVE_GUEST_IMAGE` | `…/fedora-kdive-ready-43.qcow2` | Local-disk rootfs the System boots, passed into the provision profile as `rootfs = {kind = "local", path = …}`. A file on disk, not an `image_catalog` object. |
 | `KDIVE_LIBVIRT_URI` | `qemu:///system` | libvirt connection the worker drives. |
 | `KDIVE_PYTHON` | `<repo>/.venv/bin/python` | Interpreter for `python -m kdive` and the processes. |
 | `KDIVE_LIMIT_KCU` / `KDIVE_MAX_ALLOC` / `KDIVE_MAX_SYS` | `1000000` / `4` / `4` | Seeded budget and quota. |
@@ -165,9 +165,14 @@ cost_class = "local"
 # concurrent_allocation_cap = 1   # optional; how many allocations this host serves at once
 # pool = "default"                # optional; group interchangeable hosts for by-pool allocation
 
-# Catalog a local-libvirt rootfs declaratively. This is the alternative to the
-# KDIVE_GUEST_IMAGE test-convenience env (the two are orthogonal — the env still works).
-# `source` is exactly one of s3 | build | staged; an `s3` image is shown here.
+# OPTIONAL: register a local-libvirt rootfs in the image_catalog for the *catalog*
+# provisioning lane (provision with `rootfs = {kind = "catalog", name = "..."}`). This is a
+# DIFFERENT path from KDIVE_GUEST_IMAGE, not a drop-in for it: KDIVE_GUEST_IMAGE is a
+# local-disk file booted directly via `rootfs.kind = "local"` with no catalog row, while the
+# `s3` source below boots a System only after you actually upload the qcow2 to the object
+# store at `object_key` — `build-fs` writes the file to local disk and does NOT publish it to
+# S3. Until the object exists the row stays `defined` and cannot boot anything. `source` is
+# exactly one of s3 | build | staged; an `s3` image is shown here.
 [[image]]
 provider = "local-libvirt"
 name = "fedora-kdive-ready-43"
