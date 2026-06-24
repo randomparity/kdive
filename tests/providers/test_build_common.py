@@ -22,6 +22,7 @@ from kdive.providers.shared.build_host.common import (
     _dropped_fragment_symbols,
     _fragment_symbols,
 )
+from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator
 
 _RUN = UUID("44444444-4444-4444-4444-444444444444")
@@ -139,11 +140,11 @@ def test_build_host_orchestrator_runs_neutral_build_sequence(tmp_path: Path) -> 
         assert data == fragment
         calls.append("checkout")
 
-    def step(name: str) -> Callable[[Path], int]:
-        def _run(workspace: Path) -> int:
+    def step(name: str) -> Callable[[Path], CapturedStep]:
+        def _run(workspace: Path) -> CapturedStep:
             assert workspace == tmp_path / str(_RUN)
             calls.append(name)
-            return 0
+            return CapturedStep(0, "")
 
         return _run
 

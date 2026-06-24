@@ -34,6 +34,7 @@ from kdive.providers.local_libvirt import build as build_module
 from kdive.providers.local_libvirt.build import LocalLibvirtBuild
 from kdive.providers.shared.build_host import execution as build_host_execution
 from kdive.providers.shared.build_host.configuration import config as build_host_config
+from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.publishing.artifact_publish import (
     ArtifactBytes,
     ArtifactSource,
@@ -121,6 +122,8 @@ class _Seams:
     build_id: bytes = b"\xab\xcd\xef\x01\x23\x45\x67\x89"
     olddefconfig_returncode: int = 0
     make_returncode: int = 0
+    make_output: str = ""
+    olddefconfig_output: str = ""
     olddefconfig_calls: int = 0
     make_calls: int = 0
     checkout_calls: int = 0
@@ -140,20 +143,20 @@ class _Seams:
         self.merged_fragments.append(fragment_bytes)
         self.checkout_workspaces.append(workspace)
 
-    def run_olddefconfig(self, workspace: Path) -> int:
+    def run_olddefconfig(self, workspace: Path) -> CapturedStep:
         self.olddefconfig_calls += 1
         self.call_order.append("olddefconfig")
-        return self.olddefconfig_returncode
+        return CapturedStep(self.olddefconfig_returncode, self.olddefconfig_output)
 
     def read_config(self, workspace: Path) -> str:
         self.call_order.append("read_config")
         return self.config_text
 
-    def run_make(self, workspace: Path) -> int:
+    def run_make(self, workspace: Path) -> CapturedStep:
         self.make_calls += 1
         self.call_order.append("make")
         self.make_workspaces.append(workspace)
-        return self.make_returncode
+        return CapturedStep(self.make_returncode, self.make_output)
 
     def read_kernel_source(self, workspace: Path) -> ArtifactSource:
         return ArtifactBytes(b"bzImage-bytes")
@@ -572,9 +575,9 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
         workspace_root=tmp_path / "warm",
         store_factory=lambda: store,
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
         read_kernel_source=lambda _w: ArtifactBytes(b"warm-bz"),
         read_vmlinux_source=lambda _w: ArtifactBytes(b"warm-vm"),
         read_build_id=lambda _w: "deadbeef",
@@ -634,9 +637,9 @@ def test_over_transport_build_removes_clone_dir_via_transport(tmp_path: Path) ->
         workspace_root=tmp_path / "warm",
         store_factory=lambda: store,
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
         read_kernel_source=lambda _w: ArtifactBytes(b"warm-bz"),
         read_vmlinux_source=lambda _w: ArtifactBytes(b"warm-vm"),
         read_build_id=lambda _w: "deadbeef",
@@ -731,9 +734,9 @@ def test_validate_config_ref_rejects_local_file_outside_allowed_roots(tmp_path: 
         workspace_root=tmp_path / "workspace",
         store_factory=lambda: _FakeStore(),
         checkout=lambda _run, _profile, _workspace, _fragment: None,
-        run_olddefconfig=lambda _workspace: 0,
+        run_olddefconfig=lambda _workspace: CapturedStep(0, ""),
         read_config=lambda _workspace: _GOOD_CONFIG,
-        run_make=lambda _workspace: 0,
+        run_make=lambda _workspace: CapturedStep(0, ""),
         read_kernel_source=lambda _workspace: ArtifactBytes(b"kernel"),
         read_vmlinux_source=lambda _workspace: ArtifactBytes(b"vmlinux"),
         read_build_id=lambda _workspace: "deadbeef",
@@ -764,9 +767,9 @@ def test_validate_config_ref_accepts_local_file_inside_allowed_roots(tmp_path: P
         workspace_root=tmp_path / "workspace",
         store_factory=lambda: _FakeStore(),
         checkout=lambda _run, _profile, _workspace, _fragment: None,
-        run_olddefconfig=lambda _workspace: 0,
+        run_olddefconfig=lambda _workspace: CapturedStep(0, ""),
         read_config=lambda _workspace: _GOOD_CONFIG,
-        run_make=lambda _workspace: 0,
+        run_make=lambda _workspace: CapturedStep(0, ""),
         read_kernel_source=lambda _workspace: ArtifactBytes(b"kernel"),
         read_vmlinux_source=lambda _workspace: ArtifactBytes(b"vmlinux"),
         read_build_id=lambda _workspace: "deadbeef",
@@ -795,7 +798,7 @@ def test_real_run_make_runs_parallel_jobs(monkeypatch: pytest.MonkeyPatch) -> No
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(subprocess, "run", _capture)
-    assert build_host_execution.real_run_make(Path("/ws")) == 0
+    assert build_host_execution.real_run_make(Path("/ws")).returncode == 0
     argv = captured[0]
     assert argv[:3] == ["make", "-C", "/ws"]
     assert any(tok.startswith("-j") and tok[2:].isdigit() and int(tok[2:]) >= 1 for tok in argv), (
@@ -1210,7 +1213,9 @@ def test_merge_config_fragment_write_failure_is_infrastructure_failure(
 ) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.setattr(build_host_workspace, "run_make_target", lambda *_args, **_kw: 0)
+    monkeypatch.setattr(
+        build_host_workspace, "run_make_target", lambda *_args, **_kw: CapturedStep(0, "")
+    )
 
     def _open(*_args: object, **_kwargs: object) -> int:
         raise PermissionError("workspace is unwritable")

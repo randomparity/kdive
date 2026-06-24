@@ -12,6 +12,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from kdive.domain.build_phase import BuildPhase
 from kdive.jobs.build_telemetry import BuildPhaseRecorder
 from kdive.profiles.build import BuildProfile, ServerBuildProfile
+from kdive.providers.shared.build_host.execution import CapturedStep
 from kdive.providers.shared.build_host.orchestration import BuildHostOrchestrator
 
 
@@ -83,9 +84,9 @@ def _orchestrator(tmp_path: Path) -> BuildHostOrchestrator:
         workspace_root=tmp_path / "ws",
         catalog_fetch=lambda _name: _FRAGMENT_BYTES,
         checkout=lambda _r, _p, _w, _f: None,
-        run_olddefconfig=lambda _w: 0,
+        run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
-        run_make=lambda _w: 0,
+        run_make=lambda _w: CapturedStep(0, ""),
     )
 
 

@@ -107,13 +107,17 @@ class BuildHostOrchestrator:
         with recorder.phase(BuildPhase.SOURCE_SYNC, provider):
             self.checkout(run_id, profile, workspace, fragment_bytes)
         with recorder.phase(BuildPhase.CONFIGURE, provider):
-            if self.run_olddefconfig(workspace) != 0:
-                raise build_failure("make olddefconfig exited non-zero", run_id)
+            olddefconfig = self.run_olddefconfig(workspace)
+            if olddefconfig.returncode != 0:
+                raise build_failure(
+                    "make olddefconfig exited non-zero", run_id, build_log=olddefconfig.output
+                )
             config_text = self.read_config(workspace)
             _validate_final_config(run_id, profile, fragment_text, config_text)
         with recorder.phase(BuildPhase.COMPILE, provider):
-            if self.run_make(workspace) != 0:
-                raise build_failure("make exited non-zero", run_id)
+            make = self.run_make(workspace)
+            if make.returncode != 0:
+                raise build_failure("make exited non-zero", run_id, build_log=make.output)
         return workspace
 
     def validate_config_ref(self, ref: ComponentRef) -> None:
