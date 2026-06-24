@@ -14,7 +14,7 @@ import logging
 from collections.abc import Callable
 from uuid import UUID
 
-from kdive.artifacts.storage import ArtifactWriteRequest
+from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.shared.build_host.publishing.artifact_publish import StorePort
@@ -23,14 +23,18 @@ _log = logging.getLogger(__name__)
 
 BUILD_LOG_NAME = "build-log"
 BUILD_LOG_RETENTION_CLASS = "build-log"
-# The error detail key carrying the captured build output up to the builder (set by the
-# orchestrator's `build_failure`), and the one carrying the stored object key down to the worker.
+# `BUILD_LOG_DETAIL` carries the captured build output up to the builder (set by the
+# orchestrator's `build_failure`). `BUILD_LOG_KEY_DETAIL`/`BUILD_LOG_ETAG_DETAIL` carry the stored
+# object's key+etag down to the worker, which registers the `artifacts` row from them.
 BUILD_LOG_DETAIL = "build_log"
-BUILD_LOG_ARTIFACT_DETAIL = "build_log_artifact"
+BUILD_LOG_KEY_DETAIL = "build_log_key"
+BUILD_LOG_ETAG_DETAIL = "build_log_etag"
 
 
-def persist_build_log(store: StorePort, run_id: UUID, output: str, *, tenant: str) -> str | None:
-    """PUT ``output`` as a Run-owned ``REDACTED`` ``build-log`` object; return its key.
+def persist_build_log(
+    store: StorePort, run_id: UUID, output: str, *, tenant: str
+) -> StoredArtifact | None:
+    """PUT ``output`` as a Run-owned ``REDACTED`` ``build-log`` object; return the stored artifact.
 
     The key is Run-keyed (``<tenant>/runs/<run_id>/build-log``), so a re-capture on a BUILD-job
     retry overwrites the same object rather than accumulating objects. ``output`` is already
@@ -44,11 +48,11 @@ def persist_build_log(store: StorePort, run_id: UUID, output: str, *, tenant: st
         tenant: The object-key tenant prefix.
 
     Returns:
-        The stored object key, or ``None`` when ``output`` is empty (no object written).
+        The stored artifact (key + etag + sensitivity), or ``None`` when ``output`` is empty.
     """
     if not output.strip():
         return None
-    stored = store.put_artifact(
+    return store.put_artifact(
         ArtifactWriteRequest(
             tenant=tenant,
             owner_kind="runs",
@@ -59,7 +63,6 @@ def persist_build_log(store: StorePort, run_id: UUID, output: str, *, tenant: st
             retention_class=BUILD_LOG_RETENTION_CLASS,
         )
     )
-    return stored.key
 
 
 def build_workspace_capturing_log(
@@ -73,10 +76,10 @@ def build_workspace_capturing_log(
 
     Wraps the orchestrator's ``build_workspace`` call so a ``BUILD_FAILURE`` whose
     ``details[BUILD_LOG_DETAIL]`` carries captured ``make``/``olddefconfig`` output PUTs that text
-    as a ``build-log`` artifact and re-raises the *same* error with the stored object key added to
-    ``details[BUILD_LOG_ARTIFACT_DETAIL]`` for the worker to register. A persistence failure is
-    logged and swallowed so the original build failure always propagates — a build-log outage must
-    never mask or reshape the build error. Failures carrying no captured output propagate unchanged.
+    as a ``build-log`` artifact and re-raises the *same* error with the stored object's key+etag
+    added to ``details`` for the worker to register the row from. A persistence failure is logged
+    and swallowed so the original build failure always propagates — a build-log outage must never
+    mask or reshape the build error. Failures carrying no captured output propagate unchanged.
     """
     try:
         build_workspace()
@@ -85,10 +88,11 @@ def build_workspace_capturing_log(
         if exc.category is not ErrorCategory.BUILD_FAILURE or not isinstance(output, str):
             raise
         try:
-            key = persist_build_log(store, run_id, output, tenant=tenant)
+            stored = persist_build_log(store, run_id, output, tenant=tenant)
         except CategorizedError:
             _log.warning("failed to persist build-log for run %s", run_id, exc_info=True)
             raise exc from None
-        if key is not None:
-            exc.details[BUILD_LOG_ARTIFACT_DETAIL] = key
+        if stored is not None:
+            exc.details[BUILD_LOG_KEY_DETAIL] = stored.key
+            exc.details[BUILD_LOG_ETAG_DETAIL] = stored.etag
         raise

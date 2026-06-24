@@ -32,8 +32,9 @@ class _RecordingStore:
 
 def test_persist_build_log_puts_redacted_run_owned_object() -> None:
     store = _RecordingStore()
-    key = persist_build_log(store, _RUN, "ld: undefined reference", tenant=_TENANT)
-    assert key == f"{_TENANT}/runs/{_RUN}/{BUILD_LOG_NAME}"
+    stored = persist_build_log(store, _RUN, "ld: undefined reference", tenant=_TENANT)
+    assert stored is not None
+    assert stored.key == f"{_TENANT}/runs/{_RUN}/{BUILD_LOG_NAME}"
     [request] = store.puts
     assert request.owner_kind == "runs"
     assert request.owner_id == str(_RUN)

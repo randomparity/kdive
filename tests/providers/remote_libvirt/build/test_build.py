@@ -295,7 +295,7 @@ def test_build_failure_persists_build_log_and_threads_key(tmp_path: Path) -> Non
     with pytest.raises(CategorizedError) as caught:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
 
-    assert caught.value.details["build_log_artifact"] == f"{_TENANT}/runs/{_RUN}/build-log"
+    assert caught.value.details["build_log_key"] == f"{_TENANT}/runs/{_RUN}/build-log"
     by_name = {name: (sens, data) for _, name, _, sens, data in store.puts}
     assert by_name["build-log"] == (Sensitivity.REDACTED, b"ld: undefined symbol foo")
 
@@ -308,7 +308,7 @@ def test_build_log_persist_failure_is_swallowed(tmp_path: Path) -> None:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
 
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
-    assert "build_log_artifact" not in caught.value.details
+    assert "build_log_key" not in caught.value.details
 
 
 def test_build_nonzero_modules_install_is_build_failure_nothing_stored(tmp_path: Path) -> None:

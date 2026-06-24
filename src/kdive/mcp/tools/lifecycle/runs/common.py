@@ -66,13 +66,22 @@ def _run_recovery(run: Run) -> dict[str, JsonValue]:
     }
 
 
-def _run_artifact_refs(run: Run, *, console_ref: str | None = None) -> dict[str, str]:
+# The failing job's failure-context key carrying the build-log artifact id (ADR-0238); the worker
+# writes it there from the build error's details, and the failed-Run envelope promotes it to
+# ``refs["build-log"]``.
+_BUILD_LOG_FAILURE_DETAIL = "failure_detail_build_log_artifact"
+
+
+def _run_artifact_refs(
+    run: Run, *, console_ref: str | None = None, build_log_ref: str | None = None
+) -> dict[str, str]:
     """The Run's object-store artifact keys, for the envelope ``refs`` slot.
 
     ``console_ref`` is the boot step's console evidence artifact id (ADR-0226), surfaced as
     ``console`` so an agent resolves it directly via ``artifacts.get``; it is supplied only on
     the ``runs.get`` success path (which loads the boot step), and omitted when no boot step
-    recorded evidence.
+    recorded evidence. ``build_log_ref`` is the failed build's build-log artifact id (ADR-0238),
+    surfaced as ``build-log`` on the failed-Run path; omitted when the build captured no log.
     """
     refs: dict[str, str] = {}
     if run.kernel_ref:
@@ -81,6 +90,8 @@ def _run_artifact_refs(run: Run, *, console_ref: str | None = None) -> dict[str,
         refs["debuginfo"] = run.debuginfo_ref
     if console_ref is not None:
         refs["console"] = console_ref
+    if build_log_ref is not None:
+        refs["build-log"] = build_log_ref
     return refs
 
 
@@ -196,18 +207,24 @@ def _failed_envelope(run: Run, category: ErrorCategory, failing_job: Job | None)
     """
     data: dict[str, JsonValue] = {"current_status": run.state.value, **_run_recovery(run)}
     detail: str | None = None
+    build_log_ref: str | None = None
     no_leak = suppressed_detail(category, None) is not None
     if failing_job is not None and not no_leak:
         data["failing_job_id"] = str(failing_job.id)
         context = failing_job.failure_context
         detail = context.get("failure_message") or None
+        build_log_ref = context.get(_BUILD_LOG_FAILURE_DETAIL) or None
         for key, value in context.items():
             if key.startswith("failure_detail_"):
                 data[key] = value
     elif failing_job is None:
         detail = no_job_failure_detail(category)
     return ToolResponse.failure(
-        str(run.id), category, detail=detail, refs=_run_artifact_refs(run), data=data
+        str(run.id),
+        category,
+        detail=detail,
+        refs=_run_artifact_refs(run, build_log_ref=build_log_ref),
+        data=data,
     )
 
 

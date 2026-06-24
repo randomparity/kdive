@@ -1,6 +1,6 @@
 # ADR 0238 — Capture internal-build compiler output as a retrievable `build-log` artifact
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-24
 - **Deciders:** kdive maintainers
 - **Builds on:** [ADR-0235](0235-per-run-console-evidence.md) (the per-Run
@@ -54,7 +54,7 @@ Four constraints bound the design:
 We will capture `make` and `make olddefconfig` stdout+stderr on both build paths,
 redact and tail-cap it, store it as a Run-owned `REDACTED` `build-log` artifact on a
 build-step failure, and surface its id as `refs["build-log"]` on the failed Run's
-`runs.get`, fetchable via the unchanged `artifacts.get`.
+`runs.get`, fetchable via `artifacts.get` (extended to serve Run-owned artifacts).
 
 The mechanism splits the object write (where the bytes are) from the row write (where
 the connection is):
@@ -88,8 +88,13 @@ the connection is):
 
 4. **Surface.** `_failed_envelope` promotes the recognized build-log artifact id from the
    failing job's failure detail into `refs["build-log"]`, because an artifact id belongs in
-   the `refs` slot (ADR-0226). `artifacts.get` is unchanged: the `REDACTED` row is served by
-   id, inline content bounded by `KDIVE_ARTIFACT_INLINE_MAX_BYTES`.
+   the `refs` slot (ADR-0226). `artifacts.get` is extended to serve **Run-owned** artifacts:
+   its authorization read previously hard-coded `owner_kind='systems'` and resolved the project
+   through the `systems` table. Because a failed build may have no System bound (`system_id`
+   nullable, ADR-0169), the build-log is `owner_kind='runs'`; `artifacts.get` now admits both
+   `'systems'` and `'runs'` and resolves the project through the owner's table — `runs.project`
+   carries the build's project. The `REDACTED` row is served by id, inline content bounded by
+   `KDIVE_ARTIFACT_INLINE_MAX_BYTES`. Cross-project access stays not-found-shaped on both paths.
 
 The captured output is redacted (project `Redactor`) and tail-capped at capture. The cap
 keeps the **trailing** `BUILD_LOG_TAIL_BYTES` (16 KiB) — eight times the 2000-char

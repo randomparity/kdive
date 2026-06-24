@@ -31,6 +31,7 @@ from kdive.security.artifacts.artifact_search import (
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.integration._seed import seed_unbound_running_run
 from tests.mcp._seed import seed_crashed_system
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.json_data import data_str
@@ -388,6 +389,46 @@ def test_artifacts_get_redacted_returns_ref(migrated_url: str) -> None:
             _, _, red_id = await _seed_system_with_artifacts(pool)
             resp = await artifacts_get(pool, _ctx(), artifact_id=red_id)
         assert resp.status != "error" and resp.refs
+
+    asyncio.run(_run())
+
+
+async def _seed_run_build_log(pool: AsyncConnectionPool) -> str:
+    """Insert an unbound (no-System) Run and a redacted Run-owned build-log artifact; return id."""
+    run_id = await seed_unbound_running_run(pool)
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('runs', %s, %s, 'e', 'redacted', 'build-log') RETURNING id",
+            (run_id, f"proj/runs/{run_id}/build-log"),
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        return str(row["id"])
+
+
+def test_artifacts_get_serves_run_owned_build_log(migrated_url: str) -> None:
+    # The issue acceptance: a Run-owned build-log (no System bound) is fetchable via artifacts.get,
+    # which serves its redacted bytes inline (#770, ADR-0238).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            artifact_id = await _seed_run_build_log(pool)
+            store = _SearchStore(b"ld: undefined reference to `foo'\n")
+            resp = await artifacts_get(
+                pool, _ctx(), artifact_id=artifact_id, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert data_str(resp, "content") == "ld: undefined reference to `foo'\n"
+
+    asyncio.run(_run())
+
+
+def test_artifacts_get_run_build_log_cross_project_is_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            artifact_id = await _seed_run_build_log(pool)
+            resp = await artifacts_get(pool, _ctx(projects=("other",)), artifact_id=artifact_id)
+        assert resp.status == "error"
 
     asyncio.run(_run())
 

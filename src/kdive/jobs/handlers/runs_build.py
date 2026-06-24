@@ -10,13 +10,15 @@ from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
 import kdive.config as config
+from kdive.artifacts.storage import StoredArtifact
 from kdive.build_artifacts.results import BuildOutput
 from kdive.config.core_settings import KERNEL_SRC
 from kdive.db import build_hosts
 from kdive.db.build_hosts import BuildHost
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import RUNS
+from kdive.db.repositories import ARTIFACTS, RUNS
 from kdive.domain.capacity.state import IllegalTransition, RunState
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import Job
@@ -31,9 +33,15 @@ from kdive.providers.shared.build_host.dispatch import (
     BuildHostTransportFactories,
     run_build_on_host,
 )
+from kdive.providers.shared.build_host.publishing.build_log import (
+    BUILD_LOG_ETAG_DETAIL,
+    BUILD_LOG_KEY_DETAIL,
+    BUILD_LOG_RETENTION_CLASS,
+)
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs.steps import BuildStepResult, existing_build_result
+from kdive.store.objectstore import register_artifact_row
 
 _log = logging.getLogger(__name__)
 
@@ -224,6 +232,55 @@ async def _build_handler_autocommit(
     return str(run_id)
 
 
+_BUILD_LOG_EXISTING_ROW_SQL = (
+    "SELECT id, etag FROM artifacts WHERE owner_kind = 'runs' AND owner_id = %s AND object_key = %s"
+)
+_BUILD_LOG_REFRESH_ETAG_SQL = "UPDATE artifacts SET etag = %s WHERE id = %s"
+
+
+async def _register_build_log(conn: AsyncConnection, run_id: UUID, exc: CategorizedError) -> None:
+    """Register the failed build's build-log object as a Run-owned `artifacts` row (ADR-0238).
+
+    The builder PUT the redacted build-log object off-thread and stashed its key+etag on ``exc``;
+    this seam (which holds ``conn``) registers the row, upserting on the Run-keyed object key so a
+    BUILD-job retry refreshes the etag in place rather than duplicating the row. The artifact id
+    replaces the transit key/etag details under ``build_log_artifact`` so the worker's
+    failure-context redaction surfaces it as ``refs["build-log"]`` on the failed Run (ADR-0141).
+
+    Best-effort: a registration failure is logged and swallowed — the original ``BUILD_FAILURE``
+    must still propagate, so a build-log DB error never masks the build error.
+    """
+    key = exc.details.pop(BUILD_LOG_KEY_DETAIL, None)
+    etag = exc.details.pop(BUILD_LOG_ETAG_DETAIL, None)
+    if not isinstance(key, str) or not isinstance(etag, str):
+        return
+    try:
+        stored = StoredArtifact(key, etag, Sensitivity.REDACTED, BUILD_LOG_RETENTION_CLASS)
+        artifact_id = await _upsert_build_log_row(conn, run_id, stored)
+        exc.details["build_log_artifact"] = str(artifact_id)
+    except Exception:
+        _log.warning("failed to register build-log artifact row for run %s", run_id, exc_info=True)
+
+
+async def _upsert_build_log_row(
+    conn: AsyncConnection, run_id: UUID, stored: StoredArtifact
+) -> UUID:
+    """Insert the Run-owned build-log row, or refresh its etag if the key already has one."""
+    async with conn.transaction():
+        async with conn.cursor() as cur:
+            await cur.execute(_BUILD_LOG_EXISTING_ROW_SQL, (run_id, stored.key))
+            row = await cur.fetchone()
+        if row is None:
+            inserted = await ARTIFACTS.insert(
+                conn, register_artifact_row(stored, owner_kind="runs", owner_id=run_id)
+            )
+            return inserted.id
+        artifact_id, existing_etag = row
+        if str(existing_etag) != stored.etag:
+            await conn.execute(_BUILD_LOG_REFRESH_ETAG_SQL, (stored.etag, artifact_id))
+        return artifact_id
+
+
 async def _build_and_record(
     conn: AsyncConnection,
     job: Job,
@@ -262,6 +319,7 @@ async def _build_and_record(
             provider=run.target_kind.value,
         )
     except CategorizedError as exc:
+        await _register_build_log(conn, run_id, exc)
         await _fail_build(conn, job, run, exc.category)
         raise
     return BuildStepResult(

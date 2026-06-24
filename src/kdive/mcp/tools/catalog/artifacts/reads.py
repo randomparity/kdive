@@ -44,10 +44,16 @@ _log = logging.getLogger(__name__)
 
 _MAX_SEARCHABLE_ARTIFACT_BYTES = 1024 * 1024
 _GET_SQL: LiteralString = (
-    "SELECT id, object_key, owner_id FROM artifacts "
-    "WHERE id = %s AND owner_kind = 'systems' AND sensitivity = %s"
+    "SELECT id, object_key, owner_kind, owner_id FROM artifacts "
+    "WHERE id = %s AND owner_kind IN ('systems', 'runs') AND sensitivity = %s"
 )
-_PROJECT_SQL: LiteralString = "SELECT project FROM systems WHERE id = %s"
+# The owning row's project, keyed by the artifact's owner_kind. A System-owned artifact (console,
+# vmcore) resolves through `systems`; a Run-owned build-log (ADR-0238) resolves through `runs`,
+# which carries the build's project even when no System is bound yet (system_id nullable, ADR-0169).
+_PROJECT_SQL_BY_OWNER_KIND: dict[str, LiteralString] = {
+    "systems": "SELECT project FROM systems WHERE id = %s",
+    "runs": "SELECT project FROM runs WHERE id = %s",
+}
 
 
 class _SearchStore(Protocol):
@@ -147,7 +153,10 @@ async def _authorized_redacted_artifact(
             row = await cur.fetchone()
             if row is None:
                 return _not_found(artifact_id)
-            await cur.execute(_PROJECT_SQL, (row["owner_id"],))
+            project_sql = _PROJECT_SQL_BY_OWNER_KIND.get(str(row["owner_kind"]))
+            if project_sql is None:
+                return _not_found(artifact_id)
+            await cur.execute(project_sql, (row["owner_id"],))
             owner = await cur.fetchone()
         if owner is None or owner["project"] not in ctx.projects:
             return _not_found(artifact_id)

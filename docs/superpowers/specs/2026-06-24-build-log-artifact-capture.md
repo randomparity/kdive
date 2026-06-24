@@ -2,7 +2,7 @@
 
 - **Issue:** #770
 - **ADR:** [ADR-0238](../../adr/0238-build-log-artifact-capture.md)
-- **Status:** Draft
+- **Status:** Accepted
 - **Date:** 2026-06-24
 
 ## Problem
@@ -44,12 +44,15 @@ These shape the design; violating them breaks existing contracts.
   transport session) execute inside `asyncio.to_thread`; they can PUT to the object store
   (`build()` already does, for `kernel`/`vmlinux`) but cannot register an `artifacts` **row**
   (no `conn`). Row registration must happen at the worker seam that holds `conn`.
-- **`artifacts.get` serves by `artifacts` table id, gated on `Sensitivity.REDACTED`.** The
-  successful build artifacts (`kernel`/`vmlinux`/`modules`) are NOT in the `artifacts` table —
-  they are surfaced as `runs.*_ref` object keys and stored `SENSITIVE`. For the build-log to be
-  fetchable via `artifacts.get`, it must (a) have a DB row and (b) be stored `REDACTED`. This
-  mirrors the per-Run console evidence (ADR-0235), which registers a row and stores redacted
-  bytes.
+- **`artifacts.get` serves by `artifacts` table id, gated on `Sensitivity.REDACTED`, and was
+  `owner_kind='systems'`-only.** The successful build artifacts (`kernel`/`vmlinux`/`modules`)
+  are NOT in the `artifacts` table — they are surfaced as `runs.*_ref` object keys and stored
+  `SENSITIVE`. For the build-log to be fetchable via `artifacts.get`, it must (a) have a DB row
+  and (b) be stored `REDACTED` — mirroring the per-Run console evidence (ADR-0235). But the
+  handler's authorization read hard-codes `owner_kind='systems'` and resolves the project through
+  the `systems` table, so a Run-owned artifact was unreachable. Since a build can have no System
+  (next bullet), `artifacts.get` must be extended to admit `owner_kind='runs'` and resolve the
+  project through `runs.project`.
 - **A build failure produces a FAILED Run, surfaced via `_failed_envelope`** in
   `mcp/tools/lifecycle/runs/common.py`, NOT the SUCCEEDED `runs.get` path that ADR-0226 extended.
   `_failed_envelope` already surfaces the failing job's worker-redacted `failure_detail_*` keys
@@ -133,8 +136,11 @@ first, the row committed after.
 
 ### 3. Surface on `runs.get` and `artifacts.get`
 
-- **`artifacts.get`** needs no change: once a `REDACTED` `artifacts` row exists, the existing
-  handler serves it by id (inline content subject to `KDIVE_ARTIFACT_INLINE_MAX_BYTES`).
+- **`artifacts.get`**: extend the authorization read to admit `owner_kind='runs'` (not just
+  `'systems'`) and resolve the project through the owner's table (`runs.project` for a Run-owned
+  artifact). Once a `REDACTED` Run-owned `artifacts` row exists, the handler then serves it by id
+  (inline content subject to `KDIVE_ARTIFACT_INLINE_MAX_BYTES`). Cross-project access stays
+  not-found-shaped on both owner kinds.
 - **`runs.get`** (FAILED Run): surface the build-log artifact id as `refs["build-log"]` in
   `_failed_envelope`. The id reaches the envelope through the failing job's failure context
   (`failure_detail_build_log_artifact`), which `_failed_envelope` already reads; promote that one

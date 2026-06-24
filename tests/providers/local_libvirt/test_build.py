@@ -399,7 +399,7 @@ def test_build_failure_persists_build_log_and_threads_key(tmp_path: Path) -> Non
     with pytest.raises(CategorizedError) as caught:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
-    assert caught.value.details["build_log_artifact"] == f"{_TENANT}/runs/{_RUN}/build-log"
+    assert caught.value.details["build_log_key"] == f"{_TENANT}/runs/{_RUN}/build-log"
     assert ("build-log", Sensitivity.REDACTED) in {(name, sens) for _, name, _, sens in store.puts}
     assert store.artifacts["build-log"] == b"ld: undefined symbol foo"
 
@@ -408,7 +408,7 @@ def test_build_olddefconfig_failure_persists_build_log(tmp_path: Path) -> None:
     store, seams = _FakeStore(), _Seams(olddefconfig_returncode=2, olddefconfig_output="syntax err")
     with pytest.raises(CategorizedError) as caught:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
-    assert caught.value.details["build_log_artifact"] == f"{_TENANT}/runs/{_RUN}/build-log"
+    assert caught.value.details["build_log_key"] == f"{_TENANT}/runs/{_RUN}/build-log"
     assert store.artifacts["build-log"] == b"syntax err"
 
 
@@ -416,7 +416,7 @@ def test_build_failure_with_empty_output_persists_no_build_log(tmp_path: Path) -
     store, seams = _FakeStore(), _Seams(make_returncode=2, make_output="")
     with pytest.raises(CategorizedError) as caught:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
-    assert "build_log_artifact" not in caught.value.details
+    assert "build_log_key" not in caught.value.details
     assert "build-log" not in store.artifacts
 
 
@@ -426,7 +426,7 @@ def test_build_log_persist_failure_is_swallowed(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as caught:
         _builder(store, seams, tmp_path).build(_RUN, _profile())
     assert caught.value.category is ErrorCategory.BUILD_FAILURE
-    assert "build_log_artifact" not in caught.value.details
+    assert "build_log_key" not in caught.value.details
 
 
 def test_build_missing_bzimage_after_make_is_build_failure(tmp_path: Path) -> None:

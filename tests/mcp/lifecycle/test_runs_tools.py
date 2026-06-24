@@ -519,6 +519,28 @@ def test_envelope_for_run_failed_links_job_even_without_message() -> None:
     assert resp.data["failing_job_id"] == str(job.id)
 
 
+def test_envelope_for_run_failed_surfaces_build_log_ref() -> None:
+    # A failed build whose job recorded the build-log artifact id surfaces it as refs["build-log"]
+    # so an agent resolves the captured compiler output via artifacts.get (#770, ADR-0238).
+    job = _failed_job({"failure_detail_build_log_artifact": "11111111-1111-1111-1111-111111111111"})
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE),
+        failing_job=job,
+    )
+
+    assert resp.refs["build-log"] == "11111111-1111-1111-1111-111111111111"
+
+
+def test_envelope_for_run_failed_without_build_log_has_no_ref() -> None:
+    job = _failed_job({"failure_message": "make exited non-zero"})
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.FAILED, failure=ErrorCategory.BUILD_FAILURE),
+        failing_job=job,
+    )
+
+    assert "build-log" not in resp.refs
+
+
 def test_envelope_for_run_failed_no_link_derives_detail_from_category() -> None:
     # No linked job (e.g. a reconciler-driven failure on a torn-down System): the failed Run is
     # never a bare category — `detail` is derived from `failure_category` (#516).
