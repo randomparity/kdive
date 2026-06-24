@@ -94,8 +94,12 @@ A reviewer can check each of these against the test suite:
    authoritative and unchanged.
 5. A `failed` boot job whose `error_category` is `None` yields
    `boot_readiness.error_category == null` (still surfaced; `status:"failed"` present).
-6. The fielded `runs.get` output schema includes the new optional `boot_readiness` field; the
-   committed snapshot is regenerated.
+
+`runs.get` advertises the shared generic envelope outputSchema (`ENVELOPE_OUTPUT_SCHEMA`,
+#565/ADR-0170), where `data` is a free-form object; there is no per-`data`-key fielded schema
+and no generated tool-reference doc enumerating `data` keys, so adding `data.boot_readiness`
+invalidates **no** committed schema/doc snapshot. The implementer must not hunt for one to
+regenerate.
 
 ## Non-goals / out of scope
 
@@ -112,11 +116,12 @@ A reviewer can check each of these against the test suite:
 - **Boot job missing** (never enqueued): `get_by_dedup_key` returns `None` → no evidence. ✅ (2)
 - **Boot job `queued`/`running`** (retry in flight or first attempt): not `failed` → no
   evidence. ✅ (3)
-- **Boot ledger row present and `running`** (attempt actively in flight, not yet abandoned): boot
-  step reads `running`, not `pending`; we still suppress `boot_readiness` because the step is not
-  in a failed-evidence state. The lookup is gated on `boot != "succeeded"`, but a concurrent
-  `running` ledger row with a stale `failed` job is not reachable in practice (the recycle resets
-  the job to `queued` before re-claiming the step). Tested at the `step_progress` boundary.
+- **Boot ledger row present and `running`** (attempt actively in flight): the lookup gate is
+  `boot != "succeeded"`, so the boot job is fetched — but during a live attempt that job is
+  itself `running`, not `failed`, so no `boot_readiness` is emitted. Evidence appears only once
+  the job reaches terminal `failed`, at which point the ledger row has been deleted and the boot
+  step reads `pending`. No stale-job hazard: the recycle resets the job to `queued` before it
+  re-claims the step.
 - **`error_category` absent on a `failed` job**: surfaced as `null`. ✅ (5)
 - **Project scoping**: the Run is already project-scoped before the envelope is built; the boot
   job is looked up by `dedup_key` derived from `run_id` for that same Run, so no cross-project

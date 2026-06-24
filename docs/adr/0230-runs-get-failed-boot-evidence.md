@@ -91,9 +91,10 @@ signal. `error_category` is the `ErrorCategory` value the worker recorded, or `n
 - One extra DB round-trip on `runs.get`, **only** for a `SUCCEEDED` Run whose boot has not
   succeeded (a single indexed `SELECT … WHERE dedup_key = …` on the UNIQUE column). A booted Run
   and a non-`SUCCEEDED` Run pay nothing.
-- No MCP request-shape, migration, authz, or dependency change. The fielded `runs.get`
-  outputSchema gains one optional `boot_readiness` object; its committed snapshot is
-  regenerated in this change.
+- No MCP request-shape, migration, authz, or dependency change. `runs.get` advertises the
+  shared generic envelope outputSchema (`ENVELOPE_OUTPUT_SCHEMA`, #565/ADR-0170) where `data` is
+  a free-form object, so the new `data.boot_readiness` key invalidates no committed
+  schema or generated-doc snapshot.
 - `error_category` is an enum value, `job_id` a UUID, `status` a literal — none is guest,
   console, or gdb output, so no redaction applies. (The boot job's `failure_context` *message*
   is **not** surfaced here; only the category. The Run-level failed envelope already owns
