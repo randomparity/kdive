@@ -52,14 +52,22 @@ _PLACEHOLDER_BASE_IMAGE = "REPLACE_ME-base-image-volume"
 
 # Placeholder kernel source for the direct-kernel (build-iterating) lane only. A disk-image
 # provision boots the base image's own kernel and never reads kernel_source_ref (#472), so the
-# disk-image example omits it entirely.
-_PLACEHOLDER_KERNEL_SOURCE = "git:REPLACE_ME-kernel-source"
+# disk-image example omits it entirely. The placeholder is a bare warm-tree *label*, never a
+# URI-looking string (`git:…`/`https://…`): the build checkout dispatches on the structured
+# {"git": {...}} object, so any bare string — including one that looks like a git URI — is
+# silently treated as warm-tree provenance and mirrored from KDIVE_KERNEL_SRC (workspace.py).
+# A git build needs the structured form at runs.create (build-source-staging.md). Mirrors
+# runs.profile_examples' `REPLACE_ME-warm-tree-source` (#763, BB-P3 D5).
+_PLACEHOLDER_KERNEL_SOURCE = "REPLACE_ME-warm-tree-label"
 
 _REPLACE_NOTE = (
     "Example shape only; replace every REPLACE_ME placeholder (any rootfs / base_image_volume "
     "reference, and kernel_source_ref on the direct-kernel examples) with a real value for your "
-    "host before provisioning. The disk-image example needs no kernel_source_ref: it boots the "
-    "operator-staged base image's own kernel."
+    "host before provisioning. kernel_source_ref is a bare warm-tree label, not a scheme-prefixed "
+    'address: a git build needs the structured {"git": {"remote": ..., "ref": ...}} form at '
+    "runs.create — any bare string (even one that looks scheme-prefixed) is treated as a warm-tree "
+    "label. The disk-image example needs no kernel_source_ref: it boots the operator-staged base "
+    "image's own kernel."
 )
 
 # Sizing guidance (#461): the example carries concrete vcpu/memory_mb/disk_gb so it parses alone
