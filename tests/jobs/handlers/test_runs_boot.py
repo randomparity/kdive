@@ -421,6 +421,25 @@ def test_record_expected_crash_degrades_when_system_gone(
     assert result["inert_capture"] == []
 
 
+def test_record_expected_crash_degrades_when_profile_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(_profile: object) -> object:
+        raise CategorizedError("bad profile", category=ErrorCategory.CONFIGURATION_ERROR)
+
+    monkeypatch.setattr(runs_boot.ProvisioningProfile, "parse", staticmethod(_raise))
+    # System present + capture flags provisioned, but the profile fails to parse: the outcome is
+    # still recorded (best-effort disclosure), inert set empty (ADR-0239).
+    result, audits = _record_expected(
+        monkeypatch, gdbstub=True, host_dump=True, kdump=True, system_present=True
+    )
+    assert result is not None
+    assert result["boot_outcome"] == "expected_crash_observed"
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == []
+    assert len(audits) == 1
+
+
 def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
     # ADR-0235: two Runs against one System write distinct, immutable console rows; a same-Run
     # re-boot refreshes that Run's own row rather than inserting a duplicate, so an earlier Run's

@@ -317,6 +317,31 @@ async def _record_crash_halted_live(
     }
 
 
+async def _expected_crash_inert_capture(
+    conn: AsyncConnection,
+    system_id: UUID,
+    profile_policy: ProfilePolicy,
+) -> list[str]:
+    """The inert capture set for an expected crash; ``[]`` on a missing/unparseable profile.
+
+    Best-effort: a torn-down System or a profile that fails to parse yields an empty set so the
+    disclosure never downgrades a correctly-observed expected crash to a failed boot (ADR-0239).
+    """
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        return []
+    try:
+        profile = ProvisioningProfile.parse(system.provisioning_profile)
+    except Exception:
+        _log.warning(
+            "could not parse provisioning profile for system %s; inert capture set omitted",
+            system_id,
+            exc_info=True,
+        )
+        return []
+    return _inert_capture(profile_policy, profile)
+
+
 async def _record_expected_crash(
     conn: AsyncConnection,
     job_ctx: RequestContext,
@@ -329,14 +354,11 @@ async def _record_expected_crash(
 
     The System stays ``READY`` and is routed to the console A/B flow (ADR-0227), so
     ``available_capture`` is ``["console"]``; ``inert_capture`` lists the provisioned-but-
-    unreachable methods (ADR-0239). A missing System row degrades to an empty inert set rather
-    than failing the outcome.
+    unreachable methods (ADR-0239). The inert disclosure is best-effort: a missing or
+    unparseable System profile degrades to an empty inert set rather than failing a
+    correctly-observed expected crash.
     """
-    system = await SYSTEMS.get(conn, system_id)
-    inert: list[str] = []
-    if system is not None:
-        profile = ProvisioningProfile.parse(system.provisioning_profile)
-        inert = _inert_capture(profile_policy, profile)
+    inert = await _expected_crash_inert_capture(conn, system_id, profile_policy)
     await _record_boot_audit(conn, job_ctx, run)
     return {
         "system_id": str(system_id),
