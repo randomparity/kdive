@@ -60,6 +60,20 @@ def _valid() -> dict[str, Any]:
     return copy.deepcopy(_VALID)
 
 
+def test_kernel_source_ref_field_documents_baseline_and_disk_image_exception() -> None:
+    # D6 (#763): kernel_source_ref carries a schema Field(description=...) so the MCP surface
+    # explains *why* a direct-kernel System needs a baseline kernel label and that disk-image omits
+    # it — the rationale must not live only in the model docstring. The validator's terse
+    # "required for boot_method 'direct-kernel'" message is otherwise the only on-wire hint.
+    description = ProvisioningProfile.model_fields["kernel_source_ref"].description
+    assert description is not None
+    lowered = description.lower()
+    assert "direct-kernel" in lowered
+    assert "disk-image" in lowered
+    # It names the baseline-kernel role (reaching ready before Runs iterate kernels).
+    assert "baseline" in lowered
+
+
 def test_valid_libvirt_profile_parses() -> None:
     profile = ProvisioningProfile.parse(_valid())
 

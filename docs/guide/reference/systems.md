@@ -24,7 +24,7 @@ Use `systems.provision` instead when the profile needs no upload window. Operato
 - `memory_mb` (`integer (nullable)`, optional)
 - `disk_gb` (`integer (nullable)`, optional)
 - `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods (ADR-0024 decision 2a, ADR-0080).  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model, ADR-0078); ``direct-kernel`` stays the local-libvirt/fault-inject method.
-- `kernel_source_ref` (`string (nullable)`, optional)
+- `kernel_source_ref` (`string (nullable)`, optional) — Label for the baseline kernel this System is provisioned against. Required for boot_method 'direct-kernel': the System must reach 'ready' on a baseline kernel before its Runs iterate kernels, so the direct-kernel lane needs one named here. A bare warm-tree label (e.g. 'linux-6.9'), not a URL — runs.create takes the structured git source. Omit it for boot_method 'disk-image': that lane boots the operator-staged base image's own kernel and never reads this field (ADR-0078/0080, #472).
 - `provider` (`object`, required) — The provider-specific section, keyed by provider name (ADR-0024 decision 1).  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
   - `local-libvirt` (`object (nullable)`, optional)
     - `domain_xml_params` (`map<string, string>`, optional)
@@ -124,7 +124,7 @@ System. Operator only.
 - `memory_mb` (`integer (nullable)`, optional)
 - `disk_gb` (`integer (nullable)`, optional)
 - `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods (ADR-0024 decision 2a, ADR-0080).  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model, ADR-0078); ``direct-kernel`` stays the local-libvirt/fault-inject method.
-- `kernel_source_ref` (`string (nullable)`, optional)
+- `kernel_source_ref` (`string (nullable)`, optional) — Label for the baseline kernel this System is provisioned against. Required for boot_method 'direct-kernel': the System must reach 'ready' on a baseline kernel before its Runs iterate kernels, so the direct-kernel lane needs one named here. A bare warm-tree label (e.g. 'linux-6.9'), not a URL — runs.create takes the structured git source. Omit it for boot_method 'disk-image': that lane boots the operator-staged base image's own kernel and never reads this field (ADR-0078/0080, #472).
 - `provider` (`object`, required) — The provider-specific section, keyed by provider name (ADR-0024 decision 1).  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
   - `local-libvirt` (`object (nullable)`, optional)
     - `domain_xml_params` (`map<string, string>`, optional)
@@ -199,7 +199,7 @@ use `systems.provision` instead. Requires operator and opt-in.
 - `memory_mb` (`integer (nullable)`, optional)
 - `disk_gb` (`integer (nullable)`, optional)
 - `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods (ADR-0024 decision 2a, ADR-0080).  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model, ADR-0078); ``direct-kernel`` stays the local-libvirt/fault-inject method.
-- `kernel_source_ref` (`string (nullable)`, optional)
+- `kernel_source_ref` (`string (nullable)`, optional) — Label for the baseline kernel this System is provisioned against. Required for boot_method 'direct-kernel': the System must reach 'ready' on a baseline kernel before its Runs iterate kernels, so the direct-kernel lane needs one named here. A bare warm-tree label (e.g. 'linux-6.9'), not a URL — runs.create takes the structured git source. Omit it for boot_method 'disk-image': that lane boots the operator-staged base image's own kernel and never reads this field (ADR-0078/0080, #472).
 - `provider` (`object`, required) — The provider-specific section, keyed by provider name (ADR-0024 decision 1).  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
   - `local-libvirt` (`object (nullable)`, optional)
     - `domain_xml_params` (`map<string, string>`, optional)
