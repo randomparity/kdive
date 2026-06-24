@@ -46,17 +46,18 @@
 
 ---
 
-### Task 1: Port surface — `LiveScriptOutput`, `run_script`, `live-script` mode
+### Task 1: Port surface — `LiveScriptOutput` type + `live-script` mode (no Protocol method yet)
+
+> **Ordering note:** the `run_script` method is added to the `LiveIntrospector` **Protocol** only at the end of Task 7, after both concrete realizations (Tasks 6, 7) already have it. Adding it to the Protocol earlier would break whole-tree `just type`, because `composition.py:113,292` assign the local/remote concrete introspectors into the Protocol-typed `ProviderRuntime.live_introspector` field — ty would reject them the moment the Protocol declares a method they lack. Concrete classes may carry `run_script` without the Protocol declaring it (structural subtyping allows extra methods), so Tasks 6/7 stay green; the Protocol declaration + fault-inject stub land together once all implementers exist.
 
 **Files:**
 - Modify: `src/kdive/providers/ports/lifecycle.py:31-32`
-- Modify: `src/kdive/providers/ports/retrieve.py:31-101`
+- Modify: `src/kdive/providers/ports/retrieve.py:31-36` (add `LiveScriptOutput` only)
 - Modify: `src/kdive/providers/ports/__init__.py` (exports)
-- Modify: `src/kdive/providers/fault_inject/debug/introspect.py`
-- Test: `tests/providers/ports/test_introspection_modes.py` (create), `tests/providers/fault_inject/debug/test_introspect.py` (extend or create)
+- Test: `tests/providers/ports/test_introspection_modes.py` (create)
 
 **Interfaces:**
-- Produces: `IntrospectionMode` now includes `"live-script"`; `INTROSPECTION_MODES` includes it. `LiveScriptOutput(output: str, truncated: bool)` (NamedTuple). `LiveIntrospector.run_script(*, transport_handle: str, script: str, timeout_sec: float) -> LiveScriptOutput`.
+- Produces: `IntrospectionMode` now includes `"live-script"`; `INTROSPECTION_MODES` includes it. `LiveScriptOutput(output: str, truncated: bool)` (NamedTuple), exported from `kdive.providers.ports`. The `LiveIntrospector.run_script` **Protocol method is NOT added here** — see the ordering note (it lands in Task 7).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -85,7 +86,7 @@ INTROSPECTION_MODES: frozenset[IntrospectionMode] = frozenset(
 )
 ```
 
-- [ ] **Step 4: Add the port type + method**
+- [ ] **Step 4: Add the `LiveScriptOutput` type only (no Protocol method)**
 
 ```python
 # src/kdive/providers/ports/retrieve.py  (near IntrospectOutput)
@@ -94,69 +95,19 @@ class LiveScriptOutput(NamedTuple):
     truncated: bool
 ```
 
-Extend the `LiveIntrospector` Protocol:
+Do **not** add `run_script` to the `LiveIntrospector` Protocol yet (ordering note above). Export the type from `src/kdive/providers/ports/__init__.py` (add `LiveScriptOutput` to the `from .retrieve import (...)` block and to `__all__`).
 
-```python
-class LiveIntrospector(Protocol):
-    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
-        ...
+- [ ] **Step 5: Run test + ty — expect PASS**
 
-    def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
-    ) -> LiveScriptOutput:
-        """Run a caller-supplied drgn script in-guest; return its byte-capped stdout.
+Run: `uv run python -m pytest tests/providers/ports/test_introspection_modes.py -q && just type`
+Expected: PASS; ty clean — a new mode literal value plus a new NamedTuple oblige no implementer, so whole-tree ty stays green.
 
-        Raises:
-            CategorizedError: ``CONFIGURATION_ERROR`` for a malformed handle or an
-                over-cap script, ``MISSING_DEPENDENCY`` off the ``live_vm`` gate,
-                ``TRANSPORT_FAILURE`` for an unreachable transport/timeout, or
-                ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest drgn exit.
-        """
-        ...
-```
-
-Export it from `src/kdive/providers/ports/__init__.py` (add `LiveScriptOutput` to the `from .retrieve import (...)` block and to `__all__`).
-
-- [ ] **Step 5: Satisfy the Protocol in fault-inject (synthetic, never admitted)**
-
-```python
-# src/kdive/providers/fault_inject/debug/introspect.py
-from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
-
-class FaultInjectIntrospect:
-    ...
-    def run_script(
-        self, *, transport_handle: str, script: str, timeout_sec: float
-    ) -> LiveScriptOutput:
-        # fault-inject does not advertise the "live-script" mode, so the descriptor
-        # gate rejects before this is reached; the synthetic body only satisfies the port.
-        return LiveScriptOutput(output="", truncated=False)
-```
-
-Add a fault-inject test asserting the synthetic shape:
-
-```python
-# tests/providers/fault_inject/debug/test_introspect.py
-from kdive.providers.fault_inject.debug.introspect import FaultInjectIntrospect
-
-
-def test_run_script_returns_synthetic_output():
-    out = FaultInjectIntrospect().run_script(transport_handle="x", script="print(1)", timeout_sec=5.0)
-    assert out.output == "" and out.truncated is False
-```
-
-- [ ] **Step 6: Run tests + ty — expect PASS**
-
-Run: `uv run python -m pytest tests/providers/ports/test_introspection_modes.py tests/providers/fault_inject/debug/test_introspect.py -q && just type`
-Expected: PASS; ty clean (the new Protocol method is satisfied by all three realizations once Tasks 6–7 land — fault-inject satisfies it now; local/remote are added later, so run `just type` again at the end of Task 7).
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/kdive/providers/ports/lifecycle.py src/kdive/providers/ports/retrieve.py \
-        src/kdive/providers/ports/__init__.py src/kdive/providers/fault_inject/debug/introspect.py \
-        tests/providers/ports/test_introspection_modes.py tests/providers/fault_inject/debug/test_introspect.py
-git commit -m "feat(introspect): add live-script mode + LiveIntrospector.run_script port"
+        src/kdive/providers/ports/__init__.py tests/providers/ports/test_introspection_modes.py
+git commit -m "feat(introspect): add live-script mode + LiveScriptOutput type"
 ```
 
 ---
@@ -312,26 +263,42 @@ git commit -m "feat(introspect): add assemble_script_output redact+byte-cap help
 
 - [ ] **Step 1: Write the failing test**
 
-```python
-# tests/providers/remote_libvirt/guest/test_agent.py  (add; reuse the suite's fake agent_command + domain)
-import base64, json
+First grep the module for its existing domain/agent fakes (`rg -n 'class _Fake|def.*agent_command|GuestDomain' tests/providers/remote_libvirt/guest/test_agent.py`) and reuse them; the snippet below is fully self-contained so it runs even if none match:
 
-def test_run_passes_input_data_as_base64(fake_agent):  # fake_agent: existing fixture pattern
-    captured = {}
+```python
+# tests/providers/remote_libvirt/guest/test_agent.py  (add)
+import base64
+import json
+
+from kdive.providers.remote_libvirt.guest.agent import GuestAgentExec
+
+
+class _Dom:
+    def name(self) -> str:
+        return "dom"
+
+
+def test_run_passes_input_data_as_base64():
+    captured: dict[str, object] = {}
+
     def agent_command(domain, command, timeout, flags):
         msg = json.loads(command)
         if msg["execute"] == "guest-exec":
             captured["args"] = msg["arguments"]
             return {"return": {"pid": 7}}
         return {"return": {"exited": True, "exitcode": 0, "out-data": "", "err-data": ""}}
-    exec_ = GuestAgentExec(agent_command=agent_command,
-                           allowed_programs=frozenset({"/usr/local/sbin/kdive-drgn"}))
-    exec_.run(_FakeDomain("dom"), ["/usr/local/sbin/kdive-drgn", "run-script", "30"],
-              input_data="print(1)\n")
+
+    exec_ = GuestAgentExec(
+        agent_command=agent_command,
+        allowed_programs=frozenset({"/usr/local/sbin/kdive-drgn"}),
+    )
+    exec_.run(
+        _Dom(),
+        ["/usr/local/sbin/kdive-drgn", "run-script", "30"],
+        input_data="print(1)\n",
+    )
     assert captured["args"]["input-data"] == base64.b64encode(b"print(1)\n").decode("ascii")
 ```
-
-(Adapt `_FakeDomain` / fixtures to the existing test module's helpers.)
 
 - [ ] **Step 2: Run — expect FAIL** (`run() got an unexpected keyword argument 'input_data'`).
 
@@ -576,15 +543,72 @@ def run_script(self, *, transport_handle: str, script: str, timeout_sec: float) 
 
 Thread `input_data` through `_exec` to `agent.run(domain, argv, input_data=input_data)`.
 
-- [ ] **Step 4: Run — expect PASS** + ty (now all three `LiveIntrospector` realizations have `run_script`).
+- [ ] **Step 4: Run — expect PASS** (concrete method; the Protocol does not yet declare it, so ty is still green).
 
-Run: `uv run python -m pytest tests/providers/remote_libvirt/debug/test_introspect.py -q -k run_script && just type`
+Run: `uv run python -m pytest tests/providers/remote_libvirt/debug/test_introspect.py -q -k run_script`
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Now declare the Protocol method + fault-inject stub (all implementers exist)**
+
+All three concrete classes (`LocalLibvirtLiveIntrospect` Task 6, `RemoteLibvirtLiveIntrospect` Task 7, plus the fault-inject stub below) now have `run_script`, so adding it to the Protocol keeps whole-tree ty green.
+
+```python
+# src/kdive/providers/ports/retrieve.py — extend the LiveIntrospector Protocol
+class LiveIntrospector(Protocol):
+    def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
+        ...
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        """Run a caller-supplied drgn script in-guest; return its byte-capped stdout.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for a malformed handle or an
+                over-cap script, ``MISSING_DEPENDENCY`` off the ``live_vm`` gate,
+                ``TRANSPORT_FAILURE`` for an unreachable transport/timeout, or
+                ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest drgn exit.
+        """
+        ...
+```
+
+```python
+# src/kdive/providers/fault_inject/debug/introspect.py — synthetic, never admitted
+from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
+
+class FaultInjectIntrospect:
+    ...
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        # fault-inject does not advertise "live-script", so the descriptor gate rejects
+        # before this is reached; the synthetic body only satisfies the port for ty.
+        return LiveScriptOutput(output="", truncated=False)
+```
+
+Add a fault-inject test:
+
+```python
+# tests/providers/fault_inject/debug/test_introspect.py
+from kdive.providers.fault_inject.debug.introspect import FaultInjectIntrospect
+
+
+def test_run_script_returns_synthetic_output():
+    out = FaultInjectIntrospect().run_script(transport_handle="x", script="print(1)", timeout_sec=5.0)
+    assert out.output == "" and out.truncated is False
+```
+
+- [ ] **Step 6: Run — expect PASS + whole-tree ty green**
+
+Run: `uv run python -m pytest tests/providers/remote_libvirt/debug/test_introspect.py tests/providers/fault_inject/debug/test_introspect.py -q -k 'run_script or synthetic' && just type`
+Expected: PASS; ty clean now that the Protocol method has all three implementers.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/kdive/providers/remote_libvirt/debug/introspect.py tests/providers/remote_libvirt/debug/test_introspect.py
-git commit -m "feat(remote): realize LiveIntrospector.run_script over guest-agent stdin"
+git add src/kdive/providers/remote_libvirt/debug/introspect.py src/kdive/providers/ports/retrieve.py \
+        src/kdive/providers/fault_inject/debug/introspect.py \
+        tests/providers/remote_libvirt/debug/test_introspect.py tests/providers/fault_inject/debug/test_introspect.py
+git commit -m "feat(remote): run_script over guest-agent stdin; declare port method"
 ```
 
 ---
@@ -673,10 +697,28 @@ async def test_introspect_script_clamps_timeout_to_ceiling(monkeypatch, ...):
     assert captured["timeout"] == 600.0
 
 
-async def test_introspect_script_unsupported_mode_is_capability_unsupported(...):
-    # runtime descriptor lacks "live-script" -> configuration_error / capability_unsupported
-    ...
+def test_require_introspection_rejects_when_live_script_unadvertised():
+    # The descriptor gate (_require_introspection, reused from introspect.run) is the admission
+    # control. Test it directly: a runtime whose supported_introspection omits "live-script"
+    # must return a capability_unsupported configuration_error, no port touched.
+    from kdive.mcp.tools.debug.introspect import _LIVE_SCRIPT, _require_introspection
+
+    class _Runtime:  # minimal ProviderRuntime stand-in for the gate's two reads
+        supported_introspection = frozenset({"offline-vmcore", "live"})  # no live-script
+
+        class component_sources:  # noqa: N801 - nested literal for the gate's provider read
+            provider = "local-libvirt"
+
+    denied = _require_introspection("sess-1", _Runtime(), _LIVE_SCRIPT)
+    assert denied is not None
+    assert denied.error_category is ErrorCategory.CONFIGURATION_ERROR
+    assert denied.structured_content["data"]["capability"] == "introspection:live-script"
 ```
+
+(`_require_introspection` reads only `runtime.supported_introspection` and
+`runtime.component_sources.provider`, so the stand-in above is sufficient; assert the exact
+`capability` field shape the existing `introspect.run` admission test asserts — grep
+`tests/mcp/test_introspect_tools.py` for `capability_unsupported` and mirror it.)
 
 - [ ] **Step 2: Run — expect FAIL**.
 
@@ -806,3 +848,4 @@ git commit -m "test(introspect): live_vm proof for introspect.script; promote to
 - **Spec coverage:** surface (Task 9), in-guest stdin mode + allowlist preservation (Tasks 4, 5, 7), stateless/one-shot (Task 5–7 seams), timeout clamp floor+ceiling (Tasks 2, 9), unserialized concurrency (no lock added — Task 9 mirrors `introspect_run`), redaction+byte-cap of output (Task 3), descriptor admission `live-script` (Tasks 1, 8, 9), error contracts (Tasks 6, 7, 9), `mutating`/`contributor` (Task 9 + exposure), no migration/schema change (free-form `data.output`, Task 9), live proof + maturity (Task 10). #781 (offline fetchability) is explicitly out of scope.
 - **Placeholder scan:** none — every code step shows the code; adapt-to-existing-fixtures notes point at named existing tests.
 - **Type consistency:** `LiveScriptOutput(output, truncated)`, `run_script(*, transport_handle, script, timeout_sec)`, `assemble_script_output(stdout, *, byte_cap, secret_registry)`, `_clamp_timeout(requested) -> float`, mode literal `"live-script"` are used identically across Tasks 1–10.
+- **Commit-by-commit ty:** the `LiveIntrospector.run_script` Protocol method is declared only at Task 7 Step 5, after the local (Task 6) and remote (Task 7) concrete methods and the fault-inject stub all exist — so no commit lands with a red whole-tree `just type`. Task 1 ships only the `LiveScriptOutput` type + the `live-script` mode value, which oblige no implementer.
