@@ -33,6 +33,9 @@ Attach a ready system to an unbound run before install.
 
 Boot an installed run.
 
+The kernel cmdline is fixed at build time; append extra debug args (e.g.
+`dhash_entries=1`) via `runs.build.cmdline` (bound on the Run's first build), not here.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
@@ -86,7 +89,7 @@ Create a run, bound to a system or unbound against a target_kind.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `build_profile` | object(source=server) \| object(source=external) | yes | Build profile for the Run's kernel. source='server' builds from a kernel tree (kernel_source_ref required); source='external' ingests a prebuilt artifact. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. See resource://kdive/docs/operating/build-source-staging.md for staging the source. |
+| `build_profile` | object(source=server) \| object(source=external) | yes | Build profile for the Run's kernel. source='server' builds from a kernel tree (kernel_source_ref required); source='external' ingests a prebuilt artifact. The optional 'config' is a catalog ComponentRef (e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: append them via runs.build.cmdline (bound on the first build). See resource://kdive/docs/operating/build-source-staging.md for staging the source. |
 | `expected_boot_failure` | object(free-form) (nullable) | no | Optional expected boot failure, e.g. {'kind':'console_crash','pattern':'Oops'}. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `investigation_id` | string | yes | Investigation to attach the Run to. |
@@ -180,6 +183,9 @@ _external lane (ingest a prebuilt artifact):_
 `implemented` · `read-only`
 
 Return one run; `succeeded` means build done. `data.steps` has install/boot status.
+
+`data.required_cmdline` is the platform-required boot args; append extra kernel debug
+args (e.g. `dhash_entries=1`) via `runs.build.cmdline` (bound on the Run's first build).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
