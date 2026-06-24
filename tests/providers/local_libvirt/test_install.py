@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import os
 import subprocess
+import tarfile
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +19,6 @@ from kdive.artifacts.storage import FetchedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.providers.local_libvirt.build import _local_modules_bundle
 from kdive.providers.local_libvirt.lifecycle import install
 from kdive.providers.local_libvirt.lifecycle.install import (
     ConsoleVerdict,
@@ -35,7 +36,6 @@ from kdive.providers.local_libvirt.lifecycle.install import (
     classify_console,
 )
 from kdive.providers.ports import InstallRequest
-from kdive.providers.shared.build_host.publishing.artifact_publish import ArtifactBytes
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
@@ -43,19 +43,54 @@ _RUN = UUID("22222222-2222-2222-2222-222222222222")
 _KERNEL_REF = "local/runs/22222222-2222-2222-2222-222222222222/kernel"
 _INITRD_REF = "local/runs/22222222-2222-2222-2222-222222222222/initrd"
 _CMDLINE = "console=ttyS0 crashkernel=256M"
+_MODULES_VERSION = "6.9.0"
+
+
+def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    tar.addfile(info, io.BytesIO(data))
+
+
+def _combined_kernel_tar_bytes(
+    *, with_modules: bool = True, version: str = _MODULES_VERSION
+) -> bytes:
+    """The unified `kernel` artifact: gzip tar of boot/vmlinuz + (optionally) lib/modules/<ver>/."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, "boot/vmlinuz", b"bzImage-bytes")
+        if with_modules:
+            _tar_add(tar, f"lib/modules/{version}/modules.dep", b"")
+            _tar_add(tar, f"lib/modules/{version}/kernel/drivers/virtio_blk.ko", b"module-bytes")
+    return buf.getvalue()
+
+
+def _modules_only_tar_bytes(version: str) -> bytes:
+    """A lib/modules/<ver>/ tar in the build layout (the injector's _read_release input)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _tar_add(tar, f"lib/modules/{version}/kernel/foo.ko", b"\x7fELF stub")
+        _tar_add(tar, f"lib/modules/{version}/modules.order", b"kernel/foo.ko\n")
+    return buf.getvalue()
 
 
 @dataclass
 class _Fetch:
-    """Records (kernel_ref/marker, dest) and writes canned bytes via temp-then-rename."""
+    """Records (ref, dest); writes a combined kernel tar via temp-then-rename.
+
+    The kernel fetch must produce the unified combined tar so install's host-side
+    ``extract_boot_vmlinuz``/``repack_modules_subtree`` succeed. ``with_modules=False`` writes a
+    tar with only ``boot/vmlinuz`` (no ``lib/modules/``) to exercise the modules-absent path.
+    """
 
     calls: list[tuple[str, Path]] = field(default_factory=list)
     fail: bool = False
+    with_modules: bool = True
 
     def __call__(self, ref: str, dest: Path) -> None:
         self.calls.append((ref, dest))
         tmp = dest.with_suffix(dest.suffix + ".part")
-        tmp.write_bytes(b"canned")
+        tmp.write_bytes(_combined_kernel_tar_bytes(with_modules=self.with_modules))
         if self.fail:
             raise CategorizedError("synthetic fetch failure", category=ErrorCategory.STALE_HANDLE)
         tmp.rename(dest)
@@ -173,7 +208,6 @@ def _request(
     cmdline: str = _CMDLINE,
     method: CaptureMethod = CaptureMethod.HOST_DUMP,
     initrd_ref: str | None = None,
-    modules_ref: str | None = None,
     debuginfo_ref: str | None = None,
 ) -> InstallRequest:
     return InstallRequest(
@@ -183,7 +217,6 @@ def _request(
         cmdline=cmdline,
         method=method,
         initrd_ref=initrd_ref,
-        modules_ref=modules_ref,
         debuginfo_ref=debuginfo_ref,
     )
 
@@ -295,21 +328,24 @@ def test_install_preserves_the_ssh_forward_qemu_commandline(tmp_path: Path) -> N
 # --- install: kdump prerequisite -----------------------------------------------------
 
 
-def test_install_kdump_without_initrd_is_config_error_before_redefine(tmp_path: Path) -> None:
-    # method=KDUMP with no initrd_ref: the capture initramfs is absent → CONFIGURATION_ERROR,
-    # nothing redefined (the crashkernel reservation is inert without a capture initrd).
+def test_install_kdump_without_modules_or_initrd_is_config_error_before_redefine(
+    tmp_path: Path,
+) -> None:
+    # method=KDUMP whose combined kernel tar carries no lib/modules and with no initrd_ref: the
+    # capture environment is absent → CONFIGURATION_ERROR, nothing redefined.
     conn = _conn_with_existing()
-    inst = _install(conn=conn, staging_root=tmp_path)
+    inst = _install(conn=conn, fetch=_Fetch(with_modules=False), staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
         inst.install(_request(method=CaptureMethod.KDUMP))
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert conn.defined_xml == []  # nothing redefined on a missing capture path
 
 
-def test_install_kdump_with_initrd_proceeds(tmp_path: Path) -> None:
-    # method=KDUMP with a staged initrd present: install proceeds and redefines once.
+def test_install_kdump_with_initrd_but_no_modules_proceeds(tmp_path: Path) -> None:
+    # method=KDUMP whose combined tar has no lib/modules but a staged initrd present: the initrd
+    # supplies the capture environment, so install proceeds and redefines once without injecting.
     conn = _conn_with_existing()
-    inst = _install(conn=conn, staging_root=tmp_path)
+    inst = _install(conn=conn, fetch=_Fetch(with_modules=False), staging_root=tmp_path)
     inst.install(_request(method=CaptureMethod.KDUMP, initrd_ref=_INITRD_REF))
     assert len(conn.defined_xml) == 1  # redefined once, no CONFIGURATION_ERROR raised
 
@@ -317,39 +353,45 @@ def test_install_kdump_with_initrd_proceeds(tmp_path: Path) -> None:
 # --- install: module injection (from-source kdump lane) ------------------------------
 
 
-def test_install_kdump_with_modules_ref_injects_and_no_initrd_rendered(tmp_path: Path) -> None:
+def test_install_kdump_injects_modules_from_combined_tar_and_no_initrd_rendered(
+    tmp_path: Path,
+) -> None:
+    # A kdump boot extracts boot/vmlinuz for the <kernel> element and injects the combined tar's
+    # lib/modules subtree (repacked host-side) — no separate modules artifact, no separate fetch.
     events: list[str] = []
     conn = _conn_with_existing(events=events)  # its domain is active
     writer = _FakeKernelWriter(events)
     fetch = _RecordingFetch(events)
     inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
 
-    inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
+    inst.install(_request(method=CaptureMethod.KDUMP))
 
     assert writer.injected
-    assert fetch.refs == ["runs/r/modules"]  # the modules tarball was fetched
-    # The writer is handed the per-Run staged kernel image (already fetched for the <kernel>
-    # element) so it can also stage /boot/vmlinuz-<ver> in-guest (ADR-0207).
+    assert fetch.refs == []  # no separate modules fetch; modules come from the combined kernel tar
+    # The writer is handed the per-Run staged kernel image (boot/vmlinuz extracted from the tar)
+    # so it can also stage /boot/vmlinuz-<ver> in-guest (ADR-0207), and the repacked modules tar.
     assert writer.kernel_image == tmp_path / str(_SYS) / str(_RUN) / "kernel"
     assert writer.kernel_image is not None and writer.kernel_image.exists()
-    # force-off precedes the fetch which precedes the inject.
-    assert events.index("destroy") < events.index("fetch") < events.index("inject")
+    assert writer.modules_tar == tmp_path / str(_SYS) / str(_RUN) / "modules.tar.gz"
+    assert writer.modules_tar is not None and writer.modules_tar.exists()
+    # force-off precedes the inject (no debuginfo fetch here).
+    assert events.index("destroy") < events.index("inject")
+    assert "fetch" not in events
     assert len(conn.defined_xml) == 1
     assert "<initrd>" not in conn.defined_xml[0]  # production boot has no separate initrd
 
 
-def test_install_non_kdump_with_modules_ref_does_not_force_off_or_inject(tmp_path: Path) -> None:
-    # Module injection (force-off + rw libguestfs mount) is gated on the KDUMP capture method OR
-    # a debuginfo_ref being present (ADR-0221). A console/gdbstub build carries a modules_ref (the
-    # kdump config is the default) but no debuginfo_ref here, so its install must not force-off the
-    # domain, fetch modules, or require libguestfs.
+def test_install_non_kdump_without_debuginfo_does_not_force_off_or_inject(tmp_path: Path) -> None:
+    # Module injection (force-off + rw libguestfs mount) is gated on the KDUMP capture method OR a
+    # debuginfo_ref (ADR-0221). A console/gdbstub build with no debuginfo_ref does not inject even
+    # though its combined kernel tar carries lib/modules.
     events: list[str] = []
     conn = _conn_with_existing(events=events)  # its domain is active
     writer = _FakeKernelWriter(events)
     fetch = _RecordingFetch(events)
     inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
 
-    inst.install(_request(method=CaptureMethod.CONSOLE, modules_ref="runs/r/modules"))
+    inst.install(_request(method=CaptureMethod.CONSOLE))
 
     assert events == []  # no destroy, no fetch, no inject
     assert not writer.injected
@@ -358,50 +400,42 @@ def test_install_non_kdump_with_modules_ref_does_not_force_off_or_inject(tmp_pat
 
 
 def test_install_kdump_with_debuginfo_fetches_and_stages_vmlinux(tmp_path: Path) -> None:
-    # A from-source kdump build with a debuginfo_ref (the DWARF vmlinux) stages it in-guest for
-    # live drgn, riding the same rw injection session as the modules (ADR-0221).
+    # A kdump build with a debuginfo_ref (the DWARF vmlinux) stages it in-guest for live drgn,
+    # riding the same rw injection session as the combined tar's modules (ADR-0221).
     events: list[str] = []
     conn = _conn_with_existing(events=events)
     writer = _FakeKernelWriter(events)
     fetch = _RecordingFetch(events)
     inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
 
-    inst.install(
-        _request(
-            method=CaptureMethod.KDUMP, modules_ref="runs/r/modules", debuginfo_ref="runs/r/vmlinux"
-        )
-    )
+    inst.install(_request(method=CaptureMethod.KDUMP, debuginfo_ref="runs/r/vmlinux"))
 
     assert writer.injected
-    assert fetch.refs == ["runs/r/modules", "runs/r/vmlinux"]  # modules then the DWARF vmlinux
+    assert fetch.refs == ["runs/r/vmlinux"]  # only the DWARF vmlinux is fetched, not modules
     assert writer.vmlinux == tmp_path / str(_SYS) / str(_RUN) / "vmlinux"
+    # force-off precedes the debuginfo fetch which precedes the inject.
+    assert events.index("destroy") < events.index("fetch") < events.index("inject")
 
 
 def test_install_host_dump_with_debuginfo_injects_vmlinux(tmp_path: Path) -> None:
-    # The vmlinux trigger is independent of the capture method: a non-kdump System that carries
-    # both a modules_ref and a debuginfo_ref still injects, so drgn-live works without kdump.
+    # The vmlinux trigger is independent of the capture method: a non-kdump System with a
+    # debuginfo_ref still injects (modules from the combined tar + the DWARF vmlinux), so drgn-live
+    # works without kdump.
     events: list[str] = []
     conn = _conn_with_existing(events=events)
     writer = _FakeKernelWriter(events)
     fetch = _RecordingFetch(events)
     inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
 
-    inst.install(
-        _request(
-            method=CaptureMethod.HOST_DUMP,
-            modules_ref="runs/r/modules",
-            debuginfo_ref="runs/r/vmlinux",
-        )
-    )
+    inst.install(_request(method=CaptureMethod.HOST_DUMP, debuginfo_ref="runs/r/vmlinux"))
 
     assert writer.injected
-    assert fetch.refs == ["runs/r/modules", "runs/r/vmlinux"]
+    assert fetch.refs == ["runs/r/vmlinux"]
     assert writer.vmlinux == tmp_path / str(_SYS) / str(_RUN) / "vmlinux"
 
 
 def test_install_kdump_without_debuginfo_passes_no_vmlinux(tmp_path: Path) -> None:
-    # The kdump path with no debuginfo_ref injects modules + kernel exactly as before, handing
-    # the writer no vmlinux (the existing behavior is preserved unchanged).
+    # The kdump path with no debuginfo_ref injects modules + kernel, handing the writer no vmlinux.
     events: list[str] = []
     conn = _conn_with_existing(events=events)
     writer = _FakeKernelWriter(events)
@@ -412,21 +446,21 @@ def test_install_kdump_without_debuginfo_passes_no_vmlinux(tmp_path: Path) -> No
         fetch_modules=_RecordingFetch(events),
     )
 
-    inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
+    inst.install(_request(method=CaptureMethod.KDUMP))
 
     assert writer.injected
     assert writer.vmlinux is None
 
 
 def test_install_host_dump_without_debuginfo_does_not_inject(tmp_path: Path) -> None:
-    # A non-kdump System with modules but no debuginfo_ref triggers neither force-off nor inject.
+    # A non-kdump System with no debuginfo_ref triggers neither force-off nor inject.
     events: list[str] = []
     conn = _conn_with_existing(events=events)
     writer = _FakeKernelWriter(events)
     fetch = _RecordingFetch(events)
     inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
 
-    inst.install(_request(method=CaptureMethod.HOST_DUMP, modules_ref="runs/r/modules"))
+    inst.install(_request(method=CaptureMethod.HOST_DUMP))
 
     assert events == []
     assert not writer.injected
@@ -451,7 +485,7 @@ def test_verify_vmlinux_size_accepts_non_empty_upload() -> None:
     _verify_vmlinux_size(1, "ov", "/usr/lib/debug/lib/modules/7.0.0/vmlinux")
 
 
-def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails(
+def test_install_kdump_force_off_precedes_mount_even_if_inject_fails(
     tmp_path: Path,
 ) -> None:
     # The corruption guard must fire before the writer touches the overlay, regardless of outcome.
@@ -466,39 +500,35 @@ def test_install_kdump_modules_ref_force_off_precedes_mount_even_if_inject_fails
     )
 
     with pytest.raises(CategorizedError) as caught:
-        inst.install(_request(method=CaptureMethod.KDUMP, modules_ref="runs/r/modules"))
+        inst.install(_request(method=CaptureMethod.KDUMP))
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert events[0] == "destroy"  # force-off happened before the failed inject
     assert conn.defined_xml == []  # nothing redefined
 
 
-def test_install_kdump_with_neither_modules_nor_initrd_is_config_error(tmp_path: Path) -> None:
+def test_install_kdump_no_writer_is_missing_dependency(tmp_path: Path) -> None:
+    # A kdump boot whose combined tar carries modules must inject them; without a configured
+    # GuestKernelWriter that surfaces as MISSING_DEPENDENCY (not a silent skip).
     conn = _conn_with_existing()
-    inst = _install(conn=conn, staging_root=tmp_path)
+    inst = _install(conn=conn, staging_root=tmp_path)  # no kernel_writer
     with pytest.raises(CategorizedError) as caught:
         inst.install(_request(method=CaptureMethod.KDUMP))
-    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert conn.defined_xml == []
 
 
-def test_modules_bundle_read_release_matches_build_layout(tmp_path: Path) -> None:
-    # The build seam tars members as ``lib/modules/<ver>/...``; _read_release must recover
-    # ``<ver>`` from that exact layout (the build↔install bundle contract, #654). A regression
-    # here is the double-nesting / depmod-"lib" bug the live path would otherwise hit.
+def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path) -> None:
+    # repack_modules_subtree writes members as ``lib/modules/<ver>/...``; _read_release must
+    # recover ``<ver>`` from that exact layout (the build↔install bundle contract, #654). A
+    # regression here is the double-nesting / depmod-"lib" bug the live path would otherwise hit.
     version = "7.0.0-kdive"
-    mod_root = tmp_path / "modroot"
-    ver_dir = mod_root / "lib" / "modules" / version
-    (ver_dir / "kernel").mkdir(parents=True)
-    (ver_dir / "kernel" / "foo.ko").write_bytes(b"\x7fELF stub")
-    (ver_dir / "modules.order").write_bytes(b"kernel/foo.ko\n")
+    combined = tmp_path / "kernel.tar.gz"
+    combined.write_bytes(_combined_kernel_tar_bytes(version=version))
+    modules_tar = tmp_path / "modules.tar.gz"
+    assert install.repack_modules_subtree(combined, modules_tar)
 
-    bundle = _local_modules_bundle(tmp_path / "workspace", mod_root)
-    assert isinstance(bundle, ArtifactBytes)  # the worker-local seam holds the bytes in memory
-    tar_path = tmp_path / "modules.tar.gz"
-    tar_path.write_bytes(bundle.data)
-
-    assert _RealGuestKernelWriter._read_release(tar_path, "ov") == version
+    assert _RealGuestKernelWriter._read_release(modules_tar, "ov") == version
 
 
 # --- install: kernel staging into the guest /boot (ADR-0207) -------------------------
@@ -515,14 +545,8 @@ def test_kernel_dest_composes_with_read_release(tmp_path: Path) -> None:
     # version source for /lib/modules/<ver> and /boot/vmlinuz-<ver>. Feed a build-layout tarball
     # through _read_release, then _kernel_dest, and assert the full destination path.
     version = "7.0.0-kdive"
-    mod_root = tmp_path / "modroot"
-    ver_dir = mod_root / "lib" / "modules" / version
-    (ver_dir / "kernel").mkdir(parents=True)
-    (ver_dir / "modules.order").write_bytes(b"kernel/foo.ko\n")
-    bundle = _local_modules_bundle(tmp_path / "workspace", mod_root)
-    assert isinstance(bundle, ArtifactBytes)
     tar_path = tmp_path / "modules.tar.gz"
-    tar_path.write_bytes(bundle.data)
+    tar_path.write_bytes(_modules_only_tar_bytes(version))
 
     recovered = _RealGuestKernelWriter._read_release(tar_path, "ov")
     assert _kernel_dest(recovered) == f"/boot/vmlinuz-{version}"
@@ -705,10 +729,13 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
     def _initrd_must_not_run(_ref: str, _dest: Path) -> None:
         raise AssertionError("initrd fetched when no initrd_ref given")
 
+    def _fetch_combined(_ref: str, dest: Path) -> None:
+        dest.write_bytes(_combined_kernel_tar_bytes())
+
     conn = _conn_with_existing()
     installer = LocalLibvirtInstall(
         connect=lambda: conn,
-        fetch_kernel=lambda _ref, _dest: None,
+        fetch_kernel=_fetch_combined,
         fetch_initrd=_initrd_must_not_run,
         readiness=lambda _sid: ReadinessResult(answered=True, ok=True),
         staging_root=tmp_path,

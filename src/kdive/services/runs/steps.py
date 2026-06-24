@@ -49,7 +49,6 @@ class BuildStepResult:
     debuginfo_ref: str | None
     build_id: str | None
     initrd_ref: str | None = None
-    modules_ref: str | None = None
     cmdline: str | None = None
 
     @classmethod
@@ -62,7 +61,6 @@ class BuildStepResult:
             debuginfo_ref=_optional_str(result.get("debuginfo_ref")),
             build_id=_optional_str(result.get("build_id")),
             initrd_ref=_optional_str(result.get("initrd_ref")),
-            modules_ref=_optional_str(result.get("modules_ref")),
             cmdline=_optional_str(result.get("cmdline")),
         )
 
@@ -74,8 +72,6 @@ class BuildStepResult:
             result["debuginfo_ref"] = self.debuginfo_ref
         if self.initrd_ref is not None:
             result["initrd_ref"] = self.initrd_ref
-        if self.modules_ref is not None:
-            result["modules_ref"] = self.modules_ref
         if self.build_id is not None:
             result["build_id"] = self.build_id
         if self.cmdline is not None:
@@ -90,8 +86,6 @@ class BuildStepResult:
             refs["vmlinux"] = self.debuginfo_ref
         if self.initrd_ref is not None:
             refs["initrd"] = self.initrd_ref
-        if self.modules_ref is not None:
-            refs["modules"] = self.modules_ref
         return refs
 
 
@@ -209,13 +203,6 @@ async def installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | Non
     if result is None:
         return None
     return result.initrd_ref
-
-
-async def installed_modules_ref(conn: AsyncConnection, run_id: UUID) -> str | None:
-    result = await existing_build_result(conn, run_id)
-    if result is None:
-        return None
-    return result.modules_ref
 
 
 async def installed_debuginfo_ref(conn: AsyncConnection, run_id: UUID) -> str | None:

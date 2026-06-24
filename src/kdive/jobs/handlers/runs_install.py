@@ -25,7 +25,6 @@ from kdive.services.runs.steps import (
     install_method_for,
     installed_debuginfo_ref,
     installed_initrd_ref,
-    installed_modules_ref,
 )
 
 _log = logging.getLogger(__name__)
@@ -63,7 +62,6 @@ async def install_handler(
     cmdline = await cmdline_for(conn, run, method, root_cmdline=runtime.platform_root_cmdline)
     _log.info("install: run %s resolved cmdline %r (method %s)", run_id, cmdline, method.value)
     initrd_ref = await installed_initrd_ref(conn, run_id)
-    modules_ref = await installed_modules_ref(conn, run_id)
     debuginfo_ref = await installed_debuginfo_ref(conn, run_id)
     job_ctx = job_context_from_job(job, run.project)
     claim = await claim_run_step(conn, run_id, "install")
@@ -79,7 +77,6 @@ async def install_handler(
                 cmdline=cmdline,
                 method=method,
                 initrd_ref=initrd_ref,
-                modules_ref=modules_ref,
                 debuginfo_ref=debuginfo_ref,
             ),
         )

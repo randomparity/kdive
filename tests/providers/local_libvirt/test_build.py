@@ -39,6 +39,7 @@ from kdive.providers.shared.build_host.publishing.artifact_publish import (
     ArtifactBytes,
     ArtifactSource,
 )
+from kdive.providers.shared.build_host.publishing.kernel_bundle import local_kernel_bundle
 from kdive.providers.shared.build_host.workspaces import workspace as build_host_workspace
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -158,8 +159,8 @@ class _Seams:
         self.make_workspaces.append(workspace)
         return CapturedStep(self.make_returncode, self.make_output)
 
-    def read_kernel_source(self, workspace: Path) -> ArtifactSource:
-        return ArtifactBytes(b"bzImage-bytes")
+    def make_bundle(self, workspace: Path, mod_root: Path) -> ArtifactSource:
+        return ArtifactBytes(b"combined-kernel-bundle")
 
     def read_vmlinux_source(self, workspace: Path) -> ArtifactSource:
         return ArtifactBytes(b"vmlinux-bytes")
@@ -171,9 +172,6 @@ class _Seams:
         self.modules_install_calls += 1
         self.call_order.append("modules_install")
         return self.modules_install_returncode
-
-    def make_modules_bundle(self, workspace: Path, mod_root: Path) -> ArtifactSource:
-        return ArtifactBytes(b"modules-bundle")
 
 
 def _builder(
@@ -191,11 +189,10 @@ def _builder(
         run_olddefconfig=seams.run_olddefconfig,
         read_config=seams.read_config,
         run_make=seams.run_make,
-        read_kernel_source=seams.read_kernel_source,
+        make_bundle=seams.make_bundle,
         read_vmlinux_source=seams.read_vmlinux_source,
         read_build_id=seams.read_build_id,
         run_modules_install=seams.run_modules_install,
-        make_modules_bundle=seams.make_modules_bundle,
         staging_factory=lambda: tmp_path / "modroot",
         staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
@@ -204,21 +201,27 @@ def _builder(
     )
 
 
-# --- modules_ref: config-driven production -------------------------------------------
+# --- combined kernel bundle: always produced, modules carried inside ------------------
 
 
-def test_build_publishes_modules_ref_when_config_is_kdump_capable(tmp_path: Path) -> None:
-    store, seams = _FakeStore(), _Seams()  # _GOOD_CONFIG has CONFIG_CRASH_DUMP=y
-    builder = _builder(store, seams, tmp_path)
-    output = builder.build(_RUN, _profile())
-    assert output.modules_ref is not None
-    assert "modules" in store.artifacts
+def test_build_publishes_single_combined_kernel_artifact(tmp_path: Path) -> None:
+    # The unified format publishes one `kernel` artifact (the combined kernel+modules tar) plus
+    # `vmlinux` — no separate `modules` artifact, regardless of kdump-capability (ADR-0234 §2).
+    store, seams = _FakeStore(), _Seams()
+    output = _builder(store, seams, tmp_path).build(_RUN, _profile())
+    assert "modules" not in store.artifacts
+    assert "kernel" in store.artifacts
+    assert output.kernel_ref == f"{_TENANT}/runs/{_RUN}/kernel"
 
 
-def test_config_is_not_kdump_capable_when_crash_dump_absent() -> None:
-    # Unit test for the predicate: a config without CONFIG_CRASH_DUMP=y is not kdump-capable.
-    assert not build_module._config_is_kdump_capable("CONFIG_DEBUG_INFO_DWARF5=y\n")
-    assert not build_module._config_is_kdump_capable("# CONFIG_CRASH_DUMP is not set\n")
+def test_build_runs_modules_install_then_bundles(tmp_path: Path) -> None:
+    # build() always runs modules_install (after make) and packages the combined bundle from its
+    # staging tree, matching remote-libvirt (no kdump-capability carve-out). The all-builtin
+    # (CONFIG_MODULES=n) bundling case is covered in the shared kernel_bundle test.
+    store, seams = _FakeStore(), _Seams()
+    _builder(store, seams, tmp_path).build(_RUN, _profile())
+    assert seams.modules_install_calls == 1
+    assert seams.call_order.index("make") < seams.call_order.index("modules_install")
 
 
 def test_build_modules_install_failure_is_build_failure(tmp_path: Path) -> None:
@@ -294,12 +297,12 @@ def test_build_returns_two_refs_and_build_id(tmp_path: Path) -> None:
 
 
 def test_build_stores_artifacts_sensitive(tmp_path: Path) -> None:
-    # _GOOD_CONFIG has CONFIG_CRASH_DUMP=y so modules is also published.
+    # The unified format publishes exactly two artifacts: the combined `kernel` tar + `vmlinux`.
     store, seams = _FakeStore(), _Seams()
     _builder(store, seams, tmp_path).build(_RUN, _profile())
 
     names = {name for _, name, _, _ in store.puts}
-    assert names == {"kernel", "vmlinux", "modules"}
+    assert names == {"kernel", "vmlinux"}
     assert all(sens is Sensitivity.SENSITIVE for _, _, _, sens in store.puts)
     assert all(kind == "runs" for _, _, kind, _ in store.puts)
 
@@ -430,6 +433,8 @@ def test_build_log_persist_failure_is_swallowed(tmp_path: Path) -> None:
 
 
 def test_build_missing_bzimage_after_make_is_build_failure(tmp_path: Path) -> None:
+    # A zero-exit make that left no bzImage must surface as BUILD_FAILURE through the real
+    # combined-bundle seam (which packages workspace/arch/x86/boot/bzImage).
     store, seams = _FakeStore(), _Seams()
     builder = LocalLibvirtBuild(
         tenant=_TENANT,
@@ -439,13 +444,10 @@ def test_build_missing_bzimage_after_make_is_build_failure(tmp_path: Path) -> No
         run_olddefconfig=seams.run_olddefconfig,
         read_config=seams.read_config,
         run_make=seams.run_make,
-        read_kernel_source=lambda ws: ArtifactBytes(
-            build_host_execution.real_read_kernel_image(ws)
-        ),
+        make_bundle=local_kernel_bundle,
         read_vmlinux_source=seams.read_vmlinux_source,
         read_build_id=seams.read_build_id,
         run_modules_install=seams.run_modules_install,
-        make_modules_bundle=seams.make_modules_bundle,
         staging_factory=lambda: tmp_path / "modroot",
         staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
@@ -493,14 +495,14 @@ def test_build_records_phases_with_provider_through_recorder(tmp_path: Path) -> 
     )
 
     recorded_phases = [phase for phase, _ in recorder.phases]
-    # _GOOD_CONFIG is crash-dump-capable, so build() also runs modules_install and records a
-    # MODULES phase (sibling to ARTIFACT, #654) after the artifact step.
+    # build() always runs modules_install (MODULES) before packaging the combined bundle
+    # (ARTIFACT), mirroring remote-libvirt's phase order (ADR-0234 §2).
     assert recorded_phases == [
         BuildPhase.SOURCE_SYNC,
         BuildPhase.CONFIGURE,
         BuildPhase.COMPILE,
-        BuildPhase.ARTIFACT,
         BuildPhase.MODULES,
+        BuildPhase.ARTIFACT,
     ]
     assert {provider for _, provider in recorder.phases} == {"local-libvirt"}
 
@@ -553,6 +555,9 @@ class _RemoteTransport:
         if argv[0] == "objcopy":
             self.files[argv[-1]] = _gnu_build_id_note(b"\x01\x02\x03\x04")
             return CommandResult(returncode=0, stdout="", stderr="")
+        if argv[0] == "tar":
+            self.files[argv[2]] = b"\x1f\x8bcombined-bundle"  # -czf <out> ...: the host bundle
+            return CommandResult(returncode=0, stdout="", stderr="")
         return CommandResult(returncode=0, stdout="", stderr="")
 
     def read_text(self, path: str) -> str:
@@ -594,16 +599,15 @@ class _PresignStore:
         return PresignedUpload(url=f"https://s3/{request.key}", required_headers={})
 
 
-def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path) -> None:
-    # A transport-bound local build publishes the bzImage, vmlinux, and (since _GOOD_CONFIG has
-    # CONFIG_CRASH_DUMP=y) a modules bundle via presigned PUT; the worker never reads artifact
-    # bytes — only the objcopy note.
+def test_over_transport_publishes_combined_kernel_and_vmlinux_via_presign(tmp_path: Path) -> None:
+    # A transport-bound local build publishes the combined kernel bundle + vmlinux via presigned
+    # PUT; the worker never reads artifact bytes — only the objcopy note. The host tar seam
+    # produces one `kernel` bundle (boot/vmlinuz + lib/modules), so there is no separate modules
+    # upload (ADR-0234 §2).
     store, transport = _PresignStore(), _RemoteTransport()
     workspace = tmp_path / str(_RUN)
-    modules_bundle = str(workspace / "kdive-modules.tar.gz")
-    transport.files[str(workspace / "arch/x86/boot/bzImage")] = b"\x01bz"
+    bundle = str(workspace / "kdive-bundle.tar.gz")
     transport.files[str(workspace / "vmlinux")] = b"\x7fELFvm"
-    transport.files[modules_bundle] = b""  # tar produces the bundle on the host
 
     base = LocalLibvirtBuild(
         tenant=_TENANT,
@@ -613,11 +617,10 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
         run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
         run_make=lambda _w: CapturedStep(0, ""),
-        read_kernel_source=lambda _w: ArtifactBytes(b"warm-bz"),
+        make_bundle=lambda _ws, _mr: ArtifactBytes(b"warm-bundle"),
         read_vmlinux_source=lambda _w: ArtifactBytes(b"warm-vm"),
         read_build_id=lambda _w: "deadbeef",
         run_modules_install=lambda _ws, _mr: 0,
-        make_modules_bundle=lambda _ws, _mr: ArtifactBytes(b"modules-bundle"),
         staging_factory=lambda: tmp_path / "modroot",
         staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
@@ -644,18 +647,14 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
 
     assert out.kernel_ref == f"{_TENANT}/runs/{_RUN}/kernel"
     assert out.debuginfo_ref == f"{_TENANT}/runs/{_RUN}/vmlinux"
-    assert out.modules_ref == f"{_TENANT}/runs/{_RUN}/modules"
+    # The combined kernel bundle carries modules; only two artifacts are published, no modules ref.
     assert store.puts == []  # the transport path never PUTs from worker memory
-    assert {p.key for p in store.presigns} == {out.kernel_ref, out.debuginfo_ref, out.modules_ref}
-    assert set(transport.uploaded) == {
-        str(workspace / "arch/x86/boot/bzImage"),
-        str(workspace / "vmlinux"),
-        modules_bundle,
-    }
+    assert {p.key for p in store.presigns} == {out.kernel_ref, out.debuginfo_ref}
+    assert set(transport.uploaded) == {bundle, str(workspace / "vmlinux")}
     # The worker only reads the small objcopy note back, never the artifact bytes.
     assert transport.reads == [str(workspace / "vmlinux.note")]
     heads = [a[0] for a in transport.runs]
-    assert "make" in heads and "objcopy" in heads
+    assert "make" in heads and "objcopy" in heads and "tar" in heads
     # The git clone runs on the host with the requested remote/ref into the per-run workspace.
     assert transport.clones == [("https://git.example/linux.git", "v6.9", str(workspace))]
 
@@ -663,9 +662,7 @@ def test_over_transport_publishes_bzimage_and_vmlinux_via_presign(tmp_path: Path
 def test_over_transport_build_removes_clone_dir_via_transport(tmp_path: Path) -> None:
     store, transport = _PresignStore(), _RemoteTransport()
     workspace = tmp_path / str(_RUN)
-    transport.files[str(workspace / "arch/x86/boot/bzImage")] = b"\x01bz"
     transport.files[str(workspace / "vmlinux")] = b"\x7fELFvm"
-    transport.files[str(workspace / "kdive-modules.tar.gz")] = b""
 
     base = LocalLibvirtBuild(
         tenant=_TENANT,
@@ -675,11 +672,10 @@ def test_over_transport_build_removes_clone_dir_via_transport(tmp_path: Path) ->
         run_olddefconfig=lambda _w: CapturedStep(0, ""),
         read_config=lambda _w: _GOOD_CONFIG,
         run_make=lambda _w: CapturedStep(0, ""),
-        read_kernel_source=lambda _w: ArtifactBytes(b"warm-bz"),
+        make_bundle=lambda _ws, _mr: ArtifactBytes(b"warm-bundle"),
         read_vmlinux_source=lambda _w: ArtifactBytes(b"warm-vm"),
         read_build_id=lambda _w: "deadbeef",
         run_modules_install=lambda _ws, _mr: 0,
-        make_modules_bundle=lambda _ws, _mr: ArtifactBytes(b"modules-bundle"),
         staging_factory=lambda: tmp_path / "modroot",
         staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
@@ -772,11 +768,10 @@ def test_validate_config_ref_rejects_local_file_outside_allowed_roots(tmp_path: 
         run_olddefconfig=lambda _workspace: CapturedStep(0, ""),
         read_config=lambda _workspace: _GOOD_CONFIG,
         run_make=lambda _workspace: CapturedStep(0, ""),
-        read_kernel_source=lambda _workspace: ArtifactBytes(b"kernel"),
+        make_bundle=lambda _ws, _mr: ArtifactBytes(b"kernel-bundle"),
         read_vmlinux_source=lambda _workspace: ArtifactBytes(b"vmlinux"),
         read_build_id=lambda _workspace: "deadbeef",
         run_modules_install=lambda _ws, _mr: 0,
-        make_modules_bundle=lambda _ws, _mr: ArtifactBytes(b""),
         staging_factory=lambda: tmp_path / "modroot",
         staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
@@ -805,11 +800,10 @@ def test_validate_config_ref_accepts_local_file_inside_allowed_roots(tmp_path: P
         run_olddefconfig=lambda _workspace: CapturedStep(0, ""),
         read_config=lambda _workspace: _GOOD_CONFIG,
         run_make=lambda _workspace: CapturedStep(0, ""),
-        read_kernel_source=lambda _workspace: ArtifactBytes(b"kernel"),
+        make_bundle=lambda _workspace, _mod_root: ArtifactBytes(b"kernel-bundle"),
         read_vmlinux_source=lambda _workspace: ArtifactBytes(b"vmlinux"),
         read_build_id=lambda _workspace: "deadbeef",
         run_modules_install=lambda _workspace, _mod_root: 0,
-        make_modules_bundle=lambda _workspace, _mod_root: ArtifactBytes(b"modules"),
         staging_factory=lambda: tmp_path / "modroot",
         staging_cleanup=lambda _p: None,
         secret_registry=SecretRegistry(),
@@ -977,15 +971,12 @@ def test_live_vm_real_make_build_id_matches_readelf() -> None:  # pragma: no cov
             run_olddefconfig=build_host_execution.real_run_olddefconfig,
             read_config=build_host_execution.real_read_config,
             run_make=build_host_execution.real_run_make,
-            read_kernel_source=lambda ws: ArtifactBytes(
-                build_host_execution.real_read_kernel_image(ws)
-            ),
+            make_bundle=local_kernel_bundle,
             read_vmlinux_source=lambda ws: ArtifactBytes(
                 build_host_execution.real_read_vmlinux(ws)
             ),
             read_build_id=build_host_execution.real_read_build_id,
             run_modules_install=build_host_execution.real_run_modules_install,
-            make_modules_bundle=build_module._local_modules_bundle,
             staging_factory=build_module._real_staging_factory,
             staging_cleanup=lambda p: shutil.rmtree(p, ignore_errors=True),
             secret_registry=SecretRegistry(),

@@ -191,8 +191,12 @@ class LocalLibvirtInstall:
     def install(self, request: InstallRequest) -> None:
         """Stage the kernel (and optionally initrd) and redefine the domain for direct-kernel boot.
 
-        The initrd fetch and ``<initrd>`` element are omitted when ``initrd_ref`` is ``None``
-        (e.g. a bzImage with an embedded initramfs). The kdump preflight is gated on
+        ``kernel_ref`` is the combined kernel+modules tar (the unified artifact, ADR-0234 §2):
+        install fetches it, extracts ``boot/vmlinuz`` host-side to ``staging/kernel`` for the
+        direct-kernel ``<kernel>`` element, and — when the boot is kdump or carries debuginfo —
+        repacks the tar's ``lib/modules/`` subtree and feeds it to the libguestfs injector. The
+        initrd fetch and ``<initrd>`` element are omitted when ``initrd_ref`` is ``None`` (e.g. a
+        bzImage with an embedded initramfs). The kdump preflight is gated on
         ``method == CaptureMethod.KDUMP`` — non-kdump boots do not require kdump prerequisites.
 
         Raises:
@@ -214,21 +218,26 @@ class LocalLibvirtInstall:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"op": "mkdir", "dest": str(staging_dir)},
             ) from exc
+        combined_tar = staging_dir / "kernel.tar.gz"
+        self._fetch_kernel(request.kernel_ref, combined_tar)
         kernel_path = staging_dir / "kernel"
-        self._fetch_kernel(request.kernel_ref, kernel_path)
+        extract_boot_vmlinuz(combined_tar, kernel_path)
         initrd_path: Path | None = None
         if request.initrd_ref is not None:
             initrd_path = staging_dir / "initrd"
             self._fetch_initrd(request.initrd_ref, initrd_path)
-        if request.modules_ref is not None and (
-            request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None
-        ):
-            self._inject_built_modules(
-                request.system_id, request.modules_ref, request.debuginfo_ref, staging_dir
-            )
-        if request.method is CaptureMethod.KDUMP and not (
-            request.modules_ref is not None or initrd_path is not None
-        ):
+        modules_injected = False
+        if request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None:
+            modules_tar = staging_dir / "modules.tar.gz"
+            if repack_modules_subtree(combined_tar, modules_tar):
+                self._inject_built_modules(
+                    request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
+                )
+                modules_injected = True
+        kdump_env_absent = request.method is CaptureMethod.KDUMP and not (
+            modules_injected or initrd_path is not None
+        )
+        if kdump_env_absent:
             raise CategorizedError(
                 "kdump capture environment absent (need injected modules or a staged initrd)",
                 category=ErrorCategory.CONFIGURATION_ERROR,
@@ -248,15 +257,21 @@ class LocalLibvirtInstall:
             _close(conn)
 
     def _inject_built_modules(
-        self, system_id: UUID, modules_ref: str, debuginfo_ref: str | None, staging_dir: Path
+        self,
+        system_id: UUID,
+        modules_tar: Path,
+        kernel_image: Path,
+        debuginfo_ref: str | None,
+        staging_dir: Path,
     ) -> None:
         """Force-off the domain, then stage the built kernel into its overlay (ADR-0203/0207).
 
         Injects ``/lib/modules/<ver>`` *and* the from-source kernel image at
         ``/boot/vmlinuz-<ver>`` so the guest's ``kdumpctl`` has a crash kernel to kexec-load —
         under direct-kernel boot the running kernel is supplied by libvirt and is otherwise absent
-        from the guest ``/boot`` (ADR-0207). The kernel image is the one ``install`` already
-        fetched to ``staging_dir/kernel`` for the ``<kernel>`` element; no extra fetch.
+        from the guest ``/boot`` (ADR-0207). ``modules_tar`` is the ``lib/modules/`` subtree
+        repacked host-side from the combined kernel tar; ``kernel_image`` is the ``boot/vmlinuz``
+        ``install`` already extracted to ``staging_dir/kernel`` for the ``<kernel>`` element.
 
         When ``debuginfo_ref`` is set the run's DWARF ``vmlinux`` is fetched and staged in-guest
         at ``/usr/lib/debug/lib/modules/<ver>/vmlinux`` so the live ``kdive-drgn`` helper's
@@ -272,7 +287,7 @@ class LocalLibvirtInstall:
         Raises:
             CategorizedError: ``MISSING_DEPENDENCY`` if libguestfs is absent or no writer is
                 configured; ``INFRASTRUCTURE_FAILURE`` on a force-off or libguestfs fault; any
-                fetch error category from the modules-fetch seam.
+                fetch error category from the debuginfo-fetch seam.
         """
         if self._kernel_writer is None:
             raise CategorizedError(
@@ -281,13 +296,10 @@ class LocalLibvirtInstall:
                 details={"system_id": str(system_id)},
             )
         self._force_off_if_active(system_id)
-        modules_tar = staging_dir / "modules.tar.gz"
-        self._fetch_modules(modules_ref, modules_tar)
         vmlinux: Path | None = None
         if debuginfo_ref is not None:
             vmlinux = staging_dir / "vmlinux"
             self._fetch_modules(debuginfo_ref, vmlinux)
-        kernel_image = staging_dir / "kernel"
         self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar, vmlinux)
 
     def _force_off_if_active(self, system_id: UUID) -> None:
@@ -527,6 +539,95 @@ def _write_staged_bytes(dest: Path, data: bytes) -> None:
 
 def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
     _stage_object(object_store_from_env(), ref, dest)
+
+
+_KERNEL_BUNDLE_BOOT_MEMBER = "boot/vmlinuz"
+_MODULES_MEMBER_PREFIX = "lib/modules/"
+
+
+def _tar_member_path(name: str) -> str:
+    """Normalize a tar member name for prefix matching (drop a leading ``./`` and any ``/``)."""
+    if name.startswith("./"):
+        name = name[2:]
+    return name.lstrip("/")
+
+
+def extract_boot_vmlinuz(combined_tar: Path, dest: Path) -> None:
+    """Extract ``boot/vmlinuz`` from the combined kernel tar to ``dest`` (the ``<kernel>`` image).
+
+    The unified ``kernel`` artifact is a gzip tar of ``boot/vmlinuz`` + ``lib/modules/<ver>/``
+    (ADR-0234 §2). libvirt's direct-kernel ``<kernel>`` element needs a raw bzImage path, so the
+    bzImage is extracted host-side via temp-then-rename (a fault leaves no partial file the
+    redefine could point at).
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the tar cannot be read, or carries no
+            ``boot/vmlinuz`` member (a malformed kernel artifact that upload/build should reject).
+    """
+    try:
+        with tarfile.open(combined_tar, "r:gz") as archive:
+            member = next(
+                (
+                    m
+                    for m in archive.getmembers()
+                    if _tar_member_path(m.name) == _KERNEL_BUNDLE_BOOT_MEMBER
+                ),
+                None,
+            )
+            extracted = archive.extractfile(member) if member is not None else None
+            data = extracted.read() if extracted is not None else None
+    except (OSError, tarfile.TarError) as exc:
+        raise CategorizedError(
+            "failed to read the combined kernel tar to extract boot/vmlinuz",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"op": "extract", "member": _KERNEL_BUNDLE_BOOT_MEMBER, "dest": str(dest)},
+        ) from exc
+    if data is None:
+        raise CategorizedError(
+            "combined kernel tar has no boot/vmlinuz member",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"member": _KERNEL_BUNDLE_BOOT_MEMBER, "tar": str(combined_tar)},
+        )
+    _write_staged_bytes(dest, data)
+
+
+def repack_modules_subtree(combined_tar: Path, dest: Path) -> bool:
+    """Repack the combined kernel tar's ``lib/modules/`` subtree into a modules-only gzip tar.
+
+    The libguestfs injector consumes a ``lib/modules/<ver>/`` tar; the combined ``kernel`` artifact
+    carries that subtree alongside ``boot/vmlinuz``. Copying just the ``lib/modules/`` members into
+    a fresh gzip tar keeps the injector's in-guest result byte-identical to the legacy
+    separate-modules artifact — no stray ``/boot/vmlinuz`` a whole-archive extract would plant.
+    Written via temp-then-rename.
+
+    Returns:
+        ``True`` if any ``lib/modules/`` member was found and repacked, else ``False`` (an
+        all-builtin or modules-absent tar — the caller decides whether that is a kdump error).
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` on a tar read/write fault.
+    """
+    tmp = dest.with_name(dest.name + ".part")
+    found = False
+    try:
+        with tarfile.open(combined_tar, "r:gz") as src, tarfile.open(tmp, "w:gz") as out:
+            for member in src.getmembers():
+                if _tar_member_path(member.name).startswith(_MODULES_MEMBER_PREFIX):
+                    out.addfile(member, src.extractfile(member) if member.isfile() else None)
+                    found = True
+        if found:
+            tmp.replace(dest)
+        else:
+            tmp.unlink(missing_ok=True)
+    except (OSError, tarfile.TarError) as exc:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise CategorizedError(
+            "failed to repack the lib/modules subtree from the combined kernel tar",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"op": "repack", "dest": str(dest)},
+        ) from exc
+    return found
 
 
 _MODULES_ROOT = "/lib/modules"
@@ -862,5 +963,7 @@ __all__ = [
     "LocalLibvirtInstall",
     "ReadinessResult",
     "classify_console",
+    "extract_boot_vmlinuz",
     "read_console_log",
+    "repack_modules_subtree",
 ]
