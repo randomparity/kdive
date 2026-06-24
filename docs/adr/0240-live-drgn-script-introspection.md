@@ -84,8 +84,12 @@ caller-supplied drgn (Python) script against the **live** guest kernel of an ope
   allowlisted program, no widened exec surface.
 - New obligations: the `kdive-drgn` reference helper and the baked base images must carry the
   `run-script` mode (a guest-image change operators re-bake, like any `kdive-drgn` update); a new
-  config key; a new descriptor mode the two real providers advertise. The tool ships `partial`
-  until a `live_vm` proof on a prepared host promotes it to `implemented`.
+  config key; a new descriptor mode the two real providers advertise.
+- The tool ships `implemented`, matching its `introspect.run` sibling. The `live_vm` proof ran on
+  a local-libvirt KVM host (2026-06-24): a booted guest, a real `drgn -k` caller script over the
+  drgn-live SSH transport returned `release=7.0.0-dirty init_comm=swapper/0 ntasks=137` (the
+  guest's own warm-tree kernel, distinct from the host), and an over-cap script was rejected
+  before send. Encoded as `test_spine_live_script_over_the_wire` (`live_vm`/`live_stack`-gated).
 - The offline/captured-core half is **not** delivered here; it is #781 (fetchable raw
   vmcore/vmlinux). An operator wanting arbitrary offline analysis before #781 lands has no path —
   an accepted, documented gap.

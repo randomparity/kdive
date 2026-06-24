@@ -25,11 +25,7 @@ Run live drgn introspection over a live drgn-live DebugSession. Requires contrib
 
 ## `introspect.script`
 
-`partial`
-
-**Maturity:** live_dependency — needs an operator-prepared drgn-live host; CI exercises only the fake seam
-
-**Promotion:** a live_vm proof runs a real caller script end-to-end through the guest
+`implemented`
 
 Run a caller drgn script over a live drgn-live DebugSession. Requires contributor.
 

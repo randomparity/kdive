@@ -33,7 +33,6 @@ from kdive.mcp.responses import ResponseData, ToolResponse
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import capability_unsupported as _capability_unsupported
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.mcp.tools._docmeta import MaturityReason
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
@@ -397,12 +396,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     @app.tool(
         name="introspect.script",
         annotations=_docmeta.mutating(),
-        meta=_docmeta.maturity_meta(
-            "partial",
-            reason=MaturityReason.LIVE_DEPENDENCY,
-            detail="needs an operator-prepared drgn-live host; CI exercises only the fake seam",
-            promotion="a live_vm proof runs a real caller script end-to-end through the guest",
-        ),
+        meta={"maturity": "implemented"},
     )
     async def introspect_script_tool(
         session_id: Annotated[str, Field(description="A live drgn-live DebugSession.")],

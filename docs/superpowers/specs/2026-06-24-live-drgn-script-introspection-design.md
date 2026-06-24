@@ -220,14 +220,15 @@ The port and tool reuse the existing live-introspect taxonomy:
   (e.g. read `init_uts_ns` release, resolve `&dentry_hashtable`) end-to-end through
   `introspect.script`, plus a timeout test (a `while True: pass` script returns
   `debug_attach_failure` within `timeout_sec + slack`).
-- **Live proof:** executed on this KVM host (it runs live_vm directly), promoting the tool
-  maturity from `partial` to `implemented`.
+- **Live proof:** executed on a local-libvirt KVM host (2026-06-24), encoded as
+  `test_spine_live_script_over_the_wire`. A booted guest + a real `drgn -k` caller script over the
+  drgn-live SSH transport returned `release=7.0.0-dirty init_comm=swapper/0 ntasks=137` (the
+  guest's warm-tree kernel, distinct from the host's), and an over-cap script was rejected.
 
 ## Maturity
 
-The tool ships `partial` (descriptor-gated, CI-real orchestration) and is promoted to
-`implemented` once the `live_vm` proof passes on a prepared host, mirroring the ADR-0219
-descriptor-vs-maturity split for the live introspect surface.
+The tool ships `implemented`, matching its `introspect.run` sibling: descriptor-gated, CI-real
+orchestration, and a passing `live_vm` proof of the real `drgn -k` attach (above).
 
 ## Considered & rejected
 
