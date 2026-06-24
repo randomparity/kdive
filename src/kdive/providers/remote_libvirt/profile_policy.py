@@ -29,3 +29,11 @@ class RemoteLibvirtProfilePolicy:
         if profile.provider.remote_libvirt.crashkernel is not None:
             return CaptureMethod.KDUMP
         return CaptureMethod.GDBSTUB
+
+    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+        # Remote unconditionally provisions a gdbstub endpoint (ADR-0083).
+        return True
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        # The remote section has no preserve-on-crash flag; no host-side dump.
+        return False

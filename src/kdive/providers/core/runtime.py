@@ -75,6 +75,12 @@ class ProfilePolicy(Protocol):
     def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:
         """Resolve the crash-capture method enabled by the profile."""
 
+    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+        """Return whether the System has a gdbstub endpoint (independent of capture_method)."""
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        """Return whether a host-side memory dump is available on a preserved crash."""
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderRuntime:

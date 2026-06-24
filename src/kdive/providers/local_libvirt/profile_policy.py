@@ -48,3 +48,9 @@ class LocalLibvirtProfilePolicy:
         if section.debug.preserve_on_crash:
             return CaptureMethod.HOST_DUMP
         return CaptureMethod.CONSOLE
+
+    def gdbstub_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return profile.provider.local_libvirt.debug.gdbstub
+
+    def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return profile.provider.local_libvirt.debug.preserve_on_crash
