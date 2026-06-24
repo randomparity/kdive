@@ -12,6 +12,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import StoredArtifact
+from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Run
@@ -195,16 +196,19 @@ _PROFILE_DICT: dict[str, object] = {
 
 
 class _Pol:
-    """Fake ProfilePolicy carrying just the two predicates the recording path reads."""
+    """Fake ProfilePolicy carrying just the predicates the recording path reads."""
 
-    def __init__(self, *, gdbstub: bool, host_dump: bool) -> None:
-        self._gdbstub, self._host_dump = gdbstub, host_dump
+    def __init__(self, *, gdbstub: bool, host_dump: bool, kdump: bool = False) -> None:
+        self._gdbstub, self._host_dump, self._kdump = gdbstub, host_dump, kdump
 
     def gdbstub_provisioned(self, _profile: object) -> bool:
         return self._gdbstub
 
     def host_dump_provisioned(self, _profile: object) -> bool:
         return self._host_dump
+
+    def capture_method(self, _profile: object) -> CaptureMethod:
+        return CaptureMethod.KDUMP if self._kdump else CaptureMethod.CONSOLE
 
 
 class _Connector:
@@ -237,6 +241,25 @@ def test_available_capture_with_preserve() -> None:
         _pol(gdbstub=True, host_dump=True), cast(ProvisioningProfile, object())
     )
     assert out == ["gdbstub", "console", "host_dump"]
+
+
+def test_inert_capture_empty_for_console_only_profile() -> None:
+    out = runs_boot._inert_capture(
+        _pol(gdbstub=False, host_dump=False), cast(ProvisioningProfile, object())
+    )
+    assert out == []
+
+
+def test_inert_capture_orders_gdbstub_host_dump_kdump() -> None:
+    pol = cast(ProfilePolicy, _Pol(gdbstub=True, host_dump=True, kdump=True))
+    out = runs_boot._inert_capture(pol, cast(ProvisioningProfile, object()))
+    assert out == ["gdbstub", "host_dump", "kdump"]
+
+
+def test_inert_capture_kdump_only_when_crashkernel_set() -> None:
+    pol = cast(ProfilePolicy, _Pol(gdbstub=False, host_dump=False, kdump=True))
+    out = runs_boot._inert_capture(pol, cast(ProvisioningProfile, object()))
+    assert out == ["kdump"]
 
 
 def test_gdbstub_reachable_true_when_open_succeeds() -> None:
@@ -337,6 +360,65 @@ def test_no_record_when_gdbstub_not_provisioned(monkeypatch: pytest.MonkeyPatch)
         monkeypatch, gdbstub=False, host_dump=False, console=_PANIC_CONSOLE, reachable=True
     )
     assert result is None and audits == []
+
+
+def _record_expected(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    gdbstub: bool,
+    host_dump: bool,
+    kdump: bool,
+    system_present: bool,
+) -> tuple[dict[str, object] | None, list[object]]:
+    audits: list[object] = []
+
+    async def _fake_get(_conn: object, _system_id: object) -> _FakeSystem | None:
+        return _FakeSystem(_PROFILE_DICT) if system_present else None
+
+    async def _fake_audit(_conn: object, _ctx: object, run: object) -> None:
+        audits.append(run)
+
+    monkeypatch.setattr(runs_boot.SYSTEMS, "get", _fake_get)
+    monkeypatch.setattr(runs_boot, "_record_boot_audit", _fake_audit)
+
+    artifact = runs_boot._ConsoleArtifact(uuid4(), "tenant/console", _PANIC_CONSOLE)
+
+    async def _run() -> dict[str, object] | None:
+        return await runs_boot._record_expected_crash(
+            cast(AsyncConnection, object()),
+            cast(RequestContext, object()),
+            cast(Run, _FakeRun({"kind": "console_crash", "pattern": "panic"})),
+            uuid4(),
+            cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump, kdump=kdump)),
+            artifact,
+        )
+
+    return asyncio.run(_run()), audits
+
+
+def test_record_expected_crash_discloses_console_and_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, audits = _record_expected(
+        monkeypatch, gdbstub=True, host_dump=True, kdump=False, system_present=True
+    )
+    assert result is not None
+    assert result["boot_outcome"] == "expected_crash_observed"
+    assert result["expectation_matched"] is True
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == ["gdbstub", "host_dump"]
+    assert len(audits) == 1
+
+
+def test_record_expected_crash_degrades_when_system_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, _ = _record_expected(
+        monkeypatch, gdbstub=True, host_dump=True, kdump=True, system_present=False
+    )
+    assert result is not None
+    assert result["available_capture"] == ["console"]
+    assert result["inert_capture"] == []
 
 
 def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:

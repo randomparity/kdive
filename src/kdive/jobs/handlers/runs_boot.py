@@ -247,6 +247,25 @@ def _available_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfi
     return methods
 
 
+def _inert_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -> list[str]:
+    """Capture methods the System was provisioned for that will NOT fire on an expected crash.
+
+    The ``expected_crash_observed`` outcome leaves the System ``READY`` and is routed to the
+    console A/B flow (ADR-0227), so a provisioned ``gdbstub`` (live-attach refused),
+    ``host_dump``, or ``kdump`` (both need ``CRASHED``) is inert here. Built from provider-neutral
+    ``ProfilePolicy`` predicates so the generic boot handler stays correct for every provider
+    (ADR-0239).
+    """
+    methods: list[str] = []
+    if profile_policy.gdbstub_provisioned(profile):
+        methods.append(CaptureMethod.GDBSTUB.value)
+    if profile_policy.host_dump_provisioned(profile):
+        methods.append(CaptureMethod.HOST_DUMP.value)
+    if profile_policy.capture_method(profile) is CaptureMethod.KDUMP:
+        methods.append(CaptureMethod.KDUMP.value)
+    return methods
+
+
 def _gdbstub_reachable(connector: Connector, system_id: UUID) -> bool:
     """Probe the gdbstub via the connector's read-only open path; True iff it answers.
 
@@ -298,6 +317,38 @@ async def _record_crash_halted_live(
     }
 
 
+async def _record_expected_crash(
+    conn: AsyncConnection,
+    job_ctx: RequestContext,
+    run: Run,
+    system_id: UUID,
+    profile_policy: ProfilePolicy,
+    artifact: _ConsoleArtifact,
+) -> dict[str, Any]:
+    """Record ``expected_crash_observed``, disclosing the reachable + inert capture surface.
+
+    The System stays ``READY`` and is routed to the console A/B flow (ADR-0227), so
+    ``available_capture`` is ``["console"]``; ``inert_capture`` lists the provisioned-but-
+    unreachable methods (ADR-0239). A missing System row degrades to an empty inert set rather
+    than failing the outcome.
+    """
+    system = await SYSTEMS.get(conn, system_id)
+    inert: list[str] = []
+    if system is not None:
+        profile = ProvisioningProfile.parse(system.provisioning_profile)
+        inert = _inert_capture(profile_policy, profile)
+    await _record_boot_audit(conn, job_ctx, run)
+    return {
+        "system_id": str(system_id),
+        "boot_outcome": "expected_crash_observed",
+        "expectation_matched": True,
+        "evidence_kind": "console",
+        "evidence_artifact_id": str(artifact.id),
+        "available_capture": [CaptureMethod.CONSOLE.value],
+        "inert_capture": inert,
+    }
+
+
 async def _record_boot_audit(
     conn: AsyncConnection,
     job_ctx: RequestContext,
@@ -341,14 +392,9 @@ async def _run_boot_and_capture_outcome(
                 conn, system_id, run.id, secret_registry, artifact_store, snapshotter
             )
         if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
-            await _record_boot_audit(conn, job_ctx, run)
-            return {
-                "system_id": str(system_id),
-                "boot_outcome": "expected_crash_observed",
-                "expectation_matched": True,
-                "evidence_kind": "console",
-                "evidence_artifact_id": str(artifact.id),
-            }
+            return await _record_expected_crash(
+                conn, job_ctx, run, system_id, profile_policy, artifact
+            )
         if exc.category is ErrorCategory.READINESS_FAILURE:
             crash = await _record_crash_halted_live(
                 conn,
