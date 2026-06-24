@@ -293,6 +293,22 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "root=/dev/vda" not in description
 
 
+def test_run_lifecycle_tools_cross_reference_build_cmdline() -> None:
+    # #748: extra kernel cmdline args are only settable via runs.build.cmdline, but an agent
+    # working from runs.create / runs.boot / runs.get alone could not discover that seam. Each
+    # of those tools' schema text must now name runs.build.cmdline as the way to append params.
+    tools = {t.name: t for t in TOOLS}
+
+    create = tools["runs.create"]
+    create_text = (create.description or "") + create.parameters["properties"]["build_profile"][
+        "description"
+    ]
+    assert "runs.build.cmdline" in create_text
+
+    for tool_name in ("runs.boot", "runs.get"):
+        assert "runs.build.cmdline" in (tools[tool_name].description or "")
+
+
 def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
     tools = {t.name: t for t in TOOLS}
 

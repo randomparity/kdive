@@ -149,6 +149,9 @@ def envelope_for_run(
     if steps is not None:
         data["steps"] = cast(JsonValue, steps)
     if required_cmdline is not None:
+        # The platform-owned boot args (#748). Extra kernel debug args are not set here: they
+        # are appended via runs.build.cmdline (or runs.complete_build.cmdline for external
+        # builds), bound on the Run's first build.
         data["required_cmdline"] = required_cmdline
     if run.expected_boot_failure is not None:
         kind = run.expected_boot_failure.get("kind")

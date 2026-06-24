@@ -88,7 +88,11 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
     async def runs_get(
         run_id: Annotated[str, Field(description="The Run to render.")],
     ) -> ToolResponse:
-        """Return one run; `succeeded` means build done. `data.steps` has install/boot status."""
+        """Return one run; `succeeded` means build done. `data.steps` has install/boot status.
+
+        `data.required_cmdline` is the platform-required boot args; append extra kernel debug
+        args (e.g. `dhash_entries=1`) via `runs.build.cmdline` (bound on the Run's first build).
+        """
         return await _get_run(pool, current_context(), run_id, resolver=resolver)
 
 
@@ -151,7 +155,9 @@ def _register_runs_create(
                     "(e.g. {'kind':'catalog','provider':'system','name':'kdump'}); OMIT it to get "
                     "the seeded kdump fragment (KEXEC, CRASH_DUMP, DEBUG_INFO_DWARF5, GDB_SCRIPTS) "
                     "for a kdump+debuginfo kernel. Call buildconfig.get to inspect a named "
-                    "fragment. See resource://kdive/docs/operating/build-source-staging.md for "
+                    "fragment. Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set "
+                    "here: append them via runs.build.cmdline (bound on the first build). "
+                    "See resource://kdive/docs/operating/build-source-staging.md for "
                     "staging the source."
                 )
             ),
@@ -407,7 +413,11 @@ def _register_runs_boot(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Boot an installed run."""
+        """Boot an installed run.
+
+        The kernel cmdline is fixed at build time; append extra debug args (e.g.
+        `dhash_entries=1`) via `runs.build.cmdline` (bound on the Run's first build), not here.
+        """
         return await _boot_run(pool, current_context(), run_id, idempotency_key=idempotency_key)
 
 
