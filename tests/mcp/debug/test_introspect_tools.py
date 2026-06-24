@@ -25,7 +25,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.debug import introspect as introspect_tools
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.ports import IntrospectOutput
+from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
 from kdive.security.authz.rbac import AuthorizationError, Role
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_mapping, json_mapping, json_sequence
@@ -431,6 +431,18 @@ class _FakeLiveIntrospector:
             raise self._raises
         return self._output
 
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        self.kwargs = {
+            "transport_handle": transport_handle,
+            "script": script,
+            "timeout_sec": timeout_sec,
+        }
+        if self._raises is not None:
+            raise self._raises
+        return LiveScriptOutput(output="ok", truncated=False)
+
 
 class _CountingResolver(ProviderResolver):
     def __init__(self, runtime: ProviderRuntime) -> None:
@@ -701,5 +713,133 @@ def test_run_live_malformed_session_id_is_config_error(migrated_url: str) -> Non
                 introspector=_FakeLiveIntrospector(),
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+# --- introspect.script handler (ADR-0240, live arbitrary drgn) -------------------------------
+
+
+def test_script_clamps_timeout_to_floor(migrated_url: str) -> None:
+    # coreutils `timeout 0` disables the bound, so a 0/negative request clamps up to the floor.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            port = _FakeLiveIntrospector()
+            resp = await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script="print(1)",
+                timeout_sec=0.0,
+                introspector=port,
+            )
+        assert resp.status != "error"
+        assert port.kwargs["timeout_sec"] == 1.0
+        assert resp.data["output"] == "ok"
+        assert resp.data["truncated"] == "false"
+
+    asyncio.run(_run())
+
+
+def test_script_clamps_timeout_to_ceiling(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kdive.config as config
+
+    monkeypatch.setenv("KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS", "600")
+    config.load()
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            port = _FakeLiveIntrospector()
+            await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script="print(1)",
+                timeout_sec=99999.0,
+                introspector=port,
+            )
+        assert port.kwargs["timeout_sec"] == 600.0
+
+    asyncio.run(_run())
+
+
+def test_script_threads_script_into_the_introspector(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool, transport_handle="kdive-remote-1")
+            port = _FakeLiveIntrospector()
+            resp = await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script="print(prog['x'])",
+                timeout_sec=12.0,
+                introspector=port,
+            )
+        assert resp.status != "error"
+        assert port.kwargs["transport_handle"] == "kdive-remote-1"
+        assert port.kwargs["script"] == "print(prog['x'])"
+        assert port.kwargs["timeout_sec"] == 12.0
+
+    asyncio.run(_run())
+
+
+def test_script_seam_error_surfaces_typed(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            boom = CategorizedError("drgn died", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+            port = _FakeLiveIntrospector(raises=boom)
+            resp = await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script="boom",
+                timeout_sec=5.0,
+                introspector=port,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.DEBUG_ATTACH_FAILURE
+
+    asyncio.run(_run())
+
+
+def test_require_introspection_rejects_when_live_script_unadvertised() -> None:
+    # The descriptor gate (reused from introspect.run) refuses a provider lacking live-script.
+    runtime = cast(
+        ProviderRuntime,
+        SimpleNamespace(
+            supported_introspection=frozenset({"offline-vmcore", "live"}),  # no live-script
+            component_sources=SimpleNamespace(provider="local-libvirt"),
+        ),
+    )
+    denied = introspect_tools._require_introspection("sess-1", runtime, "live-script")
+    assert denied is not None
+    assert denied.error_category == ErrorCategory.CONFIGURATION_ERROR
+    assert denied.data["capability"] == "introspection:live-script"
+
+
+def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            port = _FakeLiveIntrospector()
+            huge = "x" * (256 * 1024 + 1)
+            resp = await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script=huge,
+                timeout_sec=5.0,
+                introspector=port,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
+        assert resp.data["reason"] == "script_too_large"
+        assert port.kwargs == {}  # rejected before the seam ran
 
     asyncio.run(_run())

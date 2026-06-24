@@ -29,7 +29,12 @@ from typing import cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.prereqs.managed_ssh_key import managed_private_key_path
-from kdive.providers.ports import IntrospectOutput, LiveIntrospector, VmcoreIntrospector
+from kdive.providers.ports import (
+    IntrospectOutput,
+    LiveIntrospector,
+    LiveScriptOutput,
+    VmcoreIntrospector,
+)
 from kdive.providers.ports.lifecycle import TransportHandleData
 from kdive.providers.shared.debug_common.drgn_program import (
     open_vmcore_program,
@@ -40,6 +45,7 @@ from kdive.providers.shared.debug_common.introspect import (
     _REPORT_BYTE_CAP,
     _Program,
     assemble_report,
+    assemble_script_output,
 )
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -196,6 +202,11 @@ def _normalize_attach_error(exc: Exception, message: str) -> CategorizedError:
 
 # (transport_handle, helper) -> the section dict the in-guest ``kdive-drgn <helper>`` emits.
 type _RunLiveHelper = Callable[[str, str], dict[str, object]]
+# (transport_handle, script, timeout_sec) -> the in-guest ``kdive-drgn run-script`` stdout.
+type _RunLiveScript = Callable[[str, str, float], str]
+# Seconds added to the agent-chosen in-guest timeout to bound the SSH round-trip (ADR-0240):
+# a wedged sshd still releases the thread, but a legitimately long script is not severed.
+_LIVE_SCRIPT_SSH_SLACK_S = 10.0
 
 
 class LocalLibvirtLiveIntrospect:
@@ -219,24 +230,66 @@ class LocalLibvirtLiveIntrospect:
         *,
         secret_registry: SecretRegistry,
         run_live_helper: _RunLiveHelper | None = None,
+        run_live_script: _RunLiveScript | None = None,
     ) -> None:
         self._secret_registry = secret_registry
         self._run_live_helper = run_live_helper
+        self._run_live_script = run_live_script
         self._report_byte_cap = _REPORT_BYTE_CAP
+        self._live_script_byte_cap = _REPORT_BYTE_CAP
 
     @classmethod
     def from_env(cls, *, secret_registry: SecretRegistry) -> LocalLibvirtLiveIntrospect:
-        """Build from env with the real SSH-exec seam (opens no SSH and imports no drgn here).
+        """Build from env with the real SSH-exec seams (opens no SSH and imports no drgn here).
 
-        The seam closes over ``secret_registry`` so it can register the managed key value for
-        redaction; its real ``subprocess`` SSH call runs only under the ``live_vm`` gate, but its
+        The seams close over ``secret_registry`` so they can register the managed key value for
+        redaction; their real ``subprocess`` SSH calls run only under the ``live_vm`` gate, but the
         handle-validation / managed-key-resolution branches run in CI.
         """
 
         def _seam(transport_handle: str, helper: str) -> dict[str, object]:
             return _real_run_live_helper(transport_handle, helper, secret_registry=secret_registry)
 
-        return cls(secret_registry=secret_registry, run_live_helper=_seam)
+        def _script_seam(transport_handle: str, script: str, timeout_sec: float) -> str:
+            return _real_run_live_script(
+                transport_handle, script, timeout_sec, secret_registry=secret_registry
+            )
+
+        return cls(
+            secret_registry=secret_registry,
+            run_live_helper=_seam,
+            run_live_script=_script_seam,
+        )
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        """SSH-exec a caller drgn script in-guest over the drgn-live transport; cap + redact stdout.
+
+        The script is piped to the in-guest ``kdive-drgn run-script`` over SSH stdin (never argv);
+        its stdout is redacted (platform secrets only) and byte-capped through
+        ``assemble_script_output``. drgn runs **in the guest**; the worker only opens SSH.
+
+        Raises:
+            CategorizedError: ``MISSING_DEPENDENCY`` if the live seam was not configured (off-gate);
+                a transport-layer ``CategorizedError`` (``transport_failure`` /
+                ``debug_attach_failure`` / ``configuration_error``) propagated from the seam;
+                ``DEBUG_ATTACH_FAILURE`` if the seam fails for any other reason.
+        """
+        if self._run_live_script is None:
+            raise CategorizedError(
+                "live drgn script introspection runs only under the live_vm gate",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+            )
+        try:
+            stdout = self._run_live_script(transport_handle, script, timeout_sec)
+        except Exception as exc:  # noqa: BLE001 - any seam fault becomes a typed failure
+            raise _normalize_attach_error(
+                exc, "drgn could not run the script in the live guest"
+            ) from exc
+        return assemble_script_output(
+            stdout, byte_cap=self._live_script_byte_cap, secret_registry=self._secret_registry
+        )
 
     def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
         """SSH-exec one in-guest helper over the drgn-live transport; return a redacted report.
@@ -397,6 +450,93 @@ def _exec_live_helper(argv: list[str]) -> dict[str, object]:  # pragma: no cover
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
     return cast("dict[str, object]", decoded)
+
+
+def _real_run_live_script(
+    transport_handle: str, script: str, timeout_sec: float, *, secret_registry: SecretRegistry
+) -> str:
+    """SSH-exec ``kdive-drgn run-script <timeout>`` with the script on stdin (ADR-0240).
+
+    Decodes + re-validates the handle (loopback ssh, before IO), resolves the kdive-managed key,
+    and runs ``ssh … kdive-drgn run-script <timeout>`` with the caller script piped over stdin —
+    never argv — so the fixed argv reaches the remote command. Returns the script's raw stdout.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` for a non-ssh/non-loopback handle or an absent
+            managed key (both before IO); ``TRANSPORT_FAILURE`` for an SSH launch/connect fault or
+            timeout; ``DEBUG_ATTACH_FAILURE`` for a non-zero in-guest exit (script error or drgn
+            could not attach).
+    """
+    port = _validate_ssh_target(transport_handle)
+    key_path = managed_private_key_path()
+    if not key_path.is_file():
+        raise CategorizedError(
+            "the kdive-managed SSH private key is not present on this worker host",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"key_path": str(key_path)},
+        )
+    secret_registry.register(key_path.read_text(encoding="utf-8"), scope=None)
+    argv = [
+        "ssh",
+        "-i",
+        str(key_path),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        f"ConnectTimeout={_SSH_CONNECT_TIMEOUT_S}",
+        "-p",
+        str(port),
+        f"{_SSH_USER}@{_LOOPBACK_HOST}",
+        "--",
+        _DRGN_HELPER,
+        "run-script",
+        # Re-assert the in-guest timeout floor at the argv boundary (defense in depth): coreutils
+        # `timeout 0` disables the bound, so the in-guest value is always >= 1 regardless of caller.
+        str(max(1, int(timeout_sec))),
+    ]
+    return _exec_live_script(argv, script, timeout_sec + _LIVE_SCRIPT_SSH_SLACK_S)
+
+
+def _exec_live_script(  # pragma: no cover - live_vm
+    argv: list[str], script: str, ssh_timeout_s: float
+) -> str:
+    """Run the fixed ssh argv with the caller script on stdin; return its raw stdout.
+
+    The ``# pragma: no cover - live_vm`` covers the real ssh subprocess (a booted guest with a
+    reachable loopback-forwarded sshd, the managed key authorized, and in-guest ``kdive-drgn`` +
+    ``drgn``). The in-guest ``timeout`` bounds drgn; ``ssh_timeout_s`` (the in-guest bound + slack)
+    bounds a wedged channel so the worker thread is always released.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell; script via stdin only
+            argv,
+            input=script.encode("utf-8"),
+            timeout=ssh_timeout_s,
+            check=False,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CategorizedError(
+            "live drgn script ssh round-trip exceeded the timeout",
+            category=ErrorCategory.TRANSPORT_FAILURE,
+            details={"timeout_s": ssh_timeout_s},
+        ) from exc
+    except OSError as exc:
+        raise CategorizedError(
+            "could not launch ssh for live drgn script introspection",
+            category=ErrorCategory.TRANSPORT_FAILURE,
+        ) from exc
+    if proc.returncode != 0:
+        raise CategorizedError(
+            "in-guest drgn script exited non-zero (script error or could not attach)",
+            category=ErrorCategory.DEBUG_ATTACH_FAILURE,
+            details={"exit_status": proc.returncode},
+        )
+    return proc.stdout.decode("utf-8", "replace")
 
 
 def _real_fetch_object(ref: str) -> bytes:  # pragma: no cover - live_vm

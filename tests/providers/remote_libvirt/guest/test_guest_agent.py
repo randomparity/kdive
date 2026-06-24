@@ -113,6 +113,23 @@ def _exec(agent: _FakeAgent) -> GuestAgentExec:
     )
 
 
+def test_run_passes_input_data_as_base64_stdin() -> None:
+    agent = _FakeAgent(exitcode=0, out=b"ok")
+    _exec(agent).run(
+        _DOMAIN,
+        ["/usr/bin/kdive-install", "run-script", "30"],
+        input_data="print(1)\n",
+    )
+    exec_args = agent.commands[0]["arguments"]
+    assert exec_args["input-data"] == base64.b64encode(b"print(1)\n").decode("ascii")
+
+
+def test_run_without_input_data_sets_no_input_field() -> None:
+    agent = _FakeAgent(exitcode=0, out=b"")
+    _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "-fsS", "https://store/obj"])
+    assert "input-data" not in agent.commands[0]["arguments"]
+
+
 def test_run_returns_captured_stdout_and_exit_status() -> None:
     agent = _FakeAgent(exitcode=0, out=b"published-object-bytes")
     result = _exec(agent).run(_DOMAIN, ["/usr/bin/curl", "-fsS", "https://store/obj"])

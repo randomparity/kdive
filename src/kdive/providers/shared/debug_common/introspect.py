@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
-from kdive.providers.ports import IntrospectOutput
+from kdive.providers.ports import IntrospectOutput, LiveScriptOutput
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 
@@ -181,8 +181,28 @@ def _report_size(rows: list[object], modules: dict[str, object], sysinfo: dict[s
     return len(json.dumps(payload).encode("utf-8"))
 
 
+def assemble_script_output(
+    stdout: str, *, byte_cap: int, secret_registry: SecretRegistry
+) -> LiveScriptOutput:
+    """Redact platform secrets (the single boundary), then UTF-8 byte-cap the script stdout.
+
+    Redaction precedes the cap so the cap bounds the returned (redacted) payload exactly,
+    mirroring ``assemble_report``'s ordering. Only registered platform secrets (the managed SSH
+    key and any registered secret) are masked — never dump content, which the script's owner may
+    already read in full (ADR-0240). ``truncated`` is set when the cap trims bytes.
+    """
+    redacted = Redactor(registry=secret_registry).redact_value(stdout)
+    text = redacted if isinstance(redacted, str) else str(redacted)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= byte_cap:
+        return LiveScriptOutput(output=text, truncated=False)
+    clipped = encoded[:byte_cap].decode("utf-8", "ignore")
+    return LiveScriptOutput(output=clipped, truncated=True)
+
+
 __all__ = [
     "assemble_report",
+    "assemble_script_output",
     "helper_modules",
     "helper_sysinfo",
     "helper_tasks",

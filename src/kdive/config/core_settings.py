@@ -275,6 +275,20 @@ CRASH_DIR = Setting(
     processes=_WORKER,
     help="Directory for local kdump crash captures (live_vm path).",
 )
+LIVE_SCRIPT_MAX_TIMEOUT_SECONDS = Setting(
+    name="KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS",
+    parse=_int,
+    default="600",
+    group="debug",
+    processes=_SERVER,
+    help=(
+        "Upper bound (seconds) the server clamps an agent-chosen `introspect.script` "
+        "`timeout_sec` to before it drives the in-guest `timeout drgn -k` wrapper. A "
+        "deployment policy bounding how long one live drgn script can hold a server "
+        "thread-pool slot; single-tenant operators may set it high (ADR-0240)."
+    ),
+    suggest="an integer number of seconds, e.g. 600",
+)
 
 SECRETS_ROOT = Setting(
     name="KDIVE_SECRETS_ROOT",  # pragma: allowlist secret - env var name, not a value
@@ -591,6 +605,7 @@ SETTINGS = [
     MAX_BUILD_CONFIG_BYTES,
     DEBUG_DIR,
     CRASH_DIR,
+    LIVE_SCRIPT_MAX_TIMEOUT_SECONDS,
     SECRETS_ROOT,
     SSH_KEY_DIR,
     BUILD_WORKSPACE,

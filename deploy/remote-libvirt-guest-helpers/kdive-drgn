@@ -11,6 +11,13 @@
 #                     "decode_errors":int,"all_failed":bool}
 #   sysinfo   Print {release,version,machine,nodename,boot_cmdline,cpus_online,mem_total_pages}
 #
+# Plus one stdin mode for the live arbitrary-drgn tier (ADR-0240):
+#
+#   run-script [timeout_sec]
+#             Read a drgn script from STDIN (never argv, so the single-program allowlist is
+#             unchanged), stage it to a temp file, and run `timeout <timeout_sec> drgn -k -q`.
+#             stdout is the script's output, byte-capped + platform-secret-redacted worker-side.
+#
 # Each prints ONE JSON object that the worker passes verbatim to
 # debug_common.introspect.assemble_report as the matching section, so the shape MUST match the
 # worker-side helper_tasks/helper_modules/helper_sysinfo producers. drgn runs against the LIVE
@@ -22,8 +29,19 @@ set -euo pipefail
 helper="${1:-}"
 case "$helper" in
 tasks | modules | sysinfo) ;;
+run-script)
+  # Arbitrary caller drgn script over STDIN (ADR-0240). The script never appears in argv, so the
+  # remote single-program guest-agent allowlist matches this fixed program path unchanged. Bounded
+  # by the server-clamped timeout passed as $2; the temp script is removed on exit. This branch
+  # execs and never falls through to the fixed-helper section below.
+  timeout_sec="${2:-30}"
+  user_script="$(mktemp)"
+  trap 'rm -f "$user_script"' EXIT
+  cat >"$user_script" # read the drgn script from stdin
+  exec timeout "$timeout_sec" drgn -k -q "$user_script"
+  ;;
 *)
-  echo "kdive-drgn: unknown helper: ${helper:-<none>} (expected tasks|modules|sysinfo)" >&2
+  echo "kdive-drgn: unknown helper: ${helper:-<none>} (expected tasks|modules|sysinfo|run-script)" >&2
   exit 2
   ;;
 esac

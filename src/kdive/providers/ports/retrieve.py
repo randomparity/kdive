@@ -35,6 +35,13 @@ class IntrospectOutput(NamedTuple):
     truncated: bool
 
 
+class LiveScriptOutput(NamedTuple):
+    """The byte-capped stdout of a caller-supplied live drgn script (ADR-0240)."""
+
+    output: str
+    truncated: bool
+
+
 class Retriever(Protocol):
     """Capture port keyed on the System id."""
 
@@ -97,5 +104,18 @@ class LiveIntrospector(Protocol):
             CategorizedError: ``CONFIGURATION_ERROR`` for malformed handles or unknown
                 helpers, ``MISSING_DEPENDENCY`` for unavailable helper seams, or
                 ``DEBUG_ATTACH_FAILURE`` for live attach faults.
+        """
+        ...
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        """Run a caller-supplied drgn script in-guest; return its byte-capped stdout (ADR-0240).
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for a malformed handle,
+                ``MISSING_DEPENDENCY`` off the ``live_vm`` gate, ``TRANSPORT_FAILURE`` for an
+                unreachable transport or timeout, or ``DEBUG_ATTACH_FAILURE`` for a non-zero
+                in-guest drgn exit.
         """
         ...

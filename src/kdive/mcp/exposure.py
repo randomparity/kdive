@@ -138,6 +138,9 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # introspect.run actively drives a live drgn-live session (resolve_debug_session_context →
     # contributor), unlike from_vmcore's offline-core read.
     "introspect.run": _CONTRIBUTOR,
+    # introspect.script runs a caller drgn script in the live guest (mutating; same live-debug
+    # contributor gate as introspect.run / debug.*; ADR-0240).
+    "introspect.script": _CONTRIBUTOR,
     # inventory (platform auditor)
     "inventory.list": _PLAT_AUDITOR,
     "inventory.clear_override": _PLAT_ADMIN,

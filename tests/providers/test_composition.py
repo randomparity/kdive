@@ -37,6 +37,7 @@ from kdive.providers.ports import (
     CrashOutput,
     InstallRequest,
     IntrospectOutput,
+    LiveScriptOutput,
     SystemHandle,
     TransportHandle,
 )
@@ -193,6 +194,11 @@ class _IntrospectorProvider:
 
     def introspect_live(self, *, transport_handle: str, helper: str) -> IntrospectOutput:
         return IntrospectOutput(tasks={}, modules={}, sysinfo={}, truncated=False)
+
+    def run_script(
+        self, *, transport_handle: str, script: str, timeout_sec: float
+    ) -> LiveScriptOutput:
+        return LiveScriptOutput(output="", truncated=False)
 
 
 def test_provider_runtime_returns_typed_provider_ports_directly() -> None:
@@ -944,7 +950,7 @@ def test_remote_runtime_advertises_its_debug_and_introspection_descriptor() -> N
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     assert runtime.supported_debug_transports == frozenset({"gdbstub", "drgn-live"})
-    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live"})
+    assert runtime.supported_introspection == frozenset({"offline-vmcore", "live", "live-script"})
 
 
 def test_remote_runtime_advertises_host_dump_as_a_capture_method() -> None:
