@@ -88,12 +88,25 @@ def render_domain_xml(
     metadata = ET.SubElement(domain, "metadata")
     ET.SubElement(metadata, f"{{{KDIVE_METADATA_NS}}}system").text = str(system_id)
 
+    if section.debug.preserve_on_crash:
+        _append_preserve_on_crash(domain, devices)
     if section.debug.gdbstub:
         _append_gdbstub(domain, gdb_port)
     if section.ssh_credential_ref is not None:
         _append_ssh_forward(domain, ssh_port)
 
     return ET.tostring(domain, encoding="unicode")
+
+
+def _append_preserve_on_crash(domain: ET.Element, devices: ET.Element) -> None:
+    """Render the pvpanic device + ``<on_crash>preserve</on_crash>`` (ADR-0049 / ADR-0233).
+
+    pvpanic notifies the host on a guest panic; ``preserve`` holds the domain (vCPUs stopped)
+    instead of destroying it, so a crashed boot stays inspectable for host_dump capture and the
+    #747 live-gdb attach.
+    """
+    ET.SubElement(devices, "panic", model="pvpanic")
+    ET.SubElement(domain, "on_crash").text = "preserve"
 
 
 def _qemu_commandline(domain: ET.Element) -> ET.Element:

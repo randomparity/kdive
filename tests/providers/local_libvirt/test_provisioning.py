@@ -284,6 +284,19 @@ def test_render_ignores_gdb_port_when_flag_unset() -> None:
     assert recorded_gdb_port(xml) is None
 
 
+def test_render_emits_pvpanic_and_on_crash_preserve_when_preserve_set() -> None:
+    root = _safe_fromstring(_render(profile=_profile(debug={"preserve_on_crash": True})))
+    assert root.findtext("on_crash") == "preserve"
+    assert [p.get("model") for p in root.findall("./devices/panic")] == ["pvpanic"]
+
+
+def test_render_omits_pvpanic_and_on_crash_when_preserve_unset() -> None:
+    # The default profile leaves preserve_on_crash False.
+    root = _safe_fromstring(_render())
+    assert root.find("on_crash") is None
+    assert root.findall("./devices/panic") == []
+
+
 def test_render_rejects_gdbstub_flag_without_a_port() -> None:
     with pytest.raises(CategorizedError) as caught:
         render_domain_xml(_SYS, _profile(debug={"gdbstub": True}), disk_path=_DISK, gdb_port=None)
