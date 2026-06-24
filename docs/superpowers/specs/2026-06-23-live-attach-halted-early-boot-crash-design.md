@@ -88,25 +88,41 @@ relying on the guest kernel spinning in `panic()`'s delay loop. This is a standa
 The `provisioning.py` docstring already describes this behavior, so no doc change is needed
 there beyond confirming it now matches.
 
-### 2. Boot-time RSP stub-liveness probe
+### 2. Boot-time RSP stub-reachability probe
 
-A bounded probe that confirms the gdbstub is reachable and the target is halted: TCP-connect to
-the loopback gdb port, send the RSP `?` (halt-reason) packet, and accept a stop-reply. Reuses
-the connector's existing gdbstub bind/probe seam (ADR-0210 §1). The probe is **advisory** — it
-makes the recorded outcome trustworthy; the authoritative attach probe still runs at
-`debug.start_session` time via `open_transport`.
+Reuse the **existing** bounded reachability probe `rsp_reachable`
+(`providers/shared/debug_common/rsp.py`, ADR-0032/0083): it opens a loopback TCP socket, sends
+one read-only RSP `?` (halt-reason) packet, accepts only a valid checksummed frame (a stale or
+non-RSP listener is rejected), and is byte-bounded and timeout-bounded so a wedged or hostile
+socket cannot stall the boot job. No new probe primitive is written.
 
-The probe must be bounded (short connect + read timeout) so a wedged socket cannot stall the
-boot job.
+**The probe is reachability-only, not the crash signal.** Connecting an RSP client to a QEMU
+`-gdb` stub is *not* a passive read: QEMU stops the vCPU while a client is attached and may
+resume it on disconnect. Therefore:
+
+- "Did it crash?" is decided by **console evidence** (Component 3), not by the probe. The probe
+  answers only "is the stub reachable?".
+- For a genuine panic the resume-on-disconnect is harmless: the vCPU resumes spinning in
+  `panic()`'s loop and the authoritative attach at `debug.start_session` re-halts it in the same
+  place. The probe must **never** send a continue/detach-resume beyond the single `?` exchange
+  (`rsp_reachable` already does not).
+- A slow-but-healthy boot is **not** mislabeled, because Component 3 records the new outcome only
+  when the console shows a panic; a boot with no panic line falls through to the existing
+  `abandon → FAILED` path regardless of stub reachability.
+
+The authoritative attach probe still runs at `debug.start_session` time via `open_transport`;
+this boot-time probe only gates whether the new outcome is recorded.
 
 ### 3. Record the `crashed_halted_live` outcome
 
 `jobs/handlers/runs_boot.py` `_run_boot_and_capture_outcome` — on a `READINESS_FAILURE` that is
 **not** a matched expected crash:
 
-- if `gdbstub` is provisioned **and** the RSP probe finds the stub live →
-  capture the redacted console artifact (as the other outcomes do) and complete the `boot` step
-  **succeeded** with:
+- capture the redacted console artifact (as the other outcomes do); then, if **all three** hold —
+  (a) `gdbstub` is provisioned, (b) the captured console matches a generic kernel-panic signature
+  (a shared `_GENERIC_PANIC_PATTERN`, e.g. `Kernel panic - not syncing`, searched with the same
+  redaction-safe `search_text` the expected-crash path uses), and (c) `rsp_reachable` finds the
+  stub reachable — complete the `boot` step **succeeded** with:
 
   ```json
   {
@@ -114,14 +130,21 @@ boot job.
     "boot_outcome": "crashed_halted_live",
     "evidence_kind": "console",
     "evidence_artifact_id": "...",
-    "available_capture": ["gdbstub", "host_dump?", "console"]
+    "available_capture": ["gdbstub", "console"]
   }
   ```
 
   `available_capture` lists the genuinely-available follow-up methods for this halted System,
-  derived from the provisioning flags (`gdbstub` always present here; `host_dump` iff
-  `preserve_on_crash`; `console` always). It is advisory metadata an agent/`runs.get` can read.
-- otherwise → existing `abandon_run_step_best_effort` → Run `FAILED` (unchanged).
+  derived from the provisioning flags: `"gdbstub"` and `"console"` are always present here, and
+  `"host_dump"` is appended **iff** `preserve_on_crash` is set. The allowed strings are exactly
+  the `CaptureMethod` values (`gdbstub`, `host_dump`, `console`). It is advisory metadata an
+  agent/`runs.get` can read; the test asserts the exact list for each flag combination.
+- otherwise (no panic signature, no `gdbstub`, or stub unreachable) → existing
+  `abandon_run_step_best_effort` → Run `FAILED` (unchanged).
+
+The **console-panic signature (b) is the crash signal**, not the probe: it is what distinguishes a
+real early-boot panic from a slow-but-healthy boot that merely tripped the readiness timeout, so
+the probe's halt-on-connect side effect cannot convert a healthy boot into a recorded crash.
 
 Ordering note: the new branch sits *after* the existing expected-crash match (so a declared,
 matched expected crash still records `expected_crash_observed`) and *before* the `raise` that
@@ -130,6 +153,19 @@ abandons the step.
 The crash branch only fires for `READINESS_FAILURE` (the guest-did-not-come-up signal), exactly
 like the expected-crash branch — a genuine `INFRASTRUCTURE_FAILURE` is never reinterpreted as a
 debuggable crash.
+
+**Determinism of the halt.** `preserve_on_crash` (Component 1) makes the halt deterministic: on
+panic, pvpanic fires and libvirt holds the domain in `VIR_DOMAIN_CRASHED` with vCPUs stopped, so
+the stub is reachable on a stably-halted target. Per the chosen scope (gate on `gdbstub` + panic
+evidence, not on `preserve_on_crash`), the new outcome can also be recorded for a `gdbstub`-only
+System (e.g. kdump-primary, no `preserve_on_crash`) whose early-boot panic kdump could not
+capture. That case is only deterministic when the guest is configured to **halt** on panic
+(`panic=0`, the kernel's default — an infinite `panic()` loop) rather than reboot (`panic=N>0`
+or `panic=-1`, which would carry the kernel past the panic before attach). The kdive-provisioned
+direct-kernel cmdline does not set a rebooting `panic=`, so the default halting behavior holds;
+the `live_vm` test exercises the `preserve_on_crash` path (the deterministic one) and this
+assumption is called out so a future cmdline change that adds `panic=N` is recognized as
+breaking it.
 
 ### 4. Admit `crashed_halted_live` at the precondition gate
 
@@ -143,9 +179,15 @@ debuggable crash.
   transport cannot attach. The detail names the gdbstub alternative.
 
 The Run is already `SUCCEEDED` and the `boot` step is `succeeded`, so the `run_state` and
-`boot_first` checks pass without change. The System is **not** transitioned by the boot handler
-on failure, so it remains `READY` and the existing `SystemState.READY` check passes; the design
-relies on this and the `live_vm` test asserts it.
+`boot_first` checks pass without change. The System remains `READY`: verified against the code —
+only an explicit `force_crash` (`jobs/handlers/control.py:136`) transitions a System to
+`CRASHED`, and the reconciler never syncs a libvirt `VIR_DOMAIN_CRASHED` domain into the System
+row (its only System repair is orphaned-Allocation teardown), so a `preserve_on_crash` domain
+that libvirt holds in `VIR_DOMAIN_CRASHED` leaves the System row `READY`. A unit test asserts the
+System is still `READY` across the crashed-but-halted boot, and the `live_vm` test confirms the
+`SystemState.READY` re-check under the lock passes. (If a future change adds libvirt-domain →
+System-state reconciliation, this admit branch must be revisited to accept `CRASHED` for the
+`crashed_halted_live` case.)
 
 ### 5. Surface real options (no new knob)
 
@@ -164,9 +206,9 @@ possible, without a second config surface.
 
 ```
 runs.boot (worker)
-  booter.boot() raises READINESS_FAILURE (early-boot panic/hang)
+  booter.boot() raises READINESS_FAILURE (early-boot panic)
     ├─ expected_boot_failure declared & console matches → expected_crash_observed (unchanged → postmortem)
-    ├─ gdbstub provisioned & RSP probe live → crashed_halted_live (succeeded boot, Run SUCCEEDED)
+    ├─ gdbstub provisioned & console shows panic & rsp_reachable → crashed_halted_live (succeeded boot, Run SUCCEEDED)
     └─ else → abandon boot step → Run FAILED (unchanged)
 
 debug.start_session(run, "gdbstub")
@@ -179,12 +221,14 @@ debug.start_session(run, "gdbstub")
 
 ## Error handling & edge cases
 
-- **Probe live at boot, dead at attach** (VM torn down between): `open_transport` re-probes and
-  fails authoritatively (`debug_attach_failure`/`transport_failure`). The recorded outcome is
+- **Probe reachable at boot, dead at attach** (VM torn down between): `open_transport` re-probes
+  and fails authoritatively (`debug_attach_failure`/`transport_failure`). The recorded outcome is
   advisory; attach is the source of truth.
-- **Hang without panic** + live stub: also recorded `crashed_halted_live` and admitted —
-  attaching to a hung early boot is desirable and within scope (the gate is the live stub).
-- **`preserve_on_crash` set, `gdbstub` unset**: no live stub → existing host_dump path,
+- **Hang without a panic line** (slow boot that tripped the readiness timeout but never
+  panicked): the console-panic signature (b) does not match, so the outcome is **not** recorded —
+  the boot abandons to `FAILED` as today. This deliberately excludes the case where the probe's
+  halt-on-connect could otherwise freeze a still-progressing boot.
+- **`preserve_on_crash` set, `gdbstub` unset**: no stub at all → existing host_dump path,
   unchanged except that `preserve_on_crash` now actually renders (Component 1).
 - **kdump-primary System** (`crashkernel` + `gdbstub`) with an early-boot panic: kdump captures
   nothing, but the live stub is found → `crashed_halted_live` → live attach. The fallback the
@@ -202,10 +246,13 @@ Unit / TDD at each boundary:
 
 - `xml.py`: renders `pvpanic` + `<on_crash>preserve</on_crash>` iff `preserve_on_crash`;
   unchanged when unset; coexists with the `gdbstub` and SSH passthroughs.
-- boot handler: records `crashed_halted_live` on `READINESS_FAILURE` when `gdbstub` provisioned
-  and an injected probe reports live; abandons (→ `FAILED`) when the probe reports dead or
-  `gdbstub` unset; still records `expected_crash_observed` for a declared/matched crash; still
-  records `ready` for a clean boot.
+- boot handler: records `crashed_halted_live` on `READINESS_FAILURE` only when all three of
+  (`gdbstub` provisioned, console matches the generic panic signature, injected probe reports
+  reachable) hold; abandons (→ `FAILED`) when any is false — including the **no-panic-line but
+  probe-reachable** case (proves the panic signature, not the probe, is the crash signal) and the
+  probe-unreachable case; asserts the exact `available_capture` list for the `gdbstub`-only vs
+  `gdbstub`+`preserve_on_crash` flag combinations; still records `expected_crash_observed` for a
+  declared/matched crash and `ready` for a clean boot; asserts the System row stays `READY`.
 - `_attach_preconditions`: admits `crashed_halted_live` for `gdbstub`; rejects it for
   `drgn-live`; keeps `expected_crash_observed` → postmortem and the `boot_first` rejection.
 
