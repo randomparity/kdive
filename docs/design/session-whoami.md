@@ -61,6 +61,11 @@ side effects, no new data plumbing.
   - `suggested_next_actions = ["projects.list"]` so the probe chains into the richer
     per-project view.
 
+  `RequestContext` also carries `agent_session` (`str | None`); it is **intentionally
+  not returned**. It is a session-correlation token for audit attribution, not an
+  identity or capability claim, and the issue's field list omits it. Returning it would
+  widen the probe's surface beyond its purpose.
+
 - **Determinism / robustness:** `projects` is sorted and de-duplicated (`ctx.projects`
   is not de-duplicated upstream); `platform_roles` is sorted by value; `roles` is
   rendered from `ctx.roles` (already a per-project map). All values are JSON-safe and
