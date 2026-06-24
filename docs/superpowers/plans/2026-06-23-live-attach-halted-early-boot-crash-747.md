@@ -268,12 +268,50 @@ def _generic_panic_matches(redacted_console: bytes) -> bool:
 
 - [ ] **Step 4: Run, verify green.** `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -k generic_panic -q` → PASS.
 
-- [ ] **Step 5: Write failing tests — the recording branch.** Drive `_run_boot_and_capture_outcome` with a fake booter raising `READINESS_FAILURE`, a fake `connector` whose `open_transport` returns a handle (reachable) or raises (unreachable), a fake `profile_policy.gdbstub_provisioned`, and a console artifact whose bytes contain (or omit) the panic line. Mirror the existing outcome tests in this file (search for `_run_boot_and_capture_outcome(` usages; if none, add a focused async test constructing the minimal fakes). Assert:
-  - gdbstub + panic-line + reachable ⇒ result `boot_outcome == "crashed_halted_live"`, `available_capture == ["gdbstub", "console"]` (no preserve) and `== ["gdbstub", "console", "host_dump"]` (preserve set); a boot audit row is recorded.
-  - gdbstub + panic-line + **unreachable** (open_transport raises) ⇒ re-raises (abandon → FAILED).
-  - gdbstub + **no panic line** + reachable ⇒ re-raises (proves the panic signature, not the probe, is the crash signal).
-  - **no gdbstub** + panic-line + reachable ⇒ re-raises.
-  - declared+matched expected crash ⇒ still `expected_crash_observed` (unchanged).
+- [ ] **Step 5: Write failing tests — the recording branch.** There is no end-to-end harness for `_run_boot_and_capture_outcome` to mirror (the file only unit-tests `_expected_crash_matches`), so test the two pure/seamed helpers as units plus the recording helper with monkeypatched IO seams — do **not** touch the disk or object store.
+
+Pure unit (no IO):
+
+```python
+class _Pol:
+    def __init__(self, gdbstub: bool, host_dump: bool) -> None:
+        self._g, self._h = gdbstub, host_dump
+    def gdbstub_provisioned(self, _profile: object) -> bool: return self._g
+    def host_dump_provisioned(self, _profile: object) -> bool: return self._h
+
+def test_available_capture_without_preserve() -> None:
+    assert runs_boot._available_capture(_Pol(True, False), cast(ProvisioningProfile, object())) == ["gdbstub", "console"]
+
+def test_available_capture_with_preserve() -> None:
+    assert runs_boot._available_capture(_Pol(True, True), cast(ProvisioningProfile, object())) == ["gdbstub", "console", "host_dump"]
+```
+
+`_gdbstub_reachable` with a fake connector (no real socket):
+
+```python
+class _Conn:
+    def __init__(self, raises: bool) -> None: self._raises = raises
+    def open_transport(self, _s: object, _k: object) -> object:
+        if self._raises:
+            raise CategorizedError("no stub", category=ErrorCategory.DEBUG_ATTACH_FAILURE)
+        return object()
+    def close_transport(self, _h: object) -> None: ...
+
+def test_gdbstub_reachable_true_when_open_succeeds() -> None:
+    assert runs_boot._gdbstub_reachable(cast(Connector, _Conn(raises=False)), uuid4()) is True
+
+def test_gdbstub_reachable_false_when_open_raises() -> None:
+    assert runs_boot._gdbstub_reachable(cast(Connector, _Conn(raises=True)), uuid4()) is False
+```
+
+The recording helper, monkeypatching the IO seams (`_capture_console_artifact` → a fake `_ConsoleArtifact` carrying chosen bytes; `SYSTEMS.get` → a fake System whose `provisioning_profile` parses; `_record_boot_audit` → a recorder). Use one async test parametrized over the matrix below; assert on the returned dict / `None` and that the audit recorder fired only on the recorded case:
+  - gdbstub + panic-line + reachable ⇒ `boot_outcome == "crashed_halted_live"`, `available_capture == ["gdbstub", "console"]` (no preserve) / `["gdbstub", "console", "host_dump"]` (preserve); audit recorded.
+  - gdbstub + panic-line + **unreachable** (fake connector raises) ⇒ returns `None` (caller re-raises → FAILED).
+  - gdbstub + **no panic line** + reachable ⇒ returns `None` (panic signature, not the probe, is the crash signal).
+  - **no gdbstub** ⇒ returns `None`.
+  - Plus an integration-level assertion that a declared+matched expected crash still yields `expected_crash_observed` (the existing branch is untouched — add/keep a test exercising that path).
+
+(`_ConsoleArtifact` is the `NamedTuple` in `runs_boot.py` with `id`, `object_key`, `data`; build a fake System the same way other `tests/jobs/` tests stub `SYSTEMS.get`, or via a tiny stand-in with a `.provisioning_profile` that `ProvisioningProfile.parse` accepts.)
 
 - [ ] **Step 6: Run, verify red.** `uv run python -m pytest tests/jobs/handlers/test_runs_boot.py -k "crashed_halted or available_capture" -q` → FAIL.
 
