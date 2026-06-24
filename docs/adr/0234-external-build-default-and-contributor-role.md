@@ -114,6 +114,15 @@ Uploaded build/kernel artifacts get an enforced lifetime, settled here, implemen
 - **Scope is explicit.** Uploaded kernel/vmlinux/initrd are in scope to delete; **console and
   other crash evidence retention is a separate, deliberate choice** (it is the A/B evidence
   epic #764/#761 is working to *preserve*), reconciled with #761 rather than swept in here.
+- **Decision-3/decision-4 interaction (binding constraint on #768).** Because decision 3 lowers
+  `investigations.close` to `contributor`, close must not become a destructive evidence operation
+  in a `contributor`'s hands. #768's clear-on-close is therefore constrained to be: (a) a deferred
+  reconciler sweep after a grace period (never a synchronous delete in the `close` call path),
+  (b) scoped to uploaded *build* artifacts (kernel/vmlinux/initrd) — never console or other crash
+  evidence, and (c) audited. With those constraints a `contributor` closing its own investigation
+  reclaims only the build inputs it uploaded, after a delay, reversibly within the grace window —
+  not crash evidence. If #768 cannot honor (a)–(c), `investigations.close` must move back to
+  `operator` rather than weaken the constraint.
 
 ### 5. kdive advises the required format
 

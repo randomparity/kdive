@@ -261,3 +261,38 @@ def test_create_system_upload_stays_operator_but_run_upload_drops() -> None:
     assert required_scopes("artifacts.create_system_upload") == frozenset(
         {ExposureScope.PROJECT_OPERATOR}
     )
+
+
+#: Every tool that operates on an *existing* live DebugSession routes through the single
+#: ``resolve_debug_session_context`` runtime gate (contributor, ADR-0234). The exposure scope is
+#: hand-maintained and drifted to VIEWER twice (debug.list_breakpoints, introspect.run), so this
+#: list is the invariant: a tool in this set MUST classify as contributor, or a viewer is shown a
+#: tool the shared gate will deny. Keep it in sync with the helper's call sites
+#: (`rg resolve_debug_session_context src/kdive`).
+_LIVE_SESSION_FAMILY = frozenset(
+    {
+        "debug.end_session",
+        "debug.continue",
+        "debug.interrupt",
+        "debug.set_breakpoint",
+        "debug.clear_breakpoint",
+        "debug.list_breakpoints",
+        "debug.read_memory",
+        "debug.read_registers",
+        "introspect.run",
+    }
+)
+
+
+def test_live_session_family_classified_contributor_not_viewer() -> None:
+    # Guard against the exposure/runtime drift that hid behind list_breakpoints and introspect.run:
+    # each tool sharing the contributor live-session gate must advertise at contributor exactly.
+    for tool in _LIVE_SESSION_FAMILY:
+        assert required_scopes(tool) == frozenset({ExposureScope.PROJECT_CONTRIBUTOR}), tool
+    # And the offline-core read stays viewer (it does NOT touch a live session).
+    assert required_scopes("introspect.from_vmcore") == frozenset({ExposureScope.PROJECT_VIEWER})
+
+
+def test_viewer_sees_no_live_session_tool() -> None:
+    viewer = _ctx(roles={"a": Role.VIEWER})
+    assert visible_tool_names(viewer, _LIVE_SESSION_FAMILY) == frozenset()

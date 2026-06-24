@@ -135,7 +135,9 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "images.prune_expired": _PLAT_ADMIN,
     # introspect
     "introspect.from_vmcore": _VIEWER,
-    "introspect.run": _VIEWER,
+    # introspect.run actively drives a live drgn-live session (resolve_debug_session_context →
+    # contributor), unlike from_vmcore's offline-core read (ADR-0234).
+    "introspect.run": _CONTRIBUTOR,
     # inventory (platform auditor)
     "inventory.list": _PLAT_AUDITOR,
     "inventory.clear_override": _PLAT_ADMIN,

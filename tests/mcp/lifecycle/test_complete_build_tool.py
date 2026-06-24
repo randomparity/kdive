@@ -27,6 +27,7 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 )
 from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.server_build import BuildRunHandlers
+from kdive.security.authz.rbac import Role
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )
@@ -160,6 +161,29 @@ def test_complete_build_finalizes_external_run(migrated_url: str) -> None:
                 run = await RUNS.get(conn, run_id)
         assert run is not None and run.state is RunState.SUCCEEDED
         assert run.kernel_ref is not None and run.kernel_ref.endswith("/kernel")
+
+    asyncio.run(_run())
+
+
+def test_contributor_completes_external_build(migrated_url: str) -> None:
+    # ADR-0234 end-to-end: a contributor (not operator) can finalize an external build it
+    # uploaded. Proves the re-gated ingest core admits the role and drives the Run to SUCCEEDED,
+    # not just that an isolated require_role passes.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool,
+                _ctx(role=Role.CONTRIBUTOR),
+                str(run_id),
+                build_id=None,
+                cmdline="dhash_entries=1",
+            )
+            assert resp.status == "succeeded"
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, run_id)
+        assert run is not None and run.state is RunState.SUCCEEDED
 
     asyncio.run(_run())
 
