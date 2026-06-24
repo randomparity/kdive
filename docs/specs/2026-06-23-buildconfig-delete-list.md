@@ -2,7 +2,7 @@
 
 - **Issue:** #751 (part of #746, Part 2 black-box review follow-up)
 - **ADR:** [0231](../adr/0231-buildconfig-delete-list.md)
-- **Status:** Draft
+- **Status:** Accepted (ADR-0231)
 
 ## Problem
 
@@ -36,7 +36,10 @@ operator's to remove at runtime.
 
 ### `buildconfig.list`
 
-- Returns every fragment in the catalog as a collection envelope, sorted by `name`.
+- Returns every fragment in the catalog as a collection envelope, sorted by `name`. An
+  empty catalog returns an empty collection (`ok`, zero items), not an error. The catalog is
+  bounded (a handful of curated fragments), so the list is unpaginated — the `shapes.list`
+  precedent, not the `images.list` keyset pagination.
 - Per-row data exposes `name`, `sha256`, `source`, and `description` — enough for an
   operator/agent to see what exists and which rows are operator-owned (and therefore
   deletable).
@@ -61,6 +64,11 @@ operator's to remove at runtime.
   `_PLAT_ADMIN`.
 - On success: removes the catalog row, writes a success audit row, returns a `deleted`
   envelope. The object-store bytes are **not** deleted (see ADR rejected alternatives).
+- **Concurrency:** the handler acquires `advisory_xact_lock(conn, LockScope.BUILD_CONFIG,
+  name)` inside its transaction — the same per-name lock `buildconfig.set` and the seed take
+  — so the delete and its provenance-for-reason read are serialized against a concurrent
+  `set`/`seed`/`config` write on the same name. Without it, a delete interleaving with a
+  committing `set` could report a stale `source` (or `not_found`) in the refusal reason.
 
 ## Data layer
 
