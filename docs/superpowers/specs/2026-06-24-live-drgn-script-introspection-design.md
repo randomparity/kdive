@@ -133,9 +133,11 @@ kdive-drgn run-script [timeout_sec]   # reads the drgn script from STDIN
   control this section exists to provide. The wrapper therefore always receives a positive bound.
 - The clamped value drives the in-guest `timeout … drgn -k` wrapper (kills a runaway drgn in the
   guest).
-- The worker-side transport timeout (SSH / guest-agent round-trip) is derived as
-  `timeout_sec + transport_slack` so a legitimately long script is not severed by the channel
-  timeout, while a *wedged* sshd/agent still releases the worker thread-pool slot.
+- The worker-side transport timeout (SSH / guest-agent round-trip) is derived from the **clamped**
+  value as `clamped_timeout_sec + transport_slack` (never the raw request) so it tracks the same
+  bound the guest receives — an over-ceiling request cannot inflate the worker thread-pool wait
+  past the ceiling. A legitimately long script is not severed by the channel timeout, while a
+  *wedged* sshd/agent still releases the worker thread-pool slot.
 - A wedged or runaway script never traps the agent: it can `debug.end_session` and, if needed,
   tear down / force the VM to recover. The disposable guest is the backstop.
 - **Operator-configurable ceiling.** Because an unbounded agent-chosen timeout can squat a
