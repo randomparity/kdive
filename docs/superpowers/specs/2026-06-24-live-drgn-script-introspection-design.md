@@ -43,8 +43,11 @@ the ones that are *not* about protecting an owner from their own data (see Safet
 
 Add an MCP tool `introspect.script(session_id, script, timeout_sec?)` that runs a
 caller-supplied drgn script against the **live** guest kernel over the existing drgn-live
-`DebugSession`, returning the script's stdout. The script executes **in the guest** (disposable
-blast radius); the worker only opens the transport and relays bytes.
+`DebugSession`, returning the script's stdout. Like `introspect.run` / `introspect.from_vmcore`,
+it is a **synchronous server-side read** (a `_PLANE_REGISTRARS` tool run via `asyncio.to_thread`,
+not a worker job; ADR-0033 §1). The script executes **in the guest** (disposable blast radius);
+the server process only opens the transport and relays bytes. Every "thread-pool slot" and "shared
+credentialed process" below therefore refers to the **server** process, not the job worker.
 
 ## Surface
 
@@ -99,7 +102,7 @@ kdive-drgn run-script [timeout_sec]   # reads the drgn script from STDIN
   `GuestAgentExec` to pass `input-data` (and base64-encode the script). qemu-guest-agent caps both
   the inbound `input-data` and the captured `out-data` sizes; the script is therefore size-bounded
   before send (oversize script → `configuration_error`, not a silent agent rejection), and an agent
-  `out-data` cap is treated as the same byte-cap `truncated` path as the worker-side cap — whichever
+  `out-data` cap is treated as the same byte-cap `truncated` path as the server-side cap — whichever
   binds first sets `truncated`.
 
 ## Execution model: stateless, repeatable within a boot
@@ -133,15 +136,15 @@ kdive-drgn run-script [timeout_sec]   # reads the drgn script from STDIN
   control this section exists to provide. The wrapper therefore always receives a positive bound.
 - The clamped value drives the in-guest `timeout … drgn -k` wrapper (kills a runaway drgn in the
   guest).
-- The worker-side transport timeout (SSH / guest-agent round-trip) is derived from the **clamped**
+- The server-side transport timeout (SSH / guest-agent round-trip) is derived from the **clamped**
   value as `clamped_timeout_sec + transport_slack` (never the raw request) so it tracks the same
-  bound the guest receives — an over-ceiling request cannot inflate the worker thread-pool wait
+  bound the guest receives — an over-ceiling request cannot inflate the server thread-pool wait
   past the ceiling. A legitimately long script is not severed by the channel timeout, while a
-  *wedged* sshd/agent still releases the worker thread-pool slot.
+  *wedged* sshd/agent still releases the server thread-pool slot.
 - A wedged or runaway script never traps the agent: it can `debug.end_session` and, if needed,
   tear down / force the VM to recover. The disposable guest is the backstop.
 - **Operator-configurable ceiling.** Because an unbounded agent-chosen timeout can squat a
-  shared-worker thread-pool slot in a multi-tenant deployment, a deployment-config maximum
+  shared server thread-pool slot in a multi-tenant deployment, a deployment-config maximum
   (`KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS`, generous default `600`) clamps `timeout_sec`. This
   is a deployment *policy*, not a per-call limit; a single-tenant operator can set it
   effectively unbounded. A request over the ceiling is clamped to it (not rejected), with the
@@ -155,11 +158,11 @@ kdive-drgn run-script [timeout_sec]   # reads the drgn script from STDIN
   secret-registry `Redactor` only to mask **platform secrets** (the kdive-managed SSH key, any
   registered secret), never to redact dump contents from their owner. The managed key is
   registered for redaction exactly as the fixed-helper path does today.
-- **DoS / usability guards, not confidentiality.** The in-guest `timeout`, the worker-side
+- **DoS / usability guards, not confidentiality.** The in-guest `timeout`, the server-side
   transport timeout, the operator ceiling, and an **output byte cap** (`truncated` flag,
   reusing the 1 MiB `_REPORT_BYTE_CAP` order of magnitude) bound resource use and response size.
-- The capability is **not** offered on the offline/worker path — running an arbitrary
-  caller script on the shared, credentialed worker process is out of scope (that path is served
+- The capability is **not** offered on the offline/server path — running an arbitrary
+  caller script on the shared, credentialed server process is out of scope (that path is served
   by #781's fetch-and-analyze-locally model).
 
 ## Port + wiring
@@ -199,7 +202,7 @@ The port and tool reuse the existing live-introspect taxonomy:
   at the tool boundary, mirroring `introspect.run`.
 - **a script that wedges or crashes the live guest mid-call** → surfaces as `transport_failure`
   (the channel drops / the agent stops answering) or `debug_attach_failure` (the in-guest `timeout`
-  kills drgn), bounded by `timeout_sec + transport_slack`; it never hangs the worker thread past
+  kills drgn), bounded by `timeout_sec + transport_slack`; it never hangs the server thread past
   that bound. The call does **not** mutate Run or boot-outcome state — a `DebugSession` left
   unusable by the agent's own script is recovered by `debug.end_session` (and, if the guest is
   dead, teardown), exactly as a wedged gdb session is.
@@ -232,10 +235,10 @@ descriptor-vs-maturity split for the live introspect surface.
   direction: drgn's value is programmatic, agents author drgn well, and a bounded API kneecaps
   the capability ADR-0033 deferred whole. A symbol lookup is a one-line drgn script under this
   surface.
-- **Arbitrary scripts on the offline/worker path too.** Rejected: the worker is shared,
+- **Arbitrary scripts on the offline/server path too.** Rejected: the server is shared,
   credentialed infrastructure; arbitrary caller code there is a cross-tenant RCE surface, and it
   would also have to punch a hole in the platform-secret boundary. Offline arbitrary analysis is
-  served by #781 (fetch the static core and run drgn locally), which needs no worker execution.
+  served by #781 (fetch the static core and run drgn locally), which needs no server-side execution.
 - **A new program in the guest-agent allowlist.** Rejected: it would widen the remote
   single-program allowlist. Routing the script over stdin to the *existing* allowlisted
   `kdive-drgn` keeps the allowlist byte-for-byte unchanged.

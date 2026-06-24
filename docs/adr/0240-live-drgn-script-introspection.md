@@ -59,7 +59,7 @@ caller-supplied drgn (Python) script against the **live** guest kernel of an ope
    delete the in-guest bound) and a deployment-config maximum
    (`KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS`, default `600`) as a multi-tenant DoS policy
    (single-tenant operators set it effectively unbounded). It drives the in-guest `timeout`; the
-   worker transport timeout is `clamped_timeout + slack`.
+   server transport timeout is `clamped_timeout + slack`.
 4. **`mutating`, `contributor`, descriptor-gated.** drgn `-k` can write live memory, so the tool
    is `mutating`. It requires `contributor` (the rest of the live-debug surface's role) and a new
    `IntrospectionMode = "live-script"` the provider descriptor must advertise (ADR-0209 admission;
@@ -95,10 +95,10 @@ caller-supplied drgn (Python) script against the **live** guest kernel of an ope
 - **Symbol-resolution-only / bounded reads.** Loses the programmatic power that is drgn's point
   and that agents exploit well; a bounded API re-kneecaps the deferred capability. A symbol lookup
   is a trivial script under this surface.
-- **Arbitrary scripts on the offline/worker path too.** The worker is shared, credentialed
+- **Arbitrary scripts on the offline/server path too.** The server is shared, credentialed
   infrastructure; arbitrary caller code there is a cross-tenant RCE surface and would breach the
   platform-secret boundary. Offline arbitrary analysis is served by #781 (fetch the static core,
-  run drgn locally) with no worker execution.
+  run drgn locally) with no server-side execution.
 - **A new allowlisted in-guest program.** Widens the remote single-program allowlist. Routing the
   script over stdin to the existing `kdive-drgn` keeps the allowlist unchanged.
 - **A persistent in-guest drgn REPL for cross-call state.** Long-lived interpreter
