@@ -6,7 +6,7 @@ mutate the `external_refs` jsonb under a per-Investigation advisory lock, keyed 
 `(tracker, id)` natural key (link upserts, unlink removes-if-present — both idempotent).
 `get`/the mutators render through `_envelope_for_investigation` (every Investigation state
 is a non-failure status, so no failure mapping is needed). RBAC: mutations require
-`contributor` (ADR-0234); reads require `viewer` on the owning project. Authz denials raise
+`contributor`; reads require `viewer` on the owning project. Authz denials raise
 (ADR-0020: no authz ErrorCategory).
 """
 

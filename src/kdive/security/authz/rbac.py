@@ -1,4 +1,4 @@
-"""Project-scoped RBAC: roles, claim parsing, and enforcement (ADR-0006, ADR-0020, ADR-0234).
+"""Project-scoped RBAC: roles, claim parsing, and enforcement (ADR-0006, ADR-0020).
 
 The four project roles form a total rank, so a higher role satisfies a lower requirement.
 `roles_from_claims` turns a verified token's `roles` claim into the per-project role
@@ -26,7 +26,7 @@ _PLATFORM_ROLES_CLAIM = "platform_roles"
 class Role(StrEnum):
     """The four project-scoped roles, ordered viewer < contributor < operator < admin.
 
-    ``contributor`` (ADR-0234) is the lowest role that can run a full crash-investigation
+    ``contributor`` is the lowest role that can run a full crash-investigation
     loop — build/upload, install, boot, debug, post-mortem, and the allocations and
     investigations that loop needs — while ``viewer`` stays read-only (accounting, audit,
     activity) and system definition, image management, and destructive ops stay at
