@@ -102,6 +102,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "build_hosts.register_ephemeral_libvirt": _PLAT_ADMIN,
     # build config
     "buildconfig.set": _PLAT_ADMIN,
+    "buildconfig.delete": _PLAT_ADMIN,
     # control
     "control.power": _OPERATOR,  # `on` is operator; destructive actions gate to admin
     "control.force_crash": _ADMIN,
@@ -204,6 +205,7 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
     {
         "artifacts.expected_uploads",
         "buildconfig.get",
+        "buildconfig.list",
         "fixtures.list",
         "fixtures.validate",
         "images.list",

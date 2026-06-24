@@ -2,6 +2,16 @@
 
 # `buildconfig` tools
 
+## `buildconfig.delete`
+
+`implemented`
+
+Delete an operator-published fragment. Requires platform_admin; audited.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Operator-published fragment name to remove (e.g. kdump). |
+
 ## `buildconfig.get`
 
 `implemented` · `read-only`
@@ -11,6 +21,12 @@ Fetch a seeded kernel-config fragment inline with sha256 and merge recipe. Auth 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | The build-config fragment name to retrieve (e.g. kdump). |
+
+## `buildconfig.list`
+
+`implemented` · `read-only`
+
+List build-config fragments with name, sha256, source, and description. Auth only.
 
 ## `buildconfig.set`
 
