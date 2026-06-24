@@ -5,6 +5,7 @@ mutmut itself is never run here; these test the wrapper's pure decision logic.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from scripts.mutate import (
     collect_results,
     format_summary,
     guard_no_existing_config,
+    no_covered_mutants,
     parse_survivors,
     parse_total_mutants,
     preflight_collect,
@@ -24,7 +26,9 @@ from scripts.mutate import (
     resolve_source,
     resolve_test_paths,
     run_mutmut,
+    shim_source,
     signature,
+    subprocess_env,
     write_signature,
 )
 
@@ -263,5 +267,60 @@ def test_run_mutmut_aborts_on_broken_baseline() -> None:
         run_mutmut(runner=_fake_runner(1, stderr="ModuleNotFoundError: kdive.config"))
 
 
+def test_run_mutmut_treats_no_covered_mutants_as_benign() -> None:
+    # mutmut exits non-zero when a target's only code runs at import (no covered, mutatable
+    # lines under max_stack_depth) — that is a valid "0 mutants" result, not a broken baseline.
+    stdout = (
+        "done in 541ms (0 files mutated, 513 ignored, 1 unmodified)\n"
+        "Stopping early, because we could not find any test case for any mutant.\n"
+    )
+    assert run_mutmut(runner=_fake_runner(1, stdout=stdout)) == stdout
+
+
+def test_no_covered_mutants_detects_the_marker() -> None:
+    assert no_covered_mutants(
+        "Stopping early, because we could not find any test case for any mutant."
+    )
+    assert not no_covered_mutants("⠇ 10/10  🎉 8  🙁 2\n")
+
+
 def test_collect_results_returns_stdout() -> None:
     assert collect_results(runner=_fake_runner(0, "a: survived\n")) == "a: survived\n"
+
+
+def test_subprocess_env_sets_uv_no_sync() -> None:
+    env = subprocess_env({}, "/tmp/shim")
+    assert env["UV_NO_SYNC"] == "1"
+
+
+def test_subprocess_env_uses_shim_dir_when_no_existing_pythonpath() -> None:
+    env = subprocess_env({}, "/tmp/shim")
+    assert env["PYTHONPATH"] == "/tmp/shim"
+
+
+def test_subprocess_env_prepends_shim_dir_preserving_existing_pythonpath() -> None:
+    env = subprocess_env({"PYTHONPATH": "/existing/a"}, "/tmp/shim")
+    assert env["PYTHONPATH"] == f"/tmp/shim{os.pathsep}/existing/a"
+
+
+def test_subprocess_env_preserves_other_base_keys_without_mutating_input() -> None:
+    base = {"HOME": "/home/dev", "PYTHONPATH": "/x"}
+    env = subprocess_env(base, "/tmp/shim")
+    assert env["HOME"] == "/home/dev"
+    # the builder must not mutate the caller's mapping in place
+    assert base == {"HOME": "/home/dev", "PYTHONPATH": "/x"}
+
+
+def test_shim_source_eager_imports_beartype_and_multiprocessing_under_guard() -> None:
+    src = shim_source()
+    assert "import multiprocessing" in src
+    assert "beartype.claw._clawstate" in src
+    assert "beartype.claw._importlib._clawimpload" in src
+    assert "import pytest" in src
+    # the eager imports must be best-effort so a missing optional dep never aborts startup
+    assert "try:" in src
+    assert "except Exception:" in src
+
+
+def test_shim_source_is_valid_python() -> None:
+    compile(shim_source(), "sitecustomize.py", "exec")
