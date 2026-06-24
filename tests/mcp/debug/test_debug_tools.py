@@ -36,6 +36,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Allocation, DebugSession, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.debug import sessions as debug_tools
+from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProfilePolicy
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
@@ -605,8 +606,13 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "expected_crash_not_live_debuggable"
-        assert resp.detail is not None and "captured core" in resp.detail
-        assert resp.suggested_next_actions == ["postmortem.triage", "vmcore.fetch"]
+        # The envelope names no dead-end tool: after an expected console_crash the System stays
+        # READY, so vmcore.fetch always rejects (#759). It points straight at the console artifact
+        # and reuses postmortem.triage's shared guidance so the two surfaces cannot drift.
+        assert resp.detail == CONSOLE_CRASH_GUIDANCE
+        assert "vmcore.fetch" not in resp.suggested_next_actions
+        assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
+        assert resp.suggested_next_actions[0] == "runs.get"
         assert count == 0
         assert conn_fake.opened == []
 

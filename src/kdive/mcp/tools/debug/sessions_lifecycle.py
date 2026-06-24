@@ -45,6 +45,7 @@ from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.debug.debug_session_telemetry import DebugSessionTelemetry
 from kdive.mcp.tools.debug.ops import DebugEngineRuntime, DebugRuntimeResolver
 from kdive.mcp.tools.debug.session_context import resolve_debug_session_context
+from kdive.mcp.tools.lifecycle.vmcore import CONSOLE_CRASH_GUIDANCE
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProfilePolicy
@@ -76,10 +77,6 @@ _ATTACH_FAILURE = frozenset({ErrorCategory.DEBUG_ATTACH_FAILURE, ErrorCategory.T
 # no run state, guest output, or resource id is interpolated (no-leak seam, ADR-0123).
 _NOT_BOOTED_DETAIL = "run is not booted; it must reach a successful boot before a live session"
 _BOOT_FIRST_DETAIL = "run has no successful boot; boot it before starting a live session"
-_EXPECTED_CRASH_DETAIL = (
-    "run booted into an expected crash and is not live-debuggable; analyze its captured core "
-    "instead"
-)
 _CRASHED_HALTED_LIVE_DRGN_DETAIL = (
     "run crashed during early boot and is halted with a live gdbstub; attach over gdbstub. "
     "drgn-live needs a running in-guest sshd, which a halted crash does not have"
@@ -492,11 +489,15 @@ async def _attach_preconditions(
             data={"reason": "boot_first"},
         )
     if boot_result.get("boot_outcome") == "expected_crash_observed":
+        # An expected console_crash leaves the System READY, so vmcore.fetch always rejects and
+        # postmortem.triage only self-corrects back to the console (#759). Point straight at the
+        # console artifact and reuse postmortem.triage's shared CONSOLE_CRASH_GUIDANCE so the two
+        # surfaces cannot drift.
         return ToolResponse.failure(
             str(run.id),
             ErrorCategory.CONFIGURATION_ERROR,
-            detail=_EXPECTED_CRASH_DETAIL,
-            suggested_next_actions=["postmortem.triage", "vmcore.fetch"],
+            detail=CONSOLE_CRASH_GUIDANCE,
+            suggested_next_actions=["runs.get", "artifacts.list"],
             data={"reason": "expected_crash_not_live_debuggable"},
         )
     if boot_result.get("boot_outcome") == "crashed_halted_live" and transport == _DRGN_LIVE:

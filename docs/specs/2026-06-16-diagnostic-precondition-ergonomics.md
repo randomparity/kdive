@@ -72,7 +72,7 @@ author-controlled `detail` and `suggested_next_actions`:
 |---|---|---|---|
 | Run not `succeeded` | `current_status=<state>` | "run is not booted; it must reach a successful boot before a live session" | `runs.get` |
 | no successful boot result | `reason=boot_first` | "run has no successful boot; boot it before starting a live session" | `runs.boot`, `runs.get` |
-| booted into expected crash | `reason=expected_crash_not_live_debuggable` | "run booted into an expected crash and is not live-debuggable; analyze its captured core instead" | `postmortem.triage`, `vmcore.fetch` |
+| booted into expected crash | `reason=expected_crash_not_live_debuggable` | shared `CONSOLE_CRASH_GUIDANCE` (points at the console artifact; #759) | `runs.get`, `artifacts.list` |
 
 The System-not-present, System-not-ready, and transport-conflict branches are
 internal/transient races (not a *caller* precondition the agent can act on by calling
