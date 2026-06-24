@@ -90,8 +90,17 @@ kdive-drgn run-script [timeout_sec]   # reads the drgn script from STDIN
   agent's base64 `input-data` stdin channel.
 - **Local** (drgn-live SSH, ADR-0218 §session-ssh / ADR-0219): SSH-exec `kdive-drgn run-script <timeout>`, script
   piped over SSH stdin.
-- **Remote** (qemu-guest-agent, ADR-0083): `GuestAgentExec.run(domain, argv, input_data=script)`
-  over the same allowlisted program.
+- **Remote** (qemu-guest-agent, ADR-0083): the script is delivered over the guest-agent's
+  `guest-exec` **`input-data`** (base64 stdin) field, over the same allowlisted program.
+
+  **This is new scope, not an existing capability.** `GuestAgentExec.run(domain, argv)` today takes
+  no stdin and `_spawn` builds `guest-exec` arguments as `{path, arg, capture-output}` with no
+  `input-data` field (`remote_libvirt/guest/agent.py:208,242`). The plan must extend
+  `GuestAgentExec` to pass `input-data` (and base64-encode the script). qemu-guest-agent caps both
+  the inbound `input-data` and the captured `out-data` sizes; the script is therefore size-bounded
+  before send (oversize script → `configuration_error`, not a silent agent rejection), and an agent
+  `out-data` cap is treated as the same byte-cap `truncated` path as the worker-side cap — whichever
+  binds first sets `truncated`.
 
 ## Execution model: stateless, repeatable within a boot
 
@@ -102,12 +111,28 @@ kdive-drgn run-script [timeout_sec]   # reads the drgn script from STDIN
   continuity (variables, intermediate results) puts the whole computation in **one script**.
   This matches the existing one-shot-per-call helper model and avoids managing a long-lived
   in-guest interpreter.
+- **Concurrency stance: unserialized, agent's responsibility.** Like the existing `introspect.run`
+  live path (and unlike the gdb-MI `debug.*` ops, which take a per-session `asyncio.Lock` in
+  `run_engine_op`), `introspect.script` calls are **not serialized per session** — each is an
+  independent transport round-trip spawning its own in-guest `drgn -k`. Two concurrent calls on
+  one session therefore run two drgn processes against `/proc/kcore` at once. Concurrent *reads*
+  are safe; two concurrent *writing* scripts race against live kernel state with no ordering
+  guarantee. The spec does not add per-session serialization (it would not bound cross-session
+  concurrency anyway, and the blast radius is the agent's own guest); an agent that needs ordering
+  serializes its own calls or combines them into one script.
 
 ## Timeouts
 
 - `timeout_sec` is **agent-chosen**, defaulting to `30.0` when omitted. The platform does not
   impose an arbitrary fixed bound; the agent sizes the bound to its work.
-- The value drives the in-guest `timeout … drgn -k` wrapper (kills a runaway drgn in the guest).
+- **Bounded both ends.** The effective value is clamped to `[floor, ceiling]` *before* it reaches
+  the guest: a **floor of `1.0`** (a non-positive, blank, or non-finite `timeout_sec` is clamped
+  up to the floor, never passed through) and the operator ceiling below. The floor matters because
+  the in-guest wrapper is `timeout <n> drgn -k`, and GNU coreutils treats `timeout 0` as **no
+  timeout at all** — so a `0`/negative value would silently delete the in-guest DoS guard, the one
+  control this section exists to provide. The wrapper therefore always receives a positive bound.
+- The clamped value drives the in-guest `timeout … drgn -k` wrapper (kills a runaway drgn in the
+  guest).
 - The worker-side transport timeout (SSH / guest-agent round-trip) is derived as
   `timeout_sec + transport_slack` so a legitimately long script is not severed by the channel
   timeout, while a *wedged* sshd/agent still releases the worker thread-pool slot.
@@ -170,6 +195,12 @@ The port and tool reuse the existing live-introspect taxonomy:
 - undecodable / oversize agent reply → `infrastructure_failure`.
 - off the `live_vm` gate (no real seam) → `missing_dependency` mapped to `debug_attach_failure`
   at the tool boundary, mirroring `introspect.run`.
+- **a script that wedges or crashes the live guest mid-call** → surfaces as `transport_failure`
+  (the channel drops / the agent stops answering) or `debug_attach_failure` (the in-guest `timeout`
+  kills drgn), bounded by `timeout_sec + transport_slack`; it never hangs the worker thread past
+  that bound. The call does **not** mutate Run or boot-outcome state — a `DebugSession` left
+  unusable by the agent's own script is recovered by `debug.end_session` (and, if the guest is
+  dead, teardown), exactly as a wedged gdb session is.
 
 ## Testing
 

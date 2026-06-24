@@ -48,13 +48,18 @@ caller-supplied drgn (Python) script against the **live** guest kernel of an ope
    `trap`). The script never reaches argv, so the remote single-program guest-agent allowlist
    (`{/usr/local/sbin/kdive-drgn}`) is unchanged — untrusted bytes ride the agent's `input-data`
    stdin / the SSH stdin. The script is never installed and never persists between calls.
+   `GuestAgentExec` gains a `guest-exec` `input-data` path (it has no stdin today); the script is
+   size-bounded before send to stay within the guest-agent's base64 input/output caps.
 2. **Stateless, repeatable per boot.** The `DebugSession` persists across many calls; each call
    is a fresh `drgn -k` process with no carried-over Python state. Continuity lives in a single
    script.
-3. **Agent-chosen timeout with an operator ceiling.** `timeout_sec` defaults to `30.0`; it drives
-   the in-guest `timeout`, and the worker transport timeout is `timeout_sec + slack`. A
-   deployment-config maximum (`KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS`, default `600`) clamps it as
-   a multi-tenant DoS policy; single-tenant operators set it effectively unbounded.
+3. **Agent-chosen timeout, clamped both ends.** `timeout_sec` defaults to `30.0` and is clamped to
+   `[1.0, ceiling]` before reaching the guest — a floor of `1.0` (a `0`/negative/non-finite value
+   is clamped up, never passed through, since coreutils `timeout 0` means *no* timeout and would
+   delete the in-guest bound) and a deployment-config maximum
+   (`KDIVE_LIVE_SCRIPT_MAX_TIMEOUT_SECONDS`, default `600`) as a multi-tenant DoS policy
+   (single-tenant operators set it effectively unbounded). It drives the in-guest `timeout`; the
+   worker transport timeout is `clamped_timeout + slack`.
 4. **`mutating`, `contributor`, descriptor-gated.** drgn `-k` can write live memory, so the tool
    is `mutating`. It requires `contributor` (the rest of the live-debug surface's role) and a new
    `IntrospectionMode = "live-script"` the provider descriptor must advertise (ADR-0209 admission;
