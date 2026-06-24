@@ -22,7 +22,7 @@ def test_worker_vantage_descriptor_fields() -> None:
 def test_worker_vantage_descriptor_is_frozen() -> None:
     d = WorkerVantageDescriptor(id="c", provider="p")
     with pytest.raises(dataclasses.FrozenInstanceError):
-        d.id = "other"  # type: ignore[misc]
+        d.id = "other"  # ty: ignore[invalid-assignment]
 
 
 def test_provider_contribution_field_set() -> None:
@@ -46,4 +46,4 @@ def test_provider_contribution_is_frozen() -> None:
     )
     assert contribution.enabled() is True
     with pytest.raises(dataclasses.FrozenInstanceError):
-        contribution.provider = "other"  # type: ignore[misc]
+        contribution.provider = "other"  # ty: ignore[invalid-assignment]

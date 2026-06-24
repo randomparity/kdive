@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastmcp.tools.base import ToolResult
@@ -36,40 +36,45 @@ class _Errs(Exception):
         return self._entries
 
 
+def _ve(entries: list[dict[str, Any]]) -> ValidationError:
+    """The predicates/envelopes only consume ``.errors()``; drive them with a typed stand-in."""
+    return cast("ValidationError", _Errs(entries))
+
+
 # --- _loc_under -------------------------------------------------------------
 
 
 def test_loc_under_true_when_all_errors_under_param() -> None:
     predicate = _loc_under("profile")
-    assert predicate(_Errs([{"loc": ("profile", "kernel")}, {"loc": ("profile",)}]))
+    assert predicate(_ve([{"loc": ("profile", "kernel")}, {"loc": ("profile",)}]))
 
 
 def test_loc_under_false_when_an_error_is_under_another_param() -> None:
     predicate = _loc_under("profile")
-    assert not predicate(_Errs([{"loc": ("profile",)}, {"loc": ("system_id",)}]))
+    assert not predicate(_ve([{"loc": ("profile",)}, {"loc": ("system_id",)}]))
 
 
 def test_loc_under_false_when_no_errors() -> None:
-    assert not _loc_under("profile")(_Errs([]))
+    assert not _loc_under("profile")(_ve([]))
 
 
 def test_loc_under_false_when_loc_missing() -> None:
-    assert not _loc_under("profile")(_Errs([{"type": "x"}]))
+    assert not _loc_under("profile")(_ve([{"type": "x"}]))
 
 
 # --- _is_shape_xor_error ----------------------------------------------------
 
 
 def test_is_shape_xor_error_true_when_all_entries_match() -> None:
-    assert _is_shape_xor_error(_Errs([{"type": SHAPE_XOR_ERROR_TYPE}]))
+    assert _is_shape_xor_error(_ve([{"type": SHAPE_XOR_ERROR_TYPE}]))
 
 
 def test_is_shape_xor_error_false_for_other_type() -> None:
-    assert not _is_shape_xor_error(_Errs([{"type": "int_parsing"}]))
+    assert not _is_shape_xor_error(_ve([{"type": "int_parsing"}]))
 
 
 def test_is_shape_xor_error_false_when_empty() -> None:
-    assert not _is_shape_xor_error(_Errs([]))
+    assert not _is_shape_xor_error(_ve([]))
 
 
 # --- _is_search_context_cap_error -------------------------------------------
@@ -77,20 +82,20 @@ def test_is_shape_xor_error_false_when_empty() -> None:
 
 def test_search_cap_error_true_for_range_error_on_bound_field() -> None:
     assert _is_search_context_cap_error(
-        _Errs([{"loc": ("before_lines",), "type": "greater_than_equal"}])
+        _ve([{"loc": ("before_lines",), "type": "greater_than_equal"}])
     )
 
 
 def test_search_cap_error_false_for_parsing_error() -> None:
     # an int_parsing error is a type mismatch, not a cap rejection (#733 non-goal)
     assert not _is_search_context_cap_error(
-        _Errs([{"loc": ("before_lines",), "type": "int_parsing"}])
+        _ve([{"loc": ("before_lines",), "type": "int_parsing"}])
     )
 
 
 def test_search_cap_error_false_for_non_bound_field() -> None:
     assert not _is_search_context_cap_error(
-        _Errs([{"loc": ("artifact_id",), "type": "less_than_equal"}])
+        _ve([{"loc": ("artifact_id",), "type": "less_than_equal"}])
     )
 
 
@@ -98,31 +103,31 @@ def test_search_cap_error_false_for_non_bound_field() -> None:
 
 
 def test_profile_envelope_is_configuration_error_carrying_errors() -> None:
-    resp = _profile_envelope("alloc-1", _Errs([{"loc": ("profile",), "msg": "bad"}]))
+    resp = _profile_envelope("alloc-1", _ve([{"loc": ("profile",), "msg": "bad"}]))
     assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
     assert resp.object_id == "alloc-1"
 
 
 def test_build_profile_envelope_is_configuration_error() -> None:
-    resp = _build_profile_envelope("sys-1", _Errs([{"loc": ("build_profile",)}]))
+    resp = _build_profile_envelope("sys-1", _ve([{"loc": ("build_profile",)}]))
     assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
     assert resp.object_id == "sys-1"
 
 
 def test_shape_xor_envelope_both_branch() -> None:
-    resp = _shape_xor_envelope("proj", _Errs([{"ctx": {"both": True}}]))
+    resp = _shape_xor_envelope("proj", _ve([{"ctx": {"both": True}}]))
     assert "both a shape and a custom size" in (resp.detail or "")
 
 
 def test_shape_xor_envelope_neither_branch() -> None:
-    resp = _shape_xor_envelope("proj", _Errs([{"ctx": {}}]))
+    resp = _shape_xor_envelope("proj", _ve([{"ctx": {}}]))
     assert "neither a shape nor" in (resp.detail or "")
 
 
 def test_search_context_cap_envelope_names_field_and_bounds() -> None:
     low, high = BEFORE_LINES_RANGE
     resp = _search_context_cap_envelope(
-        "art-1", _Errs([{"loc": ("before_lines",), "type": "less_than_equal"}])
+        "art-1", _ve([{"loc": ("before_lines",), "type": "less_than_equal"}])
     )
     assert resp.detail == f"before_lines must be between {low} and {high}"
     assert resp.object_id == "art-1"
@@ -166,7 +171,7 @@ def _over_cap_error() -> ValidationError:
 
 def _parsing_error() -> ValidationError:
     try:
-        _CapModel(before_lines="not-an-int")  # type: ignore[arg-type]
+        _CapModel(before_lines=cast("int", "not-an-int"))
     except ValidationError as exc:
         return exc
     raise AssertionError("expected ValidationError")

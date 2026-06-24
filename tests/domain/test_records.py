@@ -26,13 +26,14 @@ def test_domain_model_carries_identity_and_timestamps() -> None:
 def test_domain_base_forbids_extra_fields() -> None:
     now = datetime.now(UTC)
     with pytest.raises(ValidationError):
-        DomainModel(id=uuid4(), created_at=now, updated_at=now, surprise="x")
+        DomainModel(id=uuid4(), created_at=now, updated_at=now, surprise="x")  # ty: ignore[unknown-argument]
 
 
 def test_domain_base_validates_assignment() -> None:
     m = _model()
     with pytest.raises(ValidationError):
-        m.id = "not-a-uuid"  # validate_assignment must reject the bad type
+        # validate_assignment must reject the bad type
+        m.id = "not-a-uuid"  # ty: ignore[invalid-assignment]
 
 
 def test_domain_model_extends_domain_base() -> None:

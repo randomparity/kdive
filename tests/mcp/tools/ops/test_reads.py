@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
+
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.tools._platform_auth import ALL_PROJECTS_SCOPE
 from kdive.mcp.tools.ops import _reads
+from kdive.security.authz.context import RequestContext
 
 
 def test_parse_window_delegates_with_audit_log_timestamp_column(monkeypatch) -> None:
@@ -32,8 +36,8 @@ class _Conn:
         return _txn()
 
 
-def _ctx() -> Any:
-    return SimpleNamespace(principal="alice", agent_session="sess-1")
+def _ctx() -> RequestContext:
+    return cast("RequestContext", SimpleNamespace(principal="alice", agent_session="sess-1"))
 
 
 def test_record_read_writes_platform_audit_row(monkeypatch) -> None:
@@ -50,7 +54,7 @@ def test_record_read_writes_platform_audit_row(monkeypatch) -> None:
     )
     monkeypatch.setattr(_reads, "actor_for", lambda c: actor_ctxs.append(c) or "actor-1")
 
-    conn = _Conn()
+    conn = cast("AsyncConnection", _Conn())
     ctx = _ctx()
     asyncio.run(_reads.record_read(conn, ctx, tool="audit.query", args={"a": 1}))
 
@@ -76,7 +80,7 @@ def test_audit_denial_delegates_with_all_projects_scope(monkeypatch) -> None:
         calls.append((pool, ctx, kwargs))
 
     monkeypatch.setattr(_reads, "audit_platform_denial", _denial)
-    pool = object()
+    pool = cast("AsyncConnectionPool", object())
     ctx = _ctx()
     asyncio.run(_reads.audit_denial(pool, ctx, tool="inventory.list", args={"x": 2}))
 

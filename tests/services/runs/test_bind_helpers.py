@@ -7,15 +7,17 @@ connectionless ``_run_bindable_error`` reject helper.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import ErrorCategory
+from kdive.domain.lifecycle import Run
 from kdive.services.runs.bind import _run_bindable_error
 
 
-def _run(*, system_id: object, state: RunState) -> object:
-    return SimpleNamespace(id=uuid4(), system_id=system_id, state=state)
+def _run(*, system_id: object, state: RunState) -> Run:
+    return cast("Run", SimpleNamespace(id=uuid4(), system_id=system_id, state=state))
 
 
 def test_already_bound_run_is_transport_conflict() -> None:

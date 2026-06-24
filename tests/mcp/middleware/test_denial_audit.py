@@ -107,7 +107,7 @@ def _spy_middleware() -> tuple[DenialAuditMiddleware, list[Any]]:
     async def _record(tool: str, denial: RoleDenied, *, args: Any = None) -> None:
         recorded.append((tool, denial, args))
 
-    mw._record = _record  # type: ignore[method-assign]
+    mw._record = _record  # ty: ignore[invalid-assignment]
     return mw, recorded
 
 
@@ -148,7 +148,7 @@ def test_on_call_tool_envelopes_even_when_audit_record_fails(monkeypatch) -> Non
     async def _failing_record(*_a: Any, **_k: Any) -> None:
         raise RuntimeError("db down")
 
-    mw._record = _failing_record  # type: ignore[method-assign]
+    mw._record = _failing_record  # ty: ignore[invalid-assignment]
     warnings: list[Any] = []
     monkeypatch.setattr(da._log, "warning", lambda *a, **k: warnings.append((a, k)))
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,9 @@ import pytest
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle import Allocation, System
+from kdive.profiles.types import ExpectedBootFailureInput
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.runs.admission import (
     RunCreateError,
     _allocation_block_error,
@@ -67,8 +71,8 @@ def test_run_create_failure_preserves_message_category_and_details() -> None:
     assert err.details == {"k": "v"}
 
 
-def _system(state: SystemState) -> object:
-    return SimpleNamespace(state=state)
+def _system(state: SystemState) -> System:
+    return cast("System", SimpleNamespace(state=state))
 
 
 def test_system_block_error_none_system_is_config() -> None:
@@ -99,8 +103,8 @@ def test_system_block_error_ready_passes() -> None:
     assert _system_block_error(_system(SystemState.READY), uuid4()) is None
 
 
-def _alloc(state: AllocationState, lease_expiry: datetime | None = None) -> object:
-    return SimpleNamespace(state=state, lease_expiry=lease_expiry)
+def _alloc(state: AllocationState, lease_expiry: datetime | None = None) -> Allocation:
+    return cast("Allocation", SimpleNamespace(state=state, lease_expiry=lease_expiry))
 
 
 def test_allocation_block_error_none_is_stale_missing() -> None:
@@ -142,16 +146,20 @@ class _Resolver:
         return self._kinds
 
 
+def _resolver(kinds: set[ResourceKind]) -> ProviderResolver:
+    return cast("ProviderResolver", _Resolver(kinds))
+
+
 def test_validate_unbound_target_kind_none_is_required() -> None:
     with pytest.raises(RunCreateError) as exc:
-        _validate_unbound_target_kind("obj", None, _Resolver({_A_KIND}))
+        _validate_unbound_target_kind("obj", None, _resolver({_A_KIND}))
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "target_kind_required"}
 
 
 def test_validate_unbound_target_kind_unknown_value() -> None:
     with pytest.raises(RunCreateError) as exc:
-        _validate_unbound_target_kind("obj", "nonsense-kind", _Resolver({_A_KIND}))
+        _validate_unbound_target_kind("obj", "nonsense-kind", _resolver({_A_KIND}))
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "unknown_target_kind"}
 
@@ -159,13 +167,13 @@ def test_validate_unbound_target_kind_unknown_value() -> None:
 def test_validate_unbound_target_kind_unregistered_value() -> None:
     # a valid ResourceKind that the resolver does not register is still rejected
     with pytest.raises(RunCreateError) as exc:
-        _validate_unbound_target_kind("obj", _A_KIND.value, _Resolver(set()))
+        _validate_unbound_target_kind("obj", _A_KIND.value, _resolver(set()))
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "unknown_target_kind"}
 
 
 def test_validate_unbound_target_kind_registered_passes() -> None:
-    assert _validate_unbound_target_kind("obj", _A_KIND.value, _Resolver({_A_KIND})) is _A_KIND
+    assert _validate_unbound_target_kind("obj", _A_KIND.value, _resolver({_A_KIND})) is _A_KIND
 
 
 def test_parse_expected_boot_failure_none_returns_none() -> None:
@@ -179,7 +187,7 @@ def test_parse_expected_boot_failure_valid_dict_is_serialized() -> None:
 
 def test_parse_expected_boot_failure_non_dict_rejected() -> None:
     with pytest.raises(RunCreateError) as exc:
-        _parse_expected_boot_failure("obj", "not-a-dict")  # type: ignore[arg-type]
+        _parse_expected_boot_failure("obj", cast("ExpectedBootFailureInput", "not-a-dict"))
     assert exc.value.object_id == "obj"
     assert exc.value.details == {"reason": "bad_expected_boot_failure"}
 

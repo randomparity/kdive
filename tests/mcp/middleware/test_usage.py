@@ -59,7 +59,7 @@ def _spy_middleware() -> tuple[UsageTrackingMiddleware, list[tuple[Any, ToolOutc
     async def _record(ctx: Any, outcome: ToolOutcome) -> None:
         recorded.append((ctx, outcome))
 
-    mw._record = _record  # type: ignore[method-assign]
+    mw._record = _record  # ty: ignore[invalid-assignment]
     return mw, recorded
 
 
