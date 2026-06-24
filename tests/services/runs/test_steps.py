@@ -1,4 +1,20 @@
-from kdive.services.runs.steps import BuildStepResult
+from kdive.services.runs.steps import BuildStepResult, _optional_str_list
+
+
+def test_optional_str_list_passes_through_string_list() -> None:
+    assert _optional_str_list(["console", "gdbstub"]) == ["console", "gdbstub"]
+
+
+def test_optional_str_list_empty_list_is_empty_not_none() -> None:
+    assert _optional_str_list([]) == []
+
+
+def test_optional_str_list_rejects_non_list() -> None:
+    assert _optional_str_list("console") is None
+
+
+def test_optional_str_list_rejects_non_string_member() -> None:
+    assert _optional_str_list(["console", 3]) is None
 
 
 def test_modules_ref_round_trips_through_dump_and_load() -> None:
