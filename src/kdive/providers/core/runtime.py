@@ -24,6 +24,7 @@ from kdive.providers.ports import (
     Booter,
     Builder,
     Connector,
+    ConsoleSnapshotter,
     Controller,
     CrashPostmortem,
     DebugTransportKind,
@@ -120,6 +121,11 @@ class ProviderRuntime:
     rootfs_validator: RootfsValidator | None = None
     rootfs_build_plane: RootfsBuildPlane | None = None
     staged_volume_probe: StagedVolumeProbe | None = None
+    # Per-Run console snapshot (ADR-0235). Set by providers whose console is captured out-of-band
+    # (remote-libvirt: reconciler-resident collector → S3 parts); the boot worker invokes it to
+    # persist an immutable ``console-<run>`` artifact. ``None`` → the boot handler captures the
+    # worker-local console log directly (local-libvirt).
+    console_snapshotter: ConsoleSnapshotter | None = None
     # Per-resource rebind hook (ADR-0187). A provider whose connection identity varies per
     # granted Resource (remote-libvirt: one inventory instance per host) sets this so the
     # resolver can bind the runtime's ports to the op's Resource by name. ``None`` → identity

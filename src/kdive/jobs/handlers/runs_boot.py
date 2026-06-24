@@ -26,7 +26,7 @@ from kdive.jobs.provider_context import set_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProfilePolicy
-from kdive.providers.ports import Booter, Connector, SystemHandle
+from kdive.providers.ports import Booter, Connector, ConsoleSnapshotter, SystemHandle
 from kdive.providers.shared.runtime_paths import (
     console_log_path,
     domain_name_for,
@@ -46,7 +46,7 @@ _log = logging.getLogger(__name__)
 
 _CONSOLE_ROW_SQL: LiteralString = (
     "SELECT id, etag FROM artifacts "
-    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key LIKE %s"
+    "WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
 )
 
 _REFRESH_CONSOLE_ETAG_SQL: LiteralString = "UPDATE artifacts SET etag = %s WHERE id = %s"
@@ -63,9 +63,11 @@ class _ConsoleArtifact(NamedTuple):
     data: bytes
 
 
-async def _existing_console_row(conn: AsyncConnection, system_id: UUID) -> _ConsoleRow | None:
+async def _existing_console_row(
+    conn: AsyncConnection, system_id: UUID, object_key: str
+) -> _ConsoleRow | None:
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(_CONSOLE_ROW_SQL, (system_id, "%/console"))
+        await cur.execute(_CONSOLE_ROW_SQL, (system_id, object_key))
         row = await cur.fetchone()
     return None if row is None else _ConsoleRow(row["id"], str(row["etag"]))
 
@@ -73,6 +75,7 @@ async def _existing_console_row(conn: AsyncConnection, system_id: UUID) -> _Cons
 async def _capture_console_artifact(
     conn: AsyncConnection,
     system_id: UUID,
+    run_id: UUID,
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
 ) -> _ConsoleArtifact | None:
@@ -82,7 +85,7 @@ async def _capture_console_artifact(
         redacted = await _read_redacted_console(system_id, secret_registry)
         if redacted is None:
             return None
-        stored = await _store_console_artifact(artifact_store, system_id, redacted)
+        stored = await _store_console_artifact(artifact_store, system_id, run_id, redacted)
         return await _upsert_console_artifact_row(conn, system_id, stored, redacted)
     except CategorizedError as exc:
         if exc.details.get("operation") == "read_console_log":
@@ -102,6 +105,35 @@ async def _capture_console_artifact(
         return None
 
 
+async def _capture_run_console(
+    conn: AsyncConnection,
+    system_id: UUID,
+    run_id: UUID,
+    secret_registry: SecretRegistry,
+    artifact_store: ObjectStore | None,
+    snapshotter: ConsoleSnapshotter | None,
+) -> _ConsoleArtifact | None:
+    """Persist this Run's console (ADR-0235), dispatching to the provider's capture shape.
+
+    A provider that captures its console out-of-band supplies a ``snapshotter`` (remote-libvirt:
+    assemble S3 parts); otherwise the boot worker reads the local console log. Both write an
+    immutable per-Run artifact and return its id + bytes; both are best-effort and never raise.
+    """
+    if snapshotter is not None:
+        try:
+            snap = await snapshotter.snapshot(conn, system_id, run_id)
+        except Exception:
+            _log.warning(
+                "console snapshot failed for system %s run %s; boot outcome unaffected",
+                system_id,
+                run_id,
+                exc_info=True,
+            )
+            return None
+        return None if snap is None else _ConsoleArtifact(snap.id, snap.object_key, snap.data)
+    return await _capture_console_artifact(conn, system_id, run_id, secret_registry, artifact_store)
+
+
 async def _read_redacted_console(system_id: UUID, secret_registry: SecretRegistry) -> bytes | None:
     raw = await asyncio.to_thread(read_console_log, console_log_path(system_id))
     if not raw:
@@ -118,7 +150,7 @@ async def _read_redacted_console(system_id: UUID, secret_registry: SecretRegistr
 
 
 async def _store_console_artifact(
-    artifact_store: ObjectStore, system_id: UUID, redacted: bytes
+    artifact_store: ObjectStore, system_id: UUID, run_id: UUID, redacted: bytes
 ) -> StoredArtifact:
     def _put() -> StoredArtifact:
         return artifact_store.put_artifact(
@@ -126,7 +158,10 @@ async def _store_console_artifact(
                 tenant="local",
                 owner_kind="systems",
                 owner_id=str(system_id),
-                name="console",
+                # Per-Run name (ADR-0235): each Run's boot writes an immutable
+                # `…/console-<run>` object so a later boot of the same System never overwrites
+                # the bytes an earlier Run's evidence_artifact_id still references.
+                name=f"console-{run_id}",
                 data=redacted,
                 sensitivity=Sensitivity.REDACTED,
                 retention_class="console",
@@ -143,7 +178,7 @@ async def _upsert_console_artifact_row(
     redacted: bytes,
 ) -> _ConsoleArtifact:
     async with conn.transaction():
-        existing = await _existing_console_row(conn, system_id)
+        existing = await _existing_console_row(conn, system_id, stored.key)
         if existing is None:
             inserted = await ARTIFACTS.insert(
                 conn, register_artifact_row(stored, owner_kind="systems", owner_id=system_id)
@@ -234,6 +269,7 @@ async def _record_crash_halted_live(
     profile_policy: ProfilePolicy,
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
+    snapshotter: ConsoleSnapshotter | None,
 ) -> dict[str, Any] | None:
     """Record ``crashed_halted_live`` iff gdbstub-provisioned, console panics, stub reachable.
 
@@ -245,7 +281,9 @@ async def _record_crash_halted_live(
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     if not profile_policy.gdbstub_provisioned(profile):
         return None
-    artifact = await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
+    artifact = await _capture_run_console(
+        conn, system_id, run.id, secret_registry, artifact_store, snapshotter
+    )
     if artifact is None or not artifact.data or not _generic_panic_matches(artifact.data):
         return None
     if not await asyncio.to_thread(_gdbstub_reachable, connector, system_id):
@@ -288,6 +326,7 @@ async def _run_boot_and_capture_outcome(
     profile_policy: ProfilePolicy,
     secret_registry: SecretRegistry,
     artifact_store: ObjectStore | None,
+    snapshotter: ConsoleSnapshotter | None,
 ) -> dict[str, Any]:
     system_id = run.require_system_id()
     try:
@@ -298,8 +337,8 @@ async def _run_boot_and_capture_outcome(
             exc.category is ErrorCategory.READINESS_FAILURE
             and run.expected_boot_failure is not None
         ):
-            artifact = await _capture_console_artifact(
-                conn, system_id, secret_registry, artifact_store
+            artifact = await _capture_run_console(
+                conn, system_id, run.id, secret_registry, artifact_store, snapshotter
             )
         if artifact is not None and artifact.data and _expected_crash_matches(run, artifact.data):
             await _record_boot_audit(conn, job_ctx, run)
@@ -320,11 +359,14 @@ async def _run_boot_and_capture_outcome(
                 profile_policy,
                 secret_registry,
                 artifact_store,
+                snapshotter,
             )
             if crash is not None:
                 return crash
         raise
-    artifact = await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
+    artifact = await _capture_run_console(
+        conn, system_id, run.id, secret_registry, artifact_store, snapshotter
+    )
     await _record_boot_audit(conn, job_ctx, run)
     return {
         "system_id": str(system_id),
@@ -357,6 +399,7 @@ async def boot_handler(
     binding = await resolver.binding_for_run(conn, run_id)
     set_provider_kind(binding.kind.value)
     booter = binding.runtime.booter
+    snapshotter = binding.runtime.console_snapshotter
     system_id = run.require_system_id()
 
     try:
@@ -369,11 +412,14 @@ async def boot_handler(
             binding.runtime.profile_policy,
             secret_registry,
             artifact_store,
+            snapshotter,
         )
     except CategorizedError:
         await abandon_run_step_best_effort(conn, run_id, "boot")
         try:
-            await _capture_console_artifact(conn, system_id, secret_registry, artifact_store)
+            await _capture_run_console(
+                conn, system_id, run_id, secret_registry, artifact_store, snapshotter
+            )
         finally:
             raise
     except Exception:

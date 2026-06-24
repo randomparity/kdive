@@ -9,7 +9,10 @@ from uuid import uuid4
 
 import pytest
 from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import StoredArtifact
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle import Run
 from kdive.domain.operations.jobs import Job, JobKind
@@ -36,10 +39,11 @@ def test_boot_handler_facade_and_leaf_console_patch_surface() -> None:
 
 
 class _FakeRun:
-    """Stand-in carrying only the field _expected_crash_matches reads."""
+    """Stand-in carrying the fields the boot handler reads (expected crash + run id)."""
 
     def __init__(self, expected_boot_failure: object) -> None:
         self.expected_boot_failure = expected_boot_failure
+        self.id = uuid4()
 
 
 _CONSOLE = b"line1\nkernel BUG at mm/slub.c:1\nline3\n"
@@ -285,6 +289,7 @@ def _record(
             cast(ProfilePolicy, _Pol(gdbstub=gdbstub, host_dump=host_dump)),
             cast(SecretRegistry, object()),
             None,
+            None,  # console_snapshotter — local dispatch falls through to _capture_console_artifact
         )
 
     return asyncio.run(_run()), audits
@@ -332,3 +337,36 @@ def test_no_record_when_gdbstub_not_provisioned(monkeypatch: pytest.MonkeyPatch)
         monkeypatch, gdbstub=False, host_dump=False, console=_PANIC_CONSOLE, reachable=True
     )
     assert result is None and audits == []
+
+
+def test_local_console_artifact_is_per_run_immutable(migrated_url: str) -> None:
+    # ADR-0235: two Runs against one System write distinct, immutable console rows; a same-Run
+    # re-boot refreshes that Run's own row rather than inserting a duplicate, so an earlier Run's
+    # evidence id never resolves to a later boot's bytes.
+    system_id = uuid4()
+    run_a, run_b = uuid4(), uuid4()
+
+    def _stored(run_id: object, etag: str) -> StoredArtifact:
+        key = f"local/systems/{system_id}/console-{run_id}"
+        return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
+
+    async def _run() -> tuple[runs_boot._ConsoleArtifact, ...]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                a1 = await runs_boot._upsert_console_artifact_row(
+                    conn, system_id, _stored(run_a, "etag-a"), b"crash-A"
+                )
+                b1 = await runs_boot._upsert_console_artifact_row(
+                    conn, system_id, _stored(run_b, "etag-b"), b"boot-B"
+                )
+                a2 = await runs_boot._upsert_console_artifact_row(
+                    conn, system_id, _stored(run_a, "etag-a2"), b"crash-A"
+                )
+        return a1, b1, a2
+
+    a1, b1, a2 = asyncio.run(_run())
+    assert a1.id != b1.id  # distinct Runs -> distinct rows (no cross-Run overwrite)
+    assert a2.id == a1.id  # same Run re-boot -> refreshes its own row, no duplicate
+    assert a1.object_key.endswith(f"console-{run_a}")
+    assert b1.object_key.endswith(f"console-{run_b}")

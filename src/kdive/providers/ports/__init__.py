@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from kdive.providers.ports.build import Builder, TransportCapableBuilder
 from kdive.providers.ports.build_transport import BuildTransport, CommandResult
+from kdive.providers.ports.console import ConsoleSnapshot, ConsoleSnapshotter
 from kdive.providers.ports.debug import (
     AttachSeam,
     GdbBreakpointRef,
@@ -55,6 +56,8 @@ __all__ = [
     "CaptureOutput",
     "CommandResult",
     "Connector",
+    "ConsoleSnapshot",
+    "ConsoleSnapshotter",
     "Controller",
     "CrashOutput",
     "CrashPostmortem",

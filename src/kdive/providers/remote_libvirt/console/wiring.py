@@ -102,6 +102,32 @@ class RemoteConsolePartStore:
     def delete_part(self, system_id: UUID, index: int) -> None:
         self._store.delete(self._part_key(system_id, index))
 
+    def assemble(self, system_id: UUID) -> bytes:
+        """Concatenate the System's numbered console parts in index order (no DB access)."""
+        return b"".join(
+            self.read_part(system_id, index) for index in self.list_part_indices(system_id)
+        )
+
+    def put_run_console(self, system_id: UUID, run_id: UUID, data: bytes) -> StoredArtifact:
+        """Store an immutable per-Run ``console-<run>`` object and return its handle (no row).
+
+        The bytes are already redacted (assembled from redacted parts), so the object is
+        REDACTED-class. The boot worker upserts the `artifacts` row on its own connection so the
+        row commits atomically with the boot step (ADR-0235), unlike the teardown
+        :meth:`write_console_artifact`, which writes the System-keyed assembly and its row together.
+        """
+        return self._store.put_artifact(
+            ArtifactWriteRequest(
+                tenant=_TENANT,
+                owner_kind=_OWNER_KIND,
+                owner_id=str(system_id),
+                name=f"console-{run_id}",
+                data=data,
+                sensitivity=Sensitivity.REDACTED,
+                retention_class=_RETENTION,
+            )
+        )
+
     def write_console_artifact(self, system_id: UUID, data: bytes) -> None:
         """Store the assembled console object and register/refresh its `artifacts` row.
 
