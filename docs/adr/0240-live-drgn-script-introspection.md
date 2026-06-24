@@ -1,6 +1,6 @@
 # ADR 0240 — Live in-guest arbitrary drgn script introspection
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-24
 - **Issue:** [#762](https://github.com/randomparity/kdive/issues/762) (D4, epic #764)
 - **Spec:** [`../superpowers/specs/2026-06-24-live-drgn-script-introspection-design.md`](../superpowers/specs/2026-06-24-live-drgn-script-introspection-design.md)
