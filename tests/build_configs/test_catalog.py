@@ -9,13 +9,17 @@ import psycopg
 import pytest
 
 from kdive.build_configs.catalog import (
+    BuildConfigDeleteOutcome,
     BuildConfigEntry,
+    delete_operator_build_config,
     get_build_config,
     get_build_config_sync,
+    list_build_configs,
     parse_build_config_row,
     read_build_config_provenance,
     upsert_config_build_config,
     upsert_operator_build_config,
+    upsert_seed_build_config,
 )
 from kdive.db import migrate
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -179,5 +183,85 @@ def test_provenance_absent_returns_none(migrated_url: str) -> None:
         async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
             prov = await read_build_config_provenance(conn, "nope")
         assert prov is None
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# list-all + operator delete (#751; require Docker, skip otherwise)
+# ---------------------------------------------------------------------------
+
+
+def test_list_build_configs_empty_returns_empty(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            assert await list_build_configs(conn) == []
+
+    asyncio.run(_run())
+
+
+def test_list_build_configs_returns_all_rows_sorted_by_name(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await upsert_seed_build_config(conn, "kdump", "k1", "sha_seed", "seed desc")
+            await upsert_operator_build_config(conn, "alpha", "k2", "sha_op", "op desc")
+            await upsert_config_build_config(conn, "zeta", "k3", "sha_cfg", "cfg desc")
+            entries = await list_build_configs(conn)
+        assert [e.name for e in entries] == ["alpha", "kdump", "zeta"]
+        by_name = {e.name: e for e in entries}
+        assert by_name["alpha"].source == "operator"
+        assert by_name["kdump"].source == "seed"
+        assert by_name["zeta"].source == "config"
+        assert by_name["zeta"].sha256 == "sha_cfg"
+        assert all(isinstance(e, BuildConfigEntry) for e in entries)
+
+    asyncio.run(_run())
+
+
+def test_delete_operator_removes_operator_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await upsert_operator_build_config(conn, "kdump", "k", "sha_op", "op desc")
+            outcome, source = await delete_operator_build_config(conn, "kdump")
+            still = await get_build_config(conn, "kdump")
+        assert outcome is BuildConfigDeleteOutcome.DELETED
+        assert source == "operator"
+        assert still is None
+
+    asyncio.run(_run())
+
+
+def test_delete_refuses_seed_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await upsert_seed_build_config(conn, "kdump", "k", "sha_seed", "seed desc")
+            outcome, source = await delete_operator_build_config(conn, "kdump")
+            still = await get_build_config(conn, "kdump")
+        assert outcome is BuildConfigDeleteOutcome.NOT_OPERATOR
+        assert source == "seed"
+        assert still is not None  # row left intact
+
+    asyncio.run(_run())
+
+
+def test_delete_refuses_config_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await upsert_config_build_config(conn, "kdump", "k", "sha_cfg", "cfg desc")
+            outcome, source = await delete_operator_build_config(conn, "kdump")
+            still = await get_build_config(conn, "kdump")
+        assert outcome is BuildConfigDeleteOutcome.NOT_OPERATOR
+        assert source == "config"
+        assert still is not None
+
+    asyncio.run(_run())
+
+
+def test_delete_unknown_name_is_not_found(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            outcome, source = await delete_operator_build_config(conn, "nope")
+        assert outcome is BuildConfigDeleteOutcome.NOT_FOUND
+        assert source is None
 
     asyncio.run(_run())
