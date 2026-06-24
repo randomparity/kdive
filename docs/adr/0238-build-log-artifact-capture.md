@@ -64,7 +64,10 @@ the connection is):
    bare `int`. The orchestrator still branches on `.returncode`; on non-zero it attaches
    `.output` to the raised `build_failure`. The **local** seam adds `capture_output=True`
    to the (sandboxed) subprocess; the **transport** seam builds the `CapturedStep` from the
-   `CommandResult` it already captures.
+   `CommandResult` it already captures. The local **timeout** path
+   (`subprocess.TimeoutExpired`, which carries partial `.stdout`/`.stderr` under
+   `capture_output=True`) attaches that partial output to its existing
+   `"make exceeded the build timeout"` error, so a hung build is not a build-log black hole.
 
 2. **Builder persists the object (off-thread).** On a build-step `BUILD_FAILURE` that
    carries captured output, the builder PUTs the redacted bytes to the object store under
@@ -74,9 +77,14 @@ the connection is):
 
 3. **Worker registers the row (holds `conn`).** When the propagating `CategorizedError`
    carries a build-log object key, `_fail_build` registers the `artifacts` row
-   (`owner_kind='runs'`, `owner_id=run_id`, `REDACTED`) via the existing
-   `register_artifact_row` + `ARTIFACTS.insert`, and records the artifact id in the failing
-   job's failure context. Object-PUT-before-row-commit follows ADR-0005.
+   (`owner_kind='runs'`, `owner_id=run_id`, `REDACTED`) and records the artifact id in the
+   failing job's failure context. Object-PUT-before-row-commit follows ADR-0005. The row is
+   **upsert-by-key** (mirroring the per-Run console row, ADR-0235): BUILD jobs retry up to
+   `max_attempts`, and the build-log object key is Run-keyed, so a re-capture overwrites the same
+   object and refreshes the existing row's etag rather than inserting a duplicate — a Run has at
+   most one `build-log` row and a stable `refs["build-log"]`. The PUT and the row write are
+   best-effort on the already-terminal failure path: a failure of either is logged and swallowed
+   so the original `BUILD_FAILURE` still propagates and the Run fails for the real reason.
 
 4. **Surface.** `_failed_envelope` promotes the recognized build-log artifact id from the
    failing job's failure detail into `refs["build-log"]`, because an artifact id belongs in

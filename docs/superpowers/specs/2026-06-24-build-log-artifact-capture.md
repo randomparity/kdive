@@ -84,11 +84,22 @@ the cap keeps the **tail**, where the compiler error and the failing recipe line
 
 ### 2. Carry the captured output to the failure site
 
-`build_failure(message, run_id)` is the single raise site for a non-zero make/olddefconfig. Add
-the captured build-log text to the raised error so the builder can persist it. The orchestrator
-raises `build_failure` with the captured output attached; the builder (`build.py`) catches the
-`BUILD_FAILURE`, persists the build-log object (it already owns a store), and re-raises an error
-that carries the **artifact object key** so the worker can register the row.
+Two raise sites must carry the captured output:
+
+- **Non-zero exit:** `build_failure(message, run_id)` in the orchestrator (the `make` /
+  `olddefconfig` exit-code check). Add the captured build-log text to the raised error.
+- **Timeout:** `run_make_target` / `real_run_make` raise a *distinct* `"make exceeded the build
+  timeout"` `CategorizedError` on `subprocess.TimeoutExpired`, which is the most common
+  real-world build hang — exactly when an agent needs the partial log. With
+  `capture_output=True`, `TimeoutExpired` carries the partial `.stdout` / `.stderr`; capture and
+  attach them to that error too, so the timeout path is not a build-log black hole. (The
+  transport path enforces its own `timeout_s`; if the transport raises rather than returning a
+  `CommandResult`, no partial bytes exist and behavior is unchanged.)
+
+The orchestrator/execution layer raises with the captured output attached; the builder
+(`build.py`) catches the `BUILD_FAILURE`, persists the build-log object (it already owns a
+store), and re-raises an error that carries the **artifact object key** so the worker can
+register the row.
 
 Because the builder has the object store but no `conn`, the split is:
 
@@ -99,9 +110,22 @@ Because the builder has the object store but no `conn`, the split is:
   output (e.g. a pre-compile checkout failure), behavior is unchanged.
 - **Worker (`runs_build.py` `_fail_build`, holds `conn`):** when the propagating
   `CategorizedError` carries a build-log object key, register the `artifacts` row
-  (`owner_kind='runs'`, `owner_id=run_id`, `REDACTED`) via the existing
-  `register_artifact_row` + `ARTIFACTS.insert`, and record the artifact id on the failing job's
-  failure context so the failed-Run surface can advertise it.
+  (`owner_kind='runs'`, `owner_id=run_id`, `REDACTED`) and record the artifact id on the failing
+  job's failure context so the failed-Run surface can advertise it.
+
+**Retry / idempotency.** BUILD jobs retry up to `max_attempts` (3); each attempt rebuilds while
+`existing_build_result` is `None`, so a failing build can capture a log on each attempt. The
+build-log object key is **Run-keyed** (`<tenant>/runs/<run_id>/build-log`), so a re-capture
+*overwrites* the same object — never accumulates objects. The row is registered **upsert-by-key**
+(mirroring the per-Run console row, ADR-0235): if a `build-log` row already exists for this Run's
+key, its etag is refreshed in place rather than inserting a duplicate, so a Run has at most one
+`build-log` artifact row no matter how many attempts failed, and `refs["build-log"]` is stable.
+
+**Persistence must not mask the build error.** The new object PUT and row insert/upsert are on the
+already-terminal failure path. A failure of either (store outage, DB error) is logged and
+swallowed — the original `BUILD_FAILURE` must still propagate so the Run fails for the real
+reason. A build-log-persistence error never converts a build failure into a different failure or a
+success.
 
 This keeps the object write where the bytes are (off-thread, in the builder) and the row write
 where the connection is (worker), mirroring ADR-0005 write-before-commit: the object is PUT
@@ -140,6 +164,12 @@ first, the row committed after.
   behaves exactly as today — no build-log artifact, existing `failure_detail_stderr` preserved.
 - **Olddefconfig failure**: `make olddefconfig` non-zero captures and surfaces its output the same
   way as a `make` failure.
+- **Timeout**: a `make` that exceeds `MAKE_TIMEOUT_S` captures the partial output carried on the
+  `TimeoutExpired` and surfaces it as a build-log artifact.
+- **Retry**: two failed attempts of the same Run produce exactly one `build-log` artifact row
+  (upsert-by-key), and `refs["build-log"]` resolves to it.
+- **Persistence failure**: a build-log object PUT or row write that errors is swallowed; the Run
+  still fails with the original `BUILD_FAILURE`, not a store/DB error.
 
 ## Out of scope
 
