@@ -16,6 +16,7 @@ from kdive.mcp.tools.lifecycle.runs.common import envelope_for_run
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
+from kdive.services.runs.steps import failed_boot_attempt as _failed_boot_attempt
 from kdive.services.runs.steps import install_method_for as _install_method_for
 from kdive.services.runs.steps import step_progress as _step_progress
 from kdive.services.runs.steps import system_required_cmdline
@@ -49,6 +50,11 @@ async def get_run(
             progress = (
                 await _step_progress(conn, run.id) if run.state is RunState.SUCCEEDED else None
             )
+            boot_attempt = (
+                await _failed_boot_attempt(conn, run.id)
+                if progress is not None and progress.boot != "succeeded"
+                else None
+            )
         required = (
             system_required_cmdline(
                 _install_method_for(system, runtime.profile_policy), runtime.platform_root_cmdline
@@ -62,4 +68,5 @@ async def get_run(
             failing_job=failing_job,
             active_debug_session_ids=active_sessions,
             step_progress=progress,
+            boot_readiness=boot_attempt,
         )

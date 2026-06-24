@@ -10,11 +10,15 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
+from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle import Run, System
+from kdive.jobs import queue
 from kdive.profiles.provider_policy import capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.runtime import ProfilePolicy
+from kdive.serialization import JsonValue
 
 _REQUIRED_CONSOLE = "console=ttyS0"
 _KDUMP_CRASHKERNEL = "crashkernel=256M"
@@ -145,6 +149,42 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
         boot_outcome=boot_outcome,
         console_evidence_artifact_id=console_evidence_artifact_id,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class BootAttempt:
+    """A terminally-failed boot job behind a deleted boot step (#750, ADR-0230).
+
+    The boot ``run_steps`` row is deleted on failure so a retry can recycle it (ADR-0185), but
+    the boot job survives under its deterministic ``dedup_key`` carrying the terminal failure.
+    This is the evidence ``runs.get`` surfaces so a caller can tell a failed boot from a
+    never-attempted one.
+    """
+
+    job_id: UUID
+    error_category: ErrorCategory | None
+
+    def as_data(self) -> dict[str, JsonValue]:
+        """The fixed-key ``data.boot_readiness`` payload; ``status`` is always ``"failed"``."""
+        return {
+            "job_id": str(self.job_id),
+            "status": "failed",
+            "error_category": self.error_category.value if self.error_category else None,
+        }
+
+
+async def failed_boot_attempt(conn: AsyncConnection, run_id: UUID) -> BootAttempt | None:
+    """Return the Run's boot job iff it is terminally ``failed`` (#750, ADR-0230).
+
+    Looks the boot job up by its deterministic ``dedup_key`` (``f"{run_id}:boot"``, matching
+    ``_enqueue_step``). Returns ``None`` when no boot job exists (never attempted) or the job is
+    ``queued``/``running``/``succeeded`` (an attempt in flight or already done) — only a terminal
+    ``failed`` job is reportable boot-failure evidence.
+    """
+    job = await queue.get_by_dedup_key(conn, f"{run_id}:boot")
+    if job is None or job.state is not JobState.FAILED:
+        return None
+    return BootAttempt(job_id=job.id, error_category=job.error_category)
 
 
 async def installed_initrd_ref(conn: AsyncConnection, run_id: UUID) -> str | None:
