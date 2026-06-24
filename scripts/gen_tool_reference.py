@@ -266,10 +266,8 @@ def tool_docs(tools: list[Any]) -> list[ToolDoc]:
         for p in params:
             if not p.description:
                 raise ValueError(f"{t.name}:{p.name}: parameter has no description")
-            if "|" in p.description or "\n" in p.description:
-                raise ValueError(
-                    f"{t.name}:{p.name}: description has a table-breaking character (| or newline)"
-                )
+            if "\n" in p.description:
+                raise ValueError(f"{t.name}:{p.name}: description has a table-breaking newline")
         ann = t.annotations
         docs.append(
             ToolDoc(
@@ -391,7 +389,8 @@ def render_namespace(namespace: str, docs: list[ToolDoc]) -> str:
             lines += ["| Parameter | Type | Required | Description |", "|---|---|---|---|"]
             for p in sorted(d.params, key=lambda x: x.name):
                 req = "yes" if p.required else "no"
-                lines.append(f"| `{p.name}` | {p.type} | {req} | {p.description} |")
+                cell = p.description.replace("|", "\\|")
+                lines.append(f"| `{p.name}` | {p.type} | {req} | {cell} |")
             lines.append("")
             lines += _detail_lines(d.params)
             lines += _example_lines(d.params)

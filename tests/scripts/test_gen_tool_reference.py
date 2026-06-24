@@ -113,9 +113,16 @@ def test_missing_param_description_raises() -> None:
         tool_docs([_tool("runs.get", parameters={"properties": {"x": {"type": "string"}}})])
 
 
-def test_param_description_with_pipe_raises() -> None:
-    params = {"properties": {"x": {"type": "string", "description": "a | b"}}}
-    with pytest.raises(ValueError, match="table-breaking"):
+def test_param_description_pipe_escaped_in_table() -> None:
+    params = {"properties": {"x": {"type": "string", "description": "term1|term2"}}}
+    md = render_namespace("runs", tool_docs([_tool("runs.get", parameters=params)]))
+    assert "term1\\|term2" in md
+    assert "| term1|term2 |" not in md
+
+
+def test_param_description_with_newline_raises() -> None:
+    params = {"properties": {"x": {"type": "string", "description": "a\nb"}}}
+    with pytest.raises(ValueError, match="table-breaking newline"):
         tool_docs([_tool("runs.get", parameters=params)])
 
 
