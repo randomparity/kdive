@@ -5,16 +5,28 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 
 from psycopg import AsyncConnection, Connection
 from psycopg.rows import dict_row
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
-_SELECT = (
-    "SELECT name, object_key, sha256, description, source "
-    "FROM build_config_catalog WHERE name = %(name)s"
-)
+_COLUMNS = "SELECT name, object_key, sha256, description, source FROM build_config_catalog"
+_SELECT = f"{_COLUMNS} WHERE name = %(name)s"
+_SELECT_ALL = f"{_COLUMNS} ORDER BY name"
+
+
+class BuildConfigDeleteOutcome(StrEnum):
+    """The three terminal states of an operator-scoped fragment delete.
+
+    ``DELETED`` removed an ``operator`` row; ``NOT_OPERATOR`` found a ``seed``/``config`` row
+    and left it intact (the file/seed owns it); ``NOT_FOUND`` found no row at all.
+    """
+
+    DELETED = "deleted"
+    NOT_OPERATOR = "not_operator_source"
+    NOT_FOUND = "not_found"
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,58 @@ def get_build_config_sync(conn: Connection, name: str) -> BuildConfigEntry | Non
         cur.execute(_SELECT, {"name": name})
         row = cur.fetchone()
     return parse_build_config_row(row) if row is not None else None
+
+
+async def list_build_configs(conn: AsyncConnection) -> list[BuildConfigEntry]:
+    """Return every catalog fragment as a list of entries, sorted by ``name``.
+
+    The bounded curated catalog is returned whole (no pagination), mirroring
+    ``shapes.list``. An empty catalog yields ``[]``.
+
+    Args:
+        conn: An open async psycopg connection.
+
+    Returns:
+        Every :class:`BuildConfigEntry` in the catalog, ordered by ``name``.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(_SELECT_ALL)
+        rows = await cur.fetchall()
+    return [parse_build_config_row(row) for row in rows]
+
+
+async def delete_operator_build_config(
+    conn: AsyncConnection, name: str
+) -> tuple[BuildConfigDeleteOutcome, str | None]:
+    """Delete the ``operator``-sourced fragment ``name``, refusing ``seed``/``config`` rows.
+
+    The ``DELETE ... WHERE source='operator' RETURNING`` is the atomic decision: it removes
+    only an operator row. When nothing is deleted, an in-transaction provenance read
+    distinguishes a ``seed``/``config`` row (return ``NOT_OPERATOR`` with the actual source)
+    from no row at all (``NOT_FOUND``). The caller holds the per-name advisory lock, so the
+    delete and this follow-up read cannot interleave with a concurrent ``set``.
+
+    Args:
+        conn: An open async psycopg connection (inside the caller's locked transaction).
+        name: The fragment name to remove.
+
+    Returns:
+        A ``(outcome, source)`` pair. ``source`` is ``"operator"`` on ``DELETED``, the actual
+        non-operator source on ``NOT_OPERATOR``, and ``None`` on ``NOT_FOUND``.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "DELETE FROM build_config_catalog "
+            "WHERE name = %(name)s AND source = 'operator' RETURNING name",
+            {"name": name},
+        )
+        deleted = await cur.fetchone()
+    if deleted is not None:
+        return (BuildConfigDeleteOutcome.DELETED, "operator")
+    provenance = await read_build_config_provenance(conn, name)
+    if provenance is None:
+        return (BuildConfigDeleteOutcome.NOT_FOUND, None)
+    return (BuildConfigDeleteOutcome.NOT_OPERATOR, provenance[1])
 
 
 async def upsert_operator_build_config(
