@@ -821,3 +821,25 @@ def test_require_introspection_rejects_when_live_script_unadvertised() -> None:
     assert denied is not None
     assert denied.error_category == ErrorCategory.CONFIGURATION_ERROR
     assert denied.data["capability"] == "introspection:live-script"
+
+
+def test_script_over_size_cap_is_configuration_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_drgn_session(pool)
+            port = _FakeLiveIntrospector()
+            huge = "x" * (256 * 1024 + 1)
+            resp = await introspect_tools.introspect_script(
+                pool,
+                _live_ctx(),
+                session_id=session_id,
+                script=huge,
+                timeout_sec=5.0,
+                introspector=port,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
+        assert resp.data["reason"] == "script_too_large"
+        assert port.kwargs == {}  # rejected before the seam ran
+
+    asyncio.run(_run())

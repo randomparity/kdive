@@ -260,7 +260,9 @@ class RemoteLibvirtLiveIntrospect:
                 "remote live introspection handle must carry a domain name",
                 category=ErrorCategory.CONFIGURATION_ERROR,
             )
-        argv = [_DRGN_HELPER, "run-script", str(int(timeout_sec))]
+        # Re-assert the in-guest timeout floor at the argv boundary (defense in depth): coreutils
+        # `timeout 0` disables the bound, so the in-guest value is always >= 1 regardless of caller.
+        argv = [_DRGN_HELPER, "run-script", str(max(1, int(timeout_sec)))]
         result = self._exec(domain_name, argv, input_data=script)
         if result.exit_status != 0:
             raise CategorizedError(

@@ -61,6 +61,10 @@ _LIVE_SCRIPT: IntrospectionMode = "live-script"
 # ``timeout 0`` means *no* timeout — a 0/negative value would delete the in-guest bound (ADR-0240).
 _TIMEOUT_FLOOR = 1.0
 _DEFAULT_SCRIPT_TIMEOUT = 30.0
+# Bound the inbound script before send so an oversize script is a clean ``configuration_error``
+# rather than an opaque guest-agent ``input-data`` rejection (ADR-0240); drgn scripts are tiny, so
+# 256 KiB is generous and stays well under the qemu-guest-agent QMP input-data cap.
+_MAX_SCRIPT_BYTES = 256 * 1024
 
 
 def _clamp_timeout(requested: float) -> float:
@@ -284,6 +288,16 @@ async def _run_live_script(
     introspector: LiveIntrospector,
 ) -> ToolResponse:
     """Clamp the timeout, run the script off-loop, shape the response (shared by tool + tests)."""
+    script_bytes = len(script.encode("utf-8"))
+    if script_bytes > _MAX_SCRIPT_BYTES:
+        return _config_error(
+            response_id,
+            data={
+                "reason": "script_too_large",
+                "script_bytes": str(script_bytes),
+                "max_bytes": str(_MAX_SCRIPT_BYTES),
+            },
+        )
     clamped = _clamp_timeout(timeout_sec)
     try:
         output: LiveScriptOutput = await asyncio.to_thread(

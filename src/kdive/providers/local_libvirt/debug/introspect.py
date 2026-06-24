@@ -494,7 +494,9 @@ def _real_run_live_script(
         "--",
         _DRGN_HELPER,
         "run-script",
-        str(int(timeout_sec)),
+        # Re-assert the in-guest timeout floor at the argv boundary (defense in depth): coreutils
+        # `timeout 0` disables the bound, so the in-guest value is always >= 1 regardless of caller.
+        str(max(1, int(timeout_sec))),
     ]
     return _exec_live_script(argv, script, timeout_sec + _LIVE_SCRIPT_SSH_SLACK_S)
 

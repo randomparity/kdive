@@ -787,3 +787,11 @@ def test_run_script_byte_caps_and_sets_truncated():
     out = live.run_script(transport_handle="kdive-sys", script="print('z'*5000)", timeout_sec=5.0)
     assert out.truncated is True
     assert len(out.output.encode("utf-8")) <= 64
+
+
+def test_run_script_floors_in_guest_timeout_argv_at_one():
+    # Defense in depth: even if a caller passes timeout_sec < 1 directly to the port, the in-guest
+    # `timeout` argv must be >= 1 (coreutils `timeout 0` disables the bound).
+    agent = _ScriptedAgent(lambda argv: AgentExecResult(0, b"ok", b""))
+    _live(agent).run_script(transport_handle="kdive-sys", script="print(1)", timeout_sec=0.0)
+    assert agent.argvs == [[_DRGN_HELPER, "run-script", "1"]]
