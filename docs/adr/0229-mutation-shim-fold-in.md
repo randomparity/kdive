@@ -1,8 +1,6 @@
 # ADR-0229: Fold the `just mutate` environment workarounds into the recipe
 
-## Status
-
-Accepted
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 
 ## Context
 
