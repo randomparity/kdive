@@ -44,6 +44,7 @@ from kdive.providers.ports.retrieve import (
     CrashResult,
     IntrospectOutput,
     LiveIntrospector,
+    LiveScriptOutput,
     Retriever,
     VmcoreIntrospector,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "IntrospectOutput",
     "IntrospectionMode",
     "LiveIntrospector",
+    "LiveScriptOutput",
     "OwnedInfra",
     "Provisioner",
     "Retriever",

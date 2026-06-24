@@ -35,6 +35,13 @@ class IntrospectOutput(NamedTuple):
     truncated: bool
 
 
+class LiveScriptOutput(NamedTuple):
+    """The byte-capped stdout of a caller-supplied live drgn script (ADR-0240)."""
+
+    output: str
+    truncated: bool
+
+
 class Retriever(Protocol):
     """Capture port keyed on the System id."""
 
