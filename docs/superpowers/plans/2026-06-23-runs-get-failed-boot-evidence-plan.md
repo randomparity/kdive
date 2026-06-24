@@ -49,6 +49,14 @@ fixture the runs-tool suite uses. Cases:
 - `test_failed_boot_attempt_null_category` — boot job `failed` with `error_category=None` →
   `BootAttempt(job_id=<job.id>, error_category=None)`.
 
+**Test setup — driving a boot job to `failed`:** `queue.enqueue` inserts a job as `queued`, so
+the failed-state tests must transition it explicitly. Follow the existing repo pattern: enqueue
+with `dedup_key=f"{run_id}:boot"`, then run a direct
+`UPDATE jobs SET state='failed', error_category=%s WHERE dedup_key=%s` on the same `conn` (cf.
+`_enqueue_with_state` and the inline `UPDATE jobs SET …` seeds in `tests/jobs/test_queue.py`).
+For the null-category case set `error_category` to `NULL`. Do **not** drive a real worker; seed
+the terminal state directly so the test isolates `failed_boot_attempt`'s read logic.
+
 **Implementation:**
 
 ```python
@@ -118,7 +126,9 @@ conflict.
 **Failing test first** (`tests/mcp/lifecycle/test_runs_tools.py`, end-to-end through `get_run`
 against the test DB): build a `SUCCEEDED` Run bound to a System, with a `failed` boot job
 (dedup_key `f"{run_id}:boot"`, `error_category=READINESS_FAILURE`) and **no** boot `run_steps`
-row (simulating the post-abandon state). Assert `get_run` returns `data.steps.boot == "pending"`
+row (simulating the post-abandon state — seed the `failed` job via enqueue + direct
+`UPDATE jobs SET state='failed', error_category=…`, as in Task 1; do not write a boot
+`run_steps` row). Assert `get_run` returns `data.steps.boot == "pending"`
 **and** `data.boot_readiness == {job_id, status:"failed", error_category:"readiness_failure"}`.
 Companion tests: never-attempted (no boot job) → no `boot_readiness`; `queued` boot job → no
 `boot_readiness`.
