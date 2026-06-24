@@ -52,9 +52,11 @@ Instead, make the outcome honest about its capture surface, at **boot time**, su
 
 ## What is reachable on an expected crash
 
-The System stays `READY`. Therefore:
+**Definition.** `available_capture` is the set of capture methods **invokable on this boot
+outcome without an intervening destructive op or System state change** — "reachable now". On the
+`expected_crash_observed` outcome the System stays `READY`, so:
 
-| Method | Reachable on `expected_crash_observed`? | Why |
+| Method | Reachable now on `expected_crash_observed`? | Why |
 |--------|------|-----|
 | `console` | **yes** | The per-Run console artifact (ADR-0235) is recorded as `evidence_artifact_id`; `postmortem.triage` self-redirects to it (ADR-0227). |
 | `gdbstub` (live-attach) | no | `debug.start_session` is deliberately refused and redirected to the console A/B flow (#759/ADR-0227). |
@@ -106,7 +108,20 @@ failure.
 `boot_outcome` / `evidence_artifact_id` from), coercing each to a `list[str]` (a non-list or a
 list with non-string members yields `None`, fail-closed). Because the read is generic, a
 `crashed_halted_live` outcome's existing `available_capture` is now surfaced too (it has no
-`inert_capture`, so that key stays absent) — a consistency win, not a behavior change to ADR-0233.
+`inert_capture`, so that key stays absent).
+
+**`crashed_halted_live` keeps ADR-0233's value verbatim — this PR does not redefine it.**
+ADR-0233's `_available_capture` lists `gdbstub` + `console` + (`host_dump` when
+`host_dump_provisioned`). `crashed_halted_live` also leaves the System `READY` (it is admitted via
+the `system.state is READY` fall-through in `sessions_lifecycle.py`), so under the "reachable now"
+definition above its advertised `host_dump` is *not itself* immediately invokable —
+`vmcore.fetch` still needs `CRASHED`. Whether that `host_dump` becomes reachable via an
+intervening `force_crash` is the ADR-0233 / gap-4 preservation question this spec scopes out
+(below); it is **not** re-litigated here. The two outcomes legitimately differ on `gdbstub`: a
+`crashed_halted_live` Run admits a live gdbstub session *now* (its `rsp_reachable` probe passed),
+whereas `expected_crash_observed` deliberately refuses live-attach. This PR only authors the
+`expected_crash_observed` value (and wires the generic read path the user asked for); it makes no
+claim that the two outcomes' `available_capture` sets are computed by the same rule.
 
 ### 3. Envelope — `mcp/tools/lifecycle/runs/common.py`
 
@@ -121,7 +136,11 @@ new keys invalidate no committed snapshot and need no schema regeneration.
   for `expected_crash_observed`; `vmcore.fetch` will reject (System `READY`). Aligning that
   next-action / the `debug.start_session` redirect is **#759**'s territory (a separate open
   sub-issue of the same epic). This change does not touch those surfaces, to avoid double-work
-  and a merge conflict with #759.
+  and a merge conflict with #759. **Known transient inconsistency:** after this change the same
+  `runs.get` envelope carries both `data.available_capture == ["console"]` and a
+  `suggested_next_actions` that still lists `vmcore.fetch`; #759 closes that gap. A code comment
+  at the `_succeeded_next_step` `expected_crash_observed` branch points at #759 so a reviewer does
+  not "fix" the next-action here and collide with #759's change.
 - **Re-routing / preserving the guest.** The issue's "gap 4" (whether `<on_crash>preserve>`
   physically leaves the expected-crash guest paused) only matters for Option A. Under the chosen
   disclose-don't-re-route direction the expected-crash path relies on nothing being preserved, so
@@ -152,6 +171,12 @@ Envelope (`tests/mcp/tools/lifecycle/runs/`): a `SUCCEEDED` Run whose boot is
 `expected_crash_observed` yields `data.available_capture == ["console"]` and the expected
 `data.inert_capture`; a console-only profile yields `data.inert_capture == []`; the keys are
 absent when the boot result carries neither.
+
+**Pre-existing assertions to audit.** The generic read path surfaces `available_capture` for both
+`expected_crash_observed` and `crashed_halted_live`. Before implementing, grep the existing
+`runs.get` / envelope and debug-attach tests for exact `data`-dict equality (`data == {...}` or a
+closed key-set assertion) on the `SUCCEEDED` + `expected_crash_observed` / `crashed_halted_live`
+paths and update any that would break when the new keys appear.
 
 No migration, no new tool, no request-shape or authz change. `live_vm` is not required: the
 behavior is deterministic over the recorded boot result and the profile policy.
