@@ -161,4 +161,4 @@ Search a redacted System artifact with bounded literal line context.
 | `artifact_id` | string | yes | The redacted System artifact id. |
 | `before_lines` | integer | no | Context lines before each match (0–10). |
 | `max_matches` | integer | no | Maximum match windows to return (1–50). |
-| `pattern` | string | yes | Literal OR search pattern, e.g. '__d_lookup' or 'panic'. |
+| `pattern` | string | yes | Literal alternation pattern; '\|' separates terms (grep-style), e.g. '__d_lookup\|panic'. The word 'OR' is not special. |

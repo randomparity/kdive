@@ -68,7 +68,12 @@ class ArtifactSearchRequest(BaseModel):
     artifact_id: Annotated[str, Field(description="The redacted System artifact id.")]
     pattern: Annotated[
         str,
-        Field(description="Literal OR search pattern, e.g. '__d_lookup' or 'panic'."),
+        Field(
+            description=(
+                "Literal alternation pattern; '|' separates terms (grep-style), "
+                "e.g. '__d_lookup|panic'. The word 'OR' is not special."
+            )
+        ),
     ]
     before_lines: Annotated[
         int,
