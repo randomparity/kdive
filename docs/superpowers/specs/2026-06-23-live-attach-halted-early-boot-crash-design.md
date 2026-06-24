@@ -122,7 +122,9 @@ this boot-time probe only gates whether the new outcome is recorded.
   (a) `gdbstub` is provisioned, (b) the captured console matches a generic kernel-panic signature
   (a shared `_GENERIC_PANIC_PATTERN`, e.g. `Kernel panic - not syncing`, searched with the same
   redaction-safe `search_text` the expected-crash path uses), and (c) `rsp_reachable` finds the
-  stub reachable — complete the `boot` step **succeeded** with:
+  stub reachable — record the boot audit event (`_record_boot_audit`, exactly as the `ready` and
+  `expected_crash_observed` branches do — this is the one path that reverses the ADR-0064 gate, so
+  its audit trail is required) and complete the `boot` step **succeeded** with:
 
   ```json
   {
@@ -237,6 +239,14 @@ debug.start_session(run, "gdbstub")
   `claim_run_step`/`complete_run_step`.
 - **Redaction**: the console evidence is redacted by the existing `_capture_console_artifact`
   path before persistence; no raw guest output enters the envelope.
+- **Artifact store unavailable**: the panic-signature crash signal needs the captured console
+  bytes, which `_capture_console_artifact` only returns when an object store is configured. With
+  no store the bytes are absent, the panic signature cannot match, and the boot abandons to
+  `FAILED` — the same inherited limitation the `expected_crash_observed` path has (it also
+  requires the captured artifact). The new outcome is therefore never recorded in a store-less
+  deployment; this is intended parity, not a silent regression.
+- **Boot audit**: the `crashed_halted_live` branch records the boot audit event like the other
+  terminal outcomes, so the gate reversal is observable in the audit log.
 - **Declared expected crash** (`expected_crash_observed`): unchanged → post-mortem (ADR-0064
   preserved).
 
@@ -252,7 +262,8 @@ Unit / TDD at each boundary:
   probe-reachable** case (proves the panic signature, not the probe, is the crash signal) and the
   probe-unreachable case; asserts the exact `available_capture` list for the `gdbstub`-only vs
   `gdbstub`+`preserve_on_crash` flag combinations; still records `expected_crash_observed` for a
-  declared/matched crash and `ready` for a clean boot; asserts the System row stays `READY`.
+  declared/matched crash and `ready` for a clean boot; asserts the System row stays `READY` and a
+  boot audit row is written for the new outcome.
 - `_attach_preconditions`: admits `crashed_halted_live` for `gdbstub`; rejects it for
   `drgn-live`; keeps `expected_crash_observed` → postmortem and the `boot_first` rejection.
 
