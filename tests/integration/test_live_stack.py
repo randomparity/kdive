@@ -35,6 +35,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.sizing import AllocationSizing
 from kdive.profiles.provisioning import reconcile_profile_sizing
+from kdive.security.secrets.secrets import secrets_root_from_env
 from tests.integration.live_stack.conftest import require_issuer, require_stack
 from tests.integration.live_stack.harness import (
     LiveStackClient,
@@ -63,6 +64,25 @@ _DATABASE_URL_ENV = "KDIVE_DATABASE_URL"
 _PROJECT = "spine-proj"
 _AGENT_SESSION = "spine-sess"
 _ARTIFACT_NAME = "accounting-report.json"
+
+# The drgn-live opt-in credential: a filename the operator seeds under KDIVE_SECRETS_ROOT. Setting
+# `ssh_credential_ref` renders the SSH loopback hostfwd + virtio NIC and is the credential the
+# start_session gate resolves (ADR-0085/0240). The ref's content does not authenticate SSH (the
+# managed key does); it only needs to resolve.
+_DRGN_SSH_CREDENTIAL_REF = "drgn-ssh"
+_MAX_SCRIPT_BYTES = 256 * 1024
+# A real drgn script only a live kernel can answer: `drgn -k -q <file>` provides `prog` (the live
+# drgn.Program). The marker makes the genuine in-guest output unmistakable in the returned envelope.
+_PROOF_SCRIPT = """\
+from drgn.helpers.linux.pid import for_each_task
+
+release = prog["init_uts_ns"].name.release.string_().decode()
+init_comm = prog["init_task"].comm.string_().decode()
+ntasks = sum(1 for _ in for_each_task(prog))
+print(f"KDIVE_LIVE_PROOF release={release} init_comm={init_comm} ntasks={ntasks}")
+"""
+# Over the 256 KiB inbound cap: the tool rejects it as configuration_error before any guest send.
+_OVERSIZE_SCRIPT = "# pad\n" + ("x" * (_MAX_SCRIPT_BYTES + 16))
 
 
 # --- preflight helpers ----------------------------------------------------------------------
@@ -141,6 +161,32 @@ def _build_profile() -> dict[str, object]:
         "schema_version": 1,
         "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
         "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
+    }
+
+
+def _live_script_provision_profile() -> dict[str, object]:
+    """Provision profile for the online drgn-live path: opts the SSH transport in, no force_crash.
+
+    `ssh_credential_ref` is the drgn-live opt-in — it renders the loopback SSH hostfwd + virtio
+    NIC and is resolved by the start_session credential gate (ADR-0085/0240). The introspect.script
+    proof never crashes the guest, so this profile omits the `force_crash` destructive opt-in the
+    crash spine needs.
+    """
+    return {
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
+        "provider": {
+            "local-libvirt": {
+                "rootfs": {"kind": "local", "path": os.environ[_GUEST_IMAGE_ENV]},
+                "crashkernel": "256M",
+                "ssh_credential_ref": _DRGN_SSH_CREDENTIAL_REF,
+            }
+        },
     }
 
 
@@ -353,6 +399,133 @@ def test_spine_over_the_wire() -> None:
             db_url, project=_PROJECT, allocation_id=allocation_id, system_id=system_id
         )
         await _assert_teardown(db_url, system_id)
+
+    asyncio.run(_run())
+
+
+def _require_drgn_ssh_secret() -> None:
+    """Skip unless the operator has seeded the drgn-live SSH credential ref (ADR-0240)."""
+    secret = secrets_root_from_env() / _DRGN_SSH_CREDENTIAL_REF
+    if not secret.is_file():
+        pytest.skip(
+            f"drgn-live credential ref {_DRGN_SSH_CREDENTIAL_REF!r} not seeded at {secret}; "
+            f"seed any file there (its content does not authenticate SSH — the managed key does) "
+            f"so the start_session credential gate resolves"
+        )
+
+
+@pytest.mark.live_stack
+def test_spine_live_script_over_the_wire() -> None:
+    """Boot a guest, attach drgn-live, and run a real caller drgn script via introspect.script.
+
+    The online half of the introspect surface (#762, ADR-0240): allocate → … → boot →
+    debug.start_session("drgn-live") → introspect.script(real `drgn -k` script). Asserts the script
+    ran in the live guest kernel (a proof marker + a non-empty live task walk) and that an
+    over-cap script is rejected before any guest send. Self-cleans (end_session + release).
+    """
+    issuer, base_url, db_url = _spine_preflight()
+    _require_drgn_ssh_secret()
+    operator_token = _token(issuer, role="operator")
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        allocation_id = session_id = ""
+        async with op:
+            await seed_metering(db_url, _PROJECT)
+            async with phase("allocate"):
+                env = ok(
+                    await scalar(
+                        op,
+                        "allocations.request",
+                        project=_PROJECT,
+                        request={
+                            "vcpus": 2,
+                            "memory_gb": 2,
+                            "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                            "resource": {"mode": "kind"},
+                        },
+                    ),
+                    "allocate",
+                )
+                allocation_id = env.object_id
+            async with phase("provision"):
+                env = ok(
+                    await scalar(
+                        op,
+                        "systems.provision",
+                        allocation_id=allocation_id,
+                        profile=_live_script_provision_profile(),
+                    ),
+                    "provision",
+                )
+                system_id = data_str(env, "system_id")
+                await await_system_state(op, "provision", system_id, "ready")
+            async with phase("open-investigation"):
+                env = ok(
+                    await scalar(op, "investigations.open", project=_PROJECT, title="live-script"),
+                    "open-investigation",
+                )
+                investigation_id = env.object_id
+            async with phase("create-run"):
+                env = ok(
+                    await scalar(
+                        op,
+                        "runs.create",
+                        investigation_id=investigation_id,
+                        system_id=system_id,
+                        build_profile=_build_profile(),
+                    ),
+                    "create-run",
+                )
+                run_id = env.object_id
+            for step in ("build", "install", "boot"):
+                async with phase(step):
+                    env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
+                    await drain_job(op, step, env.object_id)
+            async with phase("attach-drgn-live"):
+                env = ok(
+                    await scalar(op, "debug.start_session", run_id=run_id, transport="drgn-live"),
+                    "attach-drgn-live",
+                )
+                session_id = env.object_id
+            async with phase("introspect-script"):
+                env = ok(
+                    await scalar(
+                        op,
+                        "introspect.script",
+                        session_id=session_id,
+                        script=_PROOF_SCRIPT,
+                        timeout_sec=30.0,
+                    ),
+                    "introspect-script",
+                )
+                output = data_str(env, "output")
+                assert "KDIVE_LIVE_PROOF" in output, f"proof marker missing: {output!r}"
+                assert "ntasks=" in output and "ntasks=0" not in output, (
+                    f"no live task walk: {output!r}"
+                )
+                assert env.data["truncated"] is False, "unexpected truncation under cap"
+            async with phase("oversize-script-rejected"):
+                denied = await scalar(
+                    op,
+                    "introspect.script",
+                    session_id=session_id,
+                    script=_OVERSIZE_SCRIPT,
+                    timeout_sec=30.0,
+                )
+                if denied.status != "error" or denied.error_category != "configuration_error":
+                    raise SpinePhaseError(
+                        "oversize-script-rejected",
+                        "over-cap script not rejected",
+                        error_category=denied.error_category,
+                    )
+            async with phase("end-session"):
+                ok(await scalar(op, "debug.end_session", session_id=session_id), "end-session")
+            async with phase("release"):
+                ok(
+                    await scalar(op, "allocations.release", allocation_id=allocation_id),
+                    "release",
+                )
 
     asyncio.run(_run())
 
